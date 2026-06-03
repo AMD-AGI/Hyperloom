@@ -206,11 +206,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "plateau_overrides",
     # CLOSE phase sequencer flag.
     "close_sequence_done",
-    # explore search ledger (v0.6 backends/params
-    # search fields retained for resume parity).
+    # unified explore search ledger.
     "explore_search",
-    "backends_search",
-    "params_search",
     # structured gaps ledger.
     "gaps",
     # dynamic_action aggregate view + round counter
@@ -218,6 +215,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # outcomes via UPDATE_STATE).
     "dynamic_actions",
     "dynamic_action_round_count",
+    # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled
+    # search depth knob).
+    "framework_pr_max_candidates",
+    # Advisory model-architecture profile (launcher / state.json owned).
+    "model_arch",
 })
 
 

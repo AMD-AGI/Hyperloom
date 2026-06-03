@@ -404,6 +404,12 @@ _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset({
 _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 _ROOFLINE_WATERMARK_RATIO_ENV: str = "HYPERLOOM_ROOFLINE_WATERMARK_RATIO"
 
+# Default per-repo candidate cap for ``fa phase-discover`` during the
+# FRAMEWORK_PR phase. Higher than the historical implicit 5 so each batch
+# probes deeper; overridable per session via
+# ``SharedState.framework_pr_max_candidates``.
+DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES: int = 8
+
 
 def _resolve_roofline_watermark_ratio() -> float:
     """Resolve the roofline watermark ratio (env-tunable, safe default).
@@ -587,6 +593,7 @@ class Coordinator:
         cortex_kb: RecipeKB | None = None,
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
+        proposal_scorer: Any = None,
         warm_replay_enabled: bool = True,
         warm_replay_min_confidence: float = 0.7,
         warm_replay_min_reproduce_pct: float = 0.8,
@@ -626,6 +633,14 @@ class Coordinator:
         # (no warmup; specialist still runs but sees empty knowledge
         # surface).
         self.knowledge_plane: Any = knowledge_plane
+        # ProposalScorer facade (advisory). When non-None, a non-empty
+        # specialist ``proposal_set`` is scored by one or more gateway
+        # models in ``_record_specialist_result``; the scores ride on
+        # the specialist round entry under ``ensemble_scores`` and are
+        # surfaced to Orchestration as one reference among many (parallel
+        # to gaps / KB / analysis.md). ``None`` keeps the legacy path
+        # (no scoring). Never gates anything (Inv-9.1: no scoreboard).
+        self._proposal_scorer: Any = proposal_scorer
         # phase budget percentages (KB_design §3.8 §5.3 +
         # §3.13 M2 §7). ``None`` means library defaults; CLI flags
         # populate this dict from ``--max-minutes-<phase>-pct``. We
@@ -1602,6 +1617,86 @@ class Coordinator:
                 return cand
         return None
 
+    def _framework_pr_known_candidate_ids(self) -> set[str]:
+        """All candidate ids already discovered into any prior batch.
+
+        Used by :meth:`_discover_next_framework_pr_batch` to drop PRs that
+        an earlier batch (or a different repo in the same cross-repo scan)
+        already produced, so each new batch only carries genuinely new
+        candidates.
+        """
+        state = self.shared_state
+        ids: set[str] = set()
+        batches = getattr(state, "framework_pr_batches", None) or []
+        if not isinstance(batches, list):
+            return ids
+        for batch in batches:
+            if not isinstance(batch, dict):
+                continue
+            for cand in batch.get("candidates") or []:
+                if not isinstance(cand, dict):
+                    continue
+                cid = str(
+                    cand.get("candidate_id")
+                    or cand.get("pr_url")
+                    or cand.get("ref")
+                    or f"{cand.get('repo','')}-{cand.get('pr_number','')}"
+                )
+                if cid:
+                    ids.add(cid)
+        return ids
+
+    def _framework_pr_tried_refs(self) -> list[str]:
+        """Refs already discovered this phase (fed to ``compose_gap`` so it
+        can bias the gap away from previously-surfaced PR categories)."""
+        refs: list[str] = []
+        for cid in self._framework_pr_known_candidate_ids():
+            if cid:
+                refs.append(cid)
+        return refs
+
+    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+        """Repo URLs to query for the FRAMEWORK_PR batch.
+
+        The framework's own repo leads (primary), followed by every other
+        repo the ``pr_intel_specialist`` domain tracks (cross-repo top-up).
+        This is the same repo set EXPLORE's pr_intel_specialist surveys, so
+        the two phases share the discovery surface rather than
+        FRAMEWORK_PR owning it privately. Duplicate / empty URLs are
+        dropped while preserving order.
+        """
+        from . import framework_agent_client as _fa_client
+
+        urls: list[str] = []
+
+        def _add(u: str) -> None:
+            u = (u or "").strip()
+            if u and u not in urls:
+                urls.append(u)
+
+        # Primary: the framework's own repo.
+        _add(_fa_client.repo_url_for_framework(framework))
+
+        # Cross-repo: the pr_intel_specialist repo set (owner/name -> URL).
+        try:
+            from .specialist_domains import get_domain
+            domain = get_domain("pr_intel_specialist")
+            for repo in getattr(domain, "pr_repos", ()) or ():
+                repo = str(repo or "").strip()
+                if not repo:
+                    continue
+                if repo.startswith("http"):
+                    _add(repo)
+                elif "/" in repo:
+                    _add(f"https://github.com/{repo}.git")
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+
+        if not urls:
+            # Last-ditch: let phase_discover resolve from framework itself.
+            _add(_fa_client.repo_url_for_framework(framework or "sglang"))
+        return urls
+
     def _record_framework_pr_phase_done(
         self, *, reason: str, failure_count: int,
     ) -> None:
@@ -1643,7 +1738,34 @@ class Coordinator:
         from . import framework_agent_client as _fa_client
 
         state = self.shared_state
-        gaps = []
+        # Directed gap composition: seed the search from the latest
+        # profile bottleneck + workload taxonomy (model_class / precision /
+        # gpu_type) via compose_gap, then merge any structured
+        # ``state.gaps`` rows on top so a fresh batch is re-targeted at the
+        # current bottleneck rather than always re-querying the same
+        # static gap text.
+        framework = ""
+        try:
+            framework = str(getattr(state, "framework", "") or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            framework = ""
+        directed_keywords: list[str] = []
+        directed_gap = ""
+        try:
+            from .action_executors._framework_gap_composer import compose_gap
+            directed_gap, directed_keywords = compose_gap(
+                framework=framework,
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                model_class=str(getattr(state, "model_class", "") or ""),
+                precision=str(getattr(state, "precision", "") or ""),
+                profile_kernel_breakdown_path=getattr(
+                    state, "last_profile_kernel_breakdown", None,
+                ),
+                tried_refs=self._framework_pr_tried_refs(),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            directed_gap, directed_keywords = "", []
+        gaps: list[dict[str, str]] = []
         try:
             gap_list = getattr(state, "gaps", None) or []
             for g in gap_list:
@@ -1657,32 +1779,81 @@ class Coordinator:
                 })
         except Exception:  # noqa: BLE001 — defensive
             gaps = []
+        if directed_gap:
+            # Prepend the directed gap so fa's search leads with the
+            # bottleneck-aware phrasing; de-dup against any identical
+            # structured gap text already present.
+            existing = {str(g.get("gap_description") or "") for g in gaps}
+            if directed_gap not in existing:
+                gaps.insert(0, {
+                    "gap_canonical_id": "directed",
+                    "gap_description":  directed_gap,
+                })
         if not gaps:
             gaps = [{"gap_canonical_id": "", "gap_description": ""}]
-        framework = ""
-        try:
-            framework = str(getattr(state, "framework", "") or "").strip().lower()
-        except Exception:  # noqa: BLE001
-            framework = ""
         timeout_sec = float(
             getattr(self, "framework_pr_discover_timeout_sec", 0.0)
             or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
         )
-        try:
-            payload = await _fa_client.phase_discover(
-                model=str(getattr(state, "model", "") or ""),
-                framework=framework or "sglang",
-                gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                gaps=gaps,
-                session_dir=self.session_dir,
-                timeout_sec=timeout_sec,
-            )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        max_candidates = int(
+            getattr(state, "framework_pr_max_candidates", 0) or 0
+        ) or DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES
+        # Cross-repo: query every repo the pr_intel_specialist tracks so
+        # FRAMEWORK_PR discovery is not confined to the single framework
+        # repo. The framework's own repo leads the list (primary), the
+        # rest are cross-repo top-ups (aiter / triton / rccl / the other
+        # serving framework). This is the same repo set EXPLORE's
+        # pr_intel_specialist surveys — neither phase owns it privately.
+        repo_urls = self._framework_pr_discover_repo_urls(framework)
+        payload: dict[str, Any] | None = None
+        merged_candidates: list[dict[str, Any]] = []
+        batch_id = ""
+        any_call_ok = False
+        last_exc: Exception | None = None
+        # Spread the phase timeout across the repos so a multi-repo scan
+        # cannot blow the whole budget on the first slow repo.
+        per_repo_timeout = (
+            timeout_sec / float(len(repo_urls)) if repo_urls else timeout_sec
+        )
+        per_repo_timeout = max(per_repo_timeout, 30.0)
+        for repo_url in repo_urls:
+            try:
+                repo_payload = await _fa_client.phase_discover(
+                    model=str(getattr(state, "model", "") or ""),
+                    framework=framework or "sglang",
+                    gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                    gaps=gaps,
+                    session_dir=self.session_dir,
+                    repo_url=repo_url,
+                    keywords=directed_keywords,
+                    max_candidates=max_candidates,
+                    timeout_sec=per_repo_timeout,
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                last_exc = exc
+                log.warning(
+                    "fa phase-discover failed for repo_url=%r: %r",
+                    repo_url, exc,
+                )
+                continue
+            any_call_ok = True
+            if payload is None:
+                payload = repo_payload
+            if not batch_id:
+                batch_id = str((repo_payload or {}).get("batch_id") or "")
+            repo_cands = (repo_payload or {}).get("candidates") or []
+            if isinstance(repo_cands, list):
+                merged_candidates.extend(
+                    c for c in repo_cands if isinstance(c, dict)
+                )
+        if not any_call_ok:
             failures = int(getattr(state, "framework_pr_discover_failures", 0) or 0) + 1
             state.framework_pr_discover_failures = failures
             log.warning(
-                "fa phase-discover failed (attempt %d/%d): %r",
-                failures, _fa_client.DISCOVER_FAILURE_RETRY_LIMIT, exc,
+                "fa phase-discover failed across all %d repo(s) "
+                "(attempt %d/%d): %r",
+                len(repo_urls), failures,
+                _fa_client.DISCOVER_FAILURE_RETRY_LIMIT, last_exc,
             )
             try:
                 history = getattr(state, "phase_history", None)
@@ -1691,7 +1862,7 @@ class Coordinator:
                         "event":   "framework_pr_discover_failed",
                         "attempt": failures,
                         "limit":   _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
-                        "error":   repr(exc),
+                        "error":   repr(last_exc),
                         "ts":      datetime.now(timezone.utc).isoformat(),
                     })
             except Exception:  # noqa: BLE001 — defensive
@@ -1702,25 +1873,48 @@ class Coordinator:
         # the payload contained candidates.
         if int(getattr(state, "framework_pr_discover_failures", 0) or 0) != 0:
             state.framework_pr_discover_failures = 0
-        candidates = (payload or {}).get("candidates") or []
-        if not isinstance(candidates, list) or not candidates:
+        if not merged_candidates:
             return False
         batch_id = str((payload or {}).get("batch_id") or "")
+        # Cross-batch + cross-repo de-dup: a candidate already discovered
+        # in an earlier batch (regardless of which repo surfaced it) is
+        # dropped here so the new batch only carries genuinely new PRs.
+        # Without this, the cross-repo loop or a re-query could re-list a
+        # PR that another repo's serving overlap already produced, padding
+        # the batch with duplicates that the plateau judge then counts.
+        seen_ids = self._framework_pr_known_candidate_ids()
+        primary_repo_url = repo_urls[0] if repo_urls else ""
         # Normalise each candidate so the executor's slug helper has
         # consistent fields and the progress ledger has a stable id.
         norm: list[dict[str, Any]] = []
-        for c in candidates:
+        for c in merged_candidates:
             if not isinstance(c, dict):
                 continue
             cand_id = str(
                 c.get("pr_url") or c.get("ref")
                 or f"{c.get('repo','')}-{c.get('pr_number','')}"
             )
+            if cand_id and cand_id in seen_ids:
+                continue
+            seen_ids.add(cand_id)
+            # Stamp the repo URL the candidate came from so the executor's
+            # checkout-head path knows whether the PR lives in the live
+            # framework_root's origin (same-repo, fetchable) or a foreign
+            # repo (must fall back to diff_url). fa already returns a
+            # ``repo_url`` per candidate when known; otherwise fall back to
+            # the batch's primary repo URL.
+            discovered_repo_url = str(
+                c.get("repo_url") or c.get("discovered_repo_url")
+                or primary_repo_url
+            )
             norm.append({
                 **c,
                 "candidate_id": cand_id,
                 "batch_id": batch_id,
+                "discovered_repo_url": discovered_repo_url,
             })
+        if not norm:
+            return False
         batch_entry = {
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -3955,7 +4149,6 @@ class Coordinator:
         # Stash so ``_compose_prompt`` can update target_gap_pct.
         self._current_objective = objective
         grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
-        idle_close_ticks_threshold = _resolve_silent_ticks_closing_threshold()
         deadline = (
             time.monotonic() + max_minutes * 60.0 if max_minutes else None
         )
@@ -4060,34 +4253,13 @@ class Coordinator:
                 if objective.reached(self.shared_state):
                     stop_reason = "target_reached"
                     break
-                if await self._has_no_more_leverage():
-                    # No-more-leverage is no longer terminal: instead of
-                    # aborting, wind the session down through SWEEP ->
-                    # CLOSE via the skip_to_sweep hint. Only nudge from
-                    # EXPLORE/KERNEL; SWEEP/CLOSE already own their own
-                    # wind-down (auto-sweep / report), and PRELUDE never
-                    # satisfies the safety net. The next tick's
-                    # _advance_phase_if_needed picks the hint up and
-                    # routes to SWEEP, whose entry hook auto-enqueues a
-                    # sweep task (so the safety net stops firing).
-                    phase_now = (self.shared_state.phase or "").strip().upper()
-                    if phase_now in (
-                        _phase_state.PHASE_EXPLORE,
-                        _phase_state.PHASE_KERNEL,
-                    ) and (
-                        self.shared_state.pending_escalate_hint
-                        != _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP
-                    ):
-                        self.shared_state.set_pending_escalate_hint(
-                            _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP,
-                        )
-                        self.shared_state.save(self.session_dir)
-                        log.info(
-                            "Coordinator: no-more-leverage safety net fired "
-                            "in phase=%s; set skip_to_sweep hint "
-                            "(non-terminal wind-down to SWEEP -> CLOSE)",
-                            phase_now,
-                        )
+                # The no-more-leverage safety net (which used to wind the
+                # session down to SWEEP -> CLOSE via the skip_to_sweep hint
+                # when cheap rounds plateaued and every reusable kernel was
+                # rejected) has been removed to prioritise long-run
+                # continuity: the run keeps exploring until the wall-clock
+                # deadline rather than self-winding down on a plateau
+                # judgment.
                 if (
                     deadline is not None
                     and time.monotonic() >= deadline
@@ -4100,39 +4272,13 @@ class Coordinator:
                         grace_sec=grace_sec,
                     )
                     continue
-                # N33: if the run has been silent for
-                # ``idle_close_ticks_threshold`` consecutive ticks (LLM
-                # has stopped proposing anything actionable, no tasks in
-                # flight, no pending proposals), short-circuit to closing
-                # phase NOW instead of idling until the wall-clock
-                # deadline. This is the common failure mode where the
-                # LLM keeps re-proposing rejected ``report`` actions (or
-                # no actions at all) and would otherwise burn the
-                # remaining budget for nothing. ``threshold <= 0``
-                # disables the early-close (legacy behaviour).
-                if (
-                    idle_close_ticks_threshold > 0
-                    and not in_closing
-                    and self.shared_state.consecutive_silent_ticks
-                        >= idle_close_ticks_threshold
-                ):
-                    log.warning(
-                        "Coordinator: idle for %d consecutive ticks "
-                        "(threshold=%d); entering closing phase early "
-                        "to flush final report instead of waiting for "
-                        "wall-clock deadline (max_minutes=%.0f).",
-                        self.shared_state.consecutive_silent_ticks,
-                        idle_close_ticks_threshold,
-                        max_minutes_value,
-                    )
-                    if grace_sec <= 0:
-                        stop_reason = "idle_timeout"
-                        break
-                    closing_deadline = await self._enter_closing_phase(
-                        grace_sec=grace_sec,
-                    )
-                    self.shared_state.consecutive_silent_ticks = 0
-                    continue
+                # N33 idle-timeout early-close has been removed to
+                # prioritise long-run continuity. ``consecutive_silent_ticks``
+                # is still tracked (the LLM / breakdown can read it), but
+                # the run no longer short-circuits into the closing phase
+                # when the LLM stops proposing actionable work — it keeps
+                # ticking until the wall-clock deadline (or another
+                # stop_reason) fires.
                 if in_closing:
                     report_terminal = await self._closing_report_terminal()
                     grace_blown = (
@@ -4199,32 +4345,6 @@ class Coordinator:
                 except (NotImplementedError, RuntimeError):
                     pass
         return self.shared_state.stop_reason
-
-    async def _has_no_more_leverage(self) -> bool:
-        """Return True when automated explore/kernel levers are exhausted.
-
-        v0.8 plateau judgment lives in :mod:`phase_state`; this helper
-        is the safety-net check the closing-phase path consults before
-        winding the session down. We require:
-
-        1. baseline + current_best present (otherwise we are still in
-           PRELUDE / never finished a round)
-        2. no pending proposals or queued / running tasks
-        3. ``params_no_promote_streak >= 5`` (proxy still used as
-           the cross-phase plateau hint; see KB_gaps/Gap-15)
-        4. every reusable kernel_id is rejected.
-        """
-        if self.shared_state.baseline_tput <= 0:
-            return False
-        if not self.shared_state.current_best:
-            return False
-        if self.state.pending_proposals:
-            return False
-        if await self.tasks.queued() or await self.tasks.running():
-            return False
-        if self.shared_state.params_no_promote_streak < 5:
-            return False
-        return self._all_reusable_kernels_rejected()
 
     async def _enter_closing_phase(self, *, grace_sec: float) -> float:
         """Enter report-flush phase after the wall-clock deadline.
@@ -4301,27 +4421,6 @@ class Coordinator:
         return task.state in {
             "succeeded", "failed", "cancelled", "needs_manual_review",
         }
-
-    def _all_reusable_kernels_rejected(self) -> bool:
-        select = self.shared_state.last_trace_analyze or {}
-        reusable = {
-            str(k) for k in (select.get("reusable_native_kernel_ids") or [])
-            if k
-        }
-        if not reusable:
-            return bool(self.shared_state.last_profile_trace)
-
-        rejected = {
-            str(k) for k in (self.shared_state.rejected_kernel_ids or [])
-            if k
-        }
-        for entry in self.shared_state.rejected_kernel_patches or []:
-            if isinstance(entry, dict) and entry.get("kernel_id"):
-                rejected.add(str(entry["kernel_id"]))
-        last = self.shared_state.last_kernel_opt or {}
-        if last.get("kernel_id") and last.get("decision") == "REVERT":
-            rejected.add(str(last["kernel_id"]))
-        return reusable <= rejected
 
     # ==================================================================
     # Reactor
@@ -4525,18 +4624,16 @@ class Coordinator:
                 if remaining_min <= 5.0 and not self.shared_state.closing_phase:
                     sections.append(
                         "WARNING: < 5 min remaining. Prefer `report` next; new "
-                        "explore rounds or validate_stack will likely be cut "
-                        "by the deadline."
+                        "`explore` rounds (which inline the stack rebench) "
+                        "will likely be cut by the deadline."
                     )
 
-        # Time budget — emitted for **every** agent that needs it. Robustness
-        # consumes it to fire the ``deadline_imminent`` signal that escalates
-        # to a ``delegate(report)`` wind-down; Orchestration uses it as a
-        # heads-up so it stops proposing fresh explore rounds when the
-        # deadline is close. Kernel and Critic ignore the section; their
-        # prompt parsers don't subscribe to it.
+        # Time budget for Robustness — it consumes this to fire the
+        # ``deadline_imminent`` signal that escalates to a ``delegate(report)``
+        # wind-down. Orchestration already got its copy in the Mission-progress
+        # block above; Kernel and Critic don't subscribe to it.
         if (
-            agent_name in ("orchestration", "robustness")
+            agent_name == "robustness"
             and self._run_deadline is not None
             and self._run_started_monotonic is not None
         ):
@@ -4553,51 +4650,6 @@ class Coordinator:
                 f"budget={budget_min}min  "
                 f"closing_phase={self.shared_state.closing_phase}"
             )
-            if (
-                agent_name == "orchestration"
-                and remaining_min <= 5.0
-                and not self.shared_state.closing_phase
-            ):
-                sections.append(
-                    "WARNING: < 5 min remaining. Prefer `report` next; new "
-                    "explore rounds or validate_stack will likely be cut "
-                    "by the deadline."
-                )
-
-        # Time budget — emitted for **every** agent that needs it. Robustness
-        # consumes it to fire the ``deadline_imminent`` signal that escalates
-        # to a ``delegate(report)`` wind-down; Orchestration uses it as a
-        # heads-up so it stops proposing fresh explore rounds when the
-        # deadline is close. Kernel and Critic ignore the section; their
-        # prompt parsers don't subscribe to it.
-        if (
-            agent_name in ("orchestration", "robustness")
-            and self._run_deadline is not None
-            and self._run_started_monotonic is not None
-        ):
-            remaining_min = max(
-                0.0, (self._run_deadline - time.monotonic()) / 60.0,
-            )
-            elapsed_min = (
-                time.monotonic() - self._run_started_monotonic
-            ) / 60.0
-            budget_min = self.shared_state.max_minutes or 0
-            sections.append("=== Time budget ===")
-            sections.append(
-                f"elapsed={elapsed_min:.1f}min  remaining={remaining_min:.1f}min  "
-                f"budget={budget_min}min  "
-                f"closing_phase={self.shared_state.closing_phase}"
-            )
-            if (
-                agent_name == "orchestration"
-                and remaining_min <= 5.0
-                and not self.shared_state.closing_phase
-            ):
-                sections.append(
-                    "WARNING: < 5 min remaining. Prefer `report` next; new "
-                    "`explore` rounds (which inline the stack rebench) "
-                    "will likely be cut by the deadline."
-                )
 
         # 1. Shared session state — gives the agent goal + progress context
         # even on tick 1 when the inbox is empty.
@@ -4654,6 +4706,18 @@ class Coordinator:
             if gaps_block:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
+            # Advisory multi-model proposal scores (ProposalScorer).
+            # One reference among many — parallel to gaps / KB /
+            # analysis.md, NOT a ranking directive (Inv-9.1). Section
+            # omitted entirely when no recent round carries scores.
+            try:
+                scores_block = self.shared_state.to_proposal_scores_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: proposal_scores_summary failed")
+                scores_block = ""
+            if scores_block:
+                sections.append("=== Specialist proposal scores (advisory) ===")
+                sections.append(scores_block)
 
         # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
@@ -4939,40 +5003,6 @@ class Coordinator:
                 "report quotes the validated number, so this is the only "
                 "honest gain."
             )
-        # TODO 5/5 (current_best path): params/backends can advance
-        # ``current_best.tput`` without populating ``optimization_stack``
-        # (e.g. when the executor's best_variant lacks an explicit
-        # variant_name + candidate_args pair, the lift updates tput but
-        # appends nothing to the stack). The final report otherwise
-        # reads ``cumulative_gain_validated=0.0%`` with no validation on
-        # record. Surface a guidance TODO once the per-round gain crosses
-        # a small but meaningful threshold so Orchestration can fire one
-        # validate_stack and put an honest number into the report.
-        # Guidance only — no PolicyGate denial (the explore loop is not
-        # locked) since opt_stack-based unvalidated-KEEP detection still
-        # owns that.
-        _CB_VALIDATE_THRESHOLD_PCT = 0.5
-        cum_gain = float(self.shared_state.cumulative_gain or 0.0)
-        already_validated = bool(
-            self.shared_state.cumulative_gain_validated_ts
-        )
-        if (
-            cum_gain >= _CB_VALIDATE_THRESHOLD_PCT
-            and not self.shared_state.optimization_stack
-            and not already_validated
-        ):
-            cb_action = (self.shared_state.current_best or {}).get(
-                "action", "?",
-            )
-            return (
-                f"TODO 5/5: validate_stack recommended. current_best "
-                f"advanced to +{cum_gain:.2f}% via "
-                f"{cb_action!r} but optimization_stack is empty (no "
-                "kernel-opt KEEPs landed). Emit `validate_stack` so "
-                "cumulative_gain_validated reflects the current "
-                "configuration end-to-end before the final report. "
-                "Guidance only — explore actions remain unlocked."
-            )
         return ""
 
     def _baseline_self_loop_denial(
@@ -5148,9 +5178,8 @@ class Coordinator:
 
         Once optimization_stack has unvalidated KEEPs, the next
         ``explore`` round must carry the inlined stack rebench
-        (PolicyGate rule ``stack_rebench_required``). The legacy
-        ``validate_stack`` standalone action was retired in the legacy release; this
-        function now only enforces the cross-action ordering (target_analysis
+        (PolicyGate rule ``stack_rebench_required``). This function
+        only enforces the cross-action ordering (target_analysis
         before baseline, baseline before everything else, baseline
         self-loop guard, profile/integrate kernel-agent guards).
 
@@ -5161,11 +5190,6 @@ class Coordinator:
         further call-site churn.
         """
         action = str(action_name or "").strip()
-        # the legacy
-        # ``backends`` / ``params`` / ``validate_stack`` names are
-        # already denied by PolicyGate with ``rule='action_deprecated'``
-        # before reaching this function, so they intentionally do not
-        # appear in the sequence-gate allow-list.
         sequence_actions = {
             "target_analysis",
             "baseline", "profile", "roofline",
@@ -5310,9 +5334,7 @@ class Coordinator:
         # ``explore`` action carries an *inlined* per-KEEP stack
         # rebench, so we allow it through
         # alongside ``baseline`` (ad-hoc re-baseline) and ``report``
-        # (the wind-down). ``validate_stack`` itself is now denied at
-        # the PolicyGate boundary with ``rule='action_deprecated'``,
-        # so it can no longer be the recovery action.
+        # (the wind-down).
         if (
             self.shared_state.optimization_stack_has_unvalidated_keeps()
             and action not in {"explore", "baseline", "report"}
@@ -5387,22 +5409,14 @@ class Coordinator:
                 rule="execution_order",
                 hint="emit request kind='run_gemm_tuning' before run_optimization",
             )
-        # Note (c900791): main also gates ``run_optimization`` here on a
-        # gain-driven N19c rule (snapshot_id >= 1 + cheap-attempt
-        # recorded + last_cheap_delta_gain < EPSILON). On this branch
-        # the equivalent lives in PolicyGate as
-        # ``_validate_gain_driven_kernel_opt`` (F3-5 N19c, reads
-        # ``gain_per_stack_entry`` instead of v0.6
-        # backends_attempts/params_attempts/last_cheap_delta_gain), so
-        # the Coordinator-side gate is intentionally omitted here.
         return None
 
     @staticmethod
     def _allow_early_kernel_opt() -> bool:
         """Escape hatch — ``INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1``
-        opens the kernel_opt request gate unconditionally (skips both
-        the snapshot check and the gain-driven N19c check). Used by
-        v0-baseline-comparison flows and unit tests."""
+        opens the kernel_opt request gate unconditionally (skips the
+        roofline-snapshot check). Used by v0-baseline-comparison flows
+        and unit tests."""
         return os.environ.get(
             "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "",
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -5412,20 +5426,9 @@ class Coordinator:
         right now — i.e. when the hot-kernel report-gate (PR-C) should
         fire and the LLM should be pushed toward kernel_opt.
 
-        Mirrors PolicyGate's F3-5 N19c ``_validate_gain_driven_kernel_opt``
-        check so the two gates never disagree. Without this yield-to-N19c
-        on the Coordinator side the LLM oscillates between
-        ``hot_kernel_unfinished`` (PR-C, deny report) and
-        ``n19c_gain_driven_kernel_opt`` (PolicyGate, deny kernel_opt
-        proposal) until ``policy_loop`` auto-stops the session
-        (Qwen3-30B-A3B-Base 20260523T014653Z died this way at tick=14).
-
         The gate is open when ANY of the following hold:
           * escape hatch env set;
-          * the gain-driven N19c toggle is off (legacy F3 default);
-          * the last ``_N19C_HISTORY_WINDOW`` cheap-round deltas in
-            ``gain_per_stack_entry`` average below the F3-5 epsilon
-            (i.e. cheap exploration has actually plateaued).
+          * a roofline snapshot exists (``roofline_snapshot_id`` >= 1).
         """
         if self._allow_early_kernel_opt():
             return True
@@ -5434,28 +5437,7 @@ class Coordinator:
         snapshot_id = ta.get("roofline_snapshot_id", 0)
         if not isinstance(snapshot_id, int) or snapshot_id < 1:
             return False
-        if not bool(getattr(ss, "gain_driven_kernel_opt", False)):
-            # F3-5 toggle off → mirror PolicyGate's early-return; gate
-            # is considered open once a roofline snapshot exists.
-            return True
-        try:
-            from .policy import PolicyGate as _PolicyGate
-            window = _PolicyGate._N19C_HISTORY_WINDOW
-            epsilon = _PolicyGate._N19C_EPSILON_PCT
-        except Exception:  # noqa: BLE001 — defensive, fall back to F3-5 defaults
-            window, epsilon = 3, 0.5
-        history = list(getattr(ss, "gain_per_stack_entry", []) or [])
-        deltas: list[float] = []
-        for entry in reversed(history):
-            if isinstance(entry, dict):
-                d = entry.get("delta_pct")
-                if isinstance(d, (int, float)):
-                    deltas.append(float(d))
-            if len(deltas) >= window:
-                break
-        if len(deltas) < window:
-            return False
-        return (sum(deltas) / float(len(deltas))) < float(epsilon)
+        return True
 
     @staticmethod
     def _skip_gemm_tuning() -> bool:
@@ -7793,6 +7775,21 @@ class Coordinator:
         if int(getattr(state, "max_model_len", 0) or 0) > 0:
             params.setdefault("max_model_len", int(state.max_model_len))
 
+        # Advisory ``model_arch`` profile -> specialist ``## 2. HARDWARE
+        # CONTEXT`` via the existing ``arch_notes`` carrier. Reuses the
+        # single-source renderer from shared_state so the orchestration
+        # summary and specialist prompts stay in lockstep. Skipped entirely
+        # when no profile was loaded, so non-arch sessions render exactly as
+        # before. Prompt-context only; no deterministic gating reads it.
+        if "arch_notes" not in params:
+            from .shared_state import render_model_arch_compact
+
+            _arch_notes = render_model_arch_compact(
+                getattr(state, "model_arch", None)
+            )
+            if _arch_notes:
+                params["arch_notes"] = _arch_notes
+
         # fill gap-specific anchors from the
         # gaps[] ledger. Orchestration carries a ``gap_canonical_id``
         # via ``delegate.params`` (and also as the M5 ``gap`` field);
@@ -8255,6 +8252,33 @@ class Coordinator:
         round_entry = self._build_specialist_round_entry(
             task=task, done_payload=done_payload, source=source,
         )
+        # Advisory multi-model scoring of the proposal_set. Purely
+        # informational — the scores ride on the round entry and surface
+        # to Orchestration as one reference among many; they gate
+        # nothing. Defensive: any scorer failure leaves the entry
+        # score-free and the run continues unchanged.
+        _scorer = getattr(self, "_proposal_scorer", None)
+        if _scorer is not None and proposals:
+            try:
+                scores = await _scorer.score(
+                    gap={
+                        "domain": domain,
+                        "gap_canonical_id": done_payload.get(
+                            "gap_canonical_id", ""
+                        ),
+                        "gap_symptom": (task.params or {}).get("gap_symptom"),
+                        "gap_evidence": (task.params or {}).get("gap_evidence"),
+                        "summary": done_payload.get("summary", ""),
+                    },
+                    proposals=proposals,
+                )
+                if scores and scores.get("models"):
+                    round_entry["ensemble_scores"] = scores
+            except Exception:  # noqa: BLE001 — advisory; never block
+                log.exception(
+                    "specialist bookkeeping: proposal scoring failed for "
+                    "task=%s (continuing without scores)", task.task_id,
+                )
         try:
             self.shared_state.record_specialist_round(round_entry)
         except Exception:  # noqa: BLE001
@@ -9051,7 +9075,15 @@ class Coordinator:
         resolved_action = action_name or str(
             (intent.payload or {}).get("action_name") or ""
         )
-        streak = self.shared_state.record_policy_denial(
+        # the streak counter is still a fact (LLM sees it via
+        # policy_denial_history for self-correction), but the system no
+        # longer reacts to it: neither auto-pruning the action family
+        # (streak >= 5) nor terminating the run with a ``policy_loop``
+        # stop_reason (streak >= 10). Long-run continuity is prioritised
+        # over loop-detection stop-loss — the LLM may keep retrying a
+        # denied action and the run continues until the wall-clock
+        # deadline (or another stop_reason) fires.
+        self.shared_state.record_policy_denial(
             action_name=resolved_action,
             rule=str(denied.rule or ""),
             hint=str(denied.hint or ""),
@@ -9059,24 +9091,6 @@ class Coordinator:
             tick=int(self.shared_state.tick or 0),
             intent_payload=intent.payload,
         )
-        # the streak counter is still a fact (LLM sees it
-        # via policy_denial_history), but we no longer mirror it onto
-        # a scoreboard ``locked_reason``. The phase machine's
-        # ``policy_loop`` stop_reason at streak ≥ 10 (below) remains
-        # the only system-side reaction.
-        if resolved_action and streak >= 5:
-            self.shared_state.prune_family(resolved_action)
-            await self._record_observation(
-                "coordinator", "observation",
-                {
-                    "kind": "auto_prune",
-                    "action": resolved_action,
-                    "rule": denied.rule,
-                    "streak": streak,
-                },
-            )
-        if streak >= 10:
-            self.shared_state.set_stop_reason("policy_loop")
 
     async def _record_observation(self, source: str, topic: str, payload: dict) -> None:
         await self.bus.append_and_seq(Message.new(source, "*", topic, payload))
@@ -9581,34 +9595,13 @@ class Coordinator:
                 )
             else:
                 await self._handle_unpromotable_result(task, result.result)
-            # N34 Bug #4 (May 2026): a successful ``report`` task is the
-            # canonical terminal signal — ``final.md`` / ``final.json``
-            # are already on disk, so any further LLM-driven exploration
-            # is waste. Set ``stop_reason='report_emitted'`` so the next
-            # run-loop iteration breaks out. Skip when ``stop_reason``
-            # is already set (signal / other terminal already won) so
-            # we don't paper over an earlier failure.
-            # N34 Bug #4 (May 2026) only fires for LLM-driven report
-            # tasks (kind="report" outside the closing phase). When the
-            # closing-phase report task is already in flight,
-            # ``in_closing`` owns the stop-reason transition — let the
-            # run loop's existing ``time_exhausted`` / ``no_more_leverage``
-            # path resolve it. Otherwise an LLM-proposed mid-run report
-            # would burn the rest of the budget without this guard.
-            if (
-                task.kind == "report"
-                and result.state == "succeeded"
-                and not (self.shared_state.stop_reason or "").strip()
-                and not self.shared_state.closing_report_task_id
-            ):
-                log.info(
-                    "Coordinator: report task %s succeeded; setting "
-                    "stop_reason='report_emitted' to terminate the run "
-                    "loop (N34 Bug #4 fix).",
-                    task.task_id,
-                )
-                self.shared_state.stop_reason = "report_emitted"
-                self.shared_state.save(self.session_dir)
+            # N34 Bug #4's ``report_emitted`` self-stop has been removed
+            # to prioritise long-run continuity: a successful mid-run
+            # ``report`` task no longer terminates the run loop. The LLM
+            # may emit a report snapshot and then keep exploring; the run
+            # continues until the wall-clock deadline (or another
+            # stop_reason) fires. The closing-phase report path still owns
+            # its own terminal transition via ``in_closing``.
             # Fact-write hook. Always called so KEEP / REVERT lands
             # in the local optimization_journal + (when enabled and the
             # threshold matches) a KB lesson / pitfall write. The

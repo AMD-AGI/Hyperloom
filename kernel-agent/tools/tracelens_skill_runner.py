@@ -41,6 +41,7 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
     "elementwise": "Elementwise",
     "reduce": "Reduction",
     "triton": "Triton",
+    "flydsl": "FlyDSL",
     "norm": "LayerNorm",
     "norm_fwd": "LayerNorm",
     "norm_bwd": "LayerNorm",

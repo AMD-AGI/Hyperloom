@@ -22,7 +22,7 @@ from inference_optimizer.scripts import roofline_sweep as rs
 # extract_templates: both empty -> raise; optimized populated -> two templates
 # ---------------------------------------------------------------------------
 def test_extract_templates_refuses_when_current_best_empty() -> None:
-    state = {"current_best": {"extra_sglang_args": "", "extra_envs": {}}}
+    state = {"current_best": {"extra_server_args": "", "extra_envs": {}}}
     with pytest.raises(SystemExit, match="did not accept any optimization"):
         rs.extract_templates(state)
 
@@ -30,23 +30,23 @@ def test_extract_templates_refuses_when_current_best_empty() -> None:
 def test_extract_templates_uses_current_best() -> None:
     state = {
         "current_best": {
-            "extra_sglang_args": "--enable-aiter-fmoe-permute-fusion",
+            "extra_server_args": "--enable-aiter-fmoe-permute-fusion",
             "extra_envs": {"PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True"},
         }
     }
     base, opt = rs.extract_templates(state)
-    assert base.label == "baseline" and base.extra_sglang_args == ""
+    assert base.label == "baseline" and base.extra_server_args == ""
     assert opt.label == "optimized"
-    assert "permute-fusion" in opt.extra_sglang_args
+    assert "permute-fusion" in opt.extra_server_args
     assert opt.extra_envs["PYTORCH_HIP_ALLOC_CONF"] == "expandable_segments:True"
 
 
 def test_extract_templates_optimized_via_envs_only() -> None:
     state = {
-        "current_best": {"extra_sglang_args": "", "extra_envs": {"FOO": "1"}}
+        "current_best": {"extra_server_args": "", "extra_envs": {"FOO": "1"}}
     }
     _, opt = rs.extract_templates(state)
-    assert opt.extra_sglang_args == "" and opt.extra_envs == {"FOO": "1"}
+    assert opt.extra_server_args == "" and opt.extra_envs == {"FOO": "1"}
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ def test_sweep_one_template_dispatches_per_conc(tmp_path: Path) -> None:
         head_dim=128, weight_dtype_bytes=2.0,
         active_weight_bytes=8_000_000_000,
     )
-    tmpl = rs.LaunchTemplate(label="optimized", extra_sglang_args="--foo")
+    tmpl = rs.LaunchTemplate(label="optimized", extra_server_args="--foo")
     measured_by_conc = {1: 500.0, 8: 4000.0, 64: 18000.0}
 
     def fake_bench(*, conc: int, **_kwargs):
@@ -159,7 +159,7 @@ def test_sweep_one_template_marks_failed_bench_as_oom(tmp_path: Path) -> None:
         head_dim=128, weight_dtype_bytes=2.0,
         active_weight_bytes=8_000_000_000,
     )
-    tmpl = rs.LaunchTemplate(label="baseline", extra_sglang_args="")
+    tmpl = rs.LaunchTemplate(label="baseline", extra_server_args="")
     with mock.patch.object(rs, "SglangServer", _FakeServer), \
          mock.patch.object(rs, "run_bench", return_value={}):
         rows = rs.sweep_one_template(
@@ -221,7 +221,7 @@ def test_main_skip_bench(tmp_path: Path) -> None:
         "model_path": str(model_dir),
         "model_name": "TestModel",
         "precision": "bf16",
-        "current_best": {"extra_sglang_args": "--foo", "extra_envs": {}},
+        "current_best": {"extra_server_args": "--foo", "extra_envs": {}},
     }))
     csv_path = session_dir / "roofline_sweep.csv"
     csv_path.write_text(

@@ -53,7 +53,7 @@ class LaunchTemplate:
     """sglang launch parameter bundle (one per config: baseline / optimized)."""
 
     label: str
-    extra_sglang_args: str
+    extra_server_args: str
     extra_envs: dict[str, str] = field(default_factory=dict)
 
 
@@ -68,22 +68,22 @@ def extract_templates(state: dict[str, Any]) -> tuple[LaunchTemplate, LaunchTemp
     """Build the (baseline, optimized) launch templates from state.json.
 
     Baseline = vanilla sglang (no extra flags / envs). Optimized =
-    state.current_best.extra_sglang_args + extra_envs. The optimized
+    state.current_best.extra_server_args + extra_envs. The optimized
     template is the hard KPI of this sweep — when empty, the caller
     should refuse to run.
     """
     cb = state.get("current_best") or {}
-    opt_args = (cb.get("extra_sglang_args") or "").strip()
+    opt_args = (cb.get("extra_server_args") or "").strip()
     opt_envs = cb.get("extra_envs") or {}
     if not opt_args and not opt_envs:
         raise SystemExit(
-            "current_best.extra_sglang_args and extra_envs are both empty — "
+            "current_best.extra_server_args and extra_envs are both empty — "
             "the e2e session did not accept any optimization. Re-run the "
             "session until at least one candidate is accepted."
         )
     return (
-        LaunchTemplate(label="baseline", extra_sglang_args="", extra_envs={}),
-        LaunchTemplate(label="optimized", extra_sglang_args=opt_args, extra_envs=dict(opt_envs)),
+        LaunchTemplate(label="baseline", extra_server_args="", extra_envs={}),
+        LaunchTemplate(label="optimized", extra_server_args=opt_args, extra_envs=dict(opt_envs)),
     )
 
 
@@ -278,7 +278,7 @@ def sweep_one_template(
     bench_out_dir = output_dir / f"bench_{tmpl.label}"
     with SglangServer(
         model_path=model_path, tp=tp, port=port,
-        extra_args=tmpl.extra_sglang_args, extra_envs=tmpl.extra_envs,
+        extra_args=tmpl.extra_server_args, extra_envs=tmpl.extra_envs,
         log_path=server_log, gpu_id=gpu_id,
     ) as srv:
         for conc in concs:
@@ -485,12 +485,12 @@ def main(argv: list[str] | None = None) -> int:
             ]
     else:
         if args.baseline_only:
-            templates = [LaunchTemplate(label="baseline", extra_sglang_args="", extra_envs={})]
+            templates = [LaunchTemplate(label="baseline", extra_server_args="", extra_envs={})]
             print("[sweep] baseline-only mode (no accepted optimization)")
         else:
             tmpl_base, tmpl_opt = extract_templates(state)
-            print(f"[sweep] baseline:  args={tmpl_base.extra_sglang_args!r} envs={tmpl_base.extra_envs}")
-            print(f"[sweep] optimized: args={tmpl_opt.extra_sglang_args!r} envs={tmpl_opt.extra_envs}")
+            print(f"[sweep] baseline:  args={tmpl_base.extra_server_args!r} envs={tmpl_base.extra_envs}")
+            print(f"[sweep] optimized: args={tmpl_opt.extra_server_args!r} envs={tmpl_opt.extra_envs}")
             templates = [tmpl_base, tmpl_opt]
         rows: list[dict[str, Any]] = []
         for tmpl in templates:

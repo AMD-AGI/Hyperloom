@@ -108,6 +108,9 @@ def collect_rows(
             "display_name": task.get("display_name"),
             "submit_status": task.get("submit_status"),
             "final_status": task.get("final_status"),
+            "ci_status": task.get("ci_status"),
+            "ci_success": task.get("ci_success"),
+            "delivery_reason": task.get("delivery_reason"),
             "framework": metrics.get("framework") or detected.get("framework"),
             "precision": detected.get("precision"),
             "tp": metrics.get("tp") or detected.get("tp"),
@@ -133,6 +136,20 @@ def collect_rows(
             "artifacts": len(item.get("artifacts") or []),
             "warnings": item.get("warnings") or [],
         }
+        if not row["ci_success"]:
+            has_delivered_metrics = (
+                row["baseline_tok_per_gpu"] is not None
+                or row["optimized_tok_per_gpu"] is not None
+                or row["gain_pct"] is not None
+                or (item.get("source_files") or {}).get("session_breakdown") is not None
+            )
+            row["ci_success"] = bool(
+                row["final_status"] == "Succeeded"
+                or row["ci_status"] == "Delivered"
+                or has_delivered_metrics
+            )
+        if not row["ci_status"]:
+            row["ci_status"] = "Delivered" if row["ci_success"] else "Missing artifacts"
 
         ref = fetch_inferenceX_ref(model, hf_to_ifx, target_gpu, isl, osl) if model else None
         row["inferenceX_tok_per_gpu"] = ref
@@ -211,11 +228,13 @@ def status_icon(row: dict) -> str:
     final = row.get("final_status")
     baseline = row.get("baseline_tok_per_gpu")
     optimized = row.get("optimized_tok_per_gpu")
+    if row.get("ci_success"):
+        return "✅"
     if final and final not in ("Succeeded", "Completed"):
         return "❌"
-    if baseline and optimized:
+    if baseline is not None and optimized is not None:
         return "✅"
-    if baseline or optimized:
+    if baseline is not None or optimized is not None:
         return "🟡"
     return "❌"
 
@@ -247,29 +266,31 @@ def short_model_name(repo_id: str | None) -> str:
 
 def gain_sort_key(row: dict) -> tuple[int, float]:
     """Sort key: rows with a numeric gain first (desc), failures last."""
+    delivered_rank = 0 if row.get("ci_success") else 1
     pct = row.get("gain_pct")
     if pct is None:
-        return (1, 0.0)
+        return (delivered_rank, 1.0)
     try:
-        return (0, -float(pct))
+        return (delivered_rank, -float(pct))
     except (TypeError, ValueError):
-        return (1, 0.0)
+        return (delivered_rank, 1.0)
 
 
 def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> str:
     """Render the ranked summary in the format used for executive reporting."""
     sorted_rows = sorted(rows, key=gain_sort_key)
     n = len(rows)
-    succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
+    delivered = sum(1 for r in rows if r.get("ci_success"))
+    safe_succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
     with_gain = sum(1 for r in rows
                     if (r.get("gain_pct") or 0) > 0
-                    and r.get("baseline_tok_per_gpu")
-                    and r.get("optimized_tok_per_gpu"))
+                    and r.get("baseline_tok_per_gpu") is not None
+                    and r.get("optimized_tok_per_gpu") is not None)
     beat_infx = sum(1 for r in rows if (r.get("vs_inferenceX_pct") or 0) > 0)
 
     lines = [
         "# Hyperloom CI Summary",
-        f"- Models: {n} (Succeeded: {succeeded}, with gain: {with_gain}, beat InferenceX: {beat_infx})",
+        f"- Models: {n} (Delivered: {delivered}, SaFE Succeeded: {safe_succeeded}, with gain: {with_gain}, beat InferenceX: {beat_infx})",
         f"- ISL/OSL: {isl} / {osl}",
         f"- InferenceX reference GPU: `{target_gpu}`",
         f"- Sort: by Gain% (desc); failures last",

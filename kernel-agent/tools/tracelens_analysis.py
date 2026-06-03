@@ -654,15 +654,61 @@ def extract_source_file(event: dict[str, Any]) -> str:
     return ""
 
 
+_FLYDSL_SOURCE_MARKERS = (
+    "import flydsl",
+    "from flydsl",
+    "@flyc.kernel",
+    "@flyc.jit",
+    "flydsl.compiler",
+    "flydsl.expr",
+)
+_FLYDSL_SCAN_BYTES = 4096
+
+
+def _looks_like_flydsl_source(source_file: str) -> bool:
+    """Return True when ``source_file`` is a FlyDSL kernel source.
+
+    Detection is content-based: FlyDSL kernels are plain ``.py`` files
+    so neither extension nor path is reliable. Sniff the first 4 KiB
+    for FlyDSL import / decorator markers — same signals GEAK's
+    ``task_generator._infer_kernel_type`` uses upstream.
+    """
+    if not source_file or not source_file.endswith(".py"):
+        return False
+    try:
+        with open(source_file, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(_FLYDSL_SCAN_BYTES)
+    except OSError:
+        return False
+    return any(marker in head for marker in _FLYDSL_SOURCE_MARKERS)
+
+
+_FLYDSL_PSEUDO_OP_NAME_MARKERS = (
+    "pseudo_op::moe_flydsl_",
+    "pseudo_op::flydsl_",
+)
+
+
 def source_type_for(name: str, source_file: str) -> str:
     lower_name = name.lower()
     lower_file = source_file.lower()
+    # PR #668 (TraceLens) injects ``pseudo_op::moe_flydsl_stage1`` /
+    # ``pseudo_op::moe_flydsl_stage2`` above ``aiter::fused_moe_`` events
+    # whose subtree contains FlyDSL stage markers. The pseudo-op carries
+    # no source_file (it is synthetic) so content sniffing returns
+    # ``unknown``. Match the upstream pseudo-op name prefix directly so
+    # the candidate gets ``source_type=flydsl`` without needing a
+    # resolvable .py path.
+    if any(marker in lower_name for marker in _FLYDSL_PSEUDO_OP_NAME_MARKERS):
+        return "flydsl"
     if is_runtime_generated_kernel(name, source_file):
         return "runtime_generated"
     if source_file.endswith((".cu", ".cuh", ".hip", ".cpp", ".h", ".hpp")):
         return "hip_cpp"
     if "triton" in lower_name and source_file.endswith(".py"):
         return "triton"
+    if _looks_like_flydsl_source(source_file):
+        return "flydsl"
     if source_file.endswith(".py"):
         return "python"
     if "hipblas" in lower_name or "rocblas" in lower_name:
@@ -727,12 +773,37 @@ def _aiter_csrc_root() -> str:
     return (raw.rstrip("/") + "/") if raw else ""
 
 
+def _flydsl_reusable_roots() -> tuple[str, ...]:
+    """FlyDSL kernel checkout root(s) for PR #668 moe_flydsl pseudo-ops.
+
+    The real rewritable source for ``pseudo_op::moe_flydsl_*`` lives under
+    ``$DSL2_ROOT/kernels/`` (e.g. moe_gemm_2stage.py). The dynamic
+    framework-root discovery does not know about the FlyDSL checkout, so
+    without this the candidate is rejected "source not under a reusable
+    framework root" and never reaches GEAK. Lower-cased because
+    classify_patchability matches against ``lower_file``. ``$DSL2_ROOT`` /
+    ``$FLYDSL_ROOT`` take precedence; the WekaFS checkout is the default.
+    """
+    out: list[str] = []
+    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
+        val = (os.environ.get(env_key, "") or "").strip()
+        if val:
+            out.append((val.rstrip("/") + "/").lower())
+    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+        if default not in out:
+            out.append(default)
+    return tuple(out)
+
+
 def _reusable_roots() -> tuple[str, ...]:
-    """Discovered framework roots plus aiter's own (dynamic) csrc root."""
+    """Discovered framework roots + aiter csrc + FlyDSL checkout (dynamic)."""
     roots = _framework_patch_roots()
     csrc = _aiter_csrc_root()
     if csrc and csrc not in roots:
-        return roots + (csrc,)
+        roots = roots + (csrc,)
+    for fly in _flydsl_reusable_roots():
+        if fly not in roots:
+            roots = roots + (fly,)
     return roots
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
@@ -823,9 +894,9 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"source not under a reusable framework root: {source_file}"
         )
     source_type = candidate.get("source_type")
-    if source_type not in {"hip_cpp", "triton", "python"}:
+    if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (
-            f"source_type={source_type!r} not in {{hip_cpp, triton, python}}"
+            f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}"
         )
     return True, ""
 
@@ -1417,6 +1488,8 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
     cat = (candidate.get("tracelens_category") or "").strip()
     if cat:
         return normalize_upstream_category(cat)
+    if candidate.get("source_type") == "flydsl":
+        return "FlyDSL"
     name = str(candidate.get("name") or "").lower()
     if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
                                 "cijk", "sgemm", "hgemm")):
@@ -1590,6 +1663,25 @@ def _finalize_candidates(
         # (rare, but defensive).
         item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
         item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
+        # PR #668 FlyDSL pseudo-ops (pseudo_op::moe_flydsl_stage{1,2}) are
+        # synthetic and carry no source_file, so classify_patchability below
+        # would reject them ("source file not resolved") and kernel-opt would
+        # see zero reusable-native candidates. Inject the real FlyDSL MoE
+        # kernel source BEFORE the patchability gate so FlyDSL routes to GEAK.
+        # FlyDSL pseudo-ops either carry no source_file or a profiler frame
+        # label like ``aiter/fused_moe.py(986): fused_moe_2stages`` that is
+        # not a real rewritable path under a reusable framework root. In both
+        # cases inject the real FlyDSL MoE kernel source.
+        if item["source_type"] == "flydsl":
+            _sf = str(item.get("source_file") or "").strip()
+            if (not _sf) or (not os.path.isfile(_sf)):
+                _fb = _resolve_flydsl_source_fallback()
+                if _fb:
+                    item["source_file"] = _fb
+                    item["kernel_repo"] = (
+                        find_repo_root(_fb) or item.get("kernel_repo", "")
+                    )
+                    item["flydsl_source_from_fallback"] = True
         # Re-classify thin vendor / dispatch wrappers (the .so/.co loader
         # shims that have no rewritable kernel body). Even when the file
         # extension is .cu/.py and source_type would otherwise be hip_cpp/
@@ -1945,16 +2037,89 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
     return {}
 
 
+_FLYDSL_TARGET_ARCH_BY_PLATFORM = {
+    "mi300x": "gfx942",
+    "mi325x": "gfx942",
+    "mi355x": "gfx950",
+}
+_FLYDSL_SMEM_MARKERS = ("SmemAllocator", "SmemPtr", "smem_alloc")
+_FLYDSL_BUFFER_LOAD_MARKERS = (
+    "make_buffer_tensor", "BufferCopy", "rocdl", "buffer_load",
+)
+
+
+def _resolve_flydsl_source_fallback() -> str:
+    """Resolve the real FlyDSL MoE kernel source for pseudo-op candidates.
+
+    PR #668 pseudo-ops (``pseudo_op::moe_flydsl_stage{1,2}``) are synthetic
+    and carry no ``source_file``, so :func:`classify_patchability` would
+    reject them ("source file not resolved") and the kernel-opt routing
+    would see zero reusable-native candidates. The real rewritable source
+    is FlyDSL's 2-stage MoE GEMM kernel under ``$DSL2_ROOT/kernels/``.
+    Returns the first existing path, else "".
+    """
+    roots = [
+        os.environ.get("DSL2_ROOT", "").strip(),
+        os.environ.get("FLYDSL_ROOT", "").strip(),
+        "/wekafs/yunkai/FlyDSL",
+        "/sgl-workspace/flydsl",
+    ]
+    for root in roots:
+        if not root:
+            continue
+        cand = os.path.join(root, "kernels", "moe_gemm_2stage.py")
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _flydsl_kernel_params(
+    source_file: str, target_platform: str,
+) -> dict[str, Any]:
+    """Return FlyDSL-specific kernel_params for prompt construction.
+
+    Mirrors the metadata GEAK's ``skills/flydsl/`` cheatsheet keys off:
+    JIT cache state, MLIR target arch, and whether the source uses
+    SmemAllocator / buffer-load intrinsics. Best-effort — missing fields
+    just omit; never raise.
+    """
+    params: dict[str, Any] = {}
+    arch = _FLYDSL_TARGET_ARCH_BY_PLATFORM.get(
+        (target_platform or "").strip().lower(),
+    )
+    if arch:
+        params["FLYDSL_TARGET_ARCH"] = arch
+    cache_dir = os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", "").strip()
+    if cache_dir:
+        params["FLYDSL_AUTOTUNE_CACHE_DIR"] = cache_dir
+    enable_cache = os.environ.get("FLYDSL_RUNTIME_ENABLE_CACHE", "").strip()
+    if enable_cache:
+        params["FLYDSL_RUNTIME_ENABLE_CACHE"] = enable_cache
+    if source_file:
+        try:
+            with open(source_file, "r", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(_FLYDSL_SCAN_BYTES)
+        except OSError:
+            head = ""
+        if head:
+            if any(m in head for m in _FLYDSL_SMEM_MARKERS):
+                params["FLYDSL_USES_SMEM"] = True
+            if any(m in head for m in _FLYDSL_BUFFER_LOAD_MARKERS):
+                params["FLYDSL_USES_BUFFER_LOAD"] = True
+    return params
+
+
 def enrich_candidates_with_runtime_metadata(
     candidates: list[dict[str, Any]], args: argparse.Namespace,
 ) -> None:
     """Attach stable runtime metadata fields before GEAK prompt generation."""
     framework = str(getattr(args, "framework", "") or "").strip()
     model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
+    target_platform = str(getattr(args, "target_platform", "") or "")
     runtime_flags = {
         "analysis_mode": getattr(args, "analysis_mode", ""),
         "runtime_env": getattr(args, "runtime_env", ""),
-        "target_platform": getattr(args, "target_platform", ""),
+        "target_platform": target_platform,
     }
     for item in candidates:
         if not isinstance(item, dict):
@@ -1976,6 +2141,22 @@ def enrich_candidates_with_runtime_metadata(
             params = item["kernel_params"]
             if isinstance(params, dict):
                 for key, value in model_params.items():
+                    params.setdefault(key, value)
+        if item.get("source_type") == "flydsl":
+            # PR #668 pseudo-ops carry no source_file (or a non-file frame
+            # label). Inject the real FlyDSL MoE kernel source so GEAK has a
+            # file to rewrite.
+            _sf2 = str(item.get("source_file") or "").strip()
+            if (not _sf2) or (not os.path.isfile(_sf2)):
+                fb = _resolve_flydsl_source_fallback()
+                if fb:
+                    item["source_file"] = fb
+            flydsl_params = _flydsl_kernel_params(
+                str(item.get("source_file") or ""), target_platform,
+            )
+            params = item["kernel_params"]
+            if isinstance(params, dict):
+                for key, value in flydsl_params.items():
                     params.setdefault(key, value)
         flags = item.get("runtime_flags")
         if not isinstance(flags, dict):

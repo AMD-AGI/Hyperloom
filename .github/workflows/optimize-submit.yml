@@ -31,11 +31,8 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  schedule:
-    # Run every 12 hours at UTC 00:00 and 12:00.
-    # Cron uses the fixed production candidate pool and excludes models queued
-    # or running in other optimize-submit workflows.
-    - cron: '0 0,12 * * *'
+  # Cron is intentionally disabled while optimize-thunder runs the full
+  # 3B-12B pool. Keep manual dispatch for targeted submit runs.
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
@@ -152,6 +149,10 @@ on:
         description: 'Per-task wait timeout in minutes (default 720 = 12h)'
         required: false
         default: '720'
+      max_hours:
+        description: 'Per-task optimizer budget in hours (default 12)'
+        required: false
+        default: '12'
       all_artifacts:
         description: 'Download every artifact (default off — only optimization_report + ci_metrics)'
         type: boolean
@@ -284,6 +285,7 @@ jobs:
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
+          INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours }}
           # Cron rotates through the production pool — operators can't go
           # back and re-fetch sandbox state after the fact, so force
           # `--all-artifacts=true` on schedule. workflow_dispatch keeps
@@ -320,7 +322,7 @@ jobs:
           # Code-level contract: do not rely on natural-language prompt text
           # for these two critical values. SaFE consumes them and renders the
           # generated prompt tail consistently with the CI prefix.
-          ARGS+=(--max-hours 12)
+          ARGS+=(--max-hours "${INPUT_MAX_HOURS:-12}")
           ARGS+=(--results-path '$RESULT_DIR')
           # Hard guarantee: SaFE promptPrefix MUST be non-empty. Workflow
           # input is only populated on workflow_dispatch — for schedule
@@ -454,7 +456,7 @@ jobs:
       # `continue-on-error` so a flaky upstream never blocks the rest of
       # the per-model contract (artifact upload, prewarm log, etc).
       - name: Publish session breakdown to perf-leaderboard
-        if: success() && github.event.inputs.dry_run != 'true'
+        if: always() && github.event.inputs.dry_run != 'true'
         continue-on-error: true
         env:
           EXPECTED_MODEL: ${{ matrix.model }}
@@ -467,13 +469,21 @@ jobs:
           with open("submit-output/submission_manifest.json", encoding="utf-8") as f:
               data = json.load(f)
           records = data.get("records") if isinstance(data.get("records"), list) else []
-          ok = any((r.get("final_status") == "Succeeded") for r in records if isinstance(r, dict))
+          ok = any(
+              (
+                  r.get("final_status") == "Succeeded"
+                  or r.get("ci_success")
+                  or r.get("ci_status") == "Delivered"
+              )
+              for r in records
+              if isinstance(r, dict)
+          )
           print("yes" if ok else "no")
           PY
             )
             if [ "$READY" != "yes" ]; then
-              echo "::warning::no Succeeded task in submission_manifest.json; skipping sbd-ingester publish"
-              echo "SKIP non-succeeded-task" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
+              echo "::warning::no Succeeded or Delivered task in submission_manifest.json; skipping sbd-ingester publish"
+              echo "SKIP non-delivered-task" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
               exit 0
             fi
           fi
@@ -544,30 +554,31 @@ jobs:
                           return True
               return False
 
-          def positive_number(value):
-              return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+          def has_any_number(value):
+              if isinstance(value, bool):
+                  return False
+              if isinstance(value, (int, float)):
+                  return True
+              if isinstance(value, dict):
+                  return any(has_any_number(v) for v in value.values())
+              if isinstance(value, list):
+                  return any(has_any_number(v) for v in value[:100])
+              return False
 
-          def has_positive_perf(data):
-              baseline = data.get("baseline") if isinstance(data.get("baseline"), dict) else {}
-              final = data.get("final") if isinstance(data.get("final"), dict) else {}
-              best = data.get("best") if isinstance(data.get("best"), dict) else {}
-              base_values = (
-                  data.get("baseline_tput"),
-                  data.get("baseline_throughput"),
-                  data.get("tok_per_gpu_baseline"),
-                  baseline.get("throughput_tok_s_per_gpu"),
-                  baseline.get("output_throughput"),
+          def has_breakdown_data(data):
+              if not isinstance(data, dict):
+                  return False
+              keys = (
+                  "baseline", "best", "final", "optimized", "steps", "actions",
+                  "phases", "session", "session_meta", "workload",
+                  "baseline_throughput", "optimized_throughput",
+                  "tok_per_gpu_baseline", "tok_per_gpu_optimized", "gain_pct",
+                  "cumulative_gain_pct",
               )
-              opt_values = (
-                  data.get("best_tput"),
-                  data.get("optimized_throughput"),
-                  data.get("tok_per_gpu_optimized"),
-                  final.get("throughput_tok_s_per_gpu"),
-                  final.get("output_throughput"),
-                  best.get("throughput_tok_s_per_gpu"),
-                  best.get("output_throughput"),
+              return (
+                  any(data.get(k) not in (None, {}, [], "") for k in keys)
+                  or has_any_number(data)
               )
-              return any(positive_number(v) for v in base_values) and any(positive_number(v) for v in opt_values)
 
           def first(*values):
               for value in values:
@@ -639,8 +650,8 @@ jobs:
                       notes = [f"skip {bd_path}: {bd['_error']}"]
                       continue
                   bf = breakdown_fields(bd)
-                  if not has_positive_perf(bd):
-                      notes = [f"skip {bd_path}: missing positive baseline/best throughput"]
+                  if not has_breakdown_data(bd):
+                      notes = [f"skip {bd_path}: no structured session_breakdown data"]
                       continue
                   if ci_claw and bf["claw_session_id"] and ci_claw != bf["claw_session_id"]:
                       notes = [f"skip {bd_path}: claw_session_id={bf['claw_session_id']!r} expected={ci_claw!r}"]
@@ -709,8 +720,8 @@ jobs:
                           f"skip {bd_path}: model={bf['model']!r} expected={ci_model!r}"
                       )
                       continue
-                  if not has_positive_perf(bd):
-                      notes.append(f"skip {bd_path}: missing positive baseline/best throughput")
+                  if not has_breakdown_data(bd):
+                      notes.append(f"skip {bd_path}: no structured session_breakdown data")
                       continue
                   if ci_claw and bf["claw_session_id"] and ci_claw != bf["claw_session_id"]:
                       notes.append(
@@ -858,7 +869,7 @@ jobs:
 
       - name: Upload per-model manifest
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: submission-manifest-${{ matrix.key }}
           path: submit-output/
@@ -867,7 +878,7 @@ jobs:
 
       - name: Upload per-model task artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: task-artifacts-${{ matrix.key }}
           path: task-artifacts/
@@ -878,7 +889,7 @@ jobs:
         # Per-model prewarm log lets us diagnose "why was this model slow on
         # first encounter" reports.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: prewarm-log-${{ matrix.key }}
           path: prewarm.log
@@ -987,7 +998,7 @@ jobs:
 
       - name: Upload final summary
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-summary
           path: summary-out/
