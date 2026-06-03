@@ -3046,6 +3046,8 @@ class SharedState:
         ("kernel", "noop", ...) are still appended (the ledger is
         descriptive); the consecutive-config counter only advances on
         explicit ``"config"`` values and resets on ``"code_patch"``.
+        ``"code_patch_attempt"`` satisfies exploration-depth accounting
+        without counting as a kept code patch.
         """
         ct = str(change_type or "").strip().lower()
         entry = {
@@ -3084,9 +3086,17 @@ class SharedState:
 
         total_config = sum(1 for e in ledger if _ct(e) == "config")
         total_code_patch = sum(1 for e in ledger if _ct(e) == "code_patch")
+        total_code_patch_attempt = sum(
+            1 for e in ledger
+            if _ct(e) in ("code_patch", "code_patch_attempt")
+        )
         window = ledger[-recent_window:] if recent_window > 0 else ledger
         recent_config = sum(1 for e in window if _ct(e) == "config")
         recent_code_patch = sum(1 for e in window if _ct(e) == "code_patch")
+        recent_code_patch_attempt = sum(
+            1 for e in window
+            if _ct(e) in ("code_patch", "code_patch_attempt")
+        )
 
         consecutive_config_only = 0
         for e in reversed(ledger):
@@ -3099,8 +3109,10 @@ class SharedState:
         return {
             "total_config": total_config,
             "total_code_patch": total_code_patch,
+            "total_code_patch_attempt": total_code_patch_attempt,
             "recent_config": recent_config,
             "recent_code_patch": recent_code_patch,
+            "recent_code_patch_attempt": recent_code_patch_attempt,
             "consecutive_config_only": consecutive_config_only,
             "config_heavy": total_config >= recent_window and total_code_patch == 0,
         }
@@ -3215,7 +3227,7 @@ class SharedState:
         """Advance the code/config patch-attempt counters from a KEEP."""
         dt = self._depth()
         ct = str(change_type or "").strip().lower()
-        if ct == "code_patch":
+        if ct in ("code_patch", "code_patch_attempt"):
             dt["code_patches_attempted"] = int(
                 dt.get("code_patches_attempted") or 0
             ) + 1
@@ -3283,6 +3295,12 @@ class SharedState:
         n_patch = sum(
             1 for m in mix if (m or {}).get("change_type") == "code_patch"
         )
+        n_patch_attempt = sum(
+            1 for m in mix
+            if (m or {}).get("change_type") in (
+                "code_patch", "code_patch_attempt",
+            )
+        )
         # B2: config explore rounds that produced measurements but KEPT
         # nothing (all REVERT / KEEP_UNSTABLE) are recorded as
         # ``config_attempt``. They count toward the escalation signal so
@@ -3296,7 +3314,7 @@ class SharedState:
         config_pressure = n_config + n_config_attempt
         lines = [
             f"config_keeps={n_config} config_attempts={n_config_attempt} "
-            f"code_patch_keeps={n_patch} "
+            f"code_patch_keeps={n_patch} code_patch_attempts={n_patch_attempt} "
             f"consecutive_config_only_rounds={consec}"
         ]
         if (

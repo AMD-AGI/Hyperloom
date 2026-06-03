@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from inference_optimizer import session_paths
 from inference_optimizer.orchestrator import research_hints
 from inference_optimizer.orchestrator import specialist_domains as sd
@@ -116,3 +118,43 @@ def test_scout_counters_and_seen_pr_roundtrip():
     restored = SharedState.from_dict(s.to_dict())
     assert restored.research_scout_runs == 1
     assert restored.has_seen_pr_id("b") is True
+
+
+@pytest.mark.asyncio
+async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
+    from inference_optimizer.orchestrator.agent_role import default_role_registry
+    from inference_optimizer.orchestrator.backends.mock_backend import (
+        MockBackend, MockTurn, ScriptedPlan,
+    )
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+
+    state = SharedState(session_id="research-scout-readonly")
+    state.save(tmp_path)
+    idle = ScriptedPlan(turns=[MockTurn(intents=[])])
+    backends = {
+        "orchestration": MockBackend(idle),
+        "kernel": MockBackend(idle),
+        "critic": MockBackend(idle),
+        "robustness": MockBackend(idle),
+    }
+    coord = Coordinator(
+        session_dir=tmp_path,
+        backends=backends,
+        role_registry=default_role_registry(),
+        cortex_kb=None,
+        knowledge_plane=None,
+    )
+
+    task = await coord._enqueue_internal_research_scout_task(
+        reason="test", round_id=0,
+    )
+
+    assert task is not None
+    assert task.params["readonly"] is True
+    assert task.allowed_tools == [
+        "Read", "Grep", "Glob", "Write", "WebSearch", "WebFetch",
+    ]
+    assert "Bash" not in task.allowed_tools
+    assert "Edit" not in task.allowed_tools
+    assert "MultiEdit" not in task.allowed_tools
+    assert task.side_effects == ["writes_results"]

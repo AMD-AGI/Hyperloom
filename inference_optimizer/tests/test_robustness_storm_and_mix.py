@@ -179,9 +179,9 @@ def test_coordinator_intervention_hook_records_code_patch_for_integrate_kept():
     assert c.shared_state.consecutive_config_only_rounds == 0
 
 
-def test_coordinator_intervention_hook_skips_integrate_with_non_kept_status():
-    """integrate_patch with status reverted / apply_failed must NOT
-    advance any counter."""
+def test_coordinator_intervention_hook_records_integrate_attempts():
+    """integrate_patch attempts satisfy depth tracking even when they do
+    not KEEP. Only a kept code patch resets the config-only counter."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.task_registry import Task
 
@@ -194,7 +194,12 @@ def test_coordinator_intervention_hook_skips_integrate_with_non_kept_status():
     for status in ("reverted", "apply_failed", "rejected_by_critic",
                     "applied_no_bench", "no_patches"):
         c._record_intervention_for_task(task, {"status": status})
-    assert c.shared_state.intervention_mix == []
+    assert len(c.shared_state.intervention_mix) == 5
+    assert {
+        e["change_type"] for e in c.shared_state.intervention_mix
+    } == {"code_patch_attempt"}
+    assert c.shared_state.depth_tracker["code_patches_attempted"] == 5
+    assert c.shared_state.consecutive_config_only_rounds == 0
 
 
 # ---------------------------------------------------------------------------
@@ -206,8 +211,10 @@ def test_get_intervention_mix_empty_ledger():
     assert mix == {
         "total_config": 0,
         "total_code_patch": 0,
+        "total_code_patch_attempt": 0,
         "recent_config": 0,
         "recent_code_patch": 0,
+        "recent_code_patch_attempt": 0,
         "consecutive_config_only": 0,
         "config_heavy": False,
     }

@@ -306,7 +306,9 @@ class SpecialistRunner:
         self.per_turn_max_seconds = float(per_turn_max_seconds)
         self.knowledge_plane = knowledge_plane
 
-    def _resolve_tools(self) -> tuple[str, ...]:
+    def _resolve_tools(
+        self, task_allowed_tools: list[str] | tuple[str, ...] | None = None,
+    ) -> tuple[str, ...]:
         """Return the per-task tool whitelist.
 
         Gated on:
@@ -314,11 +316,17 @@ class SpecialistRunner:
         * KnowledgePlane PR Monitor / Cortex KB availability — strips
           ``mcp__pr_monitor__*`` / ``mcp__cortex_kb__*`` whenever the
           corresponding surface is disabled.
+        * Per-task ``Task.allowed_tools`` when the dispatcher supplied a
+          narrower surface (research_scout is the canonical read-only case).
         * Always enforces :data:`SPECIALIST_TOOL_DENYLIST` last
           (defense in depth — caller may have extended ``default_tools``
           carelessly).
         """
-        tools = list(self.default_tools)
+        tools = (
+            list(task_allowed_tools)
+            if task_allowed_tools
+            else list(self.default_tools)
+        )
         plane = self.knowledge_plane
         if plane is not None:
             try:
@@ -536,7 +544,9 @@ class SpecialistRunner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             notes=notes,
-            resolved_tools=self._resolve_tools(),
+            resolved_tools=self._resolve_tools(
+                getattr(ctx.task, "allowed_tools", None),
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -937,6 +947,12 @@ class SpecialistRunner:
         downstream collectors can surface it.
         """
         if self.subprocess_config is None or workspace is None:
+            return None, None, ""
+        params = ctx.task.params or {}
+        readonly = bool(params.get("readonly")) or (
+            str(params.get("domain") or "").strip() == "research_scout_specialist"
+        )
+        if readonly:
             return None, None, ""
         base = _pick_worktree_base(self.subprocess_config.framework_source_roots)
         if base is None:

@@ -4008,6 +4008,7 @@ class Coordinator:
             "source": "coordinator_internal",
             "reason": str(reason),
             "seen_pr_ids": seen,
+            "readonly": True,
         }
         proven = self._warm_recipe_proven_items()
         if proven:
@@ -4020,10 +4021,10 @@ class Coordinator:
                 idempotency_key=idempotency_key,
                 requires_lanes=["research_lane"],
                 allowed_tools=[
-                    "emit_intent", "Read", "Grep", "Glob", "Bash",
+                    "Read", "Grep", "Glob", "Write",
                     "WebSearch", "WebFetch",
                 ],
-                side_effects=["workspace_write"],
+                side_effects=["writes_results"],
                 lease_ttl_sec=1800,
             )
         except Exception:  # noqa: BLE001 — TaskRegistry edge cases
@@ -9999,11 +10000,11 @@ class Coordinator:
         Mapping:
         * ``task.kind == "explore"``       → ``change_type = "config"``
           (every explore KEEP is a config tweak per v0.8 M3).
-        * ``task.kind == "integrate_patch"`` AND the executor reported
-          ``status == "kept"`` → ``change_type = "code_patch"``.
-        * ``integrate_patch`` with any other status (reverted /
-          apply_failed / rejected_by_critic / applied_no_bench) →
-          NOT recorded; only successful KEEPs roll the counter.
+        * ``task.kind == "integrate_patch"`` records a
+          ``code_patch_attempt`` whenever the executor ran, satisfying the
+          depth gate's "try a code patch" condition. ``status == "kept"``
+          records ``code_patch`` instead, which additionally resets the
+          config-only escalation counter.
 
         Best-effort: the caller wraps in try/except so any field
         access failure is non-fatal.
@@ -10045,7 +10046,16 @@ class Coordinator:
             )
             return
         if kind == "integrate_patch":
-            if str(result.get("status") or "") != "kept":
+            status = str(result.get("status") or "").strip().lower()
+            if not status:
+                return
+            if status != "kept":
+                self.shared_state.record_intervention(
+                    change_type="code_patch_attempt",
+                    action="integrate_patch",
+                    task_id=task.task_id,
+                    delta_pct=result.get("delta_pct"),
+                )
                 return
             self.shared_state.record_intervention(
                 change_type="code_patch",
