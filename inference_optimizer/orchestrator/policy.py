@@ -660,6 +660,18 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # outcomes via UPDATE_STATE.
     "dynamic_actions",
     "dynamic_action_round_count",
+    # FRAMEWORK_PR per-repo discovery budget. Coordinator-controlled
+    # search depth knob (mirrors research_lane_capacity's "set once,
+    # don't let the LLM raise mid-flight" intent); locking it stops a
+    # non-core role from inflating the per-batch search / bench queue
+    # via update_state.
+    "framework_pr_max_candidates",
+    # Advisory model-architecture profile. Produced pre-launch by the
+    # SKILL launcher into state.json; drives no deterministic gating but
+    # is injected into specialist prompts, so lock it to keep the
+    # launcher / state.json as the sole source of truth (an LLM
+    # update_state must not pollute the specialist prompt context).
+    "model_arch",
 })
 
 
