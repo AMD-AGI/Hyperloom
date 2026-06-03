@@ -50,9 +50,9 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 │   ├── kernel-agent.env.sh
 │   ├── geak-config/local.yaml
 │   ├── Magpie/
-│   └── source-mirrors/{Primus-Claw,OOB,InferenceX,TraceLens,TraceLens-internal}/
-│       # TraceLens = one dep, two source repos; fallback clones only when
-│       # /workspace/TraceLens* are absent (default Local Mode uses those paths)
+│   └── source-mirrors/{Primus-Claw,OOB,InferenceX,TraceLens[,TraceLens-internal]}/
+│       # TraceLens public is required; TraceLens-internal is optional and only
+│       # present when TRACELENS_INTERNAL_ROOT is set (open-source-only otherwise)
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
@@ -110,11 +110,12 @@ the pinned session dir, and `paths.db_path_for(sd)` =
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`/workspace/TraceLens`; public [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens))
-with an internal extension at `$TRACELENS_INTERNAL_ROOT` (default
-`/workspace/TraceLens-internal`;
-[AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal)
-— rehydration module). See README Local Mode step 1. The per-version
+`/wekafs/hyperloom/TraceLens-internal`, the shared cluster checkout; base repo
+[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens))
+with an **optional** internal extension at `$TRACELENS_INTERNAL_ROOT` (no
+default; internal users set it to their own existing checkout to opt in,
+otherwise open-source-only; rehydration module — Hyperloom keeps no internal
+URL/path). See README Local Mode step 1. The per-version
 `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
 TraceLens is required by `_server_patcher`),
 `$OOB_SRC` / `$HYPERLOOM_BUNDLE`,
@@ -327,7 +328,7 @@ of `inference_optimizer/install.sh`):
 |---|---|
 | `ray==2.44.1` + `click<8.3.0` | pip |
 | TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
-| TraceLens-internal (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT`; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module) |
+| TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
 | GEAK CLI + `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` | `ensure_geak` |
 | Node.js/npm + OOB CLI + claude/codex npm CLIs + `@cursor/sdk` global install + `~/.claude/config.json` + `~/.codex/auth.json` | `ensure_node` + `ensure_oob` (mirrors `${HYPERLOOM_BUNDLE}/OOB` → `${HYPERLOOM_ROOT}/OOB/oob_cli`) |
 | `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
@@ -351,7 +352,7 @@ does not consume these.
 | `OOB_SRC: <path>` | `$OOB_SRC` | `kernel-agent/scripts/install.sh:ensure_oob` |
 | `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `inference_optimizer/scripts/install.sh:ensure_inferencex` |
 | `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (public) |
-| `TRACELENS_INTERNAL_ROOT: <path>` | `$TRACELENS_INTERNAL_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (internal) |
+| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (internal; only when set) |
 
 **Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
@@ -443,8 +444,9 @@ CLI:
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
-export TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+# Optional internal extension; export only to enable it (open-source-only if unset):
+# export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
