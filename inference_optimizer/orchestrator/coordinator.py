@@ -796,26 +796,23 @@ class Coordinator:
             session_dir=self.session_dir,
             shared_state=self.shared_state,
         )
+        # Resume detection must run before any boot-time state.json write;
+        # otherwise a fresh session that only inferred model_class would look
+        # like a resume (state_path.exists() → is_resume=True).
+        self._resumed_from = self._detect_resume_state()
         # External SKILL may fill `model_class` via --model-class /
         # MODEL_CLASS. If it does not, restore the deleted `classify` action's
-        # lightweight persistence duty by deriving the class once at boot and
-        # writing it to state.json. Only overwrite a blank value so resumed
-        # sessions keep their persisted class.
+        # lightweight persistence duty by deriving the class once at boot.
+        # Only overwrite a blank value so resumed sessions keep their persisted
+        # class. Persist via ``_ensure_phase_initialised`` (not here) so fresh
+        # sessions are not misclassified as resume.
         if not (self.shared_state.model_class or "").strip():
-            inferred_model_class = (
+            self.shared_state.model_class = (
                 self._model_class_override
                 or _infer_model_class_from_config(
                     self.shared_state.model_path or os.environ.get("MODEL_PATH", "")
                 )
             )
-            self.shared_state.model_class = inferred_model_class
-            try:
-                self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — best effort; not worth aborting boot.
-                log.exception(
-                    "Coordinator: failed to persist model_class=%r at boot",
-                    inferred_model_class,
-                )
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
@@ -911,7 +908,6 @@ class Coordinator:
         # tests).
         self._current_objective: Objective | None = None
 
-        self._resumed_from = self._detect_resume_state()
         # initialise phase machine. Fresh session enters
         # PRELUDE; resume from v0.6 (no phase field) infers a phase via
         # :func:`phase_state.infer_phase_from_state`.  Always idempotent:
