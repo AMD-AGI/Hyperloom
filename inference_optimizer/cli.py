@@ -73,6 +73,7 @@ from .orchestrator.backends import (
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
+from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 from .orchestrator.cortex_t0 import run_t0_anchor
 from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
@@ -948,6 +949,33 @@ def _build_backends(
     return backends
 
 
+def _build_proposal_scorer(
+    args: argparse.Namespace,
+) -> ProposalScorer | None:
+    """Construct the advisory specialist-proposal scorer, or ``None``.
+
+    Returns ``None`` when ``--no-proposal-scoring`` is set or the
+    resolved model list is empty. Models default to
+    :data:`DEFAULT_SCORER_MODELS` (``claude-opus-4-8,gpt-5.5,
+    dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview``).
+    Adding a
+    model = appending its gateway slug to ``--proposal-scorer-models``.
+    The scorer is purely advisory and never gates anything.
+    """
+    if getattr(args, "no_proposal_scoring", False):
+        return None
+    raw = getattr(args, "proposal_scorer_models", None)
+    if raw is None:
+        models = tuple(DEFAULT_SCORER_MODELS)
+    else:
+        models = tuple(
+            m for m in (s.strip() for s in str(raw).split(",")) if m
+        )
+    if not models:
+        return None
+    return ProposalScorer(models=models)
+
+
 def _resume_safe_flag(
     args: argparse.Namespace,
     arg_name: str,
@@ -1367,9 +1395,6 @@ def _seed_shared_state(
         # ``--no-explore`` skips the EXPLORE phase entirely (PRELUDE /
         # FRAMEWORK_PR → KERNEL, or → SWEEP when kernel is also off).
         explore_enabled=not bool(getattr(args, "no_explore", False)),
-        gain_driven_kernel_opt=bool(
-            getattr(args, "gain_driven_kernel_opt", False),
-        ),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
@@ -5044,6 +5069,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # ``None`` when --degraded-kb; otherwise wraps Cortex KB +
         # PR Monitor for specialist prompt assembly.
         knowledge_plane=knowledge_plane,
+        # Advisory multi-model specialist-proposal scorer. ``None`` when
+        # --no-proposal-scoring or an empty model list; otherwise scores
+        # each proposal_set and surfaces the results to Orchestration as
+        # one reference among many (never gates anything).
+        proposal_scorer=_build_proposal_scorer(args),
         # GAP 1 — Warm-recipe replay controls. Default ON, fires when
         # warm_start_recipe.confidence >= min_confidence and the
         # measured gain reproduces at least min_reproduce_pct of the
@@ -5917,6 +5947,32 @@ def _build_parser() -> argparse.ArgumentParser:
              "clamped down. Locked at session start.",
     )
     # ------------------------------------------------------------------
+    # Advisory specialist-proposal scorer (ProposalScorer). Scores each
+    # specialist proposal_set with one or more gateway models (single
+    # 0-10 composite + one-line reason) and surfaces the results to
+    # Orchestration as one reference among many — never gates anything.
+    # Adding a model = appending its gateway slug to the comma list.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--proposal-scorer-models",
+        dest="proposal_scorer_models",
+        type=str,
+        default=",".join(DEFAULT_SCORER_MODELS),
+        help="Comma-separated gateway model slugs that independently "
+             "score each specialist proposal_set (advisory only; never "
+             "gates; rater identities are anonymized in the orchestration "
+             "prompt). Default 'claude-opus-4-8,gpt-5.5,"
+             "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
+             "Add a model by "
+             "appending its slug. Empty list disables scoring.",
+    )
+    opt.add_argument(
+        "--no-proposal-scoring",
+        dest="no_proposal_scoring",
+        action="store_true",
+        help="Disable the advisory specialist-proposal scorer entirely.",
+    )
+    # ------------------------------------------------------------------
     # v0.8 §3.5 / §3.13 M5 + specialist sub-agent
     # backend selection. Specialists run via Claude (default) and inherit
     # the orchestration model unless overridden. Per-task turn / time
@@ -6039,22 +6095,6 @@ def _build_parser() -> argparse.ArgumentParser:
         """
         return os.environ.get(env_var, "1").strip() != "0"
 
-    # The standalone FRAMEWORK_PR phase is on by default; use
-    # ``--no-framework`` to disable it (mirrors the install-side
-    # ``INFERENCE_OPTIMIZER_NO_FRAMEWORK=1`` opt-out).
-    opt.add_argument(
-        "--gain-driven-kernel-opt",
-        dest="gain_driven_kernel_opt",
-        action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT", "0",
-        ).strip() == "1",
-        help="Lock ``kernel_opt`` until the 3-round moving "
-             "average of ``last_explore_delta_gain_pct`` drops below "
-             "epsilon (0.5%%). Prevents premature deep work while cheap "
-             "exploration is still earning. Default off. Env: "
-             "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT=1.",
-    )
     opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",

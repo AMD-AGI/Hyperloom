@@ -215,6 +215,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # outcomes via UPDATE_STATE).
     "dynamic_actions",
     "dynamic_action_round_count",
+    # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled
+    # search depth knob).
+    "framework_pr_max_candidates",
+    # Advisory model-architecture profile (launcher / state.json owned).
+    "model_arch",
 })
 
 
