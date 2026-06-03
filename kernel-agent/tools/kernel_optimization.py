@@ -165,15 +165,29 @@ def find_candidate(
 ) -> dict[str, Any] | None:
     """Resolve a candidate by ``kernel_id`` / ``name``.
 
-    Resolution order: exact ``kernel_id`` or ``name`` match, then a
+    Resolution order: exact ``kernel_id`` match, then a unique routable
+    ``name`` match, then a
     normalized ``kernel_id`` match (case-insensitive, ``kn``/``rn`` prefix
     folded to ``k``). Returns ``None`` when nothing matches so the caller can
     skip the kernel gracefully instead of crashing the whole run with a
     ``KeyError`` on an LLM-hallucinated id.
     """
     for candidate in candidates:
-        if candidate.get("kernel_id") == kernel_id or candidate.get("name") == kernel_id:
+        if candidate.get("kernel_id") == kernel_id:
             return candidate
+    # Operator names are not stable identifiers: several TraceLens candidates
+    # can share names like ``aten::mm``. Accept a name only when it uniquely
+    # identifies a routable candidate; otherwise treat it as an invalid
+    # kernel_id so the caller can skip instead of optimizing the wrong target.
+    name_matches = [
+        candidate
+        for candidate in candidates
+        if candidate.get("name") == kernel_id
+        and candidate.get("reusable_native_kernel") is not False
+        and candidate.get("source_file")
+    ]
+    if len(name_matches) == 1:
+        return name_matches[0]
     target = _normalize_kernel_id(kernel_id)
     for candidate in candidates:
         if _normalize_kernel_id(str(candidate.get("kernel_id") or "")) == target:
@@ -2978,7 +2992,54 @@ def main() -> int:
                 "kernel_id": args.kernel_id,
                 "status": "skipped",
                 "reason": "kernel_id_not_in_candidates",
+                "error_class": "invalid_kernel_id",
                 "known_kernel_ids": known,
+                "cli_log_path": str(log_path),
+                "status_path": str(status_path),
+            }, indent=2, sort_keys=True))
+            return 0
+        if (
+            candidate.get("reusable_native_kernel") is False
+            or not candidate.get("source_file")
+        ):
+            reason = (
+                candidate.get("skip_reason")
+                or candidate.get("optimization_notes")
+                or "candidate is not a reusable native kernel"
+            )
+            msg = (
+                f"kernel_id {args.kernel_id!r} resolved to non-routable "
+                f"TraceLens candidate {candidate.get('kernel_id')!r}: {reason}"
+            )
+            append_log(log_path, f"[skip] {msg}")
+            update_status(status_path, state="skipped", current_step="skipped",
+                          log_path=log_path, artifact_paths=artifacts,
+                          run_id=run_id, started_at=started_at, error=msg)
+            print(json.dumps({
+                "tool": "kernel_optimization",
+                "session_id": session_id,
+                "run_id": run_id,
+                "kernel_id": candidate.get("kernel_id") or args.kernel_id,
+                "requested_kernel_id": args.kernel_id,
+                "resolved_kernel_id": candidate.get("kernel_id"),
+                "kernel_name": candidate.get("name"),
+                "status": "skipped",
+                "decision": "REVERT",
+                "error_class": (
+                    "missing_native_source"
+                    if not candidate.get("source_file")
+                    else "non_reusable_kernel"
+                ),
+                "reason": "non_routable_candidate",
+                "skip_reason": reason,
+                "verification": {
+                    "micro_speedup": 0.0,
+                    "best_artifact_path": "",
+                },
+                "proposal": {
+                    "decision": "REVERT",
+                    "reasons": [reason],
+                },
                 "cli_log_path": str(log_path),
                 "status_path": str(status_path),
             }, indent=2, sort_keys=True))

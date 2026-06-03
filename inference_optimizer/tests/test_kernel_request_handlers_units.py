@@ -631,8 +631,9 @@ class TestReconcileKernelId:
         assert krh._reconcile_kernel_id("k010", self.CANDS) == "k010"
 
     def test_name_match_kept(self):
-        # An exact operator-name match is a valid request; keep it.
-        assert krh._reconcile_kernel_id("aten::mm", self.CANDS) == "aten::mm"
+        # An exact operator-name match is canonicalized to the candidate id so
+        # downstream lifecycle/results are keyed by the stable k00x id.
+        assert krh._reconcile_kernel_id("aten::mm", self.CANDS) == "k001"
 
     def test_normalized_prefix_resolves_to_real_id(self):
         assert krh._reconcile_kernel_id("kn001", self.CANDS) == "k001"
@@ -642,13 +643,71 @@ class TestReconcileKernelId:
         assert krh._reconcile_kernel_id("", self.CANDS) == "k001"
         assert krh._reconcile_kernel_id(None, self.CANDS) == "k001"
 
-    def test_hallucinated_id_falls_back_not_passthrough(self):
-        # The key regression: an unknown operator name must NOT pass through
-        # to the CLI (which would KeyError); fall back to the real candidate.
-        assert krh._reconcile_kernel_id("aiter.silu_and_mul", self.CANDS) == "k001"
+    def test_hallucinated_id_is_left_for_guard_or_cli_skip(self):
+        # Non-empty ids are never guessed. A pure hallucination should flow to
+        # the reusable-native guard / CLI skip path rather than being mapped to
+        # an unrelated candidate.
+        assert (
+            krh._reconcile_kernel_id("aiter.silu_and_mul", self.CANDS)
+            == "aiter.silu_and_mul"
+        )
         assert (
             krh._reconcile_kernel_id(
                 "framework_sglang_silu_and_mul_m64", self.CANDS
             )
-            == "k001"
+            == "framework_sglang_silu_and_mul_m64"
         )
+
+
+# ---------------------------------------------------------------------------
+# _resolve_candidate_id / _all_kernel_candidates
+#
+# When hot_kernels is empty the batch dispatcher returns no candidates, so
+# _reconcile_kernel_id never runs. _resolve_candidate_id canonicalizes an
+# aliased id against the full hot ∪ skipped set (no fallback) so the
+# downstream reusable-native guard rejects the real k00x rather than the
+# raw hallucinated alias.
+# ---------------------------------------------------------------------------
+
+class TestResolveCandidateId:
+    SKIPPED = [
+        {"kernel_id": "k001", "name": "aten::mm",
+         "reusable_native_kernel": False, "source_file": ""},
+        {"kernel_id": "k003", "name": "aten::mm",
+         "reusable_native_kernel": False, "source_file": ""},
+        {"kernel_id": "k010", "name": "aiter::rmsnorm",
+         "reusable_native_kernel": False, "source_file": ""},
+    ]
+
+    def test_exact_id(self):
+        assert krh._resolve_candidate_id("k003", self.SKIPPED) == "k003"
+
+    def test_kn_prefix_alias_canonicalized(self):
+        assert krh._resolve_candidate_id("kn001", self.SKIPPED) == "k001"
+        assert krh._resolve_candidate_id("rn010", self.SKIPPED) == "k010"
+
+    def test_non_unique_or_nonroutable_name_not_resolved(self):
+        # ``aten::mm`` is non-unique and non-routable -> cannot disambiguate,
+        # so leave it untouched (returns "") rather than guess a k00x.
+        assert krh._resolve_candidate_id("aten::mm", self.SKIPPED) == ""
+
+    def test_pure_hallucination_returns_empty(self):
+        assert krh._resolve_candidate_id("aiter.silu_and_mul", self.SKIPPED) == ""
+
+    def test_empty_request_returns_empty(self):
+        assert krh._resolve_candidate_id("", self.SKIPPED) == ""
+        assert krh._resolve_candidate_id(None, self.SKIPPED) == ""
+
+
+class TestAllKernelCandidates:
+    def test_union_of_hot_and_skipped(self, tmp_path):
+        cp = tmp_path / "kc.json"
+        cp.write_text(json.dumps({
+            "hot_kernels": [{"kernel_id": "k005", "name": "moe"}],
+            "skipped_kernels": [{"kernel_id": "k001", "name": "aten::mm"}],
+        }), encoding="utf-8")
+        out = krh._all_kernel_candidates({"candidates_path": str(cp)})
+        assert {c["kernel_id"] for c in out} == {"k005", "k001"}
+
+    def test_missing_path_returns_empty(self):
+        assert krh._all_kernel_candidates({}) == []
