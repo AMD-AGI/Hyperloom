@@ -641,6 +641,44 @@ def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
     assert bench["runner_type"] == "mi300x"
 
 
+def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
+    """Regression: on resume, a stale ``state.tp`` re-exported as
+    ``os.environ['TP']`` must NOT silently downgrade a YAML-pinned TP.
+
+    Reproduces the 2026-06-02 conc_sweep bug where the baseline session
+    ran with TP=2 (baseline_config.with_envs.yaml ``envs.TP: 2``) but
+    ``state.tp`` was 1 (never synced from yaml). Resume re-exported
+    ``TP=1`` to os.environ, and apply_runtime_benchmark_overrides used
+    it to overwrite the yaml TP=2 → sglang launched with TP=1,
+    making conc_sweep curves incomparable to the original baseline.
+    """
+    monkeypatch.setenv("TP", "1")
+    bench = {
+        "framework": "sglang",
+        "envs": {"TP": 2, "CONC": 64, "ISL": 1024, "OSL": 1024},
+    }
+    apply_runtime_benchmark_overrides(bench, gpu_type="mi355x")
+    assert bench["envs"]["TP"] == 2, (
+        f"yaml-pinned TP=2 must win over os.environ['TP']=1; "
+        f"got TP={bench['envs']['TP']}"
+    )
+    # Other env keys still flow through normally (no yaml-wins for them).
+    monkeypatch.setenv("CONC", "128")
+    apply_runtime_benchmark_overrides(bench, gpu_type="mi355x")
+    assert bench["envs"]["CONC"] == 128
+    assert bench["envs"]["TP"] == 2
+
+
+def test_apply_runtime_overrides_env_tp_used_when_yaml_silent(monkeypatch):
+    """Companion: when yaml has no TP, env TP is still applied
+    (the original behaviour). Guards against an over-broad fix that
+    would lock TP from being set at all."""
+    monkeypatch.setenv("TP", "4")
+    bench = {"framework": "sglang", "envs": {}}
+    apply_runtime_benchmark_overrides(bench, gpu_type="mi355x")
+    assert bench["envs"]["TP"] == 4
+
+
 def test_build_variant_yaml_propagates_benchmark_script(tmp_path):
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
