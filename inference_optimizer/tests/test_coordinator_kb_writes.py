@@ -100,6 +100,37 @@ def test_kb_amend_recipe_persists_pitfall(tmp_path: Path) -> None:
     assert "ep=8 OOMs on 30B" in descs
 
 
+def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
+    """KEEP / REVERT / CLOSE amend stamps the config.json
+    architecture-identity tags (``architectures`` + ``model_type``) into
+    the recipe ``extras`` so a fine-tuned model's row records the same
+    architecture as the base model it derives from."""
+    coord = _make_coordinator(tmp_path)
+    coord.shared_state.model_architectures = ["LlamaForCausalLM"]
+    coord.shared_state.model_type = "llama"
+    coord._kb_amend_recipe(
+        append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
+    )
+    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    assert row is not None
+    assert row.get("architectures") == ["LlamaForCausalLM"]
+    assert row.get("model_type") == "llama"
+
+
+def test_kb_amend_recipe_skips_empty_architecture_tags(tmp_path: Path) -> None:
+    """With no config.json tags on SharedState the amend must NOT stamp
+    empty ``architectures`` / ``model_type`` keys (no row pollution)."""
+    coord = _make_coordinator(tmp_path)
+    # model_architectures / model_type left at their defaults ([] / "").
+    coord._kb_amend_recipe(
+        append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
+    )
+    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    assert row is not None
+    assert "architectures" not in row
+    assert "model_type" not in row
+
+
 def test_recipe_kb_enabled_is_true(tmp_path: Path) -> None:
     """P1-2: RecipeKB exposes ``enabled`` (always True) so callers that
     probe ``client.enabled`` (the coordinator T0 gate) don't silently
