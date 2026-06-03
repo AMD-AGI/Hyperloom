@@ -6,8 +6,13 @@ name: SaFE Optimize Tiny
 # byte-for-byte on the same path as the regular SaFE submit workflow.
 
 on:
-  schedule:
-    - cron: '0 */4 * * *'
+  # ─── PAUSED 2026-06-03 ───────────────────────────────────────────
+  # Tiny (3B-12B) scheduled rotation is paused per operator request so
+  # the runner pool is dedicated to the large-B production cron. Manual
+  # workflow_dispatch still works for one-off tiny batches. To resume the
+  # rotation, uncomment the schedule block below.
+  # schedule:
+  #   - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
