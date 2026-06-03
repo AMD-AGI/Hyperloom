@@ -1,6 +1,6 @@
 """Verify SharedState renderers expose numeric ``gain_pct`` values.
 
-Pre-Phase the explore ledgers rendered as "name + counts" only, which left
+Pre-Phase the explore ledger rendered as "name + counts" only, which left
 Orchestration unable to rank retry candidates by observed impact. The
 :meth:`SharedState._format_backend_winners_history` and
 :meth:`SharedState._format_search_state` renderers now multi-line the
@@ -8,12 +8,12 @@ ledger and surface ``gain_pct``, ``tput``, and resolved flags/envs per
 variant. These tests pin that contract:
 
 * accepted entries that lack ``gain_pct`` on disk pull it from
-  ``tested[fingerprint]`` at render time (params_search shape);
+  ``tested[fingerprint]`` at render time;
 * rejected entries (which always carry ``gain_pct``) render directly;
 * ``backend_winners_history`` shows per-winner gain plus the round-level
   best gain;
-* legacy ``key=value`` prefixes survive so existing prefix-style
-  assertions across the suite keep passing.
+* ``key=value`` prefixes survive so existing prefix-style assertions
+  across the suite keep passing.
 """
 
 from __future__ import annotations
@@ -27,9 +27,11 @@ def _make_state() -> SharedState:
     round. Mirrors the shape executors persist (see params.py /
     backends.py / record_backends_accepted)."""
     s = SharedState(session_id="gain-render-test")
-    s.params_search = {
+    s.explore_search = {
         "schema_version": 2,
-        # Accepted entry uses _variant_to_dict() shape — no gain_pct key.
+        # Accepted entries: ``mem_fraction_0_85`` lacks gain_pct on disk
+        # (renderer must backfill from tested[fp]); ``qr_int4`` carries
+        # gain_pct directly (stamped by record_explore_accepted).
         "accepted": [
             {
                 "name": "mem_fraction_0_85",
@@ -37,6 +39,15 @@ def _make_state() -> SharedState:
                 "extra_server_args": "--mem-fraction-static 0.85",
                 "extra_envs": {},
                 "note": "memory",
+            },
+            {
+                "name": "qr_int4",
+                "fingerprint": "fp_c",
+                "extra_server_args": "",
+                "extra_envs": {"VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4"},
+                "note": "tier5_comm",
+                "gain_pct": 3.33,
+                "tput": 1768.67,
             },
         ],
         "rejected": [
@@ -49,6 +60,15 @@ def _make_state() -> SharedState:
                 "gain_pct": -1.05,
                 "tput": 1750.0,
                 "reason": "not_keep",
+            },
+            {
+                "name": "attn_aiter",
+                "fingerprint": "fp_d",
+                "extra_server_args": "--attention-backend aiter",
+                "extra_envs": {},
+                "note": "tier1_attention",
+                "gain_pct": -2.10,
+                "tput": 1607.0,
             },
         ],
         "tested": {
@@ -64,40 +84,12 @@ def _make_state() -> SharedState:
                 "gain_pct": -1.05,
                 "tput": 1750.0,
             },
+            "fp_c": {},
+            "fp_d": {},
         },
         "name_index": {},
-        "cursor": 2,
+        "cursor": 4,
         "last_round": {},
-    }
-    s.backends_search = {
-        "schema_version": 1,
-        # backends accepted entries carry gain_pct directly (stamped by
-        # record_backends_accepted) — exercise that path too.
-        "accepted": [
-            {
-                "name": "qr_int4",
-                "fingerprint": "fp_c",
-                "extra_server_args": "",
-                "extra_envs": {"VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4"},
-                "note": "tier5_comm",
-                "gain_pct": 3.33,
-                "tput": 1768.67,
-            },
-        ],
-        "rejected": [
-            {
-                "name": "attn_aiter",
-                "fingerprint": "fp_d",
-                "extra_server_args": "--attention-backend aiter",
-                "extra_envs": {},
-                "note": "tier1_attention",
-                "gain_pct": -2.10,
-                "tput": 1607.0,
-            },
-        ],
-        "tested": {"fp_c": {}, "fp_d": {}},
-        "name_index": {},
-        "cursor": 2,
     }
     s.push_backend_winners_round(
         action="backends",
@@ -130,26 +122,25 @@ def _make_state() -> SharedState:
 
 
 def test_search_state_renders_gain_pct_for_accepted_via_tested_lookup():
-    """params_search.accepted lacks gain_pct on disk; renderer pulls it
+    """explore_search.accepted lacks gain_pct on disk; renderer pulls it
     from tested[fingerprint] so the LLM still sees the +0.27%."""
     s = _make_state()
-    out = s._format_params_search()
+    out = s._format_explore_search()
     assert "+0.27%" in out
     assert "mem_fraction_0_85" in out
     assert "--mem-fraction-static 0.85" in out
 
 
 def test_search_state_renders_gain_pct_for_rejected_directly():
-    """*_search.rejected entries carry gain_pct natively; render them
-    with the matching sign so 'avoid' vs 'tweak value' is one read."""
+    """explore_search.rejected entries carry gain_pct natively; render
+    them with the matching sign so 'avoid' vs 'tweak value' is one read."""
     s = _make_state()
-    out_p = s._format_params_search()
-    assert "-1.05%" in out_p
-    assert "cuda_graph_max_bs_8" in out_p
-    out_b = s._format_backends_search()
-    assert "-2.10%" in out_b
-    assert "+3.33%" in out_b
-    assert "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4" in out_b
+    out = s._format_explore_search()
+    assert "-1.05%" in out
+    assert "cuda_graph_max_bs_8" in out
+    assert "-2.10%" in out
+    assert "+3.33%" in out
+    assert "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4" in out
 
 
 def test_backend_winners_history_renders_gain_pct_per_winner():
@@ -165,7 +156,7 @@ def test_backend_winners_history_renders_gain_pct_per_winner():
 def test_search_state_handles_empty_buckets():
     """Empty ledgers must not crash and must not emit body sections."""
     s = SharedState(session_id="empty")
-    s.params_search = {
+    s.explore_search = {
         "schema_version": 2,
         "accepted": [],
         "rejected": [],
@@ -174,7 +165,7 @@ def test_search_state_handles_empty_buckets():
         "cursor": 0,
         "last_round": {},
     }
-    out = s._format_params_search()
+    out = s._format_explore_search()
     assert "cursor=0" in out
     assert "accepted=0" in out
     assert "accepted:" not in out
@@ -183,12 +174,11 @@ def test_search_state_handles_empty_buckets():
 
 def test_to_prompt_summary_keeps_legacy_prefixes_and_adds_values():
     """Existing tests across the suite assert prefixes like
-    ``params_search=`` / ``backends_search=`` / ``backend_winners_history=``;
-    the multi-line body must still be preceded by those prefixes."""
+    ``explore_search=`` / ``backend_winners_history=``; the multi-line
+    body must still be preceded by those prefixes."""
     s = _make_state()
     summary = s.to_prompt_summary()
-    assert "params_search=" in summary
-    assert "backends_search=" in summary
+    assert "explore_search=" in summary
     assert "backend_winners_history=" in summary
     # And the new numeric signal is now visible end-to-end.
     assert "+3.33%" in summary

@@ -44,10 +44,20 @@ class TestNormalizeRoot:
 
 
 class TestResolveSourceFileAllowlist:
-    def test_default_when_env_empty(self):
+    def test_default_when_env_empty(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
         assert fp.resolve_source_file_allowlist() == fp._DEFAULT_SOURCE_ROOTS
 
+    def test_merges_discovered_roots(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (
+            "/usr/local/lib/python3.12/dist-packages/vllm/",
+        ))
+        roots = fp.resolve_source_file_allowlist()
+        assert fp._DEFAULT_SOURCE_ROOTS[0] in roots
+        assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
+
     def test_appends_extra_roots_unique_in_order(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
         monkeypatch.setenv(
             "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
             "/opt/custom/sglang:/sgl-workspace/aiter:/opt/other/vllm",
@@ -181,15 +191,35 @@ class TestResolveVllmArgUtils:
         assert "not found" in source
 
 
+class TestGlobInstallPackageRoots:
+    def test_finds_dist_packages_under_usr_local(self, tmp_path, monkeypatch):
+        base = tmp_path / "usr_local_lib" / "python3.12" / "dist-packages"
+        (base / "vllm").mkdir(parents=True)
+        monkeypatch.setattr(
+            fp, "_INSTALL_GLOB_PARENTS", (tmp_path / "usr_local_lib",),
+        )
+        roots = fp._glob_install_package_roots()
+        assert any("dist-packages/vllm/" in r for r in roots)
+
+
+class TestResolvePatchTargetRoots:
+    def test_includes_static_fallback_when_discovery_empty(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", raising=False)
+        roots = fp.resolve_patch_target_roots()
+        assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
+        assert "/aiter_meta/csrc/" in roots
+
+
 class TestProbeFrameworkSourceRootsForEnv:
-    def test_returns_default_dirs_when_present(self, tmp_path, monkeypatch):
-        # Simulate /sgl-workspace/* existing for one of the defaults.
+    def test_returns_existing_dirs_only(self, tmp_path, monkeypatch):
         present = tmp_path / "fake_root"
         present.mkdir()
-        monkeypatch.setattr(
-            fp, "_DEFAULT_SOURCE_ROOTS", (f"{present}/",),
-        )
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (
+            f"{present}/",
+            f"{tmp_path / 'missing'}/",
+        ))
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
         result = fp.probe_framework_source_roots_for_env()
         assert result == f"{present}/"
 
@@ -202,6 +232,7 @@ class TestProbeFrameworkSourceRootsForEnv:
             (site / name).mkdir(parents=True)
         monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
         result = fp.probe_framework_source_roots_for_env()
         for name in ("vllm", "sglang", "aiter"):
@@ -216,6 +247,10 @@ class TestProbeFrameworkSourceRootsForEnv:
             fp, "_DEFAULT_SOURCE_ROOTS", (f"{shared}/",),
         )
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: shared)
+        # Stub the install-package glob so an installed aiter/vllm/sglang
+        # in the test host's dist-packages cannot leak real roots into
+        # the result (matches the sibling test's isolation).
+        monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
         result = fp.probe_framework_source_roots_for_env()
         # Single entry, even though spec lookups all resolved to the same dir.
         assert result == f"{shared}/"
@@ -420,16 +455,17 @@ class TestAtomPathPresentInAllThreeLocations:
         )
 
     def test_atom_present_in_reusable_source_roots(self):
-        # ``kernel_request_handlers._REUSABLE_SOURCE_ROOTS`` carries
-        # the lowercased ``/app/atom/atom/`` form (see comment in
-        # ``kernel_request_handlers.py``). We compare against the
-        # lowercased entries so a future canonical-case revert here
-        # still passes — what we're guarding is presence, not casing.
+        # The orchestrator gate now derives its reusable roots
+        # dynamically via ``kernel_request_handlers._reusable_source_roots``
+        # (single source of truth = framework_paths.resolve_patch_target_roots).
+        # atom must be present in the lowercased matcher form
+        # ``/app/atom/atom/`` (the function emits a lower-case variant of
+        # every root so the case-insensitive substring check fires).
         from inference_optimizer.orchestrator import (
             kernel_request_handlers as krh,
         )
         assert any(
-            "/app/atom/atom" in r.lower() for r in krh._REUSABLE_SOURCE_ROOTS
+            "/app/atom/atom" in r.lower() for r in krh._reusable_source_roots()
         )
 
     def test_atom_present_in_tracelens_reusable_roots(self):
@@ -463,15 +499,12 @@ class TestAtomPathPresentInAllThreeLocations:
         )
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
-        """Strict subset-equality: every atom entry in
-        ``kernel_request_handlers._REUSABLE_SOURCE_ROOTS`` must also
-        appear verbatim in the kernel-agent's tracelens_analysis
-        ``_REUSABLE_SOURCE_ROOTS`` (and vice versa).
-
-        Stricter than the presence-only guard above: ensures the two
-        lists' atom subsets stay byte-for-byte identical, so a future
-        path-tree change in one place can't silently leave the other
-        side stale.
+        """The orchestrator gate and the kernel-agent classifier now both
+        derive their reusable roots from the SAME source
+        (``framework_paths.resolve_patch_target_roots``), so their atom
+        subsets are inherently in sync — no hand-maintained duplicate list
+        to drift. Guard that invariant by comparing the two dynamic
+        functions' atom subsets instead of two static constants.
         """
         ka_path = (
             Path(__file__).resolve().parents[2]
@@ -481,35 +514,40 @@ class TestAtomPathPresentInAllThreeLocations:
             pytest.skip(
                 f"kernel-agent tracelens_analysis not on disk at {ka_path}"
             )
-        from inference_optimizer.orchestrator.kernel_request_handlers import (
-            _REUSABLE_SOURCE_ROOTS as ORCH_ROOTS,
+        from inference_optimizer.orchestrator import (
+            kernel_request_handlers as krh,
         )
         orch_atom = frozenset(
-            r for r in ORCH_ROOTS
-            if "atom" in r.lower() and r != "/sgl-workspace/atom/"
+            r.lower() for r in krh._reusable_source_roots()
+            if "/atom/" in r.lower()
         )
-        # Extract the literal-string list from the kernel-agent file so
-        # we don't need to import the sister module (kernel-agent may
-        # not be on PYTHONPATH).
-        import re as _re
-        text = ka_path.read_text(encoding="utf-8")
-        ka_atom_literals = frozenset(
-            _re.findall(r'"(/[^"]*atom/[^"]*)"', text)
-        )
-        # Drop irrelevant atom hits (e.g. doc-comment paths).
-        ka_atom_literals = frozenset(
-            p for p in ka_atom_literals
-            if p.endswith("/") and "/atom/" in p
-        )
-        missing_in_kernel_agent = orch_atom - ka_atom_literals
-        missing_in_orchestrator = ka_atom_literals - orch_atom
-        assert not missing_in_kernel_agent, (
-            f"atom paths present in orchestrator but missing in "
-            f"kernel-agent/tools/tracelens_analysis.py: "
-            f"{sorted(missing_in_kernel_agent)!r}"
-        )
-        assert not missing_in_orchestrator, (
-            f"atom paths present in kernel-agent/tools/tracelens_analysis.py "
-            f"but missing in orchestrator/kernel_request_handlers: "
-            f"{sorted(missing_in_orchestrator)!r}"
+        # Load the sister tool by path. Its module-level imports reference
+        # sibling kernel-agent tools, so put that dir on sys.path first.
+        import importlib.util as _ilu
+        import sys as _sys
+        tools_dir = str(ka_path.parent)
+        added = tools_dir not in _sys.path
+        if added:
+            _sys.path.insert(0, tools_dir)
+        try:
+            spec = _ilu.spec_from_file_location(
+                "_tracelens_atom_sync_probe", ka_path,
+            )
+            assert spec is not None and spec.loader is not None
+            mod = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            ka_atom = frozenset(
+                r.lower() for r in mod._reusable_roots()
+                if "/atom/" in r.lower()
+            )
+        finally:
+            if added and tools_dir in _sys.path:
+                _sys.path.remove(tools_dir)
+        assert orch_atom, "orchestrator reusable roots carry no atom entry"
+        assert ka_atom, "tracelens reusable roots carry no atom entry"
+        # Both derive from resolve_patch_target_roots, so the atom subsets
+        # must match (tracelens may add aiter_meta csrc but no extra atom).
+        assert orch_atom == ka_atom, (
+            f"atom subsets diverged — orch={sorted(orch_atom)!r} "
+            f"ka={sorted(ka_atom)!r}"
         )

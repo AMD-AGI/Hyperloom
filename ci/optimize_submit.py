@@ -48,6 +48,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import sys
@@ -112,7 +113,7 @@ DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
 DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
-DEFAULT_TARGET_GAIN = 30.0
+DEFAULT_TARGET_GAIN = 100.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
 
 _KERNEL_BACKEND_ALIASES = {
@@ -227,8 +228,10 @@ def _proxy() -> str:
 
 def _default_sglang_image() -> str:
     # v0.5.11 (2026-05-05): Spec V2 by default + DFLASH on ROCm + all-reduce/RMSNorm fusion.
-    # Confirmed available at harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang.
-    return f"{_proxy()}/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
+    # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures kernels under
+    # HipGraphLaunch (issue #352). Drop the suffix once the fix lands in upstream ROCm.
+    # Pre-profilerfix image (restore when reverting): f"{_proxy()}/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
+    return f"{_proxy()}/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
 
 
 def _default_vllm_image() -> str:
@@ -750,7 +753,32 @@ class SafeOptimizeClient:
             body["promptPrefix"] = prompt_prefix
         if prompt_suffix:
             body["promptSuffix"] = prompt_suffix
-        return self._request("POST", "api/v1/optimization/tasks", body)
+        attempts = 8
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._request("POST", "api/v1/optimization/tasks", body)
+            except RuntimeError as e:
+                msg = str(e)
+                transient = (
+                    "HTTP 500" in msg
+                    or "HTTP 502" in msg
+                    or "HTTP 503" in msg
+                    or "HTTP 504" in msg
+                )
+                if not transient or attempt >= attempts:
+                    raise
+                delay = random.uniform(10, 60)
+                log.warning(
+                    "[submit] transient SaFE/Claw submit failure "
+                    "(attempt %d/%d, workspace=%s); retrying in %.1fs: %s",
+                    attempt,
+                    attempts,
+                    chosen_ws,
+                    delay,
+                    msg,
+                )
+                time.sleep(delay)
+        raise RuntimeError("unreachable submit retry loop exit")
 
     # ── Task lifecycle ──
 
@@ -1074,6 +1102,13 @@ class SubmissionRecord:
     final_status: str | None = None    # SaFE: Succeeded/Failed/Interrupted/Timeout
     final_phase: int | None = None     # currentPhase at terminal moment
     final_message: str | None = None   # task.Message
+    # CI delivery status is intentionally separate from SaFE final_status.
+    # A task may time out in SaFE after writing a useful session_breakdown; CI
+    # should still summarize and publish that data instead of marking the
+    # whole matrix row failed.
+    ci_status: str | None = None        # Delivered / Missing artifacts / ...
+    ci_success: bool = False
+    delivery_reason: str | None = None
     artifacts_dir: str | None = None   # local dir where artifacts landed
     artifact_count: int = 0
     artifact_files: list[str] = field(default_factory=list)
@@ -1372,6 +1407,82 @@ def _metrics_have_positive_throughput(path: str) -> bool:
         return float(baseline) > 0 and float(optimized) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _json_has_any_number(value) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, dict):
+        return any(_json_has_any_number(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_json_has_any_number(v) for v in value[:100])
+    return False
+
+
+def _breakdown_has_basic_data(path: Path) -> bool:
+    """True when a session_breakdown JSON carries usable audit/perf payload.
+
+    Throughput may legitimately be zero for aborted/fallback runs. The CI
+    delivery contract is therefore "has structured data", not "has positive
+    gain".
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    keys = (
+        "baseline", "best", "final", "optimized", "steps", "actions",
+        "phases", "session", "session_meta", "workload",
+        "baseline_throughput", "optimized_throughput",
+        "tok_per_gpu_baseline", "tok_per_gpu_optimized", "gain_pct",
+        "cumulative_gain_pct",
+    )
+    if any(data.get(k) not in (None, {}, [], "") for k in keys):
+        return True
+    return _json_has_any_number(data)
+
+
+def _mark_record_delivery(rec: SubmissionRecord) -> None:
+    """Set CI-level delivery status from collected artifacts."""
+    candidates: list[Path] = []
+    for raw in rec.artifact_files:
+        p = Path(raw)
+        if p.is_file() and p.name.startswith("session_breakdown") and p.suffix == ".json":
+            candidates.append(p)
+    if rec.artifacts_dir:
+        root = Path(rec.artifacts_dir)
+        if root.is_dir():
+            candidates.extend(
+                p for p in root.glob("**/session_breakdown*.json")
+                if p.is_file()
+            )
+    # Preserve order while de-duplicating.
+    seen: set[str] = set()
+    unique = []
+    for p in candidates:
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+
+    for p in unique:
+        if _breakdown_has_basic_data(p):
+            rec.ci_success = True
+            rec.ci_status = "Delivered"
+            rec.delivery_reason = f"publishable session_breakdown: {p.name}"
+            return
+
+    if rec.artifact_count:
+        rec.ci_status = "Artifacts incomplete"
+        rec.delivery_reason = "artifacts collected but no usable session_breakdown"
+    else:
+        rec.ci_status = "Missing artifacts"
+        rec.delivery_reason = "no artifacts collected"
 
 
 def _timestamp_hint_variants(value: str) -> set[str]:
@@ -2259,6 +2370,8 @@ def wait_and_collect_one(
                  rec.sandbox_duration_seconds if rec.sandbox_duration_seconds is not None else "?")
 
     if not collect:
+        rec.ci_status = "Not collected"
+        rec.delivery_reason = "artifact collection disabled"
         return rec
 
     # Stage 1: SaFE artifacts API. This is the most reliable path when the
@@ -2334,11 +2447,16 @@ def wait_and_collect_one(
         else:
             log.info("[task %s] NFS fallback found nothing", rec.task_id)
 
+    _mark_record_delivery(rec)
+    if rec.ci_status:
+        log.info("[task %s] CI delivery status: %s (%s)",
+                 rec.task_id, rec.ci_status, rec.delivery_reason or "-")
+
     # Stage 3: reverse-backfill the audit fields directly into the wekafs
     # SOURCE files so operators ssh-ing into /wekafs/users/<uid>/<sess>/
     # see image/hyperloom_commit/category/sandbox_duration_seconds without
     # downloading the GHA artifact zip. No-op when wekafs isn't mounted.
-    if rec.final_status == "Succeeded":
+    if rec.artifact_count:
         try:
             n_wkfs = _backfill_wekafs_in_place(rec)
             if n_wkfs:
@@ -2348,8 +2466,8 @@ def wait_and_collect_one(
             log.warning("[task %s] wekafs in-place backfill skipped due to %s: %s",
                         rec.task_id, type(e).__name__, e)
     else:
-        log.info("[task %s] wekafs in-place backfill skipped for final_status=%s",
-                 rec.task_id, rec.final_status or "?")
+        log.info("[task %s] wekafs in-place backfill skipped: no artifacts collected",
+                 rec.task_id)
     try:
         _write_artifact_sources(task_dir, rec)
     except Exception as e:
@@ -2380,8 +2498,16 @@ def process_completion(
 
     if parallel <= 1:
         for rec in pending:
-            wait_and_collect_one(safe, rec, artifacts_dir,
-                                 task_timeout_min, poll_s, collect, all_artifacts)
+            try:
+                wait_and_collect_one(safe, rec, artifacts_dir,
+                                     task_timeout_min, poll_s, collect, all_artifacts)
+            except Exception as e:
+                log.exception("[task %s] unexpected wait/collect error", rec.task_id)
+                rec.final_status = rec.final_status or "Error"
+                rec.final_message = (rec.final_message or "") + f" | wait error: {e}"
+            finally:
+                if not rec.ci_status:
+                    _mark_record_delivery(rec)
         return
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2399,6 +2525,9 @@ def process_completion(
                 log.exception("[task %s] unexpected wait/collect error", rec.task_id)
                 rec.final_status = rec.final_status or "Error"
                 rec.final_message = (rec.final_message or "") + f" | wait error: {e}"
+            finally:
+                if not rec.ci_status:
+                    _mark_record_delivery(rec)
 
 
 # ── Manifest ────────────────────────────────────────────────────────────────────
@@ -2430,8 +2559,8 @@ def write_manifest(
         f"- Volume: `{volume}`",
         f"- Submitted at: {payload['submitted_at']}",
         "",
-        "| Pool | Model | Category | Image | Duration | Submit | Final | Phase | Task ID | Display Name | Artifacts | Note |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| Pool | Model | Category | Image | Duration | Submit | Final | CI | Phase | Task ID | Display Name | Artifacts | Note |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in records:
         # Final status only meaningful when --wait-for-completion was on.
@@ -2471,9 +2600,12 @@ def write_manifest(
             mins = r.sandbox_duration_seconds / 60.0
             duration_cell = f"{mins:.1f}m"
         category_cell = r.category or "-"
+        ci_cell = r.ci_status or ("Succeeded" if r.final_status == "Succeeded" else "-")
+        if r.ci_success and r.delivery_reason:
+            ci_cell = f"{ci_cell}<br/>{r.delivery_reason}"
         md.append(
             f"| {pool_cell} | `{r.model}` | {category_cell} | {image_cell} | {duration_cell} | "
-            f"{r.status} | {final or '-'} | {phase} | "
+            f"{r.status} | {final or '-'} | {ci_cell} | {phase} | "
             f"`{r.task_id or '-'}` | {r.display_name or '-'} | {artifacts_cell} | {note} |"
         )
     (out_dir / "submission_manifest.md").write_text("\n".join(md) + "\n")
@@ -2721,6 +2853,15 @@ def main() -> int:
         volume=volume,
         submit_workspaces_pool=submit_workspaces_pool or None,
     )
+    if submit_workspaces_pool and args.pool_index:
+        try:
+            safe._submit_ws_counter = max(int(args.pool_index), 0)
+            log.info(
+                "submit round-robin offset seeded from pool_index=%s",
+                args.pool_index,
+            )
+        except ValueError:
+            log.warning("invalid pool_index=%r; round-robin starts at 0", args.pool_index)
 
     if args.hf_top:
         log.info("fetching HF top-%d (>=%.1fB)", args.hf_top, args.min_params)
@@ -2799,10 +2940,29 @@ def main() -> int:
         from collections import Counter
         final_counts = Counter(r.final_status or "Pending"
                                for r in records if r.task_id)
+        delivery_counts = Counter(r.ci_status or "Unknown"
+                                  for r in records if r.task_id)
         log.info("=" * 60)
         log.info("Final task statuses: %s",
                  ", ".join(f"{k}={v}" for k, v in sorted(final_counts.items())))
-        non_success = [r for r in records if r.task_id and r.final_status != "Succeeded"]
+        log.info("CI delivery statuses: %s",
+                 ", ".join(f"{k}={v}" for k, v in sorted(delivery_counts.items())))
+        delivered_non_success = [
+            r for r in records
+            if r.task_id and r.final_status != "Succeeded" and r.ci_success
+        ]
+        if delivered_non_success:
+            log.warning(
+                "SaFE terminal status was non-success, but CI artifacts were delivered: %s",
+                ", ".join(
+                    f"{r.model}:{r.final_status or 'Pending'}->{r.ci_status}"
+                    for r in delivered_non_success
+                ),
+            )
+        non_success = [
+            r for r in records
+            if r.task_id and r.final_status != "Succeeded" and not r.ci_success
+        ]
     else:
         non_success = []
 
@@ -2814,8 +2974,11 @@ def main() -> int:
     if args.dry_run:
         return 0
     if non_success:
-        log.error("Non-success terminal statuses: %s",
-                  ", ".join(f"{r.model}:{r.final_status or 'Pending'}" for r in non_success))
+        log.error("Non-success terminal statuses without deliverable artifacts: %s",
+                  ", ".join(
+                      f"{r.model}:{r.final_status or 'Pending'}:{r.ci_status or 'Unknown'}"
+                      for r in non_success
+                  ))
         return 2
     return 0 if submitted > 0 else 1
 

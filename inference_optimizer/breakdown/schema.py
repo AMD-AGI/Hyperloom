@@ -305,7 +305,7 @@ class KernelLifecycle(TypedDict, total=False):
 # §10 Param search
 # ---------------------------------------------------------------------------
 class ParamSearchEntry(TypedDict, total=False):
-    """One row from params_search.{tested,accepted,rejected}."""
+    """One row from explore_search.{tested,accepted,rejected}."""
     name: str
     fingerprint: str
     extra_server_args: str
@@ -454,6 +454,12 @@ class SourceBreakdown(TypedDict, total=False):
     # ``validated_total_pct``; previously these KEEPs fell into
     # ``other`` and silently disappeared.
     framework_pr_pct_of_total: float
+    # GEMM_TUNING contribution (KERNEL-entry deterministic FP8 GEMM
+    # tuner). Bucketed separately from the ``kernel`` family so the
+    # dashboard can show "deterministic tuner gain" vs "source-level
+    # GEAK / OOB rewrite gain". Always emitted (0.0 on non-FP8
+    # workloads / when the tuner skipped or produced no KEEP).
+    gemm_tuning_pct_of_total: float
     backends_pct_of_total: float
     params_pct_of_total: float
     sweep_pct_of_total: float
@@ -493,12 +499,25 @@ class PhaseBreakdownFrameworkPr(TypedDict, total=False):
     by_pr: dict[str, float]
 
 
+class PhaseBreakdownGemmTuning(TypedDict, total=False):
+    """KERNEL-entry FP8 GEMM tuning gain split by tuned-CSV path.
+    ``by_tuned_file`` keys on the entry's ``tuned_file`` (absolute
+    path to ``a8w8_blockscale_tuned_gemm.csv``); fallbacks: entry's
+    ``variant_name`` then ``"?"`` so the key is always a string."""
+    total_gain_pct: float
+    by_tuned_file: dict[str, float]
+
+
 class PhaseBreakdown(TypedDict, total=False):
     """v0.8 M7 per-phase gain attribution (KB_design §3.13 M7 §6)."""
     prelude: PhaseBreakdownExplore         # always 0 by definition
     framework_pr: PhaseBreakdownFrameworkPr  # PRELUDE → FRAMEWORK_PR → EXPLORE
     explore: PhaseBreakdownExplore
     kernel:  PhaseBreakdownKernel
+    # GEMM_TUNING is a KERNEL-entry deterministic step; bucketed
+    # separately so the dashboard can split tuner gain from
+    # source-level GEAK/OOB rewrite gain.
+    gemm_tuning: PhaseBreakdownGemmTuning
     sweep:   PhaseBreakdownExplore         # usually 0 (sweep is measurement)
     close:   PhaseBreakdownExplore         # usually 0
     unattributed: PhaseBreakdownExplore    # gain whose phase couldn't be inferred
@@ -755,8 +774,17 @@ class RooflineSnapshot(TypedDict, total=False):
     trace_input: str
 
 
-class Roofline(TypedDict, total=False):
-    """Top-level ``roofline`` section.
+class RooflineProgress(TypedDict, total=False):
+    """Top-level ``roofline_progress`` section.
+
+    NOTE — this used to be called ``Roofline`` and exported under the
+    top-level key ``roofline``, but that collided with the markdown-
+    report renderer's pre-existing ``roofline`` list contract (per-
+    final.json comparison snapshots, populated by
+    ``collect_roofline``). The two surfaces serve different consumers
+    and the previous name clash silently broke the markdown report's
+    Roofline section. Renamed to ``roofline_progress`` so both
+    surfaces coexist.
 
     Two products in one structure:
 
@@ -805,6 +833,63 @@ class Roofline(TypedDict, total=False):
     # Audit / staleness
     roofline_failure_streak: int               # consecutive watermark roofline failures
     snapshots: list[RooflineSnapshot]
+
+
+# ---------------------------------------------------------------------------
+# Optimization stack — raw KEEP ledger passthrough
+# ---------------------------------------------------------------------------
+class OptimizationStackEntry(TypedDict, total=False):
+    """One KEEP from ``state.optimization_stack[]`` exposed verbatim.
+
+    Required-shape fields (always present on writers' entries):
+
+    * ``action`` — ``baseline`` / ``params`` / ``backends`` /
+      ``explore`` / ``kernel_opt`` / ``integrate`` / ``gemm_tuning``
+      / ``framework_pr`` / ``validate_stack``.
+    * ``variant_name`` — human-readable label (``vllm_kv_cache_fp8`` /
+      kid for kernel_opt / PR ref for framework_pr / etc.).
+    * ``candidate_extra_server_args`` — full CLI fragment patched into
+      the server launch.
+    * ``extra_envs`` — env-var dict patched into the launch.
+    * ``tput`` — measured throughput (tok/s/GPU) at this stack depth.
+    * ``ts`` — iso UTC promotion timestamp.
+    * ``workspace`` — absolute path to the benchmark workspace dir
+      (or None for synthetic / kernel-only entries).
+
+    GEMM-tuning-specific fields (optional, populated by the
+    Coordinator's ``_promote_gemm_tuning_keep`` path):
+
+    * ``tuned_file`` — absolute path to the produced
+      ``a8w8_blockscale_tuned_gemm.csv``.
+    * ``final_report_path`` — absolute path to ``final_report.json``.
+    * ``source`` — provenance label (e.g. ``kernel_entry_auto``).
+
+    Additional optional fields surface from individual writers:
+
+    * ``gain_pct`` — single-step % gain (kernel_opt promotions).
+    * ``kernel_id`` — kid for kernel-owned entries.
+    * ``fingerprint`` — content-hash deduplication key for explore.
+    * ``provenance`` — ``specialist:<domain>`` / ``default_grid`` /
+      ``llm_direct`` / ``legacy:<action>`` for explore winners.
+    * ``task_id`` — orchestrator task id (link to specialist_runs etc).
+    """
+    action: str
+    variant_name: str
+    candidate_extra_server_args: str
+    extra_envs: dict[str, str]
+    tput: float | None
+    ts: str
+    workspace: str | None
+    # gemm_tuning evidence
+    tuned_file: str
+    final_report_path: str
+    source: str
+    # generic optionals
+    gain_pct: float | None
+    kernel_id: str
+    fingerprint: str
+    provenance: str
+    task_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -886,15 +971,34 @@ class SessionBreakdown(TypedDict, total=False):
     kb_provenance: KBProvenance      # Cortex KB audit
     # specialist sub-agent dispatch records.
     specialist_runs: list[SpecialistRound]
+    # Raw KEEP ledger passthrough. Mirrors
+    # ``state.optimization_stack[]`` verbatim so downstream tooling
+    # (dashboard chart, GEMM-tuning visualization, audit trails) can
+    # read full per-entry evidence — including ``tuned_file`` /
+    # ``final_report_path`` for gemm_tuning entries and ``workspace``
+    # for any KEEP — without round-tripping back to state.json. The
+    # other "stack-derived" sections (``final.action_path``,
+    # ``attribution.gain_per_stack_entry``,
+    # ``roofline_progress.trajectory``) intentionally summarise this
+    # list for their respective consumers and don't carry the full
+    # per-entry metadata.
+    optimization_stack: list["OptimizationStackEntry"]
     # Hot-kernel table for the dashboard (Dashboard-Roofline 对接清单
     # §1). Mirrors ``<sd>/reports/kernel_roofline.json`` so consumers
     # don't have to walk the kernel-agent output tree themselves.
     kernel_roofline: KernelRoofline
+    # Per-snapshot roofline comparison list (one entry per
+    # ``state.roofline_snapshots`` history pass). Drives the markdown-
+    # report ``## Roofline`` section. Each entry has ``source_path /
+    # mode / baseline / latest / delta``.
+    roofline: list[dict[str, Any]]
     # Optimization-progress curve for the dashboard
     # (Dashboard-Roofline 对接清单 §2). Carries the trajectory
     # (baseline + KEEP points), the ceiling/target reference lines,
-    # and the headline current-best numbers.
-    roofline: Roofline
+    # and the headline current-best numbers. Renamed from ``roofline``
+    # to ``roofline_progress`` to coexist with the existing list-
+    # shaped ``roofline`` consumed by the markdown renderer.
+    roofline_progress: RooflineProgress
 
     warnings: list[str]
     source_files: SourceFiles
