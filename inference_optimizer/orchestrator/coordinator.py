@@ -5751,6 +5751,19 @@ class Coordinator:
         }
         prior_extras = {k: v for k, v in live.items() if k not in _reserved}
         merged_extras = {**prior_extras, **(overrides.get("extras") or {})}
+        # Re-stamp the config.json architecture-identity tags
+        # (``architectures`` / ``model_type``) on every amend so the row
+        # always carries the current model's identity. Carried on
+        # SharedState by ``cli._load_model_config_tags``; skipped when
+        # unset so a prior T0-stamped value is preserved.
+        _arch = getattr(ss, "model_architectures", None) or []
+        if isinstance(_arch, list):
+            _arch_list = [str(a).strip() for a in _arch if str(a or "").strip()]
+            if _arch_list:
+                merged_extras["architectures"] = _arch_list
+        _mtype = str(getattr(ss, "model_type", "") or "").strip()
+        if _mtype:
+            merged_extras["model_type"] = _mtype
         put_kwargs: dict[str, Any] = {
             "canonical_id":      cid,
             "model":             ss.model_name or "unknown_model",
