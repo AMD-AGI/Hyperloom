@@ -236,6 +236,13 @@
 - 失败语义统一表。
 - contract tests 精简方案。
 
+本阶段的边界图见
+`code-cleansing-plan/07-integrations/01-integration-boundary-map.MD`,
+失败语义表见
+`code-cleansing-plan/07-integrations/02-failure-semantics.MD`,
+执行记录见
+`code-cleansing-plan/07-integrations/03-execution-status.MD`。
+
 ## 完成标准
 
 完成后应达到:
