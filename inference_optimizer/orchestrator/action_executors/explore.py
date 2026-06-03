@@ -124,7 +124,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
           "extra_args" | "extra_server_args": str,
           "extra_envs": dict[str,str],
           "note": str,
-          "provenance": str,            # default_grid / llm_direct / specialist:<domain>
+          "provenance": str,            # llm_direct / default_grid / specialist:<tag> / dynamic
           "kb_evidence": list,          # passthrough (M5/M6 uses)
           "pr_evidence": list,          # passthrough
           "source_evidence": list,      # passthrough
@@ -133,13 +133,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     Unknown keys are ignored. ``provenance`` defaults to ``'default_grid'``
     when the LLM/specialist forgot to stamp it.
 
-    PR-A9 (Arbor-into-Hyperloom): the legacy ``'llm_direct'`` default
-    was retired. PolicyGate's ``explore_requires_specialist_provenance``
-    rule denies grids whose variants are all ``llm_direct``, so we
-    fall back to ``'default_grid'`` for unstamped variants — that
-    keeps the executor running on cold-start grids while still
-    letting the policy gate flag deliberately llm_direct-stamped
-    grids upstream.
+    Unstamped variants default to ``'default_grid'`` so generated seed
+    grids remain distinguishable from deliberate ``'llm_direct'``
+    Orchestration hypotheses. PolicyGate treats provenance as an audit
+    label; only specialist/dynamic per-round caps are enforced.
     """
     out: list[GridVariant] = []
     for raw in payload or []:
@@ -594,10 +591,9 @@ class ExploreExecutor:
             # seed grid exists for the active framework, fall through
             # to the seed instead of failing the task. Stamps each
             # variant with
-            # ``provenance='default_grid'`` so PolicyGate's
-            # ``explore_requires_specialist_provenance`` rule (which
-            # accepts ``specialist:*`` OR ``default_grid``) is
-            # satisfied. The seed honours
+            # ``provenance='default_grid'`` so cold-start seed variants
+            # are visibly distinct from Orchestration-authored
+            # ``llm_direct`` hypotheses. The seed honours
             # ``provenance='default_grid'`` already (see
             # ``_atom_default_grid``); no extra stamping needed.
             seed_model_class = (

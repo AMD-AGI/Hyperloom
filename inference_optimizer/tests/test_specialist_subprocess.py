@@ -82,6 +82,7 @@ def _make_fake_claude(
       (whatever directory is passed via ``--add-dir``) and exits 0.
     * ``done_with_patch``: writes done.json AND a patch under
       ``<worktree>/patches/001_test.patch`` referenced in done.patches_written.
+    * ``done_with_env``: writes a done file that echoes GPU visibility env vars.
     * ``crash``: exits non-zero without writing anything.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +149,24 @@ new file mode 100644
 EOF
 cat > "$WORKSPACE/specialist_done.json" <<'EOF'
 {patch_payload}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_env":
+        body += """
+cat > "$WORKSPACE/specialist_done.json" <<EOF
+{
+  "gap_canonical_id": "gap.test.example",
+  "domain": "serving_specialist",
+  "proposal_set": [],
+  "patches_written": [],
+  "empty": true,
+  "summary": "env echo",
+  "confidence": 0.0,
+  "hip_visible": "$HIP_VISIBLE_DEVICES",
+  "cuda_visible": "$CUDA_VISIBLE_DEVICES",
+  "rocr_visible": "$ROCR_VISIBLE_DEVICES"
+}
 EOF
 exit 0
 """
@@ -302,6 +321,39 @@ async def test_subprocess_path_harvests_done_file(
     assert (workspace / "specialist_done.json").exists()
     assert (workspace / "process.log").exists()
     assert (workspace / "worktree").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_subprocess_path_injects_allocated_gpu_env(
+    tmp_path: Path, fake_framework_repo: Path,
+):
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_env")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    config = SpecialistSubprocessConfig(
+        claude_executable=str(fake_claude),
+        model="",
+        framework_source_roots=(str(fake_framework_repo),),
+        per_turn_max_seconds=30.0,
+        poll_interval_seconds=0.2,
+    )
+    runner = SpecialistRunner(
+        subprocess_config=config,
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    ctx = _make_runner_ctx("t-spec-gpu")
+    ctx.extra["gpu_ids"] = [2, 3]
+
+    result = await runner.run(ctx)
+
+    assert result.status == "succeeded"
+    assert result.specialist_done["hip_visible"] == "2,3"
+    assert result.specialist_done["cuda_visible"] == "2,3"
+    assert result.specialist_done["rocr_visible"] == "2,3"
+    assert result.specialist_done["allocated_gpu_ids"] == [2, 3]
 
 
 @pytest.mark.asyncio

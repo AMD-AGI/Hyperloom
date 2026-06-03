@@ -182,9 +182,8 @@ SPECIALIST_ACTION_NAME: str = "specialist"
 # verdict before bench (Inv-5.1 / Inv-3 single-tenant GPU preserved).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
-# PR-A9 (Arbor-into-Hyperloom): the merged explore action — kept
-# as a named constant alongside SPECIALIST_ACTION_NAME so the
-# explore-provenance gate has a single source of truth.
+# Merged explore action — kept as a named constant alongside
+# SPECIALIST_ACTION_NAME so explore-grid caps have a single source of truth.
 EXPLORE_ACTION_NAME: str = "explore"
 
 # the sweep action; named constant so the
@@ -262,6 +261,28 @@ def research_lane_ceiling() -> int:
     if gpus > 0:
         return 2 * gpus
     return RESEARCH_LANE_CEILING_FALLBACK
+
+
+def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
+    """Configured GPU specialist capacity for this session.
+
+    The GPU specialist pool is intentionally separate from serving lanes.
+    A value of 0 disables ``needs_gpu=true`` specialist dispatch.
+    """
+    if shared_state is not None:
+        try:
+            return max(0, int(
+                getattr(shared_state, "gpu_specialist_capacity", 0) or 0
+            ))
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return max(0, int(
+            os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0")
+            or "0"
+        ))
+    except ValueError:
+        return 0
 
 
 # Snapshot the ceiling at import for callers that need a plain int
@@ -666,6 +687,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # and mirrored into SharedState. Locking it as CORE prevents an LLM
     # from raising capacity mid-flight.
     "research_lane_capacity",
+    "gpu_specialist_capacity",
     # phase-machine escalation plumbing (KB_design §3.8 §7.3 /
     # §3.13 M7). Coordinator's ``_handle_escalate_strategy_change``
     # writes ``pending_escalate_hint`` via the validated
@@ -1054,14 +1076,13 @@ class PolicyGate:
             self._validate_conc_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
-        # PR-A9 + explore_specialist_grid_max_one — same explore-grid
-        # gates as the delegate channel. Without these, an LLM that
+        # Same explore-grid caps as the delegate channel. Without these, an LLM that
         # cannot delegate{action_name='explore', ...} (e.g. wrong role
         # or phase guard fires first) can still propose_action an
         # explore grid full of llm_direct or many specialist:* variants
-        # and have the Coordinator materialise it. Mirror both rules
-        # here so the propose advisory path can never sidestep PR-A9
-        # or the new per-round specialist cap.
+        # and have the Coordinator materialise it. Mirror the cap here
+        # so the propose advisory path can never sidestep the per-round
+        # specialist limit.
         if action_name == EXPLORE_ACTION_NAME:
             self._validate_explore_grid_size(payload)
         self._validate_fp8_only_action(action_name, intent_kind="propose_action")
@@ -2056,6 +2077,52 @@ class PolicyGate:
                     hint=(
                         f"max_turns must be in (0, {SPECIALIST_MAX_TURNS_HARD_CAP}]; "
                         f"the prompt default is 8."
+                    ),
+                )
+
+        needs_gpu_raw = params.get("needs_gpu", False)
+        if isinstance(needs_gpu_raw, str):
+            needs_gpu = needs_gpu_raw.strip().lower() in (
+                "1", "true", "yes", "y", "on",
+            )
+        else:
+            needs_gpu = bool(needs_gpu_raw)
+        if needs_gpu:
+            gpu_count_raw = params.get("gpu_count", 1)
+            try:
+                gpu_count = int(gpu_count_raw)
+            except (TypeError, ValueError) as exc:
+                raise PolicyDenied(
+                    "delegate{action='specialist'}: gpu_count must be "
+                    f"an integer, got {gpu_count_raw!r}",
+                    rule="specialist_gpu_request_invalid",
+                ) from exc
+            if gpu_count <= 0:
+                raise PolicyDenied(
+                    "delegate{action='specialist'}: gpu_count must be > 0 "
+                    "when needs_gpu=true",
+                    rule="specialist_gpu_request_invalid",
+                )
+            ceiling = gpu_specialist_ceiling(self.shared_state)
+            if ceiling <= 0:
+                raise PolicyDenied(
+                    "delegate{action='specialist'}: needs_gpu=true but the "
+                    "GPU specialist pool is disabled",
+                    rule="specialist_gpu_pool_disabled",
+                    hint=(
+                        "Start the session with --gpu-specialist-capacity > 0 "
+                        "or set INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY "
+                        "before dispatching GPU specialists."
+                    ),
+                )
+            if gpu_count > ceiling:
+                raise PolicyDenied(
+                    f"delegate{{action='specialist'}}: gpu_count={gpu_count} "
+                    f"exceeds GPU specialist capacity={ceiling}",
+                    rule="specialist_gpu_request_exceeds_capacity",
+                    hint=(
+                        "Lower params.gpu_count or start a session with a "
+                        "larger GPU specialist pool."
                     ),
                 )
 

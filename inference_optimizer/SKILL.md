@@ -195,13 +195,21 @@ These govern the optimizer's EXPLORE phase, not the launcher; the full
 contract lives in `orchestrator/system_prompts/orchestration.md`. In
 brief:
 
-- **IR-4 — EXPLORE is specialist-first**: EXPLORE grids must carry
-  `provenance='specialist:<domain>'` (up to `research_lane_capacity` per
-  round, clamped to the `2 × visible GPU count` ceiling) or
-  `'default_grid'` (cold-start, uncapped); all-`llm_direct` grids are denied
-  (`explore_requires_specialist_provenance`). Specialists
-  author patches into an isolated worktree; `integrate_patch` does the
-  actual `git apply` + throughput/accuracy gate.
+- **IR-4 — EXPLORE is specialist-informed**: prefer specialist- or
+  research-backed variants when available, but `llm_direct`,
+  `default_grid`, `specialist:<domain-or-tag>`, and `dynamic` provenance
+  values are all accepted audit labels when phase and sequence gates pass.
+  Specialist-sourced variants are capped by `research_lane_capacity`
+  (clamped to the `2 × visible GPU count` ceiling); dynamic variants use
+  their own per-round cap. Specialists author patches into an isolated
+  worktree; `integrate_patch` does the actual `git apply` +
+  throughput/accuracy gate after Critic review.
+  Optional GPU specialists are off by default: launch with
+  `--gpu-specialist-capacity N` (or
+  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) before Orchestration may
+  dispatch `delegate{action_name='specialist', params={needs_gpu: true,
+  gpu_count: ...}}`. They are limited to short GPU experiments /
+  microbenchmarks and must not start serving servers or Magpie loops.
 - **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable
@@ -238,9 +246,9 @@ under **Framework Selection** below.
 ## Retired modules and rules (do not re-introduce)
 
 These orchestrator modules were intentionally removed; the
-`actions/_meta/*.yaml` registry + `_grid_runner.py` + specialist-first
-EXPLORE flow replaced them. Re-adding them re-creates conflicting
-decision paths:
+`actions/_meta/*.yaml` registry + `_grid_runner.py` + the unified,
+specialist-informed EXPLORE flow replaced them. Re-adding them
+re-creates conflicting decision paths:
 
 - `orchestrator/backends.py` (the action-routing one — distinct from
   the LLM-adapter directory `orchestrator/backends/`)
@@ -251,7 +259,8 @@ decision paths:
 Related rules that look reasonable but break things:
 
 - **No `framework_pr first-explore priority` rule** in
-  `system_prompts/orchestration.md` — conflicts with **IR-4**.
+  `system_prompts/orchestration.md` — conflicts with the EXPLORE
+  specialist-informed flow.
   Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
   before EXPLORE; the LLM never proposes the `framework_pr`
   action (PolicyGate denies it via

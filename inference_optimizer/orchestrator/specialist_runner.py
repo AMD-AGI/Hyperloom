@@ -437,6 +437,10 @@ class SpecialistRunner:
             notes.append(f"worktree_setup_failed:{worktree_err}")
         workspace_for_prompt = worktree or workspace
 
+        allocated_gpu_ids = tuple(
+            int(g) for g in ((ctx.extra or {}).get("gpu_ids") or [])
+        )
+
         # Assemble prompts.
         if prompt_inputs is None:
             prompt_inputs = SpecialistPromptInputs(
@@ -475,6 +479,7 @@ class SpecialistRunner:
                     params.get("source_hint_directories") or ()
                 ),
                 gpu_type=str(params.get("gpu_type") or ""),
+                allocated_gpu_ids=allocated_gpu_ids,
                 tp=int(params.get("tp") or 0),
                 hbm_gb=float(params.get("hbm_gb") or 0.0),
                 peak_tflops=float(params.get("peak_tflops") or 0.0),
@@ -700,6 +705,7 @@ class SpecialistRunner:
                 user_prompt=prep.user_prompt,
                 allowed_tools=prep.resolved_tools,
                 max_turns=prep.max_turns,
+                gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
             )
         )
         self._append_transcript(workspace, 1, {
@@ -759,6 +765,9 @@ class SpecialistRunner:
         gap = prep.gap
         workspace = prep.workspace
         notes = list(extra_notes)
+        gpu_ids = [
+            int(g) for g in ((ctx.extra or {}).get("gpu_ids") or [])
+        ]
 
         if specialist_done_payload is None:
             reason = backend_error or (
@@ -770,6 +779,8 @@ class SpecialistRunner:
                 domain=domain.key,
                 reason=reason,
             )
+            if gpu_ids:
+                done_payload["allocated_gpu_ids"] = list(gpu_ids)
             self._write_specialist_done(workspace, done_payload)
             return SpecialistRunResult(
                 task_id=ctx.task.task_id,
@@ -794,6 +805,8 @@ class SpecialistRunner:
             "gap_canonical_id", ""
         )
         done_payload["domain"] = domain.key
+        if gpu_ids:
+            done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
         # Hard truncate proposal_set to the single-source-of-truth cap.

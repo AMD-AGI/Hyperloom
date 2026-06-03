@@ -3,8 +3,8 @@
 Covers the PolicyGate rule that caps ``provenance='specialist:*'``
 variants per explore round (tracking ``research_lane_capacity`` clamped
 to the GPU-derived ceiling) on both the delegate and propose_action
-channels. All-``llm_direct`` grids are accepted (the specialist-first
-provenance gate was retired)."""
+channels. All-``llm_direct`` grids are accepted; provenance is audit-only
+except for specialist/dynamic per-round caps."""
 
 from __future__ import annotations
 
@@ -48,6 +48,18 @@ def _propose(grid: list[dict]) -> Intent:
     return Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "explore",
         "params": {"grid": grid},
+    })
+
+
+def _specialist_delegate(params: dict) -> Intent:
+    merged = {
+        "tags": ["kernel"],
+        "gap_canonical_id": "gap.kernel.microbench.session-test",
+    }
+    merged.update(params)
+    return Intent(type=IntentType.DELEGATE, payload={
+        "action_name": "specialist",
+        "params": merged,
     })
 
 
@@ -124,7 +136,7 @@ def test_empty_grid_skips_size_check():
 
 
 # ---------------------------------------------------------------------------
-# propose_action channel — backstops for both PR-A9 + the new size cap
+# propose_action channel — mirrors delegate-channel size caps
 # ---------------------------------------------------------------------------
 def test_propose_denies_two_specialist_variants():
     """The new explore_specialist_grid_max_one rule applies to the
@@ -209,3 +221,40 @@ def test_cap_falls_back_to_one_when_capacity_unset():
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", _delegate(_specialist_variants(2)))
     assert exc.value.rule == "explore_specialist_grid_max_one"
+
+
+# ---------------------------------------------------------------------------
+# GPU specialist request policy
+# ---------------------------------------------------------------------------
+def test_gpu_specialist_denied_when_pool_disabled():
+    gate = _gate()
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            _specialist_delegate({"needs_gpu": True, "gpu_count": 1}),
+        )
+    assert exc.value.rule == "specialist_gpu_pool_disabled"
+
+
+def test_gpu_specialist_allowed_within_capacity():
+    s = SharedState()
+    s.phase = "EXPLORE"
+    s.gpu_specialist_capacity = 2
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=s)
+    gate.validate_intent(
+        "orchestration",
+        _specialist_delegate({"needs_gpu": True, "gpu_count": 1}),
+    )
+
+
+def test_gpu_specialist_denies_above_capacity():
+    s = SharedState()
+    s.phase = "EXPLORE"
+    s.gpu_specialist_capacity = 1
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=s)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            _specialist_delegate({"needs_gpu": True, "gpu_count": 2}),
+        )
+    assert exc.value.rule == "specialist_gpu_request_exceeds_capacity"

@@ -2753,7 +2753,7 @@ def _normalize_specialist_key(provenance: str) -> str:
     * ``"default_grid"`` — cold-start grid run when no specialist has
       produced a proposal_set yet.
     * ``"llm_direct"`` — orchestration LLM authored the variant
-      directly (legacy path; PR-A9 retired this).
+      directly.
     * ``"legacy:<action>"`` — resume of a pre-v0.8 session whose
       promoted actions predate the specialist split. Folded under
       ``"legacy_<action>"`` so it doesn't pollute the specialist

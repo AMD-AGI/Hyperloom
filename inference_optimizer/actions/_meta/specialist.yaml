@@ -26,35 +26,30 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 8
 lease_ttl_sec: 1800
-description: "Dispatch an LLM specialist sub-agent on research_lane; reads KB / PR feed for the domain, optionally writes patches under runs/specialist/<task_id>/worktree/, emits one specialist_done intent."
+description: "Dispatch an LLM specialist on research_lane; reads KB / PR feed for knowledge-domain tags, may write worktree patches, emits one specialist_done intent."
 pipeline_phase: explore
 typical_runtime_min: 6.0
 applicable_when:
   - "phase == 'EXPLORE'"
-# PR-A1 (Arbor dispatch into Hyperloom):
-#
-# ``specialist`` was a synthetic action in v0.8 M5 — the SpecialistRunner /
-# PolicyGate / phase-allowlist all knew about it, but no yaml meta existed,
-# so ``prompt_builder._section_action_catalogue`` rendered no entry for it.
-# The Orchestration LLM therefore never emitted ``delegate{action='specialist'}``
-# in any v0.8 run (verified empirically on a 12h DeepSeek-R1-0528 marathon:
-# ``storage/coordinator.db tasks`` had 0 rows of ``kind='specialist'``).
-#
-# This yaml flips the catalogue visibility; everything else (SpecialistRunner,
-# `_validate_specialist_dispatch`, phase R1) was already wired.
-#
-# Note: ``params.domain`` ∈ ``orchestrator.specialist_domains.SPECIALIST_DOMAIN_KEYS``
-# and ``params.gap_canonical_id`` are required; PolicyGate's
-# ``specialist_dispatch_source`` rule validates the payload before queue.
 params_schema:
+  tags:
+    type: list
+    description: |
+      Canonical. One or more controlled knowledge-domain tags, derived
+      from SpecialistDomain kb_anchor values: ``framework`` / ``kernel`` /
+      ``communication`` / ``compiler`` / ``systems`` /
+      ``pr_intelligence`` / ``research_scout``. Tags select KB anchors,
+      PR repo subsets, focus templates, and breakdown attribution keys.
   domain:
     type: string
     description: |
-      Required. One of the six SpecialistDomain keys:
+      Backward-compatible alias for a single tag. When supplied without
+      ``tags``, PolicyGate maps the SpecialistDomain key to its kb_anchor.
+      Known keys include:
       ``serving_specialist`` / ``kernel_switch_specialist`` / ``comm_specialist``
-      / ``compiler_specialist`` / ``system_specialist`` / ``pr_intel_specialist``.
-      Picks the KB sub-graph anchor, PR Monitor repo subset, and per-domain
-      prompt template (KB_design §3.5 §5).
+      / ``compiler_specialist`` / ``system_specialist`` /
+      ``pr_intel_specialist`` / ``session_steward_specialist`` /
+      ``research_scout_specialist``.
   gap_canonical_id:
     type: string
     description: |
@@ -85,3 +80,16 @@ params_schema:
     description: |
       Optional. Hard cap on LLM turns (default 8, hard ceiling 16). PolicyGate
       R2 ``specialist_max_turns_excess`` rejects values outside (0, 16].
+  needs_gpu:
+    type: boolean
+    description: |
+      Optional, default false. Set true only for short GPU experiments or
+      microbenchmarks. GPU specialists receive isolated visible-device
+      env vars from the Coordinator-managed GPU specialist pool. They must
+      not launch persistent serving servers or run Magpie benchmark loops.
+  gpu_count:
+    type: integer
+    description: |
+      Optional, default 1 when ``needs_gpu`` is true. Number of GPUs requested
+      from the specialist GPU pool. PolicyGate rejects non-positive values or
+      requests above the configured GPU specialist ceiling.

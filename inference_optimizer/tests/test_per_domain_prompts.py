@@ -921,5 +921,6 @@ def test_research_lane_capacity_is_core_state_field():
     """LLM cannot raise research_lane_capacity mid-flight."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
     assert "research_lane_capacity" in CORE_STATE_FIELDS
+    assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
     assert "specialist_rounds" in CORE_STATE_FIELDS
     assert "last_specialist" in CORE_STATE_FIELDS

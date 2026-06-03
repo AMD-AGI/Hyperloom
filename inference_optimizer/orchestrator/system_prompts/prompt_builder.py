@@ -397,8 +397,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
     """Return a per-action one-liner showing the LLM how to override grid."""
     if name == "explore":
         return (
-            "GRID INPUT (v0.8 M3 + PR-A9 Arbor-into-Hyperloom, "
-            "REQUIRED): emit "
+            "GRID INPUT (v0.8 M3, REQUIRED): emit "
             "`delegate{action_name='explore', params={grid: [{name, "
             "extra_args, extra_envs, provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
@@ -406,23 +405,18 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "keep_threshold_pct?: 1.0, stack_stable_threshold_pct?: 0.5}}`. "
             "Variants run serially; each KEEP triggers an inlined "
             "stack rebench. "
-            "**Provenance is now restricted (PR-A9):** every variant "
-            "MUST carry provenance='specialist:<domain>' (a derived "
-            "row from a specialist_done.proposal_set) OR "
-            "provenance='default_grid' (cold-start fallback when "
-            "no specialist has run yet). The legacy 'llm_direct' "
-            "value — orchestration LLM authored the grid from one "
-            "prompt window without any specialist research — is now "
-            "DENIED by PolicyGate (rule "
-            "'explore_requires_specialist_provenance'). **Per-round "
-            "cap:** up to research_lane_capacity variants (clamped to "
-            "the 2 x visible GPU count ceiling) "
-            "in the grid may carry provenance='specialist:*' (rule "
-            "'explore_specialist_grid_max_one'); pick the strongest "
-            "specialist proposals each round and defer any runners-up "
-            "beyond the cap to a subsequent round. "
-            "provenance='default_grid' is "
-            "uncapped — cold-start rounds may emit several. The "
+            "**Provenance is audit/advisory, not a hard gate:** "
+            "accepted values include provenance='llm_direct' "
+            "(Orchestration-authored), provenance='default_grid', "
+            "provenance='specialist:<domain-or-tag>', and "
+            "provenance='dynamic'. Prefer specialist / research-hint "
+            "variants when they exist, but use llm_direct for uncovered "
+            "gaps or cold-start hypotheses. **Remaining caps:** up to "
+            "research_lane_capacity variants (clamped to the 2 x visible "
+            "GPU count ceiling) in the grid may carry "
+            "provenance='specialist:*' (rule "
+            "'explore_specialist_grid_max_one'); at most one "
+            "provenance='dynamic' variant may run per explore round. The "
             "executor dedups against SharedState.explore_search by "
             "canonical_fingerprint, so a rename of an already-tested "
             "(args, envs) collapses to the same row."
@@ -834,9 +828,9 @@ def build_orchestration_prompt(
     ]
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
-    # Dynamic action declaration sits after the decision framework
-    # so the LLM sees the supplementary-channel framing once it has
-    # internalised the specialist-first decision flow.
+    # Dynamic action declaration sits after the decision framework so
+    # the LLM sees the supplementary-channel framing after the primary
+    # EXPLORE action catalogue.
     dyn_section = _section_dynamic_action(actions)
     if dyn_section is not None:
         sections.append(dyn_section)

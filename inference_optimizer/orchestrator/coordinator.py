@@ -72,6 +72,10 @@ from .policy import (
     RESEARCH_LANE_NAME,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from .gpu_pool import (
+    SpecialistGpuPool,
+    resolve_gpu_specialist_devices,
+)
 from .resource_lock import (
     KNOWN_LANES,
     ResourceLockManager,
@@ -710,6 +714,12 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        self.gpu_specialist_pool = SpecialistGpuPool(
+            self.db,
+            gpu_ids=resolve_gpu_specialist_devices(
+                int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0)
+            ),
+        )
         # sync research_lane capacity from SharedState into
         # the lane_capacity table. CLI/manifest
         # flow already pinned the value onto SharedState at session
@@ -9337,6 +9347,12 @@ class Coordinator:
                 done_payload.get("residual_questions") or []
             ),
         }
+        gpu_ids = done_payload.get("allocated_gpu_ids") or []
+        if isinstance(gpu_ids, list) and gpu_ids:
+            entry["allocated_gpu_ids"] = [
+                int(g) for g in gpu_ids
+                if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
+            ]
         if isinstance(truncated_from, int) and truncated_from > len(proposals):
             entry["proposals_truncated_from"] = truncated_from
         return entry
@@ -10176,7 +10192,7 @@ class Coordinator:
             return
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
-        spawned: list[tuple[Task, asyncio.Task[SubAgentResult]]] = []
+        spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         for task in queued:
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
@@ -10210,11 +10226,65 @@ class Coordinator:
                     holders[lane] = int(holders.get(lane, 0)) + 1
             else:
                 lease = None
+            gpu_lease = None
+            extra_context: dict[str, Any] = {}
+            if task.kind == "specialist":
+                params = task.params or {}
+                needs_gpu_raw = params.get("needs_gpu", False)
+                needs_gpu = (
+                    needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
+                    if isinstance(needs_gpu_raw, str)
+                    else bool(needs_gpu_raw)
+                )
+                if needs_gpu:
+                    try:
+                        gpu_count = int(params.get("gpu_count", 1) or 1)
+                    except (TypeError, ValueError):
+                        gpu_count = 1
+                    try:
+                        max_turns = int(params.get("max_turns", 8) or 8)
+                    except (TypeError, ValueError):
+                        max_turns = 8
+                    try:
+                        per_turn_s = float(
+                            params.get("specialist_per_turn_max_seconds")
+                            or os.environ.get(
+                                "INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS",
+                                "600",
+                            )
+                            or 600.0
+                        )
+                    except (TypeError, ValueError):
+                        per_turn_s = 600.0
+                    gpu_ttl_sec = max(
+                        int(task.lease_ttl_sec or 0),
+                        int(max(1, max_turns) * max(1.0, per_turn_s)),
+                    )
+                    gpu_lease = await self.gpu_specialist_pool.try_acquire(
+                        count=gpu_count,
+                        holder_id=task.task_id,
+                        task_id=task.task_id,
+                        ttl_sec=gpu_ttl_sec,
+                    )
+                    if gpu_lease is None:
+                        if lease is not None:
+                            await self.locks.release(lease)
+                            for lane in lease.lanes:
+                                holders[lane] = max(
+                                    0, int(holders.get(lane, 0)) - 1,
+                                )
+                        continue
+                    extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
             spawned.append((
                 task,
                 asyncio.create_task(
-                    self.sub.run_task(task, prebound_lease=lease),
+                    self.sub.run_task(
+                        task,
+                        prebound_lease=lease,
+                        extra_context=extra_context,
+                    ),
                 ),
+                gpu_lease,
             ))
         if not spawned:
             return
@@ -10224,9 +10294,17 @@ class Coordinator:
         # (run_task catches inside its body) but defensively absorb
         # anything that leaks here too.
         results = await asyncio.gather(
-            *(t for _, t in spawned), return_exceptions=True,
+            *(t for _, t, _ in spawned), return_exceptions=True,
         )
-        for (task, _), maybe_result in zip(spawned, results):
+        for (task, _, gpu_lease), maybe_result in zip(spawned, results):
+            if gpu_lease is not None:
+                try:
+                    await self.gpu_specialist_pool.release(gpu_lease)
+                except Exception:  # noqa: BLE001 — defensive cleanup
+                    log.exception(
+                        "dispatcher: failed to release GPU specialist lease "
+                        "for task=%s", task.task_id,
+                    )
             if isinstance(maybe_result, BaseException):
                 log.exception(
                     "dispatcher: spawned task %s raised: %r",

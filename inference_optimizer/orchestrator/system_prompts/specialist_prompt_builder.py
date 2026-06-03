@@ -499,6 +499,7 @@ class SpecialistPromptInputs:
     # tensor-parallel sessions where the Coordinator forgot to
     # plumb ``params['tp']`` from SharedState.
     gpu_type: str = ""
+    allocated_gpu_ids: tuple[int, ...] = ()
     tp: int = 0
     hbm_gb: float = 0.0
     peak_tflops: float = 0.0
@@ -671,6 +672,15 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- gpu_type: {inp.gpu_type}")
     else:
         rows.append(f"- gpu_type: {_NONE_PLACEHOLDER}")
+    if inp.allocated_gpu_ids:
+        rows.append(
+            "- allocated specialist GPU ids: "
+            + ", ".join(str(g) for g in inp.allocated_gpu_ids)
+        )
+        rows.append(
+            "- GPU specialist scope: short experiments / microbenchmarks only; "
+            "do not launch a persistent serving server or Magpie benchmark loop."
+        )
     if inp.tp > 0:
         rows.append(f"- TP: {inp.tp}")
     else:
@@ -1350,13 +1360,25 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 # ---------------------------------------------------------------------------
 def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     workspace = inp.workspace_path or "<runs/specialist/<task_id>/>"
+    if inp.allocated_gpu_ids:
+        gpu_rule = [
+            "1. You have an explicit GPU specialist allocation for this task.",
+            "   You MAY run short GPU experiments or microbenchmarks on the",
+            "   allocated visible devices only. You MUST NOT launch persistent",
+            "   serving servers, run Magpie benchmark loops, restart vLLM/SGLang,",
+            "   or control the production serving process.",
+        ]
+    else:
+        gpu_rule = [
+            "1. **NEVER** touch the serving GPU (no Magpie / no benchmark / no",
+            "   server restart / no vllm or sglang process control). The",
+            "   Coordinator runs benchmarks; you only propose what to try and",
+            "   optionally author patches.",
+        ]
     return [
         "## 9. IRON RULES (Inv-5.1 / Inv-5.2 / Inv-5.3)",
         "",
-        "1. **NEVER** touch the serving GPU (no Magpie / no benchmark / no",
-        "   server restart / no vllm or sglang process control). The",
-        "   Coordinator runs benchmarks; you only propose what to try and",
-        "   optionally author patches.",
+        *gpu_rule,
         "2. **You MAY** write source patches, but ONLY into your own",
         f"   worktree at ``{workspace}/`` (a git checkout branched off",
         "   the framework HEAD just for this task). Concretely:",

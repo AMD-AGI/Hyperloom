@@ -984,6 +984,17 @@ def _seed_shared_state(
     research_lane_capacity = max(
         0, min(research_lane_ceiling(), research_lane_capacity),
     )
+    gpu_specialist_capacity_raw = getattr(
+        args, "gpu_specialist_capacity", None,
+    )
+    try:
+        gpu_specialist_capacity = max(
+            0,
+            int(gpu_specialist_capacity_raw)
+            if gpu_specialist_capacity_raw is not None else 0,
+        )
+    except (TypeError, ValueError):
+        gpu_specialist_capacity = 0
     # collect plateau threshold overrides into a single dict
     #. Only non-None CLI overrides
     # land in the dict; absent keys fall through to the
@@ -1172,6 +1183,7 @@ def _seed_shared_state(
         cumulative_gain=0.0,
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
+        gpu_specialist_capacity=gpu_specialist_capacity,
         plateau_overrides=plateau_overrides,
         explore_overtime_kill_ratio=explore_overtime_kill_ratio,
         enable_roofline=bool(
@@ -1497,6 +1509,9 @@ def _build_specialist_executor(
             "done_path": run_result.done_path,
             "error": run_result.error,
             "notes": list(run_result.notes or []),
+            "allocated_gpu_ids": list(
+                (run_result.specialist_done or {}).get("allocated_gpu_ids") or []
+            ),
         }
 
     return _executor
@@ -5559,6 +5574,20 @@ def _build_parser() -> argparse.ArgumentParser:
              "the default. The upper bound scales with the visible GPU "
              "count (2 x GPU); values above it are silently clamped "
              "down. Locked at session start.",
+    )
+    opt.add_argument(
+        "--gpu-specialist-capacity",
+        dest="gpu_specialist_capacity",
+        type=int,
+        default=int(
+            os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0")
+            or "0"
+        ),
+        help="Number of GPUs available to specialists that request "
+             "needs_gpu=true. 0 disables GPU specialists (default). "
+             "Set INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES to a "
+             "comma-separated GPU id pool when the specialist pool should "
+             "not use device ids 0..N-1. Locked at session start.",
     )
     # ------------------------------------------------------------------
     # Advisory specialist-proposal scorer (ProposalScorer). Scores each

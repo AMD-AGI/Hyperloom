@@ -993,6 +993,10 @@ class SharedState:
     # M6 raises to 6 (concurrent). PolicyGate denies mid-session
     # mutation because it's listed in CORE_STATE_FIELDS.
     research_lane_capacity: int = 1
+    # Separate GPU pool capacity for specialists that explicitly request
+    # ``needs_gpu=true``. Zero disables GPU specialists. Locked at session
+    # start so LLM roles cannot inflate GPU access mid-run.
+    gpu_specialist_capacity: int = 0
     # escalate_strategy_change carry-over field
     #. The Coordinator's
     # ``_handle_escalate_strategy_change`` writes the validated
