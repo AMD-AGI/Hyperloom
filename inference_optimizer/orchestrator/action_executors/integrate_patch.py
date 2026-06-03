@@ -79,7 +79,7 @@ from ._workload_envs import default_baseline_config, materialize_config_with_env
 log = logging.getLogger(__name__)
 
 
-DEFAULT_KEEP_THRESHOLD_PCT = 0.2
+DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 long workload
 
 

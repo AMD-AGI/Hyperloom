@@ -39,7 +39,7 @@ Inputs (``ctx.task.params``):
     patches (list[str], optional) — explicit patch paths. When omitted,
         the executor curls ``candidate.diff_url`` into the per-task
         workspace and applies that.
-    keep_threshold_pct (float, optional) — default 0.2.
+    keep_threshold_pct (float, optional) — default 1.0.
     base_tput (float, optional) — baseline throughput; falls back to
         ``SharedState.baseline_tput``.
     accuracy_baseline (float, optional) — forwarded to the accuracy gate.

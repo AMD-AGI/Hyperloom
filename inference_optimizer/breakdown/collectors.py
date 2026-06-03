@@ -4101,6 +4101,31 @@ def _collect_flusher_status(
 # ---------------------------------------------------------------------------
 # specialist_runs section
 # ---------------------------------------------------------------------------
+def _coerce_round_id(value: Any) -> int | str:
+    """Normalise a ``specialist_rounds[*].round_id`` for the breakdown.
+
+    ``record_specialist_round`` stores ``round_id`` as a string — it may
+    be a numeric round counter ("3"), an explore-round label
+    ("explore-001"), or a task-id hash when a single specialist task is
+    the round anchor. Return an int when the value is purely numeric so
+    downstream numeric consumers keep working, otherwise preserve the
+    string. Empty / None collapses to ``0``. Never raises.
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if text.lstrip("-").isdigit():
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    return text
+
+
 def collect_specialist_runs(
     session_dir: Path,
     state: dict[str, Any],
@@ -4157,11 +4182,19 @@ def collect_specialist_runs(
     for raw in rounds:
         if not isinstance(raw, dict):
             continue
+        # ``record_specialist_round`` writes singular ``domain`` /
+        # ``task_id`` (one specialist task anchors a round) and a bare
+        # ``confidence``; tolerate both the plural / aggregated shapes
+        # (multi-task rounds) and the singular shapes so neither form is
+        # silently dropped.
+        domains = list(raw.get("domains") or [])
+        if not domains and raw.get("domain"):
+            domains = [str(raw.get("domain"))]
         entry: dict[str, Any] = {
-            "round_id":          int(raw.get("round_id") or 0),
+            "round_id":          _coerce_round_id(raw.get("round_id")),
             "dispatched_at":     str(raw.get("dispatched_at") or ""),
             "completed_at":      str(raw.get("completed_at") or ""),
-            "domains":           list(raw.get("domains") or []),
+            "domains":           domains,
             "tags":              list(raw.get("tags") or []),
             "parallelism":       int(raw.get("parallelism") or 0),
             "proposals_total":   int(raw.get("proposals_total") or 0),
@@ -4169,14 +4202,21 @@ def collect_specialist_runs(
             "proposals_rejected": int(raw.get("proposals_rejected") or 0),
             "proposals_skipped": int(raw.get("proposals_skipped") or 0),
             "kb_edge_ids":       list(raw.get("kb_edge_ids") or []),
-            "confidence_avg":    _to_float(raw.get("confidence_avg")),
+            "confidence_avg":    _to_float(
+                raw.get("confidence_avg")
+                if raw.get("confidence_avg") is not None
+                else raw.get("confidence")
+            ),
             "domain_breakdown":  _normalize_specialist_domain_breakdown(
                 raw.get("domain_breakdown"),
             ),
             "notes":             list(raw.get("notes") or []),
         }
-        # Attach transcript refs from runs/specialist/.
+        # Attach transcript refs from runs/specialist/. Tolerate the
+        # singular ``task_id`` anchor when no ``task_ids`` list exists.
         task_ids = list(raw.get("task_ids") or [])
+        if not task_ids and raw.get("task_id"):
+            task_ids = [str(raw.get("task_id"))]
         transcripts: list[dict[str, Any]] = []
         for tid in task_ids:
             tid_str = str(tid)
@@ -4237,6 +4277,8 @@ def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
     domains = round_entry.get("tags") or round_entry.get("domains") or []
     if isinstance(domains, list) and len(domains) == 1:
         return str(domains[0])
+    if round_entry.get("domain"):
+        return str(round_entry.get("domain"))
     return ""
 
 

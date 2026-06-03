@@ -83,22 +83,15 @@ log = logging.getLogger(__name__)
 # because the inlined stack rebench acts as the second gate — even a
 # marginal +0.3% won't survive into ``optimization_stack`` unless the
 # cumulative stack still wins after this variant is layered onto it.
-DEFAULT_KEEP_THRESHOLD_PCT = 0.2
+DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 # Stack rebench stability threshold. After a KEEP, the stack-applied
 # rebench tput must beat ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)``;
-# otherwise the variant is evicted (KEEP_UNSTABLE → REVERT).
-#
-# Default lowered from 0.5% → 0.2% so the rebench gate matches
-# ``DEFAULT_KEEP_THRESHOLD_PCT`` (per-variant KEEP threshold). The 0.5%
-# default was originally KB_design §3.4 §4.4's "保守值"; in practice it
-# sat squarely inside the ±1% inter-run noise band observed on MI300X
-# (e.g. Qwen3-32B FP8: single-run +0.4% rebench dipping to −0.4% on the
-# 2nd run), which silently downgraded otherwise-real wins to
-# KEEP_UNSTABLE and pushed `cumulative_gain_validated` to 0%.
-# Matching the single-variant KEEP threshold keeps both decisions
-# consistent under the same noise floor.
-DEFAULT_STACK_STABLE_PCT = 0.2
+# otherwise the variant is evicted (KEEP_UNSTABLE → REVERT). Set below
+# the single-variant KEEP threshold so a genuine win that loses a little
+# headroom when layered onto the cumulative stack is not immediately
+# evicted.
+DEFAULT_STACK_STABLE_PCT = 0.5
 
 
 def _now_iso() -> str:

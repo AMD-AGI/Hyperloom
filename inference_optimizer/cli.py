@@ -803,7 +803,7 @@ def _build_backends(
         if kernel_codex:
             backends["kernel"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
+            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=5)
     return backends
 
 
@@ -1673,6 +1673,47 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
     print("===============================================")
+
+
+def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
+    """Make the persisted ``crash_count`` agree with the authoritative
+    in-memory value printed in the final summary.
+
+    The ReportExecutor and the breakdown writer both reload state from
+    ``state.json`` (``SharedState.load_or_init``), so a reactor-pass
+    crash increment that lost a write race against a later save would
+    leave ``state.json`` / ``reports/final.json`` showing a stale (lower)
+    count while the live coordinator object — and therefore the console
+    summary — shows the true count. Reconcile both disk artifacts to the
+    live value at teardown so all three sources never disagree. We only
+    ever raise the persisted value (``max``); we never lower a count that
+    disk recorded but memory somehow missed. Best-effort: never fatal.
+    """
+    live = int(getattr(state, "crash_count", 0) or 0)
+
+    # 1) state.json — reload, bump if stale, atomic re-save.
+    try:
+        disk_state = SharedState.load_or_init(session_dir)
+        if int(disk_state.crash_count or 0) < live:
+            disk_state.crash_count = live
+            disk_state.save(session_dir)
+    except Exception:  # noqa: BLE001
+        log.exception("crash_count reconcile (state.json) failed (non-fatal)")
+
+    # 2) reports/final.json — patch the single field in place if present.
+    try:
+        from .session_paths import reports_dir
+        final_json = reports_dir(session_dir) / "final.json"
+        if final_json.exists():
+            data = json.loads(final_json.read_text(encoding="utf-8"))
+            if int(data.get("crash_count") or 0) < live:
+                data["crash_count"] = live
+                final_json.write_text(
+                    json.dumps(data, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+    except Exception:  # noqa: BLE001
+        log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
@@ -4731,6 +4772,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     "emergency final report write failed (non-fatal)"
                 )
 
+    _reconcile_crash_count(coordinator.shared_state, session_dir)
     _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in (
         "target_reached",
@@ -5415,32 +5457,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "the default. The upper bound scales with the visible GPU "
              "count (2 x GPU); values above it are silently clamped "
              "down. Locked at session start.",
-    )
-    # ------------------------------------------------------------------
-    # Advisory specialist-proposal scorer (ProposalScorer). Scores each
-    # specialist proposal_set with one or more gateway models (single
-    # 0-10 composite + one-line reason) and surfaces the results to
-    # Orchestration as one reference among many — never gates anything.
-    # Adding a model = appending its gateway slug to the comma list.
-    # ------------------------------------------------------------------
-    opt.add_argument(
-        "--proposal-scorer-models",
-        dest="proposal_scorer_models",
-        type=str,
-        default=",".join(DEFAULT_SCORER_MODELS),
-        help="Comma-separated gateway model slugs that independently "
-             "score each specialist proposal_set (advisory only; never "
-             "gates; rater identities are anonymized in the orchestration "
-             "prompt). Default 'claude-opus-4-8,gpt-5.5,"
-             "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
-             "Add a model by "
-             "appending its slug. Empty list disables scoring.",
-    )
-    opt.add_argument(
-        "--no-proposal-scoring",
-        dest="no_proposal_scoring",
-        action="store_true",
-        help="Disable the advisory specialist-proposal scorer entirely.",
     )
     # ------------------------------------------------------------------
     # Advisory specialist-proposal scorer (ProposalScorer). Scores each

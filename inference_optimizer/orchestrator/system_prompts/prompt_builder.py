@@ -363,7 +363,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "specialist_task_id=<completed specialist task_id>, "
             "patches?=[<patch paths from specialist_done>], "
             "config_changes?={ENV_VAR: value}, "
-            "keep_threshold_pct?=0.2, "
+            "keep_threshold_pct?=1.0, "
             "accuracy_baseline?={task: {metric: score}}}}"
         )
     # Mirrors the specialist emit hint shape: payload field table +
@@ -403,7 +403,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "extra_args, extra_envs, provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
-            "keep_threshold_pct?: 0.2, stack_stable_threshold_pct?: 0.2}}`. "
+            "keep_threshold_pct?: 1.0, stack_stable_threshold_pct?: 0.5}}`. "
             "Variants run serially; each KEEP triggers an inlined "
             "stack rebench. "
             "**Provenance is now restricted (PR-A9):** every variant "

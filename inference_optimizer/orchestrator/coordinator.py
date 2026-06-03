@@ -4574,7 +4574,7 @@ class Coordinator:
                 {"kind": "reactor_exception", "agent": agent_name,
                  "error": f"{type(exc).__name__}: {str(exc)[:500]}"},
             )
-            self.shared_state.crash_count += 1
+            self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
             return
         # Reset the streak — a successful turn proves the backend is alive
