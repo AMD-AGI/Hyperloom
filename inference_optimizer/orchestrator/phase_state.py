@@ -214,7 +214,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
     "explore_force_exit_low_budget",    # EXPLORE → next phase when total remaining or phase remaining drops below operator-configured thresholds
-    "no_more_leverage",                 # EXPLORE/KERNEL → SWEEP (non-terminal): steward stop_session or the _has_no_more_leverage safety net via the skip_to_sweep hint. Reclassified from a terminal stop_reason — it now winds the session down through SWEEP → CLOSE instead of aborting.
+    "no_more_leverage",                 # EXPLORE/KERNEL → SWEEP (non-terminal): steward stop_session via the skip_to_sweep hint. (The Coordinator's automatic no-more-leverage safety net was removed for long-run continuity.) Reclassified from a terminal stop_reason — it now winds the session down through SWEEP → CLOSE instead of aborting.
     # FRAMEWORK_PR phase transitions (PR-A1 / FRAMEWORK_PR phase).
     "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
     "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
@@ -408,9 +408,10 @@ ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 # the optimization. Unlike ``skip_to_close`` (which is terminal via
 # ``_global_terminal`` → ``robustness_escalated``), ``skip_to_sweep``
 # still runs the SWEEP validation pass and produces a clean report.
-# It is set by the IR-7 steward's ``stop_session`` verdict and by the
-# Coordinator's ``_has_no_more_leverage`` safety net — both of which
-# used to set a terminal ``stop_reason='no_more_leverage'``.
+# It is set by the IR-7 steward's ``stop_session`` verdict, which used
+# to set a terminal ``stop_reason='no_more_leverage'``. (The Coordinator
+# also used to drive this via an automatic no-more-leverage safety net;
+# that net was removed for long-run continuity.)
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -1295,9 +1296,9 @@ def exit_normal_explore(
             "evidence": "llm_escalation",
             "hint": hint,
         }
-    # Non-terminal "no more leverage" signal (steward stop_session or the
-    # Coordinator's _has_no_more_leverage safety net). Winds EXPLORE down
-    # to SWEEP (skipping KERNEL) → CLOSE rather than aborting the session.
+    # Non-terminal "no more leverage" signal (steward stop_session). Winds
+    # EXPLORE down to SWEEP (skipping KERNEL) → CLOSE rather than aborting
+    # the session.
     # compute_next_phase routes the ``no_more_leverage`` reason to SWEEP.
     if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
         return "no_more_leverage", {
@@ -1502,7 +1503,7 @@ def exit_normal_kernel(
        ``stop_reason=robustness_escalated``). Returns ``None`` here so
        the global path wins.
     2. ``skip_to_sweep`` hint (non-terminal "no more leverage" from the
-       _has_no_more_leverage safety net) → ``no_more_leverage``; KERNEL
+       steward's ``stop_session`` verdict) → ``no_more_leverage``; KERNEL
        already exits to SWEEP so this just forces the wind-down now.
     3. FP8 GEMM tuning completed and no source-level kernel attempts are
        queued/recorded → move on to SWEEP. GEMM tuning is the deterministic

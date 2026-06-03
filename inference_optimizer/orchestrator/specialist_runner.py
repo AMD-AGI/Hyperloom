@@ -912,17 +912,62 @@ class SpecialistRunner:
             done_payload["summary"] = (
                 "specialist emitted done without summary"[:480]
             )
-        # PR-A2: Merge subprocess-discovered patches into
-        # ``patches_written`` so downstream Coordinator bookkeeping +
-        # IntegratePatchExecutor see them. If the agent already filled
-        # ``patches_written`` from inside Bash, prefer its list over the
-        # filesystem scan (the agent may carry intent about which
-        # patches to apply in which order via numeric prefix).
-        existing_patches = done_payload.get("patches_written") or []
-        if not (
-            isinstance(existing_patches, list) and existing_patches
-        ) and patches_written:
-            done_payload["patches_written"] = patches_written
+        # PR-A2 + B4: reconcile the agent's self-reported ``patches_written``
+        # against the filesystem. The agent may list patches it intends to
+        # apply (ordered by numeric prefix), but we must NEVER trust that
+        # claim blindly: a worktree that was never materialised, a write
+        # that did not land, or an LLM that reported a path without creating
+        # the file would otherwise propagate a DANGLING ``patches_written``
+        # entry downstream — ``integrate_patch`` then finds nothing under
+        # ``worktree/patches/`` and the "patch" is silently a no-op. So we
+        # keep only claimed paths that actually exist on disk (resolved
+        # against the worktree first, then the workspace) and union them
+        # with the verified filesystem scan, preserving the agent's order.
+        claimed = done_payload.get("patches_written") or []
+        if not isinstance(claimed, list):
+            claimed = []
+        search_bases = [b for b in (prep.worktree, workspace) if b is not None]
+
+        def _resolve_existing_patch(p: Any) -> str | None:
+            raw = Path(str(p))
+            candidates = [raw] if raw.is_absolute() else []
+            for base in search_bases:
+                candidates.append(base / raw)
+            for c in candidates:
+                try:
+                    if c.is_file():
+                        return str(c)
+                except OSError:
+                    continue
+            return None
+
+        validated: list[str] = []
+        missing: list[str] = []
+        for p in claimed:
+            resolved = _resolve_existing_patch(p)
+            if resolved is not None:
+                validated.append(resolved)
+            else:
+                missing.append(str(p))
+        # Union with the filesystem scan (already verified-existing abs paths).
+        for p in patches_written:
+            if p not in validated:
+                validated.append(p)
+        # Dedupe while preserving order.
+        _seen: set[str] = set()
+        deduped: list[str] = []
+        for p in validated:
+            if p not in _seen:
+                _seen.add(p)
+                deduped.append(p)
+        done_payload["patches_written"] = deduped
+        if missing:
+            # The agent claimed patches that never materialised on disk;
+            # record it so the session_breakdown audit + operators can see
+            # the dangling claim instead of a phantom integrate_patch.
+            notes.append(
+                "patches_claimed_but_missing:" + ",".join(missing[:8])
+            )
 
         self._write_specialist_done(workspace, done_payload)
         status = "succeeded"
