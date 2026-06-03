@@ -814,10 +814,7 @@ def test_specialist_tool_denylist_excludes_kb_write_paths():
     remain blocked because the KB lifecycle is Coordinator-owned.
     """
     for forbidden in (
-        "mcp__cortex_kb__hypothesize",
-        "mcp__cortex_kb__ingest_attempt",
-        "mcp__cortex_kb__verify",
-        "mcp__cortex_kb__commit",
+        "mcp__cortex_kb__propose_point",
     ):
         assert forbidden in SPECIALIST_TOOL_DENYLIST
         assert forbidden not in DEFAULT_SPECIALIST_TOOLS

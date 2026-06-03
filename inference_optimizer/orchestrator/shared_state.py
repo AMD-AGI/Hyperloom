@@ -663,9 +663,6 @@ class SharedState:
     # remain Coordinator-internal and are denied by PolicyGate when
     # proposed by the LLM (``analysis_action_not_llm_proposable``).
     enable_roofline: bool = True
-    # Cheap-rounds gain gate is opt-in — only locks ``kernel_opt`` when
-    # the operator has tuned the thresholds for their workload.
-    gain_driven_kernel_opt: bool = False
     # Per-variant overtime kill multiplier for ExploreExecutor: when
     # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
     # in the explore loop are killed once their wall-clock exceeds

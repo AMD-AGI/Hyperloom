@@ -1183,9 +1183,6 @@ def _seed_shared_state(
         # ``--no-explore`` skips the EXPLORE phase entirely (PRELUDE /
         # FRAMEWORK_PR → KERNEL, or → SWEEP when kernel is also off).
         explore_enabled=not bool(getattr(args, "no_explore", False)),
-        gain_driven_kernel_opt=bool(
-            getattr(args, "gain_driven_kernel_opt", False),
-        ),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
@@ -5585,22 +5582,6 @@ def _build_parser() -> argparse.ArgumentParser:
     def _env_default_on(env_var: str) -> bool:
         return os.environ.get(env_var, "1").strip() != "0"
 
-    # The standalone FRAMEWORK_PR phase is on by default; use
-    # ``--no-framework`` to disable it (mirrors the install-side
-    # ``INFERENCE_OPTIMIZER_NO_FRAMEWORK=1`` opt-out).
-    opt.add_argument(
-        "--gain-driven-kernel-opt",
-        dest="gain_driven_kernel_opt",
-        action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT", "0",
-        ).strip() == "1",
-        help="Lock ``kernel_opt`` until the 3-round moving "
-             "average of ``last_explore_delta_gain_pct`` drops below "
-             "epsilon (0.5%%). Prevents premature deep work while cheap "
-             "exploration is still earning. Default off. Env: "
-             "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT=1.",
-    )
     opt.add_argument(
         "--allow-empty-kernel-shape",
         dest="allow_empty_kernel_shape",
