@@ -49,24 +49,38 @@ grid-runner entry):
     judge fires or the budget cap hits. `explore` runs its per-KEEP
     stack rebench inline.
 
-    **Specialist-first**: on entering EXPLORE you MUST
-    `delegate{action_name='specialist'}` for the top-K gaps in
+    **Specialist-informed exploration**: on entering EXPLORE, prefer
+    dispatching `delegate{action_name='specialist'}` for the top-K gaps in
     parallel in the same tick (fan out up to `research_lane_capacity`,
-    default 4, hard cap 6). Wait for ≥1 `specialist_done` before you
-    propose `explore` (grid from `proposal_set`) or `integrate_patch`
-    (from specialist patches).
+    default 4, clamped to the GPU-derived ceiling `2 × visible GPU
+    count`). Specialist results provide stronger KB / PR / source evidence
+    for `explore` grids and may also produce patches for `integrate_patch`.
+    If no specialist has covered a promising gap, you may still propose an
+    Orchestration-authored grid instead of waiting indefinitely.
 
-    **Grid provenance (PR-A9 — EXPLORE is specialist-first)**: every
-    variant MUST carry `provenance='specialist:<domain>'` (derived from a
-    `specialist_done.proposal_set`) OR `provenance='default_grid'`
-    (cold-start, no specialist yet). All-llm_direct grids are denied
-    (`explore_requires_specialist_provenance`). Per round select up to
-    `research_lane_capacity` specialist variants (hard cap 6;
-    `explore_specialist_grid_max_one` — the numeric cap tracks
-    `research_lane_capacity`); prefer the strongest and defer any
-    runners-up beyond the cap. `default_grid` is uncapped. If no specialist
-    variant survives this round, go straight to `integrate_patch` or
-    dispatch the next specialist round instead of `explore`. The
+    **GPU specialists**: by default specialists are CPU/research tasks.
+    When a gap requires a short GPU experiment or microbenchmark (for
+    example, timing a small kernel/config probe that does not start the
+    serving stack), you may dispatch
+    `delegate{action_name='specialist', params={needs_gpu: true,
+    gpu_count: N, ...}}`. This only runs if the session was launched with
+    a non-zero GPU specialist pool; otherwise PolicyGate denies it with
+    `specialist_gpu_pool_disabled`. GPU specialists must not launch
+    persistent vLLM/SGLang servers, run Magpie benchmark loops, or control
+    the production serving process.
+
+    **Grid provenance (audit/advisory)**: stamp every variant with the
+    best available provenance. Use `provenance='specialist:<domain-or-tag>'`
+    for rows derived from `specialist_done.proposal_set`,
+    `provenance='default_grid'` for framework seed grids,
+    `provenance='llm_direct'` for Orchestration-authored hypotheses, and
+    `provenance='dynamic'` for dynamic_action output. Provenance does not
+    decide acceptance by itself; the remaining hard limits are:
+    per round, up to `research_lane_capacity` specialist variants
+    (`explore_specialist_grid_max_one` — the numeric cap tracks
+    `research_lane_capacity`, clamped to the `2 × visible GPU count`
+    ceiling), and at most one dynamic variant. Prefer the strongest
+    evidence-backed variants and defer runners-up beyond the cap. The
     Critic reviews each variant against KB priors before it benches;
     rejected variants drop silently (`critic_filtered_count`).
 

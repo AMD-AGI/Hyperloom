@@ -153,12 +153,109 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "EXPLORE→KERNEL transition becomes mandatory."
         ),
     ),
+    SpecialistDomain(
+        key="research_scout_specialist",
+        layer="proven-prior research / reference scripts / arch features",
+        kb_anchor="research_scout",
+        pr_repos=("ROCm/aiter", "sgl-project/sglang", "ROCm/vllm",
+                  "triton-lang/triton", "ROCm/rccl", "NVIDIA/TensorRT-LLM"),
+        available_in="M5",
+        description=(
+            "Read-only research collector dispatched at PRELUDE (and "
+            "periodically during EXPLORE). Surveys reference launch "
+            "scripts, model config.json architecture features, and "
+            "cross-framework / NVIDIA PRs+blogs+MLPerf for proven "
+            "optimizations, then writes prioritised research_hints with "
+            "sources. Never benchmarks, applies patches, or decides "
+            "KEEP/REVERT."
+        ),
+    ),
 )
 
 
 SPECIALIST_DOMAIN_KEYS: frozenset[str] = frozenset(
     d.key for d in SPECIALIST_DOMAINS
 )
+
+
+# Controlled knowledge-domain tag vocabulary. Derived from the distinct
+# ``kb_anchor`` values in the catalogue so the tag set and the KB
+# traversal anchors never drift. A specialist dispatch carries one or
+# more of these tags; each tag selects a KB anchor + PR repo subset +
+# focus template for prompt assembly and a stable attribution key for
+# session breakdown.
+#
+# Adding a knowledge domain = give a catalogue entry a new ``kb_anchor``
+# (or append ``EXTRA_KNOWLEDGE_DOMAIN_TAGS`` for anchors with no backing
+# SpecialistDomain yet, e.g. forward-declared roles).
+EXTRA_KNOWLEDGE_DOMAIN_TAGS: tuple[str, ...] = ()
+
+
+def _derive_knowledge_domain_tags() -> tuple[str, ...]:
+    seen: dict[str, None] = {}
+    for d in SPECIALIST_DOMAINS:
+        anchor = (d.kb_anchor or "").strip()
+        if anchor:
+            seen.setdefault(anchor, None)
+    for extra in EXTRA_KNOWLEDGE_DOMAIN_TAGS:
+        tag = (extra or "").strip()
+        if tag:
+            seen.setdefault(tag, None)
+    return tuple(seen.keys())
+
+
+KNOWLEDGE_DOMAIN_TAGS: tuple[str, ...] = _derive_knowledge_domain_tags()
+KNOWLEDGE_DOMAIN_TAG_SET: frozenset[str] = frozenset(KNOWLEDGE_DOMAIN_TAGS)
+
+
+# Map each knowledge-domain tag back to a representative catalogue entry
+# so prompt assembly can recover the focus template / pr_repos for a
+# tag. The first catalogue entry that owns the anchor wins.
+def _anchor_to_domain_map() -> dict[str, "SpecialistDomain"]:
+    out: dict[str, SpecialistDomain] = {}
+    for d in SPECIALIST_DOMAINS:
+        anchor = (d.kb_anchor or "").strip()
+        if anchor and anchor not in out:
+            out[anchor] = d
+    return out
+
+
+_ANCHOR_TO_DOMAIN: dict[str, "SpecialistDomain"] = _anchor_to_domain_map()
+
+
+def domain_for_tag(tag: str) -> "SpecialistDomain | None":
+    """Return a representative catalogue entry for a knowledge-domain
+    tag (matched first by ``kb_anchor``, then by ``key``)."""
+    t = (tag or "").strip()
+    if not t:
+        return None
+    hit = _ANCHOR_TO_DOMAIN.get(t)
+    if hit is not None:
+        return hit
+    return get_domain(t)
+
+
+def normalize_dispatch_tags(params: dict) -> list[str]:
+    """Resolve a dispatch payload's tag list.
+
+    Reads ``params.tags`` (a list of knowledge-domain tags). Falls back
+    to the single ``params.domain`` alias (mapped to its ``kb_anchor``
+    when it names a catalogue entry, else used verbatim) when ``tags``
+    is absent. Order-preserving dedup; empty entries dropped.
+    """
+    raw = params.get("tags")
+    tags: list[str] = []
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            t = str(item or "").strip()
+            if t:
+                tags.append(t)
+    if not tags:
+        domain = str(params.get("domain") or "").strip()
+        if domain:
+            dom = get_domain(domain)
+            tags.append((dom.kb_anchor or domain) if dom else domain)
+    return list(dict.fromkeys(tags))
 
 # M5 active set — domains whose prompt templates are fully wired
 # in the specialist_prompt_builder. PR-A6 (Arbor-into-Hyperloom)
@@ -192,10 +289,15 @@ SPECIALIST_MAX_TURNS_HARD_CAP: int = 16
 
 __all__ = [
     "DEFAULT_SPECIALIST_MAX_TURNS",
+    "EXTRA_KNOWLEDGE_DOMAIN_TAGS",
+    "KNOWLEDGE_DOMAIN_TAGS",
+    "KNOWLEDGE_DOMAIN_TAG_SET",
     "SPECIALIST_DOMAINS",
     "SPECIALIST_DOMAINS_M5",
     "SPECIALIST_DOMAIN_KEYS",
     "SPECIALIST_MAX_TURNS_HARD_CAP",
     "SpecialistDomain",
+    "domain_for_tag",
     "get_domain",
+    "normalize_dispatch_tags",
 ]
