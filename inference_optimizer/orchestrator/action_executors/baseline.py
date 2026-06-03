@@ -507,6 +507,7 @@ class BaselineExecutor:
                 )
                 return warmup_result
             warmup_tput = warmup_result.get("output_throughput")
+            warmup_runtime = warmup_result.get("subprocess_runtime_sec")
 
             # Round 2 (measured): re-attach to the hot server (client
             # only). cleanup=true tears the server down after this round
@@ -530,6 +531,26 @@ class BaselineExecutor:
                     "baseline_double_run_discarded_first",
                 )
                 result["warmup_round_tput"] = warmup_tput
+                # Overtime-kill anchor fix: the Coordinator promotes
+                # ``subprocess_runtime_sec`` into
+                # ``SharedState.baseline_runtime_sec``, which the
+                # ExploreExecutor turns into the per-variant soft-kill
+                # deadline (``baseline_runtime_sec * kill_ratio``). Explore
+                # variants each RESTART the server (full server-boot +
+                # client), but round 2 here reused the hot server
+                # (client-only), so its wall-clock is far too small an
+                # anchor and would soft-kill normal variants as
+                # KILLED_OVERTIME. Report round 1's FULL server-boot +
+                # client wall-clock as the anchor instead (it matches the
+                # explore variants' run profile); keep round 2's client-only
+                # time under a separate key for transparency / debugging.
+                if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
+                    result["measure_round_runtime_sec"] = result.get(
+                        "subprocess_runtime_sec",
+                    )
+                    result["subprocess_runtime_sec"] = round(
+                        float(warmup_runtime), 2,
+                    )
                 _hot = result.get("output_throughput") or 0.0
                 _cold = warmup_tput or 0.0
                 log.info(
@@ -674,7 +695,9 @@ class BaselineExecutor:
                 if len(parts) > 1:
                     server_pgid = int(parts[1])
         except (OSError, ValueError):
-            server_pid = server_pid
+            # Best-effort: proceed with whatever (if anything) was parsed
+            # before the error. Teardown is defensive and must never raise.
+            pass
 
         if server_pid is not None and os.name == "posix":
             # The persistent server is setsid'd into its own session, so
@@ -696,6 +719,8 @@ class BaselineExecutor:
             try:
                 p.unlink()
             except OSError:
+                # File already gone (round 2 cleanup=true removed it) or
+                # unremovable; either way teardown must not raise.
                 pass
 
     async def _run_single_benchmark(
