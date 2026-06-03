@@ -648,6 +648,7 @@ class Coordinator:
         cortex_kb: RecipeKB | None = None,
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
+        proposal_scorer: Any = None,
         warm_replay_enabled: bool = True,
         warm_replay_min_confidence: float = 0.7,
         warm_replay_min_reproduce_pct: float = 0.8,
@@ -737,6 +738,14 @@ class Coordinator:
         # (no warmup; specialist still runs but sees empty knowledge
         # surface).
         self.knowledge_plane: Any = knowledge_plane
+        # ProposalScorer facade (advisory). When non-None, a non-empty
+        # specialist ``proposal_set`` is scored by one or more gateway
+        # models in ``_record_specialist_result``; the scores ride on
+        # the specialist round entry under ``ensemble_scores`` and are
+        # surfaced to Orchestration as one reference among many (parallel
+        # to gaps / KB / analysis.md). ``None`` keeps the legacy path
+        # (no scoring). Never gates anything (Inv-9.1: no scoreboard).
+        self._proposal_scorer: Any = proposal_scorer
         # phase budget percentages (KB_design §3.8 §5.3 +
         # §3.13 M2 §7). ``None`` means library defaults; CLI flags
         # populate this dict from ``--max-minutes-<phase>-pct``. We
@@ -2050,6 +2059,7 @@ class Coordinator:
         # PR that another repo's serving overlap already produced, padding
         # the batch with duplicates that the plateau judge then counts.
         seen_ids = self._framework_pr_known_candidate_ids()
+        primary_repo_url = repo_urls[0] if repo_urls else ""
         # Normalise each candidate so the executor's slug helper has
         # consistent fields and the progress ledger has a stable id.
         norm: list[dict[str, Any]] = []
@@ -2063,10 +2073,21 @@ class Coordinator:
             if cand_id and cand_id in seen_ids:
                 continue
             seen_ids.add(cand_id)
+            # Stamp the repo URL the candidate came from so the executor's
+            # checkout-head path knows whether the PR lives in the live
+            # framework_root's origin (same-repo, fetchable) or a foreign
+            # repo (must fall back to diff_url). fa already returns a
+            # ``repo_url`` per candidate when known; otherwise fall back to
+            # the batch's primary repo URL.
+            discovered_repo_url = str(
+                c.get("repo_url") or c.get("discovered_repo_url")
+                or primary_repo_url
+            )
             norm.append({
                 **c,
                 "candidate_id": cand_id,
                 "batch_id": batch_id,
+                "discovered_repo_url": discovered_repo_url,
             })
         if not norm:
             return False
@@ -4390,7 +4411,6 @@ class Coordinator:
         # Stash so ``_compose_prompt`` can update target_gap_pct.
         self._current_objective = objective
         grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
-        idle_close_ticks_threshold = _resolve_silent_ticks_closing_threshold()
         deadline = (
             time.monotonic() + max_minutes * 60.0 if max_minutes else None
         )
@@ -4495,34 +4515,13 @@ class Coordinator:
                 if objective.reached(self.shared_state):
                     stop_reason = "target_reached"
                     break
-                if await self._has_no_more_leverage():
-                    # No-more-leverage is no longer terminal: instead of
-                    # aborting, wind the session down through SWEEP ->
-                    # CLOSE via the skip_to_sweep hint. Only nudge from
-                    # EXPLORE/KERNEL; SWEEP/CLOSE already own their own
-                    # wind-down (auto-sweep / report), and PRELUDE never
-                    # satisfies the safety net. The next tick's
-                    # _advance_phase_if_needed picks the hint up and
-                    # routes to SWEEP, whose entry hook auto-enqueues a
-                    # sweep task (so the safety net stops firing).
-                    phase_now = (self.shared_state.phase or "").strip().upper()
-                    if phase_now in (
-                        _phase_state.PHASE_EXPLORE,
-                        _phase_state.PHASE_KERNEL,
-                    ) and (
-                        self.shared_state.pending_escalate_hint
-                        != _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP
-                    ):
-                        self.shared_state.set_pending_escalate_hint(
-                            _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP,
-                        )
-                        self.shared_state.save(self.session_dir)
-                        log.info(
-                            "Coordinator: no-more-leverage safety net fired "
-                            "in phase=%s; set skip_to_sweep hint "
-                            "(non-terminal wind-down to SWEEP -> CLOSE)",
-                            phase_now,
-                        )
+                # The no-more-leverage safety net (which used to wind the
+                # session down to SWEEP -> CLOSE via the skip_to_sweep hint
+                # when cheap rounds plateaued and every reusable kernel was
+                # rejected) has been removed to prioritise long-run
+                # continuity: the run keeps exploring until the wall-clock
+                # deadline rather than self-winding down on a plateau
+                # judgment.
                 if (
                     deadline is not None
                     and time.monotonic() >= deadline
@@ -4535,39 +4534,13 @@ class Coordinator:
                         grace_sec=grace_sec,
                     )
                     continue
-                # N33: if the run has been silent for
-                # ``idle_close_ticks_threshold`` consecutive ticks (LLM
-                # has stopped proposing anything actionable, no tasks in
-                # flight, no pending proposals), short-circuit to closing
-                # phase NOW instead of idling until the wall-clock
-                # deadline. This is the common failure mode where the
-                # LLM keeps re-proposing rejected ``report`` actions (or
-                # no actions at all) and would otherwise burn the
-                # remaining budget for nothing. ``threshold <= 0``
-                # disables the early-close (legacy behaviour).
-                if (
-                    idle_close_ticks_threshold > 0
-                    and not in_closing
-                    and self.shared_state.consecutive_silent_ticks
-                        >= idle_close_ticks_threshold
-                ):
-                    log.warning(
-                        "Coordinator: idle for %d consecutive ticks "
-                        "(threshold=%d); entering closing phase early "
-                        "to flush final report instead of waiting for "
-                        "wall-clock deadline (max_minutes=%.0f).",
-                        self.shared_state.consecutive_silent_ticks,
-                        idle_close_ticks_threshold,
-                        max_minutes_value,
-                    )
-                    if grace_sec <= 0:
-                        stop_reason = "idle_timeout"
-                        break
-                    closing_deadline = await self._enter_closing_phase(
-                        grace_sec=grace_sec,
-                    )
-                    self.shared_state.consecutive_silent_ticks = 0
-                    continue
+                # N33 idle-timeout early-close has been removed to
+                # prioritise long-run continuity. ``consecutive_silent_ticks``
+                # is still tracked (the LLM / breakdown can read it), but
+                # the run no longer short-circuits into the closing phase
+                # when the LLM stops proposing actionable work — it keeps
+                # ticking until the wall-clock deadline (or another
+                # stop_reason) fires.
                 if in_closing:
                     report_terminal = await self._closing_report_terminal()
                     grace_blown = (
@@ -4634,35 +4607,6 @@ class Coordinator:
                 except (NotImplementedError, RuntimeError):
                     pass
         return self.shared_state.stop_reason
-
-    async def _has_no_more_leverage(self) -> bool:
-        """Return True when automated explore/kernel levers are exhausted.
-
-        v0.8 plateau judgment lives in :mod:`phase_state`; this helper
-        is the safety-net check the closing-phase path consults before
-        winding the session down. We require:
-
-        1. baseline + current_best present (otherwise we are still in
-           PRELUDE / never finished a round)
-        2. no pending proposals or queued / running tasks
-        3. ``params_no_promote_streak >= 5`` (proxy still used as
-           the cross-phase plateau hint; see KB_gaps/Gap-15)
-        4. every reusable kernel_id is rejected.
-
-        Returns:
-            bool: ``True`` when all automated leverage is exhausted.
-        """
-        if self.shared_state.baseline_tput <= 0:
-            return False
-        if not self.shared_state.current_best:
-            return False
-        if self.state.pending_proposals:
-            return False
-        if await self.tasks.queued() or await self.tasks.running():
-            return False
-        if self.shared_state.params_no_promote_streak < 5:
-            return False
-        return self._all_reusable_kernels_rejected()
 
     async def _enter_closing_phase(self, *, grace_sec: float) -> float:
         """Enter report-flush phase after the wall-clock deadline.
@@ -4751,36 +4695,6 @@ class Coordinator:
         return task.state in {
             "succeeded", "failed", "cancelled", "needs_manual_review",
         }
-
-    def _all_reusable_kernels_rejected(self) -> bool:
-        """Report whether every reusable native kernel has been rejected.
-
-        When no reusable kernel ids are known, falls back to "have we at least
-        captured a profile trace?" as the leverage signal.
-
-        Returns:
-            bool: ``True`` when the set of reusable kernel ids is a subset of
-                the rejected ids (or, absent reusable ids, a trace exists).
-        """
-        select = self.shared_state.last_trace_analyze or {}
-        reusable = {
-            str(k) for k in (select.get("reusable_native_kernel_ids") or [])
-            if k
-        }
-        if not reusable:
-            return bool(self.shared_state.last_profile_trace)
-
-        rejected = {
-            str(k) for k in (self.shared_state.rejected_kernel_ids or [])
-            if k
-        }
-        for entry in self.shared_state.rejected_kernel_patches or []:
-            if isinstance(entry, dict) and entry.get("kernel_id"):
-                rejected.add(str(entry["kernel_id"]))
-        last = self.shared_state.last_kernel_opt or {}
-        if last.get("kernel_id") and last.get("decision") == "REVERT":
-            rejected.add(str(last["kernel_id"]))
-        return reusable <= rejected
 
     # ==================================================================
     # Reactor
@@ -5093,6 +5007,32 @@ class Coordinator:
             if gaps_block:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
+            # Advisory multi-model proposal scores (ProposalScorer).
+            # One reference among many — parallel to gaps / KB /
+            # analysis.md, NOT a ranking directive (Inv-9.1). Section
+            # omitted entirely when no recent round carries scores.
+            try:
+                scores_block = self.shared_state.to_proposal_scores_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: proposal_scores_summary failed")
+                scores_block = ""
+            if scores_block:
+                sections.append("=== Specialist proposal scores (advisory) ===")
+                sections.append(scores_block)
+
+            # PR-A8 / D3 (Arbor-into-Hyperloom): surface the intervention-mix
+            # ledger so Orchestration escalates to a code-patch specialist
+            # when it has been config-only for too long (Arbor's "do not
+            # settle for config-only" rule). ``record_intervention`` maintains
+            # the ledger + counter; this block is its consumer.
+            try:
+                mix_block = self.shared_state.to_intervention_mix_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: intervention_mix_summary failed")
+                mix_block = ""
+            if mix_block:
+                sections.append("=== Intervention mix (config vs code_patch) ===")
+                sections.append(mix_block)
 
         # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
@@ -5843,21 +5783,14 @@ class Coordinator:
                 rule="execution_order",
                 hint="emit request kind='run_gemm_tuning' before run_optimization",
             )
-        # Note (c900791): main also gates ``run_optimization`` here on a
-        # gain-driven N19c rule (snapshot_id >= 1 + cheap-attempt
-        # recorded + last_cheap_delta_gain < EPSILON). On this branch
-        # the equivalent lives in PolicyGate as
-        # ``_validate_gain_driven_kernel_opt`` (F3-5 N19c, reads
-        # ``gain_per_stack_entry``), so the Coordinator-side gate is
-        # intentionally omitted here.
         return None
 
     @staticmethod
     def _allow_early_kernel_opt() -> bool:
         """Escape hatch — ``INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1``
-        opens the kernel_opt request gate unconditionally (skips both
-        the snapshot check and the gain-driven N19c check). Used by
-        v0-baseline-comparison flows and unit tests.
+        opens the kernel_opt request gate unconditionally (skips the
+        roofline-snapshot check). Used by v0-baseline-comparison flows
+        and unit tests.
 
         Returns:
             bool: ``True`` when the early-kernel-opt escape hatch env is set.
@@ -5871,20 +5804,9 @@ class Coordinator:
         right now — i.e. when the hot-kernel report-gate (PR-C) should
         fire and the LLM should be pushed toward kernel_opt.
 
-        Mirrors PolicyGate's F3-5 N19c ``_validate_gain_driven_kernel_opt``
-        check so the two gates never disagree. Without this yield-to-N19c
-        on the Coordinator side the LLM oscillates between
-        ``hot_kernel_unfinished`` (PR-C, deny report) and
-        ``n19c_gain_driven_kernel_opt`` (PolicyGate, deny kernel_opt
-        proposal) until ``policy_loop`` auto-stops the session
-        (Qwen3-30B-A3B-Base 20260523T014653Z died this way at tick=14).
-
         The gate is open when ANY of the following hold:
           * escape hatch env set;
-          * the gain-driven N19c toggle is off (legacy F3 default);
-          * the last ``_N19C_HISTORY_WINDOW`` cheap-round deltas in
-            ``gain_per_stack_entry`` average below the F3-5 epsilon
-            (i.e. cheap exploration has actually plateaued).
+          * a roofline snapshot exists (``roofline_snapshot_id`` >= 1).
 
         Returns:
             bool: ``True`` when ``run_optimization`` is dispatchable right now.
@@ -5896,28 +5818,7 @@ class Coordinator:
         snapshot_id = ta.get("roofline_snapshot_id", 0)
         if not isinstance(snapshot_id, int) or snapshot_id < 1:
             return False
-        if not bool(getattr(ss, "gain_driven_kernel_opt", False)):
-            # F3-5 toggle off → mirror PolicyGate's early-return; gate
-            # is considered open once a roofline snapshot exists.
-            return True
-        try:
-            from .policy import PolicyGate as _PolicyGate
-            window = _PolicyGate._N19C_HISTORY_WINDOW
-            epsilon = _PolicyGate._N19C_EPSILON_PCT
-        except Exception:  # noqa: BLE001 — defensive, fall back to F3-5 defaults
-            window, epsilon = 3, 0.5
-        history = list(getattr(ss, "gain_per_stack_entry", []) or [])
-        deltas: list[float] = []
-        for entry in reversed(history):
-            if isinstance(entry, dict):
-                d = entry.get("delta_pct")
-                if isinstance(d, (int, float)):
-                    deltas.append(float(d))
-            if len(deltas) >= window:
-                break
-        if len(deltas) < window:
-            return False
-        return (sum(deltas) / float(len(deltas))) < float(epsilon)
+        return True
 
     @staticmethod
     def _skip_gemm_tuning() -> bool:
@@ -8937,6 +8838,33 @@ class Coordinator:
         round_entry = self._build_specialist_round_entry(
             task=task, done_payload=done_payload, source=source,
         )
+        # Advisory multi-model scoring of the proposal_set. Purely
+        # informational — the scores ride on the round entry and surface
+        # to Orchestration as one reference among many; they gate
+        # nothing. Defensive: any scorer failure leaves the entry
+        # score-free and the run continues unchanged.
+        _scorer = getattr(self, "_proposal_scorer", None)
+        if _scorer is not None and proposals:
+            try:
+                scores = await _scorer.score(
+                    gap={
+                        "domain": domain,
+                        "gap_canonical_id": done_payload.get(
+                            "gap_canonical_id", ""
+                        ),
+                        "gap_symptom": (task.params or {}).get("gap_symptom"),
+                        "gap_evidence": (task.params or {}).get("gap_evidence"),
+                        "summary": done_payload.get("summary", ""),
+                    },
+                    proposals=proposals,
+                )
+                if scores and scores.get("models"):
+                    round_entry["ensemble_scores"] = scores
+            except Exception:  # noqa: BLE001 — advisory; never block
+                log.exception(
+                    "specialist bookkeeping: proposal scoring failed for "
+                    "task=%s (continuing without scores)", task.task_id,
+                )
         try:
             self.shared_state.record_specialist_round(round_entry)
         except Exception:  # noqa: BLE001
@@ -9041,6 +8969,140 @@ class Coordinator:
             log.exception(
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
+            )
+
+        # B3 (auto-apply unlock): if this specialist authored source
+        # patches, push them to the Critic now so the integrate_patch
+        # gate can pass and the patch actually reaches the serving GPU.
+        try:
+            await self._maybe_autosubmit_specialist_patches(
+                task=task, done_payload=done_payload,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "B3: specialist patch autosubmit failed for task=%s",
+                task.task_id,
+            )
+
+    async def _maybe_autosubmit_specialist_patches(
+        self, *, task: "Task", done_payload: dict[str, Any],
+    ) -> None:
+        """B3 (Arbor-into-Hyperloom follow-up): auto-surface a specialist's
+        source patches to the Critic.
+
+        When a specialist writes ``patches_written`` into its worktree, push
+        a synthetic ``integrate_patch`` proposal onto the bus. The Critic
+        reviews it and — on approve — ``_handle_single_verdict`` both mirrors
+        the verdict onto ``SharedState.specialist_patch_verdicts`` (so
+        PolicyGate's ``integrate_patch_requires_critic_verdict`` gate passes)
+        and calls ``_materialize_approved_proposal`` to queue the
+        integrate_patch task. Mirrors the dynamic_action critic-dispatch
+        pattern (see ``_dispatch_dynamic_patch_to_critic``).
+
+        Without this, source patches sit unreviewed in the worktree forever:
+        the Critic only ever reviews ``explore`` variants, so the gate keeps
+        denying every integrate_patch delegate and config tuning spins with
+        no path to a code patch.
+
+        Idempotent: skips when a verdict for this specialist is already on
+        record (resume / re-entry) or a pending integrate_patch proposal for
+        the same ``specialist_task_id`` is already awaiting the Critic.
+        """
+        patches = done_payload.get("patches_written") or []
+        if not isinstance(patches, list) or not patches:
+            return
+        sid = str(task.task_id or "").strip()
+        if not sid:
+            return
+        # B4 guard: never submit a patch set that does not exist on disk.
+        # ``patches_written`` may carry a dangling claim (worktree never
+        # materialised / agent reported a path it never wrote). Resolve each
+        # against the specialist worktree + workspace; only submit when at
+        # least one real file is found, otherwise integrate_patch would apply
+        # nothing. The runner's _finalize already validates for the dispatch
+        # path; this re-checks the intent-routing (defense-in-depth) path too.
+        from ..session_paths import runs_dir as _runs_dir
+        resolve_bases: list[Path] = []
+        if self.session_dir is not None:
+            spec_root = _runs_dir(Path(self.session_dir), "specialist", sid)
+            resolve_bases = [spec_root / "worktree", spec_root]
+        existing_patches: list[str] = []
+        for p in patches:
+            raw = Path(str(p))
+            cands = [raw] if raw.is_absolute() else []
+            for base in resolve_bases:
+                cands.append(base / raw)
+            if any(c.is_file() for c in cands):
+                existing_patches.append(str(p))
+        if not existing_patches:
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind": "specialist_patch_autosubmit_skipped_no_files",
+                    "specialist_task_id": sid,
+                    "claimed": [str(x) for x in patches][:8],
+                },
+            )
+            return
+        # Already ruled on by the Critic (e.g. after resume) — nothing to do.
+        try:
+            if self.shared_state.get_specialist_patch_verdict(sid):
+                return
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+        # A synthetic review for this specialist is already in flight.
+        for p in self.state.pending_proposals.values():
+            try:
+                if getattr(p, "action_name", "") != "integrate_patch":
+                    continue
+                pl = getattr(p, "payload", {}) or {}
+                if (pl.get("params") or {}).get("specialist_task_id") == sid:
+                    return
+            except Exception:  # noqa: BLE001 — defensive
+                continue
+        proposals = done_payload.get("proposal_set") or []
+        patch_name = ""
+        if isinstance(proposals, list) and proposals:
+            patch_name = str((proposals[0] or {}).get("name") or "")
+        propose_payload = {
+            "action_name": "integrate_patch",
+            "provenance": "specialist",
+            "predicted_gain_pct": 0.0,
+            "params": {
+                "specialist_task_id": sid,
+                "provenance": "specialist",
+                "patch_name": patch_name,
+            },
+        }
+        msg = Message.new(
+            "coordinator", "*", "proposal",
+            {**propose_payload, "needs_review": True},
+            priority=1,
+        )
+        await self.bus.append_and_seq(msg)
+        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+            proposal_msg_id=msg.msg_id,
+            from_agent="coordinator",
+            action_name="integrate_patch",
+            predicted_gain_pct=0.0,
+            payload=dict(propose_payload),
+        )
+        await self._record_observation(
+            "coordinator", "observation",
+            {
+                "kind": "specialist_patch_autosubmitted_for_review",
+                "specialist_task_id": sid,
+                "proposal_msg_id": msg.msg_id,
+                "patch_name": patch_name,
+                "patches": [str(x) for x in patches][:8],
+            },
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "B3: save after specialist patch autosubmit failed for "
+                "task=%s", sid,
             )
 
     async def _route_steward_verdict(
@@ -9856,7 +9918,15 @@ class Coordinator:
         resolved_action = action_name or str(
             (intent.payload or {}).get("action_name") or ""
         )
-        streak = self.shared_state.record_policy_denial(
+        # the streak counter is still a fact (LLM sees it via
+        # policy_denial_history for self-correction), but the system no
+        # longer reacts to it: neither auto-pruning the action family
+        # (streak >= 5) nor terminating the run with a ``policy_loop``
+        # stop_reason (streak >= 10). Long-run continuity is prioritised
+        # over loop-detection stop-loss — the LLM may keep retrying a
+        # denied action and the run continues until the wall-clock
+        # deadline (or another stop_reason) fires.
+        self.shared_state.record_policy_denial(
             action_name=resolved_action,
             rule=str(denied.rule or ""),
             hint=str(denied.hint or ""),
@@ -9864,24 +9934,6 @@ class Coordinator:
             tick=int(self.shared_state.tick or 0),
             intent_payload=intent.payload,
         )
-        # the streak counter is still a fact (LLM sees it
-        # via policy_denial_history), but we no longer mirror it onto
-        # a scoreboard ``locked_reason``. The phase machine's
-        # ``policy_loop`` stop_reason at streak ≥ 10 (below) remains
-        # the only system-side reaction.
-        if resolved_action and streak >= 5:
-            self.shared_state.prune_family(resolved_action)
-            await self._record_observation(
-                "coordinator", "observation",
-                {
-                    "kind": "auto_prune",
-                    "action": resolved_action,
-                    "rule": denied.rule,
-                    "streak": streak,
-                },
-            )
-        if streak >= 10:
-            self.shared_state.set_stop_reason("policy_loop")
 
     async def _record_observation(self, source: str, topic: str, payload: dict) -> None:
         """Append a broadcast observation message to the bus.
@@ -10116,6 +10168,20 @@ class Coordinator:
             winners = result.get("winners") or []
             best = result.get("best_variant")
             if not winners and not best:
+                # B2: a config explore round that produced measurements but
+                # KEPT nothing (all REVERT / KEEP_UNSTABLE) still counts as a
+                # config-only *attempt*. Record it so the intervention-mix
+                # ESCALATION can fire on repeated config attempts even when
+                # the noise floor prevents any config KEEP — otherwise the
+                # "do not settle for config-only" nudge never reaches the
+                # Orchestration prompt and the loop never escalates to a
+                # code-patch ``integrate_patch``.
+                self.shared_state.record_intervention(
+                    change_type="config_attempt",
+                    action="explore",
+                    task_id=task.task_id,
+                    delta_pct=None,
+                )
                 return
             delta_pct = None
             if isinstance(best, dict):
@@ -10435,34 +10501,13 @@ class Coordinator:
                 )
             else:
                 await self._handle_unpromotable_result(task, result.result)
-            # N34 Bug #4 (May 2026): a successful ``report`` task is the
-            # canonical terminal signal — ``final.md`` / ``final.json``
-            # are already on disk, so any further LLM-driven exploration
-            # is waste. Set ``stop_reason='report_emitted'`` so the next
-            # run-loop iteration breaks out. Skip when ``stop_reason``
-            # is already set (signal / other terminal already won) so
-            # we don't paper over an earlier failure.
-            # N34 Bug #4 (May 2026) only fires for LLM-driven report
-            # tasks (kind="report" outside the closing phase). When the
-            # closing-phase report task is already in flight,
-            # ``in_closing`` owns the stop-reason transition — let the
-            # run loop's existing ``time_exhausted`` / ``no_more_leverage``
-            # path resolve it. Otherwise an LLM-proposed mid-run report
-            # would burn the rest of the budget without this guard.
-            if (
-                task.kind == "report"
-                and result.state == "succeeded"
-                and not (self.shared_state.stop_reason or "").strip()
-                and not self.shared_state.closing_report_task_id
-            ):
-                log.info(
-                    "Coordinator: report task %s succeeded; setting "
-                    "stop_reason='report_emitted' to terminate the run "
-                    "loop (N34 Bug #4 fix).",
-                    task.task_id,
-                )
-                self.shared_state.stop_reason = "report_emitted"
-                self.shared_state.save(self.session_dir)
+            # N34 Bug #4's ``report_emitted`` self-stop has been removed
+            # to prioritise long-run continuity: a successful mid-run
+            # ``report`` task no longer terminates the run loop. The LLM
+            # may emit a report snapshot and then keep exploring; the run
+            # continues until the wall-clock deadline (or another
+            # stop_reason) fires. The closing-phase report path still owns
+            # its own terminal transition via ``in_closing``.
             # Fact-write hook. Always called so KEEP / REVERT lands
             # in the local optimization_journal + (when enabled and the
             # threshold matches) a KB lesson / pitfall write. The
