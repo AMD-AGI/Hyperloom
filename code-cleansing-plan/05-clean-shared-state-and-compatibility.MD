@@ -202,6 +202,11 @@ Core state 应保持 Coordinator-only writer。Agent 通过 intent 提交变更�
 - prompt surface 简化方案。
 - state tests 重组方案。
 
+本阶段第一批的字段分类表见
+`code-cleansing-plan/05-shared-state/01-field-classification.MD`,
+执行记录见
+`code-cleansing-plan/05-shared-state/02-execution-status.MD`。
+
 ## 完成标准
 
 完成后应达到:
