@@ -164,6 +164,13 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
     so callers can treat "no Magpie checkout" as "skip patching" — this
     is what unit tests need (they may pass ``tmp_path`` fixtures without
     populating a full Magpie tree).
+
+    Args:
+        magpie_dir (Path | str | None): Magpie checkout root; falls back to
+            ``$MAGPIE_DIR`` when ``None``.
+
+    Returns:
+        Path | None: The ``benchmarker.py`` path when it exists, else ``None``.
     """
     root: Path | None = None
     if magpie_dir:
@@ -186,6 +193,12 @@ def _file_lock(lock_path: str) -> Iterator[None]:
     (read-only ``/tmp``, exotic sandbox): the atomic-replace below
     still guarantees no torn writes, and concurrent patchers each
     produce identical bytes (idempotent).
+
+    Args:
+        lock_path (str): Filesystem path used as the flock mutex.
+
+    Yields:
+        None: Control to the ``with`` body while the lock is held.
     """
     try:
         fp = open(lock_path, "w")  # noqa: SIM115 — kept open across yield
@@ -208,6 +221,15 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 
 
 def _is_patched(src: Path) -> bool:
+    """Return whether ``src`` already contains the patch sentinel.
+
+    Args:
+        src (Path): The ``benchmarker.py`` file to inspect.
+
+    Returns:
+        bool: True iff the Hyperloom patch sentinel is present (and False on
+            any read error).
+    """
     try:
         return _PATCH_SENTINEL in src.read_text(encoding="utf-8")
     except OSError as e:
@@ -218,6 +240,13 @@ def _is_patched(src: Path) -> bool:
 def _apply_patch_atomic(src: Path) -> bool:
     """Rewrite ``src`` via temp-file + atomic rename so a crash
     mid-write cannot leave a corrupt ``benchmarker.py``.
+
+    Args:
+        src (Path): The ``benchmarker.py`` file to patch in place.
+
+    Returns:
+        bool: True when the patch was written; False when the legacy block was
+            missing or any read/write step failed.
     """
     try:
         original = src.read_text(encoding="utf-8")
@@ -296,6 +325,14 @@ def ensure_magpie_atomic_scripts_patch(
     guarantees no torn writes; and the fast path bypasses the lock
     entirely once the file is patched (which is the case for every
     call after the first on a given Magpie checkout).
+
+    Args:
+        magpie_dir (Path | str | None): Magpie checkout root; falls back to
+            ``$MAGPIE_DIR`` when ``None``.
+
+    Returns:
+        bool: True when the file is in patched state at exit; False when it
+            could not be located or the legacy block was missing.
     """
     src = _resolve_benchmarker_path(magpie_dir)
     if src is None:

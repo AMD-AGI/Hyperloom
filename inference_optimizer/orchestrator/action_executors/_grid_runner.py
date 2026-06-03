@@ -67,6 +67,17 @@ def variant_fingerprint(
     See module-level rationale. Name and note are intentionally NOT part of
     the input — two variants with identical content but different names
     (e.g. ``A`` and ``A_v2``) must collapse to the same fingerprint.
+
+    Args:
+        extra_server_args (str | None): Backend server-arg string for the
+            variant; ``shlex.split`` then sorted into a token tuple (falling
+            back to a whitespace split on unbalanced quotes).
+        extra_envs (dict[str, Any] | None): Per-variant env overrides; each
+            key/value is stringified and the pairs are sorted by key.
+
+    Returns:
+        str: 16-character lowercase hex SHA-1 prefix of the normalized,
+        JSON-serialized (args_tokens, env_pairs) payload.
     """
     args_text = str(extra_server_args or "")
     try:
@@ -92,12 +103,26 @@ def _resolve_magpie_python() -> str:
 
     Order: $MAGPIE_PYTHON env > first `python3` on PATH that can
     ``import Magpie`` > /opt/venv/bin/python (if it exists).
+
+    Returns:
+        str: Path/name of the chosen Python interpreter. Falls back to the
+        ``python3`` found on PATH (or the literal ``/opt/venv/bin/python``)
+        when no candidate can import Magpie.
     """
     env_val = os.environ.get("MAGPIE_PYTHON", "").strip()
     if env_val:
         return env_val
 
     def _can_import_magpie(py: str) -> bool:
+        """Check whether ``py`` can ``import Magpie`` in a subprocess.
+
+        Args:
+            py (str): Path/name of the Python interpreter to probe.
+
+        Returns:
+            bool: ``True`` iff ``py -c "import Magpie"`` exits 0 within the
+            10-second timeout; ``False`` on nonzero exit or any exception.
+        """
         try:
             proc = run_with_session_kill(
                 [py, "-c", "import Magpie"],
@@ -125,6 +150,10 @@ def _resolve_session_dir() -> Path:
     ``$USER_DATA_PATH`` and otherwise returns ``/workspace/hyperloom``.
     Used by executor-class fallback paths when ``ctx.extra["workspace"]``
     was not pre-mkdir'd by SubAgentRunner.
+
+    Returns:
+        Path: The resolved session directory (``$USER_DATA_PATH``-aware,
+        otherwise ``/workspace/hyperloom``).
     """
     from ...paths import session_dir as _sd
     return _sd()
@@ -163,7 +192,16 @@ def resolve_skip_spec(params: dict | None) -> str:
     """Resolve the active skip spec from task params + process env.
 
     ``params["skip_variants"]`` may be a list[str] or a single str; both are
-    flattened to comma-joined form before pattern parsing.
+    flattened to comma-joined form before pattern parsing. Resolution order
+    is ``params["skip_variants"]`` > ``$SKIP_VARIANTS`` > ``""``.
+
+    Args:
+        params (dict | None): Task params; ``skip_variants`` (list/tuple/str)
+            takes precedence over the environment when present and non-empty.
+
+    Returns:
+        str: The stripped skip spec string, or ``""`` when neither source
+        supplies a value.
     """
     val = ""
     if params and "skip_variants" in params:
@@ -178,7 +216,18 @@ def resolve_skip_spec(params: dict | None) -> str:
 
 
 def _parse_skip_spec(spec: str) -> list[str]:
-    """Split ``spec`` on commas and whitespace; drop empties."""
+    """Split ``spec`` on commas and whitespace; drop empties.
+
+    Newlines are treated as commas, then each comma-separated token is
+    further split on whitespace so mixed separators all flatten into one
+    list of patterns.
+
+    Args:
+        spec (str): Raw skip spec (e.g. ``"attn_*, sched_dfs\nvllm_aiter"``).
+
+    Returns:
+        list[str]: Non-empty, stripped pattern tokens in source order.
+    """
     if not spec:
         return []
     out: list[str] = []
@@ -222,6 +271,14 @@ def apply_multi_node_invalid_variants(
     shape. Single-node short-circuits to ``(list(grid), [])`` so the
     call site stays branch-free; the per-variant ``log.info`` in callers
     only fires for actual multi-node drops.
+
+    Args:
+        grid (list[GridVariant]): Candidate variants to filter.
+
+    Returns:
+        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where each
+        dropped entry is ``{"name", "source": "multi_node_invalid", "reason"}``.
+        Single-node (or non-positive ``$CONC``) returns ``(list(grid), [])``.
     """
     from ._multi_node_env import is_multi_node
     if not is_multi_node():
@@ -311,12 +368,32 @@ def reorder_grid_for_multi_node(
     chance. Reordering surfaces empirically-strong candidates in the
     first 1-3 rounds, leaving the long-tail variants to optional later
     rounds.
+
+    Args:
+        grid (list[GridVariant]): Variants to reorder.
+        priority_tags (tuple[str, ...]): Ordered tags; the first tag that
+            appears as a case-insensitive substring of a variant's name or
+            note determines its bucket (earlier tags sort first).
+
+    Returns:
+        list[GridVariant]: A new list, bucket-sorted in multi-node mode
+        (stable, so ties keep grid order); ``list(grid)`` unchanged in
+        single-node mode.
     """
     from ._multi_node_env import is_multi_node
     if not is_multi_node():
         return list(grid)
 
     def _priority(v: GridVariant) -> int:
+        """Return the sort bucket index for ``v``.
+
+        Args:
+            v (GridVariant): Variant whose name/note is searched.
+
+        Returns:
+            int: Index of the first matching ``priority_tag``, or
+            ``len(priority_tags)`` when no tag matches (sorts to the end).
+        """
         haystack = f"{v.name} {v.note or ''}".lower()
         for i, tag in enumerate(priority_tags):
             if tag.lower() in haystack:
@@ -360,6 +437,14 @@ def apply_single_node_invalid_variants(
     The convention ``note="multi_node_only_*"`` is owned by the grid
     library (``params.py`` / ``backends.py``); we never invent the
     classification here.
+
+    Args:
+        grid (list[GridVariant]): Candidate variants to filter.
+
+    Returns:
+        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where each
+        dropped entry is ``{"name", "source": "single_node_invalid",
+        "reason"}``. Multi-node returns ``(list(grid), [])``.
     """
     from ._multi_node_env import is_multi_node
     if is_multi_node():
@@ -452,6 +537,15 @@ def _probe_server_help_text(framework: str) -> str:
     a perf optimisation (saves a wasted 10-min server restart per
     incompatible variant). It must NEVER crash the optimizer or fail
     a unit test that mocks ``subprocess.run`` for unrelated reasons.
+
+    Args:
+        framework (str): Framework key (``sglang`` / ``vllm`` / ``atom``);
+            case/whitespace-insensitive.
+
+    Returns:
+        str: The combined stdout+stderr ``--help`` text, or ``""`` for an
+        unknown framework or on ANY failure. Non-empty results are cached
+        per framework; empty results are not cached.
     """
     fw = (framework or "").strip().lower()
     if fw in _HELP_TEXT_CACHE:
@@ -478,6 +572,10 @@ def _probe_sglang_help_text() -> str:
     Pre-dates the multi-framework rename; kept so in-process tests that
     monkey-patch this exact name still work. New call sites should use
     ``_probe_server_help_text("sglang")`` directly.
+
+    Returns:
+        str: The sglang ``--help`` text, or ``""`` on failure (see
+        :func:`_probe_server_help_text`).
     """
     return _probe_server_help_text("sglang")
 
@@ -495,6 +593,13 @@ def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     Known MLA models: DeepSeek (V2/V3/R1), GLM-5, Kimi-K2 — all share
     MLA-style multi-head latent attention. Known MoE models: anything
     in the MLA set + Qwen3-MoE.
+
+    Args:
+        model_path (str): Model path/identifier; matched case-insensitively
+            against known MLA/MoE keyword lists.
+
+    Returns:
+        tuple[bool, bool]: ``(is_mla_model, is_moe_model)``.
     """
     p = model_path.lower()
     mla_keys = ("glm-5", "glm5", "deepseek", "kimi-k2", "kimi_k2", "kimi")
@@ -527,6 +632,14 @@ def apply_compatibility_filter(
     Returns the same ``(kept, dropped)`` shape as
     ``apply_user_skip_list`` so callers can merge dropped entries
     uniformly.
+
+    Args:
+        grid (list[GridVariant]): Candidate variants to filter.
+
+    Returns:
+        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where each
+        dropped entry is ``{"name", "source": "compatibility_filter",
+        "reason"}``.
     """
     model_path = os.environ.get("MODEL_PATH", "")
     if model_path:
@@ -595,6 +708,16 @@ def apply_user_skip_list(
     ``{"name", "reason", "source"}`` with source=``"user_skip"`` so
     callers can distinguish user-driven skips from model/kernel
     incompatibility skips when both layers run.
+
+    Args:
+        grid (list[GridVariant]): Candidate variants to filter.
+        skip_spec (str): Comma/whitespace-separated patterns; each is matched
+            against ``variant.name`` exactly first, then as an fnmatch glob.
+
+    Returns:
+        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where each
+        dropped entry is ``{"name", "source": "user_skip", "reason"}``. An
+        empty/whitespace ``skip_spec`` returns ``(list(grid), [])``.
     """
     patterns = _parse_skip_spec(skip_spec)
     if not patterns:
@@ -625,7 +748,20 @@ def apply_user_skip_list(
 
 @dataclass(init=False)
 class GridVariant:
-    """One row of the grid we're going to test."""
+    """One row of the grid we're going to test.
+
+    Describes a single server-config candidate: the flags/env overrides to
+    apply on top of the base Magpie config for one benchmark run.
+
+    Attributes:
+        name (str): Human-readable label for the variant.
+        extra_server_args (str): Backend server args appended via
+            ``EXTRA_{SGLANG,VLLM,ATOM}_ARGS``. Defaults to ``""``.
+        extra_envs (dict[str, str]): Per-variant environment overrides.
+            Defaults to an empty dict.
+        note (str): Optional reason/category tag (e.g. ``multi_node_only_*``).
+            Defaults to ``""``.
+    """
 
     name: str                                    # human-readable label
     extra_server_args: str = ""                  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
@@ -641,6 +777,19 @@ class GridVariant:
         *,
         extra_sglang_args: str | None = None,
     ) -> None:
+        """Initialize a variant, honoring the deprecated arg alias.
+
+        Args:
+            name (str): Human-readable variant label.
+            extra_server_args (str): Backend server args to append. Defaults
+                to ``""``.
+            extra_envs (dict[str, str] | None): Per-variant env overrides;
+                copied into a new dict (``None`` becomes ``{}``).
+            note (str): Optional reason/category tag. Defaults to ``""``.
+            extra_sglang_args (str | None): Deprecated alias for
+                ``extra_server_args``; when supplied (and ``extra_server_args``
+                is empty) it is used and a ``DeprecationWarning`` is emitted.
+        """
         # Back-compat keyword alias for the historical
         # ``extra_sglang_args`` kwarg name. Operators / tests /
         # third-party callers may still construct
@@ -665,7 +814,12 @@ class GridVariant:
 
     @property
     def fingerprint(self) -> str:
-        """Content fingerprint used as dedup-ledger key. See module doc."""
+        """Content fingerprint used as dedup-ledger key. See module doc.
+
+        Returns:
+            str: :func:`variant_fingerprint` of this variant's
+            ``extra_server_args`` and ``extra_envs``.
+        """
         return variant_fingerprint(self.extra_server_args, self.extra_envs)
 
 
@@ -693,6 +847,14 @@ def coerce_extra_envs(value: Any) -> dict[str, str]:
     to an empty dict; the action ledger records the round but no envs
     are exported. Caller logging surfaces the variant name so the LLM
     can self-correct on the next round.
+
+    Args:
+        value (Any): The raw ``extra_envs`` value (dict, ``KEY=VAL`` string,
+            list of ``KEY=VAL`` tokens / dicts, ``None``, or anything else).
+
+    Returns:
+        dict[str, str]: Stringified key/value env pairs. ``None`` keys and
+        tokens without ``=`` are skipped; unsupported shapes yield ``{}``.
     """
     if isinstance(value, dict):
         return {str(k): str(v) for k, v in value.items() if k is not None}
@@ -737,7 +899,38 @@ def coerce_extra_envs(value: Any) -> dict[str, str]:
 
 @dataclass
 class VariantResult:
-    """One bench run's parsed result."""
+    """One bench run's parsed result.
+
+    Captures the parsed outcome of a single variant's Magpie run: identity,
+    status, the headline throughput/latency metrics, artifact paths, and
+    failure-classification metadata.
+
+    Attributes:
+        name (str): Variant label (mirrors :attr:`GridVariant.name`).
+        extra_server_args (str): Server args used for this run.
+        extra_envs (dict[str, str]): Env overrides used for this run.
+        status (str): ``"succeeded"`` or ``"failed"``.
+        output_throughput (float | None): Output tokens/sec, if measured.
+        request_throughput (float | None): Requests/sec, if measured.
+        total_token_throughput (float | None): Total tokens/sec, if measured.
+        completed_requests (int | None): Number of completed requests.
+        duration_seconds (float | None): Benchmark duration in seconds.
+        ttft_mean_ms (float | None): Mean time-to-first-token (ms).
+        e2el_mean_ms (float | None): Mean end-to-end latency (ms).
+        workspace (str | None): Path to the located ``benchmark_*`` workspace.
+        report_path (str | None): Path to ``benchmark_report.json`` if present.
+        raw_result_path (str | None): Path to the raw result JSON, if salvaged.
+        reported_success (bool | None): Magpie's own success flag, if known.
+        returncode (int | None): Magpie subprocess return code.
+        nonfatal_warnings (list[str]): Non-fatal warning tags (e.g. harvested
+            leaked artifacts).
+        error (str | None): Error summary for failed/nonzero runs.
+        error_class (str): Short failure-classification tag (empty on success).
+        note (str): Optional reason/category tag carried from the variant.
+        runtime_sec (float | None): Wall-clock seconds the subprocess consumed.
+        killed_overtime (bool): ``True`` iff reaped by the soft overtime
+            deadline rather than crashing/timing-out/succeeding.
+    """
 
     name: str
     extra_server_args: str
@@ -782,10 +975,21 @@ class VariantResult:
 
     @property
     def fingerprint(self) -> str:
-        """Same fingerprint scheme as :class:`GridVariant`."""
+        """Same fingerprint scheme as :class:`GridVariant`.
+
+        Returns:
+            str: :func:`variant_fingerprint` of this result's
+            ``extra_server_args`` and ``extra_envs``.
+        """
         return variant_fingerprint(self.extra_server_args, self.extra_envs)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize this result to a plain JSON-friendly dict.
+
+        Returns:
+            dict[str, Any]: All result fields plus the computed
+            ``fingerprint``, keyed by attribute name.
+        """
         return {
             "name":               self.name,
             "extra_server_args":  self.extra_server_args,
@@ -839,6 +1043,17 @@ def sanitize_script_name(value: Any) -> str | None:
     override"). Raises ``ValueError`` for anything that looks like a
     shell injection attempt — Orchestration can then propose a corrected
     value on the next tick.
+
+    Args:
+        value (Any): Proposed benchmark-script name; stringified and stripped.
+
+    Returns:
+        str | None: The validated bare ``*.sh`` file name, or ``None`` when
+        ``value`` is ``None`` / empty.
+
+    Raises:
+        ValueError: If ``value`` is non-empty but not a bare ``*.sh`` name
+            (contains path separators or shell metacharacters).
     """
     if value is None:
         return None
@@ -860,6 +1075,16 @@ def sanitize_result_dir(value: Any) -> str | None:
     shell ``cd`` / ``mkdir`` inside the benchmark script. We reject any
     character class that would let an LLM-supplied override escape into
     a different shell word. Empty / ``None`` returns ``None``.
+
+    Args:
+        value (Any): Proposed result directory; stringified and stripped.
+
+    Returns:
+        str | None: The validated directory string, or ``None`` when
+        ``value`` is ``None`` / empty.
+
+    Raises:
+        ValueError: If ``value`` contains whitespace or shell metacharacters.
     """
     if value is None:
         return None
@@ -875,7 +1100,15 @@ def sanitize_result_dir(value: Any) -> str | None:
 
 
 def server_args_env_name(framework: str | None) -> str:
-    """Return the Magpie env var used to append backend server args."""
+    """Return the Magpie env var used to append backend server args.
+
+    Args:
+        framework (str | None): Framework name; matched case-insensitively.
+
+    Returns:
+        str: ``"EXTRA_ATOM_ARGS"`` for atom, ``"EXTRA_VLLM_ARGS"`` for vLLM,
+        otherwise ``"EXTRA_SGLANG_ARGS"`` (the sglang default).
+    """
     name = str(framework or "").strip().lower()
     # atom check first: "atom" is not a substring of vllm/sglang, but keep
     # ordering explicit so future framework names with overlapping substrings
@@ -896,6 +1129,13 @@ def merge_server_args(*parts: str | None) -> str:
     model-specific ``--block-size 1`` plus a grid candidate ``--block-size
     256``). Therefore this helper only removes empty chunks; it does not try to
     de-duplicate option names.
+
+    Args:
+        *parts (str | None): Server-arg fragments in override priority order
+            (left to right); ``None``/empty/whitespace-only parts are dropped.
+
+    Returns:
+        str: The surviving fragments stripped and space-joined.
     """
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
@@ -923,6 +1163,21 @@ def apply_runtime_benchmark_overrides(
     ``error_class=bad_param`` instead of an unsafe subprocess invocation.
     The override is written AFTER the ``gpu_type``-derived generic script
     below so the operator-supplied pick wins over Hyperloom's default.
+
+    Args:
+        bench (dict[str, Any]): The ``benchmark`` sub-dict of a Magpie YAML;
+            mutated in place (``model``, ``precision``, ``runner_type``,
+            ``benchmark_script``, ``envs``).
+        model_path (str | None): When non-empty, overrides ``bench["model"]``.
+        gpu_type (str | None): When non-empty, sets ``runner_type`` and
+            force-pins the generic ``{framework}_{gpu_type}.sh`` script.
+        benchmark_script (str | None): When non-empty (already sanitized),
+            force-selects this Magpie script after the gpu_type-derived one.
+
+    Returns:
+        dict[str, Any]: The mutated ``envs`` dict (also stored as
+        ``bench["envs"]``), populated with any ``ISL``/``OSL``/
+        ``MAX_MODEL_LEN``/``TP``/``CONC``/``ROCR_VISIBLE_DEVICES`` overrides.
     """
     if model_path:
         bench["model"] = str(model_path)
@@ -1003,6 +1258,21 @@ def _build_variant_yaml(
     variant when an operator deliberately wants a specific (often
     model-specific) script benchmarked. Applied AFTER the
     ``gpu_type``-derived generic script so the operator pick wins.
+
+    Args:
+        base_yaml_path (Path): Path to the base Magpie YAML to clone.
+        base_extra_args (str): Action-level server args merged before the
+            variant's own args.
+        variant (GridVariant): The variant whose args/envs are injected.
+        output_subdir (Path): Directory to create and write ``config.yaml``
+            into.
+        model_path (str | None): Optional ``benchmark.model`` override.
+        gpu_type (str | None): Optional ``benchmark.runner_type`` /
+            generic-script override.
+        benchmark_script (str | None): Optional sanitized script override.
+
+    Returns:
+        Path: Path to the written per-variant ``config.yaml``.
     """
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -1031,6 +1301,16 @@ def _build_variant_yaml(
 
 
 def _parse_report(workspace: Path) -> dict[str, Any] | None:
+    """Load ``benchmark_report.json`` from a benchmark workspace.
+
+    Args:
+        workspace (Path): Directory expected to contain
+            ``benchmark_report.json``.
+
+    Returns:
+        dict[str, Any] | None: The parsed report dict, or ``None`` if the
+        file is missing, unreadable, invalid JSON, or not a JSON object.
+    """
     report = workspace / "benchmark_report.json"
     if not report.exists():
         return None
@@ -1062,6 +1342,10 @@ def _kill_stale_servers() -> None:
     finds nothing matching, and clearing sandbox /dev/shm/vllm* would only
     remove unrelated state. Skip the whole sweep + the 2s settle sleep —
     server lifecycle there is owned by `multi_node restart-server`.
+
+    Returns:
+        None: This function performs cleanup as a side effect and returns
+        nothing.
     """
     from ._multi_node_env import is_multi_node
     if is_multi_node():
@@ -1095,6 +1379,22 @@ def _kill_stale_servers() -> None:
         my_pgid = -1
 
     def _is_orphaned_atom_worker(pid: int, cmdline: bytes) -> bool:
+        """Detect an orphaned atom ModelRunner worker by its memory maps.
+
+        A spawned atom worker has a generic ``--multiprocessing-fork`` cmdline,
+        so it is identified instead by atom/aiter signatures mmap'd into its
+        address space. Workers belonging to this process group are excluded.
+
+        Args:
+            pid (int): Candidate process id.
+            cmdline (bytes): The process's raw ``/proc/<pid>/cmdline``.
+
+        Returns:
+            bool: ``True`` iff ``cmdline`` carries a fork marker, the process
+            is outside our process group, and its ``/proc/<pid>/maps`` shows
+            an atom/aiter signature; ``False`` otherwise (including on any
+            read/permission error).
+        """
         if not any(m in cmdline for m in _FORK_MARKERS):
             return False
         # Never touch a worker that belongs to *our* process group.
@@ -1178,6 +1478,22 @@ def _run_magpie(
     instead of raising ``TimeoutExpired``. The caller distinguishes
     "overtime kill" (returncode sentinel) from "hard timeout"
     (TimeoutExpired) and from "crash" (any other nonzero).
+
+    Args:
+        magpie_python (str): Python interpreter used to run ``-m Magpie``.
+        config_path (Path): Path to the per-variant benchmark config YAML.
+        output_dir (Path): Magpie ``--output-dir`` and default ``$RESULT_DIR``.
+        timeout_sec (int): Hard timeout for the subprocess.
+        cwd (str): Working directory for the subprocess.
+        result_dir (str | None): Optional sanitized ``$RESULT_DIR`` override;
+            defaults to ``output_dir`` when not provided.
+        soft_deadline_sec (float | None): Optional per-variant overtime cap;
+            when set, the tree is reaped and ``OVERTIME_KILL_RETURNCODE`` is
+            returned instead of raising ``TimeoutExpired``.
+
+    Returns:
+        tuple[int, str, str]: ``(returncode, stdout, stderr)`` from the
+        Magpie subprocess.
     """
     # Pre-clean: kill lingering server processes + clear shared memory so the
     # next vLLM/SGLang startup doesn't collide with stale resources.
@@ -1300,6 +1616,32 @@ async def run_grid(
     ``KILLED_OVERTIME`` outcome instead of running them through the
     normal KEEP / REVERT / FAILED ladder. None / 0 = disabled (legacy
     behaviour, only ``variant_timeout_sec`` is enforced).
+
+    Args:
+        base_yaml_path (Path): Base Magpie YAML cloned for each variant.
+        base_extra_args (str): Action-level server args merged into every
+            variant before its own args.
+        grid (list[GridVariant]): Variants to run, in order.
+        output_root (Path): Root directory; each variant gets a
+            ``variant_NN_<name>`` subdirectory.
+        magpie_python (str | None): Interpreter for Magpie; auto-resolved via
+            :func:`_resolve_magpie_python` when falsy.
+        cwd (str): Working directory for each Magpie subprocess.
+        variant_timeout_sec (int): Hard per-variant timeout.
+        keep_going_on_failure (bool): When ``False``, stop after the first
+            failing variant; when ``True``, run the whole grid.
+        model_path (str | None): Optional model override forwarded to YAML
+            rendering and multi-node server restarts.
+        gpu_type (str | None): Optional GPU-type override forwarded to YAML
+            rendering.
+        benchmark_script (str | None): Optional sanitized script override.
+        result_dir (str | None): Optional sanitized ``$RESULT_DIR`` override.
+        soft_deadline_sec (float | None): Optional per-variant overtime cap;
+            see the ``killed_overtime`` behaviour above.
+
+    Returns:
+        list[VariantResult]: One result per attempted variant (succeeded and
+        failed alike), in grid order.
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
@@ -1311,6 +1653,15 @@ async def run_grid(
     # 30+ minutes) to finish. Best-effort, ≤ ``_PULSE_TIMEOUT_SEC``;
     # see ``_robustness_pulse.py`` for the contract.
     async def _pulse_after_variant(idx: int) -> None:
+        """Run a best-effort robustness pulse after a variant completes.
+
+        Exceptions from the pulse are swallowed (logged at debug) so a pulse
+        failure never aborts the grid.
+
+        Args:
+            idx (int): Zero-based index of the just-finished variant, passed
+                through as the pulse ``tick_index``.
+        """
         try:
             await _robustness_pulse(tick_index=idx)
         except Exception as exc:  # noqa: BLE001
@@ -1679,6 +2030,17 @@ def pick_winners(
     Single-node call sites are bit-for-bit equivalent: ``is_multi_node()``
     short-circuits to False without touching state, so the cutoff math
     is unchanged.
+
+    Args:
+        results (list[VariantResult]): All attempted variant results.
+        baseline_tput (float): Baseline output throughput to beat.
+        keep_threshold_pct (float | None): Required percent improvement over
+            baseline. ``None`` selects the multi-node (2.0%) or single-node
+            (1.0%) default.
+
+    Returns:
+        list[VariantResult]: Succeeded variants whose ``output_throughput``
+        strictly exceeds ``baseline_tput * (1 + keep_threshold_pct/100)``.
     """
     if keep_threshold_pct is None:
         from ._multi_node_env import is_multi_node
@@ -1697,7 +2059,15 @@ def pick_winners(
 
 
 def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
+    """Filesystem-safe slug for variant directory names.
+
+    Args:
+        name (str): The variant name to slugify.
+
+    Returns:
+        str: ``name`` with every character that is not alphanumeric or in
+        ``-_.`` replaced by ``_``, truncated to 60 characters.
+    """
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 
@@ -1731,6 +2101,16 @@ def _write_variant_abort_marker(
     Failure to write the marker is non-fatal — log and continue so a
     full-disk / permissions issue can't escalate a single-variant
     abort into a whole-grid abort.
+
+    Args:
+        slot (Path): Variant slot directory; created if missing, then
+            ``abort_reason.json`` is written into it.
+        variant_name (str): Name of the aborted variant.
+        error_class (str): Short failure-classification tag.
+        error_summary (str): Human-readable error detail (truncated to 2000
+            chars in the marker).
+        extra_args (str): The variant's server args, recorded for triage.
+            Defaults to ``""``.
     """
     try:
         slot.mkdir(parents=True, exist_ok=True)

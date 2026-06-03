@@ -148,9 +148,15 @@ class SpecialistSubprocessResult:
 def _pick_worktree_base(roots: tuple[str, ...]) -> Path | None:
     """Return the first ``roots`` entry that looks like a git checkout.
 
-    Falls back to None when none exist — the runner then runs the
-    specialist without an isolated worktree (it'll have ``--add-dir
-    <workspace>`` only, which is still safer than the in-process path).
+    Args:
+        roots (tuple[str, ...]): Candidate directory paths to probe, in
+            priority order.
+
+    Returns:
+        Path | None: The first existing directory with a ``.git`` marker,
+            or None when none qualify — the runner then runs the specialist
+            without an isolated worktree (``--add-dir <workspace>`` only,
+            still safer than the in-process path).
     """
     for r in roots:
         p = Path(r)
@@ -168,11 +174,21 @@ def _setup_worktree(
     base: Path, worktree_path: Path, branch: str,
 ) -> tuple[Path | None, str]:
     """Create a fresh git worktree at ``worktree_path`` branched off
-    ``base``'s HEAD. Returns (worktree_dir, error_message).
+    ``base``'s HEAD.
 
-    The function is best-effort: on any git error we return ``(None,
-    err)`` so the caller can decide whether to abort (PR-A2 default:
-    proceed without isolation) or hard-fail.
+    Best-effort: on any git error we return ``(None, err)`` so the caller
+    can decide whether to abort (PR-A2 default: proceed without isolation)
+    or hard-fail. An existing path is logged and reused.
+
+    Args:
+        base (Path): Git checkout the worktree is branched off.
+        worktree_path (Path): Target directory for the new worktree.
+        branch (str): Branch name to create with ``git worktree add -b``.
+
+    Returns:
+        tuple[Path | None, str]: ``(worktree_dir, error_message)`` —
+            ``worktree_dir`` is None on failure with the reason in the
+            string; on success the string is empty.
     """
     if worktree_path.exists():
         # Resume / retry: try to remove if stale; safer to just reuse
@@ -208,7 +224,13 @@ def _teardown_worktree(base: Path | None, worktree_path: Path) -> None:
 
     Called only by the runner on the REVERT / synth-empty path. The
     KEEP path leaves the worktree in place so ``integrate_patch`` can
-    pull patches out of it.
+    pull patches out of it. Tries ``git worktree remove`` first, then
+    falls back to ``rmtree`` if the directory survives.
+
+    Args:
+        base (Path | None): The base git checkout, used for
+            ``git worktree remove``; None / missing repo skips the git step.
+        worktree_path (Path): The worktree directory to remove.
     """
     if not worktree_path.exists():
         return
@@ -240,6 +262,12 @@ class SpecialistSubprocessDispatcher:
     """
 
     def __init__(self, config: SpecialistSubprocessConfig):
+        """Store the static spawn config for reuse across dispatches.
+
+        Args:
+            config (SpecialistSubprocessConfig): Session-wide config
+                captured at CLI boot; reused for every :meth:`run` call.
+        """
         self.config = config
 
     # ------------------------------------------------------------------
@@ -259,18 +287,30 @@ class SpecialistSubprocessDispatcher:
     ) -> SpecialistSubprocessResult:
         """Spawn a claude subprocess, reap it, return the parsed result.
 
-        Parameters
-        ----------
-        workspace: ``runs/specialist/<task_id>/`` — where prompt.md,
-            process.log, heartbeat.json, specialist_done.json live.
-        worktree: per-task git worktree (None when worktree setup
-            failed; the dispatcher still spawns claude but the agent
-            has no write-isolated tree, only ``--add-dir <workspace>``).
-        system_prompt / user_prompt: assembled by
-            :func:`specialist_prompt_builder.build_specialist_prompts`.
-        allowed_tools: per-task tool whitelist (post-:meth:`SpecialistRunner._resolve_tools`).
-        max_turns: hard cap on LLM turns; multiplied by config's
-            ``per_turn_max_seconds`` for the wall-clock ceiling.
+        Args:
+            task_id (str): Task identifier used for logging / workspace
+                layout.
+            workspace (Path): ``runs/specialist/<task_id>/`` — where
+                prompt.md, process.log, heartbeat.json, and
+                specialist_done.json live.
+            worktree (Path | None): Per-task git worktree (None when
+                worktree setup failed; the dispatcher still spawns claude
+                but the agent has no write-isolated tree, only
+                ``--add-dir <workspace>``).
+            worktree_base (Path | None): The base checkout the worktree was
+                branched off (used by callers for teardown).
+            system_prompt (str): System prompt assembled by
+                :func:`specialist_prompt_builder.build_specialist_prompts`.
+            user_prompt (str): User prompt from the same builder.
+            allowed_tools (tuple[str, ...]): Per-task tool whitelist
+                (post-:meth:`SpecialistRunner._resolve_tools`).
+            max_turns (int): Hard cap on LLM turns; multiplied by the
+                config's ``per_turn_max_seconds`` for the wall-clock ceiling.
+
+        Returns:
+            SpecialistSubprocessResult: Parsed outcome — done payload (if
+                any), exit code, timing, timeout / stale-heartbeat flags,
+                process log path, and discovered patches.
         """
         workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = workspace / "prompt.md"
@@ -409,6 +449,24 @@ class SpecialistSubprocessDispatcher:
         worktree: Path | None,
         allowed_tools: tuple[str, ...],
     ) -> list[str]:
+        """Assemble the ``claude`` CLI argv for a specialist subprocess.
+
+        Builds the flag list (output format, permission mode, system
+        prompt file, tool whitelist, mcp config, ``--add-dir`` entries,
+        operator escape-hatch args). ``emit_intent`` is dropped from the
+        tool whitelist since the subprocess has no in-process MCP server.
+
+        Args:
+            prompt_file (Path): Combined system+user prompt file passed via
+                ``--system-prompt-file``.
+            workspace (Path): Task workspace surfaced as an ``--add-dir``.
+            worktree (Path | None): Write-isolated worktree surfaced as the
+                first ``--add-dir`` when present.
+            allowed_tools (tuple[str, ...]): Per-task tool whitelist.
+
+        Returns:
+            list[str]: The full command argv to spawn.
+        """
         cfg = self.config
         cmd: list[str] = [
             cfg.claude_executable,
@@ -456,6 +514,25 @@ class SpecialistSubprocessDispatcher:
         max_seconds: float,
         started: float,
     ) -> dict[str, Any]:
+        """Poll the subprocess until it finishes, stalls, or times out.
+
+        Each tick checks (in order): a done-file at any candidate path
+        (graceful exit with a short grace window), natural process exit,
+        heartbeat staleness, and the hard wall-clock cap. Stale / timed-out
+        runs are killed via :meth:`_kill`.
+
+        Args:
+            proc (subprocess.Popen): The running claude subprocess.
+            workspace (Path): Task workspace (reserved for context).
+            done_files (tuple[Path, ...]): Candidate done-file paths to poll.
+            heartbeat_file (Path): Heartbeat file whose mtime gauges liveness.
+            max_seconds (float): Hard wall-clock ceiling for the run.
+            started (float): ``time.monotonic()`` value at spawn time.
+
+        Returns:
+            dict[str, Any]: Outcome with ``exit_code``, ``elapsed``,
+                ``timed_out``, ``stale_heartbeat``, and ``error`` keys.
+        """
         cfg = self.config
         outcome: dict[str, Any] = {
             "exit_code": None,
@@ -529,8 +606,15 @@ class SpecialistSubprocessDispatcher:
 
     @staticmethod
     def _kill(proc: subprocess.Popen) -> None:
-        """Tear down a claude subprocess. Kills the whole process group
-        so child SDK / curl invocations die with it."""
+        """Tear down a claude subprocess.
+
+        Kills the whole process group (SIGTERM, then SIGKILL after a 5s
+        grace) so child SDK / curl invocations die with it. No-op if the
+        process already exited.
+
+        Args:
+            proc (subprocess.Popen): The subprocess to terminate.
+        """
         if proc.poll() is not None:
             return
         try:
@@ -559,9 +643,19 @@ class SpecialistSubprocessDispatcher:
     def _collect_patches(
         worktree: Path | None, workspace: Path,
     ) -> list[str]:
-        """Return sorted patch paths discovered under worktree/patches/
-        and workspace/patches/ (defense in depth — the agent may write
-        to either)."""
+        """Discover patch files written by the specialist.
+
+        Scans both ``worktree/patches/`` and ``workspace/patches/``
+        (defense in depth — the agent may write to either) for ``*.patch``
+        and ``*.diff`` files.
+
+        Args:
+            worktree (Path | None): Per-task worktree, or None.
+            workspace (Path): Task workspace.
+
+        Returns:
+            list[str]: Discovered patch file paths.
+        """
         out: list[str] = []
         for base in (worktree, workspace):
             if base is None:
@@ -576,6 +670,20 @@ class SpecialistSubprocessDispatcher:
 
     @staticmethod
     def _read_done(done_file: Path) -> dict[str, Any] | None:
+        """Parse a ``specialist_done.json`` file, unwrapping intent envelopes.
+
+        Tolerates missing files and parse errors (logged, returns None).
+        When the file holds a ``specialist_done`` intent envelope, the
+        inner ``payload`` is merged with the outer keys so callers always
+        see a flat dict.
+
+        Args:
+            done_file (Path): Path to the candidate done-file.
+
+        Returns:
+            dict[str, Any] | None: The parsed (and possibly unwrapped)
+                payload, or None when missing / unparseable / not a dict.
+        """
         if not done_file.exists():
             return None
         try:

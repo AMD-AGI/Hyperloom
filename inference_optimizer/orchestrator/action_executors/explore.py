@@ -102,11 +102,21 @@ DEFAULT_STACK_STABLE_PCT = 0.2
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp in ISO 8601 format.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def _initial_explore_search_state() -> dict[str, Any]:
-    """Empty :attr:`SharedState.explore_search` ledger (M3 schema v1)."""
+    """Empty :attr:`SharedState.explore_search` ledger (M3 schema v1).
+
+    Returns:
+        dict[str, Any]: A fresh explore-search ledger with all sections
+        initialized to their empty defaults.
+    """
     return {
         "schema_version": 1,
         "tested": {},
@@ -148,6 +158,14 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     keeps the executor running on cold-start grids while still
     letting the policy gate flag deliberately llm_direct-stamped
     grids upstream.
+
+    Args:
+        payload (list[Any]): The raw LLM/specialist grid payload; each
+            usable entry is a dict with at least a ``name`` key.
+
+    Returns:
+        list[GridVariant]: One ``GridVariant`` per valid payload entry,
+        with provenance/evidence metadata stashed on each instance.
     """
     out: list[GridVariant] = []
     for raw in payload or []:
@@ -233,6 +251,17 @@ def _atom_default_grid(
     Variant naming convention: every variant name is prefixed with
     ``atom_`` so cross-session reports can disambiguate from
     sglang/vllm-named variants at a glance.
+
+    Args:
+        model_class (str): Model class string used to gate MoE / MLA /
+            FP8 / MTP variants.
+        conc (int): Live concurrency; brackets the cudagraph capture
+            sizes when positive.
+        isl (int): Input sequence length hint. Defaults to ``0``.
+        osl (int): Output sequence length hint. Defaults to ``0``.
+
+    Returns:
+        list[GridVariant]: The curated atom default grid variants.
     """
     mc_l = (model_class or "").strip().lower()
     is_moe = "moe" in mc_l
@@ -243,6 +272,15 @@ def _atom_default_grid(
     variants: list[GridVariant] = []
 
     def _add(name: str, args: str) -> None:
+        """Append a ``default_grid``-provenance variant to the grid.
+
+        Args:
+            name (str): Unique variant name (``atom_`` prefixed).
+            args (str): The extra server args for the variant.
+
+        Returns:
+            None: Appends to the enclosing ``variants`` list.
+        """
         gv = GridVariant(
             name=name,
             extra_server_args=args,
@@ -315,6 +353,18 @@ def _default_grid_for_framework(
     Callers MUST treat an empty list as "no programmatic seed for this
     framework"; the EXPLORE flow continues to accept LLM-emitted
     ``default_grid`` variants exactly as before.
+
+    Args:
+        framework (str): Target framework (``atom``, ``sglang``,
+            ``vllm``, ...).
+        model_class (str): Model class string forwarded to the seed grid.
+        conc (int): Live concurrency hint. Defaults to ``0``.
+        isl (int): Input sequence length hint. Defaults to ``0``.
+        osl (int): Output sequence length hint. Defaults to ``0``.
+
+    Returns:
+        list[GridVariant]: The programmatic seed grid for ``framework``,
+        or an empty list when none exists.
     """
     fw = (framework or "").strip().lower()
     if fw == "atom":
@@ -325,6 +375,16 @@ def _default_grid_for_framework(
 
 
 def _gain_pct(tput: float | None, base_tput: float) -> float | None:
+    """Compute the percentage throughput gain over a baseline.
+
+    Args:
+        tput (float | None): The variant's throughput.
+        base_tput (float): The baseline throughput to compare against.
+
+    Returns:
+        float | None: The gain as a percentage, or ``None`` when either
+        input is non-positive or ``tput`` is not numeric.
+    """
     if (
         not isinstance(tput, (int, float))
         or tput <= 0
@@ -395,6 +455,10 @@ def _compute_explore_variant_timeout(
             cap stays above the soft kill. ``0.5`` ≈ 50 % of the baseline
             runtime as headroom for one-off variant cold starts (e.g.
             ``--enable-torch-compile`` AOTI compile, fresh aiter shapes).
+
+    Returns:
+        int: The per-variant hard timeout in seconds, clamped to the
+        ``[floor_sec, ceiling_sec]`` range.
     """
     if baseline_runtime_sec <= 0:
         return int(floor_sec)
@@ -404,6 +468,15 @@ def _compute_explore_variant_timeout(
 
 
 def _join_args(*parts: str) -> str:
+    """Join non-empty, stripped argument fragments with single spaces.
+
+    Args:
+        *parts (str): Argument fragments; empty/whitespace ones are
+            dropped.
+
+    Returns:
+        str: The space-joined argument string.
+    """
     return " ".join(p.strip() for p in parts if p and p.strip())
 
 
@@ -426,6 +499,22 @@ class ExploreExecutor:
         stack_stable_threshold_pct: float = DEFAULT_STACK_STABLE_PCT,
         enable_stack_rebench: bool = True,
     ):
+        """Initialize the explore executor and its gating thresholds.
+
+        Args:
+            default_config_path (Path | str | None): Fallback benchmark
+                config path; resolved from defaults when ``None``.
+            session_dir (Path | str | None): Session output directory;
+                auto-resolved when ``None``.
+            variant_timeout_sec (int): Legacy per-variant hard timeout
+                floor. Defaults to ``2400``.
+            keep_threshold_pct (float): Minimum gain to KEEP a variant.
+                Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
+            stack_stable_threshold_pct (float): Stability band for the
+                stack rebench. Defaults to :data:`DEFAULT_STACK_STABLE_PCT`.
+            enable_stack_rebench (bool): Whether to run the inlined
+                per-KEEP stack rebench. Defaults to ``True``.
+        """
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
@@ -441,6 +530,21 @@ class ExploreExecutor:
         self.enable_stack_rebench = bool(enable_stack_rebench)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the merged ``explore`` action for one task.
+
+        Resolves the benchmark config and output workspace, builds the
+        candidate grid (programmatic seed and/or LLM/specialist variants),
+        benchmarks each variant with per-variant KEEP/REVERT gating, and
+        optionally performs an inlined per-KEEP stack rebench.
+
+        Args:
+            ctx: The action runner context carrying the task and params.
+
+        Returns:
+            dict[str, Any]: The explore result payload (status plus the
+            accepted/rejected variants and ledger updates), or a failure
+            dict on error.
+        """
         params = dict(ctx.task.params or {})
         # ----- Config / output workspace -----------------------------------
         config_path = Path(
@@ -705,6 +809,16 @@ class ExploreExecutor:
             search.setdefault(key, default)
 
         def _entry_fp(entry: Any) -> str:
+            """Resolve a ledger entry's variant fingerprint.
+
+            Args:
+                entry (Any): A ledger entry; expected to be a dict with
+                    a ``fingerprint`` or server-args/envs to derive one.
+
+            Returns:
+                str: The stored or canonically-derived fingerprint, or
+                ``""`` when ``entry`` is not a dict.
+            """
             if not isinstance(entry, dict):
                 return ""
             fp = entry.get("fingerprint")
@@ -1357,7 +1471,15 @@ class ExploreExecutor:
 
 
 def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
+    """Filesystem-safe slug for variant directory names.
+
+    Args:
+        name (str): The raw variant name.
+
+    Returns:
+        str: A slug with non-alphanumeric characters replaced by ``_``,
+        truncated to 60 characters.
+    """
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 

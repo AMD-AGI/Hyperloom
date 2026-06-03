@@ -45,6 +45,13 @@ def _short_name(name: str) -> str:
     arguments live at the tail of the symbol. Keeping both ends
     (with ``…`` in the middle) lets the reader tell variants apart
     without making the column too wide.
+
+    Args:
+        name (str): The full kernel/symbol name.
+
+    Returns:
+        str: The name unchanged when within the length budget, otherwise a
+            head/tail-truncated form with ``...`` in the middle.
     """
     if not name:
         return ""
@@ -56,6 +63,15 @@ def _short_name(name: str) -> str:
 
 
 def _fmt_speedup(v: Any) -> str:
+    """Format a speedup multiplier for a table cell.
+
+    Args:
+        v (Any): The speedup value; non-numeric or ``None`` yields an em dash.
+
+    Returns:
+        str: A string like ``"1.25x"``, or ``"—"`` when the value is missing
+            or non-numeric.
+    """
     if v is None:
         return "—"
     try:
@@ -66,7 +82,16 @@ def _fmt_speedup(v: Any) -> str:
 
 
 def _lane_summary(lane: dict[str, Any] | None) -> str:
-    """Format a per-lane summary cell: best-speedup + attempts + last decision."""
+    """Format a per-lane summary cell: best-speedup + attempts + last decision.
+
+    Args:
+        lane (dict[str, Any] | None): A GEAK or OOB lane record with optional
+            ``best_speedup``, ``attempts`` and ``decision`` keys.
+
+    Returns:
+        str: A compact cell like ``"1.25x (3 att) [KEEP]"``, or ``"—"`` when
+            the lane never touched the kernel.
+    """
     if not lane:
         return "—"
     spd = _fmt_speedup(lane.get("best_speedup"))
@@ -82,6 +107,20 @@ def _lane_summary(lane: dict[str, Any] | None) -> str:
 
 @register_renderer("kernel_lifecycle")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the kernel-lifecycle section as a single per-kernel table.
+
+    Emits one row per detected kernel with its full optimization
+    lifecycle (selection, GEAK/OOB attempts, adoption, final decision),
+    splitting long-tail unselected kernels into a collapsible block. The
+    section is marked skipped when no kernels were detected.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section with key facts, decisions and
+            the markdown table.
+    """
     kl = breakdown.get("kernel_lifecycle") or {}
     raw_detected = kl.get("detected") or []
     detected: list[dict[str, Any]] = []
@@ -179,6 +218,14 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     headers += ["selected", "GEAK", "OOB", "adopted_by", "final"]
 
     def _row_for(d: dict[str, Any]) -> list[Any]:
+        """Build one table row for a detected kernel record.
+
+        Args:
+            d (dict[str, Any]): A single detected-kernel record.
+
+        Returns:
+            list[Any]: The cell values matching the active ``headers`` order.
+        """
         row: list[Any] = [
             d.get("kernel_id") or "—",
             _short_name(d.get("name") or ""),

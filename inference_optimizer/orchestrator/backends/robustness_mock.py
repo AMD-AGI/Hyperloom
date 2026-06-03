@@ -32,6 +32,7 @@ class MockRobustnessBackend:
     })
 
     def __post_init__(self) -> None:
+        """Initialise per-instance tick counter and call log."""
         self._tick_count = 0
         self.calls: list[dict[str, Any]] = []
 
@@ -43,6 +44,22 @@ class MockRobustnessBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
+        """Emit a heartbeat each tick, plus a scheduled alert when configured.
+
+        Always emits a heartbeat message. If ``alert_after_ticks`` is set and
+        this is the matching tick, also emits a single ``alert`` carrying
+        ``alert_payload`` to exercise the Coordinator's alert pipe.
+
+        Args:
+            prompt (str): The composed turn prompt (recorded but not parsed).
+            system_prompt (str | None): Unused; accepted for protocol parity.
+            tools (list[str] | None): Unused; accepted for protocol parity.
+            max_turns (int): Unused; accepted for protocol parity.
+
+        Returns:
+            BackendTurnResult: The heartbeat intent and any scheduled alert for
+            this turn.
+        """
         self._tick_count += 1
         self.calls.append({"prompt": prompt, "tick": self._tick_count})
         intents: list[Intent] = [

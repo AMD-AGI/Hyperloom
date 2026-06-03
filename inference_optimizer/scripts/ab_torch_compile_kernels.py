@@ -52,6 +52,16 @@ else:
 
 
 def _inject_extra_sglang(cfg: dict, extra: str) -> dict:
+    """Inject ``EXTRA_SGLANG_ARGS`` into a Magpie benchmark config.
+
+    Args:
+        cfg (dict): Mutable Magpie config mapping (modified in place).
+        extra (str): Extra SGLang server args; ignored when blank.
+
+    Returns:
+        dict: The same ``cfg`` mapping with ``benchmark.envs.EXTRA_SGLANG_ARGS``
+        set when ``extra`` is non-empty.
+    """
     bench = cfg.setdefault("benchmark", {})
     envs = bench.setdefault("envs", {})
     if extra.strip():
@@ -67,6 +77,18 @@ def _run_magpie(
     cwd: str,
     timeout_sec: int,
 ) -> tuple[int, str, str]:
+    """Run a Magpie benchmark subprocess and capture its output.
+
+    Args:
+        magpie_python (str): Python interpreter used to launch Magpie.
+        config_path (Path): Path to the benchmark config YAML.
+        output_dir (Path): Directory Magpie writes its run output to.
+        cwd (str): Working directory for the subprocess.
+        timeout_sec (int): Subprocess timeout in seconds.
+
+    Returns:
+        tuple[int, str, str]: ``(returncode, stdout, stderr)`` from the run.
+    """
     env = os.environ.copy()
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     cmd = [
@@ -94,6 +116,15 @@ def _run_magpie(
 
 
 def _trace_files(workspace: Path) -> list[Path]:
+    """List torch profiler trace files in a workspace.
+
+    Args:
+        workspace (Path): Magpie benchmark workspace directory.
+
+    Returns:
+        list[Path]: Sorted ``torch_trace/*.trace.json.gz`` paths; empty when
+        the directory is absent.
+    """
     td = workspace / "torch_trace"
     if not td.is_dir():
         return []
@@ -101,10 +132,29 @@ def _trace_files(workspace: Path) -> list[Path]:
 
 
 def _kernel_name_set(top: list[dict[str, Any]]) -> list[str]:
+    """Extract non-empty kernel names from a top-kernel list.
+
+    Args:
+        top (list[dict[str, Any]]): Top-kernel entries from trace analysis.
+
+    Returns:
+        list[str]: Kernel name strings, preserving input order.
+    """
     return [str(x.get("name", "")) for x in top if x.get("name")]
 
 
 def _jaccard(a: set[str], b: set[str]) -> float | None:
+    """Compute the Jaccard similarity between two name sets.
+
+    Args:
+        a (set[str]): First set of kernel names.
+        b (set[str]): Second set of kernel names.
+
+    Returns:
+        float | None: Intersection-over-union in [0, 1], ``0.0`` when both are
+        non-empty but disjoint with empty union, or ``None`` when both sets are
+        empty.
+    """
     if not a and not b:
         return None
     inter = len(a & b)
@@ -113,7 +163,16 @@ def _jaccard(a: set[str], b: set[str]) -> float | None:
 
 
 def _compile_like_fraction(names: list[str], sources: list[str]) -> float:
-    """Share of kernels whose name/path hints Inductor/tmp compile artifacts."""
+    """Share of kernels whose name/path hints Inductor/tmp compile artifacts.
+
+    Args:
+        names (list[str]): Kernel names.
+        sources (list[str]): Kernel source-file strings, aligned with ``names``.
+
+    Returns:
+        float: Fraction in [0, 1] of kernels matching compile-artifact markers,
+        or ``0.0`` when ``names`` is empty.
+    """
     markers = (
         "inductor", "triton", "torchinductor", "/tmp/", "generated",
         "CompiledFunction", "autotune",
@@ -140,6 +199,25 @@ async def _profile_arm(
     variant_timeout_sec: int,
     top_k: int,
 ) -> dict[str, Any]:
+    """Run one profiling arm and summarize its top kernels.
+
+    Writes a per-arm config, runs Magpie, parses the resulting torch traces,
+    and computes the top-kernel names plus their compile-like fraction.
+
+    Args:
+        name (str): Arm label and output subdirectory name.
+        profile_yaml (Path): Base profile config to clone for this arm.
+        extra_sglang (str): Extra SGLang args to inject for this arm.
+        work_root (Path): Root directory under which the arm slot is created.
+        magpie_python (str): Python interpreter used to launch Magpie.
+        cwd (str): Working directory for the Magpie subprocess.
+        variant_timeout_sec (int): Per-run timeout in seconds.
+        top_k (int): Number of top kernels to retain from trace analysis.
+
+    Returns:
+        dict[str, Any]: Arm result with workspace/trace info, top kernel names,
+        compile-like fraction, success flag, and a stderr tail.
+    """
     slot = work_root / name
     slot.mkdir(parents=True, exist_ok=True)
     cfg = yaml.safe_load(profile_yaml.read_text(encoding="utf-8"))
@@ -182,6 +260,16 @@ async def _profile_arm(
 
 
 async def main_async() -> int:
+    """Run both profiling arms and emit the kernel-comparison report.
+
+    Parses CLI arguments, profiles a torch.compile-off and torch.compile-on
+    arm, computes Jaccard overlap and per-arm-unique kernel names, then writes
+    and prints a JSON summary.
+
+    Returns:
+        int: ``0`` when both arms succeeded, ``1`` on partial/failed arms, or
+        ``2`` on configuration/dependency errors.
+    """
     ap = argparse.ArgumentParser(
         description="Compare hot GPU kernels: torch.compile off vs on (profile traces)",
     )
@@ -287,6 +375,11 @@ async def main_async() -> int:
 
 
 def main() -> None:
+    """Run the async entry point and exit with its return code.
+
+    Raises:
+        SystemExit: Always, carrying the exit code from :func:`main_async`.
+    """
     raise SystemExit(asyncio.run(main_async()))
 
 

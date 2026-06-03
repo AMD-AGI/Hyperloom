@@ -126,6 +126,16 @@ def categorize_variant(
     filter) treats those as "potentially useful, keep". Knowing more than
     one direction is normal — a variant can stack flags from multiple
     categories.
+
+    Args:
+        extra_args (str | None): The variant's ``extra_server_args`` string,
+            matched against the flag-to-direction table.
+        extra_envs (dict[str, str] | None): The variant's env overrides,
+            matched by exact name then by known prefix.
+
+    Returns:
+        frozenset[str]: The matched roofline directions (``compute`` /
+            ``memory`` / ``host_overhead`` / ``comm``); empty when uncategorized.
     """
     cats: set[str] = set()
     args = (extra_args or "").strip()
@@ -150,6 +160,18 @@ def categorize_variant(
 
 @dataclass(frozen=True)
 class _DroppedVariant:
+    """A variant the roofline filter dropped, with its drop rationale.
+
+    Attributes:
+        name (str): The variant name.
+        extra_server_args (str): The variant's server-args string.
+        categories (tuple[str, ...]): The roofline directions the variant
+            targets.
+        saturated_directions (tuple[str, ...]): The directions found saturated
+            in the snapshot.
+        reason (str): A short machine-readable drop reason.
+    """
+
     name: str
     extra_server_args: str
     categories: tuple[str, ...]

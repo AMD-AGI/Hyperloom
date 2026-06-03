@@ -41,14 +41,35 @@ log = logging.getLogger(__name__)
 
 
 def _iso_utc_now() -> str:
+    """Return the current UTC time as a second-precision ISO string.
+
+    Returns:
+        str: Timestamp formatted as ``YYYY-MM-DDTHH:MM:SSZ``.
+    """
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _strip_str(value: Any) -> str:
+    """Coerce a value to a stripped string.
+
+    Args:
+        value (Any): Value to stringify; ``None`` becomes ``""``.
+
+    Returns:
+        str: The stripped string form of ``value``.
+    """
     return str(value or "").strip()
 
 
 def _strip_lower(value: Any) -> str:
+    """Coerce a value to a stripped, case-folded string.
+
+    Args:
+        value (Any): Value to normalise.
+
+    Returns:
+        str: The stripped, case-folded string form of ``value``.
+    """
     return _strip_str(value).casefold()
 
 
@@ -66,6 +87,17 @@ def _filter_rows(
     All string comparisons are case-insensitive; integer comparisons
     are strict. Pass ``""`` / ``0`` to skip a dimension (matches the
     handler's query-param semantics).
+
+    Args:
+        rows (list[dict[str, Any]]): Upstream rows to filter.
+        gpu (str): Hardware name to match (``""`` skips).
+        framework (str): Framework to match (``""`` skips).
+        precision (str): Precision to match (``""`` skips).
+        isl (int): Input sequence length to match (``0`` skips).
+        osl (int): Output sequence length to match (``0`` skips).
+
+    Returns:
+        list[dict[str, Any]]: The rows that pass every active filter.
     """
     out: list[dict[str, Any]] = []
     gpu_n = gpu.casefold()
@@ -91,8 +123,14 @@ def _filter_rows(
 def _row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
     """Project one upstream row into a ``BaselinePoint``.
 
-    Returns ``None`` if the row's metrics block is missing the
-    ``tput_per_gpu`` key (we cannot rank without it).
+    Latency metrics are converted from seconds to milliseconds.
+
+    Args:
+        row (dict[str, Any]): One upstream baseline row.
+
+    Returns:
+        BaselinePoint | None: The projected point, or ``None`` if the
+            row's metrics lack a positive ``tput_per_gpu``.
     """
     metrics = row.get("metrics")
     if not isinstance(metrics, dict):
@@ -105,6 +143,15 @@ def _row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
         return None
 
     def _fnum(key: str) -> float:
+        """Read a metric as a float, defaulting to ``0.0``.
+
+        Args:
+            key (str): Metric key to read from the enclosing row's
+                ``metrics`` block.
+
+        Returns:
+            float: The metric value, or ``0.0`` when missing/invalid.
+        """
         try:
             return float(metrics.get(key))
         except (TypeError, ValueError):
@@ -128,6 +175,14 @@ def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
     Upstream sometimes contains multiple rows for the same (conc, tp)
     (different dates or sweep methods). The report only needs the best
     one per slot — keeping all of them just clutters the markdown.
+
+    Args:
+        points (list[BaselinePoint]): Candidate points, possibly with
+            duplicate ``(conc, decode_tp)`` combos.
+
+    Returns:
+        list[BaselinePoint]: Best point per ``(conc, decode_tp)``,
+            sorted by those two keys.
     """
     best: dict[tuple[int, int], BaselinePoint] = {}
     for p in points:
@@ -145,6 +200,12 @@ def _format_report_md(summary: BaselineSummary) -> str:
     contract is "facts only, no derived KPI" so this section never
     accidentally becomes an optimisation target (see S2 in the design
     chat).
+
+    Args:
+        summary (BaselineSummary): The summary to render.
+
+    Returns:
+        str: The markdown report text (newline-terminated).
     """
     q = summary.query
     lines: list[str] = []
@@ -219,6 +280,15 @@ def _persist(
     Uses :mod:`session_paths` for path computation. Returns the
     ``(json_path, md_path)`` tuple so the executor can surface them
     on the bus event.
+
+    Args:
+        summary (BaselineSummary): The analysis artefact to serialise.
+        session_dir (Path): Session root under which the
+            ``target_analysis/`` output directory is created.
+
+    Returns:
+        tuple[Path, Path]: The ``(json_path, md_path)`` of the written
+            JSON and Markdown report files.
     """
     from ..session_paths import (
         target_analysis_dir,
@@ -270,6 +340,21 @@ def analyze(
 
     The caller (target_analysis ActionRunner) treats every status as
     a success — the optimizer loop never blocks on this step.
+
+    Args:
+        session_dir (Path): Session root for persisting the artefacts.
+        model_path (str): Local model path / HF repo name to map to an
+            InferenceX display name.
+        compare_against_gpu (str): Target GPU label to filter rows by;
+            an empty value short-circuits to a ``skipped`` summary.
+        framework (str): Optional inference framework filter.
+        precision (str): Optional precision filter (e.g. ``fp8``).
+        isl (int): Optional input sequence length filter.
+        osl (int): Optional output sequence length filter.
+
+    Returns:
+        BaselineSummary: The persisted summary, whose ``status`` and
+            ``reason`` describe the outcome (never raises).
     """
     canonical_model = to_inferencex_name(model_path) or ""
     query = BaselineQuery(

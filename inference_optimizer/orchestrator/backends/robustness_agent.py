@@ -61,6 +61,14 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
     requiring a pip-install of ``robustness-agent`` into the optimizer's
     Python environment. ``cwd`` is ``<root>`` (matching the convention
     :class:`CriticAgentBackend` uses for critic-agent).
+
+    Args:
+        call (RuntimeCall): The tick invocation descriptor carrying the request
+            and output paths, working directory, and subprocess environment.
+
+    Raises:
+        BackendError: If ``call.phase`` is not ``"tick"``, the subprocess times
+            out, cannot start, or exits with a non-zero return code.
     """
     if call.phase != "tick":
         raise BackendError(
@@ -141,6 +149,17 @@ class RobustnessAgentBackend:
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Normalise paths, verify the CLI module, and select the runtime caller.
+
+        Coerces ``robustness_agent_root`` and ``session_dir`` to :class:`Path`,
+        confirms ``src/robustness_agent/runtime/cli.py`` exists, wires up either
+        the test ``runtime_caller_factory`` or the real subprocess caller, and
+        snapshots the forwarded ``options``.
+
+        Raises:
+            BackendError: If the expected ``runtime/cli.py`` module is not found
+                under ``robustness_agent_root``.
+        """
         self.robustness_agent_root = Path(self.robustness_agent_root)
         self.session_dir = Path(self.session_dir)
         cli_module = (
@@ -173,7 +192,29 @@ class RobustnessAgentBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
-        """One Robustness turn — drive a single reactor tick over subprocess."""
+        """One Robustness turn — drive a single reactor tick over subprocess.
+
+        Writes a ``coordinator_inbox`` request for the rendered ``prompt``,
+        invokes one ``runtime.cli tick`` (off the event loop), reads back the
+        emitted ``intent_envelope``, validates it into intents, and records
+        per-turn telemetry.
+
+        Args:
+            prompt (str): The Coordinator-rendered prompt for this tick.
+            system_prompt (str | None): Unused; robustness ticks are
+                deterministic and ignore it.
+            tools (list[str] | None): Unused; the runtime owns its own tooling.
+            max_turns (int): Unused; one reactor tick is run per call.
+
+        Returns:
+            BackendTurnResult: The validated intents plus session/tick metadata
+            and any parse warnings from the runtime.
+
+        Raises:
+            BackendError: If ``emit.json`` cannot be read or is missing a dict
+                ``intent_envelope``.
+            NoIntentEmitted: If the emitted envelope fails intent validation.
+        """
         del system_prompt, tools, max_turns
 
         turn_idx = self._turn_idx
@@ -265,6 +306,15 @@ class RobustnessAgentBackend:
         )
 
     def _allocate_workdir(self, turn_idx: int) -> Path:
+        """Create and return a per-turn workdir, pruning stale ones first.
+
+        Args:
+            turn_idx (int): Zero-based index of the current turn, used as the
+                zero-padded subdirectory name.
+
+        Returns:
+            Path: The created ``<session>/robustness-workdir/<turn>/`` directory.
+        """
         root = self.session_dir / "robustness-workdir"
         root.mkdir(parents=True, exist_ok=True)
         self._prune_old_workdirs(root, keep=ROBUSTNESS_AGENT_WORKDIR_KEEP_COUNT)
@@ -274,7 +324,15 @@ class RobustnessAgentBackend:
 
     @staticmethod
     def _prune_old_workdirs(root: Path, *, keep: int) -> None:
-        """Remove all but the ``keep`` most recent ``<turn>/`` subdirs."""
+        """Remove all but the ``keep`` most recent ``<turn>/`` subdirs.
+
+        Best-effort: directory-listing and removal errors are swallowed so a
+        cleanup hiccup never fails a turn.
+
+        Args:
+            root (Path): The ``robustness-workdir`` parent directory to prune.
+            keep (int): Number of most recent turn subdirectories to retain.
+        """
         try:
             entries = sorted(
                 (p for p in root.iterdir() if p.is_dir()),
@@ -306,6 +364,11 @@ class RobustnessAgentBackend:
         even when ``robustness-agent`` isn't pip-installed into the
         optimizer's environment. Existing ``PYTHONPATH`` (if any) is
         preserved so test runners that rely on it keep working.
+
+        Returns:
+            dict[str, str]: A copy of the current environment with
+            ``PYTHONPATH`` and ``ROBUSTNESS_AGENT_SESSION_DIR`` set for the
+            subprocess.
         """
         env = dict(os.environ)
         src = str(self.robustness_agent_root / "src")

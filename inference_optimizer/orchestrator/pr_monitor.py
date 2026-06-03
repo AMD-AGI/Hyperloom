@@ -105,6 +105,12 @@ class PRSummary:
     body_snippet: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the PR summary to a JSON-friendly dict.
+
+        Returns:
+            dict[str, Any]: All fields, with ``labels`` rendered as a
+            list.
+        """
         return {
             "repo":         self.repo,
             "number":       self.number,
@@ -159,6 +165,20 @@ class PRMonitorClient:
         enabled: bool = True,
         timeout_sec: float | None = None,
     ) -> "PRMonitorClient":
+        """Build a client, resolving config from args then env vars.
+
+        Args:
+            url (str | None): Explicit base URL; falls back to
+                ``PR_MONITOR_URL`` / ``PRIMUS_CORTEX_PR_URL`` env vars
+                then :data:`DEFAULT_PR_MONITOR_URL`.
+            enabled (bool): Whether the client issues real requests.
+            timeout_sec (float | None): Per-request timeout; falls back
+                to the ``PR_MONITOR_TIMEOUT_SEC`` env var then the
+                default.
+
+        Returns:
+            PRMonitorClient: The configured client instance.
+        """
         resolved_url = (
             url
             or os.environ.get("PR_MONITOR_URL", "").strip()
@@ -189,11 +209,23 @@ class PRMonitorClient:
     # Low-level HTTP helper
     # ------------------------------------------------------------------
     def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        """GET ``base_url + path`` with ``params`` query string. Returns
-        parsed JSON or raises :class:`PRMonitorError`.
+        """GET ``base_url + path`` with a ``params`` query string.
 
         Defense-in-depth: limits response size to 4 MiB so a misbehaving
         endpoint can't hang a marathon pod by streaming gigabytes.
+
+        Args:
+            path (str): Path appended to ``base_url`` (leading slash).
+            params (dict[str, Any] | None): Query parameters; ``None``/
+                empty values are dropped before encoding.
+
+        Returns:
+            Any: The parsed JSON response.
+
+        Raises:
+            PRMonitorError: If the client is disabled, the request
+                fails (HTTP, network, or timeout), or the response is
+                not valid JSON.
         """
         if not self.enabled:
             raise PRMonitorError("PR Monitor client disabled (--degraded-pr)")
@@ -240,7 +272,12 @@ class PRMonitorClient:
     # REST endpoint wrappers
     # ------------------------------------------------------------------
     def healthz(self) -> bool:
-        """Return True if the PR Monitor health endpoint responds 2xx."""
+        """Probe the PR Monitor health endpoint.
+
+        Returns:
+            bool: ``True`` when ``/healthz`` responds successfully;
+            ``False`` on any :class:`PRMonitorError`.
+        """
         try:
             self._get_json("/healthz")
             return True
@@ -258,6 +295,10 @@ class PRMonitorClient:
         accept either shape. Entries with ``is_active=False`` are
         skipped because PR Monitor stops polling them and they return
         empty PR lists.
+
+        Returns:
+            list[str]: Canonical ``owner/name`` repo names; empty on
+            failure or when the response shape is unrecognised.
         """
         try:
             data = self._get_json("/repos")
@@ -291,10 +332,19 @@ class PRMonitorClient:
     ) -> list[PRSummary]:
         """List recent PRs for ``repo``.
 
-        Mirrors REST ``/repos/{repo}/prs``. Returns a list of
-        :class:`PRSummary` (empty on failure). Uses the in-memory cache
+        Mirrors REST ``/repos/{repo}/prs``. Uses the in-memory cache
         keyed by the rendered URL so multiple specialist dispatches
         within the same tick don't re-hit the network.
+
+        Args:
+            repo (str): Canonical ``owner/name`` repo identifier.
+            state (str): PR state filter (e.g. ``all``, ``open``).
+            since (str | None): Optional ISO timestamp lower bound.
+            limit (int): Maximum PRs to request; non-positive falls back
+                to :data:`DEFAULT_PR_FEED_PER_REPO_LIMIT`.
+
+        Returns:
+            list[PRSummary]: Parsed PR rows; empty on failure.
         """
         params = {
             "state": state,
@@ -365,7 +415,16 @@ class PRMonitorClient:
         return prs
 
     def get_pr(self, repo: str, number: int) -> dict[str, Any] | None:
-        """Return the full PR detail dict, or None on failure."""
+        """Fetch the full detail payload for one PR.
+
+        Args:
+            repo (str): Canonical ``owner/name`` repo identifier.
+            number (int): PR number.
+
+        Returns:
+            dict[str, Any] | None: The PR detail dict, or ``None`` on
+            failure.
+        """
         try:
             return self._get_json(f"/repos/{repo}/prs/{int(number)}")
         except PRMonitorError as exc:
@@ -399,6 +458,21 @@ class PRMonitorClient:
         - When ``keywords`` is non-empty, drop PRs whose title + label
           set contain none of the keywords (case-insensitive).
         - Sort the merged list by ``updated_at`` desc (newest first).
+
+        Args:
+            repos (list[str]): Repos to fetch PRs from.
+            keywords (list[str] | None): Optional case-insensitive filter
+                applied to title + labels + body snippet.
+            window_days (int): Look-back window for the ``since`` bound.
+            per_repo_limit (int): Maximum PRs requested per repo.
+            total_budget_sec (float): Wall-clock budget for the whole
+                call; repos beyond it are skipped with a warning.
+            now (datetime | None): Override for the current time (tests).
+
+        Returns:
+            tuple[list[PRSummary], list[str]]: ``(prs, warnings)`` where
+            warnings note disabled state, per-repo failures, or budget
+            exhaustion.
         """
         out: list[PRSummary] = []
         warns: list[str] = []
@@ -458,6 +532,19 @@ class PRMonitorClient:
         "successful but no PRs in window" from ``[]`` = "fetch failed".
         External callers should stick with the fail-soft
         :meth:`list_prs`.
+
+        Args:
+            repo (str): Canonical ``owner/name`` repo identifier.
+            state (str): PR state filter.
+            since (str | None): Optional ISO timestamp lower bound.
+            limit (int): Maximum PRs to request; non-positive falls back
+                to :data:`DEFAULT_PR_FEED_PER_REPO_LIMIT`.
+
+        Returns:
+            list[PRSummary]: Parsed PR rows (possibly empty).
+
+        Raises:
+            PRMonitorError: If the underlying request fails.
         """
         params: dict[str, Any] = {
             "state": state,
@@ -523,6 +610,14 @@ def _matches_keywords(pr: PRSummary, keywords_lower: list[str]) -> bool:
     short body snippet (which is what specialists actually see in the
     prompt). Empty keyword list → match everything (caller should
     not call this in that case).
+
+    Args:
+        pr (PRSummary): PR whose title, labels, and snippet are scanned.
+        keywords_lower (list[str]): Lower-cased keywords to match.
+
+    Returns:
+        bool: ``True`` if any keyword appears in the PR text, or when
+        ``keywords_lower`` is empty.
     """
     if not keywords_lower:
         return True

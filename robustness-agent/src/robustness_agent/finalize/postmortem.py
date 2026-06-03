@@ -101,6 +101,16 @@ class PostmortemFinalizer:
         session_id: str,
         config: PostmortemFinalizerConfig | None = None,
     ) -> None:
+        """Initialise the finalizer for one session.
+
+        Args:
+            session_dir (Path): Root session directory; outputs land under
+                its ``reports/`` subdirectory.
+            session_id (str): Session identifier; defaults to ``"default"``
+                when empty.
+            config (PostmortemFinalizerConfig | None): Optional tunables;
+                a default config is used when omitted.
+        """
         self.session_dir = Path(session_dir)
         self.session_id = session_id or "default"
         self._config = config or PostmortemFinalizerConfig()
@@ -110,13 +120,29 @@ class PostmortemFinalizer:
     # ------------------------------------------------------------------
     @property
     def reports_dir(self) -> Path:
+        """Directory under the session where outputs are written.
+
+        Returns:
+            Path: The ``<session_dir>/reports`` directory path.
+        """
         return self.session_dir / self._config.reports_subdir
 
     @property
     def marker_path(self) -> Path:
+        """Path of the idempotency marker file.
+
+        Returns:
+            Path: The ``.robustness_finalized`` marker under
+            :attr:`reports_dir`.
+        """
         return self.reports_dir / _FINALIZED_MARKER_NAME
 
     def is_finalized(self) -> bool:
+        """Report whether this session was already finalized.
+
+        Returns:
+            bool: True when the marker file exists on disk.
+        """
         return self.marker_path.is_file()
 
     # ------------------------------------------------------------------
@@ -127,6 +153,14 @@ class PostmortemFinalizer:
 
         Best-effort: any IO error is logged and swallowed. The reactor
         must never crash because the postmortem failed to write.
+
+        Args:
+            stop_reason (str): The session's stop reason, recorded in the
+                postmortem and marker.
+
+        Returns:
+            bool: True if any output file was written; False when already
+            finalized or the reports directory could not be created.
         """
         if self.is_finalized():
             log.debug(
@@ -174,6 +208,11 @@ class PostmortemFinalizer:
     # findings — L1 inputs
     # ------------------------------------------------------------------
     def _findings_path(self) -> Path:
+        """Path of the FindingSink JSONL file for this session.
+
+        Returns:
+            Path: ``<session_dir>/<findings_subdir>/<session_id>.jsonl``.
+        """
         return (
             self.session_dir
             / self._config.findings_subdir
@@ -181,6 +220,15 @@ class PostmortemFinalizer:
         )
 
     def _load_findings(self) -> list[dict[str, Any]]:
+        """Load the session findings from the FindingSink JSONL file.
+
+        Missing files, read errors, and malformed JSON lines are tolerated
+        and skipped rather than raised.
+
+        Returns:
+            list[dict[str, Any]]: One dict per well-formed finding row;
+            empty when the file is absent or unreadable.
+        """
         path = self._findings_path()
         if not path.is_file():
             return []
@@ -206,6 +254,16 @@ class PostmortemFinalizer:
     # decision trace — L2 inputs
     # ------------------------------------------------------------------
     def _build_decision_trace(self) -> dict[str, Any]:
+        """Scan ``runs/<action>/<task>/result.json`` into a trace dict.
+
+        Walks each known action directory, collecting recent task results
+        per the configured caps. A missing ``runs/`` root yields an empty
+        trace.
+
+        Returns:
+            dict[str, Any]: Trace with ``session_id``, ``tasks_by_action``
+            and ``total_tasks`` keys.
+        """
         runs_root = self.session_dir / self._config.runs_subdir
         out: dict[str, Any] = {
             "session_id": self.session_id,
@@ -229,6 +287,21 @@ class PostmortemFinalizer:
     def _collect_action_tasks(
         self, action_dir: Path, cfg: PostmortemFinalizerConfig,
     ) -> list[dict[str, Any]]:
+        """Collect normalised task entries for one action directory.
+
+        Reads up to ``cfg.max_tasks_per_action`` most-recent task dirs,
+        recording an error entry for any missing / unparsable / non-dict
+        ``result.json`` instead of dropping the task.
+
+        Args:
+            action_dir (Path): The ``runs/<action>`` directory to scan.
+            cfg (PostmortemFinalizerConfig): Config supplying the
+                per-action task cap.
+
+        Returns:
+            list[dict[str, Any]]: One entry per task (normalised result or
+            error marker).
+        """
         try:
             task_dirs = sorted(
                 (p for p in action_dir.iterdir() if p.is_dir()),
@@ -281,6 +354,20 @@ class PostmortemFinalizer:
         decision_trace: dict[str, Any],
         stop_reason: str,
     ) -> str:
+        """Render the human-facing postmortem markdown.
+
+        Composes a header, flashpoint section, findings catalogue and
+        decision-trace summary table from the prepared inputs.
+
+        Args:
+            findings (list[dict[str, Any]]): Loaded findings rows.
+            decision_trace (dict[str, Any]): Trace built by
+                :meth:`_build_decision_trace`.
+            stop_reason (str): The session's stop reason.
+
+        Returns:
+            str: The full postmortem markdown document.
+        """
         cfg = self._config
         lines: list[str] = []
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -408,6 +495,14 @@ class PostmortemFinalizer:
         return "\n".join(lines).rstrip() + "\n"
 
     def _fallback_postmortem_md(self, *, stop_reason: str) -> str:
+        """Render a minimal postmortem when full rendering fails.
+
+        Args:
+            stop_reason (str): The session's stop reason.
+
+        Returns:
+            str: A short markdown stub pointing the reader to the logs.
+        """
         return (
             f"# Robustness postmortem — `{self.session_id}`\n\n"
             f"stop_reason: `{stop_reason}`\n\n"
@@ -419,6 +514,15 @@ class PostmortemFinalizer:
     # write helpers
     # ------------------------------------------------------------------
     def _write_text(self, filename: str, body: str) -> bool:
+        """Write a text file into the reports directory.
+
+        Args:
+            filename (str): Name of the file under :attr:`reports_dir`.
+            body (str): Text content to write.
+
+        Returns:
+            bool: True on success; False when the write raised ``OSError``.
+        """
         target = self.reports_dir / filename
         try:
             target.write_text(body, encoding="utf-8")
@@ -430,6 +534,16 @@ class PostmortemFinalizer:
             return False
 
     def _write_json(self, filename: str, payload: dict[str, Any]) -> bool:
+        """Write a JSON file into the reports directory.
+
+        Args:
+            filename (str): Name of the file under :attr:`reports_dir`.
+            payload (dict[str, Any]): JSON-serialisable content to write.
+
+        Returns:
+            bool: True on success; False when serialisation or the write
+            failed.
+        """
         target = self.reports_dir / filename
         try:
             target.write_text(
@@ -444,6 +558,14 @@ class PostmortemFinalizer:
             return False
 
     def _write_marker(self, *, stop_reason: str) -> None:
+        """Write the idempotency marker recording this finalization.
+
+        Failures are logged and swallowed; a missing marker only risks a
+        redundant re-run on resume, never data loss.
+
+        Args:
+            stop_reason (str): The session's stop reason to record.
+        """
         marker = self.marker_path
         try:
             marker.write_text(
@@ -479,8 +601,17 @@ def finalize_session(
 
     Useful when an operator wants to re-run the finalizer outside the
     live reactor (e.g. post-hoc on a session whose Robustness died
-    before stop_reason was written). Returns the
-    :meth:`PostmortemFinalizer.finalize` boolean.
+    before stop_reason was written).
+
+    Args:
+        session_dir (Path): Root session directory.
+        session_id (str): Session identifier.
+        stop_reason (str): Stop reason to record; defaults to
+            ``"manual_finalize"``.
+        config (PostmortemFinalizerConfig | None): Optional tunables.
+
+    Returns:
+        bool: The :meth:`PostmortemFinalizer.finalize` result.
     """
     finalizer = PostmortemFinalizer(
         session_dir=session_dir,
@@ -501,7 +632,14 @@ def _pick_flashpoint(
 
     "First" means the lowest ``tick_index``; ``timestamp_unix`` as a
     secondary key when ticks tie or when the source uses a different
-    counter. Returns ``None`` when nothing crossed HIGH.
+    counter.
+
+    Args:
+        findings (list[dict[str, Any]]): All loaded finding rows.
+
+    Returns:
+        dict[str, Any] | None: The earliest HIGH-severity finding, or
+        ``None`` when none crossed HIGH.
     """
     high = [
         f for f in findings
@@ -529,6 +667,15 @@ def _normalise_task_entry(
     ``baseline`` carries ``output_throughput`` while ``integrate``
     carries ``gain_pct``); we capture the union so downstream
     dashboards have everything they need without re-reading each file.
+
+    Args:
+        task_dir (Path): The task's run directory.
+        result_path (Path): Path of the task's ``result.json``.
+        payload (dict[str, Any]): Parsed ``result.json`` contents.
+
+    Returns:
+        dict[str, Any]: Normalised trace entry with common executor
+        fields included only when present and non-None.
     """
     entry: dict[str, Any] = {
         "task_id": task_dir.name,

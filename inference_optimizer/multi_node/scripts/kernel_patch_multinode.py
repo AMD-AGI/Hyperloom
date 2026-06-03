@@ -57,21 +57,43 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line; stdout is reserved for the
-    final JSON document the dashboard caller parses."""
+    """Stderr-only timestamped log line.
+
+    stdout is reserved for the final JSON document the dashboard caller
+    parses, so all progress chatter goes to stderr.
+
+    Args:
+        msg (str): The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kernel_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _safe_name(value: str) -> str:
-    """Sanitize a string for use as a filename component."""
+    """Sanitize a string for use as a filename component.
+
+    Args:
+        value (str): The raw string to sanitize.
+
+    Returns:
+        str: A filename-safe slug (alnum plus ``._-``), truncated to 80
+        characters; ``"patch"`` if the result would be empty.
+    """
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "patch"
 
 
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
-    """Write ``data`` to ``target`` atomically (tmp file + os.replace)."""
+    """Write ``data`` to ``target`` atomically (tmp file + os.replace).
+
+    Args:
+        target (Path): Destination file path.
+        data (bytes): Bytes to write.
+
+    Raises:
+        OSError: If writing the temp file or replacing the target fails.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(
         prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent),
@@ -96,9 +118,28 @@ def _apply_remote(
     backup_dir: str,
     kernel_id: str,
 ) -> dict:
-    """Apply a single patch on THIS pod. Returns a dict summary; raises
-    on any error so the caller sees the failure via ``ray.get`` exception
-    propagation."""
+    """Apply a single patch on THIS pod.
+
+    Backs up the target, atomically writes the decoded patch bytes, and
+    (for ``.py`` targets) byte-compiles to catch syntax errors, auto-
+    reverting from the backup if compilation fails. Raises on any error so
+    the caller sees the failure via ``ray.get`` exception propagation.
+
+    Args:
+        target_path (str): Absolute path of the file to overwrite.
+        patch_b64 (str): Base64-encoded new file contents.
+        backup_dir (str): Directory where the pre-patch original is saved.
+        kernel_id (str): Optional identifier used in the backup filename.
+
+    Returns:
+        dict: Summary with host, target path, backup path, bytes written,
+        and the compile result.
+
+    Raises:
+        FileNotFoundError: If ``target_path`` does not exist on the pod.
+        ValueError: If ``patch_b64`` is not valid base64, or if the patched
+            ``.py`` file fails to compile (after auto-revert).
+    """
     host = socket.gethostname()
     target = Path(target_path)
     if not target.is_file():
@@ -141,8 +182,19 @@ def _revert_remote(
     target_path: str,
     backup_path: str,
 ) -> dict:
-    """Restore ``target_path`` from ``backup_path`` on THIS pod. Idempotent
-    when ``backup_path`` is missing (assumes already-reverted state)."""
+    """Restore ``target_path`` from ``backup_path`` on THIS pod.
+
+    Idempotent when ``backup_path`` is missing (assumes already-reverted
+    state).
+
+    Args:
+        target_path (str): Absolute path of the file to restore.
+        backup_path (str): Path of the backup copy to restore from.
+
+    Returns:
+        dict: Summary with host, target path, backup path, and a status of
+        ``restored`` or ``noop_missing_backup``.
+    """
     host = socket.gethostname()
     target = Path(target_path)
     backup = Path(backup_path)
@@ -165,9 +217,18 @@ def _revert_remote(
 
 
 def _alive_nodes(min_gpu: int = 0) -> list[dict]:
-    """Return the list of currently-alive Ray nodes. Each entry is the
-    full ``ray.nodes()`` row so the caller can pick per-node IDs and
-    addresses for ``NodeAffinitySchedulingStrategy``."""
+    """Return the list of currently-alive Ray nodes.
+
+    Each entry is the full ``ray.nodes()`` row so the caller can pick
+    per-node IDs and addresses for ``NodeAffinitySchedulingStrategy``.
+
+    Args:
+        min_gpu (int): If > 0, only return nodes with at least this many
+            GPUs.
+
+    Returns:
+        list[dict]: The matching alive node rows from ``ray.nodes()``.
+    """
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if min_gpu > 0:
         nodes = [n for n in nodes if int(n.get("Resources", {}).get("GPU", 0) or 0) >= min_gpu]
@@ -175,6 +236,16 @@ def _alive_nodes(min_gpu: int = 0) -> list[dict]:
 
 
 def _do_apply(args: argparse.Namespace) -> int:
+    """Fan out the patch-apply actor across every alive node and report.
+
+    Args:
+        args (argparse.Namespace): Parsed ``apply`` arguments
+            (``target_path``, ``patch_b64``, ``backup_dir``, ``kernel_id``,
+            ``timeout_sec``).
+
+    Returns:
+        int: ``0`` if every node applied successfully, otherwise ``1``.
+    """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     nodes = _alive_nodes()
     _log(f"apply: alive nodes={len(nodes)} target={args.target_path}")
@@ -225,6 +296,16 @@ def _do_apply(args: argparse.Namespace) -> int:
 
 
 def _do_revert(args: argparse.Namespace) -> int:
+    """Fan out the patch-revert actor to each backed-up host and report.
+
+    Args:
+        args (argparse.Namespace): Parsed ``revert`` arguments
+            (``target_path``, ``backup_map_json``, ``timeout_sec``).
+
+    Returns:
+        int: ``0`` if every reachable host reverted successfully, otherwise
+        ``1`` (including when ``backup_map_json`` is empty).
+    """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     backup_map: dict[str, str] = json.loads(args.backup_map_json or "{}")
     if not backup_map:
@@ -282,6 +363,12 @@ def _do_revert(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """Parse CLI arguments and dispatch the ``apply`` or ``revert`` command.
+
+    Returns:
+        int: Process exit code; the subcommand's result code, or ``2`` if
+        no recognized subcommand was given.
+    """
     p = argparse.ArgumentParser(
         prog="kernel_patch_multinode.py",
         description=(

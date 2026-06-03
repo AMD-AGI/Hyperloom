@@ -53,6 +53,12 @@ class RcaEngine:
     """Invoke LLM for root cause analysis when alerts accumulate."""
 
     def __init__(self, config: Config):
+        """Initialise the RCA engine.
+
+        Args:
+            config (Config): Agent configuration providing the LLM
+                endpoint, API key, and model name.
+        """
         self._config = config
         self._pending_alerts: list[Alert] = []
         self._last_rca_time: float = 0
@@ -60,10 +66,23 @@ class RcaEngine:
         self._trigger_threshold: int = 2
 
     def ingest_alerts(self, alerts: list[Alert]) -> None:
+        """Queue critical/warning alerts for the next RCA pass.
+
+        Args:
+            alerts (list[Alert]): Alerts to consider; only those with
+                ``CRITICAL`` or ``WARNING`` severity are retained.
+        """
         critical = [a for a in alerts if a.severity in (Severity.CRITICAL, Severity.WARNING)]
         self._pending_alerts.extend(critical)
 
     def should_trigger(self) -> bool:
+        """Decide whether an RCA run is warranted.
+
+        Returns:
+            bool: ``True`` when the pending critical alert count meets
+            the trigger threshold and the minimum interval since the
+            last run has elapsed.
+        """
         if not self._pending_alerts:
             return False
         critical_count = sum(
@@ -76,6 +95,19 @@ class RcaEngine:
         return True
 
     async def run_rca(self, extra_context: dict[str, Any] | None = None) -> Optional[RcaFinding]:
+        """Run a single root-cause analysis over the pending alerts.
+
+        Builds the evidence prompt, calls the LLM, parses the response,
+        and clears the pending alert queue on success.
+
+        Args:
+            extra_context (dict[str, Any] | None): Optional extra
+                context appended to the evidence prompt.
+
+        Returns:
+            Optional[RcaFinding]: The parsed finding, or ``None`` if
+            there are no pending alerts or the LLM call fails.
+        """
         if not self._pending_alerts:
             return None
 
@@ -92,6 +124,15 @@ class RcaEngine:
             return None
 
     def _build_evidence(self, extra: dict[str, Any] | None) -> str:
+        """Render the pending alerts (and extra context) as prompt text.
+
+        Args:
+            extra (dict[str, Any] | None): Optional extra context to
+                append under an "Additional Context" section.
+
+        Returns:
+            str: A markdown-formatted evidence string for the LLM.
+        """
         sections: list[str] = ["## Alerts\n"]
         for alert in self._pending_alerts[-20:]:
             sections.append(
@@ -104,6 +145,17 @@ class RcaEngine:
         return "\n".join(sections)
 
     async def _call_llm(self, evidence: str) -> str:
+        """Send the evidence to the configured LLM and return its reply.
+
+        Falls back to a stub "no_action" JSON response when the LLM
+        endpoint or API key is not configured.
+
+        Args:
+            evidence (str): The rendered evidence prompt.
+
+        Returns:
+            str: The LLM's raw response content (or stub JSON).
+        """
         if not self._config.llm_base_url or not self._config.llm_api_key:
             log.warning("LLM not configured, returning stub RCA")
             return json.dumps({
@@ -131,6 +183,18 @@ class RcaEngine:
         return response.choices[0].message.content or ""
 
     def _parse_result(self, raw: str) -> RcaFinding:
+        """Parse the LLM's raw response into an :class:`RcaFinding`.
+
+        Extracts the first JSON object from the response and maps its
+        fields onto a finding, defaulting missing fields to safe values.
+
+        Args:
+            raw (str): The raw LLM response text.
+
+        Returns:
+            RcaFinding: The parsed finding referencing the triggering
+            alerts.
+        """
         try:
             start = raw.find("{")
             end = raw.rfind("}") + 1

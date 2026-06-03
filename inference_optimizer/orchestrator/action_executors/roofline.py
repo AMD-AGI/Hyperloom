@@ -45,6 +45,11 @@ from ..sub_agent_runner import RunnerContext
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a second-precision ISO-8601 string.
+
+    Returns:
+        str: The current UTC timestamp formatted with ``timespec="seconds"``.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -101,6 +106,15 @@ def _extract_steady_state_retry_mode(
     for picking a different one (e.g. operator prefers decode_only
     when both decode_only and prefilldecode are non-empty) we can
     revisit; for now first-non-empty is the simplest correct policy.
+
+    Args:
+        ta_result (dict[str, Any]): The raw trace_analyze result dict to
+            inspect for ``trace_health_warnings`` recovery hints.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``(mode, warning_dict)`` for the
+            first auto-retryable warning carrying a usable alternate mode, or
+            ``None`` when no recovery hint applies.
     """
     if not isinstance(ta_result, dict):
         return None
@@ -134,12 +148,39 @@ def _extract_steady_state_retry_mode(
 class RooflineStubExecutor:
     """Stub executor used as a fallback when the real `RooflineExecutor`
     must be disabled (operator override / debug scenarios). Returns
-    `succeeded` + `degraded=True` with diagnostic `error` field."""
+    `succeeded` + `degraded=True` with diagnostic `error` field.
+
+    Attributes:
+        shared_state (Any): Optional SharedState reference used to surface the
+            last cached snapshot / trace metadata in the stub result.
+    """
 
     def __init__(self, *, shared_state: Any = None):
+        """Initialize the stub with an optional SharedState reference.
+
+        Args:
+            shared_state (Any): SharedState instance whose cached snapshot is
+                echoed back in the stub result, or ``None`` to return zeros.
+        """
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Return a degraded success result without running profiling.
+
+        Echoes back the last cached snapshot id / trace / analysis path from
+        ``shared_state`` (when available) so callers see continuity, but flags
+        ``degraded=True`` and an explanatory ``error`` so the real executor's
+        absence is visible.
+
+        Args:
+            ctx (RunnerContext): The action runner context (unused; accepted to
+                match the executor protocol).
+
+        Returns:
+            dict[str, Any]: A ``status="succeeded"`` result with ``degraded``,
+                ``error``, ``snapshot_id``, ``last_profile_trace`` and
+                ``analysis_md_path`` fields.
+        """
         snapshot_id = 0
         analysis_md_path = ""
         last_profile_trace = ""
@@ -168,7 +209,15 @@ class RooflineStubExecutor:
 def make_roofline_stub_executor(
     *, shared_state: Any = None,
 ) -> RooflineStubExecutor:
-    """Stub factory — kept as the explicit safe-fallback wiring path."""
+    """Stub factory — kept as the explicit safe-fallback wiring path.
+
+    Args:
+        shared_state (Any): SharedState reference forwarded to the stub so it
+            can echo the last cached snapshot, or ``None``.
+
+    Returns:
+        RooflineStubExecutor: A new stub executor instance.
+    """
     return RooflineStubExecutor(shared_state=shared_state)
 
 
@@ -180,7 +229,15 @@ def _extract_trace_path(profile_result: dict[str, Any]) -> str:
     ``_promote_to_shared_state`` (profile branch).
 
     Prefer ``main_trace_path`` (merged trace, what TraceLens wants);
-    fall back to the first entry of ``trace_files``."""
+    fall back to the first entry of ``trace_files``.
+
+    Args:
+        profile_result (dict[str, Any]): The profile sub-step result dict to
+            extract a trace path from.
+
+    Returns:
+        str: The resolved trace path, or ``""`` if none could be found.
+    """
     if not isinstance(profile_result, dict):
         return ""
     direct = profile_result.get("main_trace_path")
@@ -206,6 +263,16 @@ def _failed(
     `profile_no_trace` (profile succeeded but no trace path) /
     `trace_analyze`. `sub_result` carries the sub-step's raw result
     for audit; pruned to known keys to keep result size bounded.
+
+    Args:
+        phase (str): Which sub-step failed (e.g. ``"profile"``,
+            ``"profile_no_trace"`` or ``"trace_analyze"``).
+        error (str): Human-readable failure message.
+        sub_result (dict[str, Any] | None): The raw sub-step result to attach
+            (pruned to known keys), or ``None``.
+
+    Returns:
+        dict[str, Any]: A canonical ``status="failed"`` result dict.
     """
     out: dict[str, Any] = {
         "status": "failed",
@@ -263,6 +330,15 @@ class RooflineExecutor:
     """
 
     def __init__(self, *, shared_state: Any):
+        """Initialize the executor with a required SharedState reference.
+
+        Args:
+            shared_state (Any): The SharedState instance the executor mutates
+                (profile fields, trace_analyze cache). Must not be ``None``.
+
+        Raises:
+            ValueError: If ``shared_state`` is ``None``.
+        """
         if shared_state is None:
             raise ValueError(
                 "RooflineExecutor requires a SharedState reference; "
@@ -272,6 +348,25 @@ class RooflineExecutor:
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the profile + trace_analyze pipeline for one roofline action.
+
+        Resolves the session dir, runs ``profile_executor`` on a child context,
+        inline-promotes the resulting trace into SharedState, then runs
+        ``trace_analyze_handler`` (with a single N26 auto-retry on recoverable
+        steady-state-chunk warnings) and records the snapshot via
+        ``record_trace_analyze``. On any sub-step failure the stale
+        trace_analyze cache is cleared and a ``_failed(...)`` dict is returned.
+
+        Args:
+            ctx (RunnerContext): The roofline task's runner context (carries
+                task params, lease and ``extra`` with ``session_dir``).
+
+        Returns:
+            dict[str, Any]: On success, a ``status="succeeded"`` dict with
+                ``snapshot_id``, ``last_profile_trace``, ``analysis_md_path``,
+                ``kernel_roofline_path`` and ``profile_workspace``; otherwise a
+                ``_failed(...)`` result dict identifying the failed phase.
+        """
         # IR-8 (atom): the historical short-circuit returned status="skipped"
         # because profile was a hard dependency and atom had no profiler
         # wiring. The Magpie atom wrapper now bridges PROFILE=1 to atom's
@@ -455,6 +550,16 @@ class RooflineExecutor:
     # ------------------------------------------------------------------
     @staticmethod
     def _resolve_session_dir(ctx: RunnerContext) -> Path:
+        """Resolve the session directory from the runner context.
+
+        Args:
+            ctx (RunnerContext): The runner context whose ``extra`` may carry a
+                ``session_dir`` entry.
+
+        Returns:
+            Path: The configured session directory, or ``Path(".")`` when none
+                is present.
+        """
         sd = ctx.extra.get("session_dir") if ctx.extra else None
         return Path(sd) if sd else Path(".")
 
@@ -469,6 +574,14 @@ class RooflineExecutor:
         its config; lease is inherited so we don't re-acquire the
         profile_lane that SubAgentRunner already grabbed for the
         outer roofline task.
+
+        Args:
+            parent_ctx (RunnerContext): The outer roofline task's context whose
+                task params, lease and ``extra`` are inherited.
+
+        Returns:
+            RunnerContext: A child context wrapping a ``kind="profile"`` task
+                that re-uses the parent's lease.
         """
         from ..task_registry import Task
         parent_task = parent_ctx.task
@@ -494,7 +607,14 @@ def make_roofline_executor(*, shared_state: Any) -> RooflineExecutor:
     """Production factory used by `cli._register_executors`.
 
     Same call-site signature `make_roofline_stub_executor` exposes so
-    swapping stub → real is a one-line change in cli.py."""
+    swapping stub → real is a one-line change in cli.py.
+
+    Args:
+        shared_state (Any): The SharedState reference passed to the executor.
+
+    Returns:
+        RooflineExecutor: A new production executor instance.
+    """
     return RooflineExecutor(shared_state=shared_state)
 
 

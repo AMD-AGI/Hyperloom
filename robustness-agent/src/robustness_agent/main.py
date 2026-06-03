@@ -27,6 +27,11 @@ from .role.prompt_inputs import ReactorContext, SharedStateSnapshot
 
 
 def _setup_logging() -> None:
+    """Configure root logging for the daemon.
+
+    Sets up a basic stderr handler at INFO level with a timestamped
+    format shared by both run modes.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -42,6 +47,10 @@ async def _run_reactor_mode(config: Config) -> None:
     writes findings to disk. Coordinator integration drives the same
     reactor through ``robustness_agent.runtime.cli tick`` in a
     subprocess (mirroring critic-agent's transport).
+
+    Args:
+        config (Config): Resolved agent configuration controlling the
+            tick interval, server URL, and session directory.
     """
     log = logging.getLogger("robustness_agent")
     bundle = build_reactor_components(config)
@@ -50,6 +59,11 @@ async def _run_reactor_mode(config: Config) -> None:
     loop = asyncio.get_running_loop()
 
     def _shutdown(sig: signal.Signals) -> None:
+        """Signal handler that requests a graceful loop shutdown.
+
+        Args:
+            sig (signal.Signals): The received signal triggering shutdown.
+        """
         log.info("Received %s, shutting down", sig.name)
         stop.set()
 
@@ -88,7 +102,12 @@ async def _run_reactor_mode(config: Config) -> None:
 
 
 async def _run_legacy_mode(config: Config) -> None:
-    """Original event-driven RobustnessAgent loop, kept for compatibility."""
+    """Original event-driven RobustnessAgent loop, kept for compatibility.
+
+    Args:
+        config (Config): Resolved agent configuration passed to the
+            legacy :class:`RobustnessAgent`.
+    """
     from .agent import RobustnessAgent
 
     log = logging.getLogger("robustness_agent")
@@ -96,6 +115,11 @@ async def _run_legacy_mode(config: Config) -> None:
     loop = asyncio.get_running_loop()
 
     def _shutdown(sig: signal.Signals) -> None:
+        """Signal handler that schedules a graceful agent stop.
+
+        Args:
+            sig (signal.Signals): The received signal triggering shutdown.
+        """
         log.info("Received %s, shutting down", sig.name)
         loop.create_task(agent.stop())
 
@@ -109,6 +133,16 @@ async def _run_legacy_mode(config: Config) -> None:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse daemon command-line arguments.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse. Defaults to
+            ``None``, which uses ``sys.argv``.
+
+    Returns:
+        argparse.Namespace: Parsed arguments including the selected
+        ``mode``.
+    """
     parser = argparse.ArgumentParser(prog="robustness-agent")
     parser.add_argument(
         "--mode",
@@ -120,6 +154,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _async_main(argv: list[str] | None = None) -> None:
+    """Discover configuration and run the selected mode.
+
+    Args:
+        argv (list[str] | None): Argument vector forwarded to
+            :func:`_parse_args`. Defaults to ``None``.
+    """
     args = _parse_args(argv)
     config = await Config.discover()
     if args.mode == "reactor":
@@ -129,6 +169,11 @@ async def _async_main(argv: list[str] | None = None) -> None:
 
 
 def main() -> None:
+    """Synchronous process entry point for the daemon.
+
+    Configures logging and runs the async main loop, treating a
+    keyboard interrupt as a clean exit.
+    """
     _setup_logging()
     try:
         asyncio.run(_async_main())

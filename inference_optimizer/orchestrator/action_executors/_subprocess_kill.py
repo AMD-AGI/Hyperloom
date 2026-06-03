@@ -71,6 +71,9 @@ def new_session_kwargs() -> dict:
 
     Returns ``{}`` on non-POSIX where ``setsid`` is meaningless; the
     helpers below detect that and fall through to ``proc.terminate``.
+
+    Returns:
+        dict: ``{"start_new_session": True}`` on POSIX, else ``{}``.
     """
     if os.name == "posix":
         return {"start_new_session": True}
@@ -85,6 +88,13 @@ def _process_group_alive(pgid: int) -> bool:
     is empty (no member processes remain). Any other ``OSError``
     (typically ``EPERM`` from a sandbox) is treated as "still alive"
     since we can't prove otherwise.
+
+    Args:
+        pgid (int): The POSIX process-group id to probe.
+
+    Returns:
+        bool: True iff at least one process remains in the group (and on
+            non-POSIX always False).
     """
     if os.name != "posix":
         return False
@@ -98,7 +108,12 @@ def _process_group_alive(pgid: int) -> bool:
 
 
 def _signal_group(pgid: int, sig: int) -> None:
-    """Send ``sig`` to every member of ``pgid``; swallow ``ESRCH``."""
+    """Send ``sig`` to every member of ``pgid``; swallow ``ESRCH``.
+
+    Args:
+        pgid (int): The POSIX process-group id to signal.
+        sig (int): The signal number to send.
+    """
     if os.name != "posix":
         return
     try:
@@ -138,6 +153,11 @@ def kill_my_spawned_server(
     ``start_new_session=True``) so ``os.getpgid(proc.pid)`` returns a
     pgid distinct from Hyperloom's own — otherwise we would risk
     killing the Coordinator. We assert this defensively below.
+
+    Args:
+        proc (subprocess.Popen | None): The launched process handle (root of
+            the tree); ``None`` or already-exited is a no-op.
+        grace_seconds (float): Seconds to wait after SIGTERM before SIGKILL.
     """
     if proc is None:
         return
@@ -270,6 +290,24 @@ def run_with_session_kill(
     function instead (e.g.
     ``patch("inference_optimizer.orchestrator.action_executors._subprocess_kill.run_with_session_kill")``)
     — the call shape and return type are intentionally identical.
+
+    Args:
+        cmd (list[str]): The command (argv) to launch.
+        env (dict[str, str] | None): Environment for the child process.
+        cwd (str | None): Working directory for the child process.
+        timeout (int | float | None): Hard timeout (raises ``TimeoutExpired``).
+        text (bool): Whether to decode stdout/stderr as text.
+        soft_deadline_sec (float | None): Optional soft wall-clock deadline; on
+            elapse the tree is reaped and a sentinel result is returned (no
+            raise). ``None`` / ≤ 0 keeps legacy behaviour.
+
+    Returns:
+        subprocess.CompletedProcess: The completed process result, with
+            ``returncode == OVERTIME_KILL_RETURNCODE`` when the soft deadline
+            fired.
+
+    Raises:
+        subprocess.TimeoutExpired: When the hard ``timeout`` elapses.
     """
     proc: subprocess.Popen | None = None
     try:
@@ -334,6 +372,12 @@ class _SoftDeadlineExceeded(Exception):
     """
 
     def __init__(self, *, deadline_sec: float, elapsed_sec: float) -> None:
+        """Record the deadline and actual elapsed time on the sentinel.
+
+        Args:
+            deadline_sec (float): The soft deadline that was exceeded.
+            elapsed_sec (float): The actual wall-clock elapsed at trip time.
+        """
         super().__init__(
             f"soft deadline {deadline_sec:.1f}s elapsed "
             f"(actual={elapsed_sec:.1f}s)"
@@ -360,6 +404,20 @@ def _communicate_with_soft_deadline(
     ``hard_timeout`` is still enforced via ``communicate``'s own
     timeout argument on the final slice so a stuck child can't dodge
     both gates.
+
+    Args:
+        proc (subprocess.Popen): The running child process to communicate with.
+        hard_timeout (int | float | None): The legacy hard timeout passed
+            through to ``communicate``.
+        soft_deadline_sec (float | None): The soft wall-clock deadline; falsy
+            / ≤ 0 delegates straight to ``communicate``.
+
+    Returns:
+        tuple[str | bytes, str | bytes]: The ``(stdout, stderr)`` captured.
+
+    Raises:
+        _SoftDeadlineExceeded: When ``soft_deadline_sec`` elapses first.
+        subprocess.TimeoutExpired: When the hard timeout elapses first.
     """
     if soft_deadline_sec is None or float(soft_deadline_sec) <= 0.0:
         return proc.communicate(timeout=hard_timeout)

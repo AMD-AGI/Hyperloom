@@ -13,12 +13,27 @@ log = logging.getLogger(__name__)
 
 
 class StallCheck:
+    """Detect agents that have stopped producing conductor events."""
 
     def __init__(self, config: Config, conductor: ConductorReader):
+        """Initialise the stall check.
+
+        Args:
+            config (Config): Agent configuration carrying the stall
+                timeout.
+            conductor (ConductorReader): Reader providing each agent's
+                last-activity timestamp.
+        """
         self._config = config
         self._conductor = conductor
 
     async def check(self) -> list[Alert]:
+        """Raise alerts for agents idle past the stall timeout.
+
+        Returns:
+            list[Alert]: A critical alert for each non-robustness agent
+            whose last event is older than ``agent_stall_timeout_s``.
+        """
         alerts: list[Alert] = []
         activity = self._conductor.get_agent_last_activity()
         now = time.time()
