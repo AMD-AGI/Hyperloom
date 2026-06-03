@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from ray_runtime import (
+    ensure_ray_cluster,
     quiet_ray_init,
 )
 
