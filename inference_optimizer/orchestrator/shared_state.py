@@ -3866,6 +3866,125 @@ class SharedState:
             )
         return "\n".join(rows)
 
+    def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
+        """Render advisory multi-model proposal scores for Orchestration.
+
+        Reads the ``ensemble_scores`` blob attached to the most recent
+        :attr:`specialist_rounds` entries by the ProposalScorer (see
+        ``orchestrator/proposal_scorer.py``). Each line shows a variant's
+        per-rater ``score ("reason")`` side-by-side so Orchestration can
+        see agreement / disagreement. There is deliberately NO mean and
+        NO sorting — these are one reference among many (parallel to
+        gaps / KB / analysis.md), not a ranking directive (Inv-9.1: no
+        system-side scoreboard).
+
+        The rater identities are **anonymized** (``rater_1``, ``rater_2``,
+        …) so Orchestration weighs the scores on their merits and reasons
+        alone, free of any per-model prior / brand bias. The mapping is
+        *stable within a render* (the same model maps to the same
+        ``rater_N`` across every round shown) so cross-round agreement is
+        still legible, but the real model slugs never reach the prompt —
+        they stay in ``ensemble_scores`` (state.json) for debug / audit.
+
+        Returns ``""`` when no recent round carries scores so the caller
+        skips the whole section header.
+
+        Format::
+
+            round=<round_id> domain=<domain>
+              - <variant_name>: rater_1=8.0 ("..."), rater_2=6.5 ("...")
+        """
+        rounds = [
+            r for r in (self.specialist_rounds or [])
+            if isinstance(r, dict)
+            and isinstance(r.get("ensemble_scores"), dict)
+            and (r["ensemble_scores"].get("models") or {})
+        ]
+        if not rounds:
+            return ""
+        shown = rounds[-max_rounds:]
+        # Stable, anonymized rater labels: collect every real model slug
+        # across the rounds being shown, sort for determinism, and map
+        # each to ``rater_N``. The same model gets the same label across
+        # rounds (cross-round agreement stays legible) while the real
+        # slug never reaches the prompt — Orchestration must weigh scores
+        # on merit, not on which brand emitted them (avoids model bias).
+        all_slugs: set[str] = set()
+        for r in shown:
+            models = r["ensemble_scores"].get("models") or {}
+            all_slugs.update(str(s) for s in models.keys())
+            errs = r["ensemble_scores"].get("errors") or {}
+            all_slugs.update(str(s) for s in errs.keys())
+        rater_label = {
+            slug: f"rater_{i}"
+            for i, slug in enumerate(sorted(all_slugs), start=1)
+        }
+        rows: list[str] = [
+            "(Advisory only — one reference among many, NOT a ranking "
+            "directive. Scores are 0-10 likelihood-of-throughput-gain "
+            "priors from independent anonymized raters; weigh on merit "
+            "alongside gaps / KB / analysis.md.)",
+        ]
+        for r in shown:
+            ens = r["ensemble_scores"]
+            models = ens.get("models") or {}
+            scale = str(ens.get("scale") or "0-10")
+            round_id = str(r.get("round_id") or "?")
+            domain = str(r.get("domain") or "?")
+            rows.append(f"round={round_id} domain={domain} scale={scale}")
+            # Collect every variant name seen across models, preserving
+            # the proposal_set order when available.
+            ordered_names: list[str] = []
+            seen: set[str] = set()
+            for variant in (r.get("proposal_set") or []):
+                if isinstance(variant, dict):
+                    nm = str(variant.get("name") or "")
+                    if nm and nm not in seen:
+                        ordered_names.append(nm)
+                        seen.add(nm)
+            for per_model in models.values():
+                if isinstance(per_model, dict):
+                    for nm in per_model:
+                        if nm not in seen:
+                            ordered_names.append(nm)
+                            seen.add(nm)
+            # Render raters in stable label order (rater_1, rater_2, …)
+            # so a given column means the same model across every round
+            # without ever printing the model slug.
+            ordered_slugs = sorted(
+                (s for s in models if s in rater_label),
+                key=lambda s: rater_label[s],
+            )
+            for nm in ordered_names:
+                parts: list[str] = []
+                for model_slug in ordered_slugs:
+                    per_model = models.get(model_slug)
+                    if not isinstance(per_model, dict):
+                        continue
+                    label = rater_label[model_slug]
+                    cell = per_model.get(nm)
+                    if isinstance(cell, dict) and cell.get("score") is not None:
+                        reason = str(cell.get("reason") or "").replace("\n", " ")
+                        if len(reason) > 80:
+                            reason = reason[:77] + "..."
+                        parts.append(
+                            f"{label}={float(cell['score']):.1f} "
+                            f"(\"{reason}\")"
+                        )
+                    else:
+                        parts.append(f"{label}=n/a")
+                rows.append(f"  - {nm}: " + ", ".join(parts))
+            errors = ens.get("errors") or {}
+            if errors:
+                err_labels = ", ".join(
+                    sorted(
+                        rater_label.get(str(s), "rater_?")
+                        for s in errors
+                    )
+                )
+                rows.append(f"  · raters unavailable this round: {err_labels}")
+        return "\n".join(rows)
+
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
         lines = [
