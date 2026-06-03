@@ -221,7 +221,7 @@ def test_delegate_with_kb_write_name_denied():
     gate = _gate()
     intent = Intent(
         type=IntentType.DELEGATE,
-        payload={"action_name": "mcp__cortex_kb__verify"},
+        payload={"action_name": "mcp__cortex_kb__propose_point"},
     )
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)
@@ -238,7 +238,7 @@ def test_request_kind_with_kb_write_name_denied():
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel",
-            "kind": "mcp__cortex_kb__propose_edge",
+            "kind": "mcp__cortex_kb__propose_point",
         },
     )
     with pytest.raises(PolicyDenied) as excinfo:
