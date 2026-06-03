@@ -144,12 +144,55 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     return candidates
 
 
-def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any]:
-    """Find a candidate by ``kernel_id`` (or name) or raise KeyError."""
+def _normalize_kernel_id(value: str) -> str:
+    """Fold hallucinated synthetic prefixes (``kn``/``rn``) onto the real
+    ``k`` numbering and lower-case for a tolerant comparison.
+
+    The Orchestration LLM sometimes returns ``kn001`` / ``rn010`` instead of
+    the TraceLens ``k001`` / ``k010`` it was offered; collapsing the leading
+    letter run to a single ``k`` recovers the intended candidate without
+    guessing across unrelated kernels.
+    """
+    s = value.strip().lower()
+    for prefix in ("kn", "rn"):
+        if s.startswith(prefix) and s[len(prefix):].isdigit():
+            return "k" + s[len(prefix):]
+    return s
+
+
+def find_candidate(
+    candidates: list[dict[str, Any]], kernel_id: str
+) -> dict[str, Any] | None:
+    """Resolve a candidate by ``kernel_id`` / ``name``.
+
+    Resolution order: exact ``kernel_id`` match, then a unique routable
+    ``name`` match, then a
+    normalized ``kernel_id`` match (case-insensitive, ``kn``/``rn`` prefix
+    folded to ``k``). Returns ``None`` when nothing matches so the caller can
+    skip the kernel gracefully instead of crashing the whole run with a
+    ``KeyError`` on an LLM-hallucinated id.
+    """
     for candidate in candidates:
-        if candidate.get("kernel_id") == kernel_id or candidate.get("name") == kernel_id:
+        if candidate.get("kernel_id") == kernel_id:
             return candidate
-    raise KeyError(f"kernel not found in candidates: {kernel_id}")
+    # Operator names are not stable identifiers: several TraceLens candidates
+    # can share names like ``aten::mm``. Accept a name only when it uniquely
+    # identifies a routable candidate; otherwise treat it as an invalid
+    # kernel_id so the caller can skip instead of optimizing the wrong target.
+    name_matches = [
+        candidate
+        for candidate in candidates
+        if candidate.get("name") == kernel_id
+        and candidate.get("reusable_native_kernel") is not False
+        and candidate.get("source_file")
+    ]
+    if len(name_matches) == 1:
+        return name_matches[0]
+    target = _normalize_kernel_id(kernel_id)
+    for candidate in candidates:
+        if _normalize_kernel_id(str(candidate.get("kernel_id") or "")) == target:
+            return candidate
+    return None
 
 
 def existing_path(value: str) -> str:
@@ -2925,7 +2968,82 @@ def main() -> int:
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at)
         candidates_path = Path(args.candidates_path) if args.candidates_path else run_dir / "kernel_candidates.json"
-        candidate = find_candidate(load_candidates(candidates_path), args.kernel_id)
+        all_candidates = load_candidates(candidates_path)
+        candidate = find_candidate(all_candidates, args.kernel_id)
+        if candidate is None:
+            # The Orchestration LLM supplied a kernel_id that matches no
+            # TraceLens candidate (e.g. a hallucinated operator name). Skip
+            # this kernel cleanly instead of crashing the whole subprocess
+            # with a KeyError, so the orchestrator can move on to the next
+            # decision rather than burning the run.
+            known = [str(c.get("kernel_id") or "") for c in all_candidates]
+            msg = (
+                f"kernel_id {args.kernel_id!r} not found among TraceLens "
+                f"candidates {known}; skipping (no fabricated target)"
+            )
+            append_log(log_path, f"[skip] {msg}")
+            update_status(status_path, state="skipped", current_step="skipped",
+                          log_path=log_path, artifact_paths=artifacts,
+                          run_id=run_id, started_at=started_at, error=msg)
+            print(json.dumps({
+                "tool": "kernel_optimization",
+                "session_id": session_id,
+                "run_id": run_id,
+                "kernel_id": args.kernel_id,
+                "status": "skipped",
+                "reason": "kernel_id_not_in_candidates",
+                "error_class": "invalid_kernel_id",
+                "known_kernel_ids": known,
+                "cli_log_path": str(log_path),
+                "status_path": str(status_path),
+            }, indent=2, sort_keys=True))
+            return 0
+        if (
+            candidate.get("reusable_native_kernel") is False
+            or not candidate.get("source_file")
+        ):
+            reason = (
+                candidate.get("skip_reason")
+                or candidate.get("optimization_notes")
+                or "candidate is not a reusable native kernel"
+            )
+            msg = (
+                f"kernel_id {args.kernel_id!r} resolved to non-routable "
+                f"TraceLens candidate {candidate.get('kernel_id')!r}: {reason}"
+            )
+            append_log(log_path, f"[skip] {msg}")
+            update_status(status_path, state="skipped", current_step="skipped",
+                          log_path=log_path, artifact_paths=artifacts,
+                          run_id=run_id, started_at=started_at, error=msg)
+            print(json.dumps({
+                "tool": "kernel_optimization",
+                "session_id": session_id,
+                "run_id": run_id,
+                "kernel_id": candidate.get("kernel_id") or args.kernel_id,
+                "requested_kernel_id": args.kernel_id,
+                "resolved_kernel_id": candidate.get("kernel_id"),
+                "kernel_name": candidate.get("name"),
+                "status": "skipped",
+                "decision": "REVERT",
+                "error_class": (
+                    "missing_native_source"
+                    if not candidate.get("source_file")
+                    else "non_reusable_kernel"
+                ),
+                "reason": "non_routable_candidate",
+                "skip_reason": reason,
+                "verification": {
+                    "micro_speedup": 0.0,
+                    "best_artifact_path": "",
+                },
+                "proposal": {
+                    "decision": "REVERT",
+                    "reasons": [reason],
+                },
+                "cli_log_path": str(log_path),
+                "status_path": str(status_path),
+            }, indent=2, sort_keys=True))
+            return 0
         # TraceLens is the source of truth for kernel_id → source_file.
         # ``_resolve_source_file`` overrides any LLM-supplied path that
         # disagrees with ``candidate.source_file`` and logs the override,
