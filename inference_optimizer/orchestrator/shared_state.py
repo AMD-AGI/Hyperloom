@@ -18,6 +18,10 @@ fields:
                                 structured + free-text notes) loaded from
                                 the launcher's ``$USER_DATA_PATH/model_arch.json``;
                                 prompt-context only, no deterministic gating
+    model_architectures list  — config.json ``architectures``; stamped into
+                                the recipe-snapshot ``extras`` as a KB tag
+    model_type          str   — config.json ``model_type``; stamped into
+                                the recipe-snapshot ``extras`` as a KB tag
     target_summary      str   — set by `target_analysis` action
     baseline_tput       float — tok/s/GPU after `baseline` action
     baseline_accuracy   float — GSM8K score after `baseline`
@@ -316,6 +320,16 @@ class SharedState:
     # filter / framework gap token / recipe key stay on ``model_class``).
     # Empty dict means "no profile available"; renderers omit the block.
     model_arch: dict = field(default_factory=dict)
+    # KB tags lifted verbatim from the model weights' ``config.json``
+    # (``architectures`` list + ``model_type`` string). Populated at
+    # fresh-launch by ``cli._load_model_config_tags``; resume rehydrates
+    # the persisted values from state.json. Stamped into the recipe-snapshot
+    # ``extras`` on every KB write (T0 anchor + KEEP/REVERT/CLOSE amend) so a
+    # fine-tuned model carries the same architecture identity as the base
+    # model it derives from. Empty (``[]`` / ``""``) means "config.json
+    # absent or unreadable".
+    model_architectures: list[str] = field(default_factory=list)
+    model_type: str = ""
     framework: str = ""
     gpu_type: str = ""
     # Workload metadata mirrored from manifest.json at session start
