@@ -179,6 +179,12 @@
 - retired action 删除清单。
 - action source drift guard 的简化测试。
 
+本阶段第一批 action surface 收敛的执行记录见
+`code-cleansing-plan/03-action-surfaces/01-execution-status.MD`。
+
+当前 action 分类表见
+`code-cleansing-plan/03-action-surfaces/02-action-surface-table.MD`。
+
 ## 完成标准
 
 完成后应达到:
