@@ -100,7 +100,6 @@ DEFAULT_KEEP_THRESHOLD_PCT = 0.2
 # consistent under the same noise floor.
 DEFAULT_STACK_STABLE_PCT = 0.2
 
-
 def _now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string.
 
