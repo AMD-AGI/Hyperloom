@@ -201,6 +201,11 @@ Specialist 的知识上下文应由一个清晰输入 bundle 生成:
 - research scout advisory 规则。
 - specialist knowledge input bundle 设计。
 
+本阶段的知识系统职责图见
+`code-cleansing-plan/06-knowledge/01-knowledge-responsibility-map.MD`,
+执行记录见
+`code-cleansing-plan/06-knowledge/02-execution-status.MD`。
+
 ## 完成标准
 
 完成后应达到:
