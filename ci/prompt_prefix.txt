@@ -46,7 +46,10 @@ def git_out(args):
     except Exception:
         return ""
 source_dir = os.environ.get("HYPERLOOM_SOURCE_DIR", "")
-result_dir = os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")
+# Write the audit file next to the session on wekafs (USER_DATA_PATH). Never
+# fall back to /workspace — if the platform did not set USER_DATA_PATH we skip
+# the write rather than scatter artifacts onto ephemeral sandbox disk.
+result_dir = os.environ.get("USER_DATA_PATH", "")
 # Strip the embedded token from the remote URL we record (the token is OK
 # inside the sandbox env but should never end up in a persisted artifact).
 def _sanitize(url: str) -> str:
@@ -61,9 +64,10 @@ payload = {
         "remote": _sanitize(git_out(["git", "-C", source_dir, "config", "--get", "remote.origin.url"])) if source_dir else "",
     }
 }
-os.makedirs(result_dir, exist_ok=True)
-with open(os.path.join(result_dir, "source_commits.json"), "w", encoding="utf-8") as f:
-    json.dump(payload, f, indent=2)
+if result_dir:
+    os.makedirs(result_dir, exist_ok=True)
+    with open(os.path.join(result_dir, "source_commits.json"), "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
 PY
 
 Then run the skill at $HYPERLOOM_SOURCE_DIR/inference_optimizer/SKILL.md from
