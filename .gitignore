@@ -37,7 +37,7 @@ marathon-sessions/
 kernel-agent/runs/
 .optimization_strategies.md
 optimization_report.md
-bench.py
+/bench.py
 
 # IDE / editor
 .idea/
