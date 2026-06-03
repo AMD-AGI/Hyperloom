@@ -113,6 +113,10 @@ VALID_VERDICT_CLASSES: frozenset[str] = frozenset({
 # name in this table. Unknown names fall back to ``"exploration"``
 # (the safest non-deadlocking default: it only blocks the rare
 # integrate-shaped action that genuinely needs evidence).
+# Only live actions (those with an ``actions/_meta/<name>.yaml``) are
+# listed here. Retired names are intentionally absent — the loader only
+# consults this table for an action it is already loading from yaml, and
+# any unlisted name falls through to ``_DEFAULT_VERDICT_CLASS_FALLBACK``.
 _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     # archival — transcribe state, no new measurement
     "report":                  "archival",
@@ -124,19 +128,14 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     # diagnostics to GENERATE data)
     "baseline":                "exploration",
     "roofline":                "exploration",
-    "params":                  "exploration",
-    "backends":                "exploration",
     "sweep":                   "exploration",
+    "conc_sweep":              "exploration",
     "kernel_opt":              "exploration",
-    "compiler_tuning":         "exploration",
-    "comm_optimization":       "exploration",
+    "gemm_tuning":             "exploration",
     "operator_tuning":         "exploration",
     "vendor_kernel_config":    "exploration",
     "deep_kernel_analysis":    "exploration",
     "recover":                 "exploration",
-    "validate_stack":          "exploration",
-    "dream":                   "exploration",
-    "re_explore":              "exploration",
     # dynamic_action — multi-turn ReAct sub-agent that explores a
     # cross-domain patch combination (dynamic_action.MD P1).
     "dynamic_action":          "exploration",

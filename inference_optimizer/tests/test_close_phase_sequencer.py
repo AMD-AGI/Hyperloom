@@ -169,6 +169,28 @@ class _StubCortex:
         return {"status": "auto_accepted"}
 
 
+class _StubSubResult:
+    """Minimal sub-agent run result: only ``.state`` is read by the
+    CLOSE sequencer (terminal 'succeeded' → step marked done)."""
+
+    def __init__(self, state: str = "succeeded"):
+        self.state = state
+
+
+class _StubSubAgentRunner:
+    """``Coordinator.sub`` double. The CLOSE sequencer awaits
+    ``self.sub.run_task(task)`` for the report / session_breakdown steps;
+    return a terminal-succeeded result so the happy-path sequencer
+    advances without a real sub-agent."""
+
+    def __init__(self):
+        self.run_calls: list[Any] = []
+
+    async def run_task(self, task, *args, **kwargs):
+        self.run_calls.append(task)
+        return _StubSubResult(state="succeeded")
+
+
 @pytest.fixture
 def coord(tmp_path: Path):
     """Lean Coordinator stub for hook unit tests."""
@@ -176,6 +198,7 @@ def coord(tmp_path: Path):
     c.session_dir = tmp_path
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
+    c.sub = _StubSubAgentRunner()
     c.cortex_kb = None
     c.knowledge_plane = None
     c.role_registry = {}

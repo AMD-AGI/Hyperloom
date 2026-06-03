@@ -1,0 +1,129 @@
+name: SaFE Optimize Tiny
+
+# Thin scheduled/manual entrypoint for the 3B-12B Tiny pool.
+# It intentionally delegates to `SaFE Optimize Submit` so submission, waiting,
+# artifact collection, summary rendering, webhook, and perf publishing stay
+# byte-for-byte on the same path as the regular SaFE submit workflow.
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      batch_index:
+        description: 'Optional 0-based batch override. Empty = derive from the current 4-hour UTC slot.'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Forward dry_run=true to SaFE Optimize Submit.'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: optimize-tiny-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch-submit:
+    name: Dispatch 60-model Tiny submit
+    runs-on: hyperloom-mh826
+    timeout-minutes: 10
+    env:
+      CANDIDATES_FILE: candidates/hf_3b_12b_base_inference_2026-06-01.json
+      CANDIDATES_PATH: ci/candidates/hf_3b_12b_base_inference_2026-06-01.json
+      BATCH_SIZE: '60'
+      SUBMIT_WORKSPACES: core42-sandbox,core42-hyperloom
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve Tiny batch
+        id: batch
+        env:
+          INPUT_BATCH_INDEX: ${{ github.event.inputs.batch_index }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import math
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          raw = (os.environ.get("INPUT_BATCH_INDEX") or "").strip()
+          batch_size = int(os.environ["BATCH_SIZE"])
+          data = json.loads(Path(os.environ["CANDIDATES_PATH"]).read_text(encoding="utf-8"))
+          pool_size = len(data.get("candidates") or [])
+          batches = max(math.ceil(pool_size / batch_size), 1)
+
+          if raw:
+              try:
+                  batch_index = max(int(raw), 0) % batches
+              except ValueError:
+                  batch_index = 0
+          else:
+              epoch = datetime(2026, 6, 1, tzinfo=timezone.utc)
+              now = datetime.now(timezone.utc)
+              days = max((now.date() - epoch.date()).days, 0)
+              slot = days * 6 + (now.hour // 4)
+              batch_index = slot % batches
+
+          start = batch_index * batch_size
+          end = min(start + batch_size, pool_size)
+          print(f"batch_index={batch_index}")
+          print(f"pool_size={pool_size}")
+          print(f"batches={batches}")
+          print(f"slice={start}:{end}")
+          PY
+
+      - name: Dispatch SaFE Optimize Submit
+        run: |
+          set -euo pipefail
+          dry_run="${DRY_RUN:-false}"
+          ref="${GITHUB_REF_NAME}"
+          batch_index="${{ steps.batch.outputs.batch_index }}"
+
+          echo "Dispatching optimize-submit.yml on ref=${ref}"
+          echo "Tiny pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=60; submit_workspaces=${SUBMIT_WORKSPACES}"
+
+          payload=$(python3 - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "ref": os.environ["GITHUB_REF_NAME"],
+              "inputs": {
+                  "models": "",
+                  "candidates_file": os.environ["CANDIDATES_FILE"],
+                  "batch_index": os.environ["BATCH_INDEX"],
+                  "batch_size": os.environ["BATCH_SIZE"],
+                  "exclude_leaderboard": "false",
+                  "exclude_active_workflows": "true",
+                  "max_parallel": "60",
+                  "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
+                  "task_timeout_min": "240",
+                  "max_hours": "4",
+                  "all_artifacts": "true",
+                  "dry_run": os.environ.get("DRY_RUN") or "false",
+              },
+          }
+          print(json.dumps(payload))
+          PY
+          )
+
+          curl -fsS \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/optimize-submit.yml/dispatches" \
+            -d "$payload"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          BATCH_INDEX: ${{ steps.batch.outputs.batch_index }}
