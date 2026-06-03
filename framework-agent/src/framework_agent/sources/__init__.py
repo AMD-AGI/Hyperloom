@@ -47,7 +47,15 @@ class SourceConfigError(RuntimeError):
 
 
 def _dedupe(items: Iterable[Candidate]) -> list[Candidate]:
-    """Stable-deduplicate candidates by ref, preserving first-seen order."""
+    """Stable-deduplicate candidates by ref, preserving first-seen order.
+
+    Args:
+        items (Iterable[Candidate]): Candidates to deduplicate.
+
+    Returns:
+        list[Candidate]: Candidates with duplicate refs removed, first-seen
+            order preserved.
+    """
     seen: set[str] = set()
     out: list[Candidate] = []
     for item in items:
@@ -70,6 +78,15 @@ def _pr_to_candidate(
     ``score`` carries the gap-relevance value produced by
     :func:`_rank_by_keyword_overlap`; defaults to 0.0 for code paths that
     skip ranking (explicit refs, label-only listing with no keywords).
+
+    Args:
+        pr (GitHubPr): Source PR record from a discovery backend.
+        repo_url (str): Repo URL to record on the candidate.
+        source (str): Origin tag (e.g. ``"primus_cortex"`` or ``"github"``).
+        score (float): Gap-relevance score to attach. Defaults to 0.0.
+
+    Returns:
+        Candidate: A candidate carrying the PR ref, repo, title, URL, and score.
     """
     return Candidate(
         ref=pr.ref,
@@ -95,6 +112,19 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
 
     Hard-fails when ``primus_cortex`` is requested without configuration,
     or when the primus-cortex transport fails.
+
+    Args:
+        request (ExploreRequest): Request carrying explicit refs, search modes,
+            repo URL, and search configuration.
+
+    Returns:
+        list[Candidate]: Deduplicated candidates unioned across explicit refs
+            and every enabled search mode.
+
+    Raises:
+        SourceConfigError: If an unknown search mode is requested, or
+            ``primus_cortex`` is requested without configuration.
+        PrimusCortexError: If a primus_cortex query fails.
     """
     out: list[Candidate] = []
 
@@ -135,7 +165,16 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
 
 
 def _run_github(request: ExploreRequest) -> list[Candidate]:
-    """Query anonymous GitHub Search; best-effort - empty list on failure."""
+    """Query anonymous GitHub Search; best-effort - empty list on failure.
+
+    Args:
+        request (ExploreRequest): Request supplying repo URL, gap description,
+            and candidate cap.
+
+    Returns:
+        list[Candidate]: Candidates from GitHub Search, or an empty list on any
+            failure.
+    """
     prs = github_backend.search_perf_prs(
         request.repo_url,
         gap_description=request.gap_description,
@@ -156,6 +195,13 @@ def _resolve_keywords(request: ExploreRequest) -> list[str]:
        :func:`extract_keywords` (whitelist filter + CamelCase rescue).
     3. Else -> empty list. Caller drops into the cheapest label-only
        :func:`list_perf_prs` path.
+
+    Args:
+        request (ExploreRequest): Request carrying explicit ``keywords`` and/or
+            ``gap_description``.
+
+    Returns:
+        list[str]: Lowercased keyword list, possibly empty.
     """
     if request.keywords:
         return [k.lower() for k in request.keywords if k.strip()]
@@ -185,6 +231,13 @@ def _rank_by_keyword_overlap(
     :data:`framework_agent.keywords._ANTI_KEYWORDS`), so when the gap
     has no orthogonal-axis trigger the behaviour is identical to the
     prior positive-overlap-only scoring.
+
+    Args:
+        prs (list[GitHubPr]): PRs to rerank.
+        keywords (list[str]): Active gap keywords; empty leaves order untouched.
+
+    Returns:
+        list[GitHubPr]: PRs sorted by descending anti-aware score, ties stable.
     """
     if not keywords:
         return list(prs)
@@ -211,6 +264,19 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
       pipeline so we still get the best of the available pool.
     * If ``gap_description`` is empty or the extractor returns no
       keywords, preserve the old label-only behaviour (cheapest path).
+
+    Args:
+        request (ExploreRequest): Request carrying repo URL, primus_cortex
+            config, keywords/gap description, and candidate cap.
+
+    Returns:
+        list[Candidate]: Gap-ranked candidates from primus_cortex, trimmed to
+            ``max_search_candidates``.
+
+    Raises:
+        SourceConfigError: If no primus_cortex configuration is present.
+        PrimusCortexError: On primus_cortex transport / parse errors from the
+            listing endpoint.
     """
     cfg = request.primus_cortex
     if cfg is None:

@@ -24,6 +24,17 @@ from ..base import (
 
 
 def _snapshot_kv(label: str, snap: dict[str, Any] | None) -> str:
+    """Render one roofline snapshot as a labelled key-value block.
+
+    Args:
+        label (str): The block heading (e.g. ``"Baseline"`` or ``"Latest"``).
+        snap (dict[str, Any] | None): The snapshot record, including an
+            optional ``top_kernel`` sub-dict.
+
+    Returns:
+        str: The markdown block, or an empty string when the snapshot is
+            missing or has no displayable fields.
+    """
     if not isinstance(snap, dict) or not snap:
         return ""
     tk = snap.get("top_kernel") or {}
@@ -46,6 +57,15 @@ def _snapshot_kv(label: str, snap: dict[str, Any] | None) -> str:
 
 
 def _delta_block(delta: dict[str, Any] | None) -> str:
+    """Render the roofline ``delta`` mapping as a two-column table.
+
+    Args:
+        delta (dict[str, Any] | None): Field-to-value delta mapping.
+
+    Returns:
+        str: A markdown ``field``/``value`` table, or an empty string when the
+            delta is missing or empty.
+    """
     if not isinstance(delta, dict) or not delta:
         return ""
     rows = []
@@ -58,6 +78,19 @@ def _delta_block(delta: dict[str, Any] | None) -> str:
 
 @register_renderer("roofline")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the roofline-comparison section, one block per ``final.json``.
+
+    Each block shows the source path, comparison mode, baseline and latest
+    snapshots, and any emitted delta values. Skipped when the breakdown has
+    no ``roofline`` list.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered roofline section, or a skipped
+            placeholder when there are no entries.
+    """
     entries_raw = breakdown.get("roofline")
     entries: list[dict[str, Any]] = entries_raw if isinstance(entries_raw, list) else []
     if not entries:

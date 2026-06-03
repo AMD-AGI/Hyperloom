@@ -51,6 +51,22 @@ def evaluate_event_signals(
     *,
     config: EventConfig | None = None,
 ) -> list[Symptom]:
+    """Evaluate all Coordinator-event-driven signals for this tick.
+
+    Combines inbox items and ``data.coordinator_events`` and runs the
+    policy-denied, delegated-failure, recover-unsuccessful, and
+    idempotency-replay rules.
+
+    Args:
+        ctx (ReactorContext): Reactor context providing the inbox.
+        data (SourceData): Collected source data including coordinator events.
+        config (EventConfig | None): Tunables; defaults to :class:`EventConfig`
+            when ``None``.
+
+    Returns:
+        list[Symptom]: All event-driven symptoms found this tick, possibly
+            empty.
+    """
     cfg = config or EventConfig()
     inbox_view = _normalise_inbox(ctx.inbox)
     coord_view = _normalise_events(data.coordinator_events)
@@ -68,6 +84,16 @@ def _policy_denied_symptoms(
     events: list[dict[str, Any]],
     cfg: EventConfig,
 ) -> list[Symptom]:
+    """Fire ``repeated_policy_denied`` for sources over the denial threshold.
+
+    Args:
+        events (list[dict[str, Any]]): Normalised inbox + coordinator events.
+        cfg (EventConfig): Tunables (provides the policy-denied threshold).
+
+    Returns:
+        list[Symptom]: One ``repeated_policy_denied`` symptom per offending
+            source, possibly empty.
+    """
     sources: Counter[str] = Counter()
     rules: Counter[str] = Counter()
     for ev in events:
@@ -114,6 +140,16 @@ def _delegated_failure_symptoms(
     events: list[dict[str, Any]],
     cfg: EventConfig,
 ) -> list[Symptom]:
+    """Fire ``repeated_failure`` for action families over the failure threshold.
+
+    Args:
+        events (list[dict[str, Any]]): Normalised inbox + coordinator events.
+        cfg (EventConfig): Tunables (provides the delegated-failure threshold).
+
+    Returns:
+        list[Symptom]: One ``repeated_failure`` symptom per offending action
+            family, possibly empty.
+    """
     family_counts: Counter[str] = Counter()
     last_evidence: dict[str, dict[str, Any]] = {}
     for ev in events:
@@ -172,6 +208,14 @@ def _idempotency_replay_symptoms(
     We hash the projected payload + action_name and fire when the same
     hash carries ``>= idempotency_replay_threshold`` distinct keys
     within a single tick's inbox view.
+
+    Args:
+        ctx (ReactorContext): Reactor context providing the inbox of proposals.
+        cfg (EventConfig): Tunables (provides the replay threshold).
+
+    Returns:
+        list[Symptom]: One ``idempotency_replay`` symptom per offending
+            (action, payload-hash) bucket, possibly empty.
     """
     if not ctx.inbox:
         return []
@@ -257,6 +301,15 @@ def _recover_unsuccessful_symptoms(
     The function inspects only the latest ``delegated_result`` for the
     ``recover`` action; older recover attempts that succeeded already
     cleared the leak so we don't second-guess them.
+
+    Args:
+        events (list[dict[str, Any]]): Normalised inbox + coordinator events.
+        cfg (EventConfig): Tunables (provides the recover lookback window).
+
+    Returns:
+        list[Symptom]: A one-element list with the ``recover_unsuccessful``
+            symptom when the latest recover needs review, otherwise an empty
+            list.
     """
     head = events[-cfg.recover_lookback_events:] if events else []
     latest: dict[str, Any] | None = None
@@ -316,6 +369,13 @@ def _is_recover_payload(payload: dict[str, Any]) -> bool:
     Coordinator may tag the action via ``kind`` (canonical), or the
     payload may carry executor-specific fields like ``force_gpu_cleanup``
     that betray the action even when ``kind`` is missing.
+
+    Args:
+        payload (dict[str, Any]): A ``delegated_result`` payload.
+
+    Returns:
+        bool: ``True`` if the payload appears to originate from the ``recover``
+            action, otherwise ``False``.
     """
     if str(payload.get("kind") or "").strip() == "recover":
         return True
@@ -336,6 +396,15 @@ def _is_recover_payload(payload: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 def _normalise_inbox(inbox: list[InboxItem]) -> list[dict[str, Any]]:
+    """Convert inbox items to the common event-dict shape used by the rules.
+
+    Args:
+        inbox (list[InboxItem]): Inbox items from the reactor context.
+
+    Returns:
+        list[dict[str, Any]]: Event dicts with ``agent``/``topic``/``payload``/
+            ``ts`` keys (``ts`` is always ``None`` for inbox items).
+    """
     return [
         {
             "agent": item.from_agent,
@@ -348,6 +417,15 @@ def _normalise_inbox(inbox: list[InboxItem]) -> list[dict[str, Any]]:
 
 
 def _normalise_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalise raw coordinator events to the common event-dict shape.
+
+    Args:
+        events (list[dict[str, Any]]): Raw events read from conductor.db.
+
+    Returns:
+        list[dict[str, Any]]: Event dicts with ``agent``/``topic``/``payload``/
+            ``ts`` keys.
+    """
     out: list[dict[str, Any]] = []
     for ev in events:
         out.append(
@@ -366,6 +444,13 @@ def _family_of(payload: dict[str, Any]) -> str:
 
     Coordinator does not always tag a family; fall back to ``kind``
     when present so the rule still groups by action name.
+
+    Args:
+        payload (dict[str, Any]): A ``delegated_result`` payload.
+
+    Returns:
+        str: The inferred action family, or an empty string when neither
+            ``family`` nor ``kind`` is present.
     """
     family = payload.get("family")
     if isinstance(family, str) and family.strip():

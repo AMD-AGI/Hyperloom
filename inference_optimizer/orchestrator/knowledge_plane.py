@@ -84,7 +84,11 @@ _DOMAIN_REPOS_FILENAME: str = "_domain_repos.yaml"
 
 def _domain_repos_path() -> Path:
     """Where ``_domain_repos.yaml`` lives. Centralised so tests can
-    monkeypatch the resolution if they ever need to."""
+    monkeypatch the resolution if they ever need to.
+
+    Returns:
+        Path: The resolved path to the ``_domain_repos.yaml`` config.
+    """
     return asset_actions_dir() / "_meta" / _DOMAIN_REPOS_FILENAME
 
 
@@ -96,6 +100,14 @@ def load_domain_repos(path: Path | None = None) -> dict[str, DomainRepos]:
     specialist domains pre-populated. Missing / malformed yaml falls
     back to an empty dict + a warning log; callers should treat that
     as "no PR feed for any domain".
+
+    Args:
+        path (Path | None): Override config path; resolved from
+            :func:`_domain_repos_path` when ``None``.
+
+    Returns:
+        dict[str, DomainRepos]: Mapping of domain key to its resolved repos
+            config; empty when the yaml is missing or malformed.
     """
     target = path or _domain_repos_path()
     if not target.exists():
@@ -191,6 +203,21 @@ class KnowledgePlane:
         pr_feed_per_repo_limit: int = DEFAULT_PR_FEED_PER_REPO_LIMIT,
         pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL,
     ) -> "KnowledgePlane":
+        """Construct a plane from injected clients and config.
+
+        Args:
+            cortex_kb (Any): Optional legacy Cortex KB client (``None`` under
+                v2).
+            pr_monitor (PRMonitorClient | None): Optional PR Monitor client.
+            domain_repos (dict[str, DomainRepos] | None): Domain→repos config;
+                loaded from disk when ``None``.
+            pr_feed_window_days (int): PR feed lookback window in days.
+            pr_feed_per_repo_limit (int): Max PRs fetched per repo.
+            pr_monitor_mcp_url (str): MCP URL advertised to specialists.
+
+        Returns:
+            KnowledgePlane: The constructed facade.
+        """
         return cls(
             cortex_kb=cortex_kb,
             pr_monitor=pr_monitor,
@@ -211,10 +238,20 @@ class KnowledgePlane:
     # ------------------------------------------------------------------
     @property
     def pr_monitor_enabled(self) -> bool:
+        """Whether the PR Monitor client is wired and enabled.
+
+        Returns:
+            bool: ``True`` when a PR Monitor client is present and enabled.
+        """
         return self.pr_monitor is not None and self.pr_monitor.enabled
 
     @property
     def cortex_enabled(self) -> bool:
+        """Whether a Cortex KB client is wired and enabled.
+
+        Returns:
+            bool: ``True`` when a Cortex KB client is present and enabled.
+        """
         # ``self.cortex_kb`` may be a legacy CortexKBClient (which
         # has an ``.enabled`` attr) or ``None`` (the v2-default).
         # Tolerant getattr so a future caller passing the v2
@@ -225,7 +262,14 @@ class KnowledgePlane:
         )
 
     def resolve_domain_repos(self, domain: str) -> DomainRepos | None:
-        """Look up domain config; returns None for unknown domains."""
+        """Look up domain config; returns None for unknown domains.
+
+        Args:
+            domain (str): The specialist domain key.
+
+        Returns:
+            DomainRepos | None: The resolved config, or ``None`` when unknown.
+        """
         return self.domain_repos.get(domain)
 
     def specialist_mcp_url(self) -> str:
@@ -234,6 +278,9 @@ class KnowledgePlane:
         Returns ``""`` when PR Monitor is disabled so the specialist
         runner can elide the ``mcp__pr_monitor__*`` tool block instead
         of dangling a broken endpoint.
+
+        Returns:
+            str: The MCP URL, or ``""`` when PR Monitor is disabled.
         """
         if not self.pr_monitor_enabled:
             return ""
@@ -315,6 +362,16 @@ class KnowledgePlane:
         """Try the per-domain content fallback. Returns a fully-formed
         select_kb_for_domain result dict on first non-empty hit, else
         None (so the caller emits the legacy empty-result envelope).
+
+        Args:
+            domain (str): The specialist domain key.
+            anchor (str): The KB anchor canonical id for the domain.
+            hw_slug (str | None): Optional hardware slug used to filter records.
+            warnings (list[str]): Mutable warnings list appended to in place.
+
+        Returns:
+            dict[str, Any] | None: A populated KB-subgraph result on a hit, or
+                ``None`` when no strategy returns content.
         """
         from ..cortex_kb_constants import PATH_QUERY_POINT
 
@@ -419,6 +476,18 @@ class KnowledgePlane:
         - The implementation mirrors the existing
           :meth:`pr_feed_warm` defensive shape — every failure mode is
           a warning string, not an exception.
+
+        Args:
+            domain (str): The specialist domain key to anchor the traversal.
+            budget_steps (int): Max traversal hops. Defaults to ``4``.
+            budget_branches (int): Max branches per hop. Defaults to ``20``.
+            hw_slug (str | None): Optional hardware slug for the content
+                fallback filter.
+
+        Returns:
+            dict[str, Any]: The compact KB sub-graph dict (``anchor`` /
+                ``domain`` / ``points`` / ``neighbors`` / ``paths`` /
+                ``candidates`` / ``warnings``); fail-soft on every error path.
         """
         from .specialist_domains import get_domain
         from ..cortex_kb_constants import (
@@ -542,6 +611,15 @@ class KnowledgePlane:
             }
 
         def _str_list(raw: Any, cap: int) -> list[str]:
+            """Coerce a raw traverse field into a capped list of strings.
+
+            Args:
+                raw (Any): The raw field value from the traverse response.
+                cap (int): Maximum number of entries to keep.
+
+            Returns:
+                list[str]: Up to ``cap`` string-rendered entries.
+            """
             if not isinstance(raw, list):
                 return []
             out: list[str] = []
@@ -595,6 +673,17 @@ class KnowledgePlane:
         Fail-soft: a domain whose pr_feed_warm raises bubbles up the
         exception text as a single warning rather than poisoning the
         whole batch.
+
+        Args:
+            window_days (int | None): PR lookback window; falls back to the
+                instance default when ``None``.
+            per_repo_limit (int | None): Max PRs per repo; falls back to the
+                instance default when ``None``.
+            total_budget_sec (float): Shared wall-clock budget across domains.
+
+        Returns:
+            dict[str, tuple[list[PRSummary], list[str]]]: A ``{domain: (prs,
+                warnings)}`` map with an entry for every known domain.
         """
         out: dict[str, tuple[list[PRSummary], list[str]]] = {}
         all_warnings: list[str] = []
@@ -640,6 +729,19 @@ class KnowledgePlane:
         - Unknown domain → ``([], ["pr_monitor:unknown_domain:<d>"])``.
         - Per-repo unreachability is folded into ``warnings`` (PRs
           from reachable repos still surface).
+
+        Args:
+            domain (str): The specialist domain key.
+            extra_keywords (list[str] | None): Additional keywords to merge
+                with the domain defaults.
+            window_days (int | None): PR lookback window; instance default when
+                ``None``.
+            per_repo_limit (int | None): Max PRs per repo; instance default
+                when ``None``.
+            total_budget_sec (float): Wall-clock fetch budget in seconds.
+
+        Returns:
+            tuple[list[PRSummary], list[str]]: The fetched PRs and any warnings.
         """
         warnings: list[str] = []
         if not self.pr_monitor_enabled:
@@ -701,6 +803,19 @@ class KnowledgePlane:
         Returns ``{"status": "skip_disabled"}`` when Cortex is
         disabled so callers can branchlessly handle the
         ``--degraded-kb`` case.
+
+        Args:
+            canonical_id (str): Canonical id for the proposed point.
+            kind (str): The point kind.
+            attrs (Mapping[str, Any] | None): Optional point attributes.
+            authority (str): Authority tag. Defaults to ``"HYPOTHESIZED"``.
+            evidence (list[str] | None): Optional evidence strings.
+            source (str): Source tag. Defaults to ``"agent_observation"``.
+            idempotency_key (str | None): Optional idempotency key.
+
+        Returns:
+            dict[str, Any]: The client response, or ``{"status":
+                "skip_disabled"}`` when Cortex is disabled.
         """
         if not self.cortex_enabled:
             return {"status": "skip_disabled"}
@@ -738,6 +853,19 @@ class KnowledgePlane:
 
         Returns the CortexKBClient.propose_point response, or
         ``{"status": "skip_disabled"}`` when Cortex isn't wired.
+
+        Args:
+            repo (str): The ``owner/name`` repo string.
+            number (int): The PR number.
+            url (str): Explicit PR URL; derived from ``(repo, number)`` when
+                empty.
+            sha (str): Commit SHA used when ``number`` is unavailable.
+            attrs (Mapping[str, Any] | None): Extra attributes to merge.
+            evidence (list[str] | None): Optional evidence strings.
+
+        Returns:
+            dict[str, Any]: The propose-point response, or ``{"status":
+                "skip_disabled"}`` when Cortex isn't wired.
         """
         canonical = pr_node_canonical_id(repo, number=number, sha=sha)
         derived_url = url or (
@@ -773,6 +901,15 @@ def pr_node_canonical_id(repo: str, *, number: int = 0, sha: str = "") -> str:
     otherwise ``pr.<repo>@<sha>``. Falls back to
     ``pr.<repo>.unknown`` (defensive — should never happen since the
     caller always knows at least one of the two).
+
+    Args:
+        repo (str): The ``owner/name`` repo string.
+        number (int): The PR number; preferred when positive. Defaults to ``0``.
+        sha (str): Commit SHA; used when ``number`` is unavailable. Defaults to
+            ``""``.
+
+    Returns:
+        str: The derived canonical id.
     """
     repo_clean = str(repo or "").strip()
     if not repo_clean:

@@ -133,11 +133,27 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp formatted with microsecond precision.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _safe_redact(s: str) -> str:
-    """Redact obvious secrets from a transcript line before writing to disk."""
+    """Redact obvious secrets from a transcript line before writing to disk.
+
+    Scans for known environment-variable secret names and masks their values
+    in place using a conservative, regex-less substitution.
+
+    Args:
+        s (str): The raw transcript line that may contain secret material.
+
+    Returns:
+        str: The line with any recognised secret names suffixed by
+            ``[REDACTED]``.
+    """
     out = s
     for needle in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
         if needle in out:
@@ -206,6 +222,17 @@ def build_empty_specialist_done(
     ``kill_task`` synth path. Guarantees
     the payload satisfies PolicyGate R3 schema (``empty=true``,
     ``proposal_set=[]``, non-empty summary).
+
+    Args:
+        gap_canonical_id (str): Canonical id of the gap the specialist was
+            dispatched against.
+        domain (str): Specialist domain key.
+        reason (str): Human-readable reason the run produced no proposals.
+        confidence (float): Confidence score, clamped into ``[0.0, 1.0]``.
+            Defaults to ``0.0``.
+
+    Returns:
+        dict[str, Any]: A schema-valid empty ``specialist_done`` payload.
     """
     return {
         "gap_canonical_id": gap_canonical_id,
@@ -267,6 +294,26 @@ class SpecialistRunner:
         offered an absent endpoint. ``None`` leaves the default tool
         list untouched (back-compat for callers / tests that don't
         wire a plane yet).
+
+        Args:
+            backend_factory (Callable | None): Callable mapping a
+                :class:`SpecialistDomain` to a Backend for the in-process
+                path. Mutually exclusive with ``subprocess_config``.
+            subprocess_config (SpecialistSubprocessConfig | None): Config for
+                the subprocess dispatch path. Mutually exclusive with
+                ``backend_factory``.
+            session_dir (Path | None): Session root used to derive default
+                per-task workspaces.
+            default_tools (tuple[str, ...]): Default tool whitelist offered to
+                specialists.
+            default_max_turns (int): Default per-task turn budget.
+            per_turn_max_seconds (float): Soft per-turn time budget in seconds.
+            knowledge_plane (Any): Optional :class:`KnowledgePlane` used to
+                gate optional MCP tool blocks.
+
+        Raises:
+            ValueError: If neither or both of ``backend_factory`` and
+                ``subprocess_config`` are supplied.
         """
         if backend_factory is None and subprocess_config is None:
             raise ValueError(
@@ -302,6 +349,9 @@ class SpecialistRunner:
         * Always enforces :data:`SPECIALIST_TOOL_DENYLIST` last
           (defense in depth — caller may have extended ``default_tools``
           carelessly).
+
+        Returns:
+            tuple[str, ...]: The filtered tool whitelist for this task.
         """
         tools = list(self.default_tools)
         plane = self.knowledge_plane
@@ -350,6 +400,15 @@ class SpecialistRunner:
         * ``backend_factory`` is configured (v0.8 M5 in-process path,
           retained for tests + the MockBackend path) — drive
           ``Backend.run`` in the same process via a per-turn loop.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task and any
+                pre-provisioned workspace.
+            prompt_inputs (SpecialistPromptInputs | None): Pre-built prompt
+                inputs; when ``None`` they are assembled from task params.
+
+        Returns:
+            SpecialistRunResult: The outcome record for this invocation.
         """
         prep = await self._prepare(ctx, prompt_inputs=prompt_inputs)
         if prep.early_return is not None:
@@ -368,6 +427,21 @@ class SpecialistRunner:
         *,
         prompt_inputs: SpecialistPromptInputs | None,
     ) -> "_PreparedRun":
+        """Run the shared setup phase before dispatch.
+
+        Resolves the domain, gap, turn budget and workspace, optionally
+        provisions a git worktree, assembles the system/user prompts and
+        writes the initial prompt + heartbeat artifacts.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task.
+            prompt_inputs (SpecialistPromptInputs | None): Pre-built prompt
+                inputs; assembled from task params when ``None``.
+
+        Returns:
+            _PreparedRun: The setup bundle; ``early_return`` is set when the
+                execute phase should be skipped (e.g. unknown domain).
+        """
         params = ctx.task.params or {}
         domain_key = str(params.get("domain") or "").strip()
         gap = str(
@@ -520,7 +594,15 @@ class SpecialistRunner:
     ) -> SpecialistRunResult:
         """Drive ``Backend.run`` in the same Python process, one turn at
         a time, until a specialist_done intent shows up. Used by tests +
-        the MockBackend fast path."""
+        the MockBackend fast path.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task.
+            prep (_PreparedRun): Setup bundle from :meth:`_prepare`.
+
+        Returns:
+            SpecialistRunResult: The finalized run outcome.
+        """
         assert self.backend_factory is not None  # narrowed by run()
         domain = prep.domain
         gap = prep.gap
@@ -640,7 +722,15 @@ class SpecialistRunner:
         self, ctx: RunnerContext, prep: "_PreparedRun",
     ) -> SpecialistRunResult:
         """Spawn a per-task ``claude`` subprocess inside the worktree
-        and reap its ``specialist_done.json`` / ``patches/`` output."""
+        and reap its ``specialist_done.json`` / ``patches/`` output.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task.
+            prep (_PreparedRun): Setup bundle from :meth:`_prepare`.
+
+        Returns:
+            SpecialistRunResult: The finalized run outcome.
+        """
         assert self.subprocess_dispatcher is not None  # narrowed by run()
         domain = prep.domain
         gap = prep.gap
@@ -733,6 +823,26 @@ class SpecialistRunner:
         extra_notes: list[str],
         patches_written: list[str],
     ) -> SpecialistRunResult:
+        """Persist the ``specialist_done`` artifact and build the result.
+
+        Synthesises an empty payload when none was produced, sanitises and
+        truncates the proposal set, merges discovered patches and writes the
+        on-disk ``specialist_done.json``.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task.
+            prep (_PreparedRun): Setup bundle from :meth:`_prepare`.
+            specialist_done_payload (dict[str, Any] | None): Payload harvested
+                from the run, or ``None`` if the run produced none.
+            turns_used (int): Number of turns consumed.
+            tool_violations (list[str]): Non-specialist intent types seen.
+            backend_error (str): Backend/subprocess error string, if any.
+            extra_notes (list[str]): Notes to carry into the result.
+            patches_written (list[str]): Patch paths discovered by the run.
+
+        Returns:
+            SpecialistRunResult: The finalized run outcome record.
+        """
         domain = prep.domain
         gap = prep.gap
         workspace = prep.workspace
@@ -855,6 +965,15 @@ class SpecialistRunner:
         specialist, only without worktree isolation. The reason ends
         up in the ``notes`` of the returned SpecialistRunResult so
         downstream collectors can surface it.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task.
+            workspace (Path | None): Per-task workspace directory, or ``None``.
+
+        Returns:
+            tuple[Path | None, Path | None, str]: A ``(worktree_dir,
+                worktree_base, error)`` triple; the error is empty on success
+                or when no worktree was needed.
         """
         if self.subprocess_config is None or workspace is None:
             return None, None, ""
@@ -873,7 +992,14 @@ class SpecialistRunner:
     # ------------------------------------------------------------------
     @staticmethod
     def to_sub_agent_result(run_result: SpecialistRunResult) -> SubAgentResult:
-        """Translate the rich runner result into the dispatcher contract."""
+        """Translate the rich runner result into the dispatcher contract.
+
+        Args:
+            run_result (SpecialistRunResult): The runner-level outcome record.
+
+        Returns:
+            SubAgentResult: The TaskRegistry-facing result shape.
+        """
         state = "succeeded" if run_result.status in (
             "succeeded", "empty_synthesised", "tool_violation"
         ) else "failed"
@@ -896,6 +1022,18 @@ class SpecialistRunner:
     # Workspace file protocol
     # ------------------------------------------------------------------
     def _resolve_workspace(self, ctx: RunnerContext) -> Path | None:
+        """Resolve (and create) the per-task workspace directory.
+
+        Prefers a workspace pre-created by the SubAgentRunner, falling back to
+        the conventional ``runs/specialist/<task_id>/`` under the session dir.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task.
+
+        Returns:
+            Path | None: The workspace directory, or ``None`` when no session
+                directory is configured and no explicit workspace was passed.
+        """
         # Prefer the workspace SubAgentRunner pre-mkdir'd, fall back to
         # the conventional ``runs/specialist/<task_id>/``.
         extra = getattr(ctx, "extra", None) or {}
@@ -911,20 +1049,61 @@ class SpecialistRunner:
         return p
 
     def _prompt_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``prompt.md`` path within the workspace.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The prompt path, or ``None`` when no workspace.
+        """
         return (workspace / "prompt.md") if workspace else None
 
     def _transcript_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``transcript.jsonl`` path within the workspace.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The transcript path, or ``None`` when no workspace.
+        """
         return (workspace / "transcript.jsonl") if workspace else None
 
     def _heartbeat_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``heartbeat.json`` path within the workspace.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The heartbeat path, or ``None`` when no workspace.
+        """
         return (workspace / "heartbeat.json") if workspace else None
 
     def _done_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``specialist_done.json`` path within the workspace.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The done-artifact path, or ``None`` when no workspace.
+        """
         return (workspace / "specialist_done.json") if workspace else None
 
     def _write_prompt(
         self, workspace: Path | None, system: str, user: str,
     ) -> None:
+        """Write the combined system/user prompt to ``prompt.md``.
+
+        No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            system (str): The system prompt text.
+            user (str): The user prompt text.
+        """
         path = self._prompt_path(workspace)
         if path is None:
             return
@@ -940,6 +1119,15 @@ class SpecialistRunner:
     def _append_transcript(
         self, workspace: Path | None, turn: int, entry: dict[str, Any],
     ) -> None:
+        """Append one JSON line to the workspace ``transcript.jsonl``.
+
+        No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            turn (int): The turn index the entry belongs to.
+            entry (dict[str, Any]): The transcript record to serialise.
+        """
         path = self._transcript_path(workspace)
         if path is None:
             return
@@ -955,6 +1143,17 @@ class SpecialistRunner:
         self, workspace: Path | None, *,
         turn: int, max_turns: int, status: str,
     ) -> None:
+        """Atomically write the workspace ``heartbeat.json``.
+
+        Writes to a temp file then ``os.replace``-s it into place so readers
+        never observe a partial write. No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            turn (int): The current turn index.
+            max_turns (int): The configured turn budget.
+            status (str): A short lifecycle status string.
+        """
         path = self._heartbeat_path(workspace)
         if path is None:
             return
@@ -972,6 +1171,14 @@ class SpecialistRunner:
     def _write_specialist_done(
         self, workspace: Path | None, payload: dict[str, Any],
     ) -> None:
+        """Write the ``specialist_done.json`` artifact with a timestamp.
+
+        No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            payload (dict[str, Any]): The ``specialist_done`` payload to persist.
+        """
         path = self._done_path(workspace)
         if path is None:
             return

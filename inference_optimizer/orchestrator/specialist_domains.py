@@ -42,6 +42,29 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SpecialistDomain:
+    """A single specialist domain entry in the canonical catalogue.
+
+    Describes one specialist (serving, kernel, comm, compiler, system, etc.)
+    that the Orchestrator can dispatch, including which source layer it reads,
+    which KB anchor it maps to, and which upstream repos it scouts for PRs.
+
+    Attributes:
+        key (str): Stable identifier for the domain (e.g. ``serving_specialist``).
+        layer (str): Human-readable description of the source/runtime layer it
+            focuses on.
+        kb_anchor (str): Knowledge-base anchor the domain is associated with.
+        pr_repos (tuple[str, ...]): Upstream repositories scanned for relevant
+            PRs. Defaults to an empty tuple.
+        available_in (str): Milestone in which the domain becomes available
+            (e.g. ``M5`` or ``M6``). Defaults to ``"M6"``.
+        description (str): Free-form description of the domain's responsibilities.
+            Defaults to an empty string.
+        sub_kinds (tuple[str, ...]): Optional per-domain sub_kind catalogue. When
+            empty, only ``params.sub_kind`` in {None, ""} is accepted; non-empty
+            values are denied with a structured PolicyGate error. Defaults to an
+            empty tuple.
+    """
+
     key: str
     layer: str
     kb_anchor: str
@@ -173,7 +196,15 @@ SPECIALIST_DOMAINS_M5: frozenset[str] = frozenset(
 
 
 def get_domain(key: str) -> SpecialistDomain | None:
-    """Return the catalogue entry for ``key`` or None when unknown."""
+    """Return the catalogue entry for ``key`` or None when unknown.
+
+    Args:
+        key (str): The domain key to look up (e.g. ``serving_specialist``).
+
+    Returns:
+        SpecialistDomain | None: The matching catalogue entry, or None if no
+        domain with that key exists.
+    """
     for d in SPECIALIST_DOMAINS:
         if d.key == key:
             return d

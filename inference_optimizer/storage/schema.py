@@ -171,6 +171,14 @@ def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
     *dropped* during migration — they would just be reaped on the
     first ``reap_expired`` anyway, and dropping them avoids carrying
     stale state across a process restart.
+
+    Args:
+        cur (sqlite3.Cursor): Cursor inside the caller's ``BEGIN
+            IMMEDIATE`` transaction.
+
+    Returns:
+        bool: ``True`` if a migration ran; ``False`` if the table was
+            already v2, absent, or an unknown shape.
     """
     try:
         cur.execute("PRAGMA table_info(leases)")
@@ -231,6 +239,9 @@ def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
     Existing rows are left alone so a session resume preserves the
     capacity the operator chose. Coordinator boot can override on
     top via :func:`set_lane_capacity`.
+
+    Args:
+        cur (sqlite3.Cursor): Cursor inside an open transaction.
     """
     for lane, capacity in DEFAULT_LANE_CAPACITIES.items():
         cur.execute(
@@ -243,8 +254,17 @@ def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
 def set_lane_capacity(
     conn: sqlite3.Connection, lane: str, capacity: int,
 ) -> None:
-    """Upsert one ``lane_capacity`` row. Called by the CLI / Coordinator
-    boot path once :data:`SharedState.research_lane_capacity` is known."""
+    """Upsert one ``lane_capacity`` row.
+
+    Called by the CLI / Coordinator boot path once
+    :data:`SharedState.research_lane_capacity` is known. Runs in its
+    own ``BEGIN IMMEDIATE`` transaction.
+
+    Args:
+        conn (sqlite3.Connection): Open database connection.
+        lane (str): Lane name to set capacity for.
+        capacity (int): New capacity value.
+    """
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
@@ -262,10 +282,19 @@ def set_lane_capacity(
 
 
 def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
-    """Return capacity for ``lane``, falling back to
-    :data:`DEFAULT_LANE_CAPACITIES`. Returns ``1`` for unknown lanes
-    (defensive; ``ensure_schema`` already seeds every KNOWN_LANES
-    member)."""
+    """Return capacity for ``lane``, falling back to defaults.
+
+    Falls back to :data:`DEFAULT_LANE_CAPACITIES` (and finally ``1``
+    for unknown lanes — defensive, since ``ensure_schema`` already
+    seeds every known lane).
+
+    Args:
+        conn (sqlite3.Connection): Open database connection.
+        lane (str): Lane name to look up.
+
+    Returns:
+        int: Configured capacity, or the default for the lane.
+    """
     cur = conn.cursor()
     try:
         cur.execute(
@@ -289,6 +318,12 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
     one transaction so a concurrent reader never observes an
     intermediate state (a reader either sees the v1 schema or the v2
     schema, never half of each).
+
+    Args:
+        conn (sqlite3.Connection): Open database connection.
+
+    Returns:
+        int: The maximum recorded schema version after the pass.
     """
     cur = conn.cursor()
     try:
@@ -328,7 +363,14 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
 
 
 def reset_schema(conn: sqlite3.Connection) -> None:
-    """Drop and recreate every managed table. Test-only convenience."""
+    """Drop and recreate every managed table. Test-only convenience.
+
+    Drops all tables in :data:`_MANAGED_TABLES` in one transaction,
+    then re-runs :func:`ensure_schema` to rebuild them.
+
+    Args:
+        conn (sqlite3.Connection): Open database connection.
+    """
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")

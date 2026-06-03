@@ -82,6 +82,15 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
     interleave the per-step annotations far past the 2 MB window, so a
     window-only "absent" verdict must be confirmed before warning.
     Returns ``False`` on any IO/decode error (best-effort, never raises).
+
+    Args:
+        path (Path): Gzipped trace file to scan.
+        substring (str): Marker substring to search for.
+        max_bytes (int | None): Decompressed-byte cap; ``None`` resolves
+            the env/default cap.
+
+    Returns:
+        bool: ``True`` if ``substring`` is found within the byte budget.
     """
     if not substring:
         return False
@@ -120,7 +129,15 @@ def _sample_trace_text(path: Path) -> str | None:
     """Read up to ``_TRACE_INSPECT_BYTES`` of decompressed text from a
     gzipped trace file. Returns ``None`` (and debug-logs) on any IO /
     decode error so callers can skip the check rather than fail the
-    profile path."""
+    profile path.
+
+    Args:
+        path (Path): Gzipped trace file to sample.
+
+    Returns:
+        str | None: Up to ``_TRACE_INSPECT_BYTES`` of decompressed text,
+        or ``None`` on any IO/decode error.
+    """
     try:
         with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
             return fh.read(_TRACE_INSPECT_BYTES)
@@ -140,7 +157,15 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
     Used as a cheap proxy for "this kind of event appears N times in
     the trace JSON" without paying for full JSON parsing — JSON event
     names appear as ``"name": "<value>"`` so a substring count is a
-    reasonable lower-bound."""
+    reasonable lower-bound.
+
+    Args:
+        text (str): Text to scan.
+        substring (str): Substring to count.
+
+    Returns:
+        int: The number of non-overlapping occurrences (0 if empty).
+    """
     if not substring:
         return 0
     return text.count(substring)
@@ -174,6 +199,16 @@ def _validate_trace_structure(
     Read-only; safe to call after every profile execution. Each
     check's failure produces an independent warning so partial
     signals stay actionable.
+
+    Args:
+        trace_dir (Path): Directory holding the profile run's traces.
+        framework (str): Framework name (only ``sglang`` triggers
+            check 5).
+        expected_pieces (int): Reserved expected split count. Defaults
+            to ``1``.
+
+    Returns:
+        None: This function only logs warnings; it never returns a value.
     """
     issues: list[str] = []
 
@@ -371,6 +406,12 @@ def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
     capture traces under ``<profile_task>/capture_traces``. Both use
     ``*.trace.json.gz`` names, and nested layouts are possible as the profiler
     evolves.
+
+    Args:
+        trace_dir (Path): Directory to recursively scan for traces.
+
+    Returns:
+        list[Path]: Matching ``*.trace.json.gz`` paths, sorted.
     """
     return sorted(trace_dir.rglob("*.trace.json.gz"))
 
@@ -384,13 +425,28 @@ def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path
     Prefer the merged trace when Magpie produced one; otherwise pass the trace
     directory so kernel-agent can apply its own ordering instead of pinning a
     single staged file.
+
+    Args:
+        trace_dir (Path): The trace directory, returned when no merged
+            trace exists.
+        trace_files (list[Path]): Candidate trace files for this run.
+
+    Returns:
+        Path: The merged trace when present, otherwise ``trace_dir``.
     """
     merged = sorted(p for p in trace_files if p.name.startswith("merged-"))
     return merged[0] if merged else trace_dir
 
 
 def _candidate_trace_dirs(workspace: Path) -> list[Path]:
-    """Trace directories to probe for a Magpie profile workspace."""
+    """Trace directories to probe for a Magpie profile workspace.
+
+    Args:
+        workspace (Path): The Magpie profile workspace directory.
+
+    Returns:
+        list[Path]: Candidate trace directories, in probe order.
+    """
     return [
         workspace / "torch_trace",
         workspace / "capture_traces",
@@ -399,7 +455,14 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
 
 
 def _safe_mtime(p: Path) -> float:
-    """Return st_mtime, or 0 on stat() failure (e.g. NFS stale handle)."""
+    """Return st_mtime, or 0 on stat() failure (e.g. NFS stale handle).
+
+    Args:
+        p (Path): Path to stat.
+
+    Returns:
+        float: The modification time, or ``0.0`` if ``stat()`` fails.
+    """
     try:
         return p.stat().st_mtime
     except OSError:
@@ -420,6 +483,9 @@ def _default_profile_config() -> Path:
     would launch ``sglang_mi*x.sh`` under an atom-named session, which
     crashes on atom-only boxes and would run sglang under an atom
     session on multi-framework boxes.
+
+    Returns:
+        Path: The resolved profile YAML config path.
     """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
     if fw == "atom":
@@ -443,6 +509,19 @@ class ProfileExecutor(BaselineExecutor):
         default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
+        """Initialize the profile executor with profile-specific defaults.
+
+        Args:
+            magpie_python (str | None): Python interpreter for the Magpie
+                shell-out; ``None`` uses the base resolver.
+            default_config_path (Path | str | None): Override config path;
+                ``None`` defers to :meth:`_resolve_default_config`.
+            session_dir (Path | str | None): Session output directory.
+            default_timeout_sec (int): Wall-clock cap for the profile run.
+                Defaults to :data:`PROFILE_DEFAULT_TIMEOUT_SEC`.
+            cwd (Path | str): Working directory for the subprocess.
+                Defaults to ``"/tmp"``.
+        """
         super().__init__(
             magpie_python=magpie_python,
             default_config_path=default_config_path,
@@ -452,7 +531,11 @@ class ProfileExecutor(BaselineExecutor):
         )
 
     def _resolve_default_config(self) -> Path:
-        """Override BaselineExecutor's resolver to pick the profile yaml."""
+        """Override BaselineExecutor's resolver to pick the profile yaml.
+
+        Returns:
+            Path: The framework-specific profile YAML config path.
+        """
         return _default_profile_config()
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
@@ -499,6 +582,13 @@ class ProfileExecutor(BaselineExecutor):
 
         The resolved dir is mkdir'd best-effort so a sandbox-side reader
         doesn't immediately FileNotFoundError on probe.
+
+        Args:
+            ctx: The action runner context for the current profile round.
+
+        Returns:
+            str: The shared torch-trace base dir, or ``""`` for
+            single-node runs.
         """
         from ._multi_node_env import is_multi_node, rayjob_id_from_state
         if not is_multi_node():
@@ -536,6 +626,14 @@ class ProfileExecutor(BaselineExecutor):
         materialized YAML and patch that resolved path, so NUM_PROMPTS and
         PROFILE_EXTRA_BODY cannot be applied to one checkout while Magpie runs
         another.
+
+        Args:
+            config_path (Path): The materialized profile YAML to read.
+            output_dir (Path): The run output directory.
+
+        Returns:
+            dict[str, Any] | None: A failure-result dict if the InferenceX
+            checkout cannot be patched/validated, else ``None`` to proceed.
         """
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -566,6 +664,15 @@ class ProfileExecutor(BaselineExecutor):
         serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"
 
         def _contains(path: Path, needle: str) -> bool:
+            """Check whether ``needle`` appears in ``path``'s text.
+
+            Args:
+                path (Path): File to read.
+                needle (str): Substring to search for.
+
+            Returns:
+                bool: ``True`` if found; ``False`` on miss or read error.
+            """
             try:
                 return needle in path.read_text(encoding="utf-8")
             except OSError:
@@ -591,6 +698,20 @@ class ProfileExecutor(BaselineExecutor):
         return None
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the profile action and augment the result with trace info.
+
+        Delegates the benchmark shell-out to ``BaselineExecutor`` and then
+        locates the produced torch traces (single-node workspace dirs or
+        the shared multi-node trace root), surfacing ``trace_dir`` and
+        related fields for downstream TraceLens analysis.
+
+        Args:
+            ctx: The action runner context carrying the task and params.
+
+        Returns:
+            dict[str, Any]: The benchmark result dict, augmented with
+            trace discovery fields (or a failure dict on error).
+        """
         # IR-8 (atom): the historical short-circuit returned status="skipped"
         # here because atom_mi*x.sh accepted PROFILE=1 but silently no-op'd.
         # The Magpie atom wrapper now bridges PROFILE=1 to atom's

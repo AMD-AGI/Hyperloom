@@ -69,6 +69,11 @@ from .session_memory import SessionMemory
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond ISO-8601 string.
+
+    Returns:
+        str: The current UTC timestamp with microsecond precision.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -183,6 +188,13 @@ def classify_proposal_action(action_name: str | None) -> str:
     is more likely to be a new exploratory proposal than a new patch
     landing path; if it is the latter, the Coordinator's PolicyGate
     will reject it long before the patch reaches a real apply step.
+
+    Args:
+        action_name (str | None): The proposal's action name, or ``None``.
+
+    Returns:
+        str: One of ``ACTION_CLASS_PATCH_LANDING``,
+        ``ACTION_CLASS_EVIDENCE_PRODUCER`` or ``ACTION_CLASS_FRAMEWORK_OP``.
     """
     if not isinstance(action_name, str):
         return ACTION_CLASS_EVIDENCE_PRODUCER
@@ -224,6 +236,13 @@ def _discover_robustness_findings_path(session_id: str) -> Path | None:
        Robustness pick up each other automatically.
 
     Returns ``None`` when neither env is set or the file does not exist.
+
+    Args:
+        session_id (str): The session id used to form ``<session>.jsonl``;
+            falls back to ``"default"`` when empty.
+
+    Returns:
+        Path | None: Path to the findings JSONL if it exists, else ``None``.
     """
     explicit = os.environ.get("CRITIC_ROBUSTNESS_FINDINGS_DIR", "").strip()
     if explicit:
@@ -253,6 +272,16 @@ def _load_robustness_priors(
     The JSONL grows append-only, so the most recent priors live at the
     end of the file. We read the entire file (capped) and filter — a
     full session is in the low-MB range so this is cheap.
+
+    Args:
+        path (Path): The Robustness findings JSONL file to read.
+        limit (int): Maximum number of most-recent matching priors to return.
+        min_severity (str): Minimum severity (``low`` / ``medium`` / ``high``)
+            a finding must meet to be included.
+
+    Returns:
+        list[dict[str, Any]]: A narrowed projection of the most recent matching
+        findings, or an empty list if the file is unreadable or has no matches.
     """
     min_rank = _SEVERITY_RANK.get(min_severity, _SEVERITY_RANK["high"])
     try:
@@ -307,7 +336,28 @@ def _load_robustness_priors(
 # ---------------------------------------------------------------------------
 @dataclass
 class JudgeBundle:
-    """Phase-1 output. The SKILL prompts read this to produce review JSON."""
+    """Phase-1 output. The SKILL prompts read this to produce review JSON.
+
+    Attributes:
+        kind (str): The request kind being prepared.
+        session_id (str): The owning A2A session id.
+        decision_id (str | None): The decision id when reviewing a decision.
+        merged_context (dict[str, Any]): Context after session-memory merge.
+        missing_context (list[str]): Mergeable context keys still missing.
+        required_context (list[str]): Critical keys that block KB reads.
+        proposals (list[dict[str, Any]]): Proposals to review, as dicts.
+        messages (list[dict[str, Any]]): Inbox messages carried for review.
+        decision (dict[str, Any]): The decision payload, when applicable.
+        kb_priors_by_proposal (dict[str, list[dict[str, Any]]]): KB priors keyed
+            by proposal ``msg_id``.
+        kb_priors_for_decision (list[dict[str, Any]]): KB priors for a
+            decision-level review.
+        robustness_priors (list[dict[str, Any]]): Recent Robustness findings
+            injected as priors.
+        kb_read_skipped_reason (str | None): Why KB reads were skipped, if any.
+        review_constraints (dict[str, Any]): Constraints/checklists for the SKILL.
+        notes (list[str]): Free-form diagnostic notes.
+    """
 
     kind: str
     session_id: str
@@ -332,6 +382,13 @@ class JudgeBundle:
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a deep, JSON-serialisable copy of the judge bundle.
+
+        Returns:
+            dict[str, Any]: All bundle fields with nested dicts/lists copied so
+            the result can be serialised and emitted without aliasing internal
+            state.
+        """
         return {
             "kind": self.kind,
             "session_id": self.session_id,
@@ -355,7 +412,19 @@ class JudgeBundle:
 
 @dataclass
 class CommitOutcome:
-    """Phase-2 output."""
+    """Phase-2 output.
+
+    Attributes:
+        kind (str): The committed request kind.
+        session_id (str): The owning A2A session id.
+        decision_id (str | None): The decision id, when applicable.
+        intent_envelope (dict[str, Any] | None): The Coordinator-compatible
+            intent envelope, when one was produced.
+        decision_review (dict[str, Any] | None): The persisted decision-review
+            record, when one was produced.
+        kb_writes (list[dict[str, Any]]): Summaries of KB write attempts.
+        notes (list[str]): Free-form diagnostic notes.
+    """
 
     kind: str
     session_id: str
@@ -366,6 +435,15 @@ class CommitOutcome:
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serialisable copy of the commit outcome.
+
+        Optional fields (``intent_envelope`` / ``decision_review``) are only
+        included when set; the latter is emitted under the
+        ``critic_decision_review`` key.
+
+        Returns:
+            dict[str, Any]: The serialisable outcome payload.
+        """
         out = {
             "kind": self.kind,
             "session_id": self.session_id,
@@ -391,6 +469,17 @@ class DecisionReviewer:
         kb_client: KBClient | None = None,
         kb_writer: KBWriter | None = None,
     ):
+        """Wire up the reviewer with its memory, KB client and writer.
+
+        Args:
+            session_memory (SessionMemory | None): Session store; a default is
+                created when ``None``.
+            kb_client (KBClient | None): KB client used to build a default
+                ``KBWriter`` when none is supplied; an ``InMemoryKBClient`` is
+                created if both ``kb_writer`` and ``kb_client`` are ``None``.
+            kb_writer (KBWriter | None): KB write façade; built from
+                ``kb_client`` and ``session_memory`` when ``None``.
+        """
         self.session_memory = session_memory or SessionMemory()
         if kb_writer is None:
             if kb_client is None:
@@ -405,6 +494,15 @@ class DecisionReviewer:
     # Phase 0: init / close session
     # ------------------------------------------------------------------
     def init_session(self, raw_request: dict[str, Any]) -> dict[str, Any]:
+        """Initialise a session by merging its first context payload.
+
+        Args:
+            raw_request (dict[str, Any]): The raw Critic request envelope.
+
+        Returns:
+            dict[str, Any]: A dict with ``session_id``, ``merged_context`` and
+            the list of still-``missing_context`` keys.
+        """
         req = parse_request(raw_request)
         merge = self.session_memory.merge_context(req.session_id, req.context)
         self.session_memory.append_event(req.session_id, {
@@ -424,6 +522,17 @@ class DecisionReviewer:
         raw_request: dict[str, Any],
         kb_draft: dict[str, Any] | None = None,
     ) -> CommitOutcome:
+        """Close a session, optionally flushing KB drafts to the KB.
+
+        Args:
+            raw_request (dict[str, Any]): The raw Critic request envelope.
+            kb_draft (dict[str, Any] | None): Optional payload whose
+                ``kb_drafts`` list is written on close.
+
+        Returns:
+            CommitOutcome: Outcome of kind ``session_close`` recording any KB
+            writes performed.
+        """
         req = parse_request(raw_request)
         outcome = CommitOutcome(
             kind="session_close",
@@ -460,6 +569,19 @@ class DecisionReviewer:
     # Phase 1: prepare-review
     # ------------------------------------------------------------------
     def prepare_review(self, raw_request: dict[str, Any]) -> JudgeBundle:
+        """Build the phase-1 judge bundle for a review request.
+
+        Merges context, classifies proposals, and (when critical context is
+        present and KB reads are enabled and the breaker is closed) fetches KB
+        priors per proposal or per decision plus recent Robustness priors.
+
+        Args:
+            raw_request (dict[str, Any]): The raw Critic request envelope.
+
+        Returns:
+            JudgeBundle: The assembled bundle the SKILL prompt reasons over to
+            produce a review.
+        """
         req = parse_request(raw_request)
         bundle = JudgeBundle(
             kind=req.kind,
@@ -605,6 +727,15 @@ class DecisionReviewer:
     # broke this session" before it produces a fresh proposal.
     # ------------------------------------------------------------------
     def _inject_robustness_priors(self, bundle: JudgeBundle) -> None:
+        """Populate ``bundle.robustness_priors`` from recent findings.
+
+        Best-effort: disabled via ``CRITIC_ROBUSTNESS_PRIORS_DISABLED`` and
+        silently skipped when no findings file exists or loading fails. On
+        success, sets the priors and appends a diagnostic note to the bundle.
+
+        Args:
+            bundle (JudgeBundle): The bundle to enrich in place.
+        """
         if os.environ.get(
             "CRITIC_ROBUSTNESS_PRIORS_DISABLED", ""
         ).lower() in {"1", "true", "yes"}:
@@ -651,6 +782,22 @@ class DecisionReviewer:
         raw_request: dict[str, Any],
         review: dict[str, Any],
     ) -> CommitOutcome:
+        """Validate and commit a SKILL-produced review (phase 2).
+
+        Dispatches by request kind to persist verdicts, optionally write to
+        KB, and build the Coordinator-compatible intent envelope.
+
+        Args:
+            raw_request (dict[str, Any]): The raw Critic request envelope.
+            review (dict[str, Any]): The review JSON produced by the SKILL.
+
+        Returns:
+            CommitOutcome: The persisted outcome for the request kind.
+
+        Raises:
+            ReviewValidationError: If ``review`` is not a dict or the request
+                kind is not supported by ``commit_review``.
+        """
         req = parse_request(raw_request)
         self._populate_inbox(req)
         if not isinstance(review, dict):
@@ -681,6 +828,16 @@ class DecisionReviewer:
     # Implementation helpers
     # ------------------------------------------------------------------
     def _populate_inbox(self, req: CriticRequest) -> None:
+        """Parse proposals from a coordinator-inbox prompt, in place.
+
+        Only acts on ``COORDINATOR_INBOX`` requests that lack pre-parsed
+        proposals but carry a raw prompt. Fills in missing context from the
+        parsed shared state and drops proposals already reviewed this session
+        for idempotency. Parse failures are swallowed.
+
+        Args:
+            req (CriticRequest): The request to mutate in place.
+        """
         if req.kind != COORDINATOR_INBOX:
             return
         if req.proposals:
@@ -717,6 +874,14 @@ class DecisionReviewer:
         with no inbox proposals), we emit the strict ``patch_landing``
         checklist as the default — historically the only consumer of
         this branch was kernel-patch landing review.
+
+        Args:
+            proposals (list[Proposal] | None): The proposals in the batch, or
+                ``None``/empty for a decision-level review.
+
+        Returns:
+            dict[str, Any]: The constraints payload (allowed verdicts, ceiling
+            importance, ``approve_requires`` and per-proposal classes).
         """
         constraints: dict[str, Any] = {
             "allowed_verdicts": sorted(ALLOWED_VERDICTS),
@@ -749,6 +914,17 @@ class DecisionReviewer:
         return constraints
 
     def _topic_for_proposal(self, proposal: Proposal) -> str:
+        """Derive the KB lookup topic for a proposal.
+
+        Prefers the action name, then a ``topic``/``summary`` in the payload,
+        and finally a synthetic ``proposal-<msg_id>`` fallback.
+
+        Args:
+            proposal (Proposal): The proposal to derive a topic for.
+
+        Returns:
+            str: The topic string used for KB prior lookups.
+        """
         if proposal.action_name:
             return proposal.action_name
         body = proposal.payload.get("topic") or proposal.payload.get("summary")
@@ -757,6 +933,17 @@ class DecisionReviewer:
         return f"proposal-{proposal.msg_id}"
 
     def _topic_for_decision(self, req: CriticRequest) -> str:
+        """Derive the KB lookup topic for a decision-level review.
+
+        Prefers ``topic``/``summary``/``target`` from the decision payload and
+        falls back to a synthetic ``decision-<decision_id|session_id>``.
+
+        Args:
+            req (CriticRequest): The request whose decision to inspect.
+
+        Returns:
+            str: The topic string used for KB prior lookups.
+        """
         decision = req.decision
         if isinstance(decision, dict):
             for key in ("topic", "summary", "target"):
@@ -773,6 +960,21 @@ class DecisionReviewer:
         outcome: CommitOutcome,
         session_ctx: dict[str, Any],
     ) -> None:
+        """Commit a coordinator-inbox review into an intent envelope.
+
+        Validates each verdict, records it in session memory, increments
+        metrics, optionally writes a KB lesson, appends any advice intents,
+        and falls back to a heartbeat intent when there is nothing to review.
+
+        Args:
+            req (CriticRequest): The parsed request.
+            review (dict[str, Any]): The SKILL review with ``review_verdicts``.
+            outcome (CommitOutcome): Outcome mutated in place with the envelope.
+            session_ctx (dict[str, Any]): Stored session context for KB writes.
+
+        Raises:
+            ReviewValidationError: If verdicts are malformed or invalid.
+        """
         verdicts_raw = review.get("review_verdicts")
         if verdicts_raw is None:
             verdicts_raw = review.get("verdicts")
@@ -854,6 +1056,21 @@ class DecisionReviewer:
         outcome: CommitOutcome,
         session_ctx: dict[str, Any],
     ) -> None:
+        """Commit a decision-request review and persist it.
+
+        Validates the verdict, records the decision review in session memory,
+        maps the verdict to a KB write, and stores the review on ``outcome``.
+
+        Args:
+            req (CriticRequest): The parsed request.
+            review (dict[str, Any]): The SKILL review (``verdict``/``reason``).
+            outcome (CommitOutcome): Outcome mutated in place with the review.
+            session_ctx (dict[str, Any]): Stored session context for KB writes.
+
+        Raises:
+            ReviewValidationError: If required keys are missing or the verdict
+                is not one of adopt/reject/revise/needs_info.
+        """
         for k in ("verdict", "reason"):
             if k not in review:
                 raise ReviewValidationError(
@@ -924,6 +1141,17 @@ class DecisionReviewer:
         outcome: CommitOutcome,
         session_ctx: dict[str, Any],
     ) -> None:
+        """Commit a kb-draft review by batch-writing the drafts to KB.
+
+        Args:
+            req (CriticRequest): The parsed request.
+            review (dict[str, Any]): The SKILL review with a ``kb_drafts`` list.
+            outcome (CommitOutcome): Outcome mutated in place with write results.
+            session_ctx (dict[str, Any]): Stored session context for KB writes.
+
+        Raises:
+            ReviewValidationError: If ``review.kb_drafts`` is not a list.
+        """
         drafts = review.get("kb_drafts") or []
         if not isinstance(drafts, list):
             raise ReviewValidationError("kb_draft commit expects review.kb_drafts list")
@@ -953,6 +1181,18 @@ class DecisionReviewer:
         session_ctx: dict[str, Any],
         outcome: CommitOutcome,
     ) -> None:
+        """Write a KB lesson for a verdict when the SKILL opted in.
+
+        Only acts on approve/reject/redirect verdicts flagged with
+        ``persist_to_kb``. KB write failures are recorded as a note rather
+        than raised so the review pipeline never blocks.
+
+        Args:
+            verdict_item (dict[str, Any]): The single verdict payload.
+            req (CriticRequest): The parsed request.
+            session_ctx (dict[str, Any]): Stored session context for KB writes.
+            outcome (CommitOutcome): Outcome mutated in place with the result.
+        """
         verdict = verdict_item.get("verdict")
         if verdict not in {"reject", "redirect", "approve"}:
             return

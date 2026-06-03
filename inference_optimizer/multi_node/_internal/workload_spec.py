@@ -80,18 +80,44 @@ _RESERVED_LABEL_PREFIXES = (
 
 
 def _b64(s: str) -> str:
+    """Base64-encode a string as ASCII.
+
+    Args:
+        s (str): The text to encode (UTF-8).
+
+    Returns:
+        str: The base64-encoded value as an ASCII string.
+    """
     return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
 
 def _sanitize_extra_env(extra_env: dict[str, str] | None) -> dict[str, str]:
-    """Drop reserved and legacy keys from user-supplied env."""
+    """Drop reserved and legacy keys from user-supplied env.
+
+    Args:
+        extra_env (dict[str, str] | None): User-supplied environment
+            variables, or ``None``.
+
+    Returns:
+        dict[str, str]: A copy of ``extra_env`` with reserved keys removed,
+        or an empty dict when input is falsy.
+    """
     if not extra_env:
         return {}
     return {k: v for k, v in extra_env.items() if k not in _STRIP_FROM_USER_ENV}
 
 
 def _sanitize_extra_labels(extra_labels: dict[str, str] | None) -> dict[str, str]:
-    """Drop labels whose key starts with any reserved prefix."""
+    """Drop labels whose key starts with any reserved prefix.
+
+    Args:
+        extra_labels (dict[str, str] | None): User-supplied labels, or
+            ``None``.
+
+    Returns:
+        dict[str, str]: A copy of ``extra_labels`` excluding keys that start
+        with any Brain-managed reserved prefix; empty when input is falsy.
+    """
     if not extra_labels:
         return {}
     out: dict[str, str] = {}
@@ -126,6 +152,31 @@ def build_rayjob_workload_body(
 
     The returned dict is safe to pass to ``json.dumps`` — every value is
     a primitive, list of primitives, or nested dict of the same.
+
+    Args:
+        workspace (str): SaFE workspace id the workload belongs to.
+        display_name (str): Human-readable workload name.
+        image (str): Container image used for both head and worker roles.
+        nodes (int): Total number of Ray nodes (head + workers); must be >= 1.
+        gpus_per_node (int): GPUs requested per node; must be >= 1.
+        cpus_per_node (int): CPUs requested per node.
+        mem_gi_per_node (int): Memory per node in GiB.
+        ephemeral_gi_per_node (int): Ephemeral storage per node in GiB.
+        description (str | None): Optional workload description.
+        owner_id (str | None): Optional owner identifier.
+        session_id (str | None): Optional parent sandbox session id; when set,
+            a ``primus-claw/session-id`` label is injected for correlation.
+        extra_env (dict[str, str] | None): Extra environment variables merged
+            into the workload env (reserved keys are stripped).
+        extra_labels (dict[str, str] | None): Extra labels merged into the
+            workload labels (reserved-prefix keys are stripped).
+
+    Returns:
+        dict[str, Any]: A JSON-serializable SaFE CreateWorkloadRequest body.
+
+    Raises:
+        ValueError: If ``nodes`` < 1, ``gpus_per_node`` < 1, or any of
+            ``workspace``, ``display_name``, or ``image`` is empty.
     """
     if nodes < 1:
         raise ValueError(f"nodes must be >= 1, got {nodes}")
