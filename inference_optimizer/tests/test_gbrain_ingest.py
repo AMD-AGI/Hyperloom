@@ -16,7 +16,7 @@ def _recipe(**over: Any) -> dict[str, Any]:
         "canonical_id": "inference:qwen3-32b:mi300x:sglang:0_5_11:fp8",
         "model": "Qwen3-32B", "hardware": "mi300x", "framework": "sglang",
         "framework_version": "0_5_11", "precision": "fp8",
-        "best_config": {"extra_sglang_args": "--cuda-graph-max-bs 256", "FOO": "1"},
+        "best_config": {"extra_server_args": "--cuda-graph-max-bs 256", "FOO": "1"},
         "best_throughput": 5800.5, "validated_gain_pct": 7.8,
         "authority": "EXPERIENTIAL", "confidence": 0.85,
     }
@@ -60,7 +60,7 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
     }
     r = _page_to_recipe(fm)
     assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:0_5_11:fp8"
-    assert r["best_config"] == {"extra_sglang_args": "--cuda-graph-max-bs 256", "FOO": "1"}
+    assert r["best_config"] == {"extra_server_args": "--cuda-graph-max-bs 256", "FOO": "1"}
     assert r["best_throughput"] == 5800.5
 
 
