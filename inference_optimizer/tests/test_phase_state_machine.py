@@ -423,12 +423,13 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     assert row["reason"] == "phase_entered"
     # Budget dict populated. 2026-06 rebalance reshaped the slice:
     # PRELUDE 0.08 → 0.05 (only ever used ~5min of 27min in practice),
-    # EXPLORE 0.47 → 0.45 (force-exit at phase_remaining_pct=0.176
-    # confirmed it was over-provisioned), KERNEL 0.35 → 0.30, and
-    # SWEEP 0.08 → 0.18 to fit the sweep + conc_sweep pair that
-    # field telemetry showed running ~2.5x over the old 8% slice.
-    # Sum across phases remains 1.0.
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.45
+    # EXPLORE 0.47 → 0.40 (force-exit at phase_remaining_pct=0.176
+    # confirmed it was over-provisioned by ~7pp), KERNEL held at 0.35
+    # (GEAK quick-mode needs full cycles), and SWEEP 0.08 → 0.18 to
+    # fit the sweep + conc_sweep pair that field telemetry showed
+    # running ~2.5x over the old 8% slice. Sum across phases stays
+    # at 1.0.
+    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.40
     assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.05
 
 

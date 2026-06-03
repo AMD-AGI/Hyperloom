@@ -288,19 +288,19 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     # Qwen3-30B-A3B / MI355x runs once conc_sweep was on by default:
     # SWEEP was running ~2.5x over its old 8% allocation (sweep action
     # ~37min + conc_sweep ~31min, total ~68min on a ~5.7h budget) so we
-    # shift PRELUDE -3pp / EXPLORE -2pp / KERNEL -5pp into SWEEP +10pp.
+    # shift PRELUDE -3pp / EXPLORE -7pp into SWEEP +10pp while keeping
+    # KERNEL at its historical 35% (GEAK quick-mode needs full cycles).
     # PRELUDE only ever spent ~5min of its old 27min slice; EXPLORE
     # force-exit at phase_remaining_pct=0.176 confirmed the old 47%
-    # was slightly over-provisioned. KERNEL still gets 2.4h on an 8h
-    # budget which matches its historical median.
+    # was over-provisioned by ~7pp.
     #
     # FRAMEWORK_PR is *not* given a phase budget pct — the time wall is
     # ``force_exit_hours_remaining_ratio * max_hours`` instead (default
     # 0.6), matching the design's "leave at least 60% for the rest of
     # the session" intent.
     PHASE_PRELUDE: 0.05,
-    PHASE_EXPLORE: 0.45,
-    PHASE_KERNEL:  0.30,
+    PHASE_EXPLORE: 0.40,
+    PHASE_KERNEL:  0.35,
     PHASE_SWEEP:   0.18,
     PHASE_CLOSE:   0.02,
 }

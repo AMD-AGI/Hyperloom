@@ -6042,14 +6042,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_explore_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.45.",
+        help="Wall-clock budget cap for EXPLORE. Default: 0.40.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL. Default: 0.30.",
+        help="Wall-clock budget cap for KERNEL. Default: 0.35.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
