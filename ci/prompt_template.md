@@ -20,7 +20,8 @@ Workload envs — export before launch (Coordinator reuses these for baseline �
 Runtime paths (live on the shared mount; the agent does not need to re-clone):
   OOB_PATH={oob_path}
   InferenceX_PATH={inferencex_path}
-  TRACELENS_ROOT={tracelens_root}
+  TRACELENS_ROOT={tracelens_pkg_root}
+  TRACELENS_INTERNAL_ROOT={tracelens_root}
 {multinode_section}
 Session dir: /workspace/hyperloom (SKILL.md default — do NOT override).
 
