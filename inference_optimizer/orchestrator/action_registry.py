@@ -72,12 +72,12 @@ VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
 # DESIGN §11 timeline rather than the family taxonomy because family is
 # scheduler-oriented (prep/analysis/...) while phases are LLM-oriented.
 VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
-    "prep",        # setup / classify / target_analysis / baseline
+    "prep",        # target_analysis / baseline / warm replay
     "measure",     # baseline (gates explore)
-    "explore",     # backends / params / sweep
+    "explore",     # explore / specialists / patch integration
     "analysis",    # profile / roofline / deep_kernel_analysis
     "deep",        # kernel_opt / integrate / operator_tuning / vendor_kernel_config
-    "validate",    # validate_stack — apply optimization_stack + rebench
+    "validate",    # reserved; stack validation is inlined into explore
     "finalize",    # report
     "support",     # recover (v0.8 KB_design §3.15 §2.3 retired the rest)
 })
@@ -97,8 +97,8 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
 #   before/after data the gate would otherwise demand as input.
 #   Approve when the proposal is the natural next TODO per
 #   orchestration's sequencing rules. The measurement IS the
-#   evidence. (Examples: baseline / profile / roofline / params /
-#   backends / sweep / kernel_opt / validate_stack / ...)
+#   evidence. (Examples: baseline / profile / roofline / explore /
+#   sweep / kernel_opt / ...)
 # * ``promotion`` — MUTATES ``optimization_stack`` by appending a
 #   KEEP'd entry with an E2E gain claim. Genuinely requires
 #   before/after benchmark + accuracy gate + rollback evidence to
