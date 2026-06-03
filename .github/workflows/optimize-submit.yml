@@ -15,8 +15,9 @@ name: SaFE Optimize Submit
 #                                    register, so download is overlapped
 #                                    with the rest of the batch (no serial
 #                                    prewarm stage that blocks optimize).
-#                                    default max_parallel=60 so the whole
-#                                    scheduled batch can dispatch at once.
+#                                    schedule forces max_parallel=100 so the
+#                                    whole 100-model batch dispatches at once
+#                                    (dispatch default stays 60).
 #   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
 #                                    Gain% desc, with medals), publish the
@@ -31,7 +32,7 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Production large-B pool: 10 models every 8 hours. The matrix generator
+  # Production large-B pool: 100 models every 8 hours. The matrix generator
   # rotates deterministically by UTC 8-hour slot.
   schedule:
     - cron: '0 */8 * * *'
@@ -73,7 +74,7 @@ on:
         required: false
         default: '7'
       max_parallel:
-        description: 'Max parallel optimize jobs (default 60 = scheduled batch size)'
+        description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 100 to match the 100-model batch).'
         required: false
         default: '60'
       submit_workspaces:
@@ -188,7 +189,7 @@ jobs:
       # refreshed only when we want to bring in newly-published models.
       INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_hf_2026-05-25.json' || github.event.inputs.candidates_file }}
       INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
-      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '10' || github.event.inputs.batch_size }}
+      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '100' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
       # Schedule no longer excludes leaderboard-known models — that was for
@@ -223,7 +224,7 @@ jobs:
     timeout-minutes: 780
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(github.event.inputs.max_parallel || '60') }}
+      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '100' || github.event.inputs.max_parallel || '60') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
