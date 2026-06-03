@@ -257,6 +257,19 @@ def submit(prompt_file: Path, output_dir: Path, kernel_path: str = "",
            num_gpus: int = 1, prefer_ray: bool = True,
            kernel_repo: str = "", test_command: str = "") -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Placement precedence: ssh (Dynamo multi-node, env-gated) > ray > cli.
+    # ssh_placement_active() is True ONLY when the orchestrator set
+    # KERNEL_AGENT_GPU_PLACEMENT=ssh (Dynamo backend); otherwise this import is
+    # cheap and the ray/cli paths below are byte-for-byte unchanged.
+    try:
+        from ssh_runtime import ssh_placement_active, run_geak_over_ssh
+    except Exception:  # noqa: BLE001 — ssh_runtime optional; never block ray/cli
+        ssh_placement_active = lambda: False  # noqa: E731
+    if ssh_placement_active():
+        return run_geak_over_ssh(
+            prompt_file, output_dir, kernel_path, cost_limit, num_gpus,
+            timeout_s, kernel_repo=kernel_repo, test_command=test_command,
+        )
     if prefer_ray:
         try:
             import ray  # noqa: F401

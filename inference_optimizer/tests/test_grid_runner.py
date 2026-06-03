@@ -26,6 +26,8 @@ import yaml
 from inference_optimizer.orchestrator.action_executors import _grid_runner
 from inference_optimizer.orchestrator.action_executors import _grid_runner as gr
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
+    _MN_BACKENDS_PRIORITY,
+    _MN_PARAMS_PRIORITY,
     GridVariant,
     VariantResult,
     _build_variant_yaml,
@@ -36,6 +38,7 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     apply_single_node_invalid_variants,
     apply_user_skip_list,
     coerce_extra_envs,
+    reorder_grid_for_multi_node,
     resolve_skip_spec,
     run_grid,
 )
@@ -261,6 +264,51 @@ class TestSingleNodeInvalidFilter:
         kept, dropped = apply_single_node_invalid_variants(grid)
         assert [k.name for k in kept] == ["mn_only"]
         assert dropped == []
+
+
+class TestReorderGridForMultiNode:
+    """reorder is wired into explore/sweep; single-node MUST be a no-op."""
+
+    def _grid(self):
+        # Deliberately ordered so a real reorder would change it: a
+        # low-priority backend variant first, a high-priority param variant
+        # last, and an untagged variant in the middle.
+        return [
+            GridVariant(name="tier5_comm_custom_ar", note="tier5_comm"),
+            GridVariant(name="untagged_misc"),
+            GridVariant(name="cuda_graph_max_bs_64", note="cuda_graph_max_bs"),
+        ]
+
+    def test_single_node_preserves_order_bit_for_bit(self, monkeypatch):
+        # Hard requirement: single-node grid order is never altered.
+        from inference_optimizer.orchestrator.action_executors import (
+            _multi_node_env as mne,
+        )
+
+        monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+        grid = self._grid()
+        out = reorder_grid_for_multi_node(
+            grid, priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
+        )
+        assert [v.name for v in out] == [v.name for v in grid]
+
+    def test_multi_node_surfaces_likely_winners_first(self, monkeypatch):
+        from inference_optimizer.orchestrator.action_executors import (
+            _multi_node_env as mne,
+        )
+
+        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+        grid = self._grid()
+        out = reorder_grid_for_multi_node(
+            grid, priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
+        )
+        # cuda_graph_max_bs (params tier-1) sorts ahead of tier5_comm; the
+        # untagged variant sinks to the end. Stable sort keeps ties in order.
+        assert [v.name for v in out] == [
+            "cuda_graph_max_bs_64",
+            "tier5_comm_custom_ar",
+            "untagged_misc",
+        ]
 
 
 class TestApplyUserSkipList:

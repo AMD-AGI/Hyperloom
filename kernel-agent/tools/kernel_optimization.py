@@ -1321,7 +1321,13 @@ def build_prompt(
     # supporting files, stages them under --workspace on the pod, runs
     # the bench inside that workspace with the GPU, and returns
     # stdout/stderr + any matching result*.json artifacts.
-    mn_state_file = Path("/tmp/multi_node_state.json")
+    # Honour $MULTI_NODE_STATE_FILE (default /tmp/multi_node_state.json), same
+    # resolution as apply_kernel_patch._mn_state_path / _multi_node_env. This
+    # keeps test isolation intact: a stale real /tmp state file no longer
+    # misclassifies a single-node run as multi-node.
+    mn_state_file = Path(
+        os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json")
+    )
     is_multinode_run = False
     try:
         if mn_state_file.is_file():
