@@ -328,7 +328,6 @@ jobs:
           # for these two critical values. SaFE consumes them and renders the
           # generated prompt tail consistently with the CI prefix.
           ARGS+=(--max-hours "${INPUT_MAX_HOURS:-12}")
-          ARGS+=(--results-path '$USER_DATA_PATH')
           # Hard guarantee: SaFE promptPrefix MUST be non-empty. Workflow
           # input is only populated on workflow_dispatch — for schedule
           # trigger we fall back to ci/prompt_prefix.txt (single source of
