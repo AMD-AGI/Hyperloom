@@ -35,6 +35,11 @@ from typing import TYPE_CHECKING, Any
 
 from .framework_paths import resolve_source_file_allowlist
 from .intent_parser import Intent, IntentType
+from .action_surfaces import (
+    FRAMEWORK_PR_INTERNAL_ACTION_NAMES,
+    INTERNAL_ONLY_ACTION_NAMES,
+    KERNEL_OWNED_ACTIONS,
+)
 from .phase_state import (
     PHASE_EXPLORE,
     PHASE_NAMES,
@@ -107,22 +112,6 @@ class PolicyDenied(RuntimeError):
         self.hint = hint
 
 
-# ---------------------------------------------------------------------------
-# Plan A — kernel-owned actions (DESIGN §7.2 / §16.1)
-#
-# These 5 actions are owned end-to-end by the Kernel agent. Orchestration
-# (and any other role) MUST NOT delegate them directly; the only valid path
-# is REQUEST(target_agent="kernel", kind="...") + RESPONSE.
-# ---------------------------------------------------------------------------
-KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
-    "kernel_opt",
-    "integrate",
-    "deep_kernel_analysis",
-    "operator_tuning",
-    "vendor_kernel_config",
-    "gemm_tuning",
-})
-
 FP8_ONLY_ACTIONS: frozenset[str] = frozenset({
     "gemm_tuning",
     "run_gemm_tuning",
@@ -161,19 +150,9 @@ DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
 
 
 # ---------------------------------------------------------------------------
-# specialist sub-agent action.
-#
-# ``specialist`` is a synthetic action_name that the Orchestration role
-# uses to delegate work to an LLM specialist (research_lane, capacity-1
-# in M5). It does NOT have a yaml meta under ``actions/_meta/`` —
-# domain-specific behaviour is parameterised via ``params.domain``
-# instead (see ``specialist_domains.SPECIALIST_DOMAINS``).
-#
-# PolicyGate accepts ``delegate{action_name='specialist'}`` from
-# Orchestration only (R2 ``specialist_dispatch_source``) regardless of
-# whether the action is in ActionRegistry; this constant tells the
-# generic ``_validate_delegate`` unknown_action gate to skip the
-# registry lookup. R2's sub-rules then enforce the param contract.
+# Specialist dispatch is registry-backed but still parameterized by tags
+# and domain-specific payload. PolicyGate keeps the action name central so
+# R2 sub-rules can enforce the specialist dispatch contract uniformly.
 # ---------------------------------------------------------------------------
 SPECIALIST_ACTION_NAME: str = "specialist"
 
@@ -353,47 +332,6 @@ DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES: frozenset[str] = frozenset({
 # A ``scope_domains`` list consisting only of this literal collapses
 # the dispatch to a kernel-only patch; rejected at dispatch.
 DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL: str = "kernel"
-
-
-# ---------------------------------------------------------------------------
-# Analysis actions that are Coordinator-internal only
-#
-# ``roofline`` (composite: profile + trace_analyze + analysis.md
-# snapshot) and ``profile`` (lightweight trace capture) are auto-managed
-# by the Coordinator: enqueued at PRELUDE after baseline lands, and
-# again on every +10% watermark crossing of ``last_roofline_tput``.
-# Which kind runs is selected by ``shared_state.enable_roofline``
-# (CLI flag ``--enable-roofline`` / ``--no-enable-roofline``, default
-# on). The LLM does not propose either name; PolicyGate denies them at
-# the intent boundary so the policy_denial event in the prompt nudges
-# the LLM toward the proposable surface (``specialist`` / ``explore``
-# / ``integrate_patch``).
-#
-# The denial is symmetric across delegate / propose_action / request:
-# the rule fires *before* the kernel-owned + phase + unknown checks, so
-# the canonical hint always wins.
-# ---------------------------------------------------------------------------
-INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset({
-    "roofline",
-    "profile",
-    # GAP 1 — ``replay_warm_recipe`` is enqueued exclusively by the
-    # Coordinator at PRELUDE (after baseline lands) when the T0
-    # warm-start ladder returned a high-confidence prior. Letting the
-    # LLM propose it would (a) race the one-shot guard, (b) let a
-    # specialist hand-craft a "warm replay" with adversarial args
-    # that ought to go through ``explore`` instead. Same gate as
-    # roofline / profile.
-    "replay_warm_recipe",
-})
-
-# FRAMEWORK_PR phase: ``framework_pr`` is Coordinator-internal too
-# (the new phase pumps candidates serially; the LLM never proposes the
-# action). Kept as a separate set so the denial rule fires a distinct
-# ``framework_pr_action_not_llm_proposable`` name with a hint pointing
-# at ``--no-framework`` rather than the roofline/profile hint.
-FRAMEWORK_PR_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset({
-    "framework_pr",
-})
 
 
 # ---------------------------------------------------------------------------
