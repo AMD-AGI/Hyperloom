@@ -734,6 +734,13 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # launcher / state.json as the sole source of truth (an LLM
     # update_state must not pollute the specialist prompt context).
     "model_arch",
+    # Architecture-identity tags lifted from the model weights' config.json
+    # (carried on SharedState by ``cli._load_model_config_tags``). Fact-layer
+    # data fanned into the recipe-snapshot ``extras`` by the T0 anchor /
+    # ``_kb_amend_recipe`` writes, so lock them — an LLM update_state must
+    # not pollute the KB recipe tags that drive cross-session reuse.
+    "model_architectures",
+    "model_type",
 })
 
 
