@@ -15,18 +15,24 @@ This page describes the contract from a consumer's perspective.
 
 ## 1. Versioning
 
-The top-level `schema_version` field is a stable string:
+The top-level `schema_version` field is a stable string. The current
+producer emits:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v1"
+"schema_version": "hyperloom.session_breakdown.v2"
 ```
+
+`v2` is **additive over `v1`**: it only adds sections (e.g.
+`specialist_runs`, `action_timeline`, `kernel_optimization_summary`,
+`conc_sweep_summary`), so a `v1` reader can still consume a `v2` file by
+ignoring unknown keys.
 
 Compatibility rules:
 
 * **New optional fields** may appear at any time **without** bumping
   `schema_version`. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields require a major
-  bump (`v1` → `v2`). The runtime will continue to write the previous
+  bump (e.g. `v2` → `v3`). The runtime will continue to write the previous
   version's file in parallel for at least one release after the bump.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   **never** as a default / fabricated value. Consumers MUST treat
@@ -43,7 +49,7 @@ The `exporter_version` field carries the producing Hyperloom version
 
 ```jsonc
 {
-  "schema_version": "hyperloom.session_breakdown.v1",
+  "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "0.6.0",
 
@@ -265,7 +271,7 @@ investigation than the breakdown summarises.
 
 ```jsonc
 {
-  "schema_version": "hyperloom.session_breakdown.v1",
+  "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
   "exporter_version": "0.6.0",
 
