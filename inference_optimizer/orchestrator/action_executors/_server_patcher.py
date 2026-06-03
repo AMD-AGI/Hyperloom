@@ -243,9 +243,17 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
     # point-release tags still resolve to a versioned subdir.
     head = text.split("-", 1)[0].split("+", 1)[0]
     parts = head.split(".") if head else []
-    if not parts or not all(p.isdigit() for p in parts):
+    # Keep the LEADING run of purely-numeric components; stop at the first
+    # non-numeric part (e.g. ``0.5.10.dev4`` -> ``0.5.10`` -> sglang_0_5_10).
+    numeric: list[str] = []
+    for p in parts:
+        if p.isdigit():
+            numeric.append(p)
+        else:
+            break
+    if len(numeric) < 2:
         return None
-    return "sglang_" + "_".join(parts)
+    return "sglang_" + "_".join(numeric)
 
 
 def _resolve_sglang_patches_dir(

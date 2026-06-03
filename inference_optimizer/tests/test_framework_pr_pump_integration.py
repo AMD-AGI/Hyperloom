@@ -207,9 +207,22 @@ class _CoordinatorStub:
         self.shared_state = _StateStub(framework=framework)
         self.tasks = _TasksStub()
         self.framework_pr_discover_timeout_sec = 0.0
+        self._framework = framework
         self.backends: dict[str, Any] = {}
         if critic is not None:
             self.backends["critic"] = critic
+
+    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+        # Pin to a single repo so these pump scenarios keep their
+        # one-batch / one-task accounting. Cross-repo fan-out is covered
+        # in test_framework_pr_discover_directed.py.
+        return [_fa_client.repo_url_for_framework(framework or self._framework)]
+
+    def _framework_pr_known_candidate_ids(self) -> set[str]:
+        return Coordinator._framework_pr_known_candidate_ids(self)  # type: ignore[arg-type]
+
+    def _framework_pr_tried_refs(self) -> list[str]:
+        return Coordinator._framework_pr_tried_refs(self)  # type: ignore[arg-type]
 
 
 def _pump(stub: _CoordinatorStub) -> None:
