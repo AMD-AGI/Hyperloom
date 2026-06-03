@@ -77,25 +77,4 @@ PY
 Then run the skill at $HYPERLOOM_SOURCE_DIR/inference_optimizer/SKILL.md from
 that directory (cd "$HYPERLOOM_SOURCE_DIR").
 
-Environment (export before launching `inference_optimizer optimize`):
-  export NFS_ROOT=/wekafs
   export CORTEX_KB_URL=https://global.primus-safe.amd.com/knowledge-base
-  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak,claude,codex}"
-  export HYPERLOOM_GEAK_BUDGET_MIN="${HYPERLOOM_GEAK_BUDGET_MIN:-130}"
-  export HYPERLOOM_KERNEL_OPT_GATE_TOP_N="${HYPERLOOM_KERNEL_OPT_GATE_TOP_N:-5}"
-Pass `--max-hours 12` to `inference_optimizer optimize` (do not use the cli
-default). Kernel backend ladder is GEAK first, then Claude, then Codex; do NOT
-request a Claude-only backend unless explicitly told to.
-
-Artifacts are written automatically by the optimizer — you do NOT need to
-hand-write them. `inference_optimizer/cli.py`'s finally block always
-materializes the session_breakdown.json (the CI delivery contract that the
-dashboard and CI both read) plus reports/final.md under the session dir, even
-when the run aborts. ci_metrics.json values, when present, MUST match what the
-V2 orchestrator measured (phase-1 baseline / phase 6-8 best) — never recompute
-gain_pct from a partial-run eager-mode baseline. Do not bail early on a 12h run.
-
-SAFETY:
-- NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
-- NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
-- Per-bash timeouts must be <= 120s; use short polling loops rather than one long blocking call.
