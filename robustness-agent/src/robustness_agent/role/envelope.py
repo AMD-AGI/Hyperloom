@@ -220,6 +220,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "framework_pr_max_candidates",
     # Advisory model-architecture profile (launcher / state.json owned).
     "model_arch",
+    # Architecture-identity tags lifted from config.json (recipe-snapshot
+    # KB tags). Fact-layer; locked to mirror upstream
+    # ``policy.CORE_STATE_FIELDS``.
+    "model_architectures",
+    "model_type",
 })
 
 
