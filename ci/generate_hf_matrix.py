@@ -338,12 +338,12 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 
 
 def _cron_batch_index(pool_size: int, batch_size: int) -> int:
-    """Deterministic production-pool rotation for the 8-hour production cron.
+    """Deterministic production-pool rotation for the twice-daily cron.
 
     Manual workflow dispatches increment GitHub's run number, so using
     ``GITHUB_RUN_NUMBER`` for schedule rotation makes the next cron batch depend
-    on ad-hoc smoke runs. Instead, schedule uses the UTC 8-hour slot:
-    00:00-07:59 => slot 0, 08:00-15:59 => slot 1, 16:00-23:59 => slot 2.
+    on ad-hoc smoke runs. Instead, schedule uses the UTC 12-hour slot:
+    00:00-11:59 => slot 0, 12:00-23:59 => slot 1 (cron fires at 00:00 / 12:00).
     The epoch is pinned to the production pool date so every operator can
     predict the slice before cron fires.
     """
@@ -359,8 +359,8 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
         now_utc = datetime.now(timezone.utc)
     now_utc = now_utc.astimezone(timezone.utc)
     days = (now_utc.date() - epoch.date()).days
-    eight_hour_slot = min(now_utc.hour // 8, 2)
-    slot = max(days, 0) * 3 + eight_hour_slot
+    half_day_slot = min(now_utc.hour // 12, 1)
+    slot = max(days, 0) * 2 + half_day_slot
     batch_index = slot % batches
     print(
         "cron rotation: "
