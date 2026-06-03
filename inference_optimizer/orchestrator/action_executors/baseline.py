@@ -71,20 +71,24 @@ log = logging.getLogger(__name__)
 
 # Magpie's built-in InferenceX benchmark scripts that honour
 # ``MAGPIE_RUN_PHASE=server``/``client`` and therefore support the
-# server_lifecycle reuse protocol. Mirror of Magpie's
+# server_lifecycle reuse protocol. Static mirror of Magpie's
 # ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` — duplicated (not imported) so
-# Hyperloom keeps no import-time dependency on Magpie internals (Magpie
-# is not importable in the unit-test sandbox). The baseline cold-start
-# double-run guard only engages when the resolved benchmark script is
-# one of these; any other script (model-specific InferenceX scripts,
-# exotic GPU types without a generic Magpie script) falls back to the
-# legacy single-round path.
+# Hyperloom keeps no import-time dependency on Magpie internals (Magpie is
+# not importable in the unit-test sandbox). Keep in sync with Magpie. The
+# cold-start double-run guard only engages when the resolved benchmark
+# script is one of these; any other script (model-specific InferenceX
+# scripts, exotic GPU types without a generic Magpie script) falls back to
+# the legacy single round. ``atom_*`` per AMD-AGI/Magpie#34 (atom-as-a-
+# framework requires that PR, which also ships the phase-aware atom
+# scripts, so listing them here can never outrun Magpie support).
 MAGPIE_BUILTIN_SCRIPTS = frozenset(
     {
         "vllm_mi300x.sh",
         "vllm_mi355x.sh",
         "sglang_mi300x.sh",
         "sglang_mi355x.sh",
+        "atom_mi300x.sh",
+        "atom_mi355x.sh",
     }
 )
 
