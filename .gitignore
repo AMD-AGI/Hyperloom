@@ -35,6 +35,7 @@ benchmarks/
 marathon-runs/
 marathon-sessions/
 kernel-agent/runs/
+inference_optimizer/runs/
 .optimization_strategies.md
 optimization_report.md
 bench.py
@@ -59,6 +60,11 @@ Thumbs.db
 inference_optimizer/remain_todo.md
 inference_optimizer/remain_issue.md
 inference_optimizer/remain_robustness_todo.md
+
+# PR description scratchpad. Tools (gh CLI, codex) sometimes drop a
+# pr.md at the repo root when drafting a pull request; the
+# description belongs in the PR body, not in the tree.
+pr.md
 
 # F0/F1 integration: keep test baselines, dry-run merge maps, and
 # archived regression sweeps tracked.

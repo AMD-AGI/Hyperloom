@@ -8,13 +8,16 @@ miss. We target those here so the helper contracts stay locked.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
 from inference_optimizer.orchestrator import kernel_request_handlers as krh
+from inference_optimizer.orchestrator.shared_state import SharedState
 
 
 def _ensure_torch_module(monkeypatch):
@@ -94,7 +97,7 @@ class TestRuntimeGeneratedKernel:
 
     def test_reusable_source_root_overrides_compile_marker(self):
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
-        roots = krh._REUSABLE_SOURCE_ROOTS
+        roots = krh._reusable_source_roots()
         if not markers or not roots:
             pytest.skip("required tables empty in build")
         marker = next(iter(markers))
@@ -315,19 +318,20 @@ class TestReusableSourceRootsAtom:
         # case-sensitive ``startswith`` and keeps the canonical case in
         # ``framework_paths._DEFAULT_SOURCE_ROOTS`` separately.
         assert any(
-            "/app/atom/atom/" in r.lower() for r in krh._REUSABLE_SOURCE_ROOTS
+            "/app/atom/atom/" in r.lower()
+            for r in krh._reusable_source_roots()
         )
 
     def test_includes_atom_site_packages_python_3_10(self):
         assert any(
             "/opt/venv/lib/python3.10/site-packages/atom/" in r
-            for r in krh._REUSABLE_SOURCE_ROOTS
+            for r in krh._reusable_source_roots()
         )
 
     def test_includes_atom_site_packages_python_3_12(self):
         assert any(
             "/opt/venv/lib/python3.12/site-packages/atom/" in r
-            for r in krh._REUSABLE_SOURCE_ROOTS
+            for r in krh._reusable_source_roots()
         )
 
     def test_atom_path_classified_as_reusable(self):
@@ -363,6 +367,115 @@ class TestReusableSourceRootsAtom:
             marker, "/app/session_dir/runs/baseline/foo.py",
         )
         assert result is True
+# run_gemm_tuning_handler
+# ---------------------------------------------------------------------------
+
+class TestRunGemmTuningHandler:
+    def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path):
+        state = SharedState(precision="bf16", framework="sglang")
+        state.save(tmp_path)
+
+        result = asyncio.run(krh.run_gemm_tuning_handler({}, session_dir=tmp_path))
+
+        assert result["status"] == "skipped"
+        assert result["error_class"] == "fp8_only_action"
+
+    def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
+        root = tmp_path / "kernel-agent"
+        tool = root / "tools" / "gemm_tuning.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# placeholder\n")
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path="/models/qwen-fp8",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            baseline_tput=4479.0,
+        )
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            captured["timeout_sec"] = timeout_sec
+            input_path = cmd[cmd.index("--input-json") + 1]
+            data = json.loads(Path(input_path).read_text())
+            assert data["framework"] == "sglang"
+            assert data["precision"] == "fp8"
+            return 0, json.dumps({
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.2,
+                "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
+            }), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(krh.run_gemm_tuning_handler(
+            {
+                "benchmark_script": "/workspace/run_sglang_test.sh",
+                "dry_run": True,
+                "task_id": "t1",
+            },
+            session_dir=tmp_path,
+        ))
+
+        assert result["status"] == "ok"
+        cmd_text = " ".join(captured["cmd"])  # type: ignore[arg-type]
+        assert "run_sglang_test" not in cmd_text
+        assert "gemm_a8w8_blockscale_tune" not in cmd_text
+        assert "--input-json" in captured["cmd"]  # type: ignore[operator]
+
+    def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
+        root = tmp_path / "kernel-agent"
+        tool = root / "tools" / "gemm_tuning.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# placeholder\n")
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path="/models/qwen-fp8",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            baseline_tput=4479.0,
+        )
+        state.save(tmp_path)
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            input_path = cmd[cmd.index("--input-json") + 1]
+            data = json.loads(Path(input_path).read_text())
+            bench = Path(data["benchmark_script"])
+            text = bench.read_text()
+            assert bench.name == "geak_gemm_benchmark.sh"
+            assert "PORT=\"${PORT:-18888}\"" in text
+            assert "pgrep" not in text
+            assert data["benchmark_script"].endswith("geak_gemm_benchmark.sh")
+            return 0, json.dumps({
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.1,
+                "tuned_file": "/tmp/tuned.csv",
+            }), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(krh.run_gemm_tuning_handler(
+            {"dry_run": True, "task_id": "auto"},
+            session_dir=tmp_path,
+        ))
+
+        assert result["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------

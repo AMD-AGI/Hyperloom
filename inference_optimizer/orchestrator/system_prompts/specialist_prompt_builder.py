@@ -120,17 +120,42 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "- `sglang/python/sglang/srt/scheduler/` and `sglang/python/sglang/srt/managers/`.",
         "- KB anchor `framework.*` (cuda_graph / batching / chunked_prefill / kv_cache).",
         "",
-        "**Winning techniques to consider**",
+        "**Config levers (cheap, try first — these are env/flag changes)**",
         "- `--enable-chunked-prefill` + matched `--max-num-batched-tokens`.",
         "- `--enforce-eager=false` + cuda graph capture for stable batch sizes.",
         "- `--kv-cache-dtype fp8_e4m3` when the gap is HBM-bound (gate accuracy!).",
         "- `--max-num-seqs` tuning at concurrency boundaries.",
+        "- AITER umbrella (`VLLM_ROCM_USE_AITER=1`) is **ALWAYS_ON** on MI300X;",
+        "  `VLLM_ROCM_USE_AITER_RMSNORM=0` / `...PAGED_ATTN=1` are **NEVER_TOUCH**",
+        "  (crash / dead var). Do NOT propose flags in the NEVER_TOUCH set.",
+        "",
+        "**Source-patch playbook (the high-ceiling work — author real code)**",
+        "Config tuning has a low ceiling. When the gap persists after the cheap",
+        "levers (or the orchestrator escalates you for a code patch), modify the",
+        "framework **source** and write a unified diff into your worktree",
+        "`patches/` dir (see the patch protocol section). Map the profile gap to",
+        "the module:",
+        "- **Scheduler / batch composition gap** (low batch occupancy, decode",
+        "  starvation) → `scheduler.py` batch policy: prefill/decode interleave,",
+        "  `max_num_batched_tokens` chunk split, waiting-queue admission order.",
+        "- **KV-cache / block-manager gap** (HBM-bound, fragmentation) →",
+        "  block_manager / paged-cache: block-size policy, eviction, prefix-cache",
+        "  reuse. Keep `block_size >= 16`.",
+        "- **CUDA-graph / capture gap** (host-bound, dispatch overhead) →",
+        "  capture-size set, inductor graph partition, eager-fallback conditions.",
+        "- **Chunked-prefill granularity** → split-size heuristic in the",
+        "  scheduler, not just the flag.",
+        "Keep patches small (target ≤5 files); preserve upstream call-order",
+        "contracts (e.g. vLLM `scheduler.add_seq_group` ordering) or you will",
+        "break chunked-prefill / spec-decode interactions.",
         "",
         "**Pitfalls (historical REVERTs)**",
         "- Raising `--max-num-seqs` past 512 on MI300X → OOM on 671B MoE models.",
         "- `cuda_graph` + dynamic batch sizes → silent recapture cost > savings.",
         "- Chunked prefill without `--max-num-batched-tokens` → tail latency",
         "  regressions invisible to throughput-only benches.",
+        "- `torch.compile` on MLA + FP8 (DeepSeek-R1 NSA path) → incompatible;",
+        "  disable compile on that path.",
     ]
 
 
@@ -442,7 +467,7 @@ class SpecialistPromptInputs:
     # Cortex KB sub-graph (§3.5 §6 part 4)
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
 
-    # Roofline / TraceLens evidence (§3.5 §6 part 4a — post-N31).
+    # Roofline / TraceLens evidence (§3.5 §6 part 4a).
     # Filled by ``Coordinator._warm_specialist_params`` from
     # :attr:`SharedState.last_trace_analyze`. Expected keys:
     # ``analysis_md_path``, ``roofline_snapshot_id``,
@@ -577,7 +602,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend(workload_rows)
     if inp.arch_notes:
         rows.append("")
-        rows.append(f"Architecture notes: {inp.arch_notes}")
+        rows.append(f"Model architecture (advisory): {inp.arch_notes}")
     return rows
 
 
@@ -691,7 +716,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Section 4a — Roofline / TraceLens evidence (post-N31)
+# Section 4a — Roofline / TraceLens evidence
 # ---------------------------------------------------------------------------
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section.
@@ -710,6 +735,8 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
       (extracted via :func:`roofline_snapshot.extract_workload_summary`).
     * ``hot_kernels_top15``: list of hot-kernel dicts (top 8 already
       sliced by the warmer to bound token cost).
+    * ``kernel_roofline_top15``: optional per-kernel roofline projection
+      with AI / efficiency / utilization fields.
 
     Returns an empty section (just the heading + ``(none)`` placeholder)
     when ``roofline_evidence`` is empty so the specialist still sees the
@@ -747,6 +774,58 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
                 rows.append(f"- {label}: {float(val):.1f}%")
             else:
                 rows.append(f"- {label}: {val}")
+        rows.append("")
+
+    roofline = ev.get("kernel_roofline_top15") or []
+    if isinstance(roofline, list) and roofline:
+        rows.append(
+            "**Kernel roofline "
+            "(kernel_id | name | gpu_pct | bound | AI | eff_pct | "
+            "compute_pct | bandwidth_pct | action):**"
+        )
+        rows.append("")
+        rows.append(
+            "| kernel_id | name | gpu_pct | bound | AI | eff_pct | "
+            "compute_pct | bandwidth_pct | action |"
+        )
+        rows.append("|---|---|---:|---|---:|---:|---:|---:|---|")
+        for k in roofline:
+            if not isinstance(k, dict):
+                continue
+            kid = str(k.get("kernel_id") or "")
+            name = str(k.get("name") or "")
+            gpu_pct = k.get("gpu_pct")
+            gpu_pct_str = (
+                f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float))
+                else "—"
+            )
+            bound = str(k.get("bound_type") or k.get("bottleneck") or "")
+            ai = k.get("arithmetic_intensity")
+            if ai is None:
+                ai = k.get("flops_per_byte")
+            ai_str = (
+                f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "—"
+            )
+            eff = k.get("efficiency_percent")
+            eff_str = (
+                f"{float(eff):.2f}%" if isinstance(eff, (int, float)) else "—"
+            )
+            comp = k.get("compute_utilization_pct")
+            comp_str = (
+                f"{float(comp):.2f}%" if isinstance(comp, (int, float)) else "—"
+            )
+            bw = k.get("bandwidth_utilization_pct")
+            bw_str = (
+                f"{float(bw):.2f}%" if isinstance(bw, (int, float)) else "—"
+            )
+            actions = k.get("recommended_actions") or []
+            action = str(k.get("suggestion") or "")
+            if not action and isinstance(actions, list) and actions:
+                action = str(actions[0])
+            rows.append(
+                f"| `{kid}` | {name} | {gpu_pct_str} | {bound} | {ai_str} | "
+                f"{eff_str} | {comp_str} | {bw_str} | {action} |"
+            )
         rows.append("")
 
     hot = ev.get("hot_kernels_top15") or []

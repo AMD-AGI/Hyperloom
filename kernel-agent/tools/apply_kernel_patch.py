@@ -22,14 +22,43 @@ COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".
 PYTHON_SOURCE_SUFFIXES = {".py"}
 COMPILED_ARTIFACT_SUFFIXES = {".so", ".co", ".hsaco"}
 TEXT_ARTIFACT_SUFFIXES = {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}
-KNOWN_TARGET_ROOTS = (
+# Fallback when ``inference_optimizer`` is not on ``sys.path`` (standalone CLI).
+_FALLBACK_KNOWN_TARGET_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/usr/local/lib/python3.12/dist-packages/aiter/",
+    "/usr/local/lib/python3.12/dist-packages/sglang/",
+    "/usr/local/lib/python3.12/dist-packages/vllm/",
+    "/usr/local/lib/python3.10/dist-packages/aiter/",
+    "/usr/local/lib/python3.10/dist-packages/sglang/",
+    "/usr/local/lib/python3.10/dist-packages/vllm/",
 )
+
+_CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
+
+
+def known_target_roots() -> tuple[str, ...]:
+    """Resolved framework roots (importlib/glob when orchestrator is importable)."""
+    global _CACHED_KNOWN_TARGET_ROOTS
+    if _CACHED_KNOWN_TARGET_ROOTS is not None:
+        return _CACHED_KNOWN_TARGET_ROOTS
+    try:
+        from inference_optimizer.orchestrator.framework_paths import (
+            resolve_patch_target_roots,
+        )
+
+        _CACHED_KNOWN_TARGET_ROOTS = resolve_patch_target_roots()
+    except ImportError:
+        _CACHED_KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS
+    return _CACHED_KNOWN_TARGET_ROOTS
+
+
+# Backward-compat alias for tests / external imports.
+KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS
 
 
 # Default location of the multi-node patch backup directory on the
@@ -492,7 +521,8 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
 def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[str, Any]:
     target = str(target_file)
     lower = target.lower()
-    if not allow_unknown_target and not any(root in lower for root in KNOWN_TARGET_ROOTS):
+    roots = known_target_roots()
+    if not allow_unknown_target and not any(root in lower for root in roots):
         raise ValueError(f"target_file is outside known reusable source roots: {target_file}")
 
     suffix = target_file.suffix.lower()
