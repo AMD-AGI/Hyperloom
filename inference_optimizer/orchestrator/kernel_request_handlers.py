@@ -43,6 +43,7 @@ import logging
 import os
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -96,44 +97,44 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/opt/venv/lib/python3.12/site-packages/aiter/",
-    "/opt/venv/lib/python3.12/site-packages/sglang/",
-    "/opt/venv/lib/python3.12/site-packages/vllm/",
-    # Production vLLM wheel install layout (system dist-packages). Keep
-    # this in sync with ``kernel-agent/tools/tracelens_analysis.py`` so
-    # both the kernel-agent classifier and the orchestrator-side gate
-    # in ``run_optimization_handler`` agree on what counts as a
-    # reusable framework source.
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-    # atom layout. The editable install lives under ``/app/ATOM/atom/`` on disk but
-    # ``_is_runtime_generated_kernel`` and ``run_optimization_handler``
-    # lower-case their inputs before the ``startswith`` / substring
-    # check, so the prefix below is stored lower-case for the match
-    # to fire. ``framework_paths._DEFAULT_SOURCE_ROOTS`` carries the
-    # canonical-case ``/app/ATOM/atom/`` because PolicyGate's
-    # ``_path_in_allowlist`` is case-sensitive against the real
-    # filesystem path. Keep this block in sync with
-    # ``kernel-agent/tools/tracelens_analysis.py``
-    # ``_REUSABLE_SOURCE_ROOTS`` (cross-cutting guard
-    # ``test_atom_present_in_tracelens_reusable_roots``).
-    "/app/atom/atom/",
-    "/opt/venv/lib/python3.10/site-packages/atom/",
-    "/opt/venv/lib/python3.12/site-packages/atom/",
-    "/usr/local/lib/python3.12/dist-packages/atom/",
-    "/usr/local/lib/python3.10/dist-packages/atom/",
-)
+def _reusable_source_roots() -> tuple[str, ...]:
+    """Framework install roots for patchability checks (dynamic discovery).
+
+    Sourced from :func:`framework_paths.resolve_patch_target_roots` so the
+    orchestrator gate, PolicyGate and ``apply_kernel_patch`` share one set
+    of roots (importlib + glob discovery + static fallbacks, incl. atom).
+    Callers here lower-case the source path before the substring check, so
+    we also emit a lower-case variant of every root (e.g. ``/app/ATOM/atom/``
+    -> ``/app/atom/atom/``) to keep the case-insensitive match working.
+    """
+    from .framework_paths import resolve_patch_target_roots
+
+    roots = resolve_patch_target_roots()
+    out: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        for variant in (root, root.lower()):
+            if variant and variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    # FlyDSL kernel checkout(s) used as $DSL2_ROOT for PR #668
+    # pseudo_op::moe_flydsl_* candidates. Kept in sync with the kernel-agent
+    # classifier (`tracelens_analysis._flydsl_reusable_roots`) so the
+    # orchestrator gate and the classifier agree on FlyDSL patchability;
+    # without this the in-loop run_optimization gate would reject FlyDSL
+    # sources the classifier already admitted.
+    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
+        val = (os.environ.get(env_key, "") or "").strip()
+        if val:
+            cand = (val.rstrip("/") + "/").lower()
+            if cand not in seen:
+                seen.add(cand)
+                out.append(cand)
+    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+        if default not in seen:
+            seen.add(default)
+            out.append(default)
+    return tuple(out)
 _APPLY_TOOL_MODULE: Any | None = None
 # GEAK is FIRST per SKILL.md "high-priority handoff" contract: every kernel
 # Claude/Codex can rewrite, GEAK can rewrite too, and GEAK's GPU-only
@@ -162,6 +163,7 @@ _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 # ``KERNEL_OPT_MAX_PARALLEL`` env (>=1).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
+_DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
 
 
 @functools.lru_cache(maxsize=1)
@@ -246,6 +248,7 @@ _CANDIDATE_ENV_PREFIXES = (
     "VLLM_",
     "AITER_",
     "TRITON_",
+    "FLYDSL_",
     "HIPBLASLT_",
     "PYTORCH_TUNABLEOP_",
 )
@@ -283,7 +286,7 @@ def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     if any(marker in lower_file for marker in _RUNTIME_GENERATED_SOURCE_MARKERS):
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root in lower_file for root in _reusable_source_roots())
     return False
 
 
@@ -506,7 +509,7 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "source_file": source_file,
         }
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root in lower_file for root in _reusable_source_roots()):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",
@@ -764,6 +767,185 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
 
 
 # ---------------------------------------------------------------------------
+def _normalize_precision(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _gemm_tuning_timeout_sec(payload: dict) -> int:
+    raw = payload.get("timeout_sec") or os.environ.get(
+        "HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC",
+        "",
+    )
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        value = _DEFAULT_GEMM_TUNING_TIMEOUT_SEC
+    return max(60, value)
+
+
+def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
+    raw = payload.get("workspace_path")
+    if raw:
+        return Path(raw)
+    suffix = str(payload.get("task_id") or payload.get("request_id") or "").strip()
+    if not suffix:
+        suffix = f"request_{int(time.time())}"
+    return Path(session_dir) / "runs" / "gemm_tuning" / suffix
+
+
+def _write_gemm_tuning_benchmark_script(
+    *,
+    workspace: Path,
+    model_path: str,
+    framework: str,
+    gpu_type: str,
+    tp: int,
+    conc: int,
+    isl: int,
+    osl: int,
+) -> Path:
+    """Create an isolated benchmark wrapper for GEAK GEMM tuning.
+
+    The wrapper uses a distinct default port and delegates lifecycle cleanup
+    to the benchmark script's own PID/trap handling. It deliberately avoids
+    global `pgrep sglang` cleanup so it cannot kill the main optimizer's
+    benchmark server when GEMM tuning runs inside a live session.
+    """
+    runner = f"/hyperloom/InferenceX/benchmarks/{framework}_{gpu_type}.sh"
+    path = workspace / "geak_gemm_benchmark.sh"
+    path.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+export MODEL={shlex.quote(model_path)}
+export TP={int(tp)}
+export CONC={int(conc)}
+export ISL={int(isl)}
+export OSL={int(osl)}
+export RANDOM_RANGE_RATIO="${{RANDOM_RANGE_RATIO:-1}}"
+export NUM_PROMPTS="${{NUM_PROMPTS:-320}}"
+export NUM_WARMUPS="${{NUM_WARMUPS:-8}}"
+export RUN_EVAL="${{RUN_EVAL:-false}}"
+export RESULT_DIR="${{RESULT_DIR:-$PWD/gemm_benchmark_result}}"
+export RESULT_FILENAME="${{RESULT_FILENAME:-bench_serving.json}}"
+export PORT="${{PORT:-18888}}"
+export PATH="/opt/node20/bin:/opt/venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export INFERENCEX_PATH="/hyperloom/InferenceX"
+mkdir -p "$RESULT_DIR"
+cd "$INFERENCEX_PATH"
+exec {shlex.quote(runner)}
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+async def run_gemm_tuning_handler(
+    payload: dict, *, session_dir: Path,
+) -> HandlerResult:
+    """Run GEAK's FP8 block-scale GEMM tuning workflow.
+
+    This is intentionally separate from ``run_optimization``: it tunes
+    vendor/aiter GEMM dispatch configuration before source-level kernel
+    rewrites spend GEAK/OOB budget on individual reusable native kernels.
+    """
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    precision = _normalize_precision(payload.get("precision") or state.precision)
+    if precision != "fp8":
+        return {
+            "status": "skipped",
+            "decision": "REVERT",
+            "error_class": "fp8_only_action",
+            "error": f"GEAK GEMM tuning only applies to FP8 workloads (precision={precision or '(unset)'})",
+            "precision": precision,
+        }
+    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
+    if framework != "sglang":
+        return {
+            "status": "skipped",
+            "decision": "REVERT",
+            "error_class": "unsupported_framework",
+            "error": f"GEAK GEMM tuning first version supports SGLang only (framework={framework or '(unset)'})",
+            "framework": framework,
+            "precision": precision,
+        }
+    root_err = _kernel_agent_root_error()
+    if root_err:
+        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
+
+    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
+    if not model_path:
+        return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
+    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
+    conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 0)
+    isl = int(payload.get("isl") or state.isl or os.environ.get("ISL") or 0)
+    osl = int(payload.get("osl") or state.osl or os.environ.get("OSL") or 0)
+    gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "").strip().lower()
+    benchmark_script = str(
+        payload.get("benchmark_script")
+        or os.environ.get("GEAK_GEMM_BENCHMARK_SCRIPT")
+        or ""
+    ).strip()
+    if not benchmark_script:
+        if not gpu_type:
+            gpu_type = "mi355x"
+        benchmark_script = str(_write_gemm_tuning_benchmark_script(
+            workspace=workspace,
+            model_path=model_path,
+            framework=framework,
+            gpu_type=gpu_type,
+            tp=tp,
+            conc=conc,
+            isl=isl,
+            osl=osl,
+        ))
+    geak_config = str(payload.get("config") or os.environ.get("GEAK_CONFIG") or "").strip()
+    baseline_tput = payload.get("baseline_tput")
+    if baseline_tput is None:
+        baseline_tput = state.baseline_tput
+
+    input_json = workspace / "gemm_tuning_input.json"
+    input_payload = {
+        "cwd": str(workspace),
+        "model_path": model_path,
+        "benchmark_script": benchmark_script,
+        "framework": framework,
+        "precision": precision,
+        "gpu_type": gpu_type,
+        "tp": tp,
+        "conc": conc,
+        "isl": isl,
+        "osl": osl,
+        "baseline_tput": float(baseline_tput or 0.0),
+    }
+    if geak_config:
+        input_payload["config"] = geak_config
+    if payload.get("dry_run"):
+        input_payload["dry_run"] = True
+    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    cmd = [
+        "python3",
+        str(_kernel_agent_tool_path("gemm_tuning.py")),
+        "--input-json", str(input_json),
+    ]
+
+    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_tuning_timeout_sec(payload))
+    result = _shape_tool_result(rc, stdout, stderr)
+    result.setdefault("workspace", str(workspace))
+    result.setdefault("precision", precision)
+    result.setdefault("framework", framework)
+    result.setdefault("model_path", model_path)
+    result.setdefault("benchmark_script", benchmark_script)
+    return result
+
+
+# ---------------------------------------------------------------------------
 async def trace_analyze_handler(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
@@ -916,8 +1098,10 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    if payload.get("roofline_json"):
-        cmd += ["--roofline-json", str(payload["roofline_json"])]
+    # PR-E: ``--roofline-json`` CLI param retired with the
+    # ``pmc_roofline`` action (2486a19). No producer for that JSON
+    # remains; the payload key is now silently ignored if a stale
+    # caller still passes it.
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
@@ -944,6 +1128,8 @@ async def trace_analyze_handler(
         # offered the kernels they expected.
         if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
             result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
+        if isinstance(artifacts, dict) and artifacts.get("kernel_roofline"):
+            result["kernel_roofline_path"] = str(artifacts["kernel_roofline"])
 
         # A failed TraceLens run is a hard trace-quality / integration
         # failure, not a valid "empty candidates" signal. Keep
@@ -1590,8 +1776,13 @@ async def _run_optimization_single(
         cmd += ["--source-file", str(payload["source_file"])]
     if target_platform:
         cmd += ["--target-platform", str(target_platform)]
-    if payload.get("extra_server_args"):
-        cmd += ["--extra-sglang-args", str(payload["extra_server_args"])]
+    extra_args = str(
+        payload.get("extra_server_args")
+        or payload.get("extra_sglang_args")
+        or ""
+    ).strip()
+    if extra_args:
+        cmd += ["--extra-sglang-args", extra_args]
     if payload.get("candidates_path"):
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
@@ -1941,6 +2132,7 @@ async def integrate_handler(
 # requests routed via ``Coordinator._handle_request``.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze":    trace_analyze_handler,
+    "run_gemm_tuning":  run_gemm_tuning_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
     "apply_patch":      integrate_handler,   # alias — same flow
@@ -1961,6 +2153,7 @@ __all__ = [
     "get_handler",
     "has_handler",
     "integrate_handler",
+    "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
 ]

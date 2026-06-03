@@ -53,6 +53,7 @@ from .orchestrator.action_executors import (
     baseline_executor,
     explore_executor,
     recover_executor,
+    conc_sweep_executor,
     report_executor,
     session_breakdown_executor,
     sweep_executor,
@@ -73,6 +74,7 @@ from .orchestrator.backends import (
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
+from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 from .orchestrator.cortex_t0 import run_t0_anchor
 from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
@@ -89,6 +91,7 @@ from .paths import (
     make_session_dir,
     mn_profile_trace_root,
     session_dir as _session_dir_resolve,
+    workspace_root as _workspace_root_resolve,
 )
 from .session_paths import (
     agent_prompt_snapshot,
@@ -301,7 +304,7 @@ def _validate_critic_agent_runtime(root: Path) -> None:
             cwd=str(root),
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(
@@ -365,7 +368,7 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
             env=env,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(
@@ -777,6 +780,33 @@ def _build_backends(
     return backends
 
 
+def _build_proposal_scorer(
+    args: argparse.Namespace,
+) -> ProposalScorer | None:
+    """Construct the advisory specialist-proposal scorer, or ``None``.
+
+    Returns ``None`` when ``--no-proposal-scoring`` is set or the
+    resolved model list is empty. Models default to
+    :data:`DEFAULT_SCORER_MODELS` (``claude-opus-4-8,gpt-5.5,
+    dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview``).
+    Adding a
+    model = appending its gateway slug to ``--proposal-scorer-models``.
+    The scorer is purely advisory and never gates anything.
+    """
+    if getattr(args, "no_proposal_scoring", False):
+        return None
+    raw = getattr(args, "proposal_scorer_models", None)
+    if raw is None:
+        models = tuple(DEFAULT_SCORER_MODELS)
+    else:
+        models = tuple(
+            m for m in (s.strip() for s in str(raw).split(",")) if m
+        )
+    if not models:
+        return None
+    return ProposalScorer(models=models)
+
+
 def _resume_safe_flag(
     args: argparse.Namespace,
     arg_name: str,
@@ -851,6 +881,60 @@ def _resume_safe_numeric(
         except (TypeError, ValueError):
             pass
     return default
+
+
+def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
+    """Best-effort loader for the launcher's advisory ``model_arch`` profile.
+
+    Reads ``<workspace_root>/model_arch.json`` (the convention path under
+    ``$USER_DATA_PATH``) written pre-launch by the SKILL launcher. The
+    profile is **advisory-only** — it is injected into prompts but drives
+    no deterministic gating.
+
+    Soft-degrade contract (never blocks launch):
+      * file missing / unreadable / not valid JSON / not a dict -> WARN,
+        return ``{}``.
+      * stale-file guard: the convention path lives at the shared
+        workspace root (parent of every model/session dir), so a leftover
+        file from a previous run could otherwise leak into an unrelated
+        launch. Require ``data["model_name"]`` basename to match the
+        launched ``--model`` basename; mismatch -> WARN
+        ``model_arch_stale_or_mismatch``, return ``{}``.
+    """
+    arch_path = workspace_root / "model_arch.json"
+    try:
+        raw = arch_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logging.warning("model_arch_unreadable: %s (%s)", arch_path, exc)
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logging.warning("model_arch_invalid_json: %s (%s)", arch_path, exc)
+        return {}
+    if not isinstance(data, dict):
+        logging.warning(
+            "model_arch_not_a_dict: %s (got %s)", arch_path, type(data).__name__
+        )
+        return {}
+    declared = str(data.get("model_name") or "").strip()
+    if not declared:
+        logging.warning(
+            "model_arch_missing_model_name: %s (cannot verify freshness)", arch_path
+        )
+        return {}
+    if Path(declared).name != Path(model_name).name:
+        logging.warning(
+            "model_arch_stale_or_mismatch: %s declares model_name=%r but "
+            "launching %r — ignoring",
+            arch_path,
+            declared,
+            model_name,
+        )
+        return {}
+    return data
 
 
 def _seed_shared_state(
@@ -1023,6 +1107,13 @@ def _seed_shared_state(
         model_name=Path(args.model).name,
         model_path=str(args.model),
         model_class=args.model_class or "",
+        # Advisory architecture profile (launcher-supplied convention file).
+        # Fresh-launch only: resume rehydrates the persisted value from
+        # state.json (see load_or_init below), so we must NOT clobber it
+        # with a possibly newer/older convention file. Soft-degrade to {}.
+        model_arch=_load_model_arch(
+            _workspace_root_resolve(), Path(args.model).name
+        ),
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI / env at fresh-session time
@@ -1045,6 +1136,9 @@ def _seed_shared_state(
         osl=_int_env_or_arg("osl", "OSL"),
         max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
         kernel_enabled=not getattr(args, "no_kernel", False),
+        continue_kernel_after_gemm=bool(
+            getattr(args, "continue_kernel_after_gemm", True)
+        ),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
@@ -1062,15 +1156,44 @@ def _seed_shared_state(
         # ``--no-explore`` skips the EXPLORE phase entirely (PRELUDE /
         # FRAMEWORK_PR → KERNEL, or → SWEEP when kernel is also off).
         explore_enabled=not bool(getattr(args, "no_explore", False)),
-        gain_driven_kernel_opt=bool(
-            getattr(args, "gain_driven_kernel_opt", False),
-        ),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
+        # SWEEP-phase post-sweep concurrency sweep flags (on by default).
+        # See ``orchestrator/conc_sweep.py`` + coordinator hook
+        # ``_enqueue_internal_conc_sweep_task``.
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        conc_sweep_concs=_parse_conc_sweep_concs(args),
+        conc_sweep_total_budget_sec=int(
+            getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
+        ),
+        conc_sweep_variant_timeout_sec=int(
+            getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
+        ),
     )
     state.save(session_dir)
     return state
+
+
+def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
+    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]. Drops
+    non-integer tokens with a warning rather than crashing the CLI
+    boot so a typo doesn't take the whole session down. Empty list
+    (e.g. ``--conc-sweep-concs ''``) lets ``SharedState`` default-factory
+    populate the canonical 1..128 ladder."""
+    raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
+    if not raw:
+        return [1, 2, 4, 8, 16, 32, 64, 128]
+    out: list[int] = []
+    for tok in raw.split(","):
+        t = tok.strip()
+        if not t:
+            continue
+        try:
+            out.append(int(t))
+        except ValueError:
+            log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
+    return out or [1, 2, 4, 8, 16, 32, 64, 128]
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
@@ -1124,20 +1247,9 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 
 # Real executors enabled in every run mode (kernel + no-kernel).
 #
-# v0.8 M3 + KB_gaps/Gap-10: the legacy ``backends`` / ``params`` /
-# ``validate_stack`` registrations have been removed alongside
-# PolicyGate's ``action_deprecated`` rule. The merged ``explore``
-# action subsumes the per-variant KEEP/REVERT plus the per-KEEP stack
-# rebench; validate_stack is no longer a
-# standalone action.
-#
-# The legacy executor Python modules (``action_executors/backends.py``,
-# ``params.py``, ``validate_stack.py``) have been physically deleted
-# from the tree. The legacy resume audit trails (``backends_attempts``
-# etc.) keep their meaning on disk so legacy session resumes still
-# render correctly. New sessions never see these action names because
-# PolicyGate denies them with ``rule='action_deprecated'`` before a
-# task is ever queued.
+# The merged ``explore`` action subsumes the per-variant KEEP/REVERT
+# plus the per-KEEP stack rebench; there is no standalone validation
+# action.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline":          baseline_executor,
     # GAP 1 — ``replay_warm_recipe`` runs the same Magpie subprocess
@@ -1158,6 +1270,11 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "profile":           profile_executor,
     "explore":           explore_executor,
     "sweep":             sweep_executor,
+    # Coordinator-internal post-sweep concurrency comparison.
+    # On by default; disable via ``--no-enable-conc-sweep``. PolicyGate
+    # denies any LLM-proposed delegate{action_name='conc_sweep'}, so
+    # the only entry is the SWEEP-completion auto-enqueue hook.
+    "conc_sweep":        conc_sweep_executor,
     "report":            report_executor,
     "session_breakdown": session_breakdown_executor,
     # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
@@ -1165,8 +1282,7 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     # cleans up leaked VRAM owners and, behind
     # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
     # ``rocm-smi --gpureset``. See
-    # ``orchestrator/action_executors/recover.py``. ``validate_stack``
-    # has been retired and is intentionally absent.
+    # ``orchestrator/action_executors/recover.py``.
     "recover":           recover_executor,
 }
 
@@ -1187,7 +1303,7 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
 # does not raise ``no_executor`` on a stale task.
 _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
     "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config",
+    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
 )
 
 
@@ -1556,7 +1672,64 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
+    _print_kernel_opt_summary_line(state)
     print("===============================================")
+
+
+def _print_kernel_opt_summary_line(state: SharedState) -> None:
+    """One-line forensic readout of kernel_opt attempts at session end.
+
+    Pulls the same aggregation used by
+    ``reports/kernel_optimization_summary.json`` so stdout matches the
+    on-disk report. Best-effort: any failure is swallowed (this is a
+    summary print, not a critical path).
+    """
+    try:
+        from .orchestrator.kernel_attempt_summary import (
+            build_kernel_optimization_summary,
+        )
+        session_dir = _resolve_session_dir_for_summary(state)
+        if session_dir is None:
+            return
+        summary = build_kernel_optimization_summary(state, session_dir)
+        totals = summary.get("totals") or {}
+        attempted = int(totals.get("attempted") or 0)
+        if attempted == 0 and int(totals.get("unattempted") or 0) == 0:
+            return
+        integrated = int(totals.get("integrated") or 0)
+        rejected = int(totals.get("rejected") or 0)
+        unattempted = int(totals.get("unattempted") or 0)
+        print(
+            f"  kernel_opt           : {attempted} attempted "
+            f"({integrated} integrated, {rejected} rejected), "
+            f"{unattempted} unattempted in top candidates"
+        )
+        takeaways = summary.get("top_takeaways") or []
+        if len(takeaways) >= 2:
+            print(f"  kernel_opt_top_cause : {takeaways[1]}")
+        report_path = (
+            Path(session_dir) / "reports" / "kernel_optimization_summary.json"
+        )
+        if report_path.is_file():
+            print(f"  kernel_opt_report    : {report_path}")
+    except Exception:  # noqa: BLE001 — stdout print must never fail the run
+        pass
+
+
+def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
+    """Best-effort session_dir lookup for the stdout kernel_opt line.
+
+    SharedState does not carry session_dir directly, so we use the same
+    discovery the SessionInit path uses: HYPERLOOM_SESSION_DIR env when
+    set, else the cwd-anchored default. Returns ``None`` if neither
+    resolves to an existing directory.
+    """
+    env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
+    if env_sd:
+        p = Path(env_sd).expanduser()
+        if p.is_dir():
+            return p
+    return None
 
 
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
@@ -3684,6 +3857,36 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         )
 
 
+def _argv_has_option(argv: list[str], option: str) -> bool:
+    """Return True when argv explicitly carries ``option``."""
+    prefix = f"{option}="
+    return any(arg == option or arg.startswith(prefix) for arg in argv)
+
+
+def _export_workload_envs_for_optimize(
+    args: argparse.Namespace,
+    *,
+    nodes_resolved: int,
+    tp_resolved: int,
+    ep_resolved: int,
+    argv: list[str] | None = None,
+) -> None:
+    """Mirror explicit workload CLI flags into env for executors.
+
+    Single-node runs normally preserve YAML workload defaults. When the
+    operator explicitly passes ``--tp`` / ``--conc`` / ``--ep``, those values
+    must still win because the action executors read these knobs from
+    ``os.environ`` while materializing Magpie YAMLs.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if nodes_resolved >= 2 or _argv_has_option(argv, "--tp"):
+        os.environ["TP"] = str(tp_resolved)
+    if nodes_resolved >= 2 or _argv_has_option(argv, "--conc"):
+        os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
+    if nodes_resolved >= 2 or _argv_has_option(argv, "--ep"):
+        os.environ["EP"] = str(ep_resolved)
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     # Surface --nodes to the rest of the process (preflight diagnostics
     # and any executor that wants to short-circuit when the optimizer is
@@ -3743,20 +3946,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
-    # Re-export $TP / $CONC / $EP from the resolved CLI args, but ONLY in
-    # multi-node mode. Rationale: main's single-node design carries TP /
-    # CONC via `benchmark.envs.TP` / `benchmark.envs.CONC` in the YAML
-    # config (see SKILL.md §"Before a new model run"). Writing the
-    # argparse defaults ("1" / "8" / "1") back into os.environ here
-    # would silently override those YAML values via
-    # `_workload_envs.apply_runtime_benchmark_overrides` (which prefers
-    # env over envs.* for these keys). The multi-node orchestrator
-    # subprocess + sweep child workers still need to see the resolved
-    # CLI values, so the env export stays for nodes>=2 runs.
-    if nodes_resolved >= 2:
-        os.environ["TP"] = str(tp_resolved)
-        os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
-        os.environ["EP"] = str(ep_resolved)
+    # Re-export $TP / $CONC / $EP from resolved CLI args when the user
+    # explicitly supplied them, plus always for multi-node where child
+    # workers need the values. Avoid exporting argparse defaults in
+    # single-node mode because YAML workload defaults remain supported.
+    _export_workload_envs_for_optimize(
+        args,
+        nodes_resolved=nodes_resolved,
+        tp_resolved=tp_resolved,
+        ep_resolved=ep_resolved,
+    )
     # User-declared grid skip list. Resolution order is already enforced
     # by argparse default (--skip-variants > $SKIP_VARIANTS); we re-export
     # so executors started later via subprocess (multi-node orchestrator,
@@ -4129,12 +4328,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 session_dir=session_dir,
             )
         )
-        # Note: main commit 8e69732 also adds an N31 "resume backfill"
-        # block that copies last_trace_analyze into
-        # last_trace_analyze_baseline. The baseline-freeze field is
-        # main's N31 final-roofline machinery, which F3-3 retired on
-        # this branch in favour of gain-only freshness; the backfill
-        # therefore has no live consumer and is omitted.
+        # No resume backfill is required for the roofline comparison
+        # pipeline: PR #321 retired the ``last_trace_analyze_baseline``
+        # baseline-freeze field in favour of the append-only
+        # ``roofline_snapshots`` history, which is restored verbatim by
+        # ``SharedState.from_dict`` (missing key → empty list default).
     else:
         # Resolve model path from --model first, then $MODEL_PATH env. Without
         # either, fail fast: silently falling back to the YAML's hardcoded
@@ -4509,6 +4707,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # ``None`` when --degraded-kb; otherwise wraps Cortex KB +
         # PR Monitor for specialist prompt assembly.
         knowledge_plane=knowledge_plane,
+        # Advisory multi-model specialist-proposal scorer. ``None`` when
+        # --no-proposal-scoring or an empty model list; otherwise scores
+        # each proposal_set and surfaces the results to Orchestration as
+        # one reference among many (never gates anything).
+        proposal_scorer=_build_proposal_scorer(args),
         # GAP 1 — Warm-recipe replay controls. Default ON, fires when
         # warm_start_recipe.confidence >= min_confidence and the
         # measured gain reproduces at least min_reproduce_pct of the
@@ -4684,6 +4887,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 log.exception(
                     "emergency final report write failed (non-fatal)"
                 )
+
+    # NOTE: conc_sweep used to run here as a post-hook. It is now a
+    # real SWEEP-phase action auto-enqueued by the Coordinator after
+    # the SWEEP-entry sweep task lands (see
+    # ``coordinator._enqueue_internal_conc_sweep_task``). The CLI
+    # flags still live below and are mirrored onto SharedState at
+    # session init.
 
     _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in (
@@ -4914,6 +5124,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "--framework-version=0.4.5 to pin a specific tag for the run."
         ),
     )
+    opt.add_argument(
+        "--continue-kernel-after-gemm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After FP8 GEMM tuning succeeds, continue into source-level "
+            "kernel_opt. Use --no-continue-kernel-after-gemm for a "
+            "GEMM-only validation run."
+        ),
+    )
     grp = opt.add_mutually_exclusive_group()
     grp.add_argument("--target-gain", type=float, default=None,
                       help="Stop when cumulative_gain >= N%% over baseline")
@@ -4952,15 +5172,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model-class", type=str,
         default=os.environ.get("MODEL_CLASS", None),
         help=(
-            "Model class hint consumed by "
-            "``orchestrator/scoring.MODEL_CLASS_ACTION_PRIORS`` to seed "
-            "per-action base scores. Recognised values (case-insensitive, "
-            "with -/+/space tolerated): dense / moe_mla / moe_swa / "
-            "moe_mla_nsa. The deleted ``classify`` action used to discover "
-            "this from the model files; the external SKILL caller is now "
-            "expected to supply it via this flag (or the MODEL_CLASS env "
-            "var). Unset / unknown values fall back to the ``moe_mla`` "
-            "curated priors so DeepSeek-shaped sessions keep working."
+            "Categorical model-class key. It is the deterministic key for "
+            "several consumers: the atom explore seed grid "
+            "(action_executors/explore.py), the framework-agent gap search "
+            "token (action_executors/_framework_gap_composer.py), the recipe "
+            "key, and the orchestration prompt label. Recognised values "
+            "(case-insensitive, with -/+/space tolerated): dense / moe_mla / "
+            "moe_swa / moe_mla_nsa. The deleted ``classify`` action used to "
+            "discover this from the model files; the external SKILL caller is "
+            "now expected to supply it via this flag (or the MODEL_CLASS env "
+            "var). Unset / unknown values fall back to ``moe_mla`` so "
+            "DeepSeek-shaped sessions keep working. For richer *advisory* "
+            "model context (attention variant, KV/token, experts, MTP, ...) "
+            "the SKILL launcher writes $USER_DATA_PATH/model_arch.json, which "
+            "is injected into prompts but drives no gating."
         ),
     )
     opt.add_argument("--target-summary", type=str, default=None,
@@ -5357,6 +5582,32 @@ def _build_parser() -> argparse.ArgumentParser:
              "clamped down. Locked at session start.",
     )
     # ------------------------------------------------------------------
+    # Advisory specialist-proposal scorer (ProposalScorer). Scores each
+    # specialist proposal_set with one or more gateway models (single
+    # 0-10 composite + one-line reason) and surfaces the results to
+    # Orchestration as one reference among many — never gates anything.
+    # Adding a model = appending its gateway slug to the comma list.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--proposal-scorer-models",
+        dest="proposal_scorer_models",
+        type=str,
+        default=",".join(DEFAULT_SCORER_MODELS),
+        help="Comma-separated gateway model slugs that independently "
+             "score each specialist proposal_set (advisory only; never "
+             "gates; rater identities are anonymized in the orchestration "
+             "prompt). Default 'claude-opus-4-8,gpt-5.5,"
+             "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
+             "Add a model by "
+             "appending its slug. Empty list disables scoring.",
+    )
+    opt.add_argument(
+        "--no-proposal-scoring",
+        dest="no_proposal_scoring",
+        action="store_true",
+        help="Disable the advisory specialist-proposal scorer entirely.",
+    )
+    # ------------------------------------------------------------------
     # v0.8 §3.5 / §3.13 M5 + specialist sub-agent
     # backend selection. Specialists run via Claude (default) and inherit
     # the orchestration model unless overridden. Per-task turn / time
@@ -5470,22 +5721,6 @@ def _build_parser() -> argparse.ArgumentParser:
     def _env_default_on(env_var: str) -> bool:
         return os.environ.get(env_var, "1").strip() != "0"
 
-    # The standalone FRAMEWORK_PR phase is on by default; use
-    # ``--no-framework`` to disable it (mirrors the install-side
-    # ``INFERENCE_OPTIMIZER_NO_FRAMEWORK=1`` opt-out).
-    opt.add_argument(
-        "--gain-driven-kernel-opt",
-        dest="gain_driven_kernel_opt",
-        action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT", "0",
-        ).strip() == "1",
-        help="Lock ``kernel_opt`` until the 3-round moving "
-             "average of ``last_explore_delta_gain_pct`` drops below "
-             "epsilon (0.5%%). Prevents premature deep work while cheap "
-             "exploration is still earning. Default off. Env: "
-             "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT=1.",
-    )
     opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",
@@ -5500,6 +5735,75 @@ def _build_parser() -> argparse.ArgumentParser:
              "identical (same idempotency keys, same pending-task "
              "dispatch gate, same watermark anchor update). Env: "
              "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
+    )
+    # ------------------------------------------------------------------
+    # Post-optimization concurrency sweep (on by default).
+    #
+    # Runs an extra "baseline vs optimized" Magpie grid across CONC
+    # values after the close-sequence report has been written. The
+    # output is JSON/CSV in ``reports/conc_sweep_summary.json``; the
+    # frontend pairs it with the roofline ceiling to visualise the
+    # full curve. See ``orchestrator/conc_sweep.py``.
+    #
+    # Costs ~30 min/point on an 8xMI300 box and is bounded by
+    # ``--conc-sweep-total-budget-sec`` (default 2.5h) plus the
+    # remaining session wall-clock. Skip conditions (no baseline, no
+    # ``current_best``, no ISL/OSL) short-circuit before any subprocess
+    # is launched and are recorded in the JSON envelope. Disable with
+    # ``--no-enable-conc-sweep`` or
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--enable-conc-sweep",
+        dest="enable_conc_sweep",
+        action=argparse.BooleanOptionalAction,
+        default=(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", "",
+            ).strip().lower() not in ("0", "false", "no", "off")
+        ),
+        help="Run a post-optimization concurrency sweep (baseline vs "
+             "current_best across CONC) and write "
+             "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
+             "On by default; disable with --no-enable-conc-sweep or "
+             "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0.",
+    )
+    opt.add_argument(
+        "--conc-sweep-concs",
+        dest="conc_sweep_concs",
+        type=str,
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", "1,2,4,8,16,32,64,128",
+        ),
+        help="Comma-separated CONC ladder for --enable-conc-sweep. "
+             "Default 1,2,4,8,16,32,64,128.",
+    )
+    opt.add_argument(
+        "--conc-sweep-timeout-sec",
+        dest="conc_sweep_timeout_sec",
+        type=int,
+        default=int(os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_TIMEOUT_SEC", "1800",
+        )),
+        help="Per-variant timeout (seconds) for --enable-conc-sweep. "
+             "Default 1800 (~30 min). Per-variant cap is also clamped "
+             "by the remaining --conc-sweep-total-budget-sec.",
+    )
+    opt.add_argument(
+        "--conc-sweep-total-budget-sec",
+        dest="conc_sweep_total_budget_sec",
+        type=int,
+        default=int(os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_TOTAL_BUDGET_SEC", "9000",
+        )),
+        help="Total wall-clock budget (seconds) for the whole conc-sweep "
+             "action, independent of the per-variant Magpie timeout. "
+             "Once exhausted, remaining variants are recorded as "
+             "status=skipped / error_class=budget_exhausted and the "
+             "JSON envelope carries budget_exhausted=true. Default 9000 "
+             "(~2.5h); set to 0 to disable. Also bounded above by the "
+             "main session wall-clock deadline since conc_sweep runs as "
+             "a SWEEP-phase action.",
     )
     # Retired flags that operator scripts may still pass. We hard-fail
     # at argparse time with a one-line migration hint instead of
@@ -5870,21 +6174,21 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_explore_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.60.",
+        help="Wall-clock budget cap for EXPLORE. Default: 0.40.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL. Default: 0.25.",
+        help="Wall-clock budget cap for KERNEL. Default: 0.35.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.08.",
+        help="Wall-clock budget cap for SWEEP. Default: 0.18.",
     )
     opt.add_argument(
         "--max-minutes-close-pct",
