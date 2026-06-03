@@ -73,6 +73,7 @@ from .orchestrator.backends import (
 )
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
+from .orchestrator.action_surfaces import KERNEL_OWNED_ACTIONS
 from .orchestrator.coordinator import Coordinator
 from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 from .orchestrator.cortex_t0 import run_t0_anchor
@@ -1351,10 +1352,7 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
 # no-op in this process — actual work happens inside the kernel agent's
 # request handlers — but the names must stay registered so SubAgentRunner
 # does not raise ``no_executor`` on a stale task.
-_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
-    "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
-)
+_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = tuple(sorted(KERNEL_OWNED_ACTIONS))
 
 
 def _build_specialist_executor(
