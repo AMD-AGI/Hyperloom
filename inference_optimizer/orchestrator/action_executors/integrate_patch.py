@@ -22,7 +22,11 @@ Inputs (``ctx.task.params``):
     config_changes (dict[str, str], optional) — env vars layered on
         the variant's launch env. Reverted with the patches on REVERT.
     keep_threshold_pct (float, optional) — KEEP threshold; defaults to
-        ExploreExecutor's 0.2.
+        DEFAULT_KEEP_THRESHOLD_PCT (1.0). Unlike the ExploreExecutor
+        (per-variant KEEP 0.2 + cumulative stack rebench), the patch
+        integrate path has no second-stage stack rebench, so its sole
+        KEEP gate is set at the single-node grid noise floor (1.0%) to
+        avoid permanently committing noise-level "gains".
     accuracy_baseline (float | dict, optional) — accuracy gate input;
         forwarded to the existing accuracy gate utilities.
     base_tput (float, optional) — baseline throughput to compare
@@ -79,7 +83,7 @@ from ._workload_envs import default_baseline_config, materialize_config_with_env
 log = logging.getLogger(__name__)
 
 
-DEFAULT_KEEP_THRESHOLD_PCT = 0.2
+DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # D1: was 0.2 (below grid 1.0% noise floor; no stack rebench here)
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 long workload
 
 
