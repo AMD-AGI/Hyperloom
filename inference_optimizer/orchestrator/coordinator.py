@@ -3222,6 +3222,65 @@ class Coordinator:
     # ------------------------------------------------------------------
     # v0.8 §3.2 §5.4 + SWEEP phase auto-dispatch
     # ------------------------------------------------------------------
+    async def _drain_pending_keep_integrates(self) -> None:
+        """Bug #7: drain pending KEEP integrates inherited from KERNEL.
+
+        KERNEL→SWEEP transition is a hard budget cap; an orchestration
+        tick window between a kernel's final KEEP and ``kernel_phase_
+        budget_exhausted`` is often too short to propose+approve+run
+        ``integrate``. The KEEP then strands in the ``kernel_opt_attempts``
+        ledger with no path to land (SWEEP allowed set is {sweep,
+        conc_sweep, recover}; ``integrate`` is denied by phase_incompatible).
+        Downstream sweep / conc_sweep then measure the explore-only
+        current_best and the kernel's E2E contribution never reaches
+        the optimization_stack.
+
+        Mitigation: at SWEEP entry, walk
+        ``SharedState.next_pending_keep_kernel_id`` until empty, calling
+        ``integrate_handler`` directly. Each integrate runs an actual
+        E2E re-baseline (5-20 min) so this can delay SWEEP entry; that
+        is acceptable vs hours of GPU idled in singleton-blocked SWEEP
+        loops. Safety cap of 10 KEEPs guards against pathological queue
+        sizes; failures push the kernel into ``rejected_kernel_ids`` so
+        the queue cannot deadlock.
+        """
+        from .kernel_request_handlers import integrate_handler
+        state = self.shared_state
+        drained = 0
+        max_drain = 10
+        while drained < max_drain:
+            kid = state.next_pending_keep_kernel_id()
+            if not kid:
+                break
+            log.info(
+                "SWEEP entry: draining pending KEEP integrate for "
+                "kernel_id=%s (drained %d so far)", kid, drained,
+            )
+            try:
+                await integrate_handler(
+                    {"kernel_id": kid, "base_tput": float(state.baseline_tput or 0.0)},
+                    session_dir=self.session_dir,
+                )
+                state.save(self.session_dir)
+            except Exception as exc:  # noqa: BLE001 — never block SWEEP entry
+                log.exception(
+                    "SWEEP entry: integrate(%s) raised %r; marking "
+                    "rejected to prevent drain loop deadlock", kid, exc,
+                )
+                if state.rejected_kernel_ids is None:
+                    state.rejected_kernel_ids = []
+                if kid not in state.rejected_kernel_ids:
+                    state.rejected_kernel_ids.append(kid)
+                state.save(self.session_dir)
+            drained += 1
+        if drained >= max_drain:
+            log.warning(
+                "SWEEP entry: drain cap (%d) reached; remaining pending "
+                "KEEPs will be visible in summary.by_kernel as KEEP_PENDING",
+                max_drain,
+            )
+
+    # ------------------------------------------------------------------
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue a ``sweep`` task on SWEEP entry.
 
@@ -3259,6 +3318,11 @@ class Coordinator:
         the LLM intent payload.
         """
         state = self.shared_state
+        # Bug #7 fix: drain pending KEEP integrates from prior KERNEL
+        # phase so sweep / conc_sweep measure the full current_best
+        # (explore + kernel stack), not the explore-only baseline.
+        if getattr(state, "has_keep_pending_integrate", False):
+            await self._drain_pending_keep_integrates()
         try:
             task = await self._enqueue_internal_sweep_task(
                 reason="phase_entry",
@@ -3291,6 +3355,74 @@ class Coordinator:
             auto_sweep_grid_source=grid_source,
             auto_sweep_combos=combos,
         )
+
+    async def _enqueue_internal_conc_sweep_task(
+        self, *, reason: str,
+    ) -> Task | None:
+        """Build + enqueue a Coordinator-internal ``conc_sweep`` task.
+
+        Mirrors :meth:`_enqueue_internal_sweep_task` but emits the
+        SWEEP-phase ``conc_sweep`` action (baseline + current_best
+        across a CONC ladder, see
+        ``orchestrator/conc_sweep.py``). Off by default — the caller
+        (typically the sweep-completion hook) must check
+        ``shared_state.conc_sweep_enabled`` first; this method does
+        NOT re-check the flag, so callers wanting to dispatch
+        unconditionally (operator-driven resume scenarios) can do so.
+
+        Idempotency key: ``internal-conc_sweep-<reason>``. PolicyGate's
+        action-singleton rule plus this key together ensure at most
+        one conc_sweep task lands per SWEEP phase.
+
+        Returns the freshly-created (or returned-existing) Task; the
+        caller logs the task_id. Returns None and logs an error if
+        creation raised — conc_sweep is post-sweep gravy, never fatal.
+        """
+        state = self.shared_state
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            "concs": list(state.conc_sweep_concs or []),
+            "variant_timeout_sec": int(state.conc_sweep_variant_timeout_sec or 0),
+            "total_budget_sec":    int(state.conc_sweep_total_budget_sec or 0),
+        }
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="conc_sweep",
+                params=params,
+                idempotency_key=f"internal-conc_sweep-{reason}",
+                # Conc_sweep can run for hours (default 2.5h, up to
+                # ``total_budget_sec``); lease_ttl matches so the lease
+                # doesn't expire mid-flight. Coordinator's existing
+                # lease-extension heartbeats keep it alive if a
+                # variant overshoots.
+                lease_ttl_sec=int(state.conc_sweep_total_budget_sec or 9000),
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception(
+                "conc_sweep: failed to enqueue internal task: %r", exc,
+            )
+            return None
+        if was_existing:
+            log.info(
+                "internal-conc_sweep task already exists (idempotent: "
+                "task_id=%s, state=%s)", task.task_id, task.state,
+            )
+        else:
+            log.info(
+                "internal-conc_sweep task enqueued (task_id=%s reason=%s "
+                "concs=%s total_budget_sec=%s)",
+                task.task_id, reason,
+                params["concs"], params["total_budget_sec"],
+            )
+        # Bug #11 fix: stamp evidence so PolicyGate's
+        # ``conc_sweep_phase_singleton`` rule can deny subsequent
+        # LLM-emitted conc_sweep proposals in the same SWEEP phase.
+        # Without this, orchestration loops re-proposing conc_sweep
+        # (sweep is singleton-blocked, only conc_sweep is allowed)
+        # until SWEEP budget exhausts.
+        self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
+        return task
 
     async def _enqueue_internal_sweep_task(
         self, *, reason: str,
@@ -11629,6 +11761,55 @@ class Coordinator:
             # ``plateau_explore`` for no good reason. The streak field
             # is owned by the ``params`` action lifecycle; sweep MUST
             # NOT mutate it.
+            self.shared_state.save(self.session_dir)
+            # SWEEP-phase post-hook: chain ``conc_sweep`` after a
+            # succeeded sweep when the operator opted in via
+            # ``--enable-conc-sweep``. Wrapped in best-effort because
+            # the post-sweep concurrency comparison is non-critical
+            # (the session has already produced a validated
+            # current_best); failure to enqueue must not block the
+            # SWEEP→CLOSE transition.
+            if getattr(self.shared_state, "conc_sweep_enabled", False) and \
+                    result.get("status") == "succeeded":
+                try:
+                    await self._enqueue_internal_conc_sweep_task(
+                        reason="post_sweep",
+                    )
+                except Exception:  # noqa: BLE001 — never block SWEEP->CLOSE
+                    log.exception(
+                        "conc_sweep: post-sweep enqueue raised (non-fatal)"
+                    )
+            return
+        elif task_kind == "conc_sweep":
+            self.shared_state.record_action_attempt(
+                action="conc_sweep",
+                task_id=getattr(task, "task_id", "") if task is not None else "",
+                status=str(result.get("status") or "succeeded"),
+                decision="discarded",
+                result=result,
+                extras={
+                    "was_skipped":      bool(result.get("was_skipped", False)),
+                    "skip_reason":      result.get("skip_reason"),
+                    "budget_exhausted": bool(result.get("budget_exhausted", False)),
+                    "total_budget_sec": result.get("total_budget_sec"),
+                    "elapsed_sec":      result.get("elapsed_sec"),
+                    "best_speedup":     (
+                        (result.get("summary") or {}).get("best_speedup")
+                    ),
+                    "best_conc":        (
+                        (result.get("summary") or {}).get("best_conc")
+                    ),
+                    "successful_pairs": (
+                        (result.get("summary") or {}).get("successful_pairs")
+                    ),
+                    "report_path":      result.get("report_json_path"),
+                },
+            )
+            # Bug #12 fix: write last_conc_sweep so
+            # ``phase_state.exit_normal_sweep`` can fire ``conc_sweep_done``
+            # and SWEEP→CLOSE transitions without waiting for budget
+            # exhaustion.
+            self.shared_state.record_conc_sweep(result)
             self.shared_state.save(self.session_dir)
             return
         # Audit trail (kernel-parity) for the 6 non-kernel actions: one
