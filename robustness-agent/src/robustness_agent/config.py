@@ -105,6 +105,30 @@ class Config:
     health_probe_targets: list[str] = field(default_factory=list)
     health_probe_timeout_s: float = 1.5
 
+    # -- M2 multi-node knobs --
+    # ``disable_local_probe`` silences the LocalProbe fallback entirely
+    # (DegradeRouter falls back to a quiet stub that yields no signals).
+    # Required in multi-node runs because per-pod ps / HTTP / rocm-smi
+    # probes trip false ``local_server_unreachable`` / ``ray_head_dead``
+    # symptoms on every Ray worker that does not host the inference
+    # server. Defaults preserve single-node behaviour.
+    disable_local_probe: bool = False
+    # ``enable_cluster_pod_metrics`` turns on the server fan-out in
+    # :class:`RobustnessServerSource` so the local_health signals see
+    # cluster-decoded GPU snapshots from every pod backing the session.
+    enable_cluster_pod_metrics: bool = False
+    pod_metrics_categories: tuple[str, ...] = ("gpu",)
+    # ``workload_uid`` is forwarded to robustness-server's
+    # ``/api/v1/cluster/workloads/{uid}/hierarchy`` so the agent resolves
+    # the full pod set (head + workers) for a multi-node RayJob without
+    # depending on per-session pod registration order.
+    workload_uid: str = ""
+    # ``nodes`` is informational (mirrors the host's --nodes value). The
+    # actual policy is driven by ``disable_local_probe`` /
+    # ``enable_cluster_pod_metrics``; ``nodes`` is forwarded for prompt
+    # / log visibility only.
+    nodes: int = 1
+
     # -- gpu_memory_leaked signal (2026-05) --
     # Trip thresholds: a GPU is "full" when EITHER util_mem_pct exceeds
     # ``gpu_leak_util_mem_pct_threshold`` OR free MiB falls below
@@ -325,6 +349,12 @@ class Config:
         analyzer_url = await _probe_robust_analyzer()
         server_url = await _probe_robustness_server()
         llm_base_url, llm_api_key = _discover_llm_credentials()
+        workload_uid = _discover_workload_uid()
+        disable_local_probe = _env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
+        enable_cluster_pod_metrics = _env_bool(
+            "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS", False,
+        )
+        nodes = _env_int("ROBUSTNESS_NODES", 1)
 
         config = cls(
             session_dir=session_dir,
@@ -332,14 +362,24 @@ class Config:
             robustness_server_url=server_url,
             llm_base_url=llm_base_url,
             llm_api_key=llm_api_key,
+            workload_uid=workload_uid,
+            disable_local_probe=disable_local_probe,
+            enable_cluster_pod_metrics=enable_cluster_pod_metrics,
+            nodes=nodes,
         )
 
         log.info(
-            "Config discovered: session_dir=%s server=%s analyzer=%s llm=%s",
+            "Config discovered: session_dir=%s server=%s analyzer=%s llm=%s "
+            "nodes=%d workload_uid=%s disable_local_probe=%s "
+            "enable_cluster_pod_metrics=%s",
             config.session_dir,
             config.robustness_server_url or "(local-only)",
             config.robust_analyzer_url or "(local mode)",
             "(configured)" if config.llm_base_url else "(not available)",
+            config.nodes,
+            config.workload_uid or "(unset)",
+            config.disable_local_probe,
+            config.enable_cluster_pod_metrics,
         )
         return config
 
@@ -416,3 +456,44 @@ def _discover_llm_credentials() -> tuple[str, str]:
         or os.environ.get("LLM_API_KEY", "")
     )
     return base_url, api_key
+
+
+_WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
+    "ROBUSTNESS_WORKLOAD_UID",
+    "CLAW_WORKLOAD_UID",
+    "WORKLOAD_UID",
+    "KUBE_WORKLOAD_UID",
+    "RAY_JOB_ID",
+)
+
+
+def _discover_workload_uid() -> str:
+    """Resolve the multi-node workload uid the agent should reconcile with.
+
+    Picks the first non-empty value from the env keys above so a RayJob
+    sandbox can opt into hierarchy-based pod discovery without code
+    changes. Single-node runs leave every key unset and the agent
+    falls back to ``list_session_pods``.
+    """
+    for key in _WORKLOAD_UID_ENV_KEYS:
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
