@@ -940,10 +940,29 @@ def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
             "returncode": None,
         }
     if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        # A broken `ray status` CLI entrypoint (e.g. click/import error in
+        # ray's own scripts) is NOT evidence the head is down: the library
+        # imports fine, only the CLI shim crashes. Treat such self-crashes
+        # as inconclusive (silent) so we do not falsely emit ray_head_dead
+        # and prune the kernel_opt branch.
+        cli_self_crash = "Traceback (most recent call last)" in stderr and (
+            "ray/scripts/scripts.py" in stderr
+            or "add_command_alias" in stderr
+            or "ImportError" in stderr
+            or "ModuleNotFoundError" in stderr
+        )
+        if cli_self_crash:
+            log.warning(
+                "local_probe: `ray status` CLI is broken (self-crash, not "
+                "head-dead); skipping ray_head_dead. stderr=%s",
+                stderr[:200],
+            )
+            return {}
         return {
             "healthy": False,
             "reason": f"ray status exit={proc.returncode}",
-            "stderr": (proc.stderr or "").strip()[:400],
+            "stderr": stderr[:400],
             "returncode": proc.returncode,
         }
     stdout = proc.stdout or ""
