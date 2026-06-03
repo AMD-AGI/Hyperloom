@@ -552,6 +552,10 @@ class SharedState:
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
+    # Last Coordinator-side exception caught by the tick-loop resilience
+    # guard. Coordinator-only; gives postmortems a traceback without relying
+    # on harness stdout.
+    last_tick_exception: dict[str, Any] = field(default_factory=dict)
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
@@ -1740,6 +1744,29 @@ class SharedState:
     def increment_crash_count(self, by: int = 1) -> int:
         self.crash_count += by
         return self.crash_count
+
+    def record_tick_exception(
+        self,
+        *,
+        tick: int,
+        stage: str,
+        exc_type: str,
+        message: str,
+        traceback_text: str,
+        agent: str = "",
+    ) -> dict[str, Any]:
+        """Persist a compact Coordinator exception summary for postmortems."""
+        entry = {
+            "tick": int(tick or 0),
+            "ts": _now_iso(),
+            "stage": str(stage or ""),
+            "agent": str(agent or ""),
+            "type": str(exc_type or ""),
+            "message": str(message or "")[:1000],
+            "traceback": str(traceback_text or "")[:12000],
+        }
+        self.last_tick_exception = entry
+        return entry
 
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
         """Merge a non-empty changes dict into this state.

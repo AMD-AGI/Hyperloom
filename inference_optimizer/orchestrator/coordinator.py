@@ -29,6 +29,7 @@ import logging
 import os
 import signal
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -4430,6 +4431,31 @@ class Coordinator:
             # phase machine advance at tick boundary.
             await self._advance_phase_if_needed()
 
+    def _record_coordinator_exception(
+        self,
+        *,
+        stage: str,
+        exc: BaseException,
+        tick: int | None = None,
+        agent: str = "",
+    ) -> None:
+        """Record a Coordinator-side exception without killing the session."""
+        try:
+            self.shared_state.record_tick_exception(
+                tick=int(tick if tick is not None else self.shared_state.tick or 0),
+                stage=stage,
+                agent=agent,
+                exc_type=type(exc).__name__,
+                message=str(exc),
+                traceback_text="".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                ),
+            )
+            self.shared_state.increment_crash_count()
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to persist Coordinator exception metadata")
+
     # ==================================================================
     # Long-run interface (DESIGN §9 + §21)
     # ==================================================================
@@ -4506,60 +4532,81 @@ class Coordinator:
 
         tick_n = 0
         stop_reason = ""
+        last_tick_exc: BaseException | None = None
         closing_deadline: float | None = None
         try:
             while not stop_reason:
                 tick_n += 1
-                # Bump the persistent tick counter — drives phase / plateau
-                # math. Persisted on the next save() (after
-                # _promote_to_shared_state or stop).
-                self.shared_state.increment_tick()
-                in_closing = self.shared_state.closing_phase
-                # Run one reactor + dispatcher pass. During closing, skip
-                # LLM reactor passes and only pump the deterministic report.
-                if not in_closing:
-                    for name in self._tick_roles:
-                        if self._stop.is_set():
-                            break
-                        await self._reactor_pass(name)
-                if not self._stop.is_set():
-                    await self._pump_dispatcher_once()
-                # FRAMEWORK_PR phase pump: see ``tick()`` for rationale.
-                if not in_closing:
+                in_closing = bool(self.shared_state.closing_phase)
+                try:
+                    # Bump the persistent tick counter — drives phase / plateau
+                    # math. Persisted on the next save() (after
+                    # _promote_to_shared_state or stop).
+                    self.shared_state.increment_tick()
+                    in_closing = self.shared_state.closing_phase
+                    # Run one reactor + dispatcher pass. During closing, skip
+                    # LLM reactor passes and only pump the deterministic report.
+                    if not in_closing:
+                        for name in self._tick_roles:
+                            if self._stop.is_set():
+                                break
+                            await self._reactor_pass(name)
+                    if not self._stop.is_set():
+                        await self._pump_dispatcher_once()
+                    # FRAMEWORK_PR phase pump: see ``tick()`` for rationale.
+                    if not in_closing:
+                        try:
+                            await self._pump_framework_pr_phase()
+                        except Exception:  # noqa: BLE001 — defensive
+                            log.exception("FRAMEWORK_PR pump (run) failed")
+                    # phase machine advance at tick boundary.
+                    # Runs even when ``in_closing`` so CLOSE phase still gets
+                    # recorded into phase_history when the final breakdown
+                    # writer transitions us in.
                     try:
-                        await self._pump_framework_pr_phase()
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception("FRAMEWORK_PR pump (run) failed")
-                # phase machine advance at tick boundary.
-                # Runs even when ``in_closing`` so CLOSE phase still gets
-                # recorded into phase_history when the final breakdown
-                # writer transitions us in.
-                await self._advance_phase_if_needed()
+                        await self._advance_phase_if_needed()
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception("phase advance (run) failed")
+                        self._record_coordinator_exception(
+                            stage="advance_phase",
+                            exc=exc,
+                            tick=tick_n,
+                        )
 
-                # N33: bump ``consecutive_silent_ticks`` when the post-
-                # tick state shows nothing in flight (no queued / running
-                # task, no pending proposal, no ``current_action``). Any
-                # non-empty signal means the run is still making forward
-                # progress (LLM proposed, executor running, critic
-                # reviewing, etc.) so we reset the counter to 0. Skipped
-                # while we're already in closing to avoid double-firing
-                # the closing-phase trigger below.
-                if not in_closing:
-                    try:
-                        queued_now = len(await self.tasks.queued())
-                        running_now = len(await self.tasks.running())
-                    except Exception:  # noqa: BLE001
-                        queued_now = running_now = 0
-                    tick_is_idle = (
-                        queued_now == 0
-                        and running_now == 0
-                        and not self.state.pending_proposals
-                        and not (self.shared_state.current_action or "").strip()
+                    # N33: bump ``consecutive_silent_ticks`` when the post-
+                    # tick state shows nothing in flight (no queued / running
+                    # task, no pending proposal, no ``current_action``). Any
+                    # non-empty signal means the run is still making forward
+                    # progress (LLM proposed, executor running, critic
+                    # reviewing, etc.) so we reset the counter to 0. Skipped
+                    # while we're already in closing to avoid double-firing
+                    # the closing-phase trigger below.
+                    if not in_closing:
+                        try:
+                            queued_now = len(await self.tasks.queued())
+                            running_now = len(await self.tasks.running())
+                        except Exception:  # noqa: BLE001
+                            queued_now = running_now = 0
+                        tick_is_idle = (
+                            queued_now == 0
+                            and running_now == 0
+                            and not self.state.pending_proposals
+                            and not (self.shared_state.current_action or "").strip()
+                        )
+                        if tick_is_idle:
+                            self.shared_state.consecutive_silent_ticks += 1
+                        else:
+                            self.shared_state.consecutive_silent_ticks = 0
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    last_tick_exc = exc
+                    log.exception("Coordinator.run: tick %d body raised", tick_n)
+                    self._record_coordinator_exception(
+                        stage="tick_body",
+                        exc=exc,
+                        tick=tick_n,
                     )
-                    if tick_is_idle:
-                        self.shared_state.consecutive_silent_ticks += 1
-                    else:
-                        self.shared_state.consecutive_silent_ticks = 0
 
                 # ---- check stop conditions ----
                 if self._stop.is_set():
@@ -4647,7 +4694,9 @@ class Coordinator:
             # reassigned; preserve any prior persisted reason instead of
             # downgrading it to "unknown".
             self.shared_state.set_stop_reason(
-                stop_reason or self.shared_state.stop_reason or "unknown"
+                stop_reason
+                or self.shared_state.stop_reason
+                or ("coordinator_exception" if last_tick_exc is not None else "unknown")
             )
             self.shared_state.save(self.session_dir)
             log.info(
@@ -5862,50 +5911,74 @@ class Coordinator:
             await self._record_policy_denied(source, intent, denied)
             return
 
-        it = intent.type
-        if it == IntentType.PROPOSE_ACTION:
-            await self._handle_propose_action(source, intent)
-        elif it == IntentType.REVIEW_VERDICT:
-            await self._handle_review_verdict(source, intent)
-        elif it == IntentType.DELEGATE:
-            await self._handle_delegate(source, intent)
-        elif it == IntentType.REQUEST:
-            await self._handle_request(source, intent)
-        elif it == IntentType.RESPONSE:
-            await self._handle_response(source, intent)
-        elif it == IntentType.KILL_TASK:
-            await self._handle_kill_task(source, intent)
-        elif it == IntentType.PRUNE_BRANCH:
-            await self._handle_prune_branch(source, intent)
-        elif it == IntentType.FORCE_DISPATCH:
-            await self._handle_force_dispatch(source, intent)
-        elif it == IntentType.ESCALATE_STRATEGY_CHANGE:
-            await self._handle_escalate_strategy_change(source, intent)
-        elif it == IntentType.SEND_MESSAGE:
-            await self._handle_send_message(source, intent)
-        elif it == IntentType.ALERT:
-            await self._handle_alert(source, intent)
-        elif it == IntentType.UPDATE_STATE:
-            await self._handle_update_state(source, intent)
-        elif it == IntentType.SPECIALIST_DONE:
-            # v0.8 §3.5 §10 + terminal intent of a
-            # specialist task. PolicyGate R3 has already validated the
-            # ``from_agent='specialist:<task_id>'`` prefix + payload
-            # schema + gap/domain match; the handler only does
-            # bookkeeping.  The current SpecialistRunner architecture
-            # captures the done intent inside the runner instead of
-            # routing it via the bus, so this branch is mostly
-            # defense-in-depth + future-proofing (an out-of-band path
-            # — e.g. an operator script replaying a transcript — still
-            # converges on the same handler).
-            await self._handle_specialist_done(source, intent)
-        else:
-            # ASK_QUESTION / ANSWER / UPDATE_PERSONA — record for replay
-            await self._record_observation(
-                source, "observation",
-                {"intent": it.value, "payload": intent.payload},
+        try:
+            it = intent.type
+            if it == IntentType.PROPOSE_ACTION:
+                await self._handle_propose_action(source, intent)
+            elif it == IntentType.REVIEW_VERDICT:
+                await self._handle_review_verdict(source, intent)
+            elif it == IntentType.DELEGATE:
+                await self._handle_delegate(source, intent)
+            elif it == IntentType.REQUEST:
+                await self._handle_request(source, intent)
+            elif it == IntentType.RESPONSE:
+                await self._handle_response(source, intent)
+            elif it == IntentType.KILL_TASK:
+                await self._handle_kill_task(source, intent)
+            elif it == IntentType.PRUNE_BRANCH:
+                await self._handle_prune_branch(source, intent)
+            elif it == IntentType.FORCE_DISPATCH:
+                await self._handle_force_dispatch(source, intent)
+            elif it == IntentType.ESCALATE_STRATEGY_CHANGE:
+                await self._handle_escalate_strategy_change(source, intent)
+            elif it == IntentType.SEND_MESSAGE:
+                await self._handle_send_message(source, intent)
+            elif it == IntentType.ALERT:
+                await self._handle_alert(source, intent)
+            elif it == IntentType.UPDATE_STATE:
+                await self._handle_update_state(source, intent)
+            elif it == IntentType.SPECIALIST_DONE:
+                # v0.8 §3.5 §10 + terminal intent of a
+                # specialist task. PolicyGate R3 has already validated the
+                # ``from_agent='specialist:<task_id>'`` prefix + payload
+                # schema + gap/domain match; the handler only does
+                # bookkeeping.  The current SpecialistRunner architecture
+                # captures the done intent inside the runner instead of
+                # routing it via the bus, so this branch is mostly
+                # defense-in-depth + future-proofing (an out-of-band path
+                # — e.g. an operator script replaying a transcript — still
+                # converges on the same handler).
+                await self._handle_specialist_done(source, intent)
+            else:
+                # ASK_QUESTION / ANSWER / UPDATE_PERSONA — record for replay
+                await self._record_observation(
+                    source, "observation",
+                    {"intent": it.value, "payload": intent.payload},
+                )
+            await self._cursor_advance_to_latest(source)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("intent handler for %s raised", source)
+            self._record_coordinator_exception(
+                stage="handle_intent",
+                agent=source,
+                exc=exc,
             )
-        await self._cursor_advance_to_latest(source)
+            try:
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "handle_intent_exception",
+                        "agent": source,
+                        "intent_type": intent.type.value,
+                        "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("failed to record handle_intent_exception observation")
+            return
 
     # ------------------------------------------------------------------
     # PROPOSE_ACTION + REVIEW_VERDICT
@@ -10389,12 +10462,23 @@ class Coordinator:
                 )
                 continue
             result: SubAgentResult = maybe_result
-            await self.bus.append_and_seq(Message.new(
-                "coordinator", "*", "delegated_result",
-                {"task_id": task.task_id, "kind": task.kind,
-                 "state": result.state, "result": result.result,
-                 "error": result.error},
-            ))
+            try:
+                await self.bus.append_and_seq(Message.new(
+                    "coordinator", "*", "delegated_result",
+                    {"task_id": task.task_id, "kind": task.kind,
+                     "state": result.state, "result": result.result,
+                     "error": result.error},
+                ))
+            except Exception as exc:  # noqa: BLE001
+                log.exception(
+                    "dispatcher: failed to append delegated_result for task=%s",
+                    task.task_id,
+                )
+                self._record_coordinator_exception(
+                    stage="dispatcher_result",
+                    exc=exc,
+                )
+                continue
             # v0.8 §3.5 §10 + specialist bookkeeping.
             # SpecialistRunner returns the done payload under
             # ``result.result['specialist_done']`` (Gap-01 adapter
@@ -10481,12 +10565,24 @@ class Coordinator:
                 result.state == "succeeded"
                 and self._is_promotable_result(task.kind, result.result or {})
             )
-            if kept:
-                await self._promote_to_shared_state(
-                    task.kind, result.result, task=task,
+            try:
+                if kept:
+                    await self._promote_to_shared_state(
+                        task.kind, result.result, task=task,
+                    )
+                else:
+                    await self._handle_unpromotable_result(task, result.result)
+            except Exception as exc:  # noqa: BLE001
+                log.exception(
+                    "dispatcher: promotion/unpromotable handling failed "
+                    "for task=%s",
+                    task.task_id,
                 )
-            else:
-                await self._handle_unpromotable_result(task, result.result)
+                self._record_coordinator_exception(
+                    stage="dispatcher_promote",
+                    exc=exc,
+                )
+                continue
             # N34 Bug #4's ``report_emitted`` self-stop has been removed
             # to prioritise long-run continuity: a successful mid-run
             # ``report`` task no longer terminates the run loop. The LLM
@@ -10508,7 +10604,18 @@ class Coordinator:
             # gave +N%" lesson that would overwrite the original
             # recipe's measured_impact on KB shallow-merge.
             if task.kind != "replay_warm_recipe":
-                await self._fact_write_hook(task=task, result=result, kept=kept)
+                try:
+                    await self._fact_write_hook(task=task, result=result, kept=kept)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception(
+                        "dispatcher: fact-write hook failed for task=%s",
+                        task.task_id,
+                    )
+                    self._record_coordinator_exception(
+                        stage="dispatcher_fact_write",
+                        exc=exc,
+                    )
+                    continue
             # explore-round gap update.
             # For explore tasks with per-variant outcomes, append each
             # variant's KEEP/REVERT to the matching gap's attempts log
