@@ -223,6 +223,25 @@ class _AlwaysFailingBackend(Backend):
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
 
 
+class _AlwaysCrashingBackend(Backend):
+    """Backend that raises an unexpected exception from ``run``."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
+        self.calls += 1
+        raise RuntimeError(f"simulated {self.name} unexpected crash #{self.calls}")
+
+
 @pytest.mark.asyncio
 async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
     session_dir, monkeypatch,
@@ -263,6 +282,28 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         assert promoted["severity"] == "high"
         assert promoted["agent"] == "robustness"
         assert "subprocess backend has failed" in promoted["hint"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_backend_exception_records_last_tick_exception(session_dir):
+    backends = _build_backends({})
+    backends["orchestration"] = _AlwaysCrashingBackend("orchestration")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(1)
+        assert c.shared_state.crash_count == 1
+        assert c.shared_state.last_tick_exception["stage"] == "reactor_pass"
+        assert c.shared_state.last_tick_exception["agent"] == "orchestration"
+        assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
+        assert (
+            "simulated orchestration unexpected crash"
+            in c.shared_state.last_tick_exception["message"]
+        )
+
+        persisted = SharedState.load_or_init(session_dir)
+        assert persisted.last_tick_exception == c.shared_state.last_tick_exception
     finally:
         await c.stop()
 
@@ -1474,25 +1515,29 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
     session_dir,
 ):
     """Resuming an already-terminal session can re-enter ``run`` and break
-    out of the loop before the local ``stop_reason`` is reassigned (e.g. a
-    tick step raises mid-tick). The ``finally`` block must keep the
-    persisted terminal reason instead of downgrading it to ``"unknown"``."""
+    out after a tick step raises. The resilience guard records the exception,
+    then the normal stop-condition path must keep the persisted terminal
+    reason instead of downgrading it to ``"unknown"``."""
     c = Coordinator(session_dir, backends=_silent_backends())
     c.shared_state.set_stop_reason("target_reached")
     c.shared_state.save(session_dir)
 
     # Raise inside the tick body, before any stop-condition check assigns a
-    # new local stop_reason, so the loop unwinds straight into ``finally``.
+    # new local stop_reason.
     async def _boom():
         raise RuntimeError("tick exploded mid-run")
 
     c._advance_phase_if_needed = _boom  # type: ignore[assignment]
 
     try:
-        with pytest.raises(RuntimeError, match="tick exploded mid-run"):
-            await c.run(max_ticks=5)
+        reason = await c.run(max_ticks=5)
+        assert reason == "target_reached"
         assert c.shared_state.stop_reason == "target_reached"
+        assert c.shared_state.crash_count == 1
+        assert c.shared_state.last_tick_exception["stage"] == "advance_phase"
+        assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.stop_reason == "target_reached"
+        assert persisted.last_tick_exception["stage"] == "advance_phase"
     finally:
         await c.stop()
