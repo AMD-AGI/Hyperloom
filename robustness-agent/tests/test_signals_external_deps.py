@@ -94,7 +94,7 @@ def test_j2_wekafs_unreachable_fires_high():
     data = SourceData(local_external_deps={
         "mounts": [
             {"env_name": "TRACELENS_ROOT",
-             "path": "/wekafs/hyperloom/TraceLens-internal",
+             "path": "/wekafs/hyperloom/TraceLens",
              "ok": False, "error": "not_found", "latency_ms": 0.1},
         ],
     })
