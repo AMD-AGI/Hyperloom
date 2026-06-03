@@ -1467,3 +1467,32 @@ async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
         assert c.shared_state.stop_reason == "target_reached"
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reason(
+    session_dir,
+):
+    """Resuming an already-terminal session can re-enter ``run`` and break
+    out of the loop before the local ``stop_reason`` is reassigned (e.g. a
+    tick step raises mid-tick). The ``finally`` block must keep the
+    persisted terminal reason instead of downgrading it to ``"unknown"``."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.shared_state.set_stop_reason("target_reached")
+    c.shared_state.save(session_dir)
+
+    # Raise inside the tick body, before any stop-condition check assigns a
+    # new local stop_reason, so the loop unwinds straight into ``finally``.
+    async def _boom():
+        raise RuntimeError("tick exploded mid-run")
+
+    c._advance_phase_if_needed = _boom  # type: ignore[assignment]
+
+    try:
+        with pytest.raises(RuntimeError, match="tick exploded mid-run"):
+            await c.run(max_ticks=5)
+        assert c.shared_state.stop_reason == "target_reached"
+        persisted = SharedState.load_or_init(session_dir)
+        assert persisted.stop_reason == "target_reached"
+    finally:
+        await c.stop()

@@ -54,7 +54,7 @@ def test_decision_journal_renders_round_and_variants() -> None:
             "gain_vs_cb_pct": 0.56,
             "promotion_rule": "below_threshold",
             "promotion_rule_detail": "gain_vs_cb=0.56% < threshold",
-            "keep_threshold_pct": 0.2,
+            "keep_threshold_pct": 1.0,
             "variants_tested_count": 2,
         },
     }])
