@@ -134,7 +134,10 @@ async def test_policy_denial_streak_records_streak_at_two(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_policy_denial_streak_prunes_family_at_five(session_dir):
+async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir):
+    """Long-run continuity: the streak >= 5 auto-prune_family reaction
+    was removed. A repeatedly-denied action family is NOT pruned; the
+    streak is still recorded as a fact the LLM can see."""
     c = _silent_coordinator(session_dir)
     try:
         from inference_optimizer.orchestrator.policy import PolicyDenied
@@ -144,13 +147,19 @@ async def test_policy_denial_streak_prunes_family_at_five(session_dir):
             await c._record_policy_denied(
                 "orchestration", intent, pd, action_name="params",
             )
-        assert "params" in c.shared_state.pruned_families
+        assert "params" not in c.shared_state.pruned_families
+        assert c.shared_state.policy_denial_streak.get(
+            "params:duplicate_idempotency_key", 0,
+        ) == 5
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
-async def test_policy_denial_streak_sets_stop_reason_at_ten(session_dir):
+async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
+    """Long-run continuity: the streak >= 10 ``policy_loop`` stop was
+    removed. A repeatedly-denied action no longer terminates the run;
+    the streak keeps climbing but stop_reason stays unset."""
     c = _silent_coordinator(session_dir)
     try:
         from inference_optimizer.orchestrator.policy import PolicyDenied
@@ -160,7 +169,10 @@ async def test_policy_denial_streak_sets_stop_reason_at_ten(session_dir):
             await c._record_policy_denied(
                 "orchestration", intent, pd, action_name="backends",
             )
-        assert c.shared_state.stop_reason == "policy_loop"
+        assert not (c.shared_state.stop_reason or "").strip()
+        assert c.shared_state.policy_denial_streak.get(
+            "backends:duplicate_idempotency_key", 0,
+        ) == 10
     finally:
         await c.stop()
 
