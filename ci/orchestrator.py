@@ -150,7 +150,6 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         inferenceX_data=ifx_text,
         inferencex_path=merged.get("inferencex_path", ""),
         oob_path=merged.get("oob_path", ""),
-        tracelens_pkg_root=merged.get("tracelens_pkg_root", ""),
         tracelens_root=merged.get("tracelens_root", ""),
         # Multi-node / Hyperloom-skill knobs (defaults match legacy single-node CI).
         nodes=nodes,
@@ -534,7 +533,6 @@ def main():
     results_cfg["nfs_base"] = resolve_var(results_cfg.get("nfs_base", ""))
     defaults["inferencex_path"] = resolve_var(defaults.get("inferencex_path", ""))
     defaults["oob_path"] = resolve_var(defaults.get("oob_path", ""))
-    defaults["tracelens_pkg_root"] = resolve_var(defaults.get("tracelens_pkg_root", ""))
     defaults["tracelens_root"] = resolve_var(defaults.get("tracelens_root", ""))
     for m in config.get("models", []):
         if "model_path_override" in m:
