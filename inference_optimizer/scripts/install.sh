@@ -83,7 +83,9 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/framework-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
+# MAGPIE_PATH is the preferred operator override; MAGPIE_DIR is the legacy
+# name and still honoured as a fallback for backward compatibility.
+MAGPIE_DIR="${MAGPIE_PATH:-${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${HYPERLOOM_RUNTIME_DIR}/InferenceX}"
 
@@ -497,8 +499,35 @@ PY
 #     runs can be reproduced.
 ensure_inferencex() {
   if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
-    log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env; skipping fresh clone)"
+    # Magpie's benchmarker._prepare_benchmark_scripts() mkstemp's into
+    # "$INFERENCEX_PATH/benchmarks" to atomically sync its bundled *.sh. A
+    # read-only source mount (e.g. the WekaFS checkout passed via the prompt's
+    # INFERENCEX_PATH) makes that fail with "OSError: [Errno 30] Read-only file
+    # system" and aborts EVERY baseline with error_class=subprocess_nonzero.
+    # If the provided tree is not writable, mirror it into the writable runtime
+    # dir and use that instead (same writable-mirror pattern as Magpie/REPO_ROOT).
+    if ( mkdir -p "$INFERENCEX_PATH/benchmarks" 2>/dev/null \
+         && _ix_wtest="$(mktemp "$INFERENCEX_PATH/benchmarks/.wtest.XXXXXX" 2>/dev/null)" \
+         && rm -f "$_ix_wtest" ); then
+      log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env; writable)"
+      export INFERENCEX_PATH
+      return 0
+    fi
+    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      warn "INFERENCEX_PATH = $INFERENCEX_PATH is read-only; would mirror to $INFERENCEX_DEFAULT_DIR"
+      export INFERENCEX_PATH
+      return 0
+    fi
+    log "INFERENCEX_PATH = $INFERENCEX_PATH is read-only; mirroring to $INFERENCEX_DEFAULT_DIR (Magpie writes benchmarks/)"
+    mkdir -p "$INFERENCEX_DEFAULT_DIR"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a "$INFERENCEX_PATH"/ "$INFERENCEX_DEFAULT_DIR"/ || cp -a "$INFERENCEX_PATH"/. "$INFERENCEX_DEFAULT_DIR"/
+    else
+      cp -a "$INFERENCEX_PATH"/. "$INFERENCEX_DEFAULT_DIR"/
+    fi
+    INFERENCEX_PATH="$INFERENCEX_DEFAULT_DIR"
     export INFERENCEX_PATH
+    log "InferenceX mirrored to writable ${INFERENCEX_PATH}"
     return 0
   fi
   INFERENCEX_PATH="$INFERENCEX_DEFAULT_DIR"
