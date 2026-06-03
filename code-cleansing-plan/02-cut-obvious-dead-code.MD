@@ -163,6 +163,9 @@
 - 保留但待决的 compat 列表。
 - 被删除测试列表。
 
+本阶段第一批低风险清理的执行记录见
+`code-cleansing-plan/02-dead-code/01-execution-status.MD`。
+
 ## 完成标准
 
 完成后应达到:
