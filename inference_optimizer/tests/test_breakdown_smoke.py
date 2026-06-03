@@ -1274,6 +1274,240 @@ def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# kernel_optimization_summary (Breakdown 面板对接文档 §A1; PR #399)
+# ---------------------------------------------------------------------------
+# The collector mirrors ``<sd>/reports/kernel_optimization_summary.json``
+# verbatim (light shape guards only) so the dashboard reads sbd alone.
+# Written by the report action at CLOSE step 1, before sbd export at
+# step 2 — so a normally-closed session always has it on disk.
+def _report_fixture(tmp_path: Path, rel_path: str, payload: dict | None) -> Path:
+    """Session_dir with an optional ``reports/<file>.json``."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "rep"})
+    _write_json(sd / "state.json", {"session_id": "rep"})
+    if payload is not None:
+        _write_json(sd / rel_path, payload)
+    return sd
+
+
+def test_kernel_opt_summary_missing_file_returns_empty_dict(tmp_path: Path) -> None:
+    """No report → empty dict, no warning (legacy / non-report sessions
+    must stay warning-free; dashboard hides Block 1)."""
+    sd = _report_fixture(tmp_path, "reports/kernel_optimization_summary.json", None)
+    bd = build(sd)
+    assert bd["kernel_optimization_summary"] == {}
+    assert not any("kernel_optimization_summary" in w for w in bd["warnings"])
+
+
+def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
+    """Happy path: every documented field round-trips verbatim,
+    including the deeply-nested by_kernel rows (verification +
+    backend_ladder), and a rel ``report_path`` is added."""
+    payload = {
+        "schema_version": 1,
+        "session_id": "Qwen-Qwen3-30B-A3B-Base_20260602T134619Z_f70dd15b",
+        "model_name": "Qwen-Qwen3-30B-A3B-Base",
+        "cumulative_gain_validated_pct": 1.01,
+        "totals": {
+            "top_candidates": 15, "attempted": 6, "integrated": 1,
+            "keep_pending": 0, "rejected": 5, "in_flight": 0, "unattempted": 9,
+        },
+        "rejection_breakdown": {"revert_decision": 1, "max_failures_without_keep": 2,
+                                 "max_partial_attempts_without_keep": 2, "other": 0},
+        "unattempted_reason_breakdown": {"no_source_file": 4, "not_reusable_native_kernel": 2,
+                                          "no_recommended_backend": 2, "below_priority_cutoff": 1,
+                                          "unknown": 0},
+        "failure_reason_breakdown": {"ladder_all_failed": 3, "correctness_failed": 1},
+        "field_glossary": {"gpu_pct": "GPU time share 0-100"},
+        "top_takeaways": [
+            "1 of 6 attempted kernels reached KEEP and integrated; 5 were rejected.",
+        ],
+        "by_kernel": [
+            {
+                "kernel_id": "k001", "kernel_name": "aiter::ck_moe_stage1",
+                "kernel_category": "MoE", "source_file": "/abs/foo.cu",
+                "gpu_pct": 9.2, "efficiency_pct": 48.3, "bound_type": "memory-bound",
+                "arithmetic_intensity": 104.4, "category": "ATTEMPTED_REJECTED",
+                "attempts_total": 3, "rejected_reason": "max_failures_without_keep",
+                "verification": {"compile_passed": False, "correctness_passed": None,
+                                  "micro_speedup": 1.0},
+                "backend_ladder": [
+                    {"backend": "geak", "status": "failed", "produced_artifact": False,
+                     "elapsed_sec": 213.5, "error_class": "preprocess_failed",
+                     "error_message": "preprocess reported 1 error(s)"},
+                    {"backend": "claude", "status": "failed", "produced_artifact": False,
+                     "elapsed_sec": 483.5, "error_class": "timeout",
+                     "error_message": "Timed out after 480s"},
+                ],
+            },
+            {
+                "kernel_id": "k002", "kernel_name": "aten::mm", "kernel_category": "GEMM",
+                "source_file": "", "gpu_pct": 6.1, "category": "UNATTEMPTED",
+                "reusable_native_kernel": False, "recommended_backends": [],
+                "unattempted_reason": "no_source_file",
+                "unattempted_detail": "vendor-library op; address via backend swap",
+            },
+        ],
+    }
+    sd = _report_fixture(tmp_path, "reports/kernel_optimization_summary.json", payload)
+    ks = build(sd)["kernel_optimization_summary"]
+
+    # Envelope (note int schema_version, unlike conc_sweep's str).
+    assert ks["schema_version"] == 1
+    assert ks["model_name"] == "Qwen-Qwen3-30B-A3B-Base"
+    assert ks["cumulative_gain_validated_pct"] == pytest.approx(1.01)
+    assert ks["totals"]["top_candidates"] == 15
+    assert ks["failure_reason_breakdown"]["ladder_all_failed"] == 3
+    assert ks["top_takeaways"][0].startswith("1 of 6 attempted")
+
+    # by_kernel verbatim passthrough incl. nested structures + order.
+    assert [k["kernel_id"] for k in ks["by_kernel"]] == ["k001", "k002"]
+    k1 = ks["by_kernel"][0]
+    assert k1["category"] == "ATTEMPTED_REJECTED"
+    assert k1["verification"]["compile_passed"] is False
+    assert k1["verification"]["correctness_passed"] is None
+    assert k1["backend_ladder"][1]["error_class"] == "timeout"
+    assert ks["by_kernel"][1]["unattempted_reason"] == "no_source_file"
+
+    # Added rel link to the source report.
+    assert ks["report_path"] == "reports/kernel_optimization_summary.json"
+
+
+def test_kernel_opt_summary_all_zero_totals_is_valid(tmp_path: Path) -> None:
+    """Report action always writes a summary even when no kernel was
+    attempted (all-zero totals + empty by_kernel) — that's a valid,
+    warning-free Block-1-empty state, not a malformed file."""
+    payload = {
+        "schema_version": 1, "session_id": "s", "model_name": "m",
+        "cumulative_gain_validated_pct": 0.0,
+        "totals": {"top_candidates": 0, "attempted": 0, "integrated": 0,
+                    "keep_pending": 0, "rejected": 0, "in_flight": 0, "unattempted": 0},
+        "by_kernel": [], "top_takeaways": [],
+    }
+    sd = _report_fixture(tmp_path, "reports/kernel_optimization_summary.json", payload)
+    bd = build(sd)
+    ks = bd["kernel_optimization_summary"]
+    assert ks["by_kernel"] == []
+    assert ks["totals"]["attempted"] == 0
+    assert not any("kernel_optimization_summary" in w for w in bd["warnings"])
+
+
+def test_kernel_opt_summary_by_kernel_not_a_list_drops_to_empty(tmp_path: Path) -> None:
+    """``by_kernel`` arriving as a non-list is replaced with [] + warning;
+    envelope still round-trips (collector never raises)."""
+    payload = {"schema_version": 1, "totals": {"top_candidates": 1},
+               "by_kernel": {"k001": {"name": "broken"}}}
+    sd = _report_fixture(tmp_path, "reports/kernel_optimization_summary.json", payload)
+    bd = build(sd)
+    ks = bd["kernel_optimization_summary"]
+    assert ks["schema_version"] == 1
+    assert ks["by_kernel"] == []
+    assert any("by_kernel is not a list" in w for w in bd["warnings"])
+
+
+def test_kernel_opt_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
+    """Top-level JSON is not an object → empty dict + warning, never raise."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "rep"})
+    _write_json(sd / "state.json", {"session_id": "rep"})
+    (sd / "reports").mkdir(parents=True, exist_ok=True)
+    (sd / "reports" / "kernel_optimization_summary.json").write_text(
+        json.dumps([{"kernel_id": "k001"}]), encoding="utf-8",
+    )
+    bd = build(sd)
+    assert bd["kernel_optimization_summary"] == {}
+    assert any("kernel_optimization_summary" in w and "not a JSON object" in w
+               for w in bd["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# conc_sweep_summary (Breakdown 面板对接文档 §A2; PR #399)
+# ---------------------------------------------------------------------------
+def test_conc_sweep_summary_missing_file_returns_empty_dict(tmp_path: Path) -> None:
+    """No report → empty dict, no warning (conc_sweep often disabled;
+    dashboard hides Block 2)."""
+    sd = _report_fixture(tmp_path, "reports/conc_sweep_summary.json", None)
+    bd = build(sd)
+    assert bd["conc_sweep_summary"] == {}
+    assert not any("conc_sweep_summary" in w for w in bd["warnings"])
+
+
+def test_conc_sweep_summary_full_payload_passes_through(tmp_path: Path) -> None:
+    """Happy path: comparison rows, summary KPIs and the optional
+    roofline_ceiling block all round-trip verbatim; report_path added."""
+    payload = {
+        "schema_version": "1.0", "status": "succeeded", "session_id": "s",
+        "isl": 1024, "osl": 1024, "tp": 8, "concs_requested": [1, 2, 4, 8],
+        "baseline": {"extra_server_args": "", "extra_envs": {},
+                      "points": [{"arm": "baseline", "conc": 8, "status": "succeeded",
+                                   "output_throughput": 1300.34, "ttft_mean_ms": 145.2}]},
+        "optimized": {"extra_server_args": "--num-continuous-decode-steps 4",
+                       "extra_envs": {"ROCM_QUICK_REDUCE_QUANTIZATION": "FP"},
+                       "points": [{"arm": "optimized", "conc": 8, "status": "succeeded",
+                                    "output_throughput": 1313.54}]},
+        "comparison": [{"conc": 8, "baseline_tput": 1300.34, "optimized_tput": 1313.54,
+                         "speedup": 1.0101, "delta_pct": 1.01,
+                         "baseline_status": "succeeded", "optimized_status": "succeeded"}],
+        "summary": {"successful_pairs": 8, "failed_pairs": 0, "best_conc": 16,
+                     "best_speedup": 1.142, "median_speedup": 1.071, "mean_speedup": 1.083},
+        "workspace": "/abs/ws", "elapsed_sec": 123.4,
+        "total_budget_sec": 9000, "budget_exhausted": False,
+        "report_csv_path": "/abs/reports/conc_sweep_raw.csv",
+        "roofline_ceiling": {
+            "schema_version": 1, "source": "roofline_ceiling.py", "gpu_type": "mi300x",
+            "rows": [{"conc": 8, "t_peak_tok_s": 4032.76, "bound_kind": "memory",
+                       "mbu_baseline_pct": 66.17, "mbu_optimized_pct": 66.14}],
+        },
+    }
+    sd = _report_fixture(tmp_path, "reports/conc_sweep_summary.json", payload)
+    cs = build(sd)["conc_sweep_summary"]
+
+    # Envelope (note str schema_version, unlike kernel summary's int).
+    assert cs["schema_version"] == "1.0"
+    assert cs["status"] == "succeeded"
+    assert cs["optimized"]["extra_server_args"] == "--num-continuous-decode-steps 4"
+    assert cs["comparison"][0]["speedup"] == pytest.approx(1.0101)
+    assert cs["summary"]["best_conc"] == 16
+    # Optional roofline_ceiling rides through verbatim.
+    assert cs["roofline_ceiling"]["rows"][0]["t_peak_tok_s"] == pytest.approx(4032.76)
+    assert cs["roofline_ceiling"]["schema_version"] == 1  # int, distinct from top-level "1.0"
+    assert cs["report_path"] == "reports/conc_sweep_summary.json"
+
+
+def test_conc_sweep_summary_skipped_preserves_sparse_shape(tmp_path: Path) -> None:
+    """status="skipped" → producer omits baseline/optimized/comparison/
+    summary; collector must pass that sparse shape through verbatim (do
+    NOT fabricate the missing blocks)."""
+    payload = {"schema_version": "1.0", "status": "skipped",
+               "skip_reason": "no_optimization_to_compare", "session_id": "s",
+               "isl": 1024, "osl": 1024, "tp": 8, "concs_requested": [1, 2, 4]}
+    sd = _report_fixture(tmp_path, "reports/conc_sweep_summary.json", payload)
+    bd = build(sd)
+    cs = bd["conc_sweep_summary"]
+    assert cs["status"] == "skipped"
+    assert cs["skip_reason"] == "no_optimization_to_compare"
+    assert "comparison" not in cs
+    assert "summary" not in cs
+    assert "baseline" not in cs
+    assert not any("conc_sweep_summary" in w for w in bd["warnings"])
+
+
+def test_conc_sweep_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
+    """Top-level JSON is not an object → empty dict + warning, never raise."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "rep"})
+    _write_json(sd / "state.json", {"session_id": "rep"})
+    (sd / "reports").mkdir(parents=True, exist_ok=True)
+    (sd / "reports" / "conc_sweep_summary.json").write_text(
+        json.dumps("not-an-object"), encoding="utf-8",
+    )
+    bd = build(sd)
+    assert bd["conc_sweep_summary"] == {}
+    assert any("conc_sweep_summary" in w and "not a JSON object" in w
+               for w in bd["warnings"])
+
+
+# ---------------------------------------------------------------------------
 # A1.2: roofline_progress (Dashboard-Roofline 对接清单 §2)
 # ---------------------------------------------------------------------------
 # The optimization-progress chart consumer. Inputs are entirely
