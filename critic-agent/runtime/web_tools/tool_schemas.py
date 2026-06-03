@@ -21,6 +21,12 @@ def build_tool_schemas(config: WebToolsConfig) -> list[dict[str, Any]]:
     would actually be constructible (e.g. search requires a provider with
     an API key). The caller is expected to skip the ``tools=`` argument
     entirely when this list is empty.
+
+    Args:
+        config (WebToolsConfig): Resolved web-tools configuration.
+
+    Returns:
+        list[dict[str, Any]]: Enabled OpenAI tool schemas (possibly empty).
     """
     if not config.critic_web_tools_enabled:
         return []
@@ -34,7 +40,14 @@ def build_tool_schemas(config: WebToolsConfig) -> list[dict[str, Any]]:
 
 
 def _search_usable(config: WebToolsConfig) -> bool:
-    """True when at least one implemented search provider has an API key."""
+    """True when at least one implemented search provider has an API key.
+
+    Args:
+        config (WebToolsConfig): Resolved web-tools configuration.
+
+    Returns:
+        bool: Whether the ``web_search`` tool should be exposed.
+    """
     return any(
         name in IMPLEMENTED_SEARCH_PROVIDERS and config.has_search_api_key(name)
         for name in config.search_provider_chain()
@@ -42,6 +55,11 @@ def _search_usable(config: WebToolsConfig) -> bool:
 
 
 def _search_schema() -> dict[str, Any]:
+    """Return the OpenAI function schema for the ``web_search`` tool.
+
+    Returns:
+        dict[str, Any]: The ``web_search`` tool schema.
+    """
     return {
         "type": "function",
         "function": {
@@ -108,6 +126,11 @@ def _search_schema() -> dict[str, Any]:
 
 
 def _fetch_schema() -> dict[str, Any]:
+    """Return the OpenAI function schema for the ``web_fetch`` tool.
+
+    Returns:
+        dict[str, Any]: The ``web_fetch`` tool schema.
+    """
     return {
         "type": "function",
         "function": {

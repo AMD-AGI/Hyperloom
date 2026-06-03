@@ -32,7 +32,19 @@ class Baseline:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Baseline":
-        """Parse raw dict into Baseline; throughput must be > 0."""
+        """Parse raw dict into Baseline; throughput must be > 0.
+
+        Args:
+            raw (dict[str, Any]): Mapping with ``throughput`` (or
+                ``output_throughput``), optional ``accuracy``, and optional
+                ``completed``.
+
+        Returns:
+            Baseline: The parsed baseline.
+
+        Raises:
+            ValueError: If the resolved throughput is not greater than 0.
+        """
         throughput = float(raw.get("throughput") or raw.get("output_throughput") or 0.0)
         if throughput <= 0:
             raise ValueError("baseline.throughput must be > 0")
@@ -54,7 +66,15 @@ class Thresholds:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "Thresholds":
-        """Parse raw dict; missing keys fall back to defaults."""
+        """Parse raw dict; missing keys fall back to defaults.
+
+        Args:
+            raw (dict[str, Any] | None): Mapping with optional
+                ``min_throughput_ratio`` and ``max_accuracy_drop``.
+
+        Returns:
+            Thresholds: The parsed thresholds, with defaults for missing keys.
+        """
         raw = raw or {}
         return cls(
             min_throughput_ratio=float(raw.get("min_throughput_ratio", 1.05)),
@@ -77,7 +97,18 @@ class PrimusCortexConfig:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PrimusCortexConfig":
-        """Parse primus_cortex block; base_url is mandatory."""
+        """Parse primus_cortex block; base_url is mandatory.
+
+        Args:
+            raw (dict[str, Any]): Mapping with ``base_url`` and optional
+                ``timeout_sec`` / ``default_label``.
+
+        Returns:
+            PrimusCortexConfig: The parsed config.
+
+        Raises:
+            ValueError: If ``base_url`` is missing or empty.
+        """
         base_url = str(raw.get("base_url") or "").strip()
         if not base_url:
             raise ValueError("primus_cortex.base_url is required when primus_cortex block is set")
@@ -104,7 +135,18 @@ class CommandSpec:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "CommandSpec":
-        """Parse a command block; command text is mandatory."""
+        """Parse a command block; command text is mandatory.
+
+        Args:
+            raw (dict[str, Any]): Mapping with ``command`` and optional
+                ``timeout_sec`` / ``required``.
+
+        Returns:
+            CommandSpec: The parsed command spec.
+
+        Raises:
+            ValueError: If ``command`` is missing or empty.
+        """
         command = str(raw.get("command") or "").strip()
         if not command:
             raise ValueError("command spec requires a non-empty command")
@@ -142,7 +184,12 @@ class Candidate:
 
     @property
     def slug(self) -> str:
-        """Filesystem-safe slug derived from ref (used for candidate_dir name)."""
+        """Filesystem-safe slug derived from ref (used for candidate_dir name).
+
+        Returns:
+            str: A lowercased slug with non-alphanumeric characters (except
+                ``.-_``) replaced by hyphens, defaulting to ``"candidate"``.
+        """
         out = []
         for ch in self.ref.lower():
             if ch.isalnum():
@@ -156,7 +203,12 @@ class Candidate:
 
     @property
     def pr_number(self) -> int | None:
-        """Return the PR number when ref starts with ``PR:``; else None."""
+        """Return the PR number when ref starts with ``PR:``; else None.
+
+        Returns:
+            int | None: The parsed PR number, or ``None`` when the ref is not a
+                ``PR:`` ref or the number is unparseable.
+        """
         if not self.ref.startswith("PR:"):
             return None
         try:
@@ -186,7 +238,17 @@ class PrFilter:
 
     @staticmethod
     def _as_tuple(raw: Any) -> tuple[str, ...]:
-        """Coerce string/list/None into a clean tuple of non-empty strings."""
+        """Coerce string/list/None into a clean tuple of non-empty strings.
+
+        Args:
+            raw (Any): ``None``, a string, or a list/tuple of values.
+
+        Returns:
+            tuple[str, ...]: Trimmed, non-empty string values.
+
+        Raises:
+            ValueError: If ``raw`` is neither None, a string, nor a list/tuple.
+        """
         if raw is None:
             return ()
         if isinstance(raw, str):
@@ -199,7 +261,17 @@ class PrFilter:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "PrFilter":
-        """Parse pr_filter block; missing keys fall back to empty defaults."""
+        """Parse pr_filter block; missing keys fall back to empty defaults.
+
+        Args:
+            raw (dict[str, Any] | None): The ``pr_filter`` object, or ``None``.
+
+        Returns:
+            PrFilter: The parsed filter (empty when ``raw`` is ``None``).
+
+        Raises:
+            ValueError: If ``raw`` is present but not an object.
+        """
         if raw is None:
             return cls()
         if not isinstance(raw, dict):
@@ -218,7 +290,11 @@ class PrFilter:
 
     @property
     def is_empty(self) -> bool:
-        """True when no constraint is set (filter is a no-op)."""
+        """True when no constraint is set (filter is a no-op).
+
+        Returns:
+            bool: ``True`` if every filter field is unset/zero, else ``False``.
+        """
         return (
             not self.include_paths
             and not self.exclude_paths
@@ -246,6 +322,17 @@ def _parse_keywords(raw: Any) -> tuple[str, ...]:
 
     Anything else raises ``ValueError`` (matches the strictness of the
     other ``_parse_*`` helpers in this module).
+
+    Args:
+        raw (Any): ``None``, a string (split on comma/whitespace), or a
+            list/tuple of values.
+
+    Returns:
+        tuple[str, ...]: Trimmed, non-empty keyword tokens.
+
+    Raises:
+        ValueError: If ``raw`` is neither None/empty, a string, nor a
+            list/tuple.
     """
     if raw is None or raw == "":
         return ()
@@ -261,7 +348,19 @@ def _parse_keywords(raw: Any) -> tuple[str, ...]:
 
 
 def _parse_search_modes(raw: Any) -> tuple[str, ...]:
-    """Coerce a list of mode names; default to primus_cortex + github."""
+    """Coerce a list of mode names; default to primus_cortex + github.
+
+    Args:
+        raw (Any): ``None``/empty (defaults applied), a single mode string, or a
+            list/tuple of mode names.
+
+    Returns:
+        tuple[str, ...]: The validated search-mode names.
+
+    Raises:
+        ValueError: If ``raw`` is not a string/list, or contains an unknown
+            mode name.
+    """
     if raw is None or raw == "":
         return ("primus_cortex", "github")
     if isinstance(raw, str):
@@ -328,7 +427,19 @@ class ExploreRequest:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ExploreRequest":
-        """Parse a JSON request payload into ExploreRequest, validating required fields."""
+        """Parse a JSON request payload into ExploreRequest, validating required fields.
+
+        Args:
+            raw (dict[str, Any]): The decoded JSON request payload.
+
+        Returns:
+            ExploreRequest: The fully parsed and validated request.
+
+        Raises:
+            ValueError: If a required field (``framework``, ``repo_url``,
+                ``baseline``) is missing/invalid, or a nested block has the
+                wrong type.
+        """
         framework = str(raw.get("framework") or "").strip().lower()
         if not framework:
             raise ValueError("framework is required")
@@ -404,11 +515,19 @@ class CommandResult:
 
     @property
     def ok(self) -> bool:
-        """True iff returncode == 0 and command did not time out."""
+        """True iff returncode == 0 and command did not time out.
+
+        Returns:
+            bool: ``True`` when the command succeeded and did not time out.
+        """
         return self.returncode == 0 and not self.timed_out
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict for JSON output."""
+        """Serialize to a plain dict for JSON output.
+
+        Returns:
+            dict[str, Any]: A dataclass-derived dict of all fields.
+        """
         return asdict(self)
 
 
@@ -447,7 +566,12 @@ class CandidateResult:
     files_json_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict for JSON output, expanding nested fields."""
+        """Serialize to a plain dict for JSON output, expanding nested fields.
+
+        Returns:
+            dict[str, Any]: A dict with the nested ``candidate`` and
+                ``commands`` fields expanded to plain dicts.
+        """
         data = asdict(self)
         data["candidate"] = asdict(self.candidate)
         data["commands"] = [c.to_dict() for c in self.commands]

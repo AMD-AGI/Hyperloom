@@ -50,7 +50,11 @@ _DEFAULT_LOG_FILE = "/tmp/multi_node_logs/router.log"
 
 
 def _log(msg: str) -> None:
-    """Stderr line with timestamp; mirrors launch_multinode style."""
+    """Stderr line with timestamp; mirrors launch_multinode style.
+
+    Args:
+        msg (str): The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_router {ts}] {msg}\n")
     sys.stderr.flush()
@@ -67,6 +71,14 @@ def _build_sglang_router_cmd(
     when there are multiple workers per side; we emit one of each for
     the v1 of this launcher (matching the launch_multinode.py default
     of one prefill server group + one decode server group).
+
+    Args:
+        prefill_url (str): Internal prefill server HTTP endpoint.
+        decode_url (str): Internal decode server HTTP endpoint.
+        public_port (int): Public port the router should bind.
+
+    Returns:
+        list[str]: The argv list to launch the sglang router.
     """
     return [
         "python3", "-m", "sglang_router.launch_router",
@@ -91,6 +103,17 @@ def _build_vllm_router_cmd(
     command (with ``{prefill}`` / ``{decode}`` / ``{port}`` placeholders).
     Default falls back to the production-stack disagg proxy entrypoint
     name; if your image ships a different binary, supply the override.
+
+    Args:
+        prefill_url (str): Internal prefill server HTTP endpoint.
+        decode_url (str): Internal decode server HTTP endpoint.
+        public_port (int): Public port the router should bind.
+        override_cmd (str): Optional full command template with
+            ``{prefill}`` / ``{decode}`` / ``{port}`` placeholders. When
+            non-empty it replaces the default command entirely.
+
+    Returns:
+        list[str]: The argv list to launch the vllm router/proxy.
     """
     if override_cmd:
         rendered = (
@@ -119,6 +142,18 @@ def _detach_router(
     Reuses the same pattern as launch_multinode._detach_framework_launch
     so the router survives the ray dashboard job exit and is killed
     cleanly by kill_multinode.py (which SIGTERMs the process group).
+
+    Args:
+        cmd (list[str]): The router argv to launch.
+        log_file (Path): File to which router stdout/stderr is redirected.
+        pid_file (Path): File where the detached router PID is written.
+
+    Returns:
+        int: The PID of the detached router process.
+
+    Raises:
+        RuntimeError: If the spawn shell fails, the PID file is missing or
+            invalid, or the router is not alive 0.5s after spawn.
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -177,6 +212,15 @@ def _detach_router(
 
 
 def main() -> int:
+    """Parse CLI arguments and detach the PD router on the head pod.
+
+    Builds the framework-specific router command, detaches it, prints a JSON
+    summary (framework, PID, URLs, file paths) to stdout, and returns.
+
+    Returns:
+        int: Process exit code; ``0`` on success, ``1`` if the router failed
+        to stay alive after launch.
+    """
     p = argparse.ArgumentParser(
         prog="launch_router.py",
         description="Detach the PD-disaggregation router on the head pod.",

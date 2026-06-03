@@ -103,6 +103,12 @@ def _merge_sglang_defaults(extra_args: str) -> str:
     ``extra_args="--mem-fraction-static=0.9"`` returns
     ``"--mem-fraction-static=0.9 --disable-radix-cache"`` (caller's
     explicit override wins, the default is dropped).
+
+    Args:
+        extra_args (str): The variant's explicit server args (may be empty).
+
+    Returns:
+        str: ``extra_args`` with any unset Magpie default tokens appended.
     """
     user = (extra_args or "").strip()
     parts = [user] if user else []
@@ -123,7 +129,11 @@ class ServerRestartFailed(RuntimeError):
 
 
 def last_round_trace_dir() -> str:
-    """Return the trace dir the most recent restart was wired with (or '')."""
+    """Return the trace dir the most recent restart was wired with (or '').
+
+    Returns:
+        str: The most recent round's profiler trace dir, or ``""`` if none.
+    """
     return _LAST_ROUND_TRACE_DIR
 
 
@@ -149,6 +159,25 @@ def _resolve_pd_args(
       2. ``state["last_restart_pd_*"]`` from prior restart.
       3. Process env (``$PD_MODE`` etc.).
       4. Defaults (mode=colocated, prefill/decode TP=tp).
+
+    Args:
+        pd_mode (str | None): ``"colocated"`` / ``"disaggregated"`` override.
+        pd_prefill_nodes (int | None): Prefill-group node count override.
+        pd_decode_nodes (int | None): Decode-group node count override.
+        pd_prefill_tp (int | None): Prefill-group tensor-parallel override.
+        pd_decode_tp (int | None): Decode-group tensor-parallel override.
+        pd_transfer_backend (str | None): KV transfer backend override.
+        pd_ib_device (str | None): InfiniBand device override.
+        tp_int (int): The resolved overall tensor-parallel degree, used as the
+            prefill/decode TP default.
+
+    Returns:
+        dict: Resolved PD values (``pd_mode`` plus, for disaggregated mode, the
+            node / TP / backend / IB fields) for the multi_node CLI namespace.
+
+    Raises:
+        ServerRestartFailed: If ``pd_mode`` is unsupported or the resolved
+            disaggregated node / TP values are invalid.
     """
     state = _read_state()
     mode = (
@@ -181,6 +210,16 @@ def _resolve_pd_args(
         )
 
     def _intf(kw, sk, ek):
+        """Resolve an int field from kwarg > state key > env var.
+
+        Args:
+            kw: The explicit kwarg value (wins when not ``None``).
+            sk (str): The ``state.json`` key to read next.
+            ek (str): The environment variable name to read last.
+
+        Returns:
+            int: The first parseable integer found, or ``0`` when none.
+        """
         if kw is not None:
             return int(kw)
         v = state.get(sk)
@@ -259,6 +298,20 @@ def _resolve_round_args(
     Raises :class:`ServerRestartFailed` if model/tp end up empty, if
     framework is unsupported, or if ``ep > tp`` (sglang / vllm cannot
     place more expert shards than ranks).
+
+    Args:
+        framework (str | None): Framework override (``sglang`` / ``vllm``).
+        model_path (str | None): Model path override.
+        tp (int | None): Tensor-parallel degree override.
+        ep (int | None): Expert-parallel degree override (defaults to 1).
+
+    Returns:
+        tuple[str, str, int, int]: ``(framework, model, tp, ep)`` resolved
+            values.
+
+    Raises:
+        ServerRestartFailed: If model/tp are missing, the framework is
+            unsupported, or ``ep > tp``.
     """
     state = _read_state()
     fw = (framework or state.get("last_restart_framework")
@@ -348,6 +401,31 @@ async def restart_server_for_round(
 
     Raises :class:`ServerRestartFailed` on any failure; callers should
     let it bubble so the round is marked failed.
+
+    Args:
+        extra_server_args (str): Server-side flags for this round's launch.
+        torch_profiler_dir (str): Per-round profiler trace dir; exported so the
+            launcher forwards ``--torch-profiler-dir``. Empty disables it.
+        framework (str | None): Framework override (``sglang`` / ``vllm``).
+        model_path (str | None): Model path override.
+        tp (int | None): Tensor-parallel degree override.
+        ep (int | None): Expert-parallel degree override.
+        pd_mode (str | None): PD mode override (``colocated`` /
+            ``disaggregated``).
+        pd_prefill_nodes (int | None): Prefill-group node count override.
+        pd_decode_nodes (int | None): Decode-group node count override.
+        pd_prefill_tp (int | None): Prefill-group TP override.
+        pd_decode_tp (int | None): Decode-group TP override.
+        pd_transfer_backend (str | None): KV transfer backend override.
+        pd_ib_device (str | None): InfiniBand device override.
+        health_timeout_s (int): Timeout budget for the post-launch /health
+            wait and launch-driver poll.
+        poll_interval_s (int): Poll interval (seconds) for the launch driver.
+        force_full_restart (bool): When True, bypass the resume fast-path so a
+            fresh kill+launch always runs (needed after kernel patches).
+
+    Raises:
+        ServerRestartFailed: On any restart / health-wait failure.
     """
     global _LAST_ROUND_TRACE_DIR
 
@@ -591,6 +669,14 @@ async def _wait_for_server_health_async(
     persisted RayJob state). When the URL points at the in-cluster
     ClusterIP DNS name and we also have a ``head_pod_ip`` we rewrite
     to the head-pod IP so the sandbox can reach it directly.
+
+    Args:
+        timeout_s (int): Maximum time to wait for a 200 from /health.
+        poll_every_s (int): Interval between /health polls, in seconds.
+
+    Raises:
+        ServerRestartFailed: If /health does not return 200 within
+            ``timeout_s``.
     """
     import time as _time
     import re as _re

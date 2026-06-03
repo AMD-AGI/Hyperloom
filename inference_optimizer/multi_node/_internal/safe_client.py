@@ -36,9 +36,22 @@ _HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0)
 
 
 class SafeApiError(RuntimeError):
-    """Raised when SaFE returns an unexpected status or a network call fails."""
+    """Raised when SaFE returns an unexpected status or a network call fails.
+
+    Attributes:
+        status (int | None): The HTTP status code returned, if any.
+        body (str): The raw response body.
+        endpoint (str): The SaFE endpoint that produced the error.
+    """
 
     def __init__(self, status: int | None, body: str, *, endpoint: str) -> None:
+        """Initialize the error with response context.
+
+        Args:
+            status (int | None): The HTTP status code returned, if any.
+            body (str): The raw response body (truncated in the message).
+            endpoint (str): The SaFE endpoint that produced the error.
+        """
         # Truncate body to keep error messages legible in the agent's stderr.
         snippet = body[:500] + ("..." if len(body) > 500 else "")
         super().__init__(f"SaFE {endpoint} -> status={status} body={snippet}")
@@ -48,6 +61,14 @@ class SafeApiError(RuntimeError):
 
 
 def _strip_trailing_slash(url: str) -> str:
+    """Remove any trailing slashes from a URL.
+
+    Args:
+        url (str): The URL to normalize.
+
+    Returns:
+        str: ``url`` with trailing slashes removed.
+    """
     return url.rstrip("/")
 
 
@@ -55,6 +76,15 @@ class SafeClient:
     """Single-instance SaFE REST client. Stateless, thread-unsafe."""
 
     def __init__(self, base_url: str, api_key: str) -> None:
+        """Create a SaFE REST client.
+
+        Args:
+            base_url (str): The SaFE API base URL.
+            api_key (str): Bearer token used for the ``Authorization`` header.
+
+        Raises:
+            ValueError: If ``base_url`` or ``api_key`` is empty.
+        """
         if not base_url:
             raise ValueError("SAFE_API_URL is empty")
         if not api_key:
@@ -70,22 +100,53 @@ class SafeClient:
         )
 
     def close(self) -> None:
+        """Close the underlying HTTP client, ignoring any errors."""
         try:
             self._client.close()
         except Exception:
             pass
 
     def __enter__(self) -> "SafeClient":
+        """Enter the context manager.
+
+        Returns:
+            SafeClient: This client instance.
+        """
         return self
 
     def __exit__(self, *exc) -> None:
+        """Close the HTTP client on context-manager exit.
+
+        Args:
+            *exc: Standard exception triple (type, value, traceback); unused.
+        """
         self.close()
 
     def _url(self, path: str) -> str:
+        """Join an API path onto the configured base URL.
+
+        Args:
+            path (str): A path beginning with ``/api/v1/...``.
+
+        Returns:
+            str: The fully-qualified request URL.
+        """
         # path always begins with "/api/v1/..."
         return f"{self._base}{path}"
 
     def _decode(self, resp: httpx.Response, endpoint: str) -> Any:
+        """Decode a JSON response, wrapping decode errors.
+
+        Args:
+            resp (httpx.Response): The HTTP response to decode.
+            endpoint (str): Endpoint label used in error messages.
+
+        Returns:
+            Any: The parsed JSON payload.
+
+        Raises:
+            SafeApiError: If the response body is not valid JSON.
+        """
         try:
             return resp.json()
         except json.JSONDecodeError as e:
@@ -97,6 +158,16 @@ class SafeClient:
         Any non-2xx status raises :class:`SafeApiError` carrying the
         status code; the CLI ``main()`` switches on 4xx (config error,
         no retry) vs 5xx (transient, may retry).
+
+        Args:
+            body (dict): The CreateWorkloadRequest JSON body.
+
+        Returns:
+            str: The newly created workload id.
+
+        Raises:
+            SafeApiError: On any non-2xx status or a response with no
+                workload id.
         """
         endpoint = "POST /api/v1/workloads"
         resp = self._client.post(self._url("/api/v1/workloads"), json=body)
@@ -115,7 +186,18 @@ class SafeClient:
         return wid
 
     def get_workload(self, workload_id: str) -> dict:
-        """GET /api/v1/workloads/{workload_id}. Returns the full GetWorkloadResponse."""
+        """GET /api/v1/workloads/{workload_id}.
+
+        Args:
+            workload_id (str): The workload id to fetch.
+
+        Returns:
+            dict: The full GetWorkloadResponse (unwrapped from any ``data``
+            envelope).
+
+        Raises:
+            SafeApiError: On any non-2xx status.
+        """
         endpoint = f"GET /api/v1/workloads/{workload_id}"
         resp = self._client.get(self._url(f"/api/v1/workloads/{workload_id}"))
         if not (200 <= resp.status_code < 300):
@@ -127,7 +209,18 @@ class SafeClient:
         return data
 
     def get_workload_service(self, workload_id: str) -> dict:
-        """GET /api/v1/workloads/{workload_id}/service. Returns GetWorkloadServiceResponse."""
+        """GET /api/v1/workloads/{workload_id}/service.
+
+        Args:
+            workload_id (str): The workload id whose Service info to fetch.
+
+        Returns:
+            dict: The GetWorkloadServiceResponse (port + clusterIp + DNS),
+            unwrapped from any ``data`` envelope.
+
+        Raises:
+            SafeApiError: On any non-2xx status.
+        """
         endpoint = f"GET /api/v1/workloads/{workload_id}/service"
         resp = self._client.get(self._url(f"/api/v1/workloads/{workload_id}/service"))
         if not (200 <= resp.status_code < 300):
@@ -141,6 +234,12 @@ class SafeClient:
         """POST /api/v1/workloads/{workload_id}/stop. Idempotent.
 
         404 (already gone) and 409 (already stopping) are treated as success.
+
+        Args:
+            workload_id (str): The workload id to stop.
+
+        Raises:
+            SafeApiError: On any status other than 200/204/404/409.
         """
         endpoint = f"POST /api/v1/workloads/{workload_id}/stop"
         resp = self._client.post(self._url(f"/api/v1/workloads/{workload_id}/stop"))
@@ -154,6 +253,12 @@ class SafeClient:
         """DELETE /api/v1/workloads/{workload_id}. Idempotent.
 
         404 is treated as success.
+
+        Args:
+            workload_id (str): The workload id to delete.
+
+        Raises:
+            SafeApiError: On any status other than 200/204/404.
         """
         endpoint = f"DELETE /api/v1/workloads/{workload_id}"
         resp = self._client.delete(self._url(f"/api/v1/workloads/{workload_id}"))
@@ -169,6 +274,13 @@ def from_env() -> SafeClient:
 
     Raises a clean RuntimeError (not KeyError) when missing, so the CLI
     can print a single human-friendly diagnostic line.
+
+    Returns:
+        SafeClient: A client configured from the environment.
+
+    Raises:
+        RuntimeError: If ``SAFE_API_URL`` or ``SAFE_API_KEY`` is unset or
+            empty.
     """
     base = (os.environ.get("SAFE_API_URL") or "").strip()
     key = (os.environ.get("SAFE_API_KEY") or "").strip()

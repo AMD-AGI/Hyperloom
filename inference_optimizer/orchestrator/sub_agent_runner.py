@@ -32,6 +32,16 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class RunnerContext:
+    """Per-task context handed to an :data:`ExecutorFn`.
+
+    Attributes:
+        task (Task): The task being executed.
+        lease (Lease | None): The resource lease held for this task, or
+            None when the task requires no lanes.
+        extra (dict): Optional extras (e.g. ``workspace`` / ``session_dir``
+            paths) the runner stashes for the executor.
+    """
+
     task: Task
     lease: Lease | None
     extra: dict = field(default_factory=dict)
@@ -43,6 +53,16 @@ ExecutorFn = Callable[[RunnerContext], Awaitable[dict]]
 
 @dataclass
 class SubAgentResult:
+    """Outcome of a single :meth:`SubAgentRunner.run_task` call.
+
+    Attributes:
+        task_id (str): Id of the task that ran.
+        state (str): Terminal state — ``"succeeded"`` / ``"failed"`` /
+            ``"needs_manual_review"``.
+        result (dict): Executor result payload (empty on failure).
+        error (str | None): Error string when the task failed, else None.
+    """
+
     task_id: str
     state: str   # "succeeded" / "failed" / "needs_manual_review"
     result: dict
@@ -65,12 +85,31 @@ class SubAgentRunner:
         executor_registry: dict[str, ExecutorFn] | None = None,
         session_dir: Path | None = None,
     ):
+        """Initialise the runner with its lock manager + task registry.
+
+        Args:
+            locks (ResourceLockManager): Lane lease manager used to gate
+                task execution.
+            tasks (TaskRegistry): Registry the runner transitions task
+                state through.
+            executor_registry (dict[str, ExecutorFn] | None): Optional
+                initial map of ``task.kind`` to executor function (copied).
+            session_dir (Path | None): Session root used to pre-create
+                per-action workspaces; None disables workspace pre-mkdir.
+        """
         self.locks = locks
         self.tasks = tasks
         self.executor_registry: dict[str, ExecutorFn] = dict(executor_registry or {})
         self.session_dir = Path(session_dir) if session_dir else None
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
+        """Register (or replace) the executor for a task kind.
+
+        Args:
+            kind (str): The ``task.kind`` this executor handles.
+            fn (ExecutorFn): Async callable invoked with a
+                :class:`RunnerContext`.
+        """
         self.executor_registry[kind] = fn
 
     def _pre_mkdir_workspace(self, task: Task) -> Path | None:
@@ -80,6 +119,13 @@ class SubAgentRunner:
         Returns None when the task kind is not one of the known runs/
         actions (e.g. setup / classify / kernel-owned actions which use
         their own kernel-agent-workspace tree).
+
+        Args:
+            task (Task): The task whose workspace may be pre-created.
+
+        Returns:
+            Path | None: The created workspace directory, or None when no
+                session dir is configured or the kind has no runs/ slot.
         """
         if self.session_dir is None:
             return None
@@ -110,8 +156,19 @@ class SubAgentRunner:
         fire — the whole optimization loop silently stalls. Treat
         ``TaskNotFound`` on a terminal transition as a warning so the
         rest of the dispatcher pipeline (bus event + promotion to
-        SharedState) still runs. Returns ``True`` on a successful
-        transition, ``False`` on the swallowed-TaskNotFound branch.
+        SharedState) still runs.
+
+        Args:
+            task_id (str): Id of the task to transition.
+            new_state (str): Target task state.
+            evidence (dict | None): Optional evidence payload attached to
+                the transition.
+            context (str): Short label for the call site, used in the
+                warning log on the swallowed branch.
+
+        Returns:
+            bool: ``True`` on a successful transition, ``False`` on the
+                swallowed-``TaskNotFound`` branch.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
@@ -145,6 +202,15 @@ class SubAgentRunner:
         ``prebound_lease`` and the runner skips its own acquire step.
         The runner still owns the release in its finally block — so
         the dispatcher doesn't have to thread the release path.
+
+        Args:
+            task (Task): The task to execute.
+            prebound_lease (Lease | None): Lease already acquired by the
+                concurrent dispatcher; when None the runner acquires its
+                own lanes. Either way the runner releases it in finally.
+
+        Returns:
+            SubAgentResult: The terminal outcome of the task run.
         """
         # queued → running first (state machine constraint). Use the
         # resilient variant so a missing row doesn't kill the runner

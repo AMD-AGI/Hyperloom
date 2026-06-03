@@ -88,7 +88,11 @@ _OWNER_PATTERNS: tuple[str, ...] = (
 
 
 def _env_gate_allows_gpureset() -> bool:
-    """``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1`` opt-in for hard recovery."""
+    """``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1`` opt-in for hard recovery.
+
+    Returns:
+        bool: ``True`` when the env gate is explicitly set to ``"1"``.
+    """
     return os.getenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "").strip() == "1"
 
 
@@ -112,6 +116,22 @@ class RecoverExecutor:
     OWNER_PATTERNS: tuple[str, ...] = _OWNER_PATTERNS
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the GPU recovery sequence and report the outcome.
+
+        Probes GPU memory, optionally TERM/KILLs stale owner processes,
+        optionally attempts an env-gated ``rocm-smi --gpureset``, and
+        re-probes to decide success. Writes ``result.json`` to the task
+        workspace when one is available.
+
+        Args:
+            ctx (RunnerContext): The action runner context carrying the
+                task params (``reason``, ``force_gpu_cleanup``) and extras.
+
+        Returns:
+            dict[str, Any]: The recovery result, including ``state``
+            (``"succeeded"`` / ``"needs_review"``), per-stage GPU memory
+            probes, killed PIDs, and gpureset details.
+        """
         params: dict[str, Any] = dict(getattr(ctx.task, "params", {}) or {})
         reason = str(params.get("reason", ""))
         force_cleanup = bool(params.get("force_gpu_cleanup", False))
@@ -195,6 +215,15 @@ class RecoverExecutor:
     # workspace
     # ------------------------------------------------------------------
     def _workspace_dir(self, ctx: RunnerContext) -> Path | None:
+        """Resolve the task workspace directory from the runner context.
+
+        Args:
+            ctx (RunnerContext): The action runner context.
+
+        Returns:
+            Path | None: The workspace path, or ``None`` when none is
+            configured or the value is not path-like.
+        """
         ws = (ctx.extra or {}).get("workspace")
         if not ws:
             return None
@@ -204,6 +233,15 @@ class RecoverExecutor:
             return None
 
     def _write_result_json(self, workspace: Path, payload: dict[str, Any]) -> None:
+        """Write the recovery result payload to ``workspace/result.json``.
+
+        Args:
+            workspace (Path): Destination workspace directory.
+            payload (dict[str, Any]): The recovery result to serialize.
+
+        Returns:
+            None: Errors are logged and swallowed (best-effort write).
+        """
         try:
             workspace.mkdir(parents=True, exist_ok=True)
             (workspace / "result.json").write_text(
@@ -220,6 +258,13 @@ class RecoverExecutor:
     # GPU probe (rocm-smi --showmeminfo vram --csv)
     # ------------------------------------------------------------------
     def _probe_gpu_free_mb(self) -> list[dict[str, Any]]:
+        """Probe per-GPU free VRAM via ``rocm-smi --showmeminfo vram``.
+
+        Returns:
+            list[dict[str, Any]]: One snapshot per visible GPU, or an
+            empty list when ``rocm-smi`` is unavailable or the probe
+            fails.
+        """
         if not shutil.which("rocm-smi"):
             return []
         try:
@@ -256,8 +301,12 @@ class RecoverExecutor:
             card0,206158430208,205678182400
             card1,206158430208,205678182400
 
-        Returns ``[{gpu_id, vram_total_mb, vram_used_mb, free_mb}, ...]``
-        per visible card, sorted by gpu_id.
+        Args:
+            text (str): The raw ``rocm-smi --csv`` stdout to parse.
+
+        Returns:
+            list[dict[str, Any]]: ``{gpu_id, vram_total_mb, vram_used_mb,
+            free_mb}`` per visible card, sorted by ``gpu_id``.
         """
         by_id: dict[int, dict[str, Any]] = {}
         header: list[str] | None = None
@@ -300,6 +349,15 @@ class RecoverExecutor:
         return out
 
     def _all_recovered(self, gpus: list[dict[str, Any]]) -> bool:
+        """Return whether every probed GPU is above the healthy floor.
+
+        Args:
+            gpus (list[dict[str, Any]]): Per-GPU memory snapshots.
+
+        Returns:
+            bool: ``True`` iff the list is non-empty and every GPU's
+            ``free_mb`` is at least :attr:`FREE_MB_HEALTHY`.
+        """
         if not gpus:
             # Without a probe we can't claim recovery; treat as unhealthy.
             return False
@@ -318,6 +376,10 @@ class RecoverExecutor:
         Returns one record per PID we actually sent a signal to. Each
         record captures the cmdline at discovery time and the final
         signal name (``"TERM"`` or ``"KILL"``).
+
+        Returns:
+            list[dict[str, Any]]: One record per signalled PID, with its
+            ``cmd``, matched ``pattern``, and final ``signal`` name.
         """
         candidates = self._discover_stale_pids()
         if not candidates:
@@ -350,6 +412,10 @@ class RecoverExecutor:
         could be mistaken for flags.
 
         Excludes our own PID so the recover task can't kill itself.
+
+        Returns:
+            list[dict[str, Any]]: Unique ``{pid, cmd, pattern}`` records
+            for processes matching an owner pattern (own PID excluded).
         """
         if not shutil.which("pgrep"):
             log.warning("recover_executor: pgrep not on PATH; skipping kill stage")
@@ -396,6 +462,16 @@ class RecoverExecutor:
         return list(seen.values())
 
     def _send_signal(self, pid: int, sig: signal.Signals) -> bool:
+        """Send a signal to a PID, tolerating dead/forbidden processes.
+
+        Args:
+            pid (int): Target process id.
+            sig (signal.Signals): The signal to deliver.
+
+        Returns:
+            bool: ``True`` if the signal was delivered; ``False`` if the
+            process is gone or permission was denied.
+        """
         try:
             os.kill(pid, sig)
             return True
@@ -410,6 +486,14 @@ class RecoverExecutor:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
+        """Check whether a process is still alive via signal 0.
+
+        Args:
+            pid (int): Target process id.
+
+        Returns:
+            bool: ``True`` if the process exists; ``False`` otherwise.
+        """
         try:
             os.kill(pid, 0)
             return True
@@ -420,6 +504,13 @@ class RecoverExecutor:
     # hard cleanup — rocm-smi --gpureset (env-gated)
     # ------------------------------------------------------------------
     def _try_rocm_smi_gpureset(self) -> dict[str, Any]:
+        """Attempt a best-effort ``rocm-smi --gpureset --gpu=all``.
+
+        Returns:
+            dict[str, Any]: A result record with the return code and
+            captured output, or an ``error`` key when ``rocm-smi`` is
+            missing or the call times out.
+        """
         if not shutil.which("rocm-smi"):
             return {"error": "rocm-smi not on PATH"}
         log.warning(

@@ -27,7 +27,11 @@ class GitHubPr:
 
     @property
     def ref(self) -> str:
-        """Stable candidate ref used downstream (`Candidate.ref`)."""
+        """Stable candidate ref used downstream (`Candidate.ref`).
+
+        Returns:
+            str: The ref string of the form ``"PR:<number>"``.
+        """
         return f"PR:{self.number}"
 
 
@@ -35,8 +39,17 @@ def _repo_slug(repo_url: str) -> str:
     """Parse ``owner/name`` from a GitHub-style git URL.
 
     Accepts the common forms (https + .git, https without .git, ssh).
-    Raises ValueError on a non-GitHub or malformed URL so callers can
-    surface a clean error instead of guessing.
+
+    Args:
+        repo_url (str): A GitHub git URL in https or ssh form, with or without
+            a trailing ``.git``.
+
+    Returns:
+        str: The repository slug in ``owner/name`` form.
+
+    Raises:
+        ValueError: If the URL is not a GitHub remote or is malformed, so
+            callers can surface a clean error instead of guessing.
     """
     raw = repo_url.strip()
     if raw.endswith(".git"):

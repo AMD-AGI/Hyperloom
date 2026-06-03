@@ -27,12 +27,21 @@ sys.path.pop(0)
 
 
 def utc_now() -> str:
-    """Return the current UTC time as an ISO8601 string."""
+    """Return the current UTC time as an ISO8601 string.
+
+    Returns:
+        str: The current UTC timestamp in ISO-8601 format.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """Atomically write JSON to ``path`` using a temp file then rename."""
+    """Atomically write JSON to ``path`` using a temp file then rename.
+
+    Args:
+        path (Path): Destination JSON file; parent dirs are created.
+        data (dict[str, Any]): JSON-serializable payload to write.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
         json.dump(data, tmp, indent=2, sort_keys=True)
@@ -42,21 +51,41 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
-    """Append one JSON object as a line to the given JSONL file."""
+    """Append one JSON object as a line to the given JSONL file.
+
+    Args:
+        path (Path): Destination JSONL file; parent dirs are created.
+        data (dict[str, Any]): JSON-serializable object to append.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(data, sort_keys=True) + "\n")
 
 
 def append_log(log_path: Path, message: str) -> None:
-    """Append a log line to ``log_path`` (ensuring parent dirs exist)."""
+    """Append a log line to ``log_path`` (ensuring parent dirs exist).
+
+    Args:
+        log_path (Path): Log file to append to.
+        message (str): Text to append; trailing whitespace is stripped and a
+            newline is added.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(message.rstrip() + "\n")
 
 
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
-    """Return the last ``limit`` lines of a log file, empty if missing."""
+    """Return the last ``limit`` lines of a log file, empty if missing.
+
+    Args:
+        log_path (Path): Log file to read.
+        limit (int): Maximum number of trailing lines to return.
+
+    Returns:
+        list[str]: The trailing lines, or an empty list when the file does
+            not exist.
+    """
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -74,7 +103,18 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
-    """Persist a status snapshot for the current run."""
+    """Persist a status snapshot for the current run.
+
+    Args:
+        status_path (Path): Destination status JSON file.
+        state (str): Current run state (e.g. ``running``, ``succeeded``).
+        current_step (str): Human-readable label of the active step.
+        log_path (Path): Log file whose size/tail are recorded.
+        artifact_paths (dict[str, str]): Map of artifact names to paths.
+        run_id (str): Unique identifier for this run.
+        started_at (str): ISO-8601 start time of the run.
+        error (str | None): Error message recorded when the run failed.
+    """
     payload: dict[str, Any] = {
         "tool": "kernel_optimization",
         "run_id": run_id,
@@ -110,6 +150,14 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     "missing native source" stub. Return the union so both call sites
     work; the older flat-list / ``kernel_candidates`` legacy shapes are
     still respected.
+
+    Args:
+        path (Path): Path to the kernel-candidates JSON file.
+
+    Returns:
+        list[dict[str, Any]]: The union of routable (``hot_kernels``) and
+            skipped (``skipped_kernels``) candidate dicts, each with
+            ``trace_report_path`` backfilled when available.
     """
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
@@ -145,7 +193,19 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
 
 
 def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any]:
-    """Find a candidate by ``kernel_id`` (or name) or raise KeyError."""
+    """Find a candidate by ``kernel_id`` (or name) or raise KeyError.
+
+    Args:
+        candidates (list[dict[str, Any]]): Candidate dicts to search.
+        kernel_id (str): The kernel id or name to match.
+
+    Returns:
+        dict[str, Any]: The first candidate whose ``kernel_id`` or ``name``
+            matches.
+
+    Raises:
+        KeyError: When no candidate matches ``kernel_id``.
+    """
     for candidate in candidates:
         if candidate.get("kernel_id") == kernel_id or candidate.get("name") == kernel_id:
             return candidate
@@ -153,6 +213,15 @@ def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str
 
 
 def existing_path(value: str) -> str:
+    """Resolve ``value`` to an absolute path if it exists, else empty string.
+
+    Args:
+        value (str): A filesystem path (possibly ``~``-prefixed) or empty.
+
+    Returns:
+        str: The resolved absolute path when the file/dir exists; otherwise
+            an empty string (including when ``value`` is falsy).
+    """
     if not value:
         return ""
     path = Path(value).expanduser()
@@ -160,6 +229,22 @@ def existing_path(value: str) -> str:
 
 
 def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
+    """Report whether any usable benchmark/test harness exists for a kernel.
+
+    Checks the CLI-supplied benchmark/harness paths and the candidate's own
+    ``benchmark_file`` / ``test_harness_path`` / ``benchmark_files`` fields,
+    treating only paths that resolve on disk as available.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args carrying ``benchmark_file``
+            and ``test_harness_path``.
+        candidate (dict[str, Any]): Kernel candidate dict that may declare
+            benchmark/harness paths.
+
+    Returns:
+        bool: True when at least one referenced benchmark or harness file
+            exists on disk.
+    """
     bench_files = candidate.get("benchmark_files") or []
     return bool(
         existing_path(args.benchmark_file)
@@ -193,6 +278,19 @@ def _resolve_source_file(
     warning to the run log so the discrepancy is visible in postmortem,
     then return the candidate path. When candidate has no source_file
     (legacy / synthetic fixtures), fall back to the LLM-supplied path.
+
+    Args:
+        llm_source (str): The ``--source-file`` path supplied by the
+            Orchestration LLM (may be empty).
+        candidate (dict[str, Any]): TraceLens candidate dict; its
+            ``source_file`` is treated as the source of truth.
+        kernel_id (str): Kernel identifier, used only for log messages.
+        log_path (Path | None): Optional run log to record override /
+            fallback notices; no logging when None.
+
+    Returns:
+        str: The effective source-file path — the candidate's path when it
+            is authoritative, otherwise the LLM-supplied path.
     """
     cand_source = str((candidate or {}).get("source_file") or "").strip()
     llm = str(llm_source or "").strip()
@@ -209,6 +307,15 @@ def _resolve_source_file(
     # source-resolution analogue of the pseudo-op fast path in
     # ``tracelens_analysis.source_type_for``.
     def _is_real_file(p: str) -> bool:
+        """Return True when ``p`` is a non-empty path pointing at a real file.
+
+        Args:
+            p (str): Candidate filesystem path to test.
+
+        Returns:
+            bool: True if ``p`` is truthy and refers to an existing file;
+                False on any OS/runtime error or non-file path.
+        """
         try:
             return bool(p) and Path(p).is_file()
         except (OSError, RuntimeError):
@@ -309,6 +416,16 @@ def _match_benchmark_for_kernel(
     items matching that family's bench patterns come first (within the
     matched group, earlier patterns win). When no kernel pattern matches,
     return the original order — never invent a preference.
+
+    Args:
+        kernel_name (str): Name of the kernel being optimized; matched
+            against :data:`_BENCHMARK_PATTERNS`.
+        bench_files (list[Any]): Candidate benchmark/test file paths; only
+            non-empty string entries are considered.
+
+    Returns:
+        list[str]: The benchmark paths reordered so semantically-matching
+            files come first, or the original order when nothing matches.
     """
     existing = [p for p in (bench_files or []) if isinstance(p, str) and p]
     if not existing:
@@ -319,6 +436,17 @@ def _match_benchmark_for_kernel(
             continue
 
         def _priority(path: str, _bench_res=bench_res) -> int:
+            """Return the sort rank of a benchmark path within its family.
+
+            Args:
+                path (str): Benchmark file path whose basename is matched.
+                _bench_res (list[re.Pattern[str]]): Priority-ordered bench
+                    patterns for the matched kernel family (bound default).
+
+            Returns:
+                int: Index of the first matching pattern, or ``len(_bench_res)``
+                    when none match (sorts after all matched files).
+            """
             base = Path(path).name
             for idx, br in enumerate(_bench_res):
                 if br.search(base):
@@ -348,6 +476,9 @@ def _profile_timeout_sec() -> int:
 
     Default 600s; override via ``KERNEL_OPT_PROFILE_TIMEOUT_SEC``. Floors
     at 1 so a misconfigured ``0`` cannot disable the guard entirely.
+
+    Returns:
+        int: The per-subprocess profiling timeout in seconds (>= 1).
     """
     try:
         value = int(os.environ.get("KERNEL_OPT_PROFILE_TIMEOUT_SEC", "600"))
@@ -371,6 +502,19 @@ def _render_geak_test_command(
     GEAK's subprocess can ``init_process_group`` correctly. Returns ``""``
     when no usable benchmark exists; the caller leaves
     ``--test-command`` blank so GEAK falls back to its own discovery.
+
+    Args:
+        kernel_name (str): Kernel name used to order benchmark candidates.
+        bench_files (list[Any]): Candidate benchmark/test file paths.
+        is_multigpu (bool): True when the kernel implies a multi-GPU
+            collective and needs ``torchrun``.
+        num_gpus (int): Number of GPUs to pass to ``--nproc_per_node`` when
+            multi-GPU.
+        timeout_sec (int): Per-subprocess timeout prefixed via ``timeout``.
+
+    Returns:
+        str: The rendered ``--test-command`` string, or empty string when no
+            usable benchmark file is found.
     """
     ordered = _match_benchmark_for_kernel(kernel_name, bench_files)
     for bf in ordered:
@@ -387,6 +531,20 @@ def _render_geak_test_command(
 
 
 def parse_backends(backends: str) -> list[str]:
+    """Parse and validate a comma-separated backend list.
+
+    Args:
+        backends (str): Comma-separated backend names (case-insensitive),
+            e.g. ``"geak,claude"``.
+
+    Returns:
+        list[str]: The normalized (lowercased, trimmed) backend names in the
+            order given.
+
+    Raises:
+        ValueError: When any backend is outside the allowed set
+            (``geak``, ``claude``, ``codex``, ``cursor``).
+    """
     parsed = [b.strip().lower() for b in backends.split(",") if b.strip()]
     allowed = {"geak", "claude", "codex", "cursor"}
     invalid = [b for b in parsed if b not in allowed]
@@ -414,6 +572,17 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     backends.
 
     Only ``[]`` returns: vendor binaries (nothing rewritable upstream).
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args carrying ``backends`` and
+            benchmark/harness paths.
+        candidate (dict[str, Any]): Kernel candidate dict, used for
+            ``source_type`` and benchmark availability.
+
+    Returns:
+        tuple[list[str], dict[str, Any]]: The selected backend ladder and a
+            notes dict describing the selection (benchmark availability,
+            ``geak_without_benchmark`` flag, cursor key presence, etc.).
     """
     user_backends = parse_backends(args.backends)
     benchmark_available = has_benchmark(args, candidate)
@@ -491,10 +660,30 @@ _GPU_HW: dict[str, dict[str, Any]] = {
 
 
 def _normalize_target_platform(value: str) -> str:
+    """Normalize a target-platform string for ``_GPU_HW`` lookups.
+
+    Args:
+        value (str): Raw platform name (e.g. ``"MI300X"``) or empty.
+
+    Returns:
+        str: The lowercased, whitespace-stripped platform key.
+    """
     return str(value or "").strip().lower()
 
 
 def _hardware_prompt_blocks(target_platform: str) -> tuple[str, str]:
+    """Build the intro and hardware-notes prompt blocks for a target GPU.
+
+    Looks up the platform in :data:`_GPU_HW`; when unknown, returns generic
+    blocks instructing the agent to inspect the runtime device.
+
+    Args:
+        target_platform (str): Target GPU platform name (e.g. ``"mi300x"``).
+
+    Returns:
+        tuple[str, str]: A ``(intro, notes)`` pair of prompt text — the
+            optimization intro line and the hardware-notes block.
+    """
     platform = _normalize_target_platform(target_platform)
     hw = _GPU_HW.get(platform)
     if not hw:
@@ -531,12 +720,27 @@ def _hardware_prompt_blocks(target_platform: str) -> tuple[str, str]:
 
 
 def _target_build_flag(target_platform: str) -> str:
+    """Return the ``--offload-arch`` build flag for a target platform.
+
+    Args:
+        target_platform (str): Target GPU platform name (e.g. ``"mi355x"``).
+
+    Returns:
+        str: The platform's build flag (e.g. ``--offload-arch=gfx950``), or
+            the ``--offload-arch=<arch>`` placeholder when unknown.
+    """
     platform = _normalize_target_platform(target_platform)
     hw = _GPU_HW.get(platform)
     return str(hw["build_flag"]) if hw else "--offload-arch=<arch>"
 
 
 def _env_target_platform() -> str:
+    """Read the target GPU platform from the environment.
+
+    Returns:
+        str: The value of ``TARGET_GPU_TYPE``, falling back to ``GPU_TYPE``,
+            or an empty string when neither is set.
+    """
     return os.environ.get("TARGET_GPU_TYPE", "") or os.environ.get("GPU_TYPE", "")
 
 
@@ -548,6 +752,14 @@ def _format_shapes_for_case(shapes: Any) -> str:
     list of ``(shape) dtype`` strings. The ``_row_to_candidate`` parser
     has already split them into a Python list; here we collapse back
     to one line so the case bullet stays single-line.
+
+    Args:
+        shapes (Any): The row's ``shapes`` field — a string, a list of
+            shape strings / ``{call_num, shape}`` dicts, or any other value.
+
+    Returns:
+        str: A single comma-joined line describing the shapes, or empty
+            string when ``shapes`` is falsy.
     """
     if not shapes:
         return ""
@@ -588,6 +800,14 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
     (separates "high-count tiny-shape decode launch overhead" from
     "fat per-invocation prefill cost"). Both are surfaced verbatim
     rather than buried inside the kernel_metadata JSON.
+
+    Args:
+        candidate (dict[str, Any]): Kernel candidate dict; its
+            ``task_group`` rows drive the rendered case bullets.
+
+    Returns:
+        str: The rendered benchmark-cases markdown block, or empty string
+            when no ``task_group`` rows are present.
     """
     group = candidate.get("task_group")
     if not isinstance(group, dict):
@@ -758,6 +978,12 @@ def _classify_bound(bound_type: str) -> str:
     ``compute-bound`` / ``mixed`` / ``-`` / empty. Normalise to one of
     ``memory`` / ``compute`` / ``unknown`` so the priority block stays
     deterministic.
+
+    Args:
+        bound_type (str): Raw TraceLens bound string (e.g. ``"memory-bound"``).
+
+    Returns:
+        str: One of ``"memory"``, ``"compute"``, or ``"unknown"``.
     """
     text = (bound_type or "").lower()
     if "memory" in text or "bandwidth" in text or "hbm" in text:
@@ -780,6 +1006,15 @@ def _build_priority_block(candidate: dict[str, Any]) -> str:
     When a ``task_group`` is present, the bound classification of the
     *primary* row is used; non-primary rows are typically the same
     Operation called from different shapes and share the same bound.
+
+    Args:
+        candidate (dict[str, Any]): Kernel candidate dict; ``bound_type``
+            (or the primary ``task_group`` row's bound) selects the lever
+            ordering.
+
+    Returns:
+        str: The rendered optimization-priorities markdown block, or empty
+            string when no bound type is discernible.
     """
     group = candidate.get("task_group")
     bound_type = str(candidate.get("bound_type") or "").strip()
@@ -809,7 +1044,16 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     ``int / float / numeric str`` to ``float``; everything else (None,
     empty string, malformed) → ``default``. Used by hypothesis-block
     helpers so per-row impact numbers from ``all_pitem_prose`` survive
-    JSON round-trips that may have already converted them to strings."""
+    JSON round-trips that may have already converted them to strings.
+
+    Args:
+        value (Any): Value to coerce to ``float``.
+        default (float): Fallback returned when ``value`` is None/empty or
+            cannot be parsed.
+
+    Returns:
+        float: The parsed float, or ``default`` on any failure.
+    """
     try:
         if value is None or value == "":
             return default
@@ -821,7 +1065,18 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _format_impact_range(
     low_ms: float, low_e2e: float, high_ms: float, high_e2e: float,
 ) -> str:
-    """One-line impact range formatter; empty string when both ends zero."""
+    """One-line impact range formatter; empty string when both ends zero.
+
+    Args:
+        low_ms (float): Low-end estimated savings in milliseconds.
+        low_e2e (float): Low-end savings as a percent of end-to-end time.
+        high_ms (float): High-end estimated savings in milliseconds.
+        high_e2e (float): High-end savings as a percent of end-to-end time.
+
+    Returns:
+        str: The formatted impact-range line, or empty string when both
+            ``low_ms`` and ``high_ms`` are zero.
+    """
     if not (low_ms or high_ms):
         return ""
     return (
@@ -859,6 +1114,15 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
     * Numeric ``Impact estimate`` (low / high ms savings + %E2E) is
       pure roofline arithmetic and is safer to surface directly; the
       agent still needs a real measurement before declaring success.
+
+    Args:
+        candidate (dict[str, Any]): Kernel candidate dict; its
+            ``task_group`` ``all_pitem_prose`` (or top-level prose fields)
+            supply the hypothesis text and impact estimates.
+
+    Returns:
+        str: The rendered TraceLens hypothesis markdown block, or empty
+            string when no prose/impact fields are present.
     """
     # Multi-P-item case (Q2): the same source function spans multiple
     # TraceLens P-items. Each P-item contributes its own prose tuple;
@@ -948,6 +1212,16 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
 
 
 def _coerce_cli_value(value: str | bool) -> Any:
+    """Coerce a CLI token to a bool/int/float, falling back to the string.
+
+    Args:
+        value (str | bool): A raw CLI value (already a bool, or a string
+            token such as ``"true"``, ``"42"``, or ``"0.5"``).
+
+    Returns:
+        Any: The bool/int/float parsed from ``value``, or the original
+            string when it is not a recognized scalar.
+    """
     if isinstance(value, bool):
         return value
     text = str(value)
@@ -964,7 +1238,21 @@ def _coerce_cli_value(value: str | bool) -> Any:
 
 
 def parse_extra_server_args(extra_args: str) -> dict[str, Any]:
-    """Parse selected SGLang flags from an EXTRA_SGLANG_ARGS-style string."""
+    """Parse selected SGLang flags from an EXTRA_SGLANG_ARGS-style string.
+
+    Splits the string with shell rules, turning ``--flag value`` pairs into
+    coerced dict entries and bare ``--flag`` tokens into ``True``. The raw
+    string is preserved under the ``raw`` key.
+
+    Args:
+        extra_args (str): A shell-style argument string (e.g.
+            ``"--page-size 16 --disable-cuda-graph"``).
+
+    Returns:
+        dict[str, Any]: Parsed flags keyed by normalized name (dashes →
+            underscores), always including ``raw`` with the original text;
+            an empty dict when ``extra_args`` is blank.
+    """
     if not extra_args.strip():
         return {}
     try:
@@ -989,6 +1277,18 @@ def parse_extra_server_args(extra_args: str) -> dict[str, Any]:
 
 
 def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any]]:
+    """Normalize a shapes list into ``{call_num, shape}`` entries.
+
+    Args:
+        shapes (Any): Shapes value; only a list is processed (each item may
+            be a ``{call_num, shape}`` dict or a bare shape).
+        call_num (Any): Default call count applied to bare-shape entries;
+            coerced to int, defaulting to 1.
+
+    Returns:
+        list[dict[str, Any]]: One ``{"call_num", "shape"}`` dict per
+            non-empty shape; empty list when ``shapes`` is not a list.
+    """
     if not isinstance(shapes, list):
         return []
     try:
@@ -1008,7 +1308,23 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
 
 
 def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    """Build structured runtime context for GEAK task prompts."""
+    """Build structured runtime context for GEAK task prompts.
+
+    Merges the candidate's shape/dtype/runtime fields with parsed
+    ``extra_server_args`` so GEAK receives a single normalized metadata
+    dict (kernel path/name, input/output shapes and dtypes, runtime args
+    and flags, kernel params, env vars, etc.).
+
+    Args:
+        candidate (dict[str, Any]): Kernel candidate dict supplying shapes,
+            dtypes, runtime flags/args, and kernel params.
+        args (argparse.Namespace): Parsed CLI args; provides overrides such
+            as ``source_file`` and ``extra_server_args``.
+
+    Returns:
+        dict[str, Any]: The structured kernel-metadata dict consumed when
+            rendering GEAK task prompts.
+    """
     source_file = getattr(args, "source_file", "") or candidate.get("source_file", "")
     kernel_name = str(candidate.get("name") or getattr(args, "kernel_id", ""))
     input_shapes = candidate.get("input_shapes")
@@ -1110,6 +1426,23 @@ def build_prompt(
     *,
     backend: str | None = None,
 ) -> str:
+    """Render the full optimization prompt handed to a rewrite backend.
+
+    Assembles the hardware/budget/source-attribution preamble, the source
+    listing, semantically-ordered benchmark references, and the TraceLens
+    benchmark-cases / priority / hypothesis blocks into one prompt string.
+
+    Args:
+        candidate (dict[str, Any]): Kernel candidate dict supplying source,
+            benchmarks, shapes, and TraceLens context.
+        args (argparse.Namespace): Parsed CLI args (source override, GPU
+            count, kernel id, etc.).
+        backend (str | None): Target backend name, used to tailor backend-
+            specific prompt sections; None for the generic prompt.
+
+    Returns:
+        str: The fully rendered prompt text for the rewrite backend.
+    """
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
     if source_file and Path(str(source_file)).exists():
@@ -1472,6 +1805,11 @@ def build_prompt(
 
 
 def ray_available() -> bool:
+    """Report whether the optional ``ray`` dependency can be imported.
+
+    Returns:
+        bool: True when ``import ray`` succeeds; False on any import error.
+    """
     try:
         import ray  # noqa: F401
         return True
@@ -1480,6 +1818,11 @@ def ray_available() -> bool:
 
 
 def _backends_module_dir() -> Path:
+    """Return the directory holding the per-backend submitter modules.
+
+    Returns:
+        Path: The ``backends`` directory next to this module.
+    """
     return Path(__file__).resolve().parent / "backends"
 
 
@@ -1488,6 +1831,12 @@ def _import_backend(name: str):
 
     The submodules are not part of a Python package on disk; we add their
     directory to sys.path before import so they can also import each other.
+
+    Args:
+        name (str): Module name under ``backends/`` to import (e.g. ``geak``).
+
+    Returns:
+        module: The imported backend submodule.
     """
     backends_dir = _backends_module_dir()
     if str(backends_dir) not in sys.path:
@@ -1504,18 +1853,38 @@ def _kernel_agent_root() -> Path:
     which keeps cross-task GEAK/OOB artefacts keyed by kernel_id).
     Legacy default was ``$WORKSPACE_PATH/kernel-agent``; the env was
     removed during the all-artefacts-under-USER_DATA_PATH migration.
+
+    Returns:
+        Path: The ``$USER_DATA_PATH/kernel-agent`` output root.
     """
     return Path(os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")) / "kernel-agent"
 
 
 def _geak_output_dir(session_id: str, prompt_file: Path) -> Path:
+    """Return (creating if needed) the GEAK output dir for a run.
+
+    Args:
+        session_id (str): Per-session identifier namespacing the output.
+        prompt_file (Path): Prompt file whose stem names the run subdir.
+
+    Returns:
+        Path: The created ``.../geak/<session_id>/<prompt_stem>`` directory.
+    """
     out = _kernel_agent_root() / "geak" / session_id / prompt_file.stem
     out.mkdir(parents=True, exist_ok=True)
     return out
 
 
 def _set_yaml_tools_rag(text: str, enabled: bool) -> str:
-    """Return YAML text with tools.rag set without mutating the source config."""
+    """Return YAML text with tools.rag set without mutating the source config.
+
+    Args:
+        text (str): The original GEAK YAML config text.
+        enabled (bool): Whether ``tools.rag`` should be ``true`` or ``false``.
+
+    Returns:
+        str: A new YAML string with the ``tools.rag`` value set/inserted.
+    """
     value = "true" if enabled else "false"
     lines = text.splitlines()
     out: list[str] = []
@@ -1565,6 +1934,15 @@ def _ensure_yaml_env_timeout(text: str, *, timeout: int = _DEFAULT_GEAK_FALLBACK
     Without an explicit override, GEAK's test command dies with
     ``Test command timed out`` after 30s. This helper ensures the config
     always has a reasonable timeout (default 3600s).
+
+    Args:
+        text (str): The original GEAK YAML config text.
+        timeout (int): Desired ``env.timeout`` in seconds; floored at 60 and
+            only raised (never lowered) when an existing value is larger.
+
+    Returns:
+        str: YAML text guaranteed to define an ``env.timeout`` at least as
+            large as ``timeout``.
     """
     timeout = max(60, int(timeout))
     has_env = re.search(r"^env\s*:\s*(?:#.*)?$", text, flags=re.MULTILINE)
@@ -1617,7 +1995,20 @@ def _geak_config_for_run(
     args: argparse.Namespace,
     prompt_file: Path,
 ) -> str:
-    """Create a per-run GEAK config only when runtime overrides need it."""
+    """Create a per-run GEAK config only when runtime overrides need it.
+
+    Reads the base ``GEAK_CONFIG`` file and, when CLI overrides (RAG
+    disable, env timeout) change it, writes a per-run override file next to
+    the prompt; otherwise the original config path is returned unchanged.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (e.g. ``disable_rag``).
+        prompt_file (Path): Prompt file whose directory hosts any override.
+
+    Returns:
+        str: Path to the config GEAK should use — the base config when no
+            override is needed, otherwise the per-run override file.
+    """
     base_config = os.environ.get("GEAK_CONFIG", "")
     if not base_config or not Path(base_config).is_file():
         return base_config
@@ -1634,7 +2025,15 @@ def _geak_config_for_run(
 
 
 def _extract_py_path(test_command: str) -> str | None:
-    """Extract the .py file path from a test command string."""
+    """Extract the .py file path from a test command string.
+
+    Args:
+        test_command (str): A shell-style test command string.
+
+    Returns:
+        str | None: The first ``.py`` token found, or None when none is
+            present or the command cannot be split.
+    """
     try:
         for part in shlex.split(test_command):
             if part.endswith(".py"):
@@ -1655,6 +2054,19 @@ def _try_generate_harness(
     """Try to auto-generate a GEAK-compatible harness from a benchmark file.
 
     Returns a new test_command pointing to the generated harness, or None.
+
+    Args:
+        test_command (str): Existing test command whose ``.py`` path is the
+            benchmark source for generation.
+        candidate (dict): Kernel candidate dict passed to the generator.
+        source_file (str): Path to the kernel source under optimization.
+        out_dir (Path): Directory the generated harness is written to.
+        kernel_repo (str): Repo root used to resolve imports for the harness.
+        log_path (Path | None): Optional run log for generator diagnostics.
+
+    Returns:
+        str | None: A new ``test_command`` pointing at the generated harness,
+            or None when generation is not possible or fails.
     """
     bench_py = _extract_py_path(test_command)
     if not bench_py or not Path(bench_py).is_file():
@@ -1686,7 +2098,20 @@ def _apply_geak_env_overrides(
     args: argparse.Namespace,
     prompt_file: Path,
 ) -> dict[str, str | None]:
-    """Temporarily tune GEAK env for this attempt; caller must restore."""
+    """Temporarily tune GEAK env for this attempt; caller must restore.
+
+    Sets ``GEAK_CONFIG`` (and disables the knowledge base when requested)
+    for the duration of one attempt, returning the prior values so the
+    caller can restore them via :func:`_restore_env`.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (e.g. ``disable_xs_memory``).
+        prompt_file (Path): Prompt file used to derive any per-run config.
+
+    Returns:
+        dict[str, str | None]: The previous values of the mutated env vars
+            (None for vars that were previously unset).
+    """
     keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
     previous = {key: os.environ.get(key) for key in keys}
     config = _geak_config_for_run(args, prompt_file)
@@ -1699,6 +2124,12 @@ def _apply_geak_env_overrides(
 
 
 def _restore_env(previous: dict[str, str | None]) -> None:
+    """Restore environment variables captured by ``_apply_geak_env_overrides``.
+
+    Args:
+        previous (dict[str, str | None]): Map of env var name to its prior
+            value; a None value means the var was unset and is removed.
+    """
     for key, value in previous.items():
         if value is None:
             os.environ.pop(key, None)
@@ -1707,13 +2138,29 @@ def _restore_env(previous: dict[str, str | None]) -> None:
 
 
 def _oob_output_dir(session_id: str) -> Path:
+    """Return (creating if needed) the out-of-band backend output dir.
+
+    Args:
+        session_id (str): Per-session identifier namespacing the output.
+
+    Returns:
+        Path: The created ``.../oob/<session_id>`` directory.
+    """
     out = _kernel_agent_root() / "oob" / session_id
     out.mkdir(parents=True, exist_ok=True)
     return out
 
 
 def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
-    """Create a relative symlink inside the run dir pointing at the mirror."""
+    """Create a relative symlink inside the run dir pointing at the mirror.
+
+    Best-effort: failures (unsupported filesystem, existing link) are
+    swallowed so artifact mirroring never breaks a run.
+
+    Args:
+        run_dir (Path): The run directory the symlink is created under.
+        mirror (Path): The target directory the symlink should point at.
+    """
     try:
         link_dir = run_dir / mirror.parent.name  # geak / oob
         link_dir.mkdir(parents=True, exist_ok=True)
@@ -1728,7 +2175,13 @@ def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
 def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
     """Best-effort `git checkout -- .` to undo any rogue agent writes under
     the kernel repo (e.g. claude ignoring the soft safety prompt). Idempotent
-    and safe to call after every backend attempt."""
+    and safe to call after every backend attempt.
+
+    Args:
+        kernel_repo (str): Path to the kernel repo to clean; a no-op when
+            empty or not a git working tree.
+        log_path (Path): Run log that records the checkout result/errors.
+    """
     if not kernel_repo:
         return
     git_dir = Path(kernel_repo) / ".git"
@@ -1758,6 +2211,19 @@ def invoke_backend(
 
     Returns a normalized dict: returncode, stdout_tail, stderr_tail, stdout,
     gpu_ids, elapsed_s, cmd, optimized_path (optional), cli_workspace (oob).
+
+    Args:
+        backend (str): Backend name to run (e.g. ``geak``, ``claude``).
+        prompt_file (Path): File containing the rendered optimization prompt.
+        source_file (str): Path to the kernel source to be rewritten.
+        args (argparse.Namespace): Parsed CLI args carrying backend settings.
+        candidate (dict[str, Any] | None): Kernel candidate dict, when known.
+        log_path (Path | None): Optional run log for backend diagnostics.
+
+    Returns:
+        dict[str, Any]: A normalized result dict (returncode, stdout/stderr
+            tails, gpu_ids, elapsed_s, cmd, and optional optimized_path /
+            cli_workspace).
     """
     # GEAK needs more wall-clock than claude/codex: a single sub-agent task
     # already takes 5-10 min (baseline + LLM patch generation + per-patch
@@ -1940,6 +2406,15 @@ def invoke_backend(
 
 
 def env_first(*names: str) -> str:
+    """Return the first non-empty environment variable among ``names``.
+
+    Args:
+        *names (str): Environment variable names to check, in priority order.
+
+    Returns:
+        str: The value of the first set, non-empty variable, or an empty
+            string when none are set.
+    """
     for name in names:
         value = os.environ.get(name)
         if value:
@@ -1955,6 +2430,23 @@ def run_attempt(
     run_dir: Path,
     log_path: Path,
 ) -> dict[str, Any]:
+    """Run a single backend optimization attempt and record its artifacts.
+
+    Renders the prompt, invokes the backend (or a dry-run placeholder),
+    captures stdout to a durable log, locates any optimized-source artifact,
+    and returns a structured attempt record.
+
+    Args:
+        backend (str): Backend name to run for this attempt.
+        args (argparse.Namespace): Parsed CLI args controlling the attempt.
+        candidate (dict[str, Any]): Kernel candidate dict being optimized.
+        run_dir (Path): Run directory for prompts/optimized/log outputs.
+        log_path (Path): Run log appended with attempt progress.
+
+    Returns:
+        dict[str, Any]: An attempt record (id, backend, status, returncode,
+            elapsed, optimized_path, backend_paths, stdout tail, etc.).
+    """
     attempt_id = f"{backend}-{uuid.uuid4().hex[:8]}"
     prompt_dir = run_dir / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -2200,6 +2692,13 @@ def _count_auth_failures(text: str) -> int:
     distinguish "a single transient 401 that retried successfully" from
     "every single retry hit 401 because the wrong gateway is being
     talked to and there is no recoverable path".
+
+    Args:
+        text (str): Backend stdout/log text to scan for auth-failure markers.
+
+    Returns:
+        int: The number of matched auth-failure markers across all patterns
+            (0 when ``text`` is empty).
     """
     if not text:
         return 0
@@ -2215,6 +2714,13 @@ def _extract_speedup_from_report(report_path: str | Path) -> float | None:
     Picks the MAX value across all matches (agents often report per-shape
     numbers and an aggregate; we want the headline). Returns None if nothing
     parseable is found or the file does not exist.
+
+    Args:
+        report_path (str | Path): Path to an OOB ``optimization_report.md``.
+
+    Returns:
+        float | None: The median of the top-3 plausible speedup figures
+            (rounded to 4 dp), or None when none are found.
     """
     if not report_path:
         return None
@@ -2245,7 +2751,15 @@ def _extract_speedup_from_report(report_path: str | Path) -> float | None:
 
 
 def _extract_speedup_from_geak(final_report_path: str | Path) -> float | None:
-    """Pull best_speedup from a GEAK final_report.json if present and >0."""
+    """Pull best_speedup from a GEAK final_report.json if present and >0.
+
+    Args:
+        final_report_path (str | Path): Path to a GEAK ``final_report.json``.
+
+    Returns:
+        float | None: The reported ``best_speedup`` when positive, else None
+            (also None when the file is missing or unparseable).
+    """
     if not final_report_path:
         return None
     p = Path(final_report_path)
@@ -2260,7 +2774,18 @@ def _extract_speedup_from_geak(final_report_path: str | Path) -> float | None:
 
 
 def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
-    """Best-effort correctness signal from backend markdown/json reports."""
+    """Best-effort correctness signal from backend markdown/json reports.
+
+    Looks for an explicit ``[correctness] pass/fail`` marker first, then
+    falls back to scanning for known pass/fail phrasings.
+
+    Args:
+        report_path (str | Path): Path to a backend report (markdown/text).
+
+    Returns:
+        bool | None: True/False when a correctness signal is found, or None
+            when the file is missing/unreadable or no signal is present.
+    """
     if not report_path:
         return None
     p = Path(report_path)
@@ -2320,6 +2845,10 @@ def _trust_geak_correctness() -> bool:
     Set ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=0`` to restore the
     conservative behaviour (every GEAK KEEP -> NEEDS_REVIEW) for
     operators that want human review before integrate.
+
+    Returns:
+        bool: True when GEAK correctness should be trusted (the default),
+            False when ``HYPERLOOM_TRUST_GEAK_CORRECTNESS`` opts out.
     """
     raw = os.environ.get("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "").strip().lower()
     if raw in {"0", "false", "no", "off"}:
@@ -2328,7 +2857,18 @@ def _trust_geak_correctness() -> bool:
 
 
 def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None:
-    """Read correctness from GEAK-style JSON reports when present."""
+    """Read correctness from GEAK-style JSON reports when present.
+
+    Recursively walks the JSON looking for correctness/validity keys; any
+    False seen wins over True (fail-safe).
+
+    Args:
+        final_report_path (str | Path): Path to a GEAK-style JSON report.
+
+    Returns:
+        bool | None: False if any correctness key is falsy, True if only
+            truthy ones are found, or None when nothing relevant is present.
+    """
     if not final_report_path:
         return None
     p = Path(final_report_path)
@@ -2342,6 +2882,12 @@ def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None
     found: list[bool] = []
 
     def walk(obj: Any) -> None:
+        """Recursively collect correctness/validity booleans from ``obj``.
+
+        Args:
+            obj (Any): A JSON value (dict, list, or scalar) to traverse;
+                matching keys append their resolved bool to ``found``.
+        """
         if isinstance(obj, dict):
             for k, v in obj.items():
                 lk = str(k).lower()
@@ -2377,6 +2923,20 @@ _FENCE_RE = re.compile(
 
 
 def _source_text_looks_complete(text: str, suffix: str) -> bool:
+    """Heuristically decide whether ``text`` is a complete source file.
+
+    For ``.py`` it must parse and contain Python markers; for C/C++/CUDA
+    suffixes it must contain typical source markers. Text containing a code
+    fence is rejected (handled by :func:`_extract_source_block` instead).
+
+    Args:
+        text (str): Candidate file contents.
+        suffix (str): File suffix that selects the language heuristic.
+
+    Returns:
+        bool: True when ``text`` plausibly is a complete source file for the
+            given suffix; False otherwise.
+    """
     stripped = text.strip()
     if not stripped or "```" in stripped:
         return False
@@ -2401,6 +2961,22 @@ def _source_text_looks_complete(text: str, suffix: str) -> bool:
 
 
 def _extract_source_block(text_path: Path, target_suffix: str, output_path: Path) -> str:
+    """Extract a complete fenced source block from a backend stdout log.
+
+    Scans ``text_path`` for fenced code blocks whose language hint matches
+    ``target_suffix`` and that look like complete source; the last such
+    block is written to ``output_path``.
+
+    Args:
+        text_path (Path): File (typically backend stdout) to scan for fences.
+        target_suffix (str): Target source suffix used to filter fences and
+            validate completeness (e.g. ``.cu``, ``.py``).
+        output_path (Path): Where the extracted source block is written.
+
+    Returns:
+        str: The string path of the written artifact, or empty string when
+            no suitable code block is found.
+    """
     try:
         text = text_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
@@ -2447,6 +3023,14 @@ def _geak_best_worktree(best_patch_path: str) -> Path | None:
     diff. Returns ``None`` when the layout doesn't match the expected
     shape (e.g. a fixture / future GEAK reorg) so callers can fail
     soft and fall back to existing patch-based recovery.
+
+    Args:
+        best_patch_path (str): Path to a GEAK best-patch ``.patch`` file
+            under ``.../parallel_<M>/``.
+
+    Returns:
+        Path | None: The matching ``worktrees/slot_<M>`` directory, or None
+            when the path doesn't match the expected layout or is missing.
     """
     if not best_patch_path:
         return None
@@ -2486,6 +3070,16 @@ def _worktree_source_paths(
     Each returned path is verified to exist on disk. Empty list when
     no match is found so the caller falls back to its other candidate
     sources.
+
+    Args:
+        worktree (Path): GEAK worktree slot directory to search.
+        source_file (str): Original kernel source path to mirror.
+        kernel_repo (str): Repo root used to compute ``source_file``'s
+            relative path within the worktree.
+
+    Returns:
+        list[Path]: Existing files under ``worktree`` mirroring
+            ``source_file``, most-precise first; empty when none match.
     """
     if not worktree.is_dir() or not source_file:
         return []
@@ -2514,6 +3108,22 @@ def _candidate_artifact_paths(
     source_file: str = "",
     kernel_repo: str = "",
 ) -> list[Path]:
+    """Collect candidate optimized-artifact paths for an attempt, in priority.
+
+    Gathers GEAK worktree files, partial/patch outputs, ``optimized_versions``
+    directories, and the recorded ``optimized_path`` into a priority-ordered
+    list for downstream source selection.
+
+    Args:
+        attempt (dict[str, Any]): Attempt record carrying ``backend_paths``
+            and ``optimized_path``.
+        target_suffix (str): Target source suffix (used by callers to match).
+        source_file (str): Original kernel source path, for worktree mapping.
+        kernel_repo (str): Kernel repo root, for worktree-relative resolution.
+
+    Returns:
+        list[Path]: Candidate artifact paths ordered most- to least-precise.
+    """
     paths: list[Path] = []
     bp = attempt.get("backend_paths") or {}
     # GEAK worktree files first: when we have the worktree slot from
@@ -2582,7 +3192,24 @@ def _select_source_artifact(
     run_dir: Path | None = None,
     kernel_repo: str = "",
 ) -> tuple[str, str, str]:
-    """Return (artifact_path, source, error) for a complete source artifact."""
+    """Return (artifact_path, source, error) for a complete source artifact.
+
+    Tries suffix-matching complete-source candidates first, then falls back
+    to extracting a fenced code block from text/log/patch candidates.
+
+    Args:
+        attempt (dict[str, Any]): Attempt record to source artifacts from.
+        target_file (str): Original kernel source path; its suffix selects
+            the expected artifact type.
+        run_dir (Path | None): Directory used to write extracted blocks;
+            defaults to the optimized-path parent when None.
+        kernel_repo (str): Kernel repo root, for worktree-relative resolution.
+
+    Returns:
+        tuple[str, str, str]: ``(artifact_path, source, error)`` where
+            ``source`` is one of ``source_file`` / ``extracted_code_block`` /
+            ``missing`` / ``unsupported`` and ``error`` describes failures.
+    """
     target_suffix = Path(target_file).suffix.lower()
     if target_suffix not in _SOURCE_SUFFIXES:
         return "", "unsupported", f"unsupported target suffix: {target_suffix or '<none>'}"
@@ -2618,6 +3245,23 @@ def _select_source_artifact(
 
 
 def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool) -> dict[str, Any]:
+    """Aggregate backend attempts into a single verification result.
+
+    Selects the best usable attempt (by measured speedup), resolves its
+    optimized-source artifact, and derives compile/correctness/speedup
+    signals along with their provenance.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (overrides, source file,
+            repo, dry-run flags, etc.).
+        attempts (list[dict[str, Any]]): Per-backend attempt records.
+        benchmark_available (bool): Whether a benchmark/harness was available
+            (lowers verification confidence when False).
+
+    Returns:
+        dict[str, Any]: A verification dict with compile/correctness/speedup
+            flags, the chosen artifact path/source, and signal sources.
+    """
     # An attempt is usable if it either completed cleanly OR was killed past
     # the budget but left optimized_versions/ + report on disk (status=partial).
     usable = [a for a in attempts if a.get("status") in {"completed", "partial"}]
@@ -2767,6 +3411,21 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
 
 
 def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
+    """Turn a verification result into a KEEP/REVERT/PARTIAL/REVIEW decision.
+
+    Applies the policy gates (compile, correctness, artifact validity,
+    measured speedup vs the KEEP threshold, E2E/accuracy signals) to choose
+    a disposition and the reasons behind it.
+
+    Args:
+        verification (dict[str, Any]): The dict returned by
+            :func:`build_verification`.
+
+    Returns:
+        dict[str, Any]: A proposal dict with a ``decision`` (one of
+            ``KEEP`` / ``REVERT`` / ``PARTIAL`` / ``NEEDS_REVIEW``) and a
+            ``reasons`` list.
+    """
     reasons: list[str] = []
     if not verification["compile_passed"]:
         # ``compile_passed`` is computed as ``bool(best)`` in build_verification,
@@ -2829,6 +3488,15 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> int:
+    """CLI entry point for the kernel-optimization tool.
+
+    Parses command-line arguments, runs the configured backend ladder for
+    the requested kernel, builds the verification result and proposal, and
+    persists status/artifacts.
+
+    Returns:
+        int: Process exit code (0 on success, non-zero on failure).
+    """
     parser = argparse.ArgumentParser(description="Kernel Agent optimization tool")
     parser.add_argument("--kernel-id", required=True)
     parser.add_argument("--session-id", default="")

@@ -88,6 +88,22 @@ def evaluate_decision_audit_signals(
     *,
     config: DecisionAuditConfig | None = None,
 ) -> list[Symptom]:
+    """Run the G1-G7 reverse-audit rules over persisted decision artefacts.
+
+    Inspects integrate result entries, ci_metrics, and OOB attempts collected
+    into :attr:`SourceData.local_decision_audit` and aggregates any symptoms.
+
+    Args:
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected source data including the decision-audit
+            sample.
+        config (DecisionAuditConfig | None): Tunables; defaults to
+            :class:`DecisionAuditConfig` when ``None``.
+
+    Returns:
+        list[Symptom]: All decision-quality symptoms found this tick, possibly
+            empty.
+    """
     cfg = config or DecisionAuditConfig()
     audit = data.local_decision_audit
     if not isinstance(audit, dict) or not audit:
@@ -118,6 +134,15 @@ def _integrate_symptoms(
     entries: list[dict[str, Any]],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
+    """Apply the G1/G2/G3 integrate-result rules to recent KEEP/PARTIAL entries.
+
+    Args:
+        entries (list[dict[str, Any]]): Recent integrate result records.
+        cfg (DecisionAuditConfig): Audit tunables.
+
+    Returns:
+        list[Symptom]: Symptoms from the G1/G2/G3 checks across all entries.
+    """
     out: list[Symptom] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -137,6 +162,13 @@ def _g1_empty_patch_kept(entry: dict[str, Any]) -> list[Symptom]:
     An empty patch cannot have produced any speedup; if the integrate
     decision still landed KEEP, the executor's gain measurement is
     almost certainly noise. Surface for immediate revert + KB rule.
+
+    Args:
+        entry (dict[str, Any]): A single integrate result record.
+
+    Returns:
+        list[Symptom]: A one-element list with the ``empty_patch_kept`` symptom
+            when the patch is empty, otherwise an empty list.
     """
     patch_size = entry.get("patch_size_bytes")
     if not isinstance(patch_size, int) or patch_size > 0:
@@ -181,6 +213,15 @@ def _g2_decision_threshold_violated(
     Noise-floor KEEPs (Dolphin-34B +0.07% etc.) pollute the optimization
     stack. Medium severity because this is also a *configuration* fix:
     upstream should raise its keep threshold. Robustness only flags.
+
+    Args:
+        entry (dict[str, Any]): A single integrate result record.
+        cfg (DecisionAuditConfig): Audit tunables (provides the keep threshold).
+
+    Returns:
+        list[Symptom]: A one-element list with the
+            ``decision_threshold_violated`` symptom when the gain is
+            sub-threshold, otherwise an empty list.
     """
     if entry.get("decision") != "KEEP":
         return []
@@ -231,6 +272,14 @@ def _g3_kernel_dispatch_bypassed(
 
     Both fire HIGH because a KEEP without proof of execution is a
     false-positive in the optimization_stack.
+
+    Args:
+        entry (dict[str, Any]): A single integrate result record.
+        cfg (DecisionAuditConfig): Audit tunables (provides the epsilon).
+
+    Returns:
+        list[Symptom]: A one-element list with the ``kernel_dispatch_bypassed``
+            symptom when dispatch was likely bypassed, otherwise an empty list.
     """
     if entry.get("decision") != "KEEP":
         return []
@@ -288,6 +337,16 @@ def _g3_kernel_dispatch_bypassed(
 def _ci_metrics_symptoms(
     ci_metrics: dict[str, Any], ci_metrics_path: str,
 ) -> list[Symptom]:
+    """Apply the G4/G5/G6 ci_metrics audit rules when the file is present.
+
+    Args:
+        ci_metrics (dict[str, Any]): Parsed ci_metrics document.
+        ci_metrics_path (str): Filesystem path of the ci_metrics file, used in
+            evidence.
+
+    Returns:
+        list[Symptom]: Symptoms from the G4/G5/G6 checks, possibly empty.
+    """
     if not ci_metrics:
         return []
     out: list[Symptom] = []
@@ -307,6 +366,15 @@ def _g4_negative_delta_kernel_kept(
     contribution is negative — equivalent to "I optimized 6 things and
     made the model 0.17% slower". HIGH because downstream aggregators
     (dashboards, PR submitters) treat the field as a win count.
+
+    Args:
+        ci_metrics (dict[str, Any]): Parsed ci_metrics document.
+        ci_metrics_path (str): Filesystem path of the ci_metrics file.
+
+    Returns:
+        list[Symptom]: A one-element list with the
+            ``kernel_negative_delta_kept`` symptom when the delta is net
+            non-positive, otherwise an empty list.
     """
     kernels_opt = ci_metrics.get("kernels_optimized")
     delta_pct = ci_metrics.get("optimized_kernel_delta_pct")
@@ -349,6 +417,15 @@ def _g5_baseline_zero_without_status(
     report_back is to write ``{status: "baseline_failed"}`` instead of
     zeros; Robustness flags the bad row when ANY baseline-throughput-
     style field is 0.0 without the marker.
+
+    Args:
+        ci_metrics (dict[str, Any]): Parsed ci_metrics document.
+        ci_metrics_path (str): Filesystem path of the ci_metrics file.
+
+    Returns:
+        list[Symptom]: A one-element list with the ``ci_metrics_baseline_zero``
+            symptom when baseline throughput is zero without the failure
+            marker, otherwise an empty list.
     """
     if str(ci_metrics.get("status") or "") == "baseline_failed":
         return []
@@ -402,6 +479,15 @@ def _g6_schema_drift(
     field names. MEDIUM because the fix is in ``report_back/ci_metrics.py``;
     Robustness only surfaces the drift so the aggregator dashboard
     catches it before the data is graphed.
+
+    Args:
+        ci_metrics (dict[str, Any]): Parsed ci_metrics document.
+        ci_metrics_path (str): Filesystem path of the ci_metrics file.
+
+    Returns:
+        list[Symptom]: A one-element list with the ``ci_metrics_schema_drift``
+            symptom when required fields are missing or legacy fields are
+            present, otherwise an empty list.
     """
     keys = set(ci_metrics.keys())
     missing = _CI_METRICS_REQUIRED_FIELDS - keys
@@ -444,6 +530,18 @@ def _oob_symptoms(
     """G7: OOB attempt advertises "expected speedup ~1.X" but never
     measured. Surface HIGH so downstream pipeline can refuse to count
     these towards ``kernels_optimized``.
+
+    Offending entries are collapsed per ``kernel_id`` (keeping the latest by
+    timestamp) to avoid emitting one symptom per attempt.
+
+    Args:
+        entries (list[dict[str, Any]]): OOB optimization-attempt records.
+        cfg (DecisionAuditConfig): Audit tunables (provides the no-harness
+            marker phrases).
+
+    Returns:
+        list[Symptom]: One ``oob_no_harness`` symptom per offending kernel,
+            possibly empty.
     """
     out: list[Symptom] = []
     by_kernel: dict[str, dict[str, Any]] = {}

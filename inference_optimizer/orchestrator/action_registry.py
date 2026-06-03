@@ -145,9 +145,13 @@ _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
 def default_verdict_class_for(action_name: str) -> str:
     """Look up the default ``verdict_class`` for ``action_name``.
 
-    Returns the registered class if known, else falls back to
-    ``"exploration"`` (safe default: only ``integrate`` semantics
-    deadlock when treated as exploration; everything else is fine).
+    Args:
+        action_name (str): Action name to classify.
+
+    Returns:
+        str: The registered class if known, else ``"exploration"`` (safe
+            default: only ``integrate`` semantics deadlock when treated as
+            exploration; everything else is fine).
     """
     return _DEFAULT_VERDICT_CLASS.get(
         action_name, _DEFAULT_VERDICT_CLASS_FALLBACK,
@@ -196,6 +200,24 @@ class ActionMetadata:
 
     @classmethod
     def from_yaml_dict(cls, data: dict[str, Any], expected_name: str) -> "ActionMetadata":
+        """Validate a parsed YAML dict and build an :class:`ActionMetadata`.
+
+        Checks required fields, family / backend / pipeline-phase /
+        verdict-class vocabularies, and numeric ranges, filling optional
+        fields with safe defaults so older yaml keeps parsing.
+
+        Args:
+            data (dict[str, Any]): Parsed contents of one
+                ``actions/_meta/<name>.yaml`` file.
+            expected_name (str): Filename stem the ``name`` field must match.
+
+        Returns:
+            ActionMetadata: The validated, frozen metadata record.
+
+        Raises:
+            ActionRegistryError: On any missing field, name mismatch, or
+                out-of-vocabulary / out-of-range value.
+        """
         for field_name in _REQUIRED_FIELDS:
             if field_name not in data:
                 raise ActionRegistryError(
@@ -303,13 +325,30 @@ class ActionRegistry:
     """
 
     def __init__(self, actions_dir: Path | None = None) -> None:
+        """Initialise an empty registry rooted at an actions directory.
+
+        Args:
+            actions_dir (Path | None): Directory holding ``_meta/*.yaml``;
+                defaults to the packaged asset actions dir when None.
+        """
         self.actions_dir = Path(actions_dir) if actions_dir else asset_actions_dir()
         self.meta_dir = self.actions_dir / "_meta"
         self._cache: dict[str, ActionMetadata] = {}
         self._loaded = False
 
     def load(self) -> "ActionRegistry":
-        """Scan ``_meta/*.yaml``, validate, populate cache. Returns self."""
+        """Scan ``_meta/*.yaml``, validate, populate cache.
+
+        Idempotent — re-scans the meta directory each call. Files whose
+        stem starts with ``_`` are skipped.
+
+        Returns:
+            ActionRegistry: ``self``, for fluent chaining.
+
+        Raises:
+            ActionRegistryError: If PyYAML is unavailable, the meta
+                directory is missing, or any yaml fails validation.
+        """
         try:
             import yaml  # type: ignore[import-untyped]
         except ImportError as exc:  # pragma: no cover
@@ -335,21 +374,50 @@ class ActionRegistry:
         return self
 
     def get(self, name: str) -> ActionMetadata | None:
+        """Return metadata for one action, loading the cache on first use.
+
+        Args:
+            name (str): Action name to look up.
+
+        Returns:
+            ActionMetadata | None: The metadata, or None if unknown.
+        """
         if not self._loaded:
             self.load()
         return self._cache.get(name)
 
     def all(self) -> list[ActionMetadata]:
+        """Return every loaded action's metadata.
+
+        Returns:
+            list[ActionMetadata]: All cached metadata records.
+        """
         if not self._loaded:
             self.load()
         return list(self._cache.values())
 
     def names(self) -> list[str]:
+        """Return the sorted names of all loaded actions.
+
+        Returns:
+            list[str]: Action names in sorted order.
+        """
         if not self._loaded:
             self.load()
         return sorted(self._cache.keys())
 
     def by_family(self, family: str) -> list[ActionMetadata]:
+        """Return all loaded actions belonging to ``family``.
+
+        Args:
+            family (str): Family name; must be in :data:`VALID_FAMILIES`.
+
+        Returns:
+            list[ActionMetadata]: Actions whose ``family`` matches.
+
+        Raises:
+            ActionRegistryError: If ``family`` is not a known family.
+        """
         if family not in VALID_FAMILIES:
             raise ActionRegistryError(
                 f"family={family!r} not in {sorted(VALID_FAMILIES)!r}"

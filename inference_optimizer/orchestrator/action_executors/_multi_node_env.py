@@ -55,12 +55,22 @@ _DEFAULT_STATE_PATH = "/tmp/multi_node_state.json"
 
 
 def _state_path() -> Path:
-    """Resolve where the multi_node CLI dropped its state file."""
+    """Resolve where the multi_node CLI dropped its state file.
+
+    Returns:
+        Path: The state-file path from ``$MULTI_NODE_STATE_FILE`` or the
+            default ``/tmp/multi_node_state.json``.
+    """
     return Path(os.environ.get("MULTI_NODE_STATE_FILE", _DEFAULT_STATE_PATH))
 
 
 def _read_state() -> dict[str, Any]:
-    """Best-effort read of the state file. Returns {} on any failure."""
+    """Best-effort read of the state file. Returns {} on any failure.
+
+    Returns:
+        dict[str, Any]: The parsed state dict, or ``{}`` if the file is
+            missing, unreadable, or not a JSON object.
+    """
     p = _state_path()
     if not p.is_file():
         return {}
@@ -90,6 +100,9 @@ def is_multi_node() -> bool:
     2. ``$INFERENCE_OPTIMIZER_NODES`` env (set by ``cli._run_optimize``
        when ``--nodes`` is passed on the CLI). Honoured when the state
        file is absent or has no usable ``nodes``.
+
+    Returns:
+        bool: True iff a >=2-node RayJob cluster is in effect.
     """
     state = _read_state()
     try:
@@ -106,7 +119,12 @@ def is_multi_node() -> bool:
 
 
 def ray_gcs_address_from_state() -> str:
-    """Ray GCS address for ``ray.init`` (head pod IP + default GCS port)."""
+    """Ray GCS address for ``ray.init`` (head pod IP + default GCS port).
+
+    Returns:
+        str: The explicit ``ray_address`` from state, ``<head_pod_ip>:6379``
+            when only the head IP is known, or ``""`` if neither is present.
+    """
     state = _read_state()
     addr = str(state.get("ray_address") or "").strip()
     if addr:
@@ -127,6 +145,9 @@ def rayjob_id_from_state() -> str:
     ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` was not exported in-process —
     typically when the optimizer was launched out of band from
     ``cli._provision_multi_node_rayjob_stack``.
+
+    Returns:
+        str: The SaFE-allocated RayJob workload id, or ``""`` if absent.
     """
     return str(_read_state().get("rayjob_id") or "").strip()
 
@@ -221,6 +242,12 @@ def log_mn_banner(
     round-specific context (e.g. ``trace_dir=...`` for profile rounds,
     ``variant=...`` for grid rows) without each call site having to
     format the banner itself.
+
+    Args:
+        component (str): The component name shown in the banner.
+        target_log (logging.Logger): The logger to emit the banner on.
+        **extra (Any): Extra key=value context appended in insertion order;
+            empty / ``None`` values are skipped.
     """
     if not is_multi_node():
         return

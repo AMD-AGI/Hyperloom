@@ -47,6 +47,20 @@ class WebSearchProvider(Protocol):
     name: str
 
     def search(self, query: str, opts: SearchOptions) -> list[SearchHit]:
+        """Execute a search and return normalized hits.
+
+        Args:
+            query (str): The search query string.
+            opts (SearchOptions): Per-call options (max results, domain
+                filters, freshness).
+
+        Returns:
+            list[SearchHit]: Normalized result entries.
+
+        Raises:
+            ProviderError: When this provider fails non-recoverably so the
+                client can fall back to the next provider.
+        """
         pass
 
 
@@ -81,12 +95,33 @@ class TavilyProvider:
     _ENDPOINT = "https://api.tavily.com/search"
 
     def __init__(self, api_key: str, http_client: httpx.Client) -> None:
+        """Store the API key and HTTP transport.
+
+        Args:
+            api_key (str): Tavily API key.
+            http_client (httpx.Client): Synchronous transport to use.
+
+        Raises:
+            ValueError: If ``api_key`` is empty.
+        """
         if not api_key:
             raise ValueError("TavilyProvider requires non-empty api_key")
         self._api_key = api_key
         self._http = http_client
 
     def search(self, query: str, opts: SearchOptions) -> list[SearchHit]:
+        """Query the Tavily Search API and normalize results.
+
+        Args:
+            query (str): The search query string.
+            opts (SearchOptions): Per-call options mapped to Tavily fields.
+
+        Returns:
+            list[SearchHit]: Normalized hits (empty when no ``results``).
+
+        Raises:
+            ProviderError: On HTTP errors or a non-JSON response body.
+        """
         body: dict[str, object] = {
             "api_key": self._api_key,
             "query": query,
@@ -144,12 +179,36 @@ class SerperProvider:
     _ENDPOINT = "https://google.serper.dev/search"
 
     def __init__(self, api_key: str, http_client: httpx.Client) -> None:
+        """Store the API key and HTTP transport.
+
+        Args:
+            api_key (str): Serper API key.
+            http_client (httpx.Client): Synchronous transport to use.
+
+        Raises:
+            ValueError: If ``api_key`` is empty.
+        """
         if not api_key:
             raise ValueError("SerperProvider requires non-empty api_key")
         self._api_key = api_key
         self._http = http_client
 
     def search(self, query: str, opts: SearchOptions) -> list[SearchHit]:
+        """Query the Serper API and normalize the organic results.
+
+        Allowed domains are folded into the query as ``site:`` clauses and
+        blocked domains are post-filtered on the returned hostnames.
+
+        Args:
+            query (str): The search query string.
+            opts (SearchOptions): Per-call options mapped to Serper fields.
+
+        Returns:
+            list[SearchHit]: Normalized hits (empty when no ``organic``).
+
+        Raises:
+            ProviderError: On HTTP errors or a non-JSON response body.
+        """
         q = query
         if opts.allowed_domains:
             q = q + " " + " OR ".join(f"site:{d}" for d in opts.allowed_domains)
@@ -192,6 +251,16 @@ class SerperProvider:
 # ── helpers ─────────────────────────────────────────────────────────────
 
 def _hostname_in(url: str, denylist: tuple[str, ...]) -> bool:
+    """Report whether a URL's host matches or is a subdomain of a denylist.
+
+    Args:
+        url (str): The URL to inspect.
+        denylist (tuple[str, ...]): Domains to match against.
+
+    Returns:
+        bool: True when the host equals or ends with ``.<domain>`` for any
+        entry; False on empty denylist, match failure, or unparseable URL.
+    """
     if not denylist:
         return False
     try:

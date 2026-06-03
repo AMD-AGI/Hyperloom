@@ -33,6 +33,14 @@ class LogTailer:
     """Tail a log file and emit alerts on error pattern matches."""
 
     def __init__(self, log_path: Optional[Path] = None, max_lines_per_check: int = 200):
+        """Initialise the log tailer.
+
+        Args:
+            log_path (Optional[Path]): Path of the log file to tail; may
+                be set later via :meth:`set_log_path`.
+            max_lines_per_check (int): Maximum number of new lines to
+                scan per :meth:`check` call.
+        """
         self._log_path = log_path
         self._max_lines = max_lines_per_check
         self._file_pos: int = 0
@@ -40,10 +48,21 @@ class LogTailer:
         self._dedup_window_s: float = 60.0
 
     def set_log_path(self, path: Path) -> None:
+        """Point the tailer at a new log file and reset the read offset.
+
+        Args:
+            path (Path): The log file to begin tailing.
+        """
         self._log_path = path
         self._file_pos = 0
 
     async def check(self) -> list[Alert]:
+        """Scan newly appended log lines for known error patterns.
+
+        Returns:
+            list[Alert]: Alerts for matched error patterns, deduplicated
+            within the dedup window. Empty if no log file is set.
+        """
         if self._log_path is None or not self._log_path.exists():
             return []
 
@@ -69,11 +88,31 @@ class LogTailer:
         return alerts
 
     def _is_dedup(self, name: str) -> bool:
+        """Report whether a pattern was matched within the dedup window.
+
+        Args:
+            name (str): The error-pattern name to check.
+
+        Returns:
+            bool: ``True`` if the pattern matched recently enough to be
+            suppressed as a duplicate.
+        """
         last = self._recent_matches.get(name, 0)
         return (time.time() - last) < self._dedup_window_s
 
     async def _read_new_lines(self) -> list[str]:
+        """Read log lines appended since the last read, off the event loop.
+
+        Returns:
+            list[str]: Up to ``max_lines_per_check`` newly appended
+            lines (empty if the file is missing).
+        """
         def _read() -> list[str]:
+            """Synchronously read new lines and advance the file offset.
+
+            Returns:
+                list[str]: New lines, trimmed to ``max_lines_per_check``.
+            """
             if not self._log_path or not self._log_path.exists():
                 return []
             with open(self._log_path, "r", errors="replace") as f:
