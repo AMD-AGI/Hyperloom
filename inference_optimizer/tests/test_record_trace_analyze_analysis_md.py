@@ -365,7 +365,10 @@ def test_blob_renders_skipped_when_no_routable_candidates() -> None:
         "trace_health_warnings": [],
     }
     rendered = state._format_trace_analyze_blob(blob)
-    assert "skipped=[k001:aten::mm:source file not resolved]" in rendered
+    assert (
+        "skipped_kernels_top=[k001:aten::mm:source file not resolved]"
+        in rendered
+    )
 
 
 def test_blob_format_stable_when_candidates_present() -> None:
@@ -383,5 +386,30 @@ def test_blob_format_stable_when_candidates_present() -> None:
     }
     rendered = state._format_trace_analyze_blob(blob)
     # Candidates present → legacy format, no skipped suffix injected.
-    assert "skipped=" not in rendered
+    assert "skipped_kernels_top=" not in rendered
     assert "top=['k002']" in rendered
+
+
+def test_non_routable_kernel_opt_skip_rejects_canonical_id() -> None:
+    state = SharedState()
+    state.record_kernel_opt({
+        "status": "skipped",
+        "decision": "REVERT",
+        "error_class": "missing_native_source",
+        "reason": "non_routable_candidate",
+        "kernel_id": "k001",
+        "requested_kernel_id": "kn001",
+        "resolved_kernel_id": "k001",
+        "kernel_name": "aten::mm",
+        "verification": {"micro_speedup": 0.0, "best_artifact_path": ""},
+        "proposal": {
+            "decision": "REVERT",
+            "reasons": ["source file not resolved"],
+        },
+    })
+
+    assert "k001" in state.rejected_kernel_ids
+    entry = state.kernel_opt_attempts["k001"]
+    assert entry["last_decision"] == "REVERT"
+    assert entry["last_status"] == "skipped"
+    assert entry["rejected_reason"] == "revert_decision"
