@@ -197,6 +197,9 @@ Markdown report:
 - collector 拆分或简化方案。
 - downstream contract test 清单。
 
+本阶段的 breakdown contract 与执行记录见
+`code-cleansing-plan/08-breakdown/01-breakdown-contract.MD`。
+
 ## 完成标准
 
 完成后应达到:
