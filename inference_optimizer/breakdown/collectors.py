@@ -1398,9 +1398,10 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
                 bucket["rejected"] += int(payload.get("proposals_rejected") or 0)
         else:
             # Round predates ``domain_breakdown``; impute equal share
-            # across the listed domains so the per-domain numbers add
-            # up to the parent row even on legacy rounds.
-            domains = r.get("domains") or []
+            # across the round's knowledge-domain tags (or the legacy
+            # ``domains[]`` list) so the per-domain numbers add up to the
+            # parent row even on legacy rounds.
+            domains = r.get("tags") or r.get("domains") or []
             if isinstance(domains, list) and domains:
                 share_total = int(r.get("proposals_total") or 0) // len(domains)
                 share_kept = int(r.get("proposals_kept") or 0) // len(domains)
@@ -2736,6 +2737,7 @@ _SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
     "system_specialist",
     "pr_intel_specialist",
     "session_steward_specialist",
+    "research_scout_specialist",
 )
 
 
@@ -2751,7 +2753,7 @@ def _normalize_specialist_key(provenance: str) -> str:
     * ``"default_grid"`` — cold-start grid run when no specialist has
       produced a proposal_set yet.
     * ``"llm_direct"`` — orchestration LLM authored the variant
-      directly (legacy path; PR-A9 retired this).
+      directly.
     * ``"legacy:<action>"`` — resume of a pre-v0.8 session whose
       promoted actions predate the specialist split. Folded under
       ``"legacy_<action>"`` so it doesn't pollute the specialist
@@ -3618,6 +3620,150 @@ def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Kernel Optimization Summary (Breakdown 面板对接文档 §A1; PR #399)
+# ---------------------------------------------------------------------------
+_KERNEL_OPT_SUMMARY_REL_PATH = "reports/kernel_optimization_summary.json"
+
+
+def collect_kernel_optimization_summary(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Mirror ``<session_dir>/reports/kernel_optimization_summary.json``
+    into the breakdown's ``kernel_optimization_summary`` section
+    (Breakdown 面板对接文档 §A1).
+
+    The file is produced deterministically by the ``report`` action
+    (``orchestrator.kernel_attempt_summary.build_kernel_optimization_summary``),
+    which runs as CLOSE step 1 — strictly *before* the
+    ``session_breakdown`` action (step 2) writes this breakdown — so the
+    report is already on disk for a normally-closed session. Mirroring
+    it here lets the dashboard read sbd alone instead of walking the
+    ``reports/`` + kernel-agent tree itself.
+
+    Behaviour (matches :func:`collect_kernel_roofline`):
+
+    * File missing → ``{}``, **no warning**. Offline / pre-#399 sessions
+      and any session where the ``report`` action never ran simply won't
+      have it; the dashboard hides Block 1 on an empty dict.
+    * Malformed / non-object JSON → ``{}`` + warning (never raises).
+    * Otherwise the report is mirrored **verbatim** (so producer-side
+      field additions ride through without a breakdown schema change),
+      apart from light shape guards on the containers the dashboard
+      iterates (``by_kernel`` list; ``totals`` /
+      ``*_breakdown`` / ``field_glossary`` objects), plus an added
+      ``report_path`` rel-link to the source file.
+    """
+    path = session_dir / _KERNEL_OPT_SUMMARY_REL_PATH
+    if not path.exists():
+        # Quiet on absence — keeps breakdowns of legacy / non-report
+        # sessions warning-free (mirrors collect_kernel_roofline).
+        return {}
+    blob = _load_json_safe(path, warnings)
+    if not isinstance(blob, dict):
+        warnings.append(
+            f"kernel_optimization_summary: {_KERNEL_OPT_SUMMARY_REL_PATH} "
+            "is not a JSON object"
+        )
+        return {}
+
+    out = dict(blob)
+
+    raw_by_kernel = out.get("by_kernel")
+    if raw_by_kernel is None:
+        out["by_kernel"] = []
+    elif not isinstance(raw_by_kernel, list):
+        warnings.append(
+            "kernel_optimization_summary.by_kernel is not a list; dropping entries"
+        )
+        out["by_kernel"] = []
+    else:
+        # Drop any non-dict rows so the dashboard can iterate safely;
+        # otherwise pass each row through verbatim (nested verification /
+        # backend_ladder shapes documented in §A1.4).
+        out["by_kernel"] = [r for r in raw_by_kernel if isinstance(r, dict)]
+
+    for key in (
+        "totals", "rejection_breakdown", "unattempted_reason_breakdown",
+        "failure_reason_breakdown", "field_glossary",
+    ):
+        val = out.get(key)
+        if val is not None and not isinstance(val, dict):
+            warnings.append(
+                f"kernel_optimization_summary.{key} is not an object; dropping"
+            )
+            out[key] = {}
+
+    takeaways = out.get("top_takeaways")
+    if takeaways is not None and not isinstance(takeaways, list):
+        warnings.append(
+            "kernel_optimization_summary.top_takeaways is not a list; dropping"
+        )
+        out["top_takeaways"] = []
+
+    out["report_path"] = _rel(path, session_dir) or _KERNEL_OPT_SUMMARY_REL_PATH
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Conc Sweep Summary (Breakdown 面板对接文档 §A2; PR #399)
+# ---------------------------------------------------------------------------
+_CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
+
+
+def collect_conc_sweep_summary(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Mirror ``<session_dir>/reports/conc_sweep_summary.json`` into the
+    breakdown's ``conc_sweep_summary`` section (Breakdown 面板对接文档 §A2).
+
+    Produced by the ``conc_sweep`` action during SWEEP (well before
+    CLOSE), so it is already on disk when sbd exports. Surfacing it here
+    extends the single-CONC headline gain into the full baseline-vs-
+    current_best CONC ladder for the dashboard's dual-curve chart.
+
+    Behaviour:
+
+    * File missing → ``{}``, **no warning** (conc_sweep often disabled /
+      skipped; the dashboard hides Block 2 on an empty dict).
+    * Malformed / non-object JSON → ``{}`` + warning (never raises).
+    * Otherwise mirrored **verbatim** + an added ``report_path``. The
+      only shape guard is on ``comparison`` (the array the dual-curve
+      chart iterates directly).
+
+    IMPORTANT — do **not** synthesize the optional blocks: when the
+    producer writes ``status="skipped"`` it intentionally omits
+    ``baseline`` / ``optimized`` / ``comparison`` / ``summary`` (§A2.4),
+    and ``roofline_ceiling`` (§A2.9) is absent on older products.
+    Consumers must branch on ``status`` before reading those keys; we
+    pass through exactly what the producer wrote.
+    """
+    path = session_dir / _CONC_SWEEP_SUMMARY_REL_PATH
+    if not path.exists():
+        return {}
+    blob = _load_json_safe(path, warnings)
+    if not isinstance(blob, dict):
+        warnings.append(
+            f"conc_sweep_summary: {_CONC_SWEEP_SUMMARY_REL_PATH} "
+            "is not a JSON object"
+        )
+        return {}
+
+    out = dict(blob)
+
+    comparison = out.get("comparison")
+    if comparison is not None and not isinstance(comparison, list):
+        warnings.append(
+            "conc_sweep_summary.comparison is not a list; dropping entries"
+        )
+        out["comparison"] = []
+
+    out["report_path"] = _rel(path, session_dir) or _CONC_SWEEP_SUMMARY_REL_PATH
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Optimization stack — raw KEEP ledger passthrough
 # ---------------------------------------------------------------------------
 # ``state.optimization_stack[]`` is the authoritative ordered list of
@@ -4099,6 +4245,31 @@ def _collect_flusher_status(
 # ---------------------------------------------------------------------------
 # specialist_runs section
 # ---------------------------------------------------------------------------
+def _coerce_round_id(value: Any) -> int | str:
+    """Normalise a ``specialist_rounds[*].round_id`` for the breakdown.
+
+    ``record_specialist_round`` stores ``round_id`` as a string — it may
+    be a numeric round counter ("3"), an explore-round label
+    ("explore-001"), or a task-id hash when a single specialist task is
+    the round anchor. Return an int when the value is purely numeric so
+    downstream numeric consumers keep working, otherwise preserve the
+    string. Empty / None collapses to ``0``. Never raises.
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if text.lstrip("-").isdigit():
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    return text
+
+
 def collect_specialist_runs(
     session_dir: Path,
     state: dict[str, Any],
@@ -4155,25 +4326,41 @@ def collect_specialist_runs(
     for raw in rounds:
         if not isinstance(raw, dict):
             continue
+        # ``record_specialist_round`` writes singular ``domain`` /
+        # ``task_id`` (one specialist task anchors a round) and a bare
+        # ``confidence``; tolerate both the plural / aggregated shapes
+        # (multi-task rounds) and the singular shapes so neither form is
+        # silently dropped.
+        domains = list(raw.get("domains") or [])
+        if not domains and raw.get("domain"):
+            domains = [str(raw.get("domain"))]
         entry: dict[str, Any] = {
-            "round_id":          int(raw.get("round_id") or 0),
+            "round_id":          _coerce_round_id(raw.get("round_id")),
             "dispatched_at":     str(raw.get("dispatched_at") or ""),
             "completed_at":      str(raw.get("completed_at") or ""),
-            "domains":           list(raw.get("domains") or []),
+            "domains":           domains,
+            "tags":              list(raw.get("tags") or []),
             "parallelism":       int(raw.get("parallelism") or 0),
             "proposals_total":   int(raw.get("proposals_total") or 0),
             "proposals_kept":    int(raw.get("proposals_kept") or 0),
             "proposals_rejected": int(raw.get("proposals_rejected") or 0),
             "proposals_skipped": int(raw.get("proposals_skipped") or 0),
             "kb_edge_ids":       list(raw.get("kb_edge_ids") or []),
-            "confidence_avg":    _to_float(raw.get("confidence_avg")),
+            "confidence_avg":    _to_float(
+                raw.get("confidence_avg")
+                if raw.get("confidence_avg") is not None
+                else raw.get("confidence")
+            ),
             "domain_breakdown":  _normalize_specialist_domain_breakdown(
                 raw.get("domain_breakdown"),
             ),
             "notes":             list(raw.get("notes") or []),
         }
-        # Attach transcript refs from runs/specialist/.
+        # Attach transcript refs from runs/specialist/. Tolerate the
+        # singular ``task_id`` anchor when no ``task_ids`` list exists.
         task_ids = list(raw.get("task_ids") or [])
+        if not task_ids and raw.get("task_id"):
+            task_ids = [str(raw.get("task_id"))]
         transcripts: list[dict[str, Any]] = []
         for tid in task_ids:
             tid_str = str(tid)
@@ -4228,11 +4415,14 @@ def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
         v = mapping.get(task_id)
         if isinstance(v, str):
             return v
-    # Fallback: if the round has exactly one domain we can attribute
-    # the task to it without ambiguity.
-    domains = round_entry.get("domains") or []
+    # Fallback: if the round has exactly one knowledge-domain tag (or
+    # one legacy domain) we can attribute the task to it without
+    # ambiguity.
+    domains = round_entry.get("tags") or round_entry.get("domains") or []
     if isinstance(domains, list) and len(domains) == 1:
         return str(domains[0])
+    if round_entry.get("domain"):
+        return str(round_entry.get("domain"))
     return ""
 
 

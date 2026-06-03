@@ -932,6 +932,46 @@ class SharedState:
     # change_type is ``config``. Resets to 0 every time a ``code_patch``
     # KEEP lands. Robustness reads this via the per-tick prompt.
     consecutive_config_only_rounds: int = 0
+    # Research scout bookkeeping.
+    #   * ``research_scout_enabled`` — master switch (``--no-research-scout``
+    #     turns the whole feature off).
+    #   * ``research_scout_runs`` — number of scout dispatches so far;
+    #     feeds exploration-depth tracking.
+    #   * ``research_scout_seen_pr_ids`` — PR ids already surfaced by the
+    #     scout or the FRAMEWORK_PR phase, shared so the two never re-mine
+    #     the same PR.
+    research_scout_enabled: bool = True
+    research_scout_interval: int = 3
+    # Master switch for the advisory "External target gap" prompt block
+    # (``--no-target-advisory`` turns it off). Advisory only — never gates
+    # Objective / scoring.
+    target_advisory_enabled: bool = True
+    # Master switch for sedimenting KEEP/REVERT provenance (research-hint
+    # source + measured gain) into the persistent recipe. When off the
+    # recipe stays purely ephemeral (existing behaviour).
+    recipe_sediment_enabled: bool = True
+    research_scout_runs: int = 0
+    research_scout_seen_pr_ids: list[str] = field(default_factory=list)
+    # Round id at which the scout was last dispatched, so the K-round
+    # re-dispatch fires at most once per qualifying round.
+    research_scout_last_round: int = -1
+    # Exploration-depth counters consumed by the depth gate. Counters are
+    # deterministic (config/code patches, reverts); the id sets are
+    # supplied by specialist research evidence. ``enabled`` mirrors the
+    # ``--depth-gate`` switch. Stored as a dict so old state.json shapes
+    # round-trip with a defaulted sub-structure.
+    depth_tracker: dict[str, Any] = field(default_factory=lambda: {
+        "enabled": True,
+        "prs_fetched": [],
+        "pr_diffs_read": [],
+        "nvidia_refs_compared": [],
+        "code_patches_attempted": 0,
+        "config_changes_attempted": 0,
+        "consecutive_reverts": 0,
+    })
+    # Optional CLI overrides for the depth-gate thresholds; unset keys
+    # fall back to the phase_state defaults.
+    depth_gate_thresholds: dict[str, int] = field(default_factory=dict)
     # PR-A8 — total specialist dispatches in the current EXPLORE entry.
     # Reset on phase transition into a fresh EXPLORE. Robustness's
     # storm detector fires when this crosses the configured cap
@@ -953,6 +993,10 @@ class SharedState:
     # M6 raises to 6 (concurrent). PolicyGate denies mid-session
     # mutation because it's listed in CORE_STATE_FIELDS.
     research_lane_capacity: int = 1
+    # Separate GPU pool capacity for specialists that explicitly request
+    # ``needs_gpu=true``. Zero disables GPU specialists. Locked at session
+    # start so LLM roles cannot inflate GPU access mid-run.
+    gpu_specialist_capacity: int = 0
     # escalate_strategy_change carry-over field
     #. The Coordinator's
     # ``_handle_escalate_strategy_change`` writes the validated
@@ -2624,6 +2668,31 @@ class SharedState:
             if reusable and kid:
                 reusable_ids.append(str(kid))
 
+        # Project the skipped (non-routable) candidates so the prompt can
+        # show the LLM that these operators were *seen* but cannot be
+        # optimized (e.g. "source file not resolved"). Without this the
+        # structured block renders an empty candidate list whenever
+        # hot_kernels is empty, leaving analysis.md's operator names as the
+        # only kernel identifiers in the prompt -- which the LLM then echoes
+        # as a hallucinated kernel_id (operator names are also non-unique,
+        # e.g. several k00x all named ``aten::mm``). Surfacing (id, name,
+        # reason) lets the LLM avoid re-requesting them by id.
+        skipped = result.get("skipped_kernels") or []
+        skipped_summary: list[dict[str, Any]] = []
+        if isinstance(skipped, list):
+            skipped_sorted = sorted(
+                (e for e in skipped if isinstance(e, dict)),
+                key=lambda e: float(e.get("gpu_pct") or 0.0),
+                reverse=True,
+            )
+            for entry in skipped_sorted[:15]:
+                skipped_summary.append({
+                    "kernel_id": entry.get("kernel_id"),
+                    "name": entry.get("name"),
+                    "skip_reason": entry.get("skip_reason") or "",
+                    "gpu_pct": entry.get("gpu_pct"),
+                })
+
         raw_warnings = result.get("trace_health_warnings") or []
         warnings_cleaned: list[dict[str, Any]] = []
         if isinstance(raw_warnings, list):
@@ -2667,6 +2736,7 @@ class SharedState:
             "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,
             "kernel_roofline_top15": kernel_roofline,
+            "skipped_kernels_top": skipped_summary,
             "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
@@ -2882,6 +2952,11 @@ class SharedState:
                 "severity":        str(entry.get("severity") or "medium"),
                 "domain_hint":     str(entry.get("domain_hint") or ""),
                 "source":          str(entry.get("source") or ""),
+                # Origin reference (e.g. a research-hint PR/blog URL) that
+                # outlives the session so KEEP/REVERT outcomes can be
+                # sedimented into the recipe with provenance. Optional;
+                # absent on gaps without an external origin.
+                "provenance":      str(entry.get("provenance") or ""),
                 "first_seen_ts":   str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
                 "attempts":        list(entry.get("attempts") or []),
@@ -2893,7 +2968,8 @@ class SharedState:
         else:
             # Field-wise merge: incoming non-empty values win except
             # for ``first_seen_ts`` (preserve oldest).
-            for key in ("symptom", "layer", "severity", "domain_hint", "source"):
+            for key in ("symptom", "layer", "severity", "domain_hint",
+                        "source", "provenance"):
                 incoming = entry.get(key)
                 if incoming:
                     existing[key] = str(incoming)
@@ -2996,6 +3072,8 @@ class SharedState:
         ("kernel", "noop", ...) are still appended (the ledger is
         descriptive); the consecutive-config counter only advances on
         explicit ``"config"`` values and resets on ``"code_patch"``.
+        ``"code_patch_attempt"`` satisfies exploration-depth accounting
+        without counting as a kept code patch.
         """
         ct = str(change_type or "").strip().lower()
         entry = {
@@ -3012,6 +3090,58 @@ class SharedState:
             )
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
+        self.bump_depth_patch(ct)
+
+    def get_intervention_mix(self, *, recent_window: int = 5) -> dict[str, Any]:
+        """Summarise the intervention-mix ledger as derived counts.
+
+        Returns config vs code_patch totals over the whole ledger and
+        the most recent ``recent_window`` entries, plus
+        ``consecutive_config_only`` (length of the trailing config-only
+        run) and ``config_heavy`` (config has dominated and no code
+        patch has landed). Read-only; never raises.
+
+        Entries with an unknown ``change_type`` (e.g. analysis-only
+        rounds) are ignored for the config/code tallies but still break
+        the trailing config-only run.
+        """
+        ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
+
+        def _ct(entry: dict[str, Any]) -> str:
+            return str(entry.get("change_type") or "").strip().lower()
+
+        total_config = sum(1 for e in ledger if _ct(e) == "config")
+        total_code_patch = sum(1 for e in ledger if _ct(e) == "code_patch")
+        total_code_patch_attempt = sum(
+            1 for e in ledger
+            if _ct(e) in ("code_patch", "code_patch_attempt")
+        )
+        window = ledger[-recent_window:] if recent_window > 0 else ledger
+        recent_config = sum(1 for e in window if _ct(e) == "config")
+        recent_code_patch = sum(1 for e in window if _ct(e) == "code_patch")
+        recent_code_patch_attempt = sum(
+            1 for e in window
+            if _ct(e) in ("code_patch", "code_patch_attempt")
+        )
+
+        consecutive_config_only = 0
+        for e in reversed(ledger):
+            ct = _ct(e)
+            if ct == "config":
+                consecutive_config_only += 1
+            else:
+                break
+
+        return {
+            "total_config": total_config,
+            "total_code_patch": total_code_patch,
+            "total_code_patch_attempt": total_code_patch_attempt,
+            "recent_config": recent_config,
+            "recent_code_patch": recent_code_patch,
+            "recent_code_patch_attempt": recent_code_patch_attempt,
+            "consecutive_config_only": consecutive_config_only,
+            "config_heavy": total_config >= recent_window and total_code_patch == 0,
+        }
 
     def bump_specialist_dispatched(self, n: int = 1) -> int:
         """PR-A8: increment the per-EXPLORE specialist dispatch counter.
@@ -3031,6 +3161,138 @@ class SharedState:
         EXPLORE entry.
         """
         self.explore_specialist_dispatched_count = 0
+
+    def bump_research_scout_runs(self, n: int = 1) -> int:
+        """Increment the research-scout dispatch counter; return new total."""
+        self.research_scout_runs = int(self.research_scout_runs or 0) + int(n)
+        return self.research_scout_runs
+
+    def register_seen_pr_ids(self, pr_ids: Any) -> int:
+        """Add PR ids to the shared seen-set (scout + FRAMEWORK_PR dedup).
+
+        Ids are normalised to strings; duplicates and blanks are ignored.
+        Returns the number of newly-added ids.
+        """
+        seen = set(self.research_scout_seen_pr_ids or [])
+        added = 0
+        for raw in pr_ids or []:
+            pid = str(raw or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            self.research_scout_seen_pr_ids.append(pid)
+            added += 1
+        return added
+
+    def has_seen_pr_id(self, pr_id: Any) -> bool:
+        """True iff ``pr_id`` was already surfaced by scout / FRAMEWORK_PR."""
+        pid = str(pr_id or "").strip()
+        return bool(pid) and pid in set(self.research_scout_seen_pr_ids or [])
+
+    # ------------------------------------------------------------------
+    # Exploration-depth tracker
+    # ------------------------------------------------------------------
+    def _depth(self) -> dict[str, Any]:
+        """Return the depth_tracker sub-dict, repairing a missing / stale
+        shape so old state.json loads degrade to defaults."""
+        dt = self.depth_tracker
+        if not isinstance(dt, dict):
+            dt = {}
+            self.depth_tracker = dt
+        dt.setdefault("enabled", True)
+        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs_compared"):
+            if not isinstance(dt.get(key), list):
+                dt[key] = []
+        for key in ("code_patches_attempted", "config_changes_attempted",
+                    "consecutive_reverts"):
+            try:
+                dt[key] = int(dt.get(key) or 0)
+            except (TypeError, ValueError):
+                dt[key] = 0
+        return dt
+
+    def set_depth_gate_enabled(self, enabled: bool) -> None:
+        self._depth()["enabled"] = bool(enabled)
+
+    def depth_gate_enabled(self) -> bool:
+        return bool(self._depth().get("enabled", True))
+
+    def _depth_register_ids(self, key: str, ids: Any) -> int:
+        dt = self._depth()
+        seen = set(dt.get(key) or [])
+        added = 0
+        for raw in ids or []:
+            val = str(raw or "").strip()
+            if not val or val in seen:
+                continue
+            seen.add(val)
+            dt[key].append(val)
+            added += 1
+        return added
+
+    def register_research_evidence(
+        self,
+        *,
+        prs_fetched: Any = None,
+        pr_diffs_read: Any = None,
+        nvidia_refs_compared: Any = None,
+    ) -> dict[str, int]:
+        """De-dup research evidence into the depth tracker; return per-key
+        added counts. Used when aggregating ``specialist_done.research``."""
+        return {
+            "prs_fetched": self._depth_register_ids("prs_fetched", prs_fetched),
+            "pr_diffs_read": self._depth_register_ids(
+                "pr_diffs_read", pr_diffs_read,
+            ),
+            "nvidia_refs_compared": self._depth_register_ids(
+                "nvidia_refs_compared", nvidia_refs_compared,
+            ),
+        }
+
+    def bump_depth_patch(self, change_type: str) -> None:
+        """Advance the code/config patch-attempt counters from a KEEP."""
+        dt = self._depth()
+        ct = str(change_type or "").strip().lower()
+        if ct in ("code_patch", "code_patch_attempt"):
+            dt["code_patches_attempted"] = int(
+                dt.get("code_patches_attempted") or 0
+            ) + 1
+        elif ct == "config":
+            dt["config_changes_attempted"] = int(
+                dt.get("config_changes_attempted") or 0
+            ) + 1
+
+    def note_explore_outcome(self, *, promoted: bool) -> int:
+        """Update ``consecutive_reverts`` from an explore-round outcome.
+
+        A promoted KEEP resets the run to 0; a no-promote round increments
+        it. Returns the post-update value.
+        """
+        dt = self._depth()
+        if promoted:
+            dt["consecutive_reverts"] = 0
+        else:
+            dt["consecutive_reverts"] = int(
+                dt.get("consecutive_reverts") or 0
+            ) + 1
+        return int(dt["consecutive_reverts"])
+
+    def depth_snapshot(self) -> dict[str, Any]:
+        """Read-only normalised view of the depth tracker for the gate /
+        prompt (sets rendered as counts + the underlying id lists)."""
+        dt = self._depth()
+        return {
+            "enabled": bool(dt.get("enabled", True)),
+            "research_scout_runs": int(self.research_scout_runs or 0),
+            "prs_fetched": list(dt.get("prs_fetched") or []),
+            "pr_diffs_read": list(dt.get("pr_diffs_read") or []),
+            "nvidia_refs_compared": list(dt.get("nvidia_refs_compared") or []),
+            "code_patches_attempted": int(dt.get("code_patches_attempted") or 0),
+            "config_changes_attempted": int(
+                dt.get("config_changes_attempted") or 0
+            ),
+            "consecutive_reverts": int(dt.get("consecutive_reverts") or 0),
+        }
 
     def to_intervention_mix_summary(self) -> str:
         """PR-A8 / D3 (Arbor-into-Hyperloom): render the config-vs-code_patch
@@ -3059,6 +3321,12 @@ class SharedState:
         n_patch = sum(
             1 for m in mix if (m or {}).get("change_type") == "code_patch"
         )
+        n_patch_attempt = sum(
+            1 for m in mix
+            if (m or {}).get("change_type") in (
+                "code_patch", "code_patch_attempt",
+            )
+        )
         # B2: config explore rounds that produced measurements but KEPT
         # nothing (all REVERT / KEEP_UNSTABLE) are recorded as
         # ``config_attempt``. They count toward the escalation signal so
@@ -3072,7 +3340,7 @@ class SharedState:
         config_pressure = n_config + n_config_attempt
         lines = [
             f"config_keeps={n_config} config_attempts={n_config_attempt} "
-            f"code_patch_keeps={n_patch} "
+            f"code_patch_keeps={n_patch} code_patch_attempts={n_patch_attempt} "
             f"consecutive_config_only_rounds={consec}"
         ]
         if (
@@ -4535,6 +4803,24 @@ class SharedState:
             f"candidates_path={blob.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
+        # When there are no routable candidates, surface the skipped
+        # operators (id:name:reason) so the LLM sees they were detected but
+        # cannot be rewritten -- rather than an empty list that pushes it to
+        # echo analysis.md operator names as a (non-unique, invalid)
+        # kernel_id. Suppressed when candidates exist to keep the
+        # steady-state prompt format stable.
+        skipped_suffix = ""
+        if not ids:
+            sk = blob.get("skipped_kernels_top") or []
+            rendered_sk = [
+                f"{s.get('kernel_id')}:{s.get('name')}:{s.get('skip_reason') or '?'}"
+                for s in sk
+                if isinstance(s, dict) and s.get("kernel_id")
+            ]
+            if rendered_sk:
+                skipped_suffix = (
+                    f" skipped_kernels_top=[{'; '.join(rendered_sk)}]"
+                )
         # T3 / T4 finishing-touches: when TraceLens emitted a routing
         # signal (high GPU idle → prefer params; permanent failure →
         # don't keep waiting on kernel candidates), surface it inline
@@ -4547,7 +4833,7 @@ class SharedState:
         # gratuitous additions.
         warnings = blob.get("trace_health_warnings") or []
         if not warnings:
-            return base
+            return base + skipped_suffix
         rendered: list[str] = []
         for w in warnings:
             if not isinstance(w, dict):
@@ -4563,7 +4849,7 @@ class SharedState:
                 rendered.append(f"{code}({','.join(extras)})")
             else:
                 rendered.append(code)
-        return f"{base} warnings=[{'; '.join(rendered)}]"
+        return f"{base}{skipped_suffix} warnings=[{'; '.join(rendered)}]"
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:

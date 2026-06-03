@@ -188,6 +188,24 @@ def build(
                                         ),
                                         warnings,
                                         default={})
+    # Kernel-agent attempt outcome summary (Breakdown 面板对接文档 §A1).
+    # Mirrors ``<sd>/reports/kernel_optimization_summary.json`` (written
+    # by the report action at CLOSE step 1, before this export at step
+    # 2). Empty dict when absent → dashboard hides Block 1.
+    kernel_optimization_summary = _safe_collect(
+        "kernel_optimization_summary",
+        lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
+        warnings,
+        default={})
+    # Post-optimization concurrency sweep (Breakdown 面板对接文档 §A2).
+    # Mirrors ``<sd>/reports/conc_sweep_summary.json`` (written by the
+    # conc_sweep action during SWEEP). Empty dict when absent →
+    # dashboard hides Block 2.
+    conc_sweep_summary = _safe_collect(
+        "conc_sweep_summary",
+        lambda: collectors.collect_conc_sweep_summary(sd, warnings),
+        warnings,
+        default={})
     # Per-snapshot roofline comparison list driving the markdown-
     # report ``## Roofline`` section. Built from
     # ``state.roofline_snapshots`` history.
@@ -267,6 +285,14 @@ def build(
         # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
         # absent — the dashboard hides the table on empty.
         "kernel_roofline":     kernel_roofline,
+        # Kernel-agent attempt outcome summary (Breakdown 面板对接文档
+        # §A1). Mirror of ``reports/kernel_optimization_summary.json``;
+        # empty dict on absence (dashboard hides Block 1).
+        "kernel_optimization_summary": kernel_optimization_summary,
+        # Post-optimization concurrency sweep (Breakdown 面板对接文档
+        # §A2). Mirror of ``reports/conc_sweep_summary.json``; empty
+        # dict on absence (dashboard hides Block 2).
+        "conc_sweep_summary":  conc_sweep_summary,
         # Per-snapshot roofline comparison list (markdown-report
         # source). Built from ``state.roofline_snapshots``.
         "roofline":            roofline,

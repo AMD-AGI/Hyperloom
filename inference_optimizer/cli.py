@@ -451,6 +451,34 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
 _assert_atom_single_node = _apply_atom_auto_tighten
 
 
+_DEPTH_GATE_THRESHOLD_KEYS = frozenset({
+    "scout_runs_min", "prs_fetched_min", "pr_diffs_read_min",
+    "nvidia_refs_min", "code_patches_min", "reverts_to_evaluate",
+})
+
+
+def _parse_depth_gate_thresholds(raw: str) -> dict[str, int]:
+    """Parse ``--depth-gate-thresholds`` (``key=value,...``) into a dict.
+
+    Unknown keys and non-integer values are skipped silently so a typo
+    degrades to the defaults rather than aborting startup.
+    """
+    out: dict[str, int] = {}
+    for token in str(raw or "").split(","):
+        token = token.strip()
+        if not token or "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        key = key.strip()
+        if key not in _DEPTH_GATE_THRESHOLD_KEYS:
+            continue
+        try:
+            out[key] = int(value.strip())
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _resolve_gpu_type(
     user_specified: str,
     probed: str,
@@ -776,7 +804,7 @@ def _build_backends(
         if kernel_codex:
             backends["kernel"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
+            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=5)
     return backends
 
 
@@ -943,19 +971,30 @@ def _seed_shared_state(
     *,
     session_id: str,
 ) -> SharedState:
-    # research_lane capacity is locked here for the lifetime
-    # of the session. Clamp to [0, MAX_RESEARCH_LANE_CAPACITY] (M6
-    # ceiling; values above this are silently clamped down). The cap
-    # protects LLM quota and PR Monitor load (§3.14 R-07).
+    # research_lane capacity is locked here for the lifetime of the
+    # session. Clamp to [0, research-lane ceiling], where the ceiling
+    # scales with the visible GPU count (``2 × GPU``). The cap protects
+    # LLM quota and PR Monitor load (§3.14 R-07).
     from inference_optimizer.orchestrator.policy import (
-        MAX_RESEARCH_LANE_CAPACITY,
+        research_lane_ceiling,
     )
     research_lane_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 1
     )
     research_lane_capacity = max(
-        0, min(MAX_RESEARCH_LANE_CAPACITY, research_lane_capacity),
+        0, min(research_lane_ceiling(), research_lane_capacity),
     )
+    gpu_specialist_capacity_raw = getattr(
+        args, "gpu_specialist_capacity", None,
+    )
+    try:
+        gpu_specialist_capacity = max(
+            0,
+            int(gpu_specialist_capacity_raw)
+            if gpu_specialist_capacity_raw is not None else 0,
+        )
+    except (TypeError, ValueError):
+        gpu_specialist_capacity = 0
     # collect plateau threshold overrides into a single dict
     #. Only non-None CLI overrides
     # land in the dict; absent keys fall through to the
@@ -1144,6 +1183,7 @@ def _seed_shared_state(
         cumulative_gain=0.0,
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
+        gpu_specialist_capacity=gpu_specialist_capacity,
         plateau_overrides=plateau_overrides,
         explore_overtime_kill_ratio=explore_overtime_kill_ratio,
         enable_roofline=bool(
@@ -1159,6 +1199,15 @@ def _seed_shared_state(
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
+        research_scout_enabled=bool(getattr(args, "research_scout", True)),
+        research_scout_interval=max(
+            1, int(getattr(args, "research_scout_interval", 3) or 3)
+        ),
+        target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
+        recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
+        depth_gate_thresholds=_parse_depth_gate_thresholds(
+            getattr(args, "depth_gate_thresholds", "") or ""
+        ),
         # SWEEP-phase post-sweep concurrency sweep flags (on by default).
         # See ``orchestrator/conc_sweep.py`` + coordinator hook
         # ``_enqueue_internal_conc_sweep_task``.
@@ -1171,6 +1220,7 @@ def _seed_shared_state(
             getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
         ),
     )
+    state.set_depth_gate_enabled(bool(getattr(args, "depth_gate", True)))
     state.save(session_dir)
     return state
 
@@ -1459,6 +1509,9 @@ def _build_specialist_executor(
             "done_path": run_result.done_path,
             "error": run_result.error,
             "notes": list(run_result.notes or []),
+            "allocated_gpu_ids": list(
+                (run_result.specialist_done or {}).get("allocated_gpu_ids") or []
+            ),
         }
 
     return _executor
@@ -1674,6 +1727,47 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print(f"  crash_count          : {state.crash_count}")
     _print_kernel_opt_summary_line(state)
     print("===============================================")
+
+
+def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
+    """Make the persisted ``crash_count`` agree with the authoritative
+    in-memory value printed in the final summary.
+
+    The ReportExecutor and the breakdown writer both reload state from
+    ``state.json`` (``SharedState.load_or_init``), so a reactor-pass
+    crash increment that lost a write race against a later save would
+    leave ``state.json`` / ``reports/final.json`` showing a stale (lower)
+    count while the live coordinator object — and therefore the console
+    summary — shows the true count. Reconcile both disk artifacts to the
+    live value at teardown so all three sources never disagree. We only
+    ever raise the persisted value (``max``); we never lower a count that
+    disk recorded but memory somehow missed. Best-effort: never fatal.
+    """
+    live = int(getattr(state, "crash_count", 0) or 0)
+
+    # 1) state.json — reload, bump if stale, atomic re-save.
+    try:
+        disk_state = SharedState.load_or_init(session_dir)
+        if int(disk_state.crash_count or 0) < live:
+            disk_state.crash_count = live
+            disk_state.save(session_dir)
+    except Exception:  # noqa: BLE001
+        log.exception("crash_count reconcile (state.json) failed (non-fatal)")
+
+    # 2) reports/final.json — patch the single field in place if present.
+    try:
+        from .session_paths import reports_dir
+        final_json = reports_dir(session_dir) / "final.json"
+        if final_json.exists():
+            data = json.loads(final_json.read_text(encoding="utf-8"))
+            if int(data.get("crash_count") or 0) < live:
+                data["crash_count"] = live
+                final_json.write_text(
+                    json.dumps(data, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+    except Exception:  # noqa: BLE001
+        log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
 def _print_kernel_opt_summary_line(state: SharedState) -> None:
@@ -2925,6 +3019,23 @@ DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
 _VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
 
 
+def _robustness_server_configured(args: argparse.Namespace) -> bool:
+    """Return True when a robustness-server endpoint is configured.
+
+    The server is the only source that gives the agent a cluster-wide
+    view on multi-node — once it is wired the agent runs with
+    ``disable_local_probe`` / ``enable_cluster_pod_metrics`` and the
+    sandbox-local ``LocalProbeSource`` false positives are silenced.
+    We treat the server as configured when the operator passes
+    ``--robustness-server-url`` or sets ``ROBUSTNESS_SERVER_URL`` in the
+    environment.
+    """
+    url = (getattr(args, "robustness_server_url", None) or "").strip()
+    if url:
+        return True
+    return bool((os.environ.get("ROBUSTNESS_SERVER_URL") or "").strip())
+
+
 def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     """Resolve the active robustness backend choice.
 
@@ -2933,25 +3044,29 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     ``args.robustness_backend``); ``None`` falls back to
     :data:`DEFAULT_ROBUSTNESS_BACKEND`. Hard-fails on an invalid value.
 
-    Multi-node auto-downgrade: when ``args.nodes >= 2`` the
-    robustness-agent's ``LocalProbeSource`` family targets
-    sandbox-local resources only — ``ray status``, the inference
-    server health URL, GPU / FD / disk / shm metrics, etc. On
-    multi-node every one of those resources lives in a separate
-    Kubernetes pod (head pod / worker pod / RayJob submitter),
-    unreachable from the sandbox by design. Each probe failure
-    surfaces as a HIGH-severity false positive symptom
-    (``ray_head_dead``, ``local_server_unreachable``,
-    ``gpu_memory_leaked``, ...) that
-    drowns the bus, eats ActionLadder cooldown slots, and risks
-    tripping ``escalate_strategy_change`` chains that stall
-    Orchestration. Until ``robustness-agent`` grows multi-node-aware
-    probe targeting, the cleanest path is to disable the real
-    backend on multi-node and rely on the mock heartbeat. Operators
-    who explicitly pass ``--robustness-agent`` get a WARNING and
-    the auto-downgrade is honoured anyway; passing
-    ``--robustness-mock`` suppresses the WARNING. Single-node
-    behaviour is unchanged.
+    Multi-node policy: when ``args.nodes >= 2`` the robustness-agent's
+    ``LocalProbeSource`` family targets sandbox-local resources only
+    (``ray status``, the inference server health URL, GPU / FD / disk /
+    shm metrics, ...). On multi-node every one of those lives in a
+    separate Kubernetes pod, unreachable from the sandbox by design, so
+    each probe failure surfaces as a HIGH-severity false positive
+    (``ray_head_dead``, ``local_server_unreachable``, ...).
+
+    The fix is to source signals from robustness-server instead of the
+    local sandbox. So on multi-node:
+
+    * if a robustness-server is configured (``--robustness-server-url``
+      or ``ROBUSTNESS_SERVER_URL``) we keep the ``agent`` backend — it
+      runs with ``disable_local_probe`` / ``enable_cluster_pod_metrics``
+      (see :func:`_build_robustness_options`) and the cluster source
+      replaces the sandbox-local probes;
+    * if no server is configured the agent has no cluster-wide view and
+      would fall back to the noisy LocalProbe, so we auto-downgrade to
+      the heartbeat-only ``mock``.
+
+    Operators who explicitly pass ``--robustness-agent`` without a
+    server on multi-node get a WARNING; passing ``--robustness-mock``
+    suppresses it. Single-node behaviour is unchanged.
     """
     chosen = getattr(args, "robustness_backend", None)
     explicit = chosen is not None
@@ -2967,22 +3082,33 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
         )
         sys.exit(2)
     nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2 and chosen == "agent":
+    if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
         if explicit:
             print(
-                f"WARN: --robustness-agent selected but nodes={nodes} — "
-                f"robustness-agent's LocalProbe family targets "
-                f"sandbox-local resources (ray, inference server, "
-                f"GPU, ...) that all live in separate pods "
-                f"on multi-node and surface as HIGH false positives. "
-                f"Auto-downgrading to --robustness-mock; pass "
-                f"--robustness-mock explicitly to suppress this "
-                f"warning. See inference_optimizer/multi_node/SKILL.md "
+                f"WARN: --robustness-agent selected but nodes={nodes} and "
+                f"no robustness-server configured — the agent's LocalProbe "
+                f"family targets sandbox-local resources (ray, inference "
+                f"server, GPU, ...) that all live in separate pods on "
+                f"multi-node and surface as HIGH false positives. "
+                f"Auto-downgrading to --robustness-mock; configure "
+                f"--robustness-server-url / ROBUSTNESS_SERVER_URL to keep "
+                f"the agent backend, or pass --robustness-mock explicitly "
+                f"to suppress this warning. See "
+                f"inference_optimizer/multi_node/SKILL.md "
                 f"(Robustness limitation in multi-node mode).",
                 file=sys.stderr,
             )
         chosen = "mock"
     return chosen
+
+
+_MULTI_NODE_WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
+    "ROBUSTNESS_WORKLOAD_UID",
+    "CLAW_WORKLOAD_UID",
+    "WORKLOAD_UID",
+    "KUBE_WORKLOAD_UID",
+    "RAY_JOB_ID",
+)
 
 
 def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
@@ -2991,17 +3117,22 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     Only emits keys the operator actually passed so the runtime CLI
     falls back to its own defaults / env-discovery for the rest.
 
-    Multi-node auto-disable: when ``args.nodes >= 2`` the inference
-    server runs in the head pod (separate Kubernetes pod from the
-    sandbox where the robustness-agent subprocess lives), so the
-    hardcoded ``http://127.0.0.1:8888/health`` probe baked into
-    ``robustness_agent.config.Config.auto_probe_inference_server``
-    can never succeed and floods the bus with false-positive
-    ``local_server_unreachable`` symptoms each tick. Disable the
-    auto-probe by default in multi-node so single-node semantics stay
-    intact while multi-node stops emitting the bogus alert. Operators
-    who configure an explicit cluster-local probe target can re-enable
-    via a future ``--robustness-auto-probe-inference-server`` flag.
+    Multi-node policy: when ``--nodes >= 2`` the agent must source its
+    signals from the cluster (robustness-server) rather than the local
+    sandbox, otherwise the per-pod LocalProbe trips false ``ray_head_dead``
+    / ``local_server_unreachable`` symptoms on every worker that does not
+    host the inference server. We therefore default ``disable_local_probe``
+    and ``enable_cluster_pod_metrics`` to True in that mode (unless the
+    operator explicitly opted out) and forward a workload_uid hint so the
+    server can resolve every pod that belongs to the same RayJob.
+
+    For the same reason the hardcoded ``http://127.0.0.1:8888/health``
+    probe baked into ``Config.auto_probe_inference_server`` can never
+    succeed when the inference server lives in the head pod, so we also
+    disable the auto-probe and lift the ``no_levers_found`` elapsed-time
+    floor to 60 min (sglang cold start + baseline + profile + turnaround
+    alone burns 35-50 min before the first explore family runs).
+    Single-node semantics stay untouched.
     """
     options: dict[str, Any] = {}
     server_url = getattr(args, "robustness_server_url", None)
@@ -3010,8 +3141,49 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     llm_rca = getattr(args, "robustness_llm_rca", None)
     if llm_rca is not None:
         options["llm_rca_enabled"] = bool(llm_rca)
+
     nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2:
+    multi_node = nodes >= 2
+    if nodes > 1:
+        options["nodes"] = nodes
+
+    workload_uid = (getattr(args, "robustness_workload_uid", None) or "").strip()
+    if not workload_uid:
+        for key in _MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
+            candidate = (os.environ.get(key) or "").strip()
+            if candidate:
+                workload_uid = candidate
+                break
+    if workload_uid:
+        options["workload_uid"] = workload_uid
+
+    disable_local = getattr(args, "robustness_disable_local_probe", None)
+    if disable_local is None and multi_node:
+        disable_local = True
+    if disable_local is not None:
+        options["disable_local_probe"] = bool(disable_local)
+
+    enable_pod_metrics = getattr(args, "robustness_enable_cluster_pod_metrics", None)
+    if enable_pod_metrics is None and multi_node:
+        enable_pod_metrics = True
+    if enable_pod_metrics is not None:
+        options["enable_cluster_pod_metrics"] = bool(enable_pod_metrics)
+
+    categories_raw = getattr(args, "robustness_pod_metrics_categories", None)
+    if categories_raw:
+        if isinstance(categories_raw, (list, tuple)):
+            cat_iter = categories_raw
+        else:
+            cat_iter = str(categories_raw).split(",")
+        cat_list = [c.strip() for c in cat_iter if str(c).strip()]
+        if cat_list:
+            options["pod_metrics_categories"] = cat_list
+
+    if multi_node:
+        # The inference server runs in the head pod, so the hardcoded
+        # 127.0.0.1:8888 health probe can never succeed and would flood
+        # the bus with false-positive ``local_server_unreachable``
+        # symptoms each tick — disable the auto-probe in multi-node.
         options["auto_probe_inference_server"] = False
         # B3 no_levers_found floor — multi-node large-model spends
         # 35-50 min on sglang cold start + baseline + profile +
@@ -3023,6 +3195,7 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
         # without finding a lever. Single-node default (45.0) stays
         # untouched.
         options["progress_no_levers_min_minutes"] = 60.0
+
     return options
 
 
@@ -4407,6 +4580,38 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     elif no_explore:
         print("Explore phase   : DISABLED (--no-explore); "
               f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}")
+    if bool(getattr(args, "research_scout", True)):
+        print(
+            "Research scout  : ENABLED at PRELUDE (re-dispatch every "
+            f"{max(1, int(getattr(args, 'research_scout_interval', 3) or 3))} "
+            "explore rounds)"
+        )
+    else:
+        print("Research scout  : DISABLED (--no-research-scout)")
+    if bool(getattr(args, "target_advisory", True)):
+        print("Target advisory : ENABLED (External target gap injected into "
+              "prompts; advisory-only)")
+    else:
+        print("Target advisory : DISABLED (--no-target-advisory)")
+    if bool(getattr(args, "recipe_sediment", True)):
+        print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to "
+              "persistent recipe)")
+    else:
+        print("Recipe sediment : DISABLED (--no-recipe-sediment)")
+    if bool(getattr(args, "depth_gate", True)):
+        print("Depth gate      : ENABLED (stop/advance blocked while "
+              "exploration is too shallow; IR-6 budget overrides)")
+    else:
+        print("Depth gate      : DISABLED (--no-depth-gate); legacy "
+              "single steward continuation")
+    if bool(getattr(args, "allow_empty_kernel_shape", False)):
+        os.environ["HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE"] = "1"
+        print("Kernel shape    : empty-shape dispatch ALLOWED "
+              "(--allow-empty-kernel-shape)")
+    else:
+        os.environ.pop("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", None)
+        print("Kernel shape    : non-empty trace shape REQUIRED for "
+              "kernel-opt dispatch")
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
@@ -4764,6 +4969,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     "emergency final report write failed (non-fatal)"
                 )
 
+    _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep used to run here as a post-hook. It is now a
     # real SWEEP-phase action auto-enqueued by the Coordinator after
     # the SWEEP-entry sweep task lands (see
@@ -5054,11 +5260,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "token (action_executors/_framework_gap_composer.py), the recipe "
             "key, and the orchestration prompt label. Recognised values "
             "(case-insensitive, with -/+/space tolerated): dense / moe_mla / "
-            "moe_swa / moe_mla_nsa. The deleted ``classify`` action used to "
-            "discover this from the model files; the external SKILL caller is "
-            "now expected to supply it via this flag (or the MODEL_CLASS env "
-            "var). Unset / unknown values fall back to ``moe_mla`` so "
-            "DeepSeek-shaped sessions keep working. For richer *advisory* "
+            "moe_swa / moe_mla_nsa. When unset, Coordinator boot infers and "
+            "persists it from config.json (num_experts / architectures) or "
+            "model-path family keywords, replacing the deleted ``classify`` "
+            "action's lightweight state-write role. For richer *advisory* "
             "model context (attention variant, KV/token, experts, MTP, ...) "
             "the SKILL launcher writes $USER_DATA_PATH/model_arch.json, which "
             "is injected into prompts but drives no gating."
@@ -5225,6 +5430,56 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="robustness_llm_rca",
         action="store_false",
         help="Forward llm_rca_enabled=false into request.options.",
+    )
+    opt.add_argument(
+        "--robustness-workload-uid",
+        dest="robustness_workload_uid",
+        type=str,
+        default=None,
+        help="Forward workload_uid into request.options. The robustness-server "
+             "resolves it to every pod (head + workers) backing the RayJob via "
+             "the cluster/workloads/{uid}/hierarchy endpoint. Falls back to "
+             "$CLAW_WORKLOAD_UID / $WORKLOAD_UID / $RAY_JOB_ID when unset.",
+    )
+    opt.add_argument(
+        "--robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_true",
+        default=None,
+        help="Force disable_local_probe=true. The robustness-agent silences "
+             "its LocalProbe fallback so per-pod sandbox checks (ps, rocm-smi, "
+             "local HTTP) cannot emit false-positive symptoms.",
+    )
+    opt.add_argument(
+        "--no-robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_false",
+        help="Force disable_local_probe=false (keep the LocalProbe fallback "
+             "even in multi-node mode).",
+    )
+    opt.add_argument(
+        "--robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_true",
+        default=None,
+        help="Force enable_cluster_pod_metrics=true so the robustness-agent "
+             "fans out per-pod metrics through robustness-server and feeds "
+             "the local_health rules with cluster-decoded GPU snapshots.",
+    )
+    opt.add_argument(
+        "--no-robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_false",
+        help="Force enable_cluster_pod_metrics=false.",
+    )
+    opt.add_argument(
+        "--robustness-pod-metrics-categories",
+        dest="robustness_pod_metrics_categories",
+        type=str,
+        default=None,
+        help="Comma-separated metric categories forwarded into "
+             "pod_metrics_categories (e.g. 'gpu,memory'). Default 'gpu' is "
+             "applied by the runtime when this flag is omitted.",
     )
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")
@@ -5435,10 +5690,9 @@ def _build_parser() -> argparse.ArgumentParser:
     #           for the Orchestration LLM to fan out one specialist per
     #           top-K gap inside one tick (multi-emit shape) and have
     #           the dispatcher actually run them in parallel.
-    #   * 6   → M6 ceiling that matches Arbor's "six specialists across
-    #           domains" pattern; hard upper bound (values above this
-    #           are silently clamped down to 6 — see
-    #           ``MAX_RESEARCH_LANE_CAPACITY`` in
+    #   * The upper bound scales with the visible GPU count
+    #           (``2 × GPU``); operator values above the ceiling are
+    #           silently clamped down (see ``research_lane_ceiling`` in
     #           ``orchestrator/policy.py``).
     # Locked at session start (mirrored into manifest + SharedState);
     # PolicyGate denies mid-flight mutation via CORE_STATE_FIELDS.
@@ -5452,10 +5706,24 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help="Max concurrent LLM specialist sub-agents on the "
              "research_lane. 0 disables specialist "
-             "dispatch entirely (degrades to M3 LLM-direct grid); 4 is "
-             "the PR-A3 default (Arbor-into-Hyperloom); 6 is the M6 "
-             "hard cap. Range [0, 6]; values above 6 are silently "
-             "clamped down. Locked at session start.",
+             "dispatch entirely (degrades to LLM-direct grid); 4 is "
+             "the default. The upper bound scales with the visible GPU "
+             "count (2 x GPU); values above it are silently clamped "
+             "down. Locked at session start.",
+    )
+    opt.add_argument(
+        "--gpu-specialist-capacity",
+        dest="gpu_specialist_capacity",
+        type=int,
+        default=int(
+            os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0")
+            or "0"
+        ),
+        help="Number of GPUs available to specialists that request "
+             "needs_gpu=true. 0 disables GPU specialists (default). "
+             "Set INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES to a "
+             "comma-separated GPU id pool when the specialist pool should "
+             "not use device ids 0..N-1. Locked at session start.",
     )
     # ------------------------------------------------------------------
     # Advisory specialist-proposal scorer (ProposalScorer). Scores each
@@ -5598,6 +5866,20 @@ def _build_parser() -> argparse.ArgumentParser:
         return os.environ.get(env_var, "1").strip() != "0"
 
     opt.add_argument(
+        "--allow-empty-kernel-shape",
+        dest="allow_empty_kernel_shape",
+        action="store_true",
+        default=os.environ.get(
+            "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "0",
+        ).strip().lower() in {"1", "true", "yes", "on"},
+        help="Escape hatch (default off): allow kernel optimization to "
+             "dispatch a candidate with no trace-anchored shape. Normally "
+             "a shapeless candidate is rejected with a structured error so "
+             "the run returns to ``trace_analyze`` instead of burning a "
+             "GEAK / OOB budget on an unanchored kernel. Env: "
+             "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1.",
+    )
+    opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",
         action=argparse.BooleanOptionalAction,
@@ -5611,6 +5893,80 @@ def _build_parser() -> argparse.ArgumentParser:
              "identical (same idempotency keys, same pending-task "
              "dispatch gate, same watermark anchor update). Env: "
              "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
+    )
+    opt.add_argument(
+        "--research-scout",
+        dest="research_scout",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RESEARCH_SCOUT"),
+        help="Auto-dispatch a read-only research scout at PRELUDE (and "
+             "every --research-scout-interval EXPLORE rounds) that "
+             "collects proven priors — reference launch scripts, model "
+             "config.json architecture features, and cross-framework / "
+             "NVIDIA research — into ``research_hints.md`` and seeds "
+             "high-priority gaps. Default on; pass ``--no-research-scout`` "
+             "to disable the whole feature. Env: "
+             "INFERENCE_OPTIMIZER_RESEARCH_SCOUT=0.",
+    )
+    opt.add_argument(
+        "--research-scout-interval",
+        dest="research_scout_interval",
+        type=int,
+        default=3,
+        help="Re-dispatch the research scout every N EXPLORE rounds with "
+             "the current bottleneck context (append-only). Default 3. "
+             "Ignored when ``--no-research-scout`` is set.",
+    )
+    opt.add_argument(
+        "--recipe-sediment",
+        dest="recipe_sediment",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RECIPE_SEDIMENT"),
+        help="Sediment KEEP/REVERT provenance into the persistent recipe: "
+             "KEEP optimizations traceable to a research hint carry their "
+             "source + measured gain into ``what_worked``; REVERTs land in "
+             "``what_failed`` so the next warm-start avoids re-testing them. "
+             "Default on; pass ``--no-recipe-sediment`` to keep the recipe "
+             "purely ephemeral. Env: INFERENCE_OPTIMIZER_RECIPE_SEDIMENT=0.",
+    )
+    opt.add_argument(
+        "--target-advisory",
+        dest="target_advisory",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_TARGET_ADVISORY"),
+        help="Inject an advisory 'External target gap' block (throughput / "
+             "TPOT / interactivity gap vs the LLM-authored competitor "
+             "target) into the orchestration and specialist prompts; when "
+             "the TPOT ratio dominates it nudges toward latency-reducing "
+             "directions. Advisory only — never gates Objective or scoring. "
+             "Default on; pass ``--no-target-advisory`` to disable. Env: "
+             "INFERENCE_OPTIMIZER_TARGET_ADVISORY=0.",
+    )
+    opt.add_argument(
+        "--depth-gate",
+        dest="depth_gate",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_DEPTH_GATE"),
+        help="Deterministic exploration-depth guard. When the session "
+             "steward recommends stop / advance-to-kernel but the run "
+             "has not explored deeply enough (too few scout runs, no "
+             "code patch, too few PRs/diffs/NVIDIA refs), the verdict is "
+             "rewritten to continue_explore with a deepening hint — as "
+             "many times as needed, bounded only by the IR-6 budget "
+             "gate. Default on; ``--no-depth-gate`` restores the legacy "
+             "single-continuation steward behaviour. Env: "
+             "INFERENCE_OPTIMIZER_DEPTH_GATE=0.",
+    )
+    opt.add_argument(
+        "--depth-gate-thresholds",
+        dest="depth_gate_thresholds",
+        default="",
+        help="Override depth-gate minimums as comma-separated key=value "
+             "pairs. Keys: scout_runs_min, prs_fetched_min, "
+             "pr_diffs_read_min, nvidia_refs_min, code_patches_min, "
+             "reverts_to_evaluate. Defaults: 2,5,3,2,1 evaluated after "
+             "reverts_to_evaluate=3. Example: "
+             "``--depth-gate-thresholds scout_runs_min=1,code_patches_min=2``.",
     )
     # ------------------------------------------------------------------
     # Post-optimization concurrency sweep (on by default).
