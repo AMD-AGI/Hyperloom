@@ -50,7 +50,9 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 │   ├── kernel-agent.env.sh
 │   ├── geak-config/local.yaml
 │   ├── Magpie/
-│   └── source-mirrors/{geak,OOB,TraceLens-internal}/
+│   └── source-mirrors/{Primus-Claw,OOB,InferenceX,TraceLens,TraceLens-internal}/
+│       # TraceLens = one dep, two source repos; fallback clones only when
+│       # /workspace/TraceLens* are absent (default Local Mode uses those paths)
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
@@ -107,11 +109,14 @@ the pinned session dir, and `paths.db_path_for(sd)` =
 `<sd>/storage/coordinator.db`.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
-or warm-start caches): `$TRACELENS_ROOT` (default `/wekafs/hyperloom/
-TraceLens-internal`; **must** be at tag `Hyperloom_integration_v0.3.1`
-or the matching `release/hyperloom_integration_v0.3.1` branch — the
-per-version `sglang_roofline_patches/sglang_<minor>_<patch>/` layout is
-required by `_server_patcher`),
+or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
+`/workspace/TraceLens`; public [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens))
+with an internal extension at `$TRACELENS_INTERNAL_ROOT` (default
+`/workspace/TraceLens-internal`;
+[AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal)
+— rehydration module). See README Local Mode step 1. The per-version
+`sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
+TraceLens is required by `_server_patcher`),
 `$OOB_SRC` / `$HYPERLOOM_BUNDLE`,
 `/sgl-workspace/{aiter,sglang,vllm}/`, `~/.claude/config.json` +
 `~/.codex/auth.json`, `~/.cache/amd-ai-devtool/semantic-index/`
@@ -321,7 +326,8 @@ of `inference_optimizer/install.sh`):
 | Component | Provided by |
 |---|---|
 | `ray==2.44.1` + `click<8.3.0` | pip |
-| TraceLens internal (perf-report CLI) | `ensure_tracelens` (`cp -r` from read-only WekaFS mount to `${HYPERLOOM_ROOT}/TraceLens-internal` = `$USER_DATA_PATH/runtime/source-mirrors/TraceLens-internal`) |
+| TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
+| TraceLens-internal (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT`; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module) |
 | GEAK CLI + `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` | `ensure_geak` |
 | Node.js/npm + OOB CLI + claude/codex npm CLIs + `@cursor/sdk` global install + `~/.claude/config.json` + `~/.codex/auth.json` | `ensure_node` + `ensure_oob` (mirrors `${HYPERLOOM_BUNDLE}/OOB` → `${HYPERLOOM_ROOT}/OOB/oob_cli`) |
 | `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
@@ -344,9 +350,10 @@ does not consume these.
 |---|---|---|
 | `OOB_SRC: <path>` | `$OOB_SRC` | `kernel-agent/scripts/install.sh:ensure_oob` |
 | `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `inference_optimizer/scripts/install.sh:ensure_inferencex` |
-| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` |
+| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (public) |
+| `TRACELENS_INTERNAL_ROOT: <path>` | `$TRACELENS_INTERNAL_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (internal) |
 
-**Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
+**Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
 `rsync -a` them into `$SESSION_DIR/vendor/<name>/` and override the matching
 env vars BEFORE running `install.sh`. Single-node WekaFS-mount setups (the
@@ -436,7 +443,8 @@ CLI:
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
+export TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"

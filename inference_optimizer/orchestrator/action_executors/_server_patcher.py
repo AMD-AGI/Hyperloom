@@ -12,7 +12,7 @@ that are *not* in upstream vLLM / SGLang:
 * SGLang: ``--enable-shape-discovery-for-cuda-graph-profile``
 
 These only exist in builds that have the TraceLens patch set applied
-(``TraceLens-internal/examples/custom_workflows/inference_analysis/``).
+(``TraceLens/examples/custom_workflows/inference_analysis/``).
 Without the patch, vLLM rejects ``capture_torch_profiler_dir`` as an
 "unknown JSON key" and SGLang ``argparse`` errors on the unknown flag —
 the server fails to start and the entire profile run is wasted.
@@ -370,7 +370,7 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
         log.info(
-            "_server_patcher: TRACELENS_ROOT unset/missing — skip vLLM patch"
+            "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch"
         )
         return None
 
@@ -427,7 +427,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
         log.info(
-            "_server_patcher: TRACELENS_ROOT unset/missing — skip SGLang patch"
+            "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip SGLang patch"
         )
         return None
 
