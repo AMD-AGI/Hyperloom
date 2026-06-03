@@ -1738,7 +1738,8 @@ async def _probe_gateway_health(
 # Default mount paths probed by J2. Each is read from the env at probe
 # time so an operator can move them without rebuilding the agent.
 _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
-    ("TRACELENS_ROOT", "/wekafs/hyperloom/TraceLens-internal"),
+    ("TRACELENS_ROOT", "/workspace/TraceLens"),
+    ("TRACELENS_INTERNAL_ROOT", "/workspace/TraceLens-internal"),
     ("INFERENCEX_PATH", ""),
     ("OOB_SRC", ""),
 )
@@ -1778,7 +1779,7 @@ def _probe_external_mounts(
     return out
 
 
-# Both TraceLens CLI names ship from the same internal repo; the
+# Both TraceLens CLI names ship from the public repo; the
 # ``_inference`` variant is the canonical one for vLLM/SGLang traces
 # per SKILL.md but the legacy name remains valid for older builds.
 _TRACELENS_CLI_NAMES: tuple[str, ...] = (

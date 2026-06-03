@@ -132,9 +132,9 @@ class SourceData:
     #   ``gateway``    — ``{url, reachable, status_code, error}`` for
     #                    ``OPENAI_BASE_URL/models``.
     #   ``mounts``     — list of ``{path, latency_ms, ok, error}`` for
-    #                    ``$TRACELENS_ROOT`` / ``$INFERENCEX_PATH`` /
-    #                    ``$OOB_SRC``.
-    #   ``tracelens_cli`` — ``{cli_inference, cli_legacy}`` — whether
+    #                    ``$TRACELENS_ROOT`` / ``$TRACELENS_INTERNAL_ROOT`` /
+    #                    ``$INFERENCEX_PATH`` / ``$OOB_SRC``.
+    #   ``tracelens_cli`` — ``{cli_names, found, any_present}`` — whether
     #                    each CLI name is found via ``shutil.which``.
     local_external_deps: dict[str, Any] = field(default_factory=dict)
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
