@@ -39,6 +39,7 @@ import urllib.request
 from typing import Any, Mapping
 
 from .. import recipe_snapshot_constants as C
+from ..compat.payload_aliases import CANONICAL_KEY
 from .canonical_id import recipe_canonical_id
 
 log = logging.getLogger(__name__)
@@ -145,7 +146,7 @@ def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, str]:
     out: dict[str, str] = {}
     args = str(attrs.get("best_config_args") or "").strip()
     if args:
-        out["extra_sglang_args"] = args
+        out[CANONICAL_KEY] = args
     envs = attrs.get("best_config_envs")
     if isinstance(envs, Mapping):
         for key, val in envs.items():

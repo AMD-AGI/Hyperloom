@@ -67,7 +67,7 @@ def test_page_to_recipe_maps_identity_and_config() -> None:
     assert r is not None
     assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:unknown_version:fp8"
     assert r["model"] == "Qwen/Qwen3-32B"
-    assert r["best_config"]["extra_sglang_args"] == "--cuda-graph-max-bs 256"
+    assert r["best_config"]["extra_server_args"] == "--cuda-graph-max-bs 256"
     assert r["best_config"]["FOO"] == "1"
     assert r["validated_gain_pct"] == 12.5
     assert r["authority"] == "EXPERIENTIAL"
