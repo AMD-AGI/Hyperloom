@@ -482,6 +482,28 @@ def test_gate_orchestration_update_state_core_field_rejected(gate):
     assert exc.value.rule == "state_field"
 
 
+def test_core_state_fields_includes_model_arch_tags():
+    """``model_architectures`` / ``model_type`` are fact-layer tags lifted
+    from the model weights' config.json (launcher / CLI owned). Locking
+    them keeps an LLM ``update_state`` from polluting the recipe-snapshot
+    tags that ``_kb_amend_recipe`` stamps into the KB."""
+    assert "model_architectures" in CORE_STATE_FIELDS
+    assert "model_type" in CORE_STATE_FIELDS
+
+
+def test_gate_update_state_model_arch_tags_rejected(gate):
+    """A non-core-mutating role must not overwrite the config.json
+    architecture tags via ``update_state`` (else the next
+    ``_kb_amend_recipe`` writes the polluted value into the recipe row)."""
+    for field_name in ("model_architectures", "model_type"):
+        with pytest.raises(PolicyDenied) as exc:
+            gate.validate_intent("orchestration", Intent(
+                type=IntentType.UPDATE_STATE,
+                payload={"changes": {field_name: ["X"]}},
+            ))
+        assert exc.value.rule == "state_field", field_name
+
+
 # ===========================================================================
 # allowed_tools_for_agent
 # ===========================================================================
