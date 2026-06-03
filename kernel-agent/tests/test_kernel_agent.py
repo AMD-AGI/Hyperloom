@@ -213,7 +213,9 @@ class KernelAgentToolTests(unittest.TestCase):
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"', install_text)
-        self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"', install_text)
+        # Internal extension is opt-in: no default path (open-source-only unless
+        # TRACELENS_INTERNAL_ROOT is explicitly set).
+        self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.2.0}"', install_text)
         self.assertIn("ensure_rocm_torch_for_geak()", install_text)
         self.assertIn("KERNEL_AGENT_SKIP_TORCH_GATE", install_text)

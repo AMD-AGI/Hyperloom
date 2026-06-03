@@ -8,7 +8,8 @@ export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 export TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
-export TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"
+# Optional internal extension; export only to enable it (open-source-only if unset):
+# export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 export OOB_SRC="${OOB_SRC:-/wekafs/hyperloom/OOB}"
 # INFERENCEX_PATH and MAGPIE_DIR default under $USER_DATA_PATH/runtime/
 # (Magpie clone lives there now); override only if you share Magpie /

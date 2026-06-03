@@ -1739,7 +1739,9 @@ async def _probe_gateway_health(
 # time so an operator can move them without rebuilding the agent.
 _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
     ("TRACELENS_ROOT", "/workspace/TraceLens"),
-    ("TRACELENS_INTERNAL_ROOT", "/workspace/TraceLens-internal"),
+    # Internal extension is optional: no default path, so an open-source-only
+    # setup (TRACELENS_INTERNAL_ROOT unset) is not flagged as a degraded mount.
+    ("TRACELENS_INTERNAL_ROOT", ""),
     ("INFERENCEX_PATH", ""),
     ("OOB_SRC", ""),
 )

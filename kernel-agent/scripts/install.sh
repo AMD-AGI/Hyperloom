@@ -70,12 +70,14 @@ _resolve_magpie_python() {
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
-# TraceLens requires two editable installs (see README Local Mode step 1):
+# TraceLens public repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (public: skills, patches, CLI, analysis orchestrator)
 #   2. AMD-AGI/TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (internal: rehydration module)
+# Hyperloom defaults to the open-source-only setup. The internal extension is
+# used ONLY when $TRACELENS_INTERNAL_ROOT is set (env / .env); leave it unset to
+# stay open-source-only. There is no separate on/off toggle.
 TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
-TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"
-TRACELENS_INSTALL_INTERNAL="${TRACELENS_INSTALL_INTERNAL:-1}"
+TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirrors when source roots are on a read-only mount (e.g. /wekafs/...).
 TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
@@ -640,8 +642,9 @@ _pip_install_editable() {
   return 0
 }
 
+# Internal extension is opt-in: enabled iff $TRACELENS_INTERNAL_ROOT is set.
 _tracelens_internal_enabled() {
-  [ "${TRACELENS_INSTALL_INTERNAL:-1}" != "0" ]
+  [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]
 }
 
 ensure_tracelens() {
@@ -680,7 +683,7 @@ ensure_tracelens() {
   }
 
   if ! _tracelens_internal_enabled; then
-    log "TraceLens-internal: skipped (TRACELENS_INSTALL_INTERNAL=${TRACELENS_INSTALL_INTERNAL})"
+    log "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)"
     TRACELENS_INTERNAL_ROOT=""
     export TRACELENS_ROOT
     return 0
@@ -732,7 +735,7 @@ ensure_tracelens() {
       TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
       log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens + TraceLens-internal)"
+      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens, plus TraceLens-internal if TRACELENS_INTERNAL_ROOT is set)"
     fi
   fi
 }
@@ -1176,8 +1179,7 @@ write_env_file() {
     # kernel-agent/tools/tracelens_analysis.py inherit the writable
     # mirrors instead of falling back to the read-only /wekafs defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
-    echo "export TRACELENS_INSTALL_INTERNAL='${TRACELENS_INSTALL_INTERNAL}'"
-    if _tracelens_internal_enabled && [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+    if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
       echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
       echo "export TL_EXTENSION='TraceLens_internal'"
     fi

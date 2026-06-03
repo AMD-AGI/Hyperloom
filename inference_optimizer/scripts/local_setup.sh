@@ -24,10 +24,11 @@ TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
 TRACELENS_REF="${TRACELENS_REF:-release/hyperloom_integration_v0.5.0}"
 TRACELENS_INTERNAL_REPO="${TRACELENS_INTERNAL_REPO:-https://github.com/AMD-AGI/TraceLens-internal.git}"
 TRACELENS_INTERNAL_REF="${TRACELENS_INTERNAL_REF:-release/hyperloom_integration_v0.5.0}"
-TRACELENS_INSTALL_INTERNAL="${TRACELENS_INSTALL_INTERNAL:-1}"
-# Preferred container-local checkouts when operators install TraceLens manually.
+# Preferred container-local checkout for the public repo when operators install
+# TraceLens manually. The internal extension has NO default path: it is used
+# only when TRACELENS_INTERNAL_ROOT is explicitly set (open-source-only
+# otherwise). There is no separate on/off toggle.
 TRACELENS_DEFAULT_ROOT="${TRACELENS_DEFAULT_ROOT:-/workspace/TraceLens}"
-TRACELENS_INTERNAL_DEFAULT_ROOT="${TRACELENS_INTERNAL_DEFAULT_ROOT:-/workspace/TraceLens-internal}"
 
 usage() {
   cat <<'EOF'
@@ -49,8 +50,9 @@ Advanced env overrides:
   REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
   OOB_SRC, INFERENCEX_PATH, TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT,
   PRIMUS_CLAW_REPO, INFERENCEX_REPO,
-  TRACELENS_REPO, TRACELENS_REF, TRACELENS_INSTALL_INTERNAL,
+  TRACELENS_REPO, TRACELENS_REF,
   TRACELENS_INTERNAL_REPO, TRACELENS_INTERNAL_REF
+  TRACELENS_INTERNAL_ROOT (set to enable the optional internal extension)
 EOF
 }
 
@@ -224,19 +226,30 @@ resolve_tracelens() {
     log "TRACELENS_ROOT: ${TRACELENS_ROOT}"
   fi
 
-  if [ "${TRACELENS_INSTALL_INTERNAL:-1}" = "0" ]; then
-    log "TraceLens-internal: skipped (set TRACELENS_INSTALL_INTERNAL=1 to opt in)"
+  # TraceLens-internal is opt-in: resolved only when TRACELENS_INTERNAL_ROOT is
+  # explicitly provided (env or .env). With no value Hyperloom stays on the
+  # open-source-only setup (no roofline gap / MI355+ MAF). No separate toggle.
+  _normalize_trace_env_roots
+  local internal_root="${TRACELENS_INTERNAL_ROOT:-}"
+  if [ -z "$internal_root" ]; then
+    internal_root="$(_read_dotenv_var TRACELENS_INTERNAL_ROOT || true)"
+  fi
+  if _is_placeholder_path_value "$internal_root"; then
+    internal_root=""
+  fi
+  if [ -z "$internal_root" ]; then
+    log "TraceLens-internal: not requested (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)"
     return 0
   fi
 
-  if _resolve_existing_checkout TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_DEFAULT_ROOT"; then
-    :
+  TRACELENS_INTERNAL_ROOT="$internal_root"
+  if [ -d "$TRACELENS_INTERNAL_ROOT" ]; then
+    log "TRACELENS_INTERNAL_ROOT: using existing ${TRACELENS_INTERNAL_ROOT}"
   else
-    TRACELENS_INTERNAL_ROOT="${HYPERLOOM_DEPS_ROOT}/TraceLens-internal"
     clone_or_update "TraceLens-internal" "$TRACELENS_INTERNAL_REPO" "$TRACELENS_INTERNAL_ROOT" "$TRACELENS_INTERNAL_REF"
-    export TRACELENS_INTERNAL_ROOT
-    log "TRACELENS_INTERNAL_ROOT: ${TRACELENS_INTERNAL_ROOT}"
   fi
+  export TRACELENS_INTERNAL_ROOT
+  log "TRACELENS_INTERNAL_ROOT: ${TRACELENS_INTERNAL_ROOT}"
 }
 
 resolve_oob_src() {
@@ -286,7 +299,6 @@ write_local_env() {
     write_export OOB_SRC "$OOB_SRC"
     write_export INFERENCEX_PATH "$INFERENCEX_PATH"
     write_export TRACELENS_ROOT "$TRACELENS_ROOT"
-    write_export TRACELENS_INSTALL_INTERNAL "$TRACELENS_INSTALL_INTERNAL"
     if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
       write_export TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
       write_export TL_EXTENSION "TraceLens_internal"
