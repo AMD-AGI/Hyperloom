@@ -55,6 +55,12 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # propose it (framework_pr_action_not_llm_proposable, Stage 3).
     "framework_pr":         "shallow",
     "sweep":                "shallow",
+    # SWEEP-phase post-sweep concurrency comparison (Coordinator-
+    # internal auto-enqueue after sweep, on by default; disable via
+    # ``--no-enable-conc-sweep``). Same family as ``sweep`` — discovery
+    # action that benchmarks both arms across a CONC ladder and writes
+    # ``reports/conc_sweep_summary.json``; never promotes.
+    "conc_sweep":           "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
     # creative (3) — PR-A1: specialist LLM sub-agent dispatch;
