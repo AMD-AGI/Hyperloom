@@ -15,6 +15,18 @@ from ..base import Decision, RenderedSection, md_kv_list, register_renderer
 
 @register_renderer("session")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the session-identification + lifecycle section.
+
+    Surfaces session/claw ids, host, container image, code revision, stop
+    reason, elapsed time and tick count so the report header is
+    self-contained. Skipped when neither session id nor host is present.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered session section.
+    """
     s = breakdown.get("session") or {}
     facts: list[str] = []
     warnings: list[str] = []

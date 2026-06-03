@@ -54,7 +54,17 @@ _FILE_ENV = "FRAMEWORK_AGENT_LOG_FILE"
 
 
 def _resolve_level(explicit: str | int | None) -> int:
-    """Pick the effective log level (explicit > env > INFO)."""
+    """Pick the effective log level (explicit > env > INFO).
+
+    Args:
+        explicit (str | int | None): An explicit level as an int, a numeric
+            string, or a level name (e.g. ``"DEBUG"``). ``None`` defers to the
+            environment variables in :data:`_LEVEL_ENVS`.
+
+    Returns:
+        int: The resolved :mod:`logging` level constant, defaulting to
+            ``logging.INFO``.
+    """
     if explicit is not None:
         if isinstance(explicit, int):
             return explicit
@@ -83,6 +93,18 @@ class _JsonLineFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401
+        """Serialise a log record to a single JSON line.
+
+        Promotes any ``extra_*`` record attribute to a top-level field (with
+        the ``extra_`` prefix stripped) and includes a formatted traceback when
+        exception info is present.
+
+        Args:
+            record (logging.LogRecord): The record to format.
+
+        Returns:
+            str: A JSON object encoded as a single line.
+        """
         payload: dict[str, Any] = {
             "ts":     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
             "level":  record.levelname,
@@ -110,7 +132,19 @@ def configure_logging(
     root so re-running (e.g. in tests, or when the CLI re-parses args)
     does not stack duplicates.
 
-    Returns the root logger so callers may chain ``.info(...)``.
+    Args:
+        level (str | int | None): Explicit level override; falls back to env
+            vars then ``INFO`` when ``None``.
+        json_output (bool | None): Force JSON Lines (True) or text (False)
+            output; ``None`` defers to the ``FRAMEWORK_AGENT_LOG_JSON`` env var.
+        log_file (str | Path | None): Optional file sink appended alongside
+            stderr; ``None`` defers to the ``FRAMEWORK_AGENT_LOG_FILE`` env var.
+        quiet_third_party (bool): When True, raise noisy third-party loggers
+            (urllib3, requests, git) to at least WARNING. Defaults to True.
+
+    Returns:
+        logging.Logger: The configured ``framework_agent`` root logger so
+            callers may chain ``.info(...)``.
     """
     use_json = (
         json_output
@@ -168,6 +202,14 @@ def get_logger(name: str | None = None) -> logging.Logger:
 
     When ``name`` is a fully-qualified module name (``framework_agent.xxx``),
     it is returned as-is; otherwise it is treated as a leaf under the root.
+
+    Args:
+        name (str | None): Logger name. ``None`` or empty returns the root
+            logger; a name already under the root is used verbatim; any other
+            name becomes a leaf under ``framework_agent``.
+
+    Returns:
+        logging.Logger: The resolved child (or root) logger.
     """
     if not name:
         return logging.getLogger(_ROOT_NAME)
@@ -194,6 +236,21 @@ def stage_log(
         with stage_log(log, "build", candidate="PR:25748") as ctx:
             run_build(...)
             ctx["wall_sec"] = 412.3
+
+    Args:
+        logger (logging.Logger): Logger used to emit the envelopes.
+        stage (str): Short stage name (e.g. ``"build"``, ``"bench"``).
+        candidate (str | None): Optional candidate identifier attached to every
+            envelope.
+        **fields (Any): Extra structured fields merged into each envelope.
+
+    Yields:
+        dict[str, Any]: A mutable context dict the caller may populate with
+            result metrics before the ``done`` envelope fires.
+
+    Raises:
+        Exception: Re-raises any exception from the wrapped block after
+            emitting a ``stage.failed`` envelope.
     """
     started = time.monotonic()
     base: dict[str, Any] = {"stage": stage}

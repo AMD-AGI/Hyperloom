@@ -83,6 +83,14 @@ _ACTION_BLOCK_RE: re.Pattern[str] = re.compile(
 
 @dataclass(frozen=True)
 class ParsedAction:
+    """A single tool action parsed from one turn of LLM output.
+
+    Attributes:
+        tool (str): Name of the tool the LLM asked to invoke.
+        args (dict[str, Any]): Keyword arguments for the tool call.
+        raw_block (str): The raw JSON block the action was parsed from.
+    """
+
     tool: str
     args: dict[str, Any]
     raw_block: str
@@ -97,6 +105,17 @@ def parse_llm_action(text: str) -> ParsedAction:
 
     Falls back to parsing the whole text as JSON when no fenced block
     is present.
+
+    Args:
+        text (str): Raw LLM turn output to scan for an action envelope.
+
+    Returns:
+        ParsedAction: The parsed tool name, args, and raw JSON block.
+
+    Raises:
+        _UnparsableAction: If no block is found, multiple blocks are
+            present, JSON parsing fails, or the envelope is malformed
+            (not an object, missing ``tool``, or non-object ``args``).
     """
     candidates: list[str] = [m.group(1) for m in _ACTION_BLOCK_RE.finditer(text or "")]
     if not candidates:
@@ -139,6 +158,13 @@ class DynamicRunResult:
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the run result to a JSON-friendly dict.
+
+        Returns:
+            dict[str, Any]: Copy of every field, with the terminal
+            state rendered as its string value and mutable fields
+            shallow-copied.
+        """
         return {
             "dyn_id": self.dyn_id,
             "terminal_state": self.terminal_state.value,
@@ -152,6 +178,11 @@ class DynamicRunResult:
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string.
+
+    Returns:
+        str: Timestamp with microsecond precision in UTC.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -175,6 +206,16 @@ class DynamicActionRunner:
         turn_cap: int = DEFAULT_TURN_CAP,
         framework_source_roots: tuple[str, ...] = (),
     ):
+        """Configure the runner with a backend and budget limits.
+
+        Args:
+            backend (Backend): LLM backend used to drive each ReAct turn.
+            wall_clock_budget_sec (float): Maximum wall-clock seconds for
+                a single ``run`` before it is timed out.
+            turn_cap (int): Maximum number of ReAct turns per dispatch.
+            framework_source_roots (tuple[str, ...]): Candidate git
+                checkouts a per-dispatch worktree may be based on.
+        """
         self.backend = backend
         self.wall_clock_budget_sec = float(wall_clock_budget_sec)
         self.turn_cap = int(turn_cap)
@@ -184,6 +225,28 @@ class DynamicActionRunner:
     # Public entry — one dispatch
     # ------------------------------------------------------------------
     async def run(self, ctx: RunnerContext) -> DynamicRunResult:
+        """Drive the full ReAct loop for one dynamic-action dispatch.
+
+        Loads the spec and seed kit, sets up an isolated worktree, then
+        iterates turns: prompting the backend, parsing the action,
+        dispatching resource tools, and validating any emitted proposal.
+        The loop stops on a terminal state (completed, empty, failed,
+        timed-out) or when the turn cap / wall-clock budget is reached.
+        On cancellation the ABANDONED terminal is persisted before
+        re-raising, and the worktree is always reset and torn down.
+
+        Args:
+            ctx (RunnerContext): Per-dispatch context carrying the task,
+                its params, and the resolved ``session_dir``.
+
+        Returns:
+            DynamicRunResult: Terminal state, reason, turns used, and the
+            persisted proposal-set payload and journal path.
+
+        Raises:
+            asyncio.CancelledError: Re-raised after the abandoned
+                terminal has been persisted.
+        """
         dyn_id = str(ctx.task.params.get("dyn_id") or ctx.task.task_id)
         session_dir = self._session_dir(ctx)
         if session_dir is None:
@@ -415,14 +478,38 @@ class DynamicActionRunner:
     # Internal helpers
     # ------------------------------------------------------------------
     def _session_dir(self, ctx: RunnerContext) -> Path | None:
+        """Resolve the session directory from the runner context.
+
+        Args:
+            ctx (RunnerContext): Context whose ``extra`` may carry
+                ``session_dir``.
+
+        Returns:
+            Path | None: The session directory, or ``None`` when it is
+            absent from the context.
+        """
         sd = ctx.extra.get("session_dir")
         return Path(sd) if sd else None
 
     def _load_dispatch_inputs(
         self, ctx: RunnerContext, artefact_dir: Path,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Load ``spec.payload`` + ``seed_kit`` JSON; return
-        ``(None, None)`` on any I/O or parse failure."""
+        """Load ``spec.payload`` + ``seed_kit`` JSON from disk.
+
+        Falls back to ``spec.json`` / ``seed_kit.json`` under the
+        artefact dir when the task params omit explicit paths.
+
+        Args:
+            ctx (RunnerContext): Context whose task params may carry
+                ``spec_path`` and ``seed_kit_path``.
+            artefact_dir (Path): Per-dispatch artefact directory used for
+                the default file locations.
+
+        Returns:
+            tuple[dict[str, Any] | None, dict[str, Any] | None]: The spec
+            payload and seed kit, or ``(None, None)`` on any I/O or JSON
+            parse failure.
+        """
         spec_path = ctx.task.params.get("spec_path")
         seed_kit_path = ctx.task.params.get("seed_kit_path")
         if not spec_path:
@@ -461,11 +548,23 @@ class DynamicActionRunner:
     def _setup_worktree(
         self, session_dir: Path, dyn_id: str,
     ) -> tuple[Path | None, Path | None, str]:
-        """Create ``runs/dynamic/<dyn_id>/worktree/`` over the first
-        available ``framework_source_root``. Returns
-        ``(worktree, base, note)``; ``note`` is non-empty when no
-        isolated worktree could be set up (runner still proceeds but
-        ``apply_patch_in_worktree`` will fail)."""
+        """Create ``runs/dynamic/<dyn_id>/worktree/`` for the dispatch.
+
+        Bases the worktree on the first available
+        ``framework_source_root`` and prunes any stale worktree/branch
+        left by a crashed prior dispatch first.
+
+        Args:
+            session_dir (Path): Session directory under which the
+                ``runs/dynamic`` tree lives.
+            dyn_id (str): Dynamic-action identifier for this dispatch.
+
+        Returns:
+            tuple[Path | None, Path | None, str]: ``(worktree, base,
+            note)``. ``note`` is non-empty when no isolated worktree
+            could be set up (the runner still proceeds, but
+            ``apply_patch_in_worktree`` will fail).
+        """
         base = _pick_worktree_base(self.framework_source_roots)
         if base is None:
             return None, None, (
@@ -488,7 +587,16 @@ class DynamicActionRunner:
 
     @staticmethod
     def _prune_stale_worktree(base: Path, worktree: Path, branch: str) -> None:
-        """Best-effort cleanup of a stale per-dyn_id worktree + branch."""
+        """Best-effort cleanup of a stale per-dyn_id worktree + branch.
+
+        Runs ``git worktree remove``/``prune`` and ``branch -D``,
+        swallowing missing-git and timeout errors.
+
+        Args:
+            base (Path): Git checkout the worktree was based on.
+            worktree (Path): Worktree path to remove.
+            branch (str): Branch name to delete.
+        """
         import subprocess
         cmds = (
             ["git", "-C", str(base), "worktree", "remove", "--force",
@@ -514,6 +622,24 @@ class DynamicActionRunner:
         dyn_id: str,
         call_id: str,
     ) -> dict[str, Any]:
+        """Execute one resource tool requested by the LLM action.
+
+        Routes to the read-source, read-session-artifact, run-bench, or
+        apply-patch helper based on ``action.tool``, enforcing the bench
+        feature flag and worktree availability.
+
+        Args:
+            action (ParsedAction): The parsed tool action to execute.
+            session_dir (Path): Session directory for artefact reads.
+            worktree (Path | None): Worktree for bench/patch tools, or
+                ``None`` when no isolated worktree exists.
+            dyn_id (str): Dynamic-action identifier for this dispatch.
+            call_id (str): Identifier (the turn number) for the call.
+
+        Returns:
+            dict[str, Any]: The tool result envelope, or an ``ok=False``
+            error envelope for disabled, unavailable, or unknown tools.
+        """
         if action.tool == TOOL_READ_SOURCE:
             return read_source(
                 str(action.args.get("path") or ""),
@@ -572,9 +698,32 @@ class DynamicActionRunner:
         error: str = "",
         turns_used: int = 0,
     ) -> DynamicRunResult:
-        """Write ``proposal_set.json`` + ``sub_agent_journal.md`` and
-        tear down the worktree. Only these two files are recovered;
-        every other in-worktree artefact is destroyed."""
+        """Persist terminal artefacts and tear down the worktree.
+
+        Writes ``proposal_set.json`` + ``sub_agent_journal.md`` and
+        tears down the worktree. Only these two files are recovered;
+        every other in-worktree artefact is destroyed.
+
+        Args:
+            dyn_id (str): Dynamic-action identifier for this dispatch.
+            state (DynamicRunnerTerminalState): Terminal state to record.
+            reason (str): Short machine-readable terminal reason.
+            journal_path (str): Path the rendered journal is written to.
+            journal (list[JournalTurn]): Recorded turns for the journal.
+            normalised_proposal (dict[str, Any] | None): Validated
+                proposal, included only on a COMPLETED terminal.
+            worktree (Path | None): Worktree to tear down, if any.
+            worktree_base (Path | None): Git checkout the worktree was
+                based on.
+            session_dir (Path): Session directory for the proposal-set
+                output path.
+            error (str): Optional error string to surface in the result.
+            turns_used (int): Number of executed turns.
+
+        Returns:
+            DynamicRunResult: Result envelope carrying the terminal
+            state, reason, proposal payload, and journal path.
+        """
         # Every terminal state gets a journal on disk for audit, even
         # FAILED with zero turns.
         try:
@@ -628,6 +777,19 @@ def _render_journal_markdown(
     reason: str,
     journal: list[JournalTurn],
 ) -> str:
+    """Render a dynamic-action journal as a Markdown document.
+
+    Args:
+        dyn_id (str): Dynamic-action identifier shown in the heading.
+        state (DynamicRunnerTerminalState): Terminal state of the run.
+        reason (str): Short machine-readable terminal reason.
+        journal (list[JournalTurn]): Recorded turns to render, each with
+            optional LLM text, parsed action, tool result, and proposal
+            validation sections.
+
+    Returns:
+        str: The full journal rendered as Markdown.
+    """
     lines = [
         f"# Dynamic action sub-agent journal — {dyn_id}",
         f"- terminal_state: {state.value}",

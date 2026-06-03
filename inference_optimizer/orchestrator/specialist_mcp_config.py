@@ -49,14 +49,16 @@ def write_specialist_mcp_config(
     on-disk file is idempotent: repeated calls with the same inputs
     overwrite the file with byte-identical content.
 
-    Parameters
-    ----------
-    session_dir
-        Session root. The file lands at
-        ``<session_dir>/runtime/<SPECIALIST_MCP_CONFIG_FILENAME>``.
-    pr_monitor_mcp_url
-        ``KnowledgePlane.specialist_mcp_url()`` — empty string means
-        PR Monitor is disabled / degraded.
+    Args:
+        session_dir (Path | str): Session root. The file lands at
+            ``<session_dir>/runtime/<SPECIALIST_MCP_CONFIG_FILENAME>``.
+        pr_monitor_mcp_url (str): ``KnowledgePlane.specialist_mcp_url()`` — an
+            empty string means PR Monitor is disabled / degraded.
+
+    Returns:
+        Path | None: Path to the written config file, or ``None`` when no MCP
+        server is wireable (caller should then leave ``--mcp-config`` off the
+        claude command line).
     """
     servers: dict[str, dict[str, Any]] = {}
     pr_url = (pr_monitor_mcp_url or "").strip()

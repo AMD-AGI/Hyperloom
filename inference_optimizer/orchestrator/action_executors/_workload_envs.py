@@ -75,6 +75,9 @@ def _visible_gpu_count() -> int:
     Override (escape hatch for hosts where torch + rocm-smi disagree, or
     for unit tests that exercise the clamp without GPU hardware):
     ``$INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT=N``.
+
+    Returns:
+        int: The number of visible GPUs, or ``0`` on any failure / unknown.
     """
     override = os.environ.get("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "").strip()
     if override:
@@ -134,6 +137,10 @@ def _tracelens_patch_enabled() -> bool:
     compatible and add no flags by themselves — they only enable
     capabilities Hyperloom requests via ``EXTRA_VLLM_ARGS`` /
     ``EXTRA_SGLANG_ARGS`` when patching succeeds.
+
+    Returns:
+        bool: True when runtime patching is enabled (default), False when
+            ``HYPERLOOM_ENABLE_PATCH=0``.
     """
     return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
 
@@ -143,6 +150,9 @@ def default_baseline_config() -> Path:
 
     Returns the sglang YAML when ``$FRAMEWORK`` is unset/unknown so existing
     sglang-default tests keep passing.
+
+    Returns:
+        Path: The shipped Magpie YAML config path for the resolved framework.
     """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
     if fw == "atom":
@@ -205,6 +215,23 @@ def materialize_config_with_envs(
 
     Returns the path to the materialized YAML written under ``output_dir``.
     Reuses the file name across calls so callers can locate it predictably.
+
+    Args:
+        config_path (Path): The base Magpie YAML to render from.
+        output_dir (Path): Directory the materialized YAML is written under.
+        extra_server_args (str): Framework-neutral server args routed into the
+            framework-specific ``EXTRA_*_ARGS`` env.
+        extra_envs (dict[str, Any] | None): Per-variant env overrides applied
+            last (win over all computed values).
+        model_path (str | None): Model path override for ``benchmark.model``.
+        gpu_type (str | None): GPU type override for ``benchmark.runner_type``
+            and the generic benchmark script.
+        benchmark_script (str | None): Sanitized script override re-pinning
+            ``benchmark.benchmark_script``.
+        out_name (str): File name for the materialized YAML under output_dir.
+
+    Returns:
+        Path: The path to the materialized YAML.
     """
     server_args = (extra_server_args or "").strip()
     with config_path.open(encoding="utf-8") as f:

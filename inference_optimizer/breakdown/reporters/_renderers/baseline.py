@@ -10,6 +10,19 @@ from ._invocation import render_invocation_block
 
 @register_renderer("baseline")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the baseline-measurement section.
+
+    Surfaces baseline throughput, accuracy and latency, the attempts
+    history, and the launch invocation block, emitting data-quality
+    warnings (e.g. missing throughput or TTFT). Skipped when neither
+    throughput nor attempts were recorded.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered baseline section.
+    """
     b = breakdown.get("baseline") or {}
     session = breakdown.get("session") or {}
     tput = b.get("throughput_tok_s_per_gpu")

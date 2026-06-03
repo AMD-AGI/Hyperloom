@@ -96,10 +96,32 @@ _KERNEL_PROMPT = (
 
 
 async def _noop_prep(ctx) -> dict:
+    """No-op prep executor stub used by the full-optimize demo.
+
+    Args:
+        ctx: Executor context supplying ``ctx.task.kind``.
+
+    Returns:
+        dict: A success result echoing the task kind.
+    """
     return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
 
 
 async def _run(ticks: int, target_gain: float) -> int:
+    """Run the P2 full-optimization demo against a target gain.
+
+    Seeds SharedState, wires real Claude orchestration plus real Codex
+    kernel/critic backends, registers the full executor set, runs the
+    coordinator until the target objective or tick budget is hit, and prints a
+    final summary.
+
+    Args:
+        ticks (int): Maximum number of coordinator ticks to run.
+        target_gain (float): Target cumulative gain percentage objective.
+
+    Returns:
+        int: Process exit code (always ``0`` on completion).
+    """
     session_dir = make_session_dir()
     print(f"Session dir: {session_dir}")
 
@@ -162,6 +184,11 @@ async def _run(ticks: int, target_gain: float) -> int:
 
 
 def main() -> None:
+    """Read tick/target-gain env vars then run the demo, exiting with its code.
+
+    Raises:
+        SystemExit: Carrying the exit code returned by :func:`_run`.
+    """
     ticks = int(os.environ.get("COORDINATOR_TICKS", "6"))
     target_gain = float(os.environ.get("TARGET_GAIN", "10"))
     sys.exit(asyncio.run(_run(ticks=ticks, target_gain=target_gain)))

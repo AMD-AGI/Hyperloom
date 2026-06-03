@@ -118,7 +118,14 @@ _DTYPE_BYTES: dict[str, float] = {
 
 
 def _resolve_dtype_bytes(tag: str | None) -> float:
-    """HF/precision tag → bytes per element; bf16 (2.0) on miss."""
+    """HF/precision tag → bytes per element; bf16 (2.0) on miss.
+
+    Args:
+        tag (str | None): HF ``torch_dtype`` / precision tag.
+
+    Returns:
+        float: Bytes per element, defaulting to ``2.0`` on an unknown tag.
+    """
     if not tag:
         return 2.0
     return _DTYPE_BYTES.get(str(tag).strip().lower(), 2.0)
@@ -131,6 +138,13 @@ def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> flo
     as "T_cmp unavailable" and fall back to the pure T_mem ceiling
     (``bound_kind="memory"``), which keeps backward compatibility with
     sessions whose precision/GPU pair is not in ``HW_SPECS`` yet.
+
+    Args:
+        gpu_type (str | None): GPU type key (e.g. ``"mi300x"``).
+        precision_tag (str | None): Precision tag (e.g. ``"bf16"``).
+
+    Returns:
+        float: Vendor dense peak TFLOPS, or ``0.0`` when the pair is unknown.
     """
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
@@ -179,6 +193,13 @@ def _read_total_size(model_path: Path) -> int | None:
 
     This is byte-exact on-disk weight size and already reflects
     quantization (FP8/FP4/INT4 weights produce a smaller value).
+
+    Args:
+        model_path (Path): Local HF model directory.
+
+    Returns:
+        int | None: Total weight bytes, or ``None`` when the index file is
+            absent or unreadable.
     """
     idx = model_path / "model.safetensors.index.json"
     if not idx.is_file():
@@ -192,6 +213,15 @@ def _read_total_size(model_path: Path) -> int | None:
 
 
 def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
+    """Read and parse ``config.json`` from a local HF model directory.
+
+    Args:
+        model_path (Path): Local HF model directory.
+
+    Returns:
+        dict[str, Any] | None: The parsed config, or ``None`` when the file is
+            absent or unreadable.
+    """
     cfg = model_path / "config.json"
     if not cfg.is_file():
         return None
@@ -203,7 +233,14 @@ def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
 
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:
     """GQA-aware: ``num_key_value_heads`` if present, else MHA fallback
-    to ``num_attention_heads``."""
+    to ``num_attention_heads``.
+
+    Args:
+        cfg (dict[str, Any]): Parsed HF ``config.json``.
+
+    Returns:
+        int: The number of KV heads, or ``0`` when neither field is present.
+    """
     kv = cfg.get("num_key_value_heads")
     if kv is None:
         kv = cfg.get("num_attention_heads")
@@ -212,7 +249,14 @@ def _derive_kv_heads(cfg: dict[str, Any]) -> int:
 
 def _derive_head_dim(cfg: dict[str, Any]) -> int:
     """HF either exposes ``head_dim`` directly or implies it via
-    ``hidden_size / num_attention_heads``."""
+    ``hidden_size / num_attention_heads``.
+
+    Args:
+        cfg (dict[str, Any]): Parsed HF ``config.json``.
+
+    Returns:
+        int: The attention head dimension, or ``0`` when it cannot be derived.
+    """
     head_dim = cfg.get("head_dim")
     if head_dim:
         return int(head_dim)
@@ -264,6 +308,15 @@ def _compute_active_weight_bytes(
       * computed ``total_expert_bytes >= weight_bytes`` → config /
         safetensors mismatch (quantized experts, accounting drift);
         stay safe and keep the dense-equivalent divisor
+
+    Args:
+        cfg (dict[str, Any]): Parsed HF ``config.json``.
+        weight_bytes (int): Total on-disk weight bytes.
+        dtype_bytes (float): Bytes per weight element.
+
+    Returns:
+        int: Estimated per-token active weight bytes; equals ``weight_bytes``
+            for dense or unknown-geometry models.
     """
     active, _total_expert, _ne, _ept = _compute_expert_decomposition(
         cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
@@ -300,6 +353,16 @@ def _compute_expert_decomposition(
     them into ``non_expert_bytes`` via ``weight_bytes - routed_pool``,
     so ``active = non_expert + (k/n)*routed`` correctly counts them
     as always-active without double-charging the routed top-k pool.
+
+    Args:
+        cfg (dict[str, Any]): Parsed HF ``config.json``.
+        weight_bytes (int): Total on-disk weight bytes.
+        dtype_bytes (float): Bytes per weight element.
+
+    Returns:
+        tuple[int, int, int, int]: ``(active_weight_bytes, total_expert_bytes,
+            num_experts, experts_per_tok)``; dense/unknown geometry yields
+            ``(weight_bytes, 0, 0, 0)``.
     """
     num_experts = int(
         cfg.get("num_experts")
@@ -364,6 +427,15 @@ def load_model_meta(
          the operator-supplied fallback when ``torch_dtype`` is
          omitted).
       4. ``precision_hint`` from the CLI.
+
+    Args:
+        model_path (str | Path): Local HF model directory.
+        precision_hint (str): Operator-declared precision, consulted only when
+            the config omits a dtype. Defaults to ``""``.
+
+    Returns:
+        ModelMeta | None: The extracted metadata, or ``None`` when the config
+            or safetensors index is missing/unreadable.
     """
     if not model_path:
         return None
@@ -418,6 +490,15 @@ def compute_kv_bytes_per_token(
 
     ``2`` factors covers K + V tensors. Caller multiplies by
     ``kv_seq_len`` to get the per-token HBM read volume.
+
+    Args:
+        num_layers (int): Number of transformer layers.
+        num_kv_heads (int): Number of KV heads.
+        head_dim (int): Attention head dimension.
+        kv_dtype_bytes (float): Bytes per KV-cache element.
+
+    Returns:
+        int: KV-cache bytes read per generated token across all layers.
     """
     return int(2 * num_layers * num_kv_heads * head_dim * kv_dtype_bytes)
 
@@ -459,6 +540,28 @@ def compute_theoretical_peak_output_tok_per_sec(
     is positive. Dense models (or callers without MoE knowledge) leave
     it at 0 and get the original ``weight_bytes`` divisor — preserves
     backward compatibility.
+
+    Args:
+        gpu_type (str): GPU type key (e.g. ``"mi300x"``).
+        num_gpus (int): Tensor-parallel GPU count per replica.
+        weight_bytes (int): Total model weight bytes.
+        num_layers (int): Number of transformer layers.
+        num_kv_heads (int): Number of KV heads.
+        head_dim (int): Attention head dimension.
+        kv_dtype_bytes (float): Bytes per KV-cache element.
+        isl (int): Input sequence length.
+        osl (int): Output sequence length.
+        concurrency (int): Continuous-batching width.
+        active_weight_bytes (int): MoE B=1 per-token active weight bytes.
+            Defaults to ``0`` (dense).
+        num_experts (int): Total routed experts. Defaults to ``0``.
+        experts_per_tok (int): Experts activated per token. Defaults to ``0``.
+        expert_weight_bytes (int): Total routed-expert pool bytes. Defaults to
+            ``0``.
+
+    Returns:
+        float: The decode memory-bound ceiling in tok/s, or ``0.0`` when the
+            GPU is unsupported or a divisor degenerates.
     """
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
@@ -541,6 +644,18 @@ def compute_compute_bound_ceiling_tok_per_sec(
     Returns 0.0 when any of ``gpu_type`` / precision / active_weight_bytes
     / dtype_bytes is missing or zero so the caller treats T_cmp as
     "unavailable" and the roofline degrades to the pure T_mem ceiling.
+
+    Args:
+        gpu_type (str): GPU type key (e.g. ``"mi300x"``).
+        num_gpus (int): Tensor-parallel GPU count per replica.
+        precision_tag (str): Precision tag (e.g. ``"bf16"``).
+        active_weight_bytes (int): B=1 per-token active weight bytes.
+        weight_bytes (int): Dense total weight bytes (fallback divisor).
+        weight_dtype_bytes (float): Bytes per weight element.
+
+    Returns:
+        float: The decode compute-bound ceiling in tok/s, or ``0.0`` when any
+            required input is missing or zero.
     """
     peak_tflops = _resolve_peak_tflops(gpu_type, precision_tag)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
@@ -569,6 +684,12 @@ def _read_baseline_yaml_conc(state: Any) -> int:
 
     This is the ground-truth concurrency the Magpie subprocess actually
     ran with. Returns ``0`` when the file / field is unreadable.
+
+    Args:
+        state (Any): The SharedState-like object carrying ``last_baseline``.
+
+    Returns:
+        int: The parsed concurrency, or ``0`` when unreadable/non-positive.
     """
     last_bl = getattr(state, "last_baseline", None) or {}
     if not isinstance(last_bl, dict):
@@ -611,6 +732,12 @@ def _resolve_effective_concurrency(state: Any) -> int:
          degenerates (matches the single-stream interpretation).
 
     Returns ``int`` >= 1.
+
+    Args:
+        state (Any): The SharedState-like object carrying baseline / conc.
+
+    Returns:
+        int: The effective concurrency, always ``>= 1``.
     """
     yaml_conc = _read_baseline_yaml_conc(state)
     if yaml_conc > 0:
@@ -654,6 +781,14 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
     Safe degrade: never raises; returns ``_EMPTY_BREAKDOWN`` on any
     missing-field path so the caller can stamp the result into history
     snapshots unconditionally.
+
+    Args:
+        state (Any): The SharedState-like object carrying model path, GPU,
+            precision, tp, isl, osl and concurrency fields.
+
+    Returns:
+        RooflineBreakdown: The T_mem / T_cmp / peak / bound-kind breakdown;
+            ``_EMPTY_BREAKDOWN`` when inputs are missing.
     """
     meta = load_model_meta(
         getattr(state, "model_path", ""),
@@ -712,5 +847,11 @@ def compute_peak_from_state(state: Any) -> float:
     docstring references). New code should call
     ``compute_roofline_breakdown_from_state`` directly to get T_mem /
     T_cmp / bound_kind alongside the min.
+
+    Args:
+        state (Any): The SharedState-like object.
+
+    Returns:
+        float: The ``T_peak`` ceiling in tok/s (``0.0`` when unavailable).
     """
     return compute_roofline_breakdown_from_state(state).peak_tok_per_sec

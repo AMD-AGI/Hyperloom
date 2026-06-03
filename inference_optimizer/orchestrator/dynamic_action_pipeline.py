@@ -65,6 +65,14 @@ def runner_status_to_lifecycle(
     Accepts both the enum and its string value. Unknown / empty input
     maps to ``FAILED`` so an unrecognised value never silently lands
     in a non-terminal state.
+
+    Args:
+        terminal_state (str | DynamicRunnerTerminalState): Runner
+            terminal state as an enum member or its string value.
+
+    Returns:
+        DynamicActionStatus: The mapped lifecycle status, or ``FAILED``
+        for unknown/empty input.
     """
     if isinstance(terminal_state, DynamicRunnerTerminalState):
         ts = terminal_state
@@ -89,6 +97,13 @@ def integrate_status_to_lifecycle(
       ``failed``                → ``INTEGRATE_FAILED``
     * ``applied_no_bench``      → ``KEPT`` (apply_only mode)
     * everything else           → ``INTEGRATE_FAILED``
+
+    Args:
+        integrate_status (str): Status string from
+            ``IntegratePatchExecutor`` (case-insensitive).
+
+    Returns:
+        DynamicActionStatus: The mapped lifecycle status.
     """
     s = (integrate_status or "").strip().lower()
     if s == "kept" or s == "applied_no_bench":
@@ -106,14 +121,28 @@ def make_dynamic_specialist_task_id(dyn_id: str) -> str:
 
     A ``dyn_id`` already starts with ``dyn-``, so the id is itself.
     Kept as a single point of truth so future renames stay safe.
+
+    Args:
+        dyn_id (str): Dynamic-action identifier.
+
+    Returns:
+        str: The synthesised specialist task id (the stripped dyn_id).
     """
     return str(dyn_id or "").strip()
 
 
 def is_dynamic_specialist_task_id(specialist_task_id: str) -> bool:
-    """True when ``specialist_task_id`` was synthesised from a
-    ``dyn_id`` — used to route integrate completions back to the
-    dyn_id summary."""
+    """Return whether a specialist task id was synthesised from a dyn_id.
+
+    Used to route integrate completions back to the dyn_id summary.
+
+    Args:
+        specialist_task_id (str): Specialist task id to test.
+
+    Returns:
+        bool: ``True`` when the id starts with
+        :data:`DYNAMIC_SPECIALIST_TASK_ID_PREFIX`.
+    """
     sid = (specialist_task_id or "").strip()
     return sid.startswith(DYNAMIC_SPECIALIST_TASK_ID_PREFIX)
 
@@ -129,8 +158,17 @@ def materialize_dynamic_patch_workspace(
     ``IntegratePatchExecutor`` discovers patches under
     ``runs/specialist/<sid>/worktree/patches/`` and optionally reads
     ``runs/specialist/<sid>/specialist_done.json`` for
-    ``patches_written``. Returns ``(specialist_task_id,
-    patches_written)`` for the integrate_patch task params.
+    ``patches_written``.
+
+    Args:
+        session_dir (Path): Session directory holding the runs tree.
+        dyn_id (str): Dynamic-action identifier for the workspace.
+        proposal (dict[str, Any]): Runner proposal carrying ``name`` and
+            ``patch_text``.
+
+    Returns:
+        tuple[str, list[str]]: ``(specialist_task_id, patches_written)``
+        for the integrate_patch task params.
     """
     specialist_task_id = make_dynamic_specialist_task_id(dyn_id)
     workspace = (
@@ -189,6 +227,17 @@ def build_integrate_patch_proposal_payload(
     ``review_constraints.cross_domain``. On approve, the existing
     ``_materialize_approved_proposal`` queues the integrate_patch task
     with the synthesised ``specialist_task_id``.
+
+    Args:
+        dyn_id (str): Dynamic-action identifier.
+        specialist_task_id (str): Synthesised specialist task id.
+        proposal (dict[str, Any]): Runner proposal supplying rationale,
+            qualitative argument, and patch name.
+        spec_payload (dict[str, Any]): Spec payload supplying
+            ``scope_domains``.
+
+    Returns:
+        dict[str, Any]: The ``propose_action`` payload for the bus.
     """
     return {
         "action_name": "integrate_patch",
@@ -233,6 +282,21 @@ def compose_critic_verdict_envelope(
     overrides any LLM verdict. ``revise`` and ``reject`` both land on
     ``CRITIC_REJECTED`` (no sub-agent re-dispatch loop today); the
     verdict label is preserved on ``critic_verdict.json`` for audit.
+
+    Args:
+        dyn_id (str): Dynamic-action identifier.
+        proposal (dict[str, Any]): Proposal under review.
+        spec_scope_domains (list[str]): Authoritative scope domains from
+            the spec.
+        llm_verdict (str | None): Optional LLM-critic verdict; defaults
+            to ``approve`` and is coerced to ``reject`` if unrecognised.
+        llm_reason (str | None): Optional LLM-critic rationale recorded
+            in the reviewer notes.
+
+    Returns:
+        tuple[dict[str, Any], DynamicActionStatus]: The verdict envelope
+        and the resulting lifecycle status (``INTEGRATING`` on approve,
+        ``CRITIC_REJECTED`` otherwise).
     """
     pre: CrossDomainPreverdict = run_mechanical_cross_domain_checks(
         proposal, spec_scope_domains=list(spec_scope_domains or ()),
@@ -276,9 +340,19 @@ def compose_critic_verdict_envelope(
 def read_runner_proposal_set(
     session_dir: Path, dyn_id: str,
 ) -> dict[str, Any] | None:
-    """Read the runner's ``proposal_set.json``; return ``None`` when
-    the file is absent or unparsable so the caller can route the
-    dispatch to ``FAILED`` instead of crashing the tick."""
+    """Read the runner's ``proposal_set.json`` from disk.
+
+    Returns ``None`` when the file is absent or unparsable so the caller
+    can route the dispatch to ``FAILED`` instead of crashing the tick.
+
+    Args:
+        session_dir (Path): Session directory holding the artefact tree.
+        dyn_id (str): Dynamic-action identifier for the artefact dir.
+
+    Returns:
+        dict[str, Any] | None: Parsed proposal set, or ``None`` when the
+        file is missing or invalid JSON.
+    """
     artefact = dynamic_action_artifact_dir(session_dir, dyn_id)
     path = artefact / "proposal_set.json"
     if not path.is_file():

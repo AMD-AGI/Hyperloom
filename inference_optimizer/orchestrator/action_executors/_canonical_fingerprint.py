@@ -59,6 +59,15 @@ def canonical_fingerprint(
     * args: ``shlex.split`` → sorted token tuple.
     * envs: ``(str(k), str(v))`` pairs sorted by key.
     * 16-char SHA-1 prefix (collision-resistant for per-session ledger).
+
+    Args:
+        extra_args (str | None): The variant's server args; ``shlex.split`` +
+            sorted before hashing.
+        extra_envs (dict[str, Any] | None): The variant's env overrides;
+            stringified and sorted by key before hashing.
+
+    Returns:
+        str: The 16-char SHA-1 prefix fingerprint for the variant.
     """
     args_text = str(extra_args or "")
     try:
@@ -98,6 +107,16 @@ def workload_signature(
     Args default to the corresponding process env vars (``CONC`` / ``ISL``
     / ``OSL`` / ``PRECISION`` / ``TP``) when omitted, matching the
     Magpie ``benchmark.envs`` materialization path.
+
+    Args:
+        conc (int | str | None): Concurrency; defaults to env ``CONC``.
+        isl (int | str | None): Input sequence length; defaults to env ``ISL``.
+        osl (int | str | None): Output sequence length; defaults to env ``OSL``.
+        precision (str | None): Precision tag; defaults to env ``PRECISION``.
+        tp (int | str | None): Tensor-parallel degree; defaults to env ``TP``.
+
+    Returns:
+        str: A stable 12-char SHA-1 prefix digest of the workload contract.
     """
     fields = {
         "conc": str(conc if conc is not None else os.environ.get("CONC", "")).strip(),

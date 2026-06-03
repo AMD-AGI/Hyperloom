@@ -30,7 +30,19 @@ PERF_TERMS = (
 
 
 def _build_query(repo: str, gap_description: str) -> str:
-    """Compose a GitHub Search query string from gap_description + repo scope."""
+    """Compose a GitHub Search query string from gap_description + repo scope.
+
+    Keywords extracted from ``gap_description`` drive the OR-term clause;
+    when no keywords are found the curated :data:`PERF_TERMS` list is used.
+
+    Args:
+        repo (str): Repository slug in ``owner/name`` form to scope the search.
+        gap_description (str): Free-text gap description used to derive search
+            keywords.
+
+    Returns:
+        str: A GitHub Search query restricted to open PRs in ``repo``.
+    """
     keywords = extract_keywords(gap_description) if gap_description else []
     if not keywords:
         terms = PERF_TERMS
@@ -58,6 +70,18 @@ def search_perf_prs(
     Best-effort: rate-limits or non-GitHub remotes return an empty list
     rather than raising. Callers that need hard-fail behaviour should
     use the ``primus_cortex`` backend instead.
+
+    Args:
+        repo_url (str): Git URL of the target repo; parsed to an ``owner/name``
+            slug.
+        gap_description (str): Free-text gap description used to derive search
+            keywords. Defaults to empty.
+        limit (int): Maximum number of PRs to return. Defaults to 5.
+        timeout_sec (float): Per-request HTTP timeout in seconds. Defaults to 10.
+
+    Returns:
+        list[GitHubPr]: Matching open PRs (at most ``limit``), or an empty list
+            on any failure or non-GitHub remote.
     """
     try:
         repo = _repo_slug(repo_url)

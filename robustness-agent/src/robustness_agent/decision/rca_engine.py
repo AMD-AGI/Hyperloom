@@ -37,6 +37,14 @@ class RcaEngine(Protocol):
     """Minimal contract the ActionLadder consumes."""
 
     async def summarize(self, symptom: Symptom) -> str:
+        """Produce root-cause text for a symptom.
+
+        Args:
+            symptom (Symptom): The symptom to summarize.
+
+        Returns:
+            str: Root-cause summary text, or an empty string when none.
+        """
         ...
 
 
@@ -47,6 +55,14 @@ class NoopRcaEngine:
     label: str = "noop"
 
     async def summarize(self, symptom: Symptom) -> str:
+        """Return empty RCA text; this engine never contacts an LLM.
+
+        Args:
+            symptom (Symptom): The symptom (ignored by this engine).
+
+        Returns:
+            str: Always an empty string.
+        """
         return ""
 
 
@@ -56,6 +72,15 @@ class NoopRcaEngine:
 
 @dataclass
 class RcaThrottleConfig:
+    """Tunables that bound LLM RCA cost.
+
+    Attributes:
+        severity_min (SymptomSeverity): Minimum symptom severity allowed to
+            trigger an LLM call.
+        cooldown_seconds (float): Per-dedup-key cooldown between LLM calls.
+        max_calls_per_tick (int): Maximum number of LLM calls per tick.
+    """
+
     severity_min: SymptomSeverity = SymptomSeverity.HIGH
     cooldown_seconds: float = 60.0
     max_calls_per_tick: int = 1
@@ -76,6 +101,14 @@ class RcaThrottle:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
+        """Initialise the throttle and load any persisted cooldown state.
+
+        Args:
+            config (RcaThrottleConfig | None): Cost-guard tunables; a default
+                config is used when ``None``.
+            state_view (DetectorStateView | None): Optional disk-backed store
+                used to persist per-key cooldown timestamps across ticks.
+        """
         self._config = config or RcaThrottleConfig()
         self._state_view = state_view
         # Disk-backed per-key cooldown timestamps — the 60s default
@@ -93,9 +126,15 @@ class RcaThrottle:
 
     @property
     def config(self) -> RcaThrottleConfig:
+        """Return the active throttle configuration.
+
+        Returns:
+            RcaThrottleConfig: The configuration in effect.
+        """
         return self._config
 
     def _persist(self) -> None:
+        """Write the current cooldown timestamps to the state view, if any."""
         if self._state_view is None:
             return
         self._state_view.save({
@@ -105,11 +144,30 @@ class RcaThrottle:
         })
 
     def begin_tick(self, tick_id: int) -> None:
+        """Reset the per-tick call counter when a new tick begins.
+
+        Args:
+            tick_id (int): Identifier of the current tick.
+        """
         if self._tick_id != tick_id:
             self._tick_id = tick_id
             self._tick_calls = 0
 
     def should_call(self, sym: Symptom, *, now_unix: float, tick_id: int) -> bool:
+        """Decide whether an LLM call is permitted for this symptom now.
+
+        Applies the severity gate, the per-tick budget, and the per-key
+        cooldown in that order.
+
+        Args:
+            sym (Symptom): The symptom under consideration.
+            now_unix (float): Current wall-clock time in Unix seconds.
+            tick_id (int): Identifier of the current tick.
+
+        Returns:
+            bool: ``True`` if the engine may contact the LLM; ``False`` if any
+            guard rejects the call.
+        """
         self.begin_tick(tick_id)
         if sym.severity.rank < self._config.severity_min.rank:
             return False
@@ -121,6 +179,12 @@ class RcaThrottle:
         return True
 
     def record(self, sym: Symptom, *, now_unix: float) -> None:
+        """Record that an LLM call was made for a symptom and persist it.
+
+        Args:
+            sym (Symptom): The symptom that was just summarized.
+            now_unix (float): Wall-clock time of the call, in Unix seconds.
+        """
         self._last_called_unix[sym.dedup_key()] = now_unix
         self._tick_calls += 1
         self._persist()
@@ -160,6 +224,7 @@ class LlmRcaEngine:
     _config_warned: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Validate config and lazily build the HTTP client and throttle."""
         if not self.base_url or not self.api_key:
             log.warning("LlmRcaEngine constructed without base_url/api_key; calls will be skipped")
         if self.client is None:
@@ -176,10 +241,22 @@ class LlmRcaEngine:
             self.throttle = RcaThrottle()
 
     async def aclose(self) -> None:
+        """Close the underlying HTTP client if this engine created it."""
         if self._owns_client and self.client is not None:
             await self.client.aclose()
 
     async def summarize(self, symptom: Symptom) -> str:
+        """Summarize a symptom via the chat-server, subject to throttling.
+
+        Returns an empty string when the engine is unconfigured or when the
+        throttle rejects the call for this tick.
+
+        Args:
+            symptom (Symptom): The symptom to summarize.
+
+        Returns:
+            str: The (truncated) root-cause summary, or an empty string.
+        """
         if not self.base_url or not self.api_key:
             return ""
         now_unix = time.time()
@@ -196,12 +273,28 @@ class LlmRcaEngine:
         return _truncate(text, self.max_chars)
 
     def set_tick(self, tick_id: int) -> None:
-        """Hook used by ActionLadder to scope per-tick budgets."""
+        """Hook used by ActionLadder to scope per-tick budgets.
+
+        Args:
+            tick_id (int): Identifier of the current tick; routes the per-tick
+                LLM budget to a single bucket.
+        """
         self._current_tick_id = tick_id
         if self.throttle is not None:
             self.throttle.begin_tick(tick_id)
 
     async def _call(self, symptom: Symptom) -> str:
+        """Issue the chat-completion request and extract the reply text.
+
+        Network, HTTP-status, and decoding failures are logged and degraded to
+        an empty string rather than raised.
+
+        Args:
+            symptom (Symptom): The symptom whose evidence is sent to the LLM.
+
+        Returns:
+            str: The model's reply content, or an empty string on any failure.
+        """
         prompt = _build_user_prompt(symptom, self.extra_evidence_provider)
         payload = {
             "model": self.model,
@@ -254,6 +347,16 @@ def _build_user_prompt(
     sym: Symptom,
     extra_evidence_provider: Any | None,
 ) -> str:
+    """Render a symptom (plus optional extra evidence) into a prompt string.
+
+    Args:
+        sym (Symptom): The symptom to describe.
+        extra_evidence_provider (Any | None): Optional callable returning extra
+            evidence lines (e.g. recent log errors) for the symptom.
+
+    Returns:
+        str: The newline-joined user prompt.
+    """
     lines = [
         f"symptom: {sym.name}",
         f"severity: {sym.severity.value}",
@@ -277,6 +380,18 @@ def _build_user_prompt(
 
 
 def _format_evidence(payload: Any, prefix: str = "  ") -> list[str]:
+    """Flatten arbitrary evidence into indented, human-readable lines.
+
+    Mappings are recursed (sorted by key), sequences are truncated to the
+    first ten items, and scalars are rendered directly.
+
+    Args:
+        payload (Any): The evidence value to format.
+        prefix (str): Indentation prefix applied to each emitted line.
+
+    Returns:
+        list[str]: The formatted lines.
+    """
     if isinstance(payload, Mapping):
         out: list[str] = []
         for k in sorted(payload.keys()):
@@ -293,6 +408,17 @@ def _format_evidence(payload: Any, prefix: str = "  ") -> list[str]:
 
 
 def _safe_extra_evidence(provider: Any | None, sym: Symptom) -> list[str]:
+    """Call an extra-evidence provider defensively, swallowing failures.
+
+    Args:
+        provider (Any | None): Optional callable taking a symptom and returning
+            a list of evidence items.
+        sym (Symptom): The symptom passed to the provider.
+
+    Returns:
+        list[str]: Up to ten stringified, length-capped evidence items; empty
+        when the provider is absent, errors, or returns a non-list.
+    """
     if provider is None:
         return []
     try:
@@ -306,6 +432,16 @@ def _safe_extra_evidence(provider: Any | None, sym: Symptom) -> list[str]:
 
 
 def _truncate(text: str, max_chars: int) -> str:
+    """Trim text to a maximum length, appending an ellipsis when cut.
+
+    Args:
+        text (str): The text to truncate.
+        max_chars (int): Maximum allowed length of the result.
+
+    Returns:
+        str: The stripped text, shortened with a trailing ``...`` if it
+        exceeded ``max_chars``.
+    """
     text = (text or "").strip()
     if len(text) <= max_chars:
         return text
@@ -324,6 +460,17 @@ _THROTTLE_KEY_SEP: str = "\x1f"
 def _encode_throttle_keys(
     last_called: dict[tuple[str, ...], float],
 ) -> dict[str, float]:
+    """Serialise tuple-keyed cooldown timestamps to a JSON-safe dict.
+
+    Tuple key parts are joined with the unit-separator so they round-trip
+    through JSON object keys; malformed entries are skipped.
+
+    Args:
+        last_called (dict[tuple[str, ...], float]): Per-key last-call times.
+
+    Returns:
+        dict[str, float]: A dict with string keys safe for JSON storage.
+    """
     out: dict[str, float] = {}
     for key, ts in last_called.items():
         try:
@@ -338,6 +485,15 @@ def _encode_throttle_keys(
 
 
 def _decode_throttle_keys(payload: Any) -> dict[tuple[str, ...], float]:
+    """Inverse of :func:`_encode_throttle_keys`; tolerant of bad input.
+
+    Args:
+        payload (Any): The persisted mapping of encoded keys to timestamps.
+
+    Returns:
+        dict[tuple[str, ...], float]: The decoded tuple-keyed cooldown dict;
+        empty when ``payload`` is not a dict.
+    """
     if not isinstance(payload, dict):
         return {}
     out: dict[tuple[str, ...], float] = {}

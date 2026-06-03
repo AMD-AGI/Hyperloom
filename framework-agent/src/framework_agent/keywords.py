@@ -59,6 +59,13 @@ def extract_keywords(description: str) -> list[str]:
     such as ``AsyncLLMEngine`` are added next; if nothing else matched
     we fall back to the first five 3+ letter words so callers still get
     *some* signal instead of an empty list.
+
+    Args:
+        description (str): Free-form gap description to mine for keywords.
+
+    Returns:
+        list[str]: Sorted, deduplicated keywords (whitelist hits, lowercased
+            CamelCase identifiers, or a short fallback word list).
     """
     tokens = set(re.findall(r"[a-z][a-z0-9_]+", description.lower()))
     keywords = tokens & _TECHNICAL_TERMS
@@ -79,8 +86,16 @@ def score_title_against_keywords(title: str, keywords: Sequence[str]) -> int:
     Lowercase, snake_case-aware token split mirrors :func:`extract_keywords`
     so a keyword like ``fp8`` matches both ``fp8`` and ``fp8_moe``.
 
-    Returns 0 for an empty title or an empty keywords list. Pure-Python,
-    no regex compile cache needed because titles are short.
+    Pure-Python, no regex compile cache needed because titles are short.
+
+    Args:
+        title (str): PR title to score.
+        keywords (Sequence[str]): Keywords (typically from
+            :func:`extract_keywords`) to count overlap against.
+
+    Returns:
+        int: Number of overlapping tokens; ``0`` for an empty title or empty
+            keywords list.
     """
     if not keywords or not title:
         return 0
@@ -170,6 +185,17 @@ def score_title_with_anti_signal(
     ordering remains intuitive ("zero relevance" is a floor); rerank
     callers that want to *drop* anti-heavy PRs can post-filter on
     ``score == 0`` themselves.
+
+    Args:
+        title (str): PR title to score.
+        keywords (Sequence[str]): Active gap keywords used for both positive
+            overlap and anti-signal lookup.
+        anti_penalty (float): Weight applied per anti-correlated title token.
+            Defaults to 2.0.
+
+    Returns:
+        float: ``max(0.0, positive - anti_penalty * anti)``; ``0.0`` for an
+            empty title or empty keywords list.
     """
     if not keywords or not title:
         return 0.0

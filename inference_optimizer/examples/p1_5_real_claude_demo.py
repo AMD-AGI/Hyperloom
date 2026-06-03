@@ -41,6 +41,14 @@ ENV_TOKEN_NAMES = ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "AN
 
 
 def _check_env() -> None:
+    """Verify an LLM API token is present and report the base URL.
+
+    Exits the process with status 2 when none of the recognized token
+    environment variables are set.
+
+    Raises:
+        SystemExit: When no API token environment variable is configured.
+    """
     if not any(os.environ.get(n) for n in ENV_TOKEN_NAMES):
         print(
             f"ERROR: none of {ENV_TOKEN_NAMES} are set in this shell.\n"
@@ -55,6 +63,14 @@ def _check_env() -> None:
 
 
 async def _baseline_executor(ctx) -> dict:
+    """Pretend to run a baseline benchmark for the demo.
+
+    Args:
+        ctx: Executor context supplying ``ctx.task.task_id``.
+
+    Returns:
+        dict: Mock baseline metrics including the originating task id.
+    """
     return {
         "tput_tok_per_s_per_gpu": 1840.0,
         "p99_latency_ms": 152,
@@ -64,6 +80,19 @@ async def _baseline_executor(ctx) -> dict:
 
 
 async def _run(ticks: int, model: str | None) -> int:
+    """Run the real-Claude main-loop demo for a number of ticks.
+
+    Builds a coordinator with a real Claude orchestration backend and mock
+    critic/kernel/robustness agents, ticks the loop, and prints per-tick
+    event counts, highlights, and orchestration backend stats.
+
+    Args:
+        ticks (int): Number of coordinator ticks to run.
+        model (str | None): Claude model name; ``None`` uses the SDK default.
+
+    Returns:
+        int: Process exit code (always ``0`` on completion).
+    """
     session_dir = make_session_dir()
     print(f"Session dir: {session_dir}")
 
@@ -121,6 +150,11 @@ async def _run(ticks: int, model: str | None) -> int:
 
 
 def main() -> None:
+    """Check the environment then run the demo, exiting with its code.
+
+    Raises:
+        SystemExit: Carrying the exit code returned by :func:`_run`.
+    """
     _check_env()
     ticks = int(os.environ.get("COORDINATOR_TICKS", "4"))
     model = os.environ.get("CLAUDE_MODEL")  # None → SDK default

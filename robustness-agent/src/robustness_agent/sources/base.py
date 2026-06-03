@@ -37,6 +37,17 @@ log = logging.getLogger(__name__)
 
 
 class HealthState(str, Enum):
+    """Routing state of a single source inside the DegradeRouter.
+
+    Attributes:
+        HEALTHY (str): Source is being consulted normally.
+        DEGRADED (str): Source failed enough times to be skipped; it is
+            reprobed periodically.
+        FAILED (str): Reserved for when the fallback itself is
+            unhealthy and the reactor should report a degraded
+            heartbeat.
+    """
+
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     FAILED = "failed"
@@ -146,7 +157,14 @@ class SourceData:
 
         Used by callers that want to enrich a primary result with extra
         fallback data; M1 does not exercise this path but keeps the
-        helper available for M2 ``signals/*`` evolution.
+        helper available for M2 ``signals/*`` evolution. List/dict slots
+        are only filled from ``other`` when this snapshot's slot is
+        empty, so existing data is never overwritten.
+
+        Args:
+            other (SourceData): The snapshot to merge from. Its
+                ``degraded_reason`` and ``sources_used`` are also folded
+                in when not already present.
         """
         for slot in (
             "session_pods",
@@ -191,12 +209,33 @@ class Source(Protocol):
     name: str
 
     async def fetch(self, ctx: Any) -> SourceData:
-        """Return a snapshot or raise :class:`SourceUnavailable`."""
+        """Return a snapshot or raise :class:`SourceUnavailable`.
+
+        Args:
+            ctx (Any): The per-tick reactor context (clock, shared
+                state, session id, etc.).
+
+        Returns:
+            SourceData: The snapshot collected for this tick.
+
+        Raises:
+            SourceUnavailable: When the backing service is unreachable.
+        """
         ...
 
 
 @dataclass
 class _SourceState:
+    """Mutable per-source bookkeeping tracked by the DegradeRouter.
+
+    Attributes:
+        name (str): The source's name (used in transition logs).
+        state (HealthState): Current routing state of the source.
+        fail_streak (int): Consecutive failure count; reset on success.
+        last_recheck (float): Clock value at the last fetch attempt,
+            used to space out reprobes while DEGRADED.
+    """
+
     name: str
     state: HealthState = HealthState.HEALTHY
     fail_streak: int = 0
@@ -232,6 +271,19 @@ class DegradeRouter:
         recheck_interval_s: float = 30.0,
         clock: Callable[[], float] | None = None,
     ) -> None:
+        """Initialise the router with its primary and fallback sources.
+
+        Args:
+            primary (Source): Source consulted first each tick.
+            fallback (Source): Source used while the primary is
+                DEGRADED.
+            fail_threshold (int): Consecutive primary failures required
+                to mark it DEGRADED; clamped to at least 1.
+            recheck_interval_s (float): Seconds between primary reprobes
+                once DEGRADED; clamped to at least 0.
+            clock (Callable[[], float] | None): Optional time source;
+                defaults to :func:`time.monotonic`.
+        """
         self._primary = primary
         self._fallback = fallback
         self._fail_threshold = max(1, int(fail_threshold))
@@ -244,10 +296,28 @@ class DegradeRouter:
 
     @property
     def primary_state(self) -> HealthState:
+        """Current routing state of the primary source.
+
+        Returns:
+            HealthState: The primary source's :class:`HealthState`.
+        """
         return self._states[self._primary.name].state
 
     async def collect(self, ctx: Any) -> SourceData:
-        """Fetch one tick of source data, with degrade routing."""
+        """Fetch one tick of source data, with degrade routing.
+
+        Tries the primary source when it is HEALTHY (or due for a
+        reprobe) and falls back to the secondary source otherwise or on
+        failure. Records success/failure to drive the state machine.
+
+        Args:
+            ctx (Any): The per-tick reactor context passed to each
+                source's ``fetch``.
+
+        Returns:
+            SourceData: The snapshot from whichever source served the
+            tick, with ``sources_used`` annotated.
+        """
         primary_state = self._states[self._primary.name]
         if self._should_try_primary(primary_state):
             try:
@@ -271,6 +341,22 @@ class DegradeRouter:
         return fallback_data
 
     async def _fetch_fallback(self, ctx: Any) -> SourceData:
+        """Fetch from the fallback source and update its state.
+
+        On :class:`SourceUnavailable` the fallback is marked FAILED and
+        a "both sources unavailable" snapshot is returned; on any other
+        exception an empty degraded snapshot is returned. On success the
+        snapshot is annotated with a degraded reason when the primary is
+        still DEGRADED.
+
+        Args:
+            ctx (Any): The per-tick reactor context passed to the
+                fallback's ``fetch``.
+
+        Returns:
+            SourceData: The fallback snapshot, or a degraded placeholder
+            snapshot when the fallback also fails.
+        """
         fallback_state = self._states[self._fallback.name]
         try:
             data = await self._fallback.fetch(ctx)
@@ -307,6 +393,18 @@ class DegradeRouter:
     # -- state machine helpers ------------------------------------------
 
     def _should_try_primary(self, state: _SourceState) -> bool:
+        """Decide whether the primary should be attempted this tick.
+
+        A HEALTHY source is always tried; a DEGRADED one is only tried
+        once ``recheck_interval_s`` has elapsed since the last attempt
+        (and the recheck clock is advanced when it is).
+
+        Args:
+            state (_SourceState): The primary source's tracked state.
+
+        Returns:
+            bool: ``True`` if the primary should be fetched now.
+        """
         if state.state is HealthState.HEALTHY:
             return True
         now = self._clock()
@@ -316,6 +414,14 @@ class DegradeRouter:
         return False
 
     def _record_success(self, state: _SourceState) -> None:
+        """Mark a source healthy after a successful fetch.
+
+        Resets the failure streak, logs a recovery transition when the
+        source was not already HEALTHY, and advances the recheck clock.
+
+        Args:
+            state (_SourceState): The source state to update in place.
+        """
         if state.state is not HealthState.HEALTHY:
             self._maybe_log_transition(state, HealthState.HEALTHY, "recovered")
             state.state = HealthState.HEALTHY
@@ -323,6 +429,16 @@ class DegradeRouter:
         state.last_recheck = self._clock()
 
     def _record_failure(self, state: _SourceState, reason: str) -> None:
+        """Record a failed fetch and degrade the source past threshold.
+
+        Increments the failure streak and advances the recheck clock;
+        when a HEALTHY source crosses ``fail_threshold`` it transitions
+        to DEGRADED (logged once).
+
+        Args:
+            state (_SourceState): The source state to update in place.
+            reason (str): Human-readable failure reason for the log.
+        """
         state.fail_streak += 1
         state.last_recheck = self._clock()
         if (
@@ -338,6 +454,16 @@ class DegradeRouter:
         target: HealthState,
         reason: str,
     ) -> None:
+        """Emit a single WARN log for a state transition.
+
+        No log is emitted when the source is already in ``target``; the
+        caller is responsible for actually mutating ``state.state``.
+
+        Args:
+            state (_SourceState): The source whose state is changing.
+            target (HealthState): The state being transitioned to.
+            reason (str): Human-readable reason recorded in the log.
+        """
         if state.state is target:
             return
         log.warning(
@@ -365,6 +491,18 @@ async def call_with_timeout(
     Translates :class:`asyncio.TimeoutError` to :class:`SourceUnavailable`
     so DegradeRouter treats it as a counted failure. Other exceptions
     propagate.
+
+    Args:
+        coro_factory (Callable[[], Awaitable[Any]]): Zero-arg callable
+            returning the awaitable to run.
+        timeout_s (float): Maximum seconds to await before timing out.
+        label (str): Label used in the raised error message.
+
+    Returns:
+        Any: The result of awaiting ``coro_factory()``.
+
+    Raises:
+        SourceUnavailable: When the awaited coroutine times out.
     """
     try:
         return await asyncio.wait_for(coro_factory(), timeout=timeout_s)

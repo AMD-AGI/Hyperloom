@@ -62,8 +62,14 @@ except ImportError:  # pragma: no cover — exercised only in IO-only test envs
     def repo_url_for_framework(framework: str) -> str:
         """Return the canonical GitHub repo URL for ``framework``.
 
-        Returns an empty string for unknown frameworks; the caller is
-        expected to bail out / log when this happens.
+        Args:
+            framework (str): Framework name (e.g. ``"sglang"``); matched
+                case-insensitively after stripping.
+
+        Returns:
+            str: The repo URL, or an empty string for unknown frameworks
+                (the caller is expected to bail out / log when this
+                happens).
         """
         return _FRAMEWORK_TO_REPO_URL.get(
             (framework or "").strip().lower(), "",
@@ -82,6 +88,10 @@ def _resolve_fa_binary() -> str | None:
     3. ``$FRAMEWORK_AGENT_ROOT/scripts/fa`` — repo-local fallback for
        sessions that source the repo's runtime env but don't have the
        global ``fa`` symlink on $PATH yet.
+
+    Returns:
+        str | None: The resolved path to the ``fa`` binary, or ``None``
+            when none of the resolution steps locate it.
     """
     explicit = (os.environ.get("FA_BIN") or "").strip()
     if explicit and Path(explicit).exists():
@@ -118,6 +128,17 @@ def _run_fa_subcommand_sync(
     subcommand-agnostic so adding a second wired subcommand later
     (should we ever need to bring ``phase-emit-proposal`` back into
     the Coordinator loop) does not require touching it. Never raises.
+
+    Args:
+        fa_bin (str): Path to the ``fa`` binary to invoke.
+        subcommand (str): The ``fa`` subcommand (e.g. ``"phase-discover"``).
+        request_path (Path): JSON request file passed via ``--request``.
+        timeout_sec (float): Wall-clock timeout for the subprocess.
+
+    Returns:
+        tuple[int, str, str]: ``(returncode, stdout, stderr)``. Spawn or
+            timeout failures are mapped to synthetic ``127`` / ``124``
+            return codes with the reason in stderr.
     """
     cmd = [fa_bin, subcommand, "--request", str(request_path), "--out", "-"]
     try:
@@ -144,9 +165,23 @@ async def _invoke_fa_phase(
 ) -> dict[str, Any]:
     """Generic async runner for ``fa phase-*`` subcommands.
 
-    Writes ``request`` as a temp JSON, runs the subcommand, returns the
-    parsed JSON output. Raises :class:`RuntimeError` on binary missing
-    / non-zero exit / JSON parse failure so callers can degrade.
+    Writes ``request`` as a temp JSON, runs the subcommand off the event
+    loop, returns the parsed JSON output, and cleans up the temp file.
+
+    Args:
+        subcommand (str): The ``fa`` subcommand to run.
+        request (dict[str, Any]): Request payload serialised to the temp
+            JSON file.
+        session_dir (Path): Session directory under which the ``.fa-tmp``
+            scratch dir is created.
+        timeout_sec (float): Wall-clock timeout for the subprocess.
+
+    Returns:
+        dict[str, Any]: The parsed JSON object emitted by the subcommand.
+
+    Raises:
+        RuntimeError: If the ``fa`` binary is missing, the subcommand
+            exits non-zero, or its stdout is not valid JSON.
     """
     fa_bin = _resolve_fa_binary()
     if not fa_bin:
@@ -203,8 +238,29 @@ async def phase_discover(
     ``extract_keywords`` step. Empty / ``None`` preserves the legacy
     behaviour (fa extracts keywords from the gap text).
 
-    Returns the parsed payload from ``fa phase-discover``:
-    ``{batch_id, framework, repo_url, candidates: [...]}``.
+    Args:
+        model (str): Target serving model id.
+        framework (str): Framework name; defaults to ``"sglang"`` when
+            blank and is lowercased for the request.
+        gpu_type (str): GPU type tag forwarded to fa.
+        gaps (list[dict[str, str]]): Gap descriptors fa searches against.
+        session_dir (Path): Session directory for the ``.fa-tmp`` scratch
+            tree.
+        repo_url (str): Explicit repo URL override; falls back to
+            :func:`repo_url_for_framework` when empty.
+        keywords (list[str] | None): Optional explicit keyword override
+            (deduplicated, order-preserving) for the AND-search.
+        max_candidates (int): Max candidate PRs fa should return.
+        batch_id (str): Caller-supplied batch identifier echoed back.
+        timeout_sec (float): Wall-clock timeout for the subcommand.
+
+    Returns:
+        dict[str, Any]: The parsed payload from ``fa phase-discover``:
+            ``{batch_id, framework, repo_url, candidates: [...]}``.
+
+    Raises:
+        RuntimeError: Propagated from :func:`_invoke_fa_phase` on binary
+            missing / non-zero exit / JSON parse failure.
     """
     resolved_repo_url = (repo_url or repo_url_for_framework(framework)).strip()
     request = {
