@@ -123,7 +123,8 @@ installer and the agent use them to wire together the local stack.
 | `REPO_ROOT`        | Always                                             | `$(pwd)` if invoked from the repo root | This Hyperloom checkout. Locates `inference_optimizer/`, `kernel-agent/`, `.env`, skills, scripts.            |
 | `OOB_SRC`          | OOB kernel-opt backends (claude / codex / cursor)  | none                   | Path to the `OOB/` subdirectory of the [Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) clone.            |
 | `INFERENCEX_PATH`  | Baseline comparison, target analysis               | none                   | Path to the [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) repo.                    |
-| `TRACELENS_ROOT`   | Profile & kernel detection                         | `/wekafs/hyperloom/TraceLens-internal` (when present) | Path to a checkout of [TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal) on branch `release/hyperloom_integration_v0.3`. |
+| `TRACELENS_ROOT`   | Profile & kernel detection                         | `/wekafs/hyperloom/TraceLens-internal` | Path to a TraceLens base checkout ([AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens)); the shared cluster checkout is a complete TraceLens. |
+| `TRACELENS_INTERNAL_ROOT` (optional) | Internal extension (roofline gap, MI355+ MAF) | none | Path to your own internal TraceLens extension checkout (internal users only; self-provided). Unset => open-source-only. Hyperloom never clones it. |
 | `USER_DATA_PATH`   | Session artefacts (logs, runs, mirrors, breakdown) | `/workspace/hyperloom` | Writable directory. Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH` variables.    |
 
 > **Migration note.** `WORKSPACE_PATH` and `INFERENCE_OPTIMIZER_SESSION_DIR`

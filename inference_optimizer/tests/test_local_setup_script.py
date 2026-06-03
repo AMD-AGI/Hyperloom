@@ -27,6 +27,7 @@ _HOST_LEAK_VARS = (
     "OOB_SRC",
     "INFERENCEX_PATH",
     "TRACELENS_ROOT",
+    "TRACELENS_INTERNAL_ROOT",
     "SAFE_API_KEY",
     "OPENAI_BASE_URL",
     "CURSOR_API_KEY",
@@ -82,7 +83,6 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
     tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    tracelens_internal = _git_repo(remotes / "TraceLens-internal", {"README.md": "tracelens-internal\n"})
 
     result = _run_local_setup(
         tmp_path,
@@ -91,8 +91,6 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
             "INFERENCEX_REPO": str(inferencex),
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
-            "TRACELENS_INTERNAL_REPO": str(tracelens_internal),
-            "TRACELENS_INTERNAL_REF": "HEAD",
             "SAFE_API_KEY": secret,
         },
     )
@@ -105,9 +103,66 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert f"export OOB_SRC='{tmp_path / 'deps' / 'Primus-Claw' / 'OOB'}'" in env_text
     assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
     assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
-    assert f"export TRACELENS_INTERNAL_ROOT='{tmp_path / 'deps' / 'TraceLens-internal'}'" in env_text
-    assert "export TL_EXTENSION='TraceLens_internal'" in env_text
+    # Default is open-source-only: the internal extension is NOT requested and
+    # must not be cloned, exported, or activated via TL_EXTENSION.
+    assert "TRACELENS_INTERNAL_ROOT" not in env_text
+    assert "TL_EXTENSION" not in env_text
+    assert not (tmp_path / "deps" / "TraceLens-internal").exists()
+    assert "open-source-only" in result.stdout
     assert secret not in env_text
+
+
+def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> None:
+    remotes = tmp_path / "remotes"
+    primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
+    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
+    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
+    # An existing internal checkout provided via TRACELENS_INTERNAL_ROOT opts in.
+    internal_checkout = _git_repo(
+        tmp_path / "existing" / "TraceLens-internal", {"README.md": "internal\n"}
+    )
+
+    result = _run_local_setup(
+        tmp_path,
+        env={
+            "PRIMUS_CLAW_REPO": str(primus),
+            "INFERENCEX_REPO": str(inferencex),
+            "TRACELENS_REPO": str(tracelens_public),
+            "TRACELENS_REF": "HEAD",
+            "TRACELENS_INTERNAL_ROOT": str(internal_checkout),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
+    assert f"export TRACELENS_INTERNAL_ROOT='{internal_checkout}'" in env_text
+    assert "export TL_EXTENSION='TraceLens_internal'" in env_text
+
+
+def test_local_setup_internal_missing_path_falls_back_to_oss_only(tmp_path: Path) -> None:
+    # TRACELENS_INTERNAL_ROOT set to a non-existent path: Hyperloom never clones
+    # internal (no URL kept), so it must warn and fall back to open-source-only.
+    remotes = tmp_path / "remotes"
+    primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
+    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
+    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
+
+    result = _run_local_setup(
+        tmp_path,
+        env={
+            "PRIMUS_CLAW_REPO": str(primus),
+            "INFERENCEX_REPO": str(inferencex),
+            "TRACELENS_REPO": str(tracelens_public),
+            "TRACELENS_REF": "HEAD",
+            "TRACELENS_INTERNAL_ROOT": str(tmp_path / "nope" / "TraceLens-internal"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
+    assert "TRACELENS_INTERNAL_ROOT" not in env_text
+    assert "TL_EXTENSION" not in env_text
+    assert "falling back to open-source-only" in result.stderr
 
 
 def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
@@ -116,7 +171,6 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
     remotes = tmp_path / "remotes"
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
     tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    tracelens_internal = _git_repo(remotes / "TraceLens-internal", {"README.md": "tracelens-internal\n"})
 
     result = _run_local_setup(
         tmp_path,
@@ -125,8 +179,6 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
             "INFERENCEX_REPO": str(inferencex),
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
-            "TRACELENS_INTERNAL_REPO": str(tracelens_internal),
-            "TRACELENS_INTERNAL_REF": "HEAD",
         },
     )
 
@@ -185,5 +237,6 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     assert f"HYPERLOOM_DEPS_ROOT={expected_deps}" in result.stdout
     assert str(expected_deps / "Primus-Claw") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
-    assert str(expected_deps / "TraceLens-internal") in result.stdout
+    # Open-source-only by default: internal extension is not requested/cloned.
+    assert str(expected_deps / "TraceLens-internal") not in result.stdout
     assert "release/hyperloom_integration_v0.5.0" in result.stdout
