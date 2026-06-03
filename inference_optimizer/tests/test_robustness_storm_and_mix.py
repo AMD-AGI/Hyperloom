@@ -131,8 +131,10 @@ def test_coordinator_intervention_hook_records_config_for_explore():
 
 
 def test_coordinator_intervention_hook_skips_explore_with_no_winners():
-    """Explore round with empty winners + no best_variant is a
-    no-keep round; the counter does NOT advance."""
+    """Explore round with empty winners + no best_variant is a no-keep
+    round: the contiguous config-KEEP counter does NOT advance, but B2
+    records a ``config_attempt`` so repeated fruitless config rounds can
+    still drive the intervention-mix ESCALATION toward a code patch."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.task_registry import Task
 
@@ -144,7 +146,10 @@ def test_coordinator_intervention_hook_skips_explore_with_no_winners():
     )
     result = {"status": "succeeded", "winners": [], "best_variant": None}
     c._record_intervention_for_task(task, result)
-    assert c.shared_state.intervention_mix == []
+    # B2: a no-keep config round is recorded as a config_attempt ...
+    assert len(c.shared_state.intervention_mix) == 1
+    assert c.shared_state.intervention_mix[0]["change_type"] == "config_attempt"
+    # ... but the contiguous config-KEEP counter must NOT advance.
     assert c.shared_state.consecutive_config_only_rounds == 0
 
 
@@ -246,11 +251,15 @@ def test_get_intervention_mix_unknown_breaks_consecutive_run():
 # ---------------------------------------------------------------------------
 # 6. Advisory intervention-mix prompt summary
 # ---------------------------------------------------------------------------
-def test_intervention_mix_summary_empty_when_balanced():
+def test_intervention_mix_summary_no_escalation_when_balanced():
     s = SharedState()
     s.record_intervention(change_type="config", action="explore")
     s.record_intervention(change_type="code_patch", action="integrate_patch")
-    assert s.to_intervention_mix_summary() == ""
+    # D3: a code_patch KEEP resets the consecutive-config counter, so the
+    # advisory still renders the counts line but fires no ESCALATION.
+    out = s.to_intervention_mix_summary()
+    assert "code_patch_keeps=1" in out
+    assert "ESCALATION" not in out
 
 
 def test_intervention_mix_summary_fires_on_two_consecutive_config():
@@ -273,5 +282,8 @@ def test_intervention_mix_summary_fires_on_config_heavy():
 def test_intervention_mix_summary_respects_threshold():
     s = SharedState()
     s.record_intervention(change_type="config", action="explore")
-    # One config-only KEEP is below the default threshold of 2.
-    assert s.to_intervention_mix_summary() == ""
+    # D3: one config-only KEEP is below the escalation threshold of 2 —
+    # the counts line renders but no ESCALATION directive fires yet.
+    out = s.to_intervention_mix_summary()
+    assert "config_keeps=1" in out
+    assert "ESCALATION" not in out

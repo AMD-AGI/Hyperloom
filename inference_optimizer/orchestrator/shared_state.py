@@ -368,6 +368,30 @@ class SharedState:
     # After deterministic FP8 GEMM tuning succeeds, continue into source-level
     # kernel_opt by default. Operators can disable this for a GEMM-only run.
     continue_kernel_after_gemm: bool = True
+    # SWEEP-phase post-sweep concurrency sweep. On by default;
+    # operator opts out via ``--no-enable-conc-sweep`` /
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``. When True, the
+    # Coordinator auto-enqueues a ``conc_sweep`` task right after the
+    # SWEEP-entry sweep task lands (see ``_on_sweep_task_completed``);
+    # the executor runs baseline + current_best across the
+    # ``conc_sweep_concs`` ladder bounded by
+    # ``conc_sweep_total_budget_sec`` total wall-clock.
+    conc_sweep_enabled: bool = True
+    # CONC ladder used by the conc_sweep action. Default mirrors
+    # ``orchestrator.conc_sweep.DEFAULT_CONCS``. Empty list short-
+    # circuits the executor with skip_reason=empty_conc_list.
+    conc_sweep_concs: list[int] = field(
+        default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128],
+    )
+    # Total wall-clock budget (seconds) for the whole conc_sweep
+    # action. Default 9000 (~2.5h). 0 disables the gate so the
+    # executor runs every variant until the per-variant timeout
+    # alone caps it.
+    conc_sweep_total_budget_sec: int = 9000
+    # Per-variant Magpie subprocess timeout (seconds). Default 1800
+    # (~30 min). Effective timeout is clamped to the remaining total
+    # budget so the last variant cannot overshoot the deadline.
+    conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
@@ -711,6 +735,11 @@ class SharedState:
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
+    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE can
+    # exit on conc_sweep completion (not only sweep completion). Carries
+    # status / skip_reason / summary so phase_state.exit_normal_sweep
+    # treats succeeded / partial / completed / skipped as terminal.
+    last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Kernel-opt response tracking — Coordinator records the most recent
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
@@ -2598,6 +2627,10 @@ class SharedState:
             summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
+                # TraceLens derive_kernel_category bucket (MoE / LayerNorm /
+                # GEMM / ...). Without this passthrough downstream consumers
+                # (kernel_attempt_summary by_kernel rows) get an empty string.
+                "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
                 "bottleneck": entry.get("bottleneck"),
                 "bound_type": entry.get("bound_type"),
@@ -2775,6 +2808,31 @@ class SharedState:
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
+        }
+
+    def record_conc_sweep(self, result: dict[str, Any]) -> None:
+        """Record conc_sweep task completion (mirrors record_sweep).
+
+        Bug #12 fix: ``phase_state.exit_normal_sweep`` previously only
+        looked at ``last_sweep.status`` to fire ``sweep_done``. When the
+        SWEEP phase reaches its terminal state via conc_sweep alone (e.g.
+        sweep was singleton-blocked or completed in a prior session and
+        only conc_sweep runs in this resume), the phase had no exit
+        signal and idled until ``sweep_budget_exhausted``. Writing
+        ``last_conc_sweep.status`` lets ``exit_normal_sweep`` return
+        ``conc_sweep_done`` and the SWEEP→CLOSE transition fires
+        immediately after conc_sweep settles.
+        """
+        if not isinstance(result, dict):
+            return
+        self.last_conc_sweep = {
+            "ts":               _now_iso(),
+            "status":           str(result.get("status") or "succeeded"),
+            "skip_reason":      str(result.get("skip_reason") or ""),
+            "was_skipped":      bool(result.get("was_skipped", False)),
+            "budget_exhausted": bool(result.get("budget_exhausted", False)),
+            "summary":          dict(result.get("summary") or {}),
+            "workspace":        str(result.get("workspace") or ""),
         }
 
     # ------------------------------------------------------------------
@@ -3043,31 +3101,6 @@ class SharedState:
             "config_heavy": total_config >= recent_window and total_code_patch == 0,
         }
 
-    def to_intervention_mix_summary(
-        self, *, consecutive_threshold: int = 2,
-    ) -> str:
-        """Advisory prompt block nudging the next EXPLORE round toward a
-        code-patch specialist when config tweaks have dominated.
-
-        Returns an empty string when the mix is balanced (so the prompt
-        section is skipped). Advisory only — never gates a round.
-        """
-        mix = self.get_intervention_mix()
-        consecutive = int(mix.get("consecutive_config_only") or 0)
-        config_heavy = bool(mix.get("config_heavy"))
-        if consecutive < consecutive_threshold and not config_heavy:
-            return ""
-        lines = [
-            f"Recent KEEPs are config-only "
-            f"(consecutive config-only={consecutive}, "
-            f"total config={mix.get('total_config')}, "
-            f"total code-patch={mix.get('total_code_patch')}).",
-            "Consider dispatching a specialist that authors a source "
-            "patch next round so exploration reaches the code surface, "
-            "not just server args / envs.",
-        ]
-        return "\n".join(lines)
-
     def bump_specialist_dispatched(self, n: int = 1) -> int:
         """PR-A8: increment the per-EXPLORE specialist dispatch counter.
 
@@ -3218,6 +3251,64 @@ class SharedState:
             ),
             "consecutive_reverts": int(dt.get("consecutive_reverts") or 0),
         }
+
+    def to_intervention_mix_summary(self) -> str:
+        """PR-A8 / D3 (Arbor-into-Hyperloom): render the config-vs-code_patch
+        intervention ledger for the Orchestration per-tick prompt.
+
+        Returns ``""`` when the ledger is empty (nothing recorded yet — no
+        escalation possible). Otherwise returns a one-line counts summary,
+        plus an ``ESCALATION`` directive when the session has been
+        config-only for too long, nudging Orchestration to dispatch a
+        code-patch ``serving_specialist`` next (Arbor's "do not settle for
+        config-only" rule). ``record_intervention`` maintains the ledger;
+        this is its sole consumer.
+
+        Thresholds mirror Arbor's ``get_intervention_mix`` heuristics:
+        escalate when ``consecutive_config_only_rounds >= 2`` OR the ledger
+        is config-heavy (>= 5 config keeps) with zero code_patch keeps.
+        """
+        mix = self.intervention_mix or []
+        if not mix:
+            return ""
+        escalate_at = 2
+        config_heavy_at = 5
+        n_config = sum(
+            1 for m in mix if (m or {}).get("change_type") == "config"
+        )
+        n_patch = sum(
+            1 for m in mix if (m or {}).get("change_type") == "code_patch"
+        )
+        # B2: config explore rounds that produced measurements but KEPT
+        # nothing (all REVERT / KEEP_UNSTABLE) are recorded as
+        # ``config_attempt``. They count toward the escalation signal so
+        # repeated fruitless config tuning escalates to a code-patch
+        # ``integrate_patch`` even when the MI300X noise floor prevents
+        # any config KEEP (the failure mode that left this loop spinning).
+        n_config_attempt = sum(
+            1 for m in mix if (m or {}).get("change_type") == "config_attempt"
+        )
+        consec = int(self.consecutive_config_only_rounds or 0)
+        config_pressure = n_config + n_config_attempt
+        lines = [
+            f"config_keeps={n_config} config_attempts={n_config_attempt} "
+            f"code_patch_keeps={n_patch} "
+            f"consecutive_config_only_rounds={consec}"
+        ]
+        if (
+            consec >= escalate_at
+            or (n_config >= config_heavy_at and n_patch == 0)
+            or (config_pressure >= escalate_at and n_patch == 0)
+        ):
+            lines.append(
+                "ESCALATION: config-only for too long. Config tuning has a "
+                "low ceiling — your NEXT EXPLORE dispatch SHOULD delegate a "
+                "`serving_specialist` to author a framework SOURCE patch "
+                "(scheduler / kv_cache / chunked-prefill), integrated via "
+                "`integrate_patch`, rather than another config-only "
+                "`params` / `explore` round."
+            )
+        return "\n".join(lines)
 
     def record_dynamic_action_dispatch(
         self, dyn_id: str, summary: dict[str, Any],

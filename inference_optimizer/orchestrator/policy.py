@@ -192,6 +192,7 @@ EXPLORE_ACTION_NAME: str = "explore"
 # Coordinator's auto-enqueue already landed one in SWEEP phase) has
 # a single source of truth.  See _validate_sweep_singleton.
 SWEEP_ACTION_NAME: str = "sweep"
+CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 
 # Specialist / Explore parallelism caps — single source of truth
 # imported by cli.py, specialist_runner.py, specialist_prompt_builder.py,
@@ -953,6 +954,11 @@ class PolicyGate:
         # vllm engines on init; see _validate_sweep_singleton.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
+        # conc_sweep_phase_singleton (Bug #11): block duplicate
+        # conc_sweep proposals once Coordinator's post-sweep hook
+        # already dispatched one; see _validate_conc_sweep_singleton.
+        if action_name == CONC_SWEEP_ACTION_NAME:
+            self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
         # Same explore-minimum gate applies at the delegate channel so
         # kernel_opt cannot bypass it by skipping propose_action.
         self._validate_fp8_only_action(action_name, intent_kind="delegate")
@@ -1043,8 +1049,19 @@ class PolicyGate:
             self._validate_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
-        # Mirror the explore-grid fan-out cap on the propose channel so
-        # the advisory path cannot sidestep the per-round specialist cap.
+        # conc_sweep_phase_singleton (Bug #11) on propose_action.
+        if action_name == CONC_SWEEP_ACTION_NAME:
+            self._validate_conc_sweep_singleton(
+                payload, intent_kind="propose_action",
+            )
+        # PR-A9 + explore_specialist_grid_max_one — same explore-grid
+        # gates as the delegate channel. Without these, an LLM that
+        # cannot delegate{action_name='explore', ...} (e.g. wrong role
+        # or phase guard fires first) can still propose_action an
+        # explore grid full of llm_direct or many specialist:* variants
+        # and have the Coordinator materialise it. Mirror both rules
+        # here so the propose advisory path can never sidestep PR-A9
+        # or the new per-round specialist cap.
         if action_name == EXPLORE_ACTION_NAME:
             self._validate_explore_grid_size(payload)
         self._validate_fp8_only_action(action_name, intent_kind="propose_action")
@@ -1771,6 +1788,61 @@ class PolicyGate:
                 f"set params.bypass_sweep_singleton=True on the "
                 f"{intent_kind} payload (the override is recorded "
                 f"on the audit trail)."
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # ``conc_sweep_phase_singleton`` (Bug #11)
+    # ------------------------------------------------------------------
+    def _validate_conc_sweep_singleton(
+        self, payload: dict[str, Any], *, intent_kind: str,
+    ) -> None:
+        """Enforce one conc_sweep per SWEEP phase.
+
+        Mirrors :meth:`_validate_sweep_singleton`. Coordinator's post-
+        sweep hook (or SWEEP-entry hook when sweep is already covered)
+        stamps ``evidence.auto_conc_sweep_task_id``. Re-proposals here
+        are denied: every conc_sweep runs the same baseline + current_
+        best ladder, so a second run yields no new data but burns
+        another 30–150 minutes of GPU. Without this rule orchestration
+        loops re-proposing conc_sweep (the only non-sweep, non-recover
+        action allowed in SWEEP) until budget exhausts.
+
+        Operator escape hatch: ``params.bypass_conc_sweep_singleton=True``.
+        """
+        params = payload.get("params") or {}
+        if isinstance(params, dict) and params.get("bypass_conc_sweep_singleton"):
+            return
+        ss = getattr(self, "shared_state", None)
+        if ss is None:
+            return
+        history = getattr(ss, "phase_history", None) or []
+        if not history:
+            return
+        latest = history[-1]
+        if not isinstance(latest, dict):
+            return
+        if str(latest.get("to_phase") or "").strip() != PHASE_SWEEP:
+            return
+        evidence = latest.get("evidence")
+        if not isinstance(evidence, dict):
+            return
+        auto_id = str(evidence.get("auto_conc_sweep_task_id") or "").strip()
+        if not auto_id:
+            return
+        raise PolicyDenied(
+            f"conc_sweep: SWEEP phase already has an auto-enqueued "
+            f"conc_sweep task (auto_conc_sweep_task_id={auto_id!r}); "
+            f"duplicate runs reproduce the same baseline + current_best "
+            f"comparison and add no new data while burning 30-150 min "
+            f"of GPU time.",
+            rule="conc_sweep_phase_singleton",
+            hint=(
+                "Coordinator's post-sweep hook already dispatched "
+                "conc_sweep — wait for SWEEP→CLOSE. If you need a "
+                "second run for debug, set "
+                f"params.bypass_conc_sweep_singleton=True on the "
+                f"{intent_kind} payload (recorded on the audit trail)."
             ),
         )
 

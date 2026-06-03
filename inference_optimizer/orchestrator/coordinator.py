@@ -3257,6 +3257,65 @@ class Coordinator:
     # ------------------------------------------------------------------
     # v0.8 §3.2 §5.4 + SWEEP phase auto-dispatch
     # ------------------------------------------------------------------
+    async def _drain_pending_keep_integrates(self) -> None:
+        """Bug #7: drain pending KEEP integrates inherited from KERNEL.
+
+        KERNEL→SWEEP transition is a hard budget cap; an orchestration
+        tick window between a kernel's final KEEP and ``kernel_phase_
+        budget_exhausted`` is often too short to propose+approve+run
+        ``integrate``. The KEEP then strands in the ``kernel_opt_attempts``
+        ledger with no path to land (SWEEP allowed set is {sweep,
+        conc_sweep, recover}; ``integrate`` is denied by phase_incompatible).
+        Downstream sweep / conc_sweep then measure the explore-only
+        current_best and the kernel's E2E contribution never reaches
+        the optimization_stack.
+
+        Mitigation: at SWEEP entry, walk
+        ``SharedState.next_pending_keep_kernel_id`` until empty, calling
+        ``integrate_handler`` directly. Each integrate runs an actual
+        E2E re-baseline (5-20 min) so this can delay SWEEP entry; that
+        is acceptable vs hours of GPU idled in singleton-blocked SWEEP
+        loops. Safety cap of 10 KEEPs guards against pathological queue
+        sizes; failures push the kernel into ``rejected_kernel_ids`` so
+        the queue cannot deadlock.
+        """
+        from .kernel_request_handlers import integrate_handler
+        state = self.shared_state
+        drained = 0
+        max_drain = 10
+        while drained < max_drain:
+            kid = state.next_pending_keep_kernel_id()
+            if not kid:
+                break
+            log.info(
+                "SWEEP entry: draining pending KEEP integrate for "
+                "kernel_id=%s (drained %d so far)", kid, drained,
+            )
+            try:
+                await integrate_handler(
+                    {"kernel_id": kid, "base_tput": float(state.baseline_tput or 0.0)},
+                    session_dir=self.session_dir,
+                )
+                state.save(self.session_dir)
+            except Exception as exc:  # noqa: BLE001 — never block SWEEP entry
+                log.exception(
+                    "SWEEP entry: integrate(%s) raised %r; marking "
+                    "rejected to prevent drain loop deadlock", kid, exc,
+                )
+                if state.rejected_kernel_ids is None:
+                    state.rejected_kernel_ids = []
+                if kid not in state.rejected_kernel_ids:
+                    state.rejected_kernel_ids.append(kid)
+                state.save(self.session_dir)
+            drained += 1
+        if drained >= max_drain:
+            log.warning(
+                "SWEEP entry: drain cap (%d) reached; remaining pending "
+                "KEEPs will be visible in summary.by_kernel as KEEP_PENDING",
+                max_drain,
+            )
+
+    # ------------------------------------------------------------------
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue a ``sweep`` task on SWEEP entry.
 
@@ -3294,6 +3353,11 @@ class Coordinator:
         the LLM intent payload.
         """
         state = self.shared_state
+        # Bug #7 fix: drain pending KEEP integrates from prior KERNEL
+        # phase so sweep / conc_sweep measure the full current_best
+        # (explore + kernel stack), not the explore-only baseline.
+        if getattr(state, "has_keep_pending_integrate", False):
+            await self._drain_pending_keep_integrates()
         try:
             task = await self._enqueue_internal_sweep_task(
                 reason="phase_entry",
@@ -3326,6 +3390,74 @@ class Coordinator:
             auto_sweep_grid_source=grid_source,
             auto_sweep_combos=combos,
         )
+
+    async def _enqueue_internal_conc_sweep_task(
+        self, *, reason: str,
+    ) -> Task | None:
+        """Build + enqueue a Coordinator-internal ``conc_sweep`` task.
+
+        Mirrors :meth:`_enqueue_internal_sweep_task` but emits the
+        SWEEP-phase ``conc_sweep`` action (baseline + current_best
+        across a CONC ladder, see
+        ``orchestrator/conc_sweep.py``). Off by default — the caller
+        (typically the sweep-completion hook) must check
+        ``shared_state.conc_sweep_enabled`` first; this method does
+        NOT re-check the flag, so callers wanting to dispatch
+        unconditionally (operator-driven resume scenarios) can do so.
+
+        Idempotency key: ``internal-conc_sweep-<reason>``. PolicyGate's
+        action-singleton rule plus this key together ensure at most
+        one conc_sweep task lands per SWEEP phase.
+
+        Returns the freshly-created (or returned-existing) Task; the
+        caller logs the task_id. Returns None and logs an error if
+        creation raised — conc_sweep is post-sweep gravy, never fatal.
+        """
+        state = self.shared_state
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            "concs": list(state.conc_sweep_concs or []),
+            "variant_timeout_sec": int(state.conc_sweep_variant_timeout_sec or 0),
+            "total_budget_sec":    int(state.conc_sweep_total_budget_sec or 0),
+        }
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="conc_sweep",
+                params=params,
+                idempotency_key=f"internal-conc_sweep-{reason}",
+                # Conc_sweep can run for hours (default 2.5h, up to
+                # ``total_budget_sec``); lease_ttl matches so the lease
+                # doesn't expire mid-flight. Coordinator's existing
+                # lease-extension heartbeats keep it alive if a
+                # variant overshoots.
+                lease_ttl_sec=int(state.conc_sweep_total_budget_sec or 9000),
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception(
+                "conc_sweep: failed to enqueue internal task: %r", exc,
+            )
+            return None
+        if was_existing:
+            log.info(
+                "internal-conc_sweep task already exists (idempotent: "
+                "task_id=%s, state=%s)", task.task_id, task.state,
+            )
+        else:
+            log.info(
+                "internal-conc_sweep task enqueued (task_id=%s reason=%s "
+                "concs=%s total_budget_sec=%s)",
+                task.task_id, reason,
+                params["concs"], params["total_budget_sec"],
+            )
+        # Bug #11 fix: stamp evidence so PolicyGate's
+        # ``conc_sweep_phase_singleton`` rule can deny subsequent
+        # LLM-emitted conc_sweep proposals in the same SWEEP phase.
+        # Without this, orchestration loops re-proposing conc_sweep
+        # (sweep is singleton-blocked, only conc_sweep is allowed)
+        # until SWEEP budget exhausts.
+        self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
+        return task
 
     async def _enqueue_internal_sweep_task(
         self, *, reason: str,
@@ -4865,6 +4997,20 @@ class Coordinator:
             if priors_block:
                 sections.append("=== Priors-match (advisory ordering) ===")
                 sections.append(priors_block)
+
+            # PR-A8 / D3 (Arbor-into-Hyperloom): surface the intervention-mix
+            # ledger so Orchestration escalates to a code-patch specialist
+            # when it has been config-only for too long (Arbor's "do not
+            # settle for config-only" rule). ``record_intervention`` maintains
+            # the ledger + counter; this block is its consumer.
+            try:
+                mix_block = self.shared_state.to_intervention_mix_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: intervention_mix_summary failed")
+                mix_block = ""
+            if mix_block:
+                sections.append("=== Intervention mix (config vs code_patch) ===")
+                sections.append(mix_block)
 
         # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
@@ -8590,6 +8736,18 @@ class Coordinator:
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
             )
+        # B3 (auto-apply unlock): if this specialist authored source
+        # patches, push them to the Critic now so the integrate_patch
+        # gate can pass and the patch actually reaches the serving GPU.
+        try:
+            await self._maybe_autosubmit_specialist_patches(
+                task=task, done_payload=done_payload,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "B3: specialist patch autosubmit failed for task=%s",
+                task.task_id,
+            )
 
     def _target_gap_advisory_block(self) -> str:
         """Build the advisory "External target gap" prompt block.
@@ -8799,6 +8957,127 @@ class Coordinator:
                     except (TypeError, ValueError):
                         pass
         return out
+
+    async def _maybe_autosubmit_specialist_patches(
+        self, *, task: "Task", done_payload: dict[str, Any],
+    ) -> None:
+        """B3 (Arbor-into-Hyperloom follow-up): auto-surface a specialist's
+        source patches to the Critic.
+
+        When a specialist writes ``patches_written`` into its worktree, push
+        a synthetic ``integrate_patch`` proposal onto the bus. The Critic
+        reviews it and — on approve — ``_handle_single_verdict`` both mirrors
+        the verdict onto ``SharedState.specialist_patch_verdicts`` (so
+        PolicyGate's ``integrate_patch_requires_critic_verdict`` gate passes)
+        and calls ``_materialize_approved_proposal`` to queue the
+        integrate_patch task. Mirrors the dynamic_action critic-dispatch
+        pattern (see ``_dispatch_dynamic_patch_to_critic``).
+
+        Without this, source patches sit unreviewed in the worktree forever:
+        the Critic only ever reviews ``explore`` variants, so the gate keeps
+        denying every integrate_patch delegate and config tuning spins with
+        no path to a code patch.
+
+        Idempotent: skips when a verdict for this specialist is already on
+        record (resume / re-entry) or a pending integrate_patch proposal for
+        the same ``specialist_task_id`` is already awaiting the Critic.
+        """
+        patches = done_payload.get("patches_written") or []
+        if not isinstance(patches, list) or not patches:
+            return
+        sid = str(task.task_id or "").strip()
+        if not sid:
+            return
+        # B4 guard: never submit a patch set that does not exist on disk.
+        # ``patches_written`` may carry a dangling claim (worktree never
+        # materialised / agent reported a path it never wrote). Resolve each
+        # against the specialist worktree + workspace; only submit when at
+        # least one real file is found, otherwise integrate_patch would apply
+        # nothing. The runner's _finalize already validates for the dispatch
+        # path; this re-checks the intent-routing (defense-in-depth) path too.
+        from ..session_paths import runs_dir as _runs_dir
+        resolve_bases: list[Path] = []
+        if self.session_dir is not None:
+            spec_root = _runs_dir(Path(self.session_dir), "specialist", sid)
+            resolve_bases = [spec_root / "worktree", spec_root]
+        existing_patches: list[str] = []
+        for p in patches:
+            raw = Path(str(p))
+            cands = [raw] if raw.is_absolute() else []
+            for base in resolve_bases:
+                cands.append(base / raw)
+            if any(c.is_file() for c in cands):
+                existing_patches.append(str(p))
+        if not existing_patches:
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind": "specialist_patch_autosubmit_skipped_no_files",
+                    "specialist_task_id": sid,
+                    "claimed": [str(x) for x in patches][:8],
+                },
+            )
+            return
+        # Already ruled on by the Critic (e.g. after resume) — nothing to do.
+        try:
+            if self.shared_state.get_specialist_patch_verdict(sid):
+                return
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+        # A synthetic review for this specialist is already in flight.
+        for p in self.state.pending_proposals.values():
+            try:
+                if getattr(p, "action_name", "") != "integrate_patch":
+                    continue
+                pl = getattr(p, "payload", {}) or {}
+                if (pl.get("params") or {}).get("specialist_task_id") == sid:
+                    return
+            except Exception:  # noqa: BLE001 — defensive
+                continue
+        proposals = done_payload.get("proposal_set") or []
+        patch_name = ""
+        if isinstance(proposals, list) and proposals:
+            patch_name = str((proposals[0] or {}).get("name") or "")
+        propose_payload = {
+            "action_name": "integrate_patch",
+            "provenance": "specialist",
+            "predicted_gain_pct": 0.0,
+            "params": {
+                "specialist_task_id": sid,
+                "provenance": "specialist",
+                "patch_name": patch_name,
+            },
+        }
+        msg = Message.new(
+            "coordinator", "*", "proposal",
+            {**propose_payload, "needs_review": True},
+            priority=1,
+        )
+        await self.bus.append_and_seq(msg)
+        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+            proposal_msg_id=msg.msg_id,
+            from_agent="coordinator",
+            action_name="integrate_patch",
+            predicted_gain_pct=0.0,
+            payload=dict(propose_payload),
+        )
+        await self._record_observation(
+            "coordinator", "observation",
+            {
+                "kind": "specialist_patch_autosubmitted_for_review",
+                "specialist_task_id": sid,
+                "proposal_msg_id": msg.msg_id,
+                "patch_name": patch_name,
+                "patches": [str(x) for x in patches][:8],
+            },
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "B3: save after specialist patch autosubmit failed for "
+                "task=%s", sid,
+            )
 
     async def _route_steward_verdict(
         self, *, task: "Task", done_payload: dict[str, Any],
@@ -9718,6 +9997,20 @@ class Coordinator:
             winners = result.get("winners") or []
             best = result.get("best_variant")
             if not winners and not best:
+                # B2: a config explore round that produced measurements but
+                # KEPT nothing (all REVERT / KEEP_UNSTABLE) still counts as a
+                # config-only *attempt*. Record it so the intervention-mix
+                # ESCALATION can fire on repeated config attempts even when
+                # the noise floor prevents any config KEEP — otherwise the
+                # "do not settle for config-only" nudge never reaches the
+                # Orchestration prompt and the loop never escalates to a
+                # code-patch ``integrate_patch``.
+                self.shared_state.record_intervention(
+                    change_type="config_attempt",
+                    action="explore",
+                    task_id=task.task_id,
+                    delta_pct=None,
+                )
                 return
             delta_pct = None
             if isinstance(best, dict):
@@ -12139,6 +12432,55 @@ class Coordinator:
             # ``plateau_explore`` for no good reason. The streak field
             # is owned by the ``params`` action lifecycle; sweep MUST
             # NOT mutate it.
+            self.shared_state.save(self.session_dir)
+            # SWEEP-phase post-hook: chain ``conc_sweep`` after a
+            # succeeded sweep when the operator opted in via
+            # ``--enable-conc-sweep``. Wrapped in best-effort because
+            # the post-sweep concurrency comparison is non-critical
+            # (the session has already produced a validated
+            # current_best); failure to enqueue must not block the
+            # SWEEP→CLOSE transition.
+            if getattr(self.shared_state, "conc_sweep_enabled", False) and \
+                    result.get("status") == "succeeded":
+                try:
+                    await self._enqueue_internal_conc_sweep_task(
+                        reason="post_sweep",
+                    )
+                except Exception:  # noqa: BLE001 — never block SWEEP->CLOSE
+                    log.exception(
+                        "conc_sweep: post-sweep enqueue raised (non-fatal)"
+                    )
+            return
+        elif task_kind == "conc_sweep":
+            self.shared_state.record_action_attempt(
+                action="conc_sweep",
+                task_id=getattr(task, "task_id", "") if task is not None else "",
+                status=str(result.get("status") or "succeeded"),
+                decision="discarded",
+                result=result,
+                extras={
+                    "was_skipped":      bool(result.get("was_skipped", False)),
+                    "skip_reason":      result.get("skip_reason"),
+                    "budget_exhausted": bool(result.get("budget_exhausted", False)),
+                    "total_budget_sec": result.get("total_budget_sec"),
+                    "elapsed_sec":      result.get("elapsed_sec"),
+                    "best_speedup":     (
+                        (result.get("summary") or {}).get("best_speedup")
+                    ),
+                    "best_conc":        (
+                        (result.get("summary") or {}).get("best_conc")
+                    ),
+                    "successful_pairs": (
+                        (result.get("summary") or {}).get("successful_pairs")
+                    ),
+                    "report_path":      result.get("report_json_path"),
+                },
+            )
+            # Bug #12 fix: write last_conc_sweep so
+            # ``phase_state.exit_normal_sweep`` can fire ``conc_sweep_done``
+            # and SWEEP→CLOSE transitions without waiting for budget
+            # exhaustion.
+            self.shared_state.record_conc_sweep(result)
             self.shared_state.save(self.session_dir)
             return
         # Audit trail (kernel-parity) for the 6 non-kernel actions: one

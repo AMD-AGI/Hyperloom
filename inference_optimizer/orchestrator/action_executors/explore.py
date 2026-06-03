@@ -93,7 +93,6 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 # evicted.
 DEFAULT_STACK_STABLE_PCT = 0.5
 
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
