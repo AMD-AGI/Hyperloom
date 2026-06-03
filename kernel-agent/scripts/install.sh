@@ -70,12 +70,14 @@ _resolve_magpie_python() {
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
-# TraceLens requires two editable installs (see README Local Mode step 1):
-#   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (public: skills, patches, CLI, analysis orchestrator)
+# TraceLens base repo is required; the internal extension is OPTIONAL.
+#   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
 #   2. AMD-AGI/TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (internal: rehydration module)
-TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
-TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"
-TRACELENS_INSTALL_INTERNAL="${TRACELENS_INSTALL_INTERNAL:-1}"
+# Default base points at the shared cluster checkout (a complete TraceLens).
+# The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
+# (env / .env); leave it unset for the base-only report. No separate toggle.
+TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirrors when source roots are on a read-only mount (e.g. /wekafs/...).
 TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
@@ -640,17 +642,17 @@ _pip_install_editable() {
   return 0
 }
 
+# Internal extension is opt-in: enabled iff $TRACELENS_INTERNAL_ROOT is set.
 _tracelens_internal_enabled() {
-  [ "${TRACELENS_INSTALL_INTERNAL:-1}" != "0" ]
+  [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]
 }
 
 ensure_tracelens() {
   if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens" ]; then
     TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens"
   fi
-  if [ ! -d "$TRACELENS_INTERNAL_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens-internal" ]; then
-    TRACELENS_INTERNAL_ROOT="${HYPERLOOM_BUNDLE}/TraceLens-internal"
-  fi
+  # Internal extension is opt-in via TRACELENS_INTERNAL_ROOT only; no implicit
+  # bundle/default path is probed (keeps internal location out of this repo).
 
   if [ ! -d "$TRACELENS_ROOT" ]; then
     if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
@@ -680,18 +682,17 @@ ensure_tracelens() {
   }
 
   if ! _tracelens_internal_enabled; then
-    log "TraceLens-internal: skipped (TRACELENS_INSTALL_INTERNAL=${TRACELENS_INSTALL_INTERNAL})"
+    log "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)"
     TRACELENS_INTERNAL_ROOT=""
     export TRACELENS_ROOT
     return 0
   fi
 
   if [ ! -d "$TRACELENS_INTERNAL_ROOT" ]; then
-    if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
-      warn "TraceLens-internal root not found: $TRACELENS_INTERNAL_ROOT"
-      return
-    fi
-    die "TraceLens-internal root not found: $TRACELENS_INTERNAL_ROOT"
+    warn "TRACELENS_INTERNAL_ROOT set but not found: $TRACELENS_INTERNAL_ROOT; falling back to open-source-only (provide an existing internal checkout to enable)"
+    TRACELENS_INTERNAL_ROOT=""
+    export TRACELENS_ROOT
+    return 0
   fi
   # Read-only source guard (mirrors the OOB cp -r pattern). When
   # $TRACELENS_INTERNAL_ROOT is on a read-only mount (the WekaFS default), pip
@@ -732,7 +733,7 @@ ensure_tracelens() {
       TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
       log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens + TraceLens-internal)"
+      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens, plus TraceLens-internal if TRACELENS_INTERNAL_ROOT is set)"
     fi
   fi
 }
@@ -1176,8 +1177,7 @@ write_env_file() {
     # kernel-agent/tools/tracelens_analysis.py inherit the writable
     # mirrors instead of falling back to the read-only /wekafs defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
-    echo "export TRACELENS_INSTALL_INTERNAL='${TRACELENS_INSTALL_INTERNAL}'"
-    if _tracelens_internal_enabled && [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+    if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
       echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
       echo "export TL_EXTENSION='TraceLens_internal'"
     fi
