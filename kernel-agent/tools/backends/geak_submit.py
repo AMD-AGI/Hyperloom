@@ -260,6 +260,11 @@ def submit(prompt_file: Path, output_dir: Path, kernel_path: str = "",
     if prefer_ray:
         try:
             import ray  # noqa: F401
+            # Don't burn 30 s of ray.init retries on a wedged cluster. If
+            # `ray status` fails, ``ensure_ray_cluster`` will start a fresh
+            # head node here (safe no-op when the cluster is already healthy).
+            ensure_ray_cluster(num_gpus=num_gpus,
+                               log_path=output_dir / "ray_lifecycle.log")
             return run_via_ray(prompt_file, output_dir, kernel_path, cost_limit,
                                num_gpus, timeout_s, kernel_repo=kernel_repo,
                                test_command=test_command)
@@ -267,7 +272,11 @@ def submit(prompt_file: Path, output_dir: Path, kernel_path: str = "",
             return {
                 "returncode": 1,
                 "stdout_tail": "",
-                "stderr_tail": f"ray submission failed: {type(exc).__name__}: {exc}",
+                "stderr_tail": (
+                    f"ray submission failed: {type(exc).__name__}: {exc}\n"
+                    f"hint: check `ray status` in container; raylet zombie symptom is "
+                    f"`global_state_accessor.cc:500 ... retrying ... 'ray start' on this node'`."
+                ),
                 "gpu_ids": "",
                 "elapsed_s": 0.0,
                 "cmd": [],

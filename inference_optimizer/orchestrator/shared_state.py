@@ -13,7 +13,11 @@ fields:
     session_id          str   — set by Coordinator at session creation
     model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"
     model_path          str   — local NFS path to weights
-    model_class         str   — set by `classify` action
+    model_class         str   — categorical key supplied via --model-class
+    model_arch          dict  — advisory architecture profile (hybrid
+                                structured + free-text notes) loaded from
+                                the launcher's ``$USER_DATA_PATH/model_arch.json``;
+                                prompt-context only, no deterministic gating
     target_summary      str   — set by `target_analysis` action
     baseline_tput       float — tok/s/GPU after `baseline` action
     baseline_accuracy   float — GSM8K score after `baseline`
@@ -27,7 +31,7 @@ fields:
     max_minutes         int   — wall-clock budget (0 = unlimited)
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
-                                `select_kernels` REQUEST `trace_input` param
+                                `trace_analyze` REQUEST `trace_input` param
 """
 
 from __future__ import annotations
@@ -50,6 +54,48 @@ from typing import Any
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+# Ordered (key, label) projection for the advisory ``model_arch`` profile.
+# ``notes`` is rendered last as a free-text trailer. Keys absent / empty /
+# ``None`` are dropped so the rendered block stays compact and only
+# surfaces fields the launcher actually populated.
+_MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("decoder_type", "decoder"),
+    ("attention", "attention"),
+    ("layer_mix", "layers"),
+    ("kv_cache_per_token", "kv/token"),
+    ("active_params", "params"),
+    ("num_experts", "experts"),
+    ("experts_per_tok", "experts/tok"),
+    ("mtp", "mtp"),
+    ("swa_window", "swa_window"),
+    ("norm", "norm"),
+)
+
+
+def render_model_arch_compact(arch: dict | None) -> str:
+    """Render the advisory ``model_arch`` profile as a single compact line.
+
+    Returns ``""`` when ``arch`` is empty / not a dict so callers can omit
+    the prompt block entirely. Structured fields render as
+    ``decoder=Sparse MoE; attention=MLA; ...`` followed by an optional
+    ``notes=<free text>`` trailer. Empty / ``None`` field values are
+    dropped. This is the single source of truth shared by the
+    orchestration prompt summary and the specialist ``arch_notes`` carrier.
+    """
+    if not isinstance(arch, dict) or not arch:
+        return ""
+    parts: list[str] = []
+    for key, label in _MODEL_ARCH_STRUCTURED_FIELDS:
+        val = arch.get(key)
+        if val is None or val == "":
+            continue
+        parts.append(f"{label}={val}")
+    notes = str(arch.get("notes") or "").strip()
+    if notes:
+        parts.append(f"notes={notes}")
+    return "; ".join(parts)
 
 
 # Default partial-attempt cap for run_optimization. kernel_opt is an
@@ -94,6 +140,14 @@ _DEFAULT_LAST_FAILURES = 10
 # loops, which we'd want surfaced as a warning anyway. Cap is enforced
 # in :meth:`SharedState.record_phase_transition`.
 _PHASE_HISTORY_CAP = 100
+
+# roofline_snapshots history cap. PRELUDE bootstrap writes #1; every
+# +10% watermark crossing writes a refresh. Even a pathological run
+# with 50 watermark crossings would stay well under this cap; the
+# limit only exists to prevent unbounded state.json growth if the
+# refresh policy ever loosens. Cap is enforced in
+# :meth:`SharedState.record_trace_analyze`.
+_ROOFLINE_SNAPSHOTS_CAP = 50
 
 # gap ledger caps. ``_GAPS_MAX_ENTRIES`` bounds the
 # total list so a pathological session can't blow up state.json;
@@ -143,6 +197,48 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 LATEST_STATE_SCHEMA_VERSION: int = 2
 
 
+# The payload-surface field was renamed from ``extra_sglang_args``
+# (sglang-era name) to ``extra_server_args`` (framework-neutral).
+# The on-disk state.json may carry the legacy key in any of several
+# deeply-nested ledgers, so a one-shot walk-and-rewrite on load is
+# the cleanest migration — the next save then emits canonical only
+# and a re-load is a no-op.
+_PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
+    "extra_sglang_args":           "extra_server_args",
+    "candidate_extra_sglang_args": "candidate_extra_server_args",
+}
+
+
+def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
+    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place.
+
+    Walks every dict and list reachable from ``obj`` and renames keys
+    listed in :data:`_PHASE4_LEGACY_KEY_RENAMES` to their canonical
+    counterparts. When both names are present on the same dict the
+    canonical value is kept (writer migration is considered done as
+    soon as the new key appears); otherwise the legacy value is
+    copied over.
+
+    Returns the total number of keys rewritten so the caller can log
+    a single info-level migration event.
+    """
+    migrated = 0
+    if isinstance(obj, dict):
+        for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
+            if legacy_key in obj:
+                if canonical_key not in obj:
+                    obj[canonical_key] = obj.pop(legacy_key)
+                else:
+                    del obj[legacy_key]
+                migrated += 1
+        for v in obj.values():
+            migrated += _migrate_legacy_extra_sglang_args_keys(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            migrated += _migrate_legacy_extra_sglang_args_keys(item)
+    return migrated
+
+
 @dataclass
 class TraceAnalyzeSnapshot:
     """Reference shape for ``SharedState.last_trace_analyze``.
@@ -158,7 +254,9 @@ class TraceAnalyzeSnapshot:
 
     trace_input: str = ""
     candidates_path: str = ""
+    kernel_roofline_path: str = ""
     hot_kernels_top15: list[dict[str, Any]] = field(default_factory=list)
+    kernel_roofline_top15: list[dict[str, Any]] = field(default_factory=list)
     task_groups: list[dict[str, Any]] = field(default_factory=list)
     reusable_native_kernel_ids: list[str] = field(default_factory=list)
     trace_health_warnings: list[dict[str, Any]] = field(default_factory=list)
@@ -174,7 +272,9 @@ class TraceAnalyzeSnapshot:
         return cls(
             trace_input=str(d.get("trace_input") or ""),
             candidates_path=str(d.get("candidates_path") or ""),
+            kernel_roofline_path=str(d.get("kernel_roofline_path") or ""),
             hot_kernels_top15=list(d.get("hot_kernels_top15") or []),
+            kernel_roofline_top15=list(d.get("kernel_roofline_top15") or []),
             task_groups=list(d.get("task_groups") or []),
             reusable_native_kernel_ids=list(
                 d.get("reusable_native_kernel_ids") or []
@@ -208,6 +308,14 @@ class SharedState:
     model_name: str = ""
     model_path: str = ""
     model_class: str = ""
+    # Advisory architecture profile (hybrid: a few structured fields +
+    # free-text ``notes``). Produced pre-launch by the SKILL launcher
+    # (LLM Architecture Gallery lookup, else a lightweight classify) and
+    # loaded from ``$USER_DATA_PATH/model_arch.json``. Prompt-context only
+    # — no deterministic gating consumes it (atom seed grid / compat
+    # filter / framework gap token / recipe key stay on ``model_class``).
+    # Empty dict means "no profile available"; renderers omit the block.
+    model_arch: dict = field(default_factory=dict)
     framework: str = ""
     gpu_type: str = ""
     # Workload metadata mirrored from manifest.json at session start
@@ -225,12 +333,65 @@ class SharedState:
     # PRECISION) so downstream executors see the same values the
     # original run used. Zero / empty means "unspecified".
     tp: int = 0
+    # Expert-parallel size for MoE inference. Mirror of the ``EP`` env
+    # var (cli writes both at boot). Stored on SharedState so resume in
+    # a fresh shell that hasn't ``export EP`` still recovers the
+    # original value — without this, KB warm-start queries would lose
+    # the EP filter on resume and the recipe anchor's ``ep`` tag would
+    # become unreliable. Multi-node lifecycle scripts still read the
+    # env var; this field is the resume-safe authority.
+    ep: int = 0
     precision: str = ""
+    # Recipe-snapshot v2 canonical id is a five-tuple
+    # ``model + hardware + framework + framework_version + precision``;
+    # ``framework_version`` is the only one not derivable from existing
+    # SharedState fields, so it lives here. Populated by ``cli`` from
+    # ``--framework-version`` (operator override) or, when omitted,
+    # auto-detected via :func:`recipe_snapshot_constants.detect_framework_version`
+    # (best-effort: imports the framework's top-level package and reads
+    # ``__version__``). Mirrored to env ``FRAMEWORK_VERSION`` on resume so
+    # downstream executors see the same value the original run used.
+    # Empty string means "unknown" — the recipe canonical_id falls back
+    # to ``unknown_version`` and KB lookups for this dimension lose
+    # specificity (rows still write under that slug).
+    framework_version: str = ""
     conc: int = 0
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
+    # When False (CLI ``--no-explore``) the EXPLORE phase is skipped:
+    # PRELUDE / FRAMEWORK_PR route straight to KERNEL (or SWEEP when
+    # kernel is also disabled). Mirrors the ``kernel_enabled`` /
+    # ``framework_phase_enabled`` opt-out pattern.
+    explore_enabled: bool = True
+    # After deterministic FP8 GEMM tuning succeeds, continue into source-level
+    # kernel_opt by default. Operators can disable this for a GEMM-only run.
+    continue_kernel_after_gemm: bool = True
+    # SWEEP-phase post-sweep concurrency sweep. On by default;
+    # operator opts out via ``--no-enable-conc-sweep`` /
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``. When True, the
+    # Coordinator auto-enqueues a ``conc_sweep`` task right after the
+    # SWEEP-entry sweep task lands (see ``_on_sweep_task_completed``);
+    # the executor runs baseline + current_best across the
+    # ``conc_sweep_concs`` ladder bounded by
+    # ``conc_sweep_total_budget_sec`` total wall-clock.
+    conc_sweep_enabled: bool = True
+    # CONC ladder used by the conc_sweep action. Default mirrors
+    # ``orchestrator.conc_sweep.DEFAULT_CONCS``. Empty list short-
+    # circuits the executor with skip_reason=empty_conc_list.
+    conc_sweep_concs: list[int] = field(
+        default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128],
+    )
+    # Total wall-clock budget (seconds) for the whole conc_sweep
+    # action. Default 9000 (~2.5h). 0 disables the gate so the
+    # executor runs every variant until the per-variant timeout
+    # alone caps it.
+    conc_sweep_total_budget_sec: int = 9000
+    # Per-variant Magpie subprocess timeout (seconds). Default 1800
+    # (~30 min). Effective timeout is clamped to the remaining total
+    # budget so the last variant cannot overshoot the deadline.
+    conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
@@ -258,6 +419,65 @@ class SharedState:
     # downstream executors fall back to materializing the shipped YAML
     # against current process env when this is empty.
     baseline_config_path: str = ""
+    # GAP 5 (KB tag completeness): runtime component versions populated
+    # by cli at boot from manifest / stack_fingerprint. Mirror of the
+    # equivalent fields written to ``recipe.attrs`` by the T0 backfill,
+    # exposed here so ``_collect_workload_tags`` can stamp them onto
+    # every lesson / pitfall write WITHOUT having to re-parse manifest
+    # at fact-write time.
+    #
+    # Shape: ``{"sglang": "0.5.11", "vllm": "0.19.0", "rocm": "6.2.0",
+    #           "aiter": "abc123", "image_digest": "sha256:..."}``.
+    # All keys optional; empty / "unknown" values are stripped before
+    # writing onto the recipe so KB attrs stays compact. Resume-safe
+    # because the field is JSON-serialised into state.json.
+    stack_fingerprint_meta: dict = field(default_factory=dict)
+    # GAP 5: extra workload-shape fields parsed from the materialized
+    # baseline YAML — ``max_running_requests`` / ``max_num_seqs`` /
+    # ``chunked_prefill_enabled`` / ``enable_torch_compile`` /
+    # ``quant_scheme`` / ``workload_mode``. These are *not* in the
+    # canonical id (would explode the recipe space) but they are
+    # crucial filters for the warm-start ladder and the lesson reader
+    # so future sessions can pick a closer prior.
+    #
+    # Populated by ``BaselineExecutor._promote_to_shared_state`` after
+    # the baseline YAML is materialized. Empty dict before first
+    # baseline result; downstream consumers tolerate missing keys.
+    baseline_workload_extra: dict = field(default_factory=dict)
+    # GAP 1 (warm-recipe replay) — one-shot guard so the PRELUDE
+    # auto-enqueue path doesn't fire twice for the same session
+    # (resume safety). The Coordinator flips this to True at the
+    # moment a ``replay_warm_recipe`` task is created; the field
+    # survives resume via state.json so a robustness restart cannot
+    # accidentally double-spend the replay budget. ``False`` is the
+    # default for fresh sessions.
+    warm_replay_attempted: bool = False
+    # GAP 1 supporting field — one-shot guard for
+    # ``_inject_warm_recipe_history_into_ledger``. Decoupled from
+    # ``warm_replay_attempted`` because the history injection is
+    # independent of whether the operator enabled warm replay:
+    # ``--no-warm-replay`` users still benefit from "don't retry
+    # known-failed variants". Resume-safe: persists into state.json
+    # so a robustness restart cannot double-inject the same rows.
+    warm_history_injected: bool = False
+    # GAP 1 — structured outcome of the warm-replay attempt so the
+    # report / prompt can render "we tried the KB best_config and
+    # got +X% (vs the recipe's claim of +Y%)". Shape::
+    #
+    #   {
+    #     "status":            "reproduced" | "drift" | "failed" | "skipped",
+    #     "expected_gain_pct": 25.0,
+    #     "actual_gain_pct":   23.5,
+    #     "warm_recipe_tier":  "exact",
+    #     "warm_recipe_conf":  1.0,
+    #     "replay_task_id":    "task-uuid",
+    #     "reason":            "..."        # only on failed / skipped / drift
+    #   }
+    #
+    # Empty dict before the replay completes or when ``--no-warm-replay``
+    # is in effect. Persisted into state.json so resume + breakdown
+    # collectors see it.
+    warm_replay_outcome: dict = field(default_factory=dict)
     # Wall-clock seconds the baseline Magpie subprocess took to
     # finish (success path only). Populated by Coordinator from the
     # baseline executor's ``subprocess_runtime_sec`` and read by the
@@ -350,25 +570,45 @@ class SharedState:
     # Orchestration uses this to decide whether re-profiling would change the
     # hot-kernel distribution; identical args means the same trace.
     last_profile_args: str = ""
-    # Cached result of the most recent `select_kernels` request keyed by
-    # `trace_input`. Coordinator short-circuits subsequent identical requests
-    # so Orchestration does not waste budget re-analysing the same trace.
-    last_select_kernels: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
-    # roofline-v2 placeholder fields (PR #288 integration).
+    # Roofline-v2 trace-analyze cache (canonical, post-M4 rename).
     #
-    # ``last_trace_analyze`` mirrors the canonical 11-field dict main's
-    # ``record_trace_analyze`` writes (see ``TraceAnalyzeSnapshot.from_dict``
-    # for the reader-side schema). F1 ports the writer; until then these
-    # stay default-empty and no consumer reads them.
+    # ``last_trace_analyze`` is the canonical 11-field dict written by
+    # :meth:`record_trace_analyze` after a successful ``trace_analyze``
+    # sub-step (typically driven by ``RooflineExecutor``). Coordinator
+    # short-circuits subsequent identical ``trace_analyze`` requests off
+    # this cache so Orchestration does not waste budget re-analysing the
+    # same trace.
     #
     # ``roofline_snapshot_id`` mirrors ``last_trace_analyze['roofline_snapshot_id']``
     # at the top level for fast PolicyGate / Coordinator access (avoids the
     # nested-dict lookup on hot paths).
+    #
+    # Pre-M4 ``last_select_kernels`` field was removed in this branch
+    # (commit "drop select_kernels alias…") — all readers must use
+    # ``last_trace_analyze``. Resume of a stale state.json that still
+    # carries ``last_select_kernels`` will silently drop the extra key
+    # via :meth:`_apply_loaded_state`.
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
+    # Append-only history of compact roofline snapshots used by
+    # ``report.py`` to render the ``## Roofline Comparison`` section.
+    # PR #321 retired the legacy ``last_trace_analyze_baseline``
+    # baseline-freeze field; the snapshot history preserves the first
+    # (baseline) snapshot across watermark-driven refreshes of
+    # ``last_trace_analyze`` so a real before/after comparison stays
+    # available even after multiple +10% refreshes overwrite the
+    # latest-snapshot cache.
+    #
+    # Each entry matches the shape returned by
+    # :func:`orchestrator.roofline_snapshot.build_roofline_snapshot`
+    # (snapshot_id / ts / compute_pct / idle_pct / comm_pct /
+    # top_bottleneck / top_kernel) plus ``analysis_md_path`` and
+    # ``trace_input`` for downstream re-extraction. Capped at
+    # ``MAX_ROOFLINE_SNAPSHOTS`` to bound on-disk state.json size.
+    roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # N27 — outer roofline failure counter. Bumped by
     # ``Coordinator._promote_to_shared_state`` on every failed
     # ``roofline`` task and reset to 0 on the next successful one.
@@ -421,6 +661,12 @@ class SharedState:
     # PR scan no longer collapses the whole FRAMEWORK_PR phase
     # silently.
     framework_pr_discover_failures: int = 0
+    # Per-repo candidate cap passed to ``fa phase-discover`` during the
+    # FRAMEWORK_PR phase. 0 / unset → the Coordinator falls back to
+    # ``DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES``. Bumping this makes each
+    # batch probe deeper (more PRs per repo per batch). Round-trips via
+    # the dataclass asdict/from_dict path like every other field.
+    framework_pr_max_candidates: int = 0
     # FRAMEWORK_PR Critic-gate decisions, one row per reviewed candidate:
     # ``{candidate_id, batch_id, verdict, rationale, ts}``. The
     # Coordinator's pump calls the Critic backend before each
@@ -441,9 +687,6 @@ class SharedState:
     # remain Coordinator-internal and are denied by PolicyGate when
     # proposed by the LLM (``analysis_action_not_llm_proposable``).
     enable_roofline: bool = True
-    # Cheap-rounds gain gate is opt-in — only locks ``kernel_opt`` when
-    # the operator has tuned the thresholds for their workload.
-    gain_driven_kernel_opt: bool = False
     # Per-variant overtime kill multiplier for ExploreExecutor: when
     # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
     # in the explore loop are killed once their wall-clock exceeds
@@ -492,6 +735,11 @@ class SharedState:
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
+    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE can
+    # exit on conc_sweep completion (not only sweep completion). Carries
+    # status / skip_reason / summary so phase_state.exit_normal_sweep
+    # treats succeeded / partial / completed / skipped as terminal.
+    last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Kernel-opt response tracking — Coordinator records the most recent
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
@@ -507,14 +755,10 @@ class SharedState:
     # symmetry.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
-    # ``last_backends`` / ``last_params``
-    # / ``last_validate_stack`` are legacy resume-parity zombies: the
-    # legacy actions are denied at PolicyGate so new sessions never
-    # write to them, but the field shape must stay so a resumed v0.6
-    # ``state.json`` round-trips (Inv-10.1 fact-layer compatibility).
-    last_backends: dict[str, Any] = field(default_factory=dict)
-    last_params: dict[str, Any] = field(default_factory=dict)
-    last_validate_stack: dict[str, Any] = field(default_factory=dict)
+    # GEAK FP8 GEMM tuning snapshot. This is kernel-owned but not a
+    # source-level kernel rewrite: it produces an aiter A8W8 block-scale
+    # tuned CSV and (for SGLang) a dispatch patch before kernel_opt runs.
+    last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
     # merged explore action snapshot. Same
     # schema as the other ``last_<action>`` mirrors.
     last_explore: dict[str, Any] = field(default_factory=dict)
@@ -526,14 +770,8 @@ class SharedState:
     last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
+    gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # ``backends_attempts`` /
-    # ``params_attempts`` / ``validate_stack_attempts`` are kept as
-    # zero-write resume-parity zombies for the same Inv-10.1 reason
-    # as the snapshot mirrors above.
-    backends_attempts: list[dict[str, Any]] = field(default_factory=list)
-    params_attempts: list[dict[str, Any]] = field(default_factory=list)
-    validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
     # explore audit log. Capped per _DEFAULT_ATTEMPTS_HISTORY.
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Roofline-v2 N10: per-tick roofline audit log (capped). Records the
@@ -573,15 +811,8 @@ class SharedState:
     # this to nudge Orch off the params plateau. Reset to 0 whenever
     # current_best advances.
     params_no_promote_streak: int = 0
-    # DFS ledger (params / backends). Kept on the dataclass for
-    # legacy resume parity (Inv-10.1); sessions read ``explore_search``
-    # below. ``tested`` is keyed by content fingerprint so two variants
-    # with identical args + envs under different names collapse.
-    params_search: dict[str, Any] = field(default_factory=dict)
-    backends_search: dict[str, Any] = field(default_factory=dict)
     # unified explore ledger (KB_design §3.4 Inv-4.1 "single
-    # ledger"). Merges the legacy ``backends_search`` + ``params_search``
-    # ledgers into one persistent DFS state for the merged ``explore``
+    # ledger"). Persistent DFS state for the merged ``explore``
     # action. ``tested`` is keyed by canonical_fingerprint (content-based,
     # see ``action_executors._canonical_fingerprint``), same hashing as
     # ``variant_fingerprint`` so the ledgers migrate losslessly.
@@ -591,16 +822,16 @@ class SharedState:
     #   {
     #     "schema_version": 1,
     #     "tested": {
-    #       fingerprint: {name, extra_sglang_args, extra_envs, outcome,
+    #       fingerprint: {name, extra_server_args, extra_envs, outcome,
     #                     round_id, ts, gain_pct, tput, provenance,
     #                     workload_signature}
     #     },
     #     "accepted": [
-    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #       {fingerprint, name, extra_server_args, extra_envs,
     #        gain_pct, stack_index, accepted_at_round, ts}
     #     ],
     #     "rejected": [
-    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #       {fingerprint, name, extra_server_args, extra_envs,
     #        reason, gain_pct, tput, round_id, ts}
     #     ],
     #     "winners_history": [
@@ -641,7 +872,6 @@ class SharedState:
     #                                      # explore round finishes
     #     "proposals_rejected": int,
     #     "proposals_skipped": int,
-    #     "kb_edge_ids": [str, ...],       # M5 simplified; M6 per-variant
     #     "confidence_avg": float | None,
     #     "domain_breakdown": {domain_key: {...}},
     #     "notes": [str, ...],
@@ -663,6 +893,11 @@ class SharedState:
     last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
     remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
     steward_continuation_used: bool = False
+    # Per EXPLORE-round count of steward subprocess/transport failures
+    # (used to mint retry idempotency keys; not a plateau signal).
+    steward_infra_failures_by_round: dict[str, int] = field(
+        default_factory=dict,
+    )
     # last specialist task snapshot (parity with other
     # ``last_<action>`` mirrors; useful for the orchestration prompt
     # to surface "last round's specialist outcome").
@@ -697,16 +932,71 @@ class SharedState:
     # change_type is ``config``. Resets to 0 every time a ``code_patch``
     # KEEP lands. Robustness reads this via the per-tick prompt.
     consecutive_config_only_rounds: int = 0
+    # Research scout bookkeeping.
+    #   * ``research_scout_enabled`` — master switch (``--no-research-scout``
+    #     turns the whole feature off).
+    #   * ``research_scout_runs`` — number of scout dispatches so far;
+    #     feeds exploration-depth tracking.
+    #   * ``research_scout_seen_pr_ids`` — PR ids already surfaced by the
+    #     scout or the FRAMEWORK_PR phase, shared so the two never re-mine
+    #     the same PR.
+    research_scout_enabled: bool = True
+    research_scout_interval: int = 3
+    # Master switch for the advisory "External target gap" prompt block
+    # (``--no-target-advisory`` turns it off). Advisory only — never gates
+    # Objective / scoring.
+    target_advisory_enabled: bool = True
+    # Master switch for sedimenting KEEP/REVERT provenance (research-hint
+    # source + measured gain) into the persistent recipe. When off the
+    # recipe stays purely ephemeral (existing behaviour).
+    recipe_sediment_enabled: bool = True
+    research_scout_runs: int = 0
+    research_scout_seen_pr_ids: list[str] = field(default_factory=list)
+    # Round id at which the scout was last dispatched, so the K-round
+    # re-dispatch fires at most once per qualifying round.
+    research_scout_last_round: int = -1
+    # Exploration-depth counters consumed by the depth gate. Counters are
+    # deterministic (config/code patches, reverts); the id sets are
+    # supplied by specialist research evidence. ``enabled`` mirrors the
+    # ``--depth-gate`` switch. Stored as a dict so old state.json shapes
+    # round-trip with a defaulted sub-structure.
+    depth_tracker: dict[str, Any] = field(default_factory=lambda: {
+        "enabled": True,
+        "prs_fetched": [],
+        "pr_diffs_read": [],
+        "nvidia_refs_compared": [],
+        "code_patches_attempted": 0,
+        "config_changes_attempted": 0,
+        "consecutive_reverts": 0,
+    })
+    # Optional CLI overrides for the depth-gate thresholds; unset keys
+    # fall back to the phase_state defaults.
+    depth_gate_thresholds: dict[str, int] = field(default_factory=dict)
     # PR-A8 — total specialist dispatches in the current EXPLORE entry.
     # Reset on phase transition into a fresh EXPLORE. Robustness's
     # storm detector fires when this crosses the configured cap
     # without a single non-empty proposal_set in the same window.
     explore_specialist_dispatched_count: int = 0
+    # Aggregate view of dynamic_action dispatches keyed by ``dyn_id``;
+    # Coordinator-only writer (``CORE_STATE_FIELDS`` blocks LLM
+    # ``UPDATE_STATE``). Each value is the lifecycle summary dict
+    # (status / last_outcome / cumulative_gain / …).
+    dynamic_actions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-EXPLORE-round counter of *successful* dynamic_action
+    # dispatches (PolicyGate denials do not increment). Reset on
+    # every fresh EXPLORE entry; read by
+    # ``PolicyGate._validate_dynamic_action_dispatch`` for the
+    # ``MAX_DYNAMIC_PER_ROUND`` cap; Coordinator is the sole writer.
+    dynamic_action_round_count: int = 0
     # research_lane capacity locked at session start
     #. M5 default is 1 (single-specialist series);
     # M6 raises to 6 (concurrent). PolicyGate denies mid-session
     # mutation because it's listed in CORE_STATE_FIELDS.
     research_lane_capacity: int = 1
+    # Separate GPU pool capacity for specialists that explicitly request
+    # ``needs_gpu=true``. Zero disables GPU specialists. Locked at session
+    # start so LLM roles cannot inflate GPU access mid-run.
+    gpu_specialist_capacity: int = 0
     # escalate_strategy_change carry-over field
     #. The Coordinator's
     # ``_handle_escalate_strategy_change`` writes the validated
@@ -741,7 +1031,7 @@ class SharedState:
     discovered_flags: dict[str, Any] = field(default_factory=dict)
     # Rolling per-action winners log (cap 20) used by IR-26 idea
     # generation. Schema: ``{action, round_id, base_tput,
-    # winners: [{name, tput, gain_pct, extra_sglang_args, extra_envs}],
+    # winners: [{name, tput, gain_pct, extra_server_args, extra_envs}],
     # best: {...}, ts}``.
     backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
     # Synergy combo keys (``"name1+name2+..."``) already tested this
@@ -769,11 +1059,6 @@ class SharedState:
     # ``Coordinator.run()`` / ``Coordinator.tick(n)`` iteration; kept
     # so plateau / phase budget math has a stable monotonic anchor.
     tick: int = 0
-    # Monotonic per-session experiment counter. Bumped once per
-    # ``propose_action`` (T2) so :func:`experiment_canonical_id`
-    # produces a stable ``exp:{sid}:{iter:04d}`` aligned with the KB
-    # ``experiment`` kind schema.
-    session_iter_index: int = 0
     # Remaining gain-pct target gap (0.0 means "no target"). Coordinator
     # refreshes this when the run objective is ``gain_pct=N``. Kept
     # because the prompt builder + breakdown rely on it for the
@@ -818,26 +1103,19 @@ class SharedState:
     # (Inv-1 single writer). LLM consumers read them indirectly via
     # prompt injection.
     #
-    # ``cortex_session_id`` is the sid returned by the Cortex
-    # ``session begin`` call at T0. Empty string means either
-    # ``--degraded-kb`` was selected for this run or the session has not
-    # yet reached T0. Written **once** in PRELUDE; never overwritten.
+    # ``cortex_session_id`` is the hyperloom-local session identifier
+    # carried into KB fact-write attrs (``source_session_id``) for
+    # cross-session traceability. It is **not** a KB-side session id
+    # (the KB session begin/commit protocol was retired); it now
+    # defaults to ``session_dir.name`` when T0 mints it.
     cortex_session_id: str = ""
-    # T4 ``session commit`` payload snapshot: ``{"status": "committed",
-    # "promoted_edges": [...], "negation_edges": [...],
-    # "derived_summary_id": "..."}``. Empty dict until commit succeeds.
-    # Drives the ``breakdown.kb_provenance.commit`` section and the
-    # operator-visible "what survived this session" summary.
+    # Retired: the KB ``session commit`` protocol was removed alongside
+    # T2/T3. The field is kept (always ``{}``) for state.json resume
+    # back-compat — the next ``state.save`` writes an empty dict and
+    # the breakdown collector tolerates a missing summary. The
+    # ``breakdown.kb_provenance.commit`` section is now derived from
+    # ``drain_pending`` results instead.
     cortex_session_summary: dict[str, Any] = field(default_factory=dict)
-    # Tentative edge_ids created by T2 ``session hypothesize`` that have
-    # not yet been ``verify``-d by T3. Crash-recovery rule (KB_design
-    # §3.13 M1 §7 "resume"): on resume the Coordinator inspects this
-    # list and routes orphans through ``propose-edge + late_verified``
-    # rather than ``verify`` (avoids 404 from a stale edge that never
-    # made it past the NDJSON queue). Capped indirectly by the in-flight
-    # proposal count — proposals removed from ``pending_proposals`` also
-    # drop their edge_id here.
-    pending_kb_edges: list[dict[str, Any]] = field(default_factory=list)
     # T0 snapshot of ``find-recipe`` raw output (CLI ``--format text``,
     # one entry per recipe row). v0.8 M1 only **records** this — it is
     # not yet injected into the orchestration prompt; that happens in M5
@@ -845,9 +1123,26 @@ class SharedState:
     # without re-parsing. Empty dict on first-ever session for a
     # (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # T0 snapshot of ``traps`` output (known pitfalls list). Same
-    # injection-deferral story as ``warm_start_recipe``.
+    # T0 snapshot of ``pitfalls`` output (negative priors from prior
+    # REVERT / crash / OOM decisions on this (model, hardware),
+    # optionally filtered by framework). List of KB point dicts
+    # (each with ``{canonical_id, kind, attrs, confidence, ...}``),
+    # mirroring ``warm_start_lessons``. Consumed by the specialist
+    # prompt's "§ 5c. KNOWN PITFALLS" section.
+    #
+    # Schema change history: pre-fix this field held
+    # ``[{"raw": <json_string>}]`` because the broken
+    # ``traps(symptom=...)`` reader returned an opaque JSON blob.
+    # Resume from such a snapshot is tolerated (the prompt section
+    # filters out rows without ``attrs.description``).
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    # T0 snapshot of ``lessons`` output (positive priors from prior
+    # KEEPs on this (model, hardware), optionally filtered by
+    # framework). Symmetric with ``warm_start_pitfalls``; consumed
+    # by the specialist prompt's "§ 5b. RELATED LESSONS" section.
+    # Empty when Cortex was bypassed (``--degraded-kb``) or T0
+    # failed.
+    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
     # bypassed (``--degraded-kb``) or T0 failed.
     warm_start_ts: str = ""
@@ -920,6 +1215,21 @@ class SharedState:
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
 
+        # Migrate the ``extra_sglang_args`` -> ``extra_server_args`` rename
+        # (same for ``candidate_extra_sglang_args``). The on-disk shape
+        # stays a plain dict, so the legacy key may appear in any of the
+        # many nested ledgers (winners, baseline_artifacts, action_attempts,
+        # explore_search, etc.). Walk the entire payload once at load time
+        # and rewrite the legacy keys in place — the next save will then
+        # emit canonical only and a future load of the same file is a no-op.
+        legacy_migrations = _migrate_legacy_extra_sglang_args_keys(raw)
+        if legacy_migrations:
+            migration_events.append(
+                f"extra_server_args rename: migrated {legacy_migrations} legacy "
+                f"extra_sglang_args / candidate_extra_sglang_args key(s) "
+                f"to extra_server_args / candidate_extra_server_args"
+            )
+
         # Filter to known fields so older / newer state.json shapes don't
         # crash. Unknown keys are dropped; missing keys fall back to defaults.
         known = {f for f in cls.__dataclass_fields__}
@@ -943,6 +1253,11 @@ class SharedState:
             "score_mult",
             "effective_score",
             "last_action_score_snapshot",
+            # Removed in this branch: M4 renamed select_kernels →
+            # trace_analyze; the legacy mirror field was dropped so all
+            # readers use ``last_trace_analyze``. Resume of an older
+            # state.json silently discards this slot.
+            "last_select_kernels",
         )
         legacy_seen: list[tuple[str, int]] = []
         for legacy in _legacy_drop_fields:
@@ -976,50 +1291,16 @@ class SharedState:
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
                     "state.json (%s).", summary,
                 )
-        # Phase 7 of the dedup-by-fingerprint plan: migrate any v1
-        # ``params_search`` ledger (where ``tested`` was keyed by display
-        # name) to schema v2 (keyed by content fingerprint). Backends has
-        # no pre-fingerprint persisted data so it only needs default-key
-        # normalization. We do this here — at the load boundary — so the
-        # executor and Coordinator paths can assume the v2 schema and
-        # never need a fallback branch.
-        filtered["params_search"] = cls._migrate_search_ledger(
-            filtered.get("params_search"), schema_target=2,
-        )
-        filtered["backends_search"] = cls._migrate_search_ledger(
-            filtered.get("backends_search"), schema_target=1,
-        )
-        # merge the legacy backends_search + params_search ledgers
-        # into the unified ``explore_search`` ledger.
-        # The merge is one-shot at load: subsequent ExploreExecutor runs
-        # only touch ``explore_search``; the legacy ledgers stay around
-        # (deprecated, read-only) so an emergency rollback to v0.6 still
-        # has its data. ``record_*_accepted`` / executor updates from the
-        # legacy backends/params executors continue to write to the old
-        # ledgers — the merge function is idempotent under repeated calls,
-        # so an interleaved v0.6 fallback + legacy resume picks up cleanly.
-        explore_before = filtered.get("explore_search") or {}
+        # Normalize the unified ``explore_search`` ledger at the load
+        # boundary so the executor and Coordinator paths can assume the
+        # shaped schema and never need a fallback branch. Winners /
+        # synergy history are folded in from the live history fields.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
-            backends_search=filtered.get("backends_search"),
-            params_search=filtered.get("params_search"),
             backend_winners_history=filtered.get("backend_winners_history"),
             params_winner_history=filtered.get("params_winner_history"),
             synergy_attempted=filtered.get("synergy_attempted"),
         )
-        if needs_migration:
-            tested_before = (
-                len(explore_before.get("tested") or {})
-                if isinstance(explore_before, dict) else 0
-            )
-            tested_after = len(
-                filtered["explore_search"].get("tested") or {},
-            )
-            if tested_after > tested_before:
-                migration_events.append(
-                    "§3.4 merged backends_search/params_search → "
-                    f"explore_search (tested={tested_after})"
-                )
 
         # fact-layer integrity check. ``strict``
         # (the default) aborts when a fact-layer key was present in a
@@ -1089,337 +1370,53 @@ class SharedState:
         return cls(**filtered)
 
     @staticmethod
-    def _migrate_search_ledger(
-        ledger: Any, *, schema_target: int,
-    ) -> dict[str, Any]:
-        """Normalize an *_search ledger to the fingerprint-keyed schema.
-
-        Idempotent: already-migrated ledgers are returned with only the
-        defensive defaults filled in. A legacy v1 ledger whose ``tested``
-        is keyed by variant name gets re-keyed by content fingerprint
-        re-computed from the stored ``extra_sglang_args`` / ``extra_envs``;
-        the original name is preserved inside each entry and surfaced
-        through ``name_index`` so display lookups remain stable.
-        """
-        if not isinstance(ledger, dict) or not ledger:
-            return {}
-        from .action_executors._grid_runner import variant_fingerprint
-        out: dict[str, Any] = dict(ledger)
-        out.setdefault("schema_version", schema_target)
-        out.setdefault("accepted", [])
-        out.setdefault("rejected", [])
-        out.setdefault("tested", {})
-        out.setdefault("name_index", {})
-        out.setdefault("cursor", 0)
-        tested = out.get("tested") or {}
-        if not isinstance(tested, dict):
-            tested = {}
-        # A fingerprint key is a 16-char lowercase hex string; anything
-        # else is treated as a legacy display-name key.
-        def _looks_like_fingerprint(key: str) -> bool:
-            return (
-                isinstance(key, str)
-                and len(key) == 16
-                and all(c in "0123456789abcdef" for c in key)
-            )
-        migrated: dict[str, Any] = {}
-        name_index = dict(out.get("name_index") or {})
-        for key, entry in tested.items():
-            if not isinstance(entry, dict):
-                continue
-            if _looks_like_fingerprint(str(key)):
-                # Already fingerprint-keyed; just ensure name_index is in
-                # sync so display-name lookups also work on resume.
-                fp = str(key)
-                entry.setdefault("fingerprint", fp)
-                migrated[fp] = entry
-                nm = entry.get("name")
-                if nm:
-                    name_index[str(nm)] = fp
-                continue
-            # Legacy: key was a display name. Re-derive fingerprint from
-            # stored args/envs. Older entries nested the executor's
-            # full ``result`` dict under ``result``; check both.
-            nested = entry.get("result") if isinstance(entry.get("result"), dict) else {}
-            args = str(
-                entry.get("extra_sglang_args")
-                or nested.get("extra_sglang_args") or ""
-            )
-            envs = dict(
-                entry.get("extra_envs")
-                or nested.get("extra_envs") or {}
-            )
-            fp = variant_fingerprint(args, envs)
-            new_entry = dict(entry)
-            new_entry.setdefault("name", str(key))
-            new_entry.setdefault("extra_sglang_args", args)
-            new_entry.setdefault("extra_envs", envs)
-            new_entry["fingerprint"] = fp
-            migrated[fp] = new_entry
-            name_index[str(key)] = fp
-        out["tested"] = migrated
-        out["name_index"] = name_index
-        # Stamp fingerprints onto accepted/rejected too, so the executor's
-        # fast-path dedup sets fill cleanly on the first resume round.
-        for bucket in ("accepted", "rejected"):
-            rebuilt: list[dict[str, Any]] = []
-            for v in out.get(bucket) or []:
-                if not isinstance(v, dict):
-                    continue
-                v = dict(v)
-                if not v.get("fingerprint"):
-                    v["fingerprint"] = variant_fingerprint(
-                        str(v.get("extra_sglang_args") or ""),
-                        dict(v.get("extra_envs") or {}),
-                    )
-                rebuilt.append(v)
-                if v.get("name") and v.get("fingerprint"):
-                    name_index[str(v["name"])] = str(v["fingerprint"])
-            out[bucket] = rebuilt
-        out["name_index"] = name_index
-        # Bump the schema marker so callers can short-circuit re-migration.
-        out["schema_version"] = max(int(out.get("schema_version") or 0), schema_target)
-        return out
-
-    @staticmethod
     def _build_explore_search(
         *,
         existing: Any,
-        backends_search: Any,
-        params_search: Any,
         backend_winners_history: Any,
         params_winner_history: Any,
         synergy_attempted: Any,
     ) -> dict[str, Any]:
-        """Merge v0.6 backends_search + params_search into explore_search.
+        """Shape the unified ``explore_search`` ledger at load time.
 
-        Idempotent: if ``existing`` already carries ``schema_version >= 1``
-        and the legacy ledgers haven't grown new fingerprints since the
-        last merge (tracked via ``existing.merged_from_legacy_sig``),
-        the call is a no-op other than re-stamping defensive defaults.
-
-        Conflict resolution:
-
-        * ``tested`` — union by fingerprint; outcome rank
-          ``KEEP > REVERT > SKIPPED`` wins the row.
-        * ``accepted`` — union by fingerprint; later entries win
-          (newer KEEPs reflect the latest evidence).
-        * ``rejected`` — union by fingerprint; entries already in
-          ``accepted`` are dropped (a re-promote supersedes a prior
-          reject).
-        * ``winners_history`` — append of legacy ``backend_winners_history``
-          + ``params_winner_history``, sorted by ``round_id`` / ``ts``.
-        * ``discovered_flags`` — empty in M3 (filled by M5 specialists).
-        * ``synergy_attempted`` — copied from legacy field.
-        * ``domains_round_summary`` — empty (M5/M6 fills).
+        The ExploreExecutor owns ``explore_search`` at runtime; this
+        load-boundary normalizer only fills the defensive defaults and
+        folds the live ``*_winner_history`` / ``synergy_attempted``
+        history fields into ``winners_history`` / ``synergy_attempted``
+        so a resume preserves the cross-round aggregation the prompt
+        summary and plateau proxy read.
         """
         from .action_executors._grid_runner import variant_fingerprint as _fp
 
         existing = existing if isinstance(existing, dict) else {}
-        merged_sig = str(existing.get("merged_from_legacy_sig") or "")
+        out: dict[str, Any] = dict(existing)
+        out.setdefault("schema_version", 1)
+        out.setdefault("tested", {})
+        out.setdefault("accepted", [])
+        out.setdefault("rejected", [])
+        out.setdefault("discovered_flags", [])
+        out.setdefault("domains_round_summary", [])
+        out.setdefault("name_index", {})
+        out.setdefault("cursor", len(out.get("tested") or {}))
+        out.setdefault("last_round", {})
 
-        # Legacy ledger normalization (already migrated to v2/v1 by
-        # _migrate_search_ledger so tested is fingerprint-keyed).
-        b = backends_search if isinstance(backends_search, dict) else {}
-        p = params_search if isinstance(params_search, dict) else {}
-
-        # Compose a cheap signature of the source ledgers so we can
-        # short-circuit when nothing changed since the last merge.
-        legacy_sig = json.dumps(
-            {
-                "b_tested": sorted(list((b.get("tested") or {}).keys())),
-                "p_tested": sorted(list((p.get("tested") or {}).keys())),
-                "b_accepted": len(b.get("accepted") or []),
-                "p_accepted": len(p.get("accepted") or []),
-                "b_rejected": len(b.get("rejected") or []),
-                "p_rejected": len(p.get("rejected") or []),
-            },
-            sort_keys=True, separators=(",", ":"),
-        )
-        if (
-            existing
-            and existing.get("schema_version")
-            and merged_sig == legacy_sig
-        ):
-            # Idempotent re-load with no upstream changes; preserve
-            # whatever ExploreExecutor wrote since the last merge.
-            existing.setdefault("tested", {})
-            existing.setdefault("accepted", [])
-            existing.setdefault("rejected", [])
-            existing.setdefault("winners_history", [])
-            existing.setdefault("discovered_flags", [])
-            existing.setdefault("synergy_attempted", [])
-            existing.setdefault("domains_round_summary", [])
-            existing.setdefault("name_index", {})
-            existing.setdefault("cursor", 0)
-            return existing
-
-        _RANK = {"KEEP": 3, "REVERT": 2, "SKIPPED": 1, "FAILED": 1,
-                 "KEEP_UNSTABLE": 2, "": 0}
-
-        def _outcome_for(entry: dict[str, Any]) -> str:
-            """Map a legacy ledger entry to the outcome vocabulary."""
-            outcome = str(entry.get("outcome") or "").upper().strip()
-            if outcome:
-                return outcome
-            # Legacy entries didn't stamp ``outcome``; infer from the
-            # bucket the entry sat in. Reject/accept buckets handled by
-            # caller via the explicit code paths below.
-            status = str(entry.get("status") or "").lower()
-            if status == "failed":
-                return "FAILED"
-            return "REVERT"
-
-        # tested: union by fingerprint with outcome-rank precedence.
-        tested: dict[str, dict[str, Any]] = {}
-        name_index: dict[str, str] = {}
-
-        def _ingest_tested(source: dict[str, Any], legacy_action: str) -> None:
-            src_tested = source.get("tested") or {}
-            if not isinstance(src_tested, dict):
-                return
-            for fp_key, entry in src_tested.items():
-                if not isinstance(entry, dict):
-                    continue
-                fp = (
-                    str(fp_key)
-                    if (isinstance(fp_key, str)
-                        and len(fp_key) == 16
-                        and all(c in "0123456789abcdef" for c in fp_key))
-                    else str(entry.get("fingerprint")
-                             or _fp(
-                                 str(entry.get("extra_sglang_args") or ""),
-                                 dict(entry.get("extra_envs") or {}),
-                             ))
-                )
-                outcome = _outcome_for(entry)
-                row = {
-                    "fingerprint": fp,
-                    "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
-                    "extra_envs": dict(entry.get("extra_envs") or {}),
-                    "note": str(entry.get("note") or ""),
-                    "outcome": outcome,
-                    "round_id": str(entry.get("round_id") or ""),
-                    "ts": str(entry.get("ts") or ""),
-                    "gain_pct": entry.get("gain_pct"),
-                    "tput": entry.get("tput") or entry.get("output_throughput"),
-                    "provenance": str(entry.get("provenance")
-                                       or f"legacy:{legacy_action}"),
-                    "workload_signature": str(entry.get("workload_signature") or ""),
-                }
-                prev = tested.get(fp)
-                if prev is None or _RANK.get(outcome, 0) >= _RANK.get(
-                    str(prev.get("outcome") or ""), 0,
-                ):
-                    tested[fp] = row
-                if row["name"]:
-                    name_index[row["name"]] = fp
-
-        _ingest_tested(b, "backends")
-        _ingest_tested(p, "params")
-
-        # accepted: union by fingerprint, later entries win.
-        accepted_by_fp: dict[str, dict[str, Any]] = {}
-
-        def _ingest_accepted(source: dict[str, Any], legacy_action: str) -> None:
-            for entry in source.get("accepted") or []:
-                if not isinstance(entry, dict):
-                    continue
-                fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_sglang_args") or ""),
-                    dict(entry.get("extra_envs") or {}),
-                ))
-                row = {
-                    "fingerprint": fp,
-                    "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
-                    "extra_envs": dict(entry.get("extra_envs") or {}),
-                    "note": str(entry.get("note") or ""),
-                    "gain_pct": entry.get("gain_pct"),
-                    "tput": entry.get("tput") or entry.get("output_throughput"),
-                    "stack_index": entry.get("stack_index"),
-                    "accepted_at_round": str(entry.get("accepted_at_round") or ""),
-                    "ts": str(entry.get("ts") or ""),
-                    "provenance": str(entry.get("provenance")
-                                       or f"legacy:{legacy_action}"),
-                }
-                accepted_by_fp[fp] = row
-                if row["name"]:
-                    name_index[row["name"]] = fp
-
-        _ingest_accepted(b, "backends")
-        _ingest_accepted(p, "params")
-        # Also pull from ``existing`` so a re-load preserves ExploreExecutor's
-        # own writes since the last merge.
-        for entry in existing.get("accepted") or []:
-            if not isinstance(entry, dict):
-                continue
-            fp = str(entry.get("fingerprint") or "")
-            if fp:
-                accepted_by_fp[fp] = dict(entry)
-
-        # rejected: union by fingerprint; drop fingerprints already in
-        # accepted (re-promote wins).
-        accepted_fps = set(accepted_by_fp.keys())
-        rejected_by_fp: dict[str, dict[str, Any]] = {}
-
-        def _ingest_rejected(source: dict[str, Any], legacy_action: str) -> None:
-            for entry in source.get("rejected") or []:
-                if not isinstance(entry, dict):
-                    continue
-                fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_sglang_args") or ""),
-                    dict(entry.get("extra_envs") or {}),
-                ))
-                if fp in accepted_fps:
-                    continue
-                row = {
-                    "fingerprint": fp,
-                    "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
-                    "extra_envs": dict(entry.get("extra_envs") or {}),
-                    "note": str(entry.get("note") or ""),
-                    "reason": str(entry.get("reason") or "not_keep"),
-                    "gain_pct": entry.get("gain_pct"),
-                    "tput": entry.get("tput") or entry.get("output_throughput"),
-                    "round_id": str(entry.get("round_id") or ""),
-                    "ts": str(entry.get("ts") or ""),
-                    "provenance": str(entry.get("provenance")
-                                       or f"legacy:{legacy_action}"),
-                }
-                rejected_by_fp[fp] = row
-                if row["name"]:
-                    name_index[row["name"]] = fp
-
-        _ingest_rejected(b, "backends")
-        _ingest_rejected(p, "params")
-        for entry in existing.get("rejected") or []:
-            if not isinstance(entry, dict):
-                continue
-            fp = str(entry.get("fingerprint") or "")
-            if fp and fp not in accepted_fps:
-                rejected_by_fp[fp] = dict(entry)
-
-        # winners_history: append legacy lists + preserve any prior
-        # explore-side rows, then sort by (round_id, ts).
+        # winners_history: fold the live history fields + preserve any
+        # prior explore-side rows, then sort by (round_id, ts).
         wh: list[dict[str, Any]] = []
-        for source_list, legacy_action in (
-            (backend_winners_history, "backends"),
-            (params_winner_history, "params"),
-            (existing.get("winners_history") or [], "explore"),
+        for source_list in (
+            backend_winners_history,
+            params_winner_history,
+            existing.get("winners_history") or [],
         ):
             if not isinstance(source_list, list):
                 continue
             for entry in source_list:
                 if not isinstance(entry, dict):
                     continue
-                fp_val = entry.get("fingerprint")
-                if not fp_val:
-                    fp_val = _fp(
-                        str(entry.get("extra_sglang_args") or ""),
-                        dict(entry.get("extra_envs") or {}),
-                    )
+                fp_val = entry.get("fingerprint") or _fp(
+                    str(entry.get("extra_server_args") or ""),
+                    dict(entry.get("extra_envs") or {}),
+                )
                 wh.append({
                     "round_id": str(entry.get("round_id") or ""),
                     "variant_name": str(entry.get("variant_name")
@@ -1427,21 +1424,16 @@ class SharedState:
                     "fingerprint": str(fp_val),
                     "gain_pct": entry.get("gain_pct"),
                     "extra_args": str(entry.get("extra_args")
-                                       or entry.get("extra_sglang_args") or ""),
+                                       or entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
-                    "provenance": str(entry.get("provenance")
-                                       or f"legacy:{legacy_action}"),
+                    "provenance": str(entry.get("provenance") or ""),
                     "ts": str(entry.get("ts") or ""),
                 })
+        wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
+        out["winners_history"] = wh
 
-        def _sort_key(row: dict[str, Any]) -> tuple[str, str]:
-            return (str(row.get("round_id") or ""), str(row.get("ts") or ""))
-
-        wh.sort(key=_sort_key)
-
-        # synergy_attempted: copy from legacy field; preserve any
-        # ExploreExecutor-side additions.
-        sa_raw = synergy_attempted if isinstance(synergy_attempted, list) else []
+        # synergy_attempted: fold the live field + preserve any
+        # ExploreExecutor-side additions, deduped.
         sa_set: set[tuple[str, ...]] = set()
 
         def _normalize_combo(c: Any) -> tuple[str, ...] | None:
@@ -1449,41 +1441,19 @@ class SharedState:
                 items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
                 return items if items else None
             if isinstance(c, str) and c.strip():
-                # Legacy synergy_attempted entries were "+"-joined strings.
                 parts = tuple(sorted(p for p in c.split("+") if p))
                 return parts if parts else None
             return None
 
-        for c in sa_raw:
-            norm = _normalize_combo(c)
-            if norm:
-                sa_set.add(norm)
-        for c in existing.get("synergy_attempted") or []:
-            norm = _normalize_combo(c)
-            if norm:
-                sa_set.add(norm)
-
-        # discovered_flags: M3 leaves empty; preserve any existing rows.
-        df_existing = existing.get("discovered_flags") or []
-        df: list[dict[str, Any]] = [
-            d for d in df_existing if isinstance(d, dict)
-        ]
-
-        return {
-            "schema_version": 1,
-            "tested": tested,
-            "accepted": list(accepted_by_fp.values()),
-            "rejected": list(rejected_by_fp.values()),
-            "winners_history": wh,
-            "discovered_flags": df,
-            "synergy_attempted": [list(c) for c in sorted(sa_set)],
-            "domains_round_summary": list(existing.get("domains_round_summary") or []),
-            "name_index": name_index,
-            "cursor": len(tested),
-            "last_round": dict(existing.get("last_round") or {}),
-            # Sentinel so a re-load with unchanged legacy data short-circuits.
-            "merged_from_legacy_sig": legacy_sig,
-        }
+        for source in (synergy_attempted, existing.get("synergy_attempted") or []):
+            if not isinstance(source, list):
+                continue
+            for c in source:
+                norm = _normalize_combo(c)
+                if norm:
+                    sa_set.add(norm)
+        out["synergy_attempted"] = [list(c) for c in sorted(sa_set)]
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -1841,7 +1811,12 @@ class SharedState:
             or payload.get("source_file")
             or ""
         )
-        extra_args = str(payload.get("extra_sglang_args") or "").strip()
+        # ``payload`` is an external envelope (LLM intent or sub-agent
+        # kernel_opt result); route through the compat helper so a legacy
+        # ``extra_sglang_args`` key still resolves with a single
+        # DeprecationWarning logged via stacklevel=3.
+        from ..compat.payload_aliases import read_extra_server_args
+        extra_args = read_extra_server_args(payload).strip()
         return kernel_id, patch_path, target_file, extra_args
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
@@ -1905,7 +1880,7 @@ class SharedState:
             "kernel_id": kernel_id,
             "patch_path": patch_path,
             "target_file": target_file,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "attempts": attempts,
             "attempt_count": len(attempts),
             "best_gain_pct": best_gain,
@@ -1935,7 +1910,7 @@ class SharedState:
             "kernel_id": kernel_id,
             "patch_path": patch_path,
             "target_file": target_file,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "attempt_count": len(attempts),
             "best_gain_pct": best_gain,
             "keep_threshold_pct": keep_threshold_pct,
@@ -2148,6 +2123,17 @@ class SharedState:
             )
 
         self.kernel_opt_attempts[kernel_id] = entry
+
+    def record_gemm_tuning(self, result: dict[str, Any]) -> None:
+        """Capture the GEAK GEMM tuning result for sequencing and prompts."""
+        if not isinstance(result, dict):
+            result = {"status": "failed", "error": "non-dict gemm tuning result"}
+        entry = dict(result)
+        entry.setdefault("ts", _now_iso())
+        self.last_gemm_tuning = entry
+        attempts = list(self.gemm_tuning_attempts or [])
+        attempts.append(entry)
+        self.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
 
     # ------------------------------------------------------------------
     # Multi-KEEP integrate queue helpers (PR-B follow-up).
@@ -2585,26 +2571,30 @@ class SharedState:
         """write the canonical 11-field ``last_trace_analyze`` dict.
 
         Called by :class:`RooflineExecutor` (F1-2) after a successful
-        ``trace_analyze`` sub-step. Distinct from the legacy
-        :meth:`record_select_kernels` writer below, which writes a thinner
-        ``last_select_kernels`` schema for the ``select_kernels_handler``
-        path and stays in place for backward compatibility.
+        ``trace_analyze`` sub-step, and by the inline programmatic
+        handler path in :meth:`Coordinator._handle_request` when an LLM
+        emits a ``trace_analyze`` request directly. Single canonical
+        writer for this cache — the M4 legacy ``record_select_kernels``
+        twin was removed in this branch.
 
         On every successful call, ``roofline_snapshot_id`` is read from the
         previous ``last_trace_analyze`` and incremented by one — giving a
-        monotonic counter the orchestration prompt + N31 final-roofline
-        guard rely on. ``roofline_baseline_gain_at_snapshot`` captures
+        monotonic counter the orchestration prompt + the watermark-driven
+        freshness gate (:meth:`Coordinator._needs_roofline_for_watermark`)
+        both rely on. ``roofline_baseline_gain_at_snapshot`` captures
         ``cumulative_gain_validated`` at write time so the prompt can
         surface the gain delta since the report was taken.
+
+        A compact copy is also appended to
+        :attr:`roofline_snapshots` (PR #321 retired the legacy
+        ``last_trace_analyze_baseline`` field; the history list is the
+        new source for ``report.py``'s ``## Roofline Comparison``
+        before/after view).
 
         ``analysis_md_text`` is read verbatim from
         ``result['trace_report_path']``; OSErrors degrade silently to
         empty text (the ``analysis_md_path`` field still lets a future
         ``read_artifact`` intent re-fetch it on demand).
-
-        Cherry-picked from /wekafs/zgong/Hyperloom main @ c6f0a71
-        ``shared_state.py:1508`` ; verbatim except for the docstring tying
-        it to F1-1 / F1-2 of this branch's integration plan.
         """
         if not isinstance(result, dict):
             return
@@ -2618,25 +2608,63 @@ class SharedState:
             artifacts = result.get("artifact_paths") or {}
             if isinstance(artifacts, dict):
                 candidates_path = artifacts.get("kernel_candidates", "") or ""
+        kernel_roofline_path = result.get("kernel_roofline_path") or ""
+        if not kernel_roofline_path:
+            artifacts = result.get("artifact_paths") or {}
+            if isinstance(artifacts, dict):
+                kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
         hot = result.get("hot_kernels") or []
         summary: list[dict[str, Any]] = []
+        kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
         for entry in hot[:15] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
             kid = entry.get("kernel_id")
             reusable = bool(entry.get("reusable_native_kernel"))
-            summary.append({
+            arithmetic_intensity = entry.get("arithmetic_intensity")
+            if arithmetic_intensity is None:
+                arithmetic_intensity = entry.get("flops_per_byte")
+            efficiency_percent = entry.get("efficiency_percent")
+            if efficiency_percent is None:
+                efficiency_percent = entry.get("efficiency_pct")
+            summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
+                # TraceLens derive_kernel_category bucket (MoE / LayerNorm /
+                # GEMM / ...). Without this passthrough downstream consumers
+                # (kernel_attempt_summary by_kernel rows) get an empty string.
+                "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
                 "bottleneck": entry.get("bottleneck"),
-                "arithmetic_intensity": entry.get("arithmetic_intensity"),
+                "bound_type": entry.get("bound_type"),
+                "arithmetic_intensity": arithmetic_intensity,
+                "flops_per_byte": entry.get("flops_per_byte"),
+                "efficiency_percent": efficiency_percent,
+                "compute_utilization_pct": entry.get("compute_utilization_pct"),
+                "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
+                "suggestion": entry.get("suggestion") or "",
+                "roofline_name": entry.get("roofline_name"),
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
-            })
+            }
+            summary.append(summary_entry)
+            if any(
+                summary_entry.get(key) not in (None, "", [])
+                for key in (
+                    "bound_type",
+                    "arithmetic_intensity",
+                    "flops_per_byte",
+                    "efficiency_percent",
+                    "compute_utilization_pct",
+                    "bandwidth_utilization_pct",
+                    "suggestion",
+                    "roofline_name",
+                )
+            ):
+                kernel_roofline.append(dict(summary_entry))
             if reusable and kid:
                 reusable_ids.append(str(kid))
 
@@ -2659,9 +2687,13 @@ class SharedState:
         analysis_md_text = ""
         if analysis_md_path:
             try:
-                # No truncation: typical analysis.md is 10-20 KB, worst
-                # case ~200 KB — well within the 200K-token orchestration
-                # context budget.
+                # Stored verbatim, but the prompt path strips embedded
+                # base64 data-URLs before injection (see
+                # ``_format_analysis_md_full`` /
+                # ``strip_base64_data_urls``). A raw analysis.md can be
+                # ~120K tokens of base64 images; post-strip it is ~6K
+                # tokens of actual report text. NEVER inject this field
+                # raw — always go through the strip helper.
                 analysis_md_text = Path(analysis_md_path).read_text(
                     encoding="utf-8", errors="replace",
                 )
@@ -2672,10 +2704,13 @@ class SharedState:
         if not isinstance(task_groups, list):
             task_groups = []
 
+        ts_iso = _now_iso()
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
+            "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,
+            "kernel_roofline_top15": kernel_roofline,
             "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
@@ -2685,126 +2720,74 @@ class SharedState:
             "roofline_baseline_gain_at_snapshot": float(
                 self.cumulative_gain_validated,
             ),
-            "ts": _now_iso(),
+            "ts": ts_iso,
         }
         # Mirror the snapshot id at the top level so PolicyGate /
         # Coordinator can read it without the nested-dict lookup.
         self.roofline_snapshot_id = snapshot_id
 
-    def record_select_kernels(self, payload: dict[str, Any],
-                              result: dict[str, Any]) -> None:
-        """Cache the latest select_kernels output keyed by trace_input.
-
-        We persist a wider window than the prompt-visible top5 so that when
-        the very top GPU consumers are vendor-binary kernels (Tensile / CK)
-        Orchestration still sees lower-ranked but **reusable native** entries
-        (e.g. AITER RMSNorm) and can dispatch ``run_optimization`` against
-        them instead of looping on rejected ones.
-
-        We also persist ``trace_health_warnings`` so Orchestration's prompt
-        surfaces the structured routing signals produced by the TraceLens
-        analyzer (Hyperloom v0.4 finishing-touches T3 / T4):
-
-        * ``high_gpu_idle_pct`` — Executive Summary's ``Idle %`` exceeded
-          the gate threshold; per Report_Interfacing.docx §2 (idle-gate
-          sanity check) the LLM should pivot to parameter optimization
-          rather than kernel rewriting in this regime.
-        * ``tracelens_analysis_failed`` — the TraceLens subprocess crashed
-          permanently (perf-CLI missing, ``analysis.md`` not produced,
-          timeout, …); Coordinator already demoted this to ``status=ok``
-          + empty ``hot_kernels`` at the handler boundary, but the LLM
-          still needs to *see* the failure so it picks parameter
-          optimization explicitly instead of inferring "TraceLens is
-          still running" from the empty list.
-
-        Without this pass-through the warnings produced upstream are
-        dropped at the SharedState boundary and Orchestration cannot
-        ground its routing decisions on them.
-        """
-        if not isinstance(result, dict):
-            return
-        trace_input = (
-            (payload or {}).get("trace_input")
-            or (payload or {}).get("trace_dir")
-            or ""
-        )
-        candidates_path = result.get("candidates_path") or ""
-        if not candidates_path:
-            artifacts = result.get("artifact_paths") or {}
-            if isinstance(artifacts, dict):
-                candidates_path = artifacts.get("kernel_candidates", "") or ""
-        hot = result.get("hot_kernels") or []
-        summary: list[dict[str, Any]] = []
-        reusable_ids: list[str] = []
-        for entry in hot[:15] if isinstance(hot, list) else []:
-            if not isinstance(entry, dict):
-                continue
-            kid = entry.get("kernel_id")
-            reusable = bool(entry.get("reusable_native_kernel"))
-            summary.append({
-                "kernel_id": kid,
-                "name": entry.get("name"),
-                "gpu_pct": entry.get("gpu_pct"),
-                "bottleneck": entry.get("bottleneck"),
-                "arithmetic_intensity": entry.get("arithmetic_intensity"),
-                "source_file": entry.get("source_file"),
-                "reusable_native_kernel": reusable,
-                "recommended_backends": entry.get("recommended_backends") or [],
-                "recommended_actions": entry.get("recommended_actions") or [],
-            })
-            if reusable and kid:
-                reusable_ids.append(str(kid))
-
-        # T3 / T4: keep the structured warning list verbatim — handler
-        # already shaped each entry into the documented form (code,
-        # severity, message, plus code-specific extras like idle_pct or
-        # returncode). We filter to ``dict`` to be defensive against a
-        # buggy tool emitting non-dict junk, but otherwise pass through
-        # untouched so the LLM sees the full diagnostic.
-        raw_warnings = result.get("trace_health_warnings") or []
-        warnings_cleaned: list[dict[str, Any]] = []
-        if isinstance(raw_warnings, list):
-            for entry in raw_warnings:
-                if isinstance(entry, dict) and entry.get("code"):
-                    warnings_cleaned.append(dict(entry))
-
-        # 893bc6f: propagate ``task_groups`` from the handler result so
-        # the multi-KEEP integrate queue's source-of-truth lookups stay
-        # in sync with what ``_batch_kernel_candidates`` dispatched.
-        # Without this, ``untried_hot_reusable_kernels()`` and
-        # ``next_pending_keep_kernel_id()`` see ``task_groups=[]`` and
-        # fall through to per-kernel logic — e.g. for
-        # ``primary=k004 kids=[k003, k004]`` they treat k003 as an
-        # untried independent kernel even though dispatching k004
-        # already covered the same AST function.
-        task_groups = result.get("task_groups") or []
-        if not isinstance(task_groups, list):
-            task_groups = []
-        # F1-1: ``record_trace_analyze`` is the canonical writer for
-        # the 11-field ``last_trace_analyze`` (snapshot_id /
-        # analysis_md_text / baseline_gain_at_snapshot / …). This
-        # legacy ``record_select_kernels`` writer stays in place for
-        # backwards-compatible callers and only mirrors the slim
-        # ``last_select_kernels`` schema; task_groups is added so the
-        # downstream lookups behave identically regardless of which
-        # path populated SharedState.
-        cached = {
-            "trace_input": str(trace_input),
-            "candidates_path": str(candidates_path),
-            "hot_kernels_top15": summary,
-            "task_groups": task_groups,
-            "reusable_native_kernel_ids": reusable_ids,
-            "trace_health_warnings": warnings_cleaned,
-            "ts": _now_iso(),
-        }
-        self.last_select_kernels = cached
-        # Main M4 main merge: ``last_trace_analyze`` is the canonical
-        # post-rename name (RooflineExecutor / `record_trace_analyze`
-        # writes a richer schema there, but the legacy
-        # ``record_select_kernels`` writer must also mirror its slim
-        # schema into ``last_trace_analyze`` so the policy gate's cache
-        # lookup (which prefers the canonical field) finds the entry.
-        self.last_trace_analyze = dict(cached)
+        # Append a compact history entry for the report-side Roofline
+        # Comparison renderer. Parses analysis.md once at write time so
+        # the renderer never has to (and the snapshot survives even if
+        # the on-disk file is later deleted). Best-effort: parsing
+        # errors degrade silently to None fields.
+        try:
+            from .roofline_snapshot import build_roofline_snapshot
+            # Stamp decode-roofline ceiling + measured throughput so
+            # the dashboard can surface "% within roofline" without
+            # re-reading model files. Ceiling is a session-level
+            # constant (hardware + model + isl/osl don't change),
+            # achieved tput is current_best.tput if optimization has
+            # produced a winner, else baseline_tput.
+            from .roofline_ceiling import (
+                RooflineBreakdown,
+                compute_roofline_breakdown_from_state,
+            )
+            # Two-sided roofline (T_mem + T_cmp + min) — see formula
+            # change in roofline_ceiling.py. ``peak_tput`` continues to
+            # equal ``min(mem, cmp)`` so the existing dashboard
+            # ``theoretical_peak_tok_per_sec`` field stays meaningful.
+            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+            try:
+                breakdown = compute_roofline_breakdown_from_state(self)
+            except Exception:  # noqa: BLE001 — ceiling is best-effort
+                pass
+            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            achieved_tput = 0.0
+            cb = self.current_best if isinstance(self.current_best, dict) else {}
+            cb_tput = cb.get("tput")
+            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                achieved_tput = float(cb_tput)
+            elif isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+                achieved_tput = float(self.baseline_tput)
+            history_entry = build_roofline_snapshot(
+                snapshot_id=snapshot_id,
+                ts=ts_iso,
+                analysis_md_path=str(analysis_md_path),
+                theoretical_peak_tok_per_sec=peak_tput,
+                achieved_tok_per_sec=achieved_tput,
+                mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
+                cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
+                bound_kind=breakdown.bound_kind,
+            )
+            history_entry["trace_input"] = str(trace_input)
+            history_entry["analysis_md_path"] = str(analysis_md_path)
+            # 9fe4609 sidecar artifact pointer: dashboards read this
+            # path to surface per-kernel roofline data from the
+            # tracelens-written ``reports/kernel_roofline.json``.
+            history_entry["kernel_roofline_path"] = str(kernel_roofline_path)
+            if not isinstance(self.roofline_snapshots, list):
+                self.roofline_snapshots = []
+            self.roofline_snapshots.append(history_entry)
+            if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
+                # Drop oldest non-baseline entries; always keep
+                # snapshot #1 so the report's "baseline" anchor never
+                # rotates away.
+                base = self.roofline_snapshots[0]
+                tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1):]
+                self.roofline_snapshots = [base, *tail]
+        except Exception:  # noqa: BLE001 — never block record on render concerns
+            pass
 
     def record_sweep(self, result: dict[str, Any]) -> None:
         if not isinstance(result, dict):
@@ -2829,6 +2812,31 @@ class SharedState:
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
+        }
+
+    def record_conc_sweep(self, result: dict[str, Any]) -> None:
+        """Record conc_sweep task completion (mirrors record_sweep).
+
+        Bug #12 fix: ``phase_state.exit_normal_sweep`` previously only
+        looked at ``last_sweep.status`` to fire ``sweep_done``. When the
+        SWEEP phase reaches its terminal state via conc_sweep alone (e.g.
+        sweep was singleton-blocked or completed in a prior session and
+        only conc_sweep runs in this resume), the phase had no exit
+        signal and idled until ``sweep_budget_exhausted``. Writing
+        ``last_conc_sweep.status`` lets ``exit_normal_sweep`` return
+        ``conc_sweep_done`` and the SWEEP→CLOSE transition fires
+        immediately after conc_sweep settles.
+        """
+        if not isinstance(result, dict):
+            return
+        self.last_conc_sweep = {
+            "ts":               _now_iso(),
+            "status":           str(result.get("status") or "succeeded"),
+            "skip_reason":      str(result.get("skip_reason") or ""),
+            "was_skipped":      bool(result.get("was_skipped", False)),
+            "budget_exhausted": bool(result.get("budget_exhausted", False)),
+            "summary":          dict(result.get("summary") or {}),
+            "workspace":        str(result.get("workspace") or ""),
         }
 
     # ------------------------------------------------------------------
@@ -2918,6 +2926,11 @@ class SharedState:
                 "severity":        str(entry.get("severity") or "medium"),
                 "domain_hint":     str(entry.get("domain_hint") or ""),
                 "source":          str(entry.get("source") or ""),
+                # Origin reference (e.g. a research-hint PR/blog URL) that
+                # outlives the session so KEEP/REVERT outcomes can be
+                # sedimented into the recipe with provenance. Optional;
+                # absent on gaps without an external origin.
+                "provenance":      str(entry.get("provenance") or ""),
                 "first_seen_ts":   str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
                 "attempts":        list(entry.get("attempts") or []),
@@ -2929,7 +2942,8 @@ class SharedState:
         else:
             # Field-wise merge: incoming non-empty values win except
             # for ``first_seen_ts`` (preserve oldest).
-            for key in ("symptom", "layer", "severity", "domain_hint", "source"):
+            for key in ("symptom", "layer", "severity", "domain_hint",
+                        "source", "provenance"):
                 incoming = entry.get(key)
                 if incoming:
                     existing[key] = str(incoming)
@@ -3032,6 +3046,8 @@ class SharedState:
         ("kernel", "noop", ...) are still appended (the ledger is
         descriptive); the consecutive-config counter only advances on
         explicit ``"config"`` values and resets on ``"code_patch"``.
+        ``"code_patch_attempt"`` satisfies exploration-depth accounting
+        without counting as a kept code patch.
         """
         ct = str(change_type or "").strip().lower()
         entry = {
@@ -3048,6 +3064,58 @@ class SharedState:
             )
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
+        self.bump_depth_patch(ct)
+
+    def get_intervention_mix(self, *, recent_window: int = 5) -> dict[str, Any]:
+        """Summarise the intervention-mix ledger as derived counts.
+
+        Returns config vs code_patch totals over the whole ledger and
+        the most recent ``recent_window`` entries, plus
+        ``consecutive_config_only`` (length of the trailing config-only
+        run) and ``config_heavy`` (config has dominated and no code
+        patch has landed). Read-only; never raises.
+
+        Entries with an unknown ``change_type`` (e.g. analysis-only
+        rounds) are ignored for the config/code tallies but still break
+        the trailing config-only run.
+        """
+        ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
+
+        def _ct(entry: dict[str, Any]) -> str:
+            return str(entry.get("change_type") or "").strip().lower()
+
+        total_config = sum(1 for e in ledger if _ct(e) == "config")
+        total_code_patch = sum(1 for e in ledger if _ct(e) == "code_patch")
+        total_code_patch_attempt = sum(
+            1 for e in ledger
+            if _ct(e) in ("code_patch", "code_patch_attempt")
+        )
+        window = ledger[-recent_window:] if recent_window > 0 else ledger
+        recent_config = sum(1 for e in window if _ct(e) == "config")
+        recent_code_patch = sum(1 for e in window if _ct(e) == "code_patch")
+        recent_code_patch_attempt = sum(
+            1 for e in window
+            if _ct(e) in ("code_patch", "code_patch_attempt")
+        )
+
+        consecutive_config_only = 0
+        for e in reversed(ledger):
+            ct = _ct(e)
+            if ct == "config":
+                consecutive_config_only += 1
+            else:
+                break
+
+        return {
+            "total_config": total_config,
+            "total_code_patch": total_code_patch,
+            "total_code_patch_attempt": total_code_patch_attempt,
+            "recent_config": recent_config,
+            "recent_code_patch": recent_code_patch,
+            "recent_code_patch_attempt": recent_code_patch_attempt,
+            "consecutive_config_only": consecutive_config_only,
+            "config_heavy": total_config >= recent_window and total_code_patch == 0,
+        }
 
     def bump_specialist_dispatched(self, n: int = 1) -> int:
         """PR-A8: increment the per-EXPLORE specialist dispatch counter.
@@ -3067,6 +3135,387 @@ class SharedState:
         EXPLORE entry.
         """
         self.explore_specialist_dispatched_count = 0
+
+    def bump_research_scout_runs(self, n: int = 1) -> int:
+        """Increment the research-scout dispatch counter; return new total."""
+        self.research_scout_runs = int(self.research_scout_runs or 0) + int(n)
+        return self.research_scout_runs
+
+    def register_seen_pr_ids(self, pr_ids: Any) -> int:
+        """Add PR ids to the shared seen-set (scout + FRAMEWORK_PR dedup).
+
+        Ids are normalised to strings; duplicates and blanks are ignored.
+        Returns the number of newly-added ids.
+        """
+        seen = set(self.research_scout_seen_pr_ids or [])
+        added = 0
+        for raw in pr_ids or []:
+            pid = str(raw or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            self.research_scout_seen_pr_ids.append(pid)
+            added += 1
+        return added
+
+    def has_seen_pr_id(self, pr_id: Any) -> bool:
+        """True iff ``pr_id`` was already surfaced by scout / FRAMEWORK_PR."""
+        pid = str(pr_id or "").strip()
+        return bool(pid) and pid in set(self.research_scout_seen_pr_ids or [])
+
+    # ------------------------------------------------------------------
+    # Exploration-depth tracker
+    # ------------------------------------------------------------------
+    def _depth(self) -> dict[str, Any]:
+        """Return the depth_tracker sub-dict, repairing a missing / stale
+        shape so old state.json loads degrade to defaults."""
+        dt = self.depth_tracker
+        if not isinstance(dt, dict):
+            dt = {}
+            self.depth_tracker = dt
+        dt.setdefault("enabled", True)
+        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs_compared"):
+            if not isinstance(dt.get(key), list):
+                dt[key] = []
+        for key in ("code_patches_attempted", "config_changes_attempted",
+                    "consecutive_reverts"):
+            try:
+                dt[key] = int(dt.get(key) or 0)
+            except (TypeError, ValueError):
+                dt[key] = 0
+        return dt
+
+    def set_depth_gate_enabled(self, enabled: bool) -> None:
+        self._depth()["enabled"] = bool(enabled)
+
+    def depth_gate_enabled(self) -> bool:
+        return bool(self._depth().get("enabled", True))
+
+    def _depth_register_ids(self, key: str, ids: Any) -> int:
+        dt = self._depth()
+        seen = set(dt.get(key) or [])
+        added = 0
+        for raw in ids or []:
+            val = str(raw or "").strip()
+            if not val or val in seen:
+                continue
+            seen.add(val)
+            dt[key].append(val)
+            added += 1
+        return added
+
+    def register_research_evidence(
+        self,
+        *,
+        prs_fetched: Any = None,
+        pr_diffs_read: Any = None,
+        nvidia_refs_compared: Any = None,
+    ) -> dict[str, int]:
+        """De-dup research evidence into the depth tracker; return per-key
+        added counts. Used when aggregating ``specialist_done.research``."""
+        return {
+            "prs_fetched": self._depth_register_ids("prs_fetched", prs_fetched),
+            "pr_diffs_read": self._depth_register_ids(
+                "pr_diffs_read", pr_diffs_read,
+            ),
+            "nvidia_refs_compared": self._depth_register_ids(
+                "nvidia_refs_compared", nvidia_refs_compared,
+            ),
+        }
+
+    def bump_depth_patch(self, change_type: str) -> None:
+        """Advance the code/config patch-attempt counters from a KEEP."""
+        dt = self._depth()
+        ct = str(change_type or "").strip().lower()
+        if ct in ("code_patch", "code_patch_attempt"):
+            dt["code_patches_attempted"] = int(
+                dt.get("code_patches_attempted") or 0
+            ) + 1
+        elif ct == "config":
+            dt["config_changes_attempted"] = int(
+                dt.get("config_changes_attempted") or 0
+            ) + 1
+
+    def note_explore_outcome(self, *, promoted: bool) -> int:
+        """Update ``consecutive_reverts`` from an explore-round outcome.
+
+        A promoted KEEP resets the run to 0; a no-promote round increments
+        it. Returns the post-update value.
+        """
+        dt = self._depth()
+        if promoted:
+            dt["consecutive_reverts"] = 0
+        else:
+            dt["consecutive_reverts"] = int(
+                dt.get("consecutive_reverts") or 0
+            ) + 1
+        return int(dt["consecutive_reverts"])
+
+    def depth_snapshot(self) -> dict[str, Any]:
+        """Read-only normalised view of the depth tracker for the gate /
+        prompt (sets rendered as counts + the underlying id lists)."""
+        dt = self._depth()
+        return {
+            "enabled": bool(dt.get("enabled", True)),
+            "research_scout_runs": int(self.research_scout_runs or 0),
+            "prs_fetched": list(dt.get("prs_fetched") or []),
+            "pr_diffs_read": list(dt.get("pr_diffs_read") or []),
+            "nvidia_refs_compared": list(dt.get("nvidia_refs_compared") or []),
+            "code_patches_attempted": int(dt.get("code_patches_attempted") or 0),
+            "config_changes_attempted": int(
+                dt.get("config_changes_attempted") or 0
+            ),
+            "consecutive_reverts": int(dt.get("consecutive_reverts") or 0),
+        }
+
+    def to_intervention_mix_summary(self) -> str:
+        """PR-A8 / D3 (Arbor-into-Hyperloom): render the config-vs-code_patch
+        intervention ledger for the Orchestration per-tick prompt.
+
+        Returns ``""`` when the ledger is empty (nothing recorded yet — no
+        escalation possible). Otherwise returns a one-line counts summary,
+        plus an ``ESCALATION`` directive when the session has been
+        config-only for too long, nudging Orchestration to dispatch a
+        code-patch ``serving_specialist`` next (Arbor's "do not settle for
+        config-only" rule). ``record_intervention`` maintains the ledger;
+        this is its sole consumer.
+
+        Thresholds mirror Arbor's ``get_intervention_mix`` heuristics:
+        escalate when ``consecutive_config_only_rounds >= 2`` OR the ledger
+        is config-heavy (>= 5 config keeps) with zero code_patch keeps.
+        """
+        mix = self.intervention_mix or []
+        if not mix:
+            return ""
+        escalate_at = 2
+        config_heavy_at = 5
+        n_config = sum(
+            1 for m in mix if (m or {}).get("change_type") == "config"
+        )
+        n_patch = sum(
+            1 for m in mix if (m or {}).get("change_type") == "code_patch"
+        )
+        n_patch_attempt = sum(
+            1 for m in mix
+            if (m or {}).get("change_type") in (
+                "code_patch", "code_patch_attempt",
+            )
+        )
+        # B2: config explore rounds that produced measurements but KEPT
+        # nothing (all REVERT / KEEP_UNSTABLE) are recorded as
+        # ``config_attempt``. They count toward the escalation signal so
+        # repeated fruitless config tuning escalates to a code-patch
+        # ``integrate_patch`` even when the MI300X noise floor prevents
+        # any config KEEP (the failure mode that left this loop spinning).
+        n_config_attempt = sum(
+            1 for m in mix if (m or {}).get("change_type") == "config_attempt"
+        )
+        consec = int(self.consecutive_config_only_rounds or 0)
+        config_pressure = n_config + n_config_attempt
+        lines = [
+            f"config_keeps={n_config} config_attempts={n_config_attempt} "
+            f"code_patch_keeps={n_patch} code_patch_attempts={n_patch_attempt} "
+            f"consecutive_config_only_rounds={consec}"
+        ]
+        if (
+            consec >= escalate_at
+            or (n_config >= config_heavy_at and n_patch == 0)
+            or (config_pressure >= escalate_at and n_patch == 0)
+        ):
+            lines.append(
+                "ESCALATION: config-only for too long. Config tuning has a "
+                "low ceiling — your NEXT EXPLORE dispatch SHOULD delegate a "
+                "`serving_specialist` to author a framework SOURCE patch "
+                "(scheduler / kv_cache / chunked-prefill), integrated via "
+                "`integrate_patch`, rather than another config-only "
+                "`params` / `explore` round."
+            )
+        return "\n".join(lines)
+
+    def record_dynamic_action_dispatch(
+        self, dyn_id: str, summary: dict[str, Any],
+    ) -> int:
+        """Register a freshly-dispatched ``dynamic_action`` + bump the
+        per-round counter atomically.
+
+        Coordinator-only writer (CORE_STATE_FIELDS protects it from
+        LLM ``UPDATE_STATE``). Idempotent on ``dyn_id``: a re-record
+        overwrites the summary but does not double-bump the counter.
+        Returns the post-increment round counter value.
+        """
+        key = str(dyn_id or "").strip()
+        if not key:
+            return self.dynamic_action_round_count
+        was_new = key not in self.dynamic_actions
+        self.dynamic_actions[key] = dict(summary or {})
+        if was_new:
+            self.dynamic_action_round_count = int(
+                self.dynamic_action_round_count or 0
+            ) + 1
+        return self.dynamic_action_round_count
+
+    def reset_dynamic_action_round_count(self) -> None:
+        """Clear the per-EXPLORE round cap counter; the cumulative
+        ``dynamic_actions`` ledger is preserved across rounds."""
+        self.dynamic_action_round_count = 0
+
+    def record_dynamic_action_outcome(
+        self,
+        dyn_id: str,
+        *,
+        status: str,
+        last_outcome: str | None = None,
+        cumulative_gain: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Transition-validated update of the summary row keyed by
+        ``dyn_id``.
+
+        Coordinator-only writer (``CORE_STATE_FIELDS`` guards it from
+        LLM ``UPDATE_STATE``). Only keys passed in are touched;
+        ``last_outcome`` defaults to the prompt-friendly label for
+        ``status``; ``last_updated_at`` is always refreshed. Illegal
+        transitions are logged and skipped so a buggy hook cannot
+        corrupt the audit trail.
+        """
+        # Local import avoids the cycle with
+        # :mod:`dynamic_action_proposal`.
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+            can_transition,
+        )
+
+        key = str(dyn_id or "").strip()
+        if not key:
+            return
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        try:
+            target_status = DynamicActionStatus(
+                str(status or "").strip(),
+            )
+        except ValueError:
+            _log.warning(
+                "record_dynamic_action_outcome: unknown status=%r for "
+                "dyn_id=%s; dropping write",
+                status, key,
+            )
+            return
+        existing = dict(self.dynamic_actions.get(key) or {})
+        current_status_raw = existing.get("status")
+        current_status: DynamicActionStatus | None
+        if current_status_raw:
+            try:
+                current_status = DynamicActionStatus(str(current_status_raw))
+            except ValueError:
+                current_status = None
+        else:
+            current_status = None
+        if not can_transition(current_status, target_status):
+            _log.warning(
+                "record_dynamic_action_outcome: illegal transition "
+                "%s → %s for dyn_id=%s; preserving prior state",
+                current_status_raw or "(none)", target_status.value, key,
+            )
+            return
+        existing.setdefault("dyn_id", key)
+        existing["status"] = target_status.value
+        existing["last_outcome"] = str(
+            last_outcome
+            if last_outcome is not None
+            else LAST_OUTCOME_BY_STATUS.get(target_status, target_status.value.lower()),
+        )
+        if cumulative_gain is not None:
+            existing["cumulative_gain"] = float(cumulative_gain)
+        if extra:
+            for k, v in extra.items():
+                existing[k] = v
+        existing["last_updated_at"] = _now_iso()
+        self.dynamic_actions[key] = existing
+
+    def to_dynamic_actions_prompt_section(
+        self,
+        *,
+        max_entries: int = 5,
+        title: str = "Dynamic Action History",
+    ) -> str:
+        """Compact ``=== <title> ===`` block for orchestration prompt
+        injection.
+
+        Renders the most recent ``max_entries`` summaries sorted by
+        ``last_updated_at`` descending (stable tiebreak on
+        ``dyn_id``). Older rows are collapsed into an elision marker
+        pointing at the on-disk artefact dir. Returns the empty
+        string when no rows exist so callers can skip the section.
+        """
+        summaries = self.dynamic_actions or {}
+        if not summaries:
+            return ""
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+        )
+
+        ordered = sorted(
+            summaries.items(),
+            key=lambda kv: (
+                str(kv[1].get("last_updated_at") or ""),
+                str(kv[0]),
+            ),
+            reverse=True,
+        )
+        recent = ordered[: max(0, int(max_entries))]
+        older = ordered[max(0, int(max_entries)):]
+        lines: list[str] = [f"=== {title} ==="]
+        for _dyn_id, summary in recent:
+            lines.append(self._format_dynamic_action_summary_row(
+                summary,
+                _last_outcome_lookup=LAST_OUTCOME_BY_STATUS,
+                _status_enum=DynamicActionStatus,
+            ))
+        if older:
+            lines.append(
+                f"... ({len(older)} more older entries; full list in "
+                f"$SESSION_DIR/agents/orchestration/dynamic_actions/)"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_dynamic_action_summary_row(
+        summary: dict[str, Any],
+        *,
+        _last_outcome_lookup: dict | None = None,
+        _status_enum: Any | None = None,
+    ) -> str:
+        """Render one compact summary row (~50 tokens):
+
+            - <dyn_id> [<STATUS>, gain=<delta>%] scope=[d1,d2]
+              motivation: "<motivation_gap_short>"
+              artifact: <artifact_path>
+        """
+        dyn_id = str(summary.get("dyn_id") or "(unknown)")
+        status = str(summary.get("status") or "(unknown)")
+        scope = list(summary.get("scope_domains") or ())
+        motivation = str(summary.get("motivation_gap_short") or "").strip()
+        if not motivation:
+            motivation = "(no motivation summary)"
+        gain = summary.get("cumulative_gain")
+        gain_text = (
+            f"gain={gain:+.2f}%" if isinstance(gain, (int, float)) else "gain=n/a"
+        )
+        artifact = str(summary.get("artifact_path") or "(missing)")
+        last_outcome = str(summary.get("last_outcome") or "")
+        last_outcome_suffix = (
+            f" outcome={last_outcome}" if last_outcome else ""
+        )
+        head = (
+            f"- {dyn_id} [{status}, {gain_text}{last_outcome_suffix}] "
+            f"scope={scope!r}"
+        )
+        body = f'  motivation: "{motivation}"'
+        tail = f"  artifact: {artifact}"
+        return "\n".join((head, body, tail))
 
     def record_specialist_patch_verdict(
         self, specialist_task_id: str, verdict: str,
@@ -3176,15 +3625,15 @@ class SharedState:
             return
         from .action_executors._canonical_fingerprint import canonical_fingerprint
         args = str(
-            variant.get("candidate_extra_sglang_args")
-            or variant.get("extra_sglang_args") or ""
+            variant.get("candidate_extra_server_args")
+            or variant.get("extra_server_args") or ""
         )
         envs = dict(variant.get("extra_envs") or {})
         fp = str(variant.get("fingerprint") or canonical_fingerprint(args, envs))
         entry = {
             "fingerprint": fp,
             "name": str(variant.get("name") or ""),
-            "extra_sglang_args": args,
+            "extra_server_args": args,
             "extra_envs": envs,
             "note": str(variant.get("note") or ""),
             "tput": variant.get("output_throughput") or variant.get("tput"),
@@ -3282,15 +3731,15 @@ class SharedState:
 
         def _stamped(entry: dict[str, Any]) -> dict[str, Any]:
             args = str(
-                entry.get("candidate_extra_sglang_args")
-                or entry.get("extra_sglang_args") or ""
+                entry.get("candidate_extra_server_args")
+                or entry.get("extra_server_args") or ""
             )
             envs = dict(entry.get("extra_envs") or {})
             return {
                 "name": str(entry.get("name", "")),
                 "tput": entry.get("output_throughput") or entry.get("tput"),
                 "gain_pct": entry.get("gain_pct"),
-                "extra_sglang_args": args,
+                "extra_server_args": args,
                 "extra_envs": envs,
                 "note": str(entry.get("note") or ""),
                 "fingerprint": (
@@ -3336,11 +3785,6 @@ class SharedState:
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
-    def increment_session_iter_index(self) -> int:
-        """Bump the per-session experiment iter counter and return it."""
-        self.session_iter_index = int(self.session_iter_index or 0) + 1
-        return self.session_iter_index
-
     # Note: main commit 8e69732 also ports ``to_action_scores_summary``
     # — a render helper for the legacy ``Action scores`` prompt block.
     # KB_design §3.9 retired the scoreboard on this branch (see
@@ -3353,7 +3797,7 @@ class SharedState:
         action: str,
         variant_name: str | None,
         new_tput: float,
-        extra_sglang_args: str = "",
+        extra_server_args: str = "",
         ts: str | None = None,
     ) -> float | None:
         """N32b: Mirror an ``optimization_stack`` append into
@@ -3395,13 +3839,13 @@ class SharedState:
         if self.optimization_stack or not isinstance(self.current_best, dict):
             return
         variant = self.current_best.get("variant_name")
-        extra_args = self.current_best.get("extra_sglang_args")
+        extra_args = self.current_best.get("extra_server_args")
         if not variant and not extra_args:
             return
         self.optimization_stack = [{
             "action": self.current_best.get("action", "unknown"),
             "variant_name": variant or "legacy_current_best",
-            "extra_sglang_args": extra_args or "",
+            "extra_server_args": extra_args or "",
             "extra_envs": dict(self.current_best.get("extra_envs") or {}),
             "tput": self.current_best.get("tput"),
             "workspace": self.current_best.get("workspace"),
@@ -3415,7 +3859,7 @@ class SharedState:
             )
 
     # ------------------------------------------------------------------
-    # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
+    # Time-budget helpers (consumed by Coordinator._compose_prompt)
     # ------------------------------------------------------------------
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
         """Wall-clock minutes since ``start_ts``.
@@ -3777,11 +4221,141 @@ class SharedState:
             )
         return "\n".join(rows)
 
+    def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
+        """Render advisory multi-model proposal scores for Orchestration.
+
+        Reads the ``ensemble_scores`` blob attached to the most recent
+        :attr:`specialist_rounds` entries by the ProposalScorer (see
+        ``orchestrator/proposal_scorer.py``). Each line shows a variant's
+        per-rater ``score ("reason")`` side-by-side so Orchestration can
+        see agreement / disagreement. There is deliberately NO mean and
+        NO sorting — these are one reference among many (parallel to
+        gaps / KB / analysis.md), not a ranking directive (Inv-9.1: no
+        system-side scoreboard).
+
+        The rater identities are **anonymized** (``rater_1``, ``rater_2``,
+        …) so Orchestration weighs the scores on their merits and reasons
+        alone, free of any per-model prior / brand bias. The mapping is
+        *stable within a render* (the same model maps to the same
+        ``rater_N`` across every round shown) so cross-round agreement is
+        still legible, but the real model slugs never reach the prompt —
+        they stay in ``ensemble_scores`` (state.json) for debug / audit.
+
+        Returns ``""`` when no recent round carries scores so the caller
+        skips the whole section header.
+
+        Format::
+
+            round=<round_id> domain=<domain>
+              - <variant_name>: rater_1=8.0 ("..."), rater_2=6.5 ("...")
+        """
+        rounds = [
+            r for r in (self.specialist_rounds or [])
+            if isinstance(r, dict)
+            and isinstance(r.get("ensemble_scores"), dict)
+            and (r["ensemble_scores"].get("models") or {})
+        ]
+        if not rounds:
+            return ""
+        shown = rounds[-max_rounds:]
+        # Stable, anonymized rater labels: collect every real model slug
+        # across the rounds being shown, sort for determinism, and map
+        # each to ``rater_N``. The same model gets the same label across
+        # rounds (cross-round agreement stays legible) while the real
+        # slug never reaches the prompt — Orchestration must weigh scores
+        # on merit, not on which brand emitted them (avoids model bias).
+        all_slugs: set[str] = set()
+        for r in shown:
+            models = r["ensemble_scores"].get("models") or {}
+            all_slugs.update(str(s) for s in models.keys())
+            errs = r["ensemble_scores"].get("errors") or {}
+            all_slugs.update(str(s) for s in errs.keys())
+        rater_label = {
+            slug: f"rater_{i}"
+            for i, slug in enumerate(sorted(all_slugs), start=1)
+        }
+        rows: list[str] = [
+            "(Advisory only — one reference among many, NOT a ranking "
+            "directive. Scores are 0-10 likelihood-of-throughput-gain "
+            "priors from independent anonymized raters; weigh on merit "
+            "alongside gaps / KB / analysis.md.)",
+        ]
+        for r in shown:
+            ens = r["ensemble_scores"]
+            models = ens.get("models") or {}
+            scale = str(ens.get("scale") or "0-10")
+            round_id = str(r.get("round_id") or "?")
+            domain = str(r.get("domain") or "?")
+            rows.append(f"round={round_id} domain={domain} scale={scale}")
+            # Collect every variant name seen across models, preserving
+            # the proposal_set order when available.
+            ordered_names: list[str] = []
+            seen: set[str] = set()
+            for variant in (r.get("proposal_set") or []):
+                if isinstance(variant, dict):
+                    nm = str(variant.get("name") or "")
+                    if nm and nm not in seen:
+                        ordered_names.append(nm)
+                        seen.add(nm)
+            for per_model in models.values():
+                if isinstance(per_model, dict):
+                    for nm in per_model:
+                        if nm not in seen:
+                            ordered_names.append(nm)
+                            seen.add(nm)
+            # Render raters in stable label order (rater_1, rater_2, …)
+            # so a given column means the same model across every round
+            # without ever printing the model slug.
+            ordered_slugs = sorted(
+                (s for s in models if s in rater_label),
+                key=lambda s: rater_label[s],
+            )
+            for nm in ordered_names:
+                parts: list[str] = []
+                for model_slug in ordered_slugs:
+                    per_model = models.get(model_slug)
+                    if not isinstance(per_model, dict):
+                        continue
+                    label = rater_label[model_slug]
+                    cell = per_model.get(nm)
+                    if isinstance(cell, dict) and cell.get("score") is not None:
+                        reason = str(cell.get("reason") or "").replace("\n", " ")
+                        if len(reason) > 80:
+                            reason = reason[:77] + "..."
+                        parts.append(
+                            f"{label}={float(cell['score']):.1f} "
+                            f"(\"{reason}\")"
+                        )
+                    else:
+                        parts.append(f"{label}=n/a")
+                rows.append(f"  - {nm}: " + ", ".join(parts))
+            errors = ens.get("errors") or {}
+            if errors:
+                err_labels = ", ".join(
+                    sorted(
+                        rater_label.get(str(s), "rater_?")
+                        for s in errors
+                    )
+                )
+                rows.append(f"  · raters unavailable this round: {err_labels}")
+        return "\n".join(rows)
+
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
+        ]
+        # Advisory architecture profile (launcher-supplied). Prompt-context
+        # only; the live TraceLens ``analysis_md`` snapshot below remains the
+        # ground truth for bottleneck classification. Omit entirely when no
+        # profile was loaded so non-arch sessions render exactly as before.
+        _arch_line = render_model_arch_compact(self.model_arch)
+        if _arch_line:
+            lines.append(
+                f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}"
+            )
+        lines += [
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
             f"current_best={self.current_best or '(none)'}",
@@ -3800,12 +4374,8 @@ class SharedState:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
-            f"last_select_kernels={self._format_last_select_kernels()}",
-            # Main M4 main merge: ``last_trace_analyze`` mirrors the
-            # canonical post-rename name; both keys carry the same
-            # slim cache schema, so we render both lines for backward
-            # compatibility with prompt-format-stable tests on either
-            # side (legacy regression_locks expects `last_trace_analyze=`).
+            # Canonical post-M4 cache key; legacy ``last_select_kernels``
+            # was removed in this branch (callers must use this field).
             f"last_trace_analyze={self._format_last_trace_analyze()}",
             # Full TraceLens ``analysis.md`` (snapshot id + gain in the
             # bookend header) so the orchestration LLM grounds
@@ -3817,8 +4387,7 @@ class SharedState:
             # were removed. The plateau judges also consume this on
             # legacy resume sessions when ``explore_search`` is empty.
             f"params_no_promote_streak={self.params_no_promote_streak}",
-            f"params_search={self._format_params_search()}",
-            f"backends_search={self._format_backends_search()}",
+            f"explore_search={self._format_explore_search()}",
             f"discovered_flags={self._format_discovered_flags()}",
             f"backend_winners_history={self._format_backend_winners_history()}",
             f"synergy_attempted={len(self.synergy_attempted)} combos",
@@ -3841,6 +4410,7 @@ class SharedState:
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
             f"last_profile={self._format_attempt(self.last_profile)}",
+            f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"last_sweep={self._format_attempt(self.last_sweep)}",
             f"attempts_history={self._format_attempts_history()}",
@@ -3978,7 +4548,7 @@ class SharedState:
             else ""
         )
         args = (
-            str(entry.get("extra_sglang_args") or "").strip()
+            str(entry.get("extra_server_args") or "").strip()
             or "(no-flag)"
         )
         envs = entry.get("extra_envs") or {}
@@ -3994,13 +4564,10 @@ class SharedState:
     ) -> dict[str, Any]:
         """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]``.
 
-        ``params_search.accepted`` is built from ``_variant_to_dict()`` and
-        does NOT persist ``gain_pct``; the matching ``tested[fingerprint]``
-        entry does. ``backends_search.accepted`` already stamps gain on
-        promote (legacy ledger written via resume migration only), so
-        this is a no-op there. Pulling the value across at render time
-        keeps the renderer symmetric and avoids a second writer for
-        accepted entries.
+        Some ``explore_search.accepted`` entries do NOT persist
+        ``gain_pct``; the matching ``tested[fingerprint]`` entry does.
+        Pulling the value across at render time keeps the renderer
+        symmetric and avoids a second writer for accepted entries.
         """
         if (
             entry.get("gain_pct") is not None
@@ -4066,11 +4633,8 @@ class SharedState:
             )
         return "\n".join(out)
 
-    def _format_params_search(self) -> str:
-        return self._format_search_state(self.params_search)
-
-    def _format_backends_search(self) -> str:
-        return self._format_search_state(self.backends_search)
+    def _format_explore_search(self) -> str:
+        return self._format_search_state(self.explore_search)
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
@@ -4193,21 +4757,13 @@ class SharedState:
             f"=== End TraceLens Analysis ===\n"
         )
 
-    def _format_last_select_kernels(self) -> str:
-        return self._format_select_kernels_blob(self.last_select_kernels)
-
     def _format_last_trace_analyze(self) -> str:
-        # Main M4 renamed ``select_kernels`` → ``trace_analyze`` and the
-        # back-compat path ships the same dict shape under both keys; on
-        # this branch ``last_trace_analyze`` is populated alongside
-        # ``last_select_kernels`` for resume + v0.6 prompt-format parity.
-        # Prefer ``last_trace_analyze`` (canonical post-M4), fall back to
-        # ``last_select_kernels`` (legacy writer) so tests that seed only
-        # one of the two keys still render meaningfully.
-        blob = self.last_trace_analyze or self.last_select_kernels
-        return self._format_select_kernels_blob(blob)
+        # Canonical post-M4 cache key. Legacy ``last_select_kernels``
+        # field was removed in this branch — see SharedState dataclass
+        # docstring.
+        return self._format_trace_analyze_blob(self.last_trace_analyze)
 
-    def _format_select_kernels_blob(self, blob: dict[str, Any] | None) -> str:
+    def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
         if not blob:
             return "(none)"
         ids = [
@@ -4265,4 +4821,4 @@ class SharedState:
         )
 
 
-__all__ = ["SharedState"]
+__all__ = ["SharedState", "render_model_arch_compact"]

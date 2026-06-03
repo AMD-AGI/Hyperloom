@@ -131,8 +131,10 @@ def test_coordinator_intervention_hook_records_config_for_explore():
 
 
 def test_coordinator_intervention_hook_skips_explore_with_no_winners():
-    """Explore round with empty winners + no best_variant is a
-    no-keep round; the counter does NOT advance."""
+    """Explore round with empty winners + no best_variant is a no-keep
+    round: the contiguous config-KEEP counter does NOT advance, but B2
+    records a ``config_attempt`` so repeated fruitless config rounds can
+    still drive the intervention-mix ESCALATION toward a code patch."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.task_registry import Task
 
@@ -144,7 +146,10 @@ def test_coordinator_intervention_hook_skips_explore_with_no_winners():
     )
     result = {"status": "succeeded", "winners": [], "best_variant": None}
     c._record_intervention_for_task(task, result)
-    assert c.shared_state.intervention_mix == []
+    # B2: a no-keep config round is recorded as a config_attempt ...
+    assert len(c.shared_state.intervention_mix) == 1
+    assert c.shared_state.intervention_mix[0]["change_type"] == "config_attempt"
+    # ... but the contiguous config-KEEP counter must NOT advance.
     assert c.shared_state.consecutive_config_only_rounds == 0
 
 
@@ -174,9 +179,9 @@ def test_coordinator_intervention_hook_records_code_patch_for_integrate_kept():
     assert c.shared_state.consecutive_config_only_rounds == 0
 
 
-def test_coordinator_intervention_hook_skips_integrate_with_non_kept_status():
-    """integrate_patch with status reverted / apply_failed must NOT
-    advance any counter."""
+def test_coordinator_intervention_hook_records_integrate_attempts():
+    """integrate_patch attempts satisfy depth tracking even when they do
+    not KEEP. Only a kept code patch resets the config-only counter."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.task_registry import Task
 
@@ -189,4 +194,103 @@ def test_coordinator_intervention_hook_skips_integrate_with_non_kept_status():
     for status in ("reverted", "apply_failed", "rejected_by_critic",
                     "applied_no_bench", "no_patches"):
         c._record_intervention_for_task(task, {"status": status})
-    assert c.shared_state.intervention_mix == []
+    assert len(c.shared_state.intervention_mix) == 5
+    assert {
+        e["change_type"] for e in c.shared_state.intervention_mix
+    } == {"code_patch_attempt"}
+    assert c.shared_state.depth_tracker["code_patches_attempted"] == 5
+    assert c.shared_state.consecutive_config_only_rounds == 0
+
+
+# ---------------------------------------------------------------------------
+# 5. Derived intervention-mix summary
+# ---------------------------------------------------------------------------
+def test_get_intervention_mix_empty_ledger():
+    s = SharedState()
+    mix = s.get_intervention_mix()
+    assert mix == {
+        "total_config": 0,
+        "total_code_patch": 0,
+        "total_code_patch_attempt": 0,
+        "recent_config": 0,
+        "recent_code_patch": 0,
+        "recent_code_patch_attempt": 0,
+        "consecutive_config_only": 0,
+        "config_heavy": False,
+    }
+
+
+def test_get_intervention_mix_counts_and_consecutive_tail():
+    s = SharedState()
+    for _ in range(3):
+        s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="code_patch", action="integrate_patch")
+    s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="config", action="explore")
+    mix = s.get_intervention_mix()
+    assert mix["total_config"] == 5
+    assert mix["total_code_patch"] == 1
+    # Trailing run is the two config KEEPs after the code patch.
+    assert mix["consecutive_config_only"] == 2
+    assert mix["config_heavy"] is False
+
+
+def test_get_intervention_mix_config_heavy_flag():
+    s = SharedState()
+    for _ in range(5):
+        s.record_intervention(change_type="config", action="explore")
+    mix = s.get_intervention_mix()
+    assert mix["config_heavy"] is True
+    assert mix["consecutive_config_only"] == 5
+
+
+def test_get_intervention_mix_unknown_breaks_consecutive_run():
+    s = SharedState()
+    s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="other", action="recover")
+    mix = s.get_intervention_mix()
+    # The unknown tail entry breaks the trailing config-only run.
+    assert mix["consecutive_config_only"] == 0
+    assert mix["total_config"] == 1
+    assert mix["total_code_patch"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 6. Advisory intervention-mix prompt summary
+# ---------------------------------------------------------------------------
+def test_intervention_mix_summary_no_escalation_when_balanced():
+    s = SharedState()
+    s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="code_patch", action="integrate_patch")
+    # D3: a code_patch KEEP resets the consecutive-config counter, so the
+    # advisory still renders the counts line but fires no ESCALATION.
+    out = s.to_intervention_mix_summary()
+    assert "code_patch_keeps=1" in out
+    assert "ESCALATION" not in out
+
+
+def test_intervention_mix_summary_fires_on_two_consecutive_config():
+    s = SharedState()
+    s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="config", action="explore")
+    hint = s.to_intervention_mix_summary()
+    assert hint
+    assert "config-only" in hint
+    assert "source\n" in hint or "source " in hint or "patch" in hint
+
+
+def test_intervention_mix_summary_fires_on_config_heavy():
+    s = SharedState()
+    for _ in range(5):
+        s.record_intervention(change_type="config", action="explore")
+    assert s.to_intervention_mix_summary() != ""
+
+
+def test_intervention_mix_summary_respects_threshold():
+    s = SharedState()
+    s.record_intervention(change_type="config", action="explore")
+    # D3: one config-only KEEP is below the escalation threshold of 2 —
+    # the counts line renders but no ESCALATION directive fires yet.
+    out = s.to_intervention_mix_summary()
+    assert "config_keeps=1" in out
+    assert "ESCALATION" not in out

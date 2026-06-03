@@ -8,11 +8,27 @@ miss. We target those here so the helper contracts stay locked.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
+import types
+from pathlib import Path
 
 import pytest
 
 from inference_optimizer.orchestrator import kernel_request_handlers as krh
+from inference_optimizer.orchestrator.shared_state import SharedState
+
+
+def _ensure_torch_module(monkeypatch):
+    try:
+        import torch
+    except ModuleNotFoundError:
+        torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(device_count=lambda: 0),
+        )
+        monkeypatch.setitem(sys.modules, "torch", torch)
+    return torch
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +97,7 @@ class TestRuntimeGeneratedKernel:
 
     def test_reusable_source_root_overrides_compile_marker(self):
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
-        roots = krh._REUSABLE_SOURCE_ROOTS
+        roots = krh._reusable_source_roots()
         if not markers or not roots:
             pytest.skip("required tables empty in build")
         marker = next(iter(markers))
@@ -192,6 +208,72 @@ class TestLoadMaterializedWorkloadMetadata:
         # Env vars passed through the allowlist guard.
         assert "TP" in out["env_vars"]
 
+    @pytest.mark.parametrize(
+        "framework,env_name,expected_args",
+        [
+            ("sglang", "EXTRA_SGLANG_ARGS", "--mem-fraction-static=0.8"),
+            ("vllm",   "EXTRA_VLLM_ARGS",   "--gpu-memory-utilization 0.9"),
+            ("atom",   "EXTRA_ATOM_ARGS",
+             "--trust-remote-code --level 2 --enable-expert-parallel"),
+        ],
+    )
+    def test_server_args_read_from_per_framework_env_key(
+        self, tmp_path, framework, env_name, expected_args,
+    ):
+        """The handler must read the per-framework
+        ``EXTRA_<FRAMEWORK>_ARGS`` slot, not silently default to
+        ``EXTRA_SGLANG_ARGS`` on non-sglang sessions. Otherwise atom
+        sessions resolve to an empty ``EXTRA_SGLANG_ARGS`` and drop
+        every atom-side flag from the kernel-opt metadata.
+        """
+        cfg = tmp_path / f"magpie_{framework}.yaml"
+        cfg.write_text(
+            "benchmark:\n"
+            f"  framework: {framework}\n"
+            "  model: /weights/m\n"
+            "  precision: bf16\n"
+            "  envs:\n"
+            "    TP: 4\n"
+            "    CONC: 32\n"
+            "    ISL: 1024\n"
+            "    OSL: 1024\n"
+            f"    {env_name}: '{expected_args}'\n"
+        )
+        out = krh._load_materialized_workload_metadata(str(cfg))
+        runtime = out["runtime_args"]
+        assert runtime["framework"] == framework
+        # The per-framework slot wins regardless of which framework
+        # the session is on.
+        assert runtime["server_args"] == expected_args, (
+            f"framework={framework!r} expected server_args="
+            f"{expected_args!r}; got {runtime['server_args']!r}."
+        )
+
+    def test_atom_server_args_not_read_from_extra_sglang_args(self, tmp_path):
+        """When an atom YAML carries BOTH ``EXTRA_ATOM_ARGS`` (real) AND
+        a stray ``EXTRA_SGLANG_ARGS`` (left over from a copy-paste), the
+        handler MUST pick the atom slot, not the sglang one.
+        """
+        cfg = tmp_path / "magpie_atom_mixed.yaml"
+        cfg.write_text(
+            "benchmark:\n"
+            "  framework: atom\n"
+            "  model: /weights/m\n"
+            "  precision: fp8\n"
+            "  envs:\n"
+            "    TP: 4\n"
+            "    CONC: 32\n"
+            "    ISL: 1024\n"
+            "    OSL: 1024\n"
+            "    EXTRA_SGLANG_ARGS: '--should-be-ignored'\n"
+            "    EXTRA_ATOM_ARGS: '--trust-remote-code --level 2'\n"
+        )
+        out = krh._load_materialized_workload_metadata(str(cfg))
+        runtime = out["runtime_args"]
+        assert runtime["framework"] == "atom"
+        assert runtime["server_args"] == "--trust-remote-code --level 2"
+        assert "--should-be-ignored" not in runtime["server_args"]
+
 
 # ---------------------------------------------------------------------------
 # enrichment helpers
@@ -218,6 +300,182 @@ class TestEnrichCandidate:
     def test_enrich_candidates_artifact_noop_when_missing_path(self):
         # Should not raise even though path does not exist.
         krh._enrich_candidates_artifact("", {"env_vars": {}}, trace_report_path="")
+
+
+# ---------------------------------------------------------------------------
+# atom-aware reusable kernel detection
+# ---------------------------------------------------------------------------
+
+class TestReusableSourceRootsAtom:
+    """atom layout prefixes participate in cross-task kernel reuse
+    alongside aiter/sglang/vllm."""
+
+    def test_includes_atom_editable_path(self):
+        # The matcher (``_is_runtime_generated_kernel``) lowercases its
+        # source-file input before substring matching, so the stored
+        # prefix is lowercase ``/app/atom/atom/`` even though the real
+        # filesystem path is ``/app/ATOM/atom/``. PolicyGate uses a
+        # case-sensitive ``startswith`` and keeps the canonical case in
+        # ``framework_paths._DEFAULT_SOURCE_ROOTS`` separately.
+        assert any(
+            "/app/atom/atom/" in r.lower()
+            for r in krh._reusable_source_roots()
+        )
+
+    def test_includes_atom_site_packages_python_3_10(self):
+        assert any(
+            "/opt/venv/lib/python3.10/site-packages/atom/" in r
+            for r in krh._reusable_source_roots()
+        )
+
+    def test_includes_atom_site_packages_python_3_12(self):
+        assert any(
+            "/opt/venv/lib/python3.12/site-packages/atom/" in r
+            for r in krh._reusable_source_roots()
+        )
+
+    def test_atom_path_classified_as_reusable(self):
+        """A representative atom-owned kernel source (model_runner.py) at
+        /app/ATOM/atom/ must NOT be flagged as runtime-generated even
+        when its kernel name matches an inductor / triton compile
+        marker. This is the exact condition the reusable-roots check
+        guards against in ``_is_runtime_generated_kernel``."""
+        markers = krh._COMPILE_GENERATED_NAME_MARKERS
+        if not markers:
+            pytest.skip("compile markers empty in build")
+        marker = next(iter(markers))
+        result = krh._is_runtime_generated_kernel(
+            marker, "/app/ATOM/atom/model_engine/model_runner.py",
+        )
+        # Same logic as the existing sglang/vllm test (line 84): the
+        # name marker would normally classify as runtime-generated, but
+        # the source path lives under a reusable root so the kernel is
+        # treated as patchable framework code.
+        assert result is False
+
+    def test_non_framework_path_under_app_is_not_reusable(self):
+        """A non-atom path under /app/ (e.g. /app/session_dir/runs/...)
+        must NOT match the atom reusable-source-root prefix — only
+        /app/ATOM/atom/ specifically."""
+        markers = krh._COMPILE_GENERATED_NAME_MARKERS
+        if not markers:
+            pytest.skip("compile markers empty in build")
+        marker = next(iter(markers))
+        # Path under /app/ but NOT /app/ATOM/atom/ — must classify as
+        # runtime-generated (i.e. not reusable).
+        result = krh._is_runtime_generated_kernel(
+            marker, "/app/session_dir/runs/baseline/foo.py",
+        )
+        assert result is True
+# run_gemm_tuning_handler
+# ---------------------------------------------------------------------------
+
+class TestRunGemmTuningHandler:
+    def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path):
+        state = SharedState(precision="bf16", framework="sglang")
+        state.save(tmp_path)
+
+        result = asyncio.run(krh.run_gemm_tuning_handler({}, session_dir=tmp_path))
+
+        assert result["status"] == "skipped"
+        assert result["error_class"] == "fp8_only_action"
+
+    def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
+        root = tmp_path / "kernel-agent"
+        tool = root / "tools" / "gemm_tuning.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# placeholder\n")
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path="/models/qwen-fp8",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            baseline_tput=4479.0,
+        )
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            captured["timeout_sec"] = timeout_sec
+            input_path = cmd[cmd.index("--input-json") + 1]
+            data = json.loads(Path(input_path).read_text())
+            assert data["framework"] == "sglang"
+            assert data["precision"] == "fp8"
+            return 0, json.dumps({
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.2,
+                "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
+            }), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(krh.run_gemm_tuning_handler(
+            {
+                "benchmark_script": "/workspace/run_sglang_test.sh",
+                "dry_run": True,
+                "task_id": "t1",
+            },
+            session_dir=tmp_path,
+        ))
+
+        assert result["status"] == "ok"
+        cmd_text = " ".join(captured["cmd"])  # type: ignore[arg-type]
+        assert "run_sglang_test" not in cmd_text
+        assert "gemm_a8w8_blockscale_tune" not in cmd_text
+        assert "--input-json" in captured["cmd"]  # type: ignore[operator]
+
+    def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
+        root = tmp_path / "kernel-agent"
+        tool = root / "tools" / "gemm_tuning.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# placeholder\n")
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path="/models/qwen-fp8",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            baseline_tput=4479.0,
+        )
+        state.save(tmp_path)
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            input_path = cmd[cmd.index("--input-json") + 1]
+            data = json.loads(Path(input_path).read_text())
+            bench = Path(data["benchmark_script"])
+            text = bench.read_text()
+            assert bench.name == "geak_gemm_benchmark.sh"
+            assert "PORT=\"${PORT:-18888}\"" in text
+            assert "pgrep" not in text
+            assert data["benchmark_script"].endswith("geak_gemm_benchmark.sh")
+            return 0, json.dumps({
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.1,
+                "tuned_file": "/tmp/tuned.csv",
+            }), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(krh.run_gemm_tuning_handler(
+            {"dry_run": True, "task_id": "auto"},
+            session_dir=tmp_path,
+        ))
+
+        assert result["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +553,7 @@ class TestDefaultKernelBatchParallel:
     def patch_torch(self, monkeypatch):
         """Returns a setter that overrides ``torch.cuda.device_count`` and
         ``$KERNEL_AGENT_NUM_GPUS`` for the helper under test."""
-        import torch
+        torch = _ensure_torch_module(monkeypatch)
 
         def _set(n_gpus, per_task=None):
             monkeypatch.setattr(torch.cuda, "device_count", lambda: n_gpus)
@@ -346,7 +604,7 @@ class TestDefaultKernelBatchParallel:
         )
 
     def test_torch_failure_returns_legacy_fallback(self, monkeypatch):
-        import torch
+        torch = _ensure_torch_module(monkeypatch)
 
         def _boom():
             raise RuntimeError("driver init failed")

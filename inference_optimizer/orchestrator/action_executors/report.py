@@ -74,23 +74,20 @@ def _build_summary_dict(
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
-    # N31: Roofline Comparison section data. We always emit it
-    # (even when only one snapshot was captured) so the report
-    # renderer can either show the before/after pair OR a single
-    # snapshot's Executive Summary with a note explaining why.
-    baseline_snap = dict(getattr(state, "last_trace_analyze_baseline", {}) or {})
-    latest_snap_raw = state.last_trace_analyze or {}
-    latest_snap = {
-        "snapshot_id": latest_snap_raw.get("roofline_snapshot_id"),
-        "analysis_md_path": str(latest_snap_raw.get("analysis_md_path") or ""),
-        "trace_input": str(latest_snap_raw.get("trace_input") or ""),
-        "ts": str(latest_snap_raw.get("ts") or ""),
-    }
-    if baseline_snap or latest_snap.get("analysis_md_path"):
-        summary["roofline_comparison"] = {
-            "baseline": baseline_snap,
-            "latest": latest_snap,
-        }
+    # Roofline Comparison: PR #321 retired the legacy
+    # ``last_trace_analyze_baseline`` baseline-freeze field; we now
+    # walk the append-only ``state.roofline_snapshots`` list, where
+    # entry[0] is the baseline snapshot (PRELUDE bootstrap) and
+    # entry[-1] is the most recent watermark refresh. The block is
+    # only emitted when at least one snapshot was captured so older
+    # sessions (no roofline action ever completed) leave ``final.json``
+    # without a stale empty stub.
+    from ..roofline_snapshot import build_roofline_comparison_from_history
+    cmp = build_roofline_comparison_from_history(
+        getattr(state, "roofline_snapshots", None)
+    )
+    if cmp:
+        summary["roofline_comparison"] = cmp
     return summary
 
 
@@ -259,24 +256,34 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
 
 
 def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
-    """Render the N31 ``## Roofline Comparison`` section.
+    """Render the ``## Roofline Comparison`` section.
 
-    ``cmp`` is the dict materialised by the report executor from
-    ``shared_state.last_trace_analyze_baseline`` (snapshot #1, frozen
-    at first promotion) plus ``shared_state.last_trace_analyze``
-    (latest snapshot). When the two snapshot_ids are identical we
-    only had one snapshot for the whole session (no
-    post-optimization re-roofline was triggered, e.g. cumulative_gain
-    stayed at 0 -- per the N31 design intent of "no improvement ->
-    don't waste 20min on a second snapshot just for the report").
-    Render both views regardless; the operator sees a clear note when
-    they are the same.
+    ``cmp`` is the dict materialised by
+    :func:`roofline_snapshot.build_roofline_comparison_from_history`
+    from :attr:`SharedState.roofline_snapshots` (the append-only
+    history that survived the PR #321 ``last_trace_analyze_baseline``
+    retirement). Two modes:
+
+    * ``single_snapshot`` — only the PRELUDE bootstrap roofline ran;
+      no +10% watermark crossing fired a refresh. The section shows
+      one Executive Summary plus the compact Base/—/— metric table.
+    * ``before_after`` — at least one watermark refresh produced a
+      distinct snapshot id. The section shows two Executive Summaries
+      side-by-side plus the compact Base/Opt/Δ metric table.
     """
+    from ..roofline_snapshot import format_roofline_metrics_table
+
     lines: list[str] = ["## Roofline Comparison", ""]
     baseline = cmp.get("baseline") or {}
     latest = cmp.get("latest") or {}
     base_id = baseline.get("snapshot_id")
     latest_id = latest.get("snapshot_id")
+    mode = cmp.get("mode") or (
+        "single_snapshot"
+        if (base_id is not None and base_id == latest_id)
+        else "before_after"
+    )
+
     if not baseline.get("analysis_md_path"):
         lines.append(
             "_No roofline snapshot was captured during this session — "
@@ -285,26 +292,36 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         lines.append("")
         return lines
 
-    same_snapshot = (
-        latest.get("analysis_md_path") == baseline.get("analysis_md_path")
-        or (
-            isinstance(base_id, int) and isinstance(latest_id, int)
-            and base_id == latest_id
-        )
-    )
-    if same_snapshot:
+    if mode == "single_snapshot":
         lines.append(
             f"_Only one roofline snapshot was captured this session "
-            f"(snapshot #{base_id}) — no post-optimization re-snapshot "
-            "was triggered. Per N31 design: a final roofline runs before "
-            "the report only when `cumulative_gain_validated > 0` AND "
-            "`optimization_stack` is non-empty, i.e. when there is a real "
-            "improvement to compare against._"
+            f"(snapshot #{base_id}). PR #321 retired the legacy "
+            "close-phase auto-roofline; refreshes are now driven by a "
+            "10% gain watermark over `last_roofline_tput` (see "
+            "`Coordinator._maybe_enqueue_watermark_roofline`). The "
+            "watermark did not cross during this session, so the "
+            "PRELUDE bootstrap snapshot is the only datapoint available "
+            "for the report._"
         )
         lines.append("")
+        lines.append(
+            "_The **Theoretical peak** below is the decode "
+            "memory-roofline ceiling derived from the GPU's HBM "
+            "bandwidth and the model's weight + KV-cache traffic per "
+            "token (see `roofline_ceiling.compute_peak_from_state`). "
+            "It is an upper bound: real `output_throughput` always "
+            "stays under it because of comm overhead, kernel "
+            "efficiency < 100%, and KV-cache fragmentation. **Within "
+            "roofline %** = measured / peak; **Gap to roofline %** = "
+            "100 − Within._"
+        )
+        lines.append("")
+        lines.extend(format_roofline_metrics_table(cmp))
         lines.append(f"### Snapshot #{base_id} — Executive Summary")
         lines.append("")
         lines.append(f"`{baseline.get('analysis_md_path')}`")
+        if baseline.get("ts"):
+            lines.append(f"_captured: {baseline.get('ts')}_")
         lines.append("")
         lines.append(_extract_executive_summary(
             str(baseline.get("analysis_md_path") or "")
@@ -313,12 +330,27 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         return lines
 
     lines.append(
-        "Before/after comparison of TraceLens Executive Summaries — "
-        "the first snapshot was captured immediately after baseline, "
-        "the latest after `validate_stack` confirmed the cumulative "
-        "improvement."
+        "Before/after comparison of TraceLens Executive Summaries. "
+        "The baseline snapshot was captured at PRELUDE; the latest "
+        "snapshot was captured after a +10% gain watermark refresh "
+        "(see `Coordinator._maybe_enqueue_watermark_roofline`)."
     )
     lines.append("")
+    lines.append(
+        "_The **Theoretical peak** below is the decode "
+        "memory-roofline ceiling derived from the GPU's HBM "
+        "bandwidth and the model's weight + KV-cache traffic per "
+        "token (see `roofline_ceiling.compute_peak_from_state`). "
+        "It is an upper bound: real `output_throughput` always "
+        "stays under it because of comm overhead, kernel "
+        "efficiency < 100%, and KV-cache fragmentation. **Within "
+        "roofline %** = measured / peak; **Gap to roofline %** = "
+        "100 − Within. The ceiling is a session-level constant "
+        "(hardware + model + isl/osl don't change), so baseline and "
+        "latest are compared against the same anchor._"
+    )
+    lines.append("")
+    lines.extend(format_roofline_metrics_table(cmp))
     lines.append(f"### Baseline snapshot #{base_id}")
     lines.append("")
     lines.append(f"`{baseline.get('analysis_md_path')}`")
@@ -368,7 +400,7 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     if reason == "no_target_gpu_configured":
         lines.append("## External baseline (not requested)")
     else:
-        lines.append("## External baseline (InferenceX, advisory)")
+        lines.append("## External baseline (competitor target, advisory)")
     lines.append("")
     if reason == "no_target_gpu_configured":
         lines.append(
@@ -466,6 +498,82 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
         return None
 
 
+def _write_kernel_opt_summary(
+    state: SharedState,
+    session_dir: Path,
+    output_dir: Path,
+) -> Path | None:
+    """Build + atomically write ``reports/kernel_optimization_summary.json``.
+
+    Best-effort: any failure is logged and returns ``None`` so the
+    upstream ``final.json`` write still happens. The summary aggregates
+    :attr:`SharedState.kernel_opt_attempts` with per-kernel kernel-agent
+    ``results/<kid>.json`` so the front-end can answer "why did each
+    kernel-agent attempt not produce an optimized kernel?".
+    """
+    try:
+        from ..kernel_attempt_summary import build_kernel_optimization_summary
+        summary = build_kernel_optimization_summary(state, session_dir)
+        out_path = output_dir / "kernel_optimization_summary.json"
+        with out_path.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
+        return out_path
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "report_executor: failed to write kernel_optimization_summary.json: %s",
+            exc,
+        )
+        return None
+
+
+def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
+    """Build the ``conc_sweep_summary`` pointer block for ``final.json``.
+
+    Returns ``None`` when the conc_sweep action did not write a
+    summary (either disabled, skipped, or report write failed). The
+    pointer is small (report_path + status + summary) so the
+    front-end can decide whether to lazy-load the full
+    ``conc_sweep_summary.json`` payload.
+    """
+    from ...session_paths import reports_dir as _reports_dir
+    json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
+    if not json_path.exists():
+        return None
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning(
+            "report_executor: cannot read conc_sweep_summary.json: %s", exc,
+        )
+        return None
+    try:
+        rel = json_path.relative_to(session_dir).as_posix()
+    except ValueError:
+        rel = json_path.as_posix()
+    return {
+        "report_path":      rel,
+        "status":           data.get("status"),
+        "summary":          data.get("summary", {}),
+        "budget_exhausted": bool(data.get("budget_exhausted", False)),
+        "total_budget_sec": data.get("total_budget_sec"),
+    }
+
+
+def _read_ko_summary_totals(path: Path) -> dict[str, int]:
+    """Re-read the just-written totals so the pointer in final.json
+    doesn't drift from the on-disk file."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        totals = data.get("totals") or {}
+        return {
+            k: int(v)
+            for k, v in totals.items()
+            if isinstance(v, (int, float))
+        }
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
 def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
     """Pick the most useful 1-line summary out of an event's payload."""
     summary = ""
@@ -560,6 +668,31 @@ class ReportExecutor:
             highlights,
             external_baseline=external_baseline,
         )
+
+        # Kernel-optimization forensic summary — separate file so the
+        # front-end can poll it independently of final.json. The pointer
+        # is added to final.json for discoverability.
+        ko_summary_path = _write_kernel_opt_summary(state, session_dir, output_dir)
+        if ko_summary_path is not None:
+            try:
+                rel = ko_summary_path.relative_to(session_dir)
+                summary["kernel_optimization_summary"] = {
+                    "report_path": str(rel),
+                    "totals": _read_ko_summary_totals(ko_summary_path),
+                }
+            except ValueError:
+                summary["kernel_optimization_summary"] = {
+                    "report_path": str(ko_summary_path),
+                    "totals": _read_ko_summary_totals(ko_summary_path),
+                }
+
+        # Post-sweep concurrency comparison pointer. The conc_sweep
+        # action (SWEEP-phase, off by default) writes its own JSON +
+        # CSV; we just surface a compact summary in final.json so the
+        # front-end discovers it without having to globbing reports/.
+        cs_pointer = _read_conc_sweep_pointer(session_dir)
+        if cs_pointer is not None:
+            summary["conc_sweep_summary"] = cs_pointer
 
         json_path = output_dir / "final.json"
         md_path = output_dir / "final.md"

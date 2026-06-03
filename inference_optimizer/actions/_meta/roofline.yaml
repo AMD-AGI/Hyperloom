@@ -20,7 +20,7 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 15
 lease_ttl_sec: 2700
-description: "Composite action: runs profile + trace_analyze atomically to produce a fresh TraceLens analysis.md snapshot. Required prerequisite for backends / params / kernel_opt / comm_optimization."
+description: "Composite action: runs profile + trace_analyze atomically to produce a fresh TraceLens analysis.md snapshot. Required prerequisite for explore / kernel_opt."
 pipeline_phase: analysis
 typical_runtime_min: 10.0
 applicable_when:

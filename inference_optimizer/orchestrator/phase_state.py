@@ -32,15 +32,8 @@ Vocabularies are closed enums; PolicyGate cross-checks any write of
 v0.8 transition (M3 complete)
 -----------------------------
 The §3.2 design talks about ``explore`` (single merged action) and
-``specialist`` (LLM sub-agent). M3 (``explore`` merge) and M5
-(``specialist``) have shipped; the legacy ``backends`` / ``params`` /
-``validate_stack`` action names are now closed at the PolicyGate
-boundary via the ``action_deprecated`` rule (KB_gaps/Gap-10 /
-KB_design §3.13 M3 §PR7). The EXPLORE allowed-action set reflects
-that — only ``explore`` / ``specialist`` / ``recover`` remain. The
-legacy executor modules and ``last_backends`` / ``backends_attempts``
-fields stay on :class:`SharedState` for legacy resume parity (Inv-10.1)
-but cannot be re-entered in a fresh session.
+``specialist`` (LLM sub-agent). Both have shipped; the EXPLORE
+allowed-action set is ``explore`` / ``specialist`` / ``recover``.
 """
 
 from __future__ import annotations
@@ -84,21 +77,11 @@ def phase_index(phase: str) -> int:
 # v0.8 view:
 #
 # * EXPLORE allowlist contains the merged ``explore`` action and the
-#   ``specialist`` LLM sub-agent. The v0.6 ``backends`` / ``params`` /
-#   ``validate_stack`` are gone — PolicyGate's ``action_deprecated``
-#   rule denies them at the intent boundary with a
-#   structured replacement hint, so the LLM gets a single
-#   forward-pointing error instead of the misleading
-#   ``phase_incompatible`` "wait for the phase to advance" message.
+#   ``specialist`` LLM sub-agent.
 # * ``recover`` stays in every phase — phase-orthogonal per §3.2.
 # * ``session_breakdown`` is a CLOSE action (it materializes the
-#   report bundle). The v0.6 ``validate_stack`` rebench is now
-#   inlined into ``explore``, so it disappears
-#   from the EXPLORE allowlist alongside the other legacy names.
-#
-# Note: the dataclass fields ``last_backends`` / ``backends_attempts``
-# / etc. stay on :class:`SharedState` for resume parity (Inv-10.1);
-# only the *entry points* close.
+#   report bundle). The per-KEEP stack rebench is inlined into
+#   ``explore``.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset({
         # ``roofline`` / ``profile`` are Coordinator-auto-enqueued at
@@ -137,6 +120,11 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # this internally on plateau (bypasses PolicyGate); LLM-side
         # proposes are throttled by ``assess_remaining_gaps_throttle``.
         "assess_remaining_gaps",
+        # dynamic_action.MD P1 — supplementary cross-domain ReAct
+        # sub-agent channel; orchestration-only dispatch, capped at
+        # MAX_DYNAMIC_PER_ROUND per EXPLORE round. See PolicyGate
+        # ``_validate_dynamic_action_dispatch``.
+        "dynamic_action",
         # ``roofline`` / ``profile`` are Coordinator-auto-enqueued mid-
         # EXPLORE whenever the watermark check at the
         # cumulative_gain_validated writer fires (10% step compound vs
@@ -149,7 +137,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_KERNEL: frozenset({
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
-        "operator_tuning", "vendor_kernel_config",
+        "operator_tuning", "vendor_kernel_config", "gemm_tuning",
         # ``roofline`` / ``profile`` are auto-enqueued on watermark
         # crossing here too — kernel integrate KEEPs flow through the
         # same single-writer hook as explore/specialist KEEPs; mode is
@@ -158,7 +146,15 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         "recover",
     }),
     PHASE_SWEEP: frozenset({
-        "sweep", "recover",
+        # ``conc_sweep`` is a Coordinator-internal post-sweep action
+        # (PHASE_SWEEP only, on by default; disable via
+        # ``--no-enable-conc-sweep``) that benchmarks both baseline
+        # and ``current_best`` across a CONC ladder. Like ``sweep``
+        # it is discovery-only and never
+        # promotes; PolicyGate denies LLM-proposed
+        # ``delegate{action_name='conc_sweep'}`` because the auto-enqueue
+        # at sweep-task completion is the sole legitimate entry point.
+        "sweep", "conc_sweep", "recover",
     }),
     PHASE_CLOSE: frozenset({
         "report", "session_breakdown",
@@ -198,10 +194,12 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "explore_phase_budget_exhausted",
     "kernel_phase_budget_exhausted",
     "sweep_done",
+    "conc_sweep_done",                  # SWEEP → CLOSE when conc_sweep settles
     "sweep_budget_exhausted",
     "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
     "explore_force_exit_low_budget",    # EXPLORE → next phase when total remaining or phase remaining drops below operator-configured thresholds
+    "no_more_leverage",                 # EXPLORE/KERNEL → SWEEP (non-terminal): steward stop_session via the skip_to_sweep hint. (The Coordinator's automatic no-more-leverage safety net was removed for long-run continuity.) Reclassified from a terminal stop_reason — it now winds the session down through SWEEP → CLOSE instead of aborting.
     # FRAMEWORK_PR phase transitions (PR-A1 / FRAMEWORK_PR phase).
     "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
     "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
@@ -210,7 +208,6 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     # Terminal exits (any phase → CLOSE)
     "robustness_escalated",
     "target_reached",
-    "no_more_leverage",
     "time_exhausted",
     "time_exhausted_during_prelude",
     "user_stop_requested",
@@ -267,6 +264,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "plateau_kernel",
     "no_kernel_skipped",
     "sweep_done",
+    "conc_sweep_done",
     "explore_force_exit_low_budget",
     "framework_pr_phase_done",
     "framework_pr_plateau",
@@ -286,20 +284,24 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of total wall-clock) — KB_design §3.8 §5.3
 # ---------------------------------------------------------------------------
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
-    # PRELUDE bumped from 0.05 to 0.08 because the phase now owns the
-    # initial roofline (profile + trace_analyze) in addition to
-    # target_analysis + baseline. IR-6 force-exit thresholds only ever
-    # gated EXPLORE, so this bump is the only budget knob affected.
+    # Rebalanced 2026-06 based on field telemetry from the
+    # Qwen3-30B-A3B / MI355x runs once conc_sweep was on by default:
+    # SWEEP was running ~2.5x over its old 8% allocation (sweep action
+    # ~37min + conc_sweep ~31min, total ~68min on a ~5.7h budget) so we
+    # shift PRELUDE -3pp / EXPLORE -7pp into SWEEP +10pp while keeping
+    # KERNEL at its historical 35% (GEAK quick-mode needs full cycles).
+    # PRELUDE only ever spent ~5min of its old 27min slice; EXPLORE
+    # force-exit at phase_remaining_pct=0.176 confirmed the old 47%
+    # was over-provisioned by ~7pp.
     #
     # FRAMEWORK_PR is *not* given a phase budget pct — the time wall is
     # ``force_exit_hours_remaining_ratio * max_hours`` instead (default
     # 0.6), matching the design's "leave at least 60% for the rest of
-    # the session" intent. Adding a pct here would skim from EXPLORE's
-    # 0.57 slice which the operators already tuned.
-    PHASE_PRELUDE: 0.08,
-    PHASE_EXPLORE: 0.57,
-    PHASE_KERNEL:  0.25,
-    PHASE_SWEEP:   0.08,
+    # the session" intent.
+    PHASE_PRELUDE: 0.05,
+    PHASE_EXPLORE: 0.40,
+    PHASE_KERNEL:  0.35,
+    PHASE_SWEEP:   0.18,
     PHASE_CLOSE:   0.02,
 }
 
@@ -356,6 +358,25 @@ DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
 
 
 # ---------------------------------------------------------------------------
+# Exploration-depth gate thresholds.
+#
+# The depth gate only evaluates once the explore loop has shown
+# instability (``consecutive_reverts`` >= the activation threshold).
+# Each dimension is a minimum the session must reach before a stop /
+# advance verdict is allowed through. Dimensions whose evidence is not
+# being supplied this session (no specialist reports PR / diff / nvidia
+# refs) are dropped from the decision (recorded as N/A) so they never
+# become an unsatisfiable stall.
+# ---------------------------------------------------------------------------
+DEFAULT_DEPTH_GATE_SCOUT_RUNS:          int = 2
+DEFAULT_DEPTH_GATE_PRS_FETCHED:         int = 5
+DEFAULT_DEPTH_GATE_PR_DIFFS_READ:       int = 3
+DEFAULT_DEPTH_GATE_NVIDIA_REFS:         int = 2
+DEFAULT_DEPTH_GATE_CODE_PATCHES:        int = 1
+DEFAULT_DEPTH_GATE_REVERTS_TO_EVALUATE: int = 3
+
+
+# ---------------------------------------------------------------------------
 # escalate_strategy_change hint vocabulary
 # ---------------------------------------------------------------------------
 # Closed enum so the Coordinator + phase_state agree on which hints can
@@ -363,13 +384,24 @@ DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
 # do NOT change phase (defensive — prevents an arbitrary
 # robustness-emitted string from steering the state machine).
 ESCALATE_HINT_SKIP_TO_KERNEL:      str = "skip_to_kernel"
+ESCALATE_HINT_SKIP_TO_SWEEP:       str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE:       str = "skip_to_close"
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET:  str = "extend_kernel_budget"
 ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 
+# ``skip_to_sweep`` is the non-terminal "no more leverage" signal: it
+# winds EXPLORE (or KERNEL) down to SWEEP → CLOSE *without* terminating
+# the optimization. Unlike ``skip_to_close`` (which is terminal via
+# ``_global_terminal`` → ``robustness_escalated``), ``skip_to_sweep``
+# still runs the SWEEP validation pass and produces a clean report.
+# It is set by the IR-7 steward's ``stop_session`` verdict, which used
+# to set a terminal ``stop_reason='no_more_leverage'``. (The Coordinator
+# also used to drive this via an automatic no-more-leverage safety net;
+# that net was removed for long-run continuity.)
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
     ESCALATE_HINT_SKIP_TO_KERNEL,
+    ESCALATE_HINT_SKIP_TO_SWEEP,
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
     ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
@@ -643,6 +675,92 @@ def should_force_exit_explore(
     return fired, evidence
 
 
+def depth_gate(
+    state: Any,
+    *,
+    scout_runs_min: int = DEFAULT_DEPTH_GATE_SCOUT_RUNS,
+    prs_fetched_min: int = DEFAULT_DEPTH_GATE_PRS_FETCHED,
+    pr_diffs_read_min: int = DEFAULT_DEPTH_GATE_PR_DIFFS_READ,
+    nvidia_refs_min: int = DEFAULT_DEPTH_GATE_NVIDIA_REFS,
+    code_patches_min: int = DEFAULT_DEPTH_GATE_CODE_PATCHES,
+    reverts_to_evaluate: int = DEFAULT_DEPTH_GATE_REVERTS_TO_EVALUATE,
+) -> tuple[bool, list[str], str]:
+    """Deterministic exploration-depth check.
+
+    Returns ``(satisfied, blockers, next_action)``:
+
+    * ``satisfied`` — whether every *supplied* depth dimension has met
+      its minimum. The gate only activates once the explore loop has
+      shown instability (``consecutive_reverts >= reverts_to_evaluate``);
+      before that it reports ``satisfied=True`` (nothing to enforce).
+    * ``blockers`` — human-readable list of unmet dimensions, most
+      important first.
+    * ``next_action`` — a concrete deepening instruction for the most
+      important blocker (empty when satisfied).
+
+    Dimensions whose evidence is not being supplied this session (no
+    specialist reports PR / diff / nvidia refs) are dropped — their bar
+    cannot be satisfied, so enforcing them would stall the session. The
+    deterministic dimensions (scout runs, code patches) are always
+    enforced. Pure + fail-soft: a missing / malformed tracker yields
+    ``satisfied=True``.
+    """
+    snap_fn = getattr(state, "depth_snapshot", None)
+    try:
+        snap = snap_fn() if callable(snap_fn) else {}
+    except Exception:  # noqa: BLE001 — fail-soft on any malformed tracker
+        snap = {}
+    if not isinstance(snap, dict) or not snap:
+        return True, [], ""
+    if not bool(snap.get("enabled", True)):
+        return True, [], ""
+
+    reverts = int(snap.get("consecutive_reverts") or 0)
+    if reverts < int(reverts_to_evaluate):
+        return True, [], ""
+
+    scout_runs = int(snap.get("research_scout_runs") or 0)
+    code_patches = int(snap.get("code_patches_attempted") or 0)
+    prs = len(snap.get("prs_fetched") or [])
+    diffs = len(snap.get("pr_diffs_read") or [])
+    nvidia = len(snap.get("nvidia_refs_compared") or [])
+
+    blockers: list[str] = []
+    # (label, current, minimum, supplied, next_action) — order encodes
+    # priority: cheap / always-supplied deepening first.
+    dims = [
+        (
+            "research_scout_runs", scout_runs, int(scout_runs_min), True,
+            "dispatch another research scout to gather proven priors",
+        ),
+        (
+            "code_patches_attempted", code_patches, int(code_patches_min), True,
+            "try at least one source-level code patch, not just config tweaks",
+        ),
+        (
+            "prs_fetched", prs, int(prs_fetched_min), prs > 0,
+            "fetch more candidate PRs across frameworks before stopping",
+        ),
+        (
+            "pr_diffs_read", diffs, int(pr_diffs_read_min), diffs > 0,
+            "read more PR diffs to extract concrete optimizations",
+        ),
+        (
+            "nvidia_refs_compared", nvidia, int(nvidia_refs_min), nvidia > 0,
+            "compare against more NVIDIA / cross-vendor reference numbers",
+        ),
+    ]
+    next_action = ""
+    for label, current, minimum, supplied, action in dims:
+        if minimum <= 0 or not supplied:
+            continue
+        if current < minimum:
+            blockers.append(f"{label}={current}<{minimum}")
+            if not next_action:
+                next_action = action
+    return (len(blockers) == 0), blockers, next_action
+
+
 # ----------------------- plateau pure functions --------
 def compute_plateau_explore(
     state: Any,
@@ -813,7 +931,7 @@ def compute_plateau_kernel(
     # started with zero attempts on record — coupled with EXPLORE that
     # produced no KEEPs (e.g. force-exit on low budget), the session went
     # EXPLORE→KERNEL→SWEEP without ever spawning a single
-    # ``select_kernels`` / ``run_optimization`` request. Returning False
+    # ``trace_analyze`` / ``run_optimization`` request. Returning False
     # here lets the LLM (and the in-loop scheduling-police) actually
     # exercise the kernel phase before plateau is reconsidered.
     if not recent:
@@ -883,12 +1001,32 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
 
 
 # ----------------------- per-phase judgments -------------------------------
+def warm_replay_in_flight(state: Any) -> bool:
+    """True while the PRELUDE warm-recipe replay task has not finished.
+
+    The Coordinator stamps ``warm_replay_outcome.status='in_flight'`` at
+    enqueue time and clears it in ``_promote_warm_replay``. PRELUDE must
+    not exit (and the initial roofline must not enqueue) until this
+    returns False — both paths launch Magpie/sglang on the same GPU.
+    """
+    outcome = getattr(state, "warm_replay_outcome", None) or {}
+    if not isinstance(outcome, dict):
+        return False
+    return str(outcome.get("status") or "").strip() == "in_flight"
+
+
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """``baseline_tput > 0`` → reason=``prelude_done``, target=EXPLORE.
+    """``baseline_tput > 0`` and warm-replay settled → ``prelude_done``.
 
     Returns ``(reason, evidence)`` when ready to transition, ``None``
     otherwise. Evidence is later spliced into ``phase_history``.
+
+    Warm-replay blocks the exit while ``warm_replay_in_flight`` so
+    FRAMEWORK_PR / auto-roofline cannot start a second Magpie job on
+    the GPU before the KB config replay finishes.
     """
+    if warm_replay_in_flight(state):
+        return None
     try:
         tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -951,7 +1089,7 @@ def exit_normal_explore(
        ``INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1`` (Coordinator
        reads + passes through) once their fleet is fully v0.8 to
        fail closed.
-    4. Phase budget exhausted.
+    5. Phase budget exhausted.
     """
     # Priority 0 — HARD force-exit (IR-6).
     forced, force_ev = should_force_exit_explore(
@@ -971,6 +1109,15 @@ def exit_normal_explore(
     if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
         return "plateau_explore", {
             "evidence": "llm_escalation",
+            "hint": hint,
+        }
+    # Non-terminal "no more leverage" signal (steward stop_session). Winds
+    # EXPLORE down to SWEEP (skipping KERNEL) → CLOSE rather than aborting
+    # the session.
+    # compute_next_phase routes the ``no_more_leverage`` reason to SWEEP.
+    if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
+        return "no_more_leverage", {
+            "evidence": "no_more_leverage",
             "hint": hint,
         }
     explore_search = getattr(state, "explore_search", None) or {}
@@ -1015,13 +1162,25 @@ def exit_normal_explore(
             steward_used = bool(getattr(
                 state, "steward_continuation_used", False,
             ))
+            # When the depth gate is active it owns continuation
+            # bounding (rewrites stop/advance to continue as often as
+            # needed, IR-6 being the only backstop), so the legacy
+            # single-continuation cap is lifted. With the gate off the
+            # original "one continuation per session" semantics apply.
+            depth_gate_on = True
+            depth_enabled_fn = getattr(state, "depth_gate_enabled", None)
+            if callable(depth_enabled_fn):
+                try:
+                    depth_gate_on = bool(depth_enabled_fn())
+                except Exception:  # noqa: BLE001 — fail-soft
+                    depth_gate_on = True
             if not rec:
                 # No verdict yet — stay in EXPLORE one more tick and
                 # let the Coordinator enqueue an internal steward run
                 # (it polls ``wants_steward_assessment`` after
                 # ``compute_next_phase`` returns None).
                 return None
-            if rec == "continue_explore" and not steward_used:
+            if rec == "continue_explore" and (depth_gate_on or not steward_used):
                 # Continuation granted; the Coordinator already
                 # processed the verdict (reset plateau counters,
                 # injected next_gap). Stay in EXPLORE.
@@ -1034,21 +1193,21 @@ def exit_normal_explore(
             }
     elif not disable_legacy_proxy:
         params_streak = int(getattr(state, "params_no_promote_streak", 0) or 0)
-        backends_search = getattr(state, "backends_search", None) or {}
-        backends_accepted = 0
-        if isinstance(backends_search, dict):
-            accepted = backends_search.get("accepted") or []
-            backends_accepted = len(accepted) if isinstance(accepted, list) else 0
+        explore_search = getattr(state, "explore_search", None) or {}
+        explore_accepted = 0
+        if isinstance(explore_search, dict):
+            accepted = explore_search.get("accepted") or []
+            explore_accepted = len(accepted) if isinstance(accepted, list) else 0
         optimization_stack = getattr(state, "optimization_stack", None) or []
         has_results = bool(
             isinstance(optimization_stack, list) and optimization_stack
         )
-        if params_streak >= 5 and backends_accepted == 0 and has_results:
+        if params_streak >= 5 and explore_accepted == 0 and has_results:
             return "plateau_explore", {
                 "evidence": "m2_proxy",
                 "r09_provisional": True,
                 "params_no_promote_streak": params_streak,
-                "backends_accepted": backends_accepted,
+                "explore_accepted": explore_accepted,
                 "note": (
                     "KB_design §3.14 R-09 — legacy params_no_promote_streak "
                     "proxy fired (signals empty); set "
@@ -1131,9 +1290,11 @@ def wants_steward_assessment(
     if not triggered:
         return False
     assessment = getattr(state, "last_remaining_gaps_assessment", None) or {}
-    if isinstance(assessment, dict) and assessment.get("recommendation"):
-        # Already have a verdict; Coordinator should be routing on it.
-        return False
+    if isinstance(assessment, dict):
+        rec = str(assessment.get("recommendation") or "").strip().lower()
+        if rec in ("continue_explore", "advance_to_kernel", "stop_session"):
+            # Already have a routable verdict.
+            return False
     return True
 
 
@@ -1154,12 +1315,40 @@ def exit_normal_kernel(
        defer to the global terminal handler (caller writes
        ``stop_reason=robustness_escalated``). Returns ``None`` here so
        the global path wins.
-    2. Real :func:`compute_plateau_kernel` (KB_design §3.8 §5.2
+    2. ``skip_to_sweep`` hint (non-terminal "no more leverage" from the
+       steward's ``stop_session`` verdict) → ``no_more_leverage``; KERNEL
+       already exits to SWEEP so this just forces the wind-down now.
+    3. FP8 GEMM tuning completed and no source-level kernel attempts are
+       queued/recorded → move on to SWEEP. GEMM tuning is the deterministic
+       KERNEL-entry operator-level lever; if it succeeded and the LLM has
+       not produced kernel_opt work, do not burn the entire KERNEL budget
+       on heartbeat turns.
+    4. Real :func:`compute_plateau_kernel` (KB_design §3.8 §5.2
        OR-of clauses).
-    3. Phase budget exhausted.
+    5. Phase budget exhausted.
     """
+    if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
+        return "no_more_leverage", {
+            "evidence": "no_more_leverage",
+            "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
+        }
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
+    last_gemm = getattr(state, "last_gemm_tuning", None) or {}
+    kernel_attempts = getattr(state, "kernel_opt_attempts", None) or {}
+    if (
+        isinstance(last_gemm, dict)
+        and str(last_gemm.get("status") or "").lower() in {"complete", "completed", "ok", "succeeded", "success"}
+        and str(last_gemm.get("decision") or "").upper() == "KEEP"
+        and not kernel_attempts
+        and not bool(getattr(state, "continue_kernel_after_gemm", True))
+    ):
+        return "plateau_kernel", {
+            "evidence": "gemm_tuning_complete_no_kernel_opt",
+            "rejected_kernel_count": rejected_count,
+            "gemm_speedup": last_gemm.get("best_speedup"),
+            "tuned_file": last_gemm.get("tuned_file"),
+        }
     triggered, evidence = compute_plateau_kernel(
         state,
         lookback=plateau_lookback,
@@ -1189,12 +1378,23 @@ def exit_normal_sweep(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """SWEEP normal exit. sweep_done OR budget exhausted."""
+    """SWEEP normal exit. sweep_done OR conc_sweep_done OR budget exhausted.
+
+    Bug #12 fix: previously only sweep_done / budget_exhausted were
+    honoured. When sweep was singleton-blocked but conc_sweep ran to
+    completion, the phase had no exit signal and idled until budget
+    exhaustion (wasting hours of GPU on repeated conc_sweep proposals).
+    """
     last_sweep = getattr(state, "last_sweep", None) or {}
     if isinstance(last_sweep, dict):
         status = str(last_sweep.get("status") or "").lower()
         if status in ("succeeded", "partial", "completed"):
             return "sweep_done", {"sweep_status": status}
+    last_conc = getattr(state, "last_conc_sweep", None) or {}
+    if isinstance(last_conc, dict):
+        cs_status = str(last_conc.get("status") or "").lower()
+        if cs_status in ("succeeded", "partial", "completed", "skipped"):
+            return "conc_sweep_done", {"conc_sweep_status": cs_status}
     remaining = phase_budget_remaining_seconds(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )
@@ -1383,6 +1583,21 @@ def exit_normal_framework_pr(
     return None
 
 
+def _post_prelude_target(*, explore_enabled: bool, kernel_enabled: bool) -> str:
+    """First active phase after PRELUDE / FRAMEWORK_PR.
+
+    EXPLORE when enabled; otherwise KERNEL when enabled; otherwise SWEEP.
+    Mirrors the EXPLORE-exit fallthrough (kernel disabled → SWEEP) so the
+    ``--no-explore`` opt-out collapses the chain the same way
+    ``--no-kernel`` does at the EXPLORE→ boundary.
+    """
+    if explore_enabled:
+        return PHASE_EXPLORE
+    if kernel_enabled:
+        return PHASE_KERNEL
+    return PHASE_SWEEP
+
+
 def compute_next_phase(
     state: Any,
     *,
@@ -1391,6 +1606,7 @@ def compute_next_phase(
     now_unix: float | None = None,
     disable_legacy_proxy: bool = False,
     framework_phase_enabled: bool = False,
+    explore_enabled: bool = True,
     max_hours: float | None = None,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
@@ -1421,12 +1637,20 @@ def compute_next_phase(
         if norm is not None:
             if framework_phase_enabled:
                 return PHASE_FRAMEWORK_PR, norm[0], norm[1]
-            # Framework phase off → straight through to EXPLORE with the
-            # historical ``prelude_done`` reason. The FRAMEWORK_PR phase
-            # has no dedicated "skipped" reason: --no-framework simply
-            # collapses the chain and the routing record stays
-            # backward-compatible with pre-FRAMEWORK_PR sessions.
-            return PHASE_EXPLORE, norm[0], norm[1]
+            # Framework phase off → straight through to the first active
+            # phase with the historical ``prelude_done`` reason. Neither
+            # FRAMEWORK_PR nor EXPLORE has a dedicated "skipped" reason:
+            # --no-framework / --no-explore simply collapse the chain and
+            # the routing record stays backward-compatible with
+            # pre-FRAMEWORK_PR sessions. ``explore_skipped`` evidence is
+            # stamped when EXPLORE is bypassed (--no-explore).
+            target = _post_prelude_target(
+                explore_enabled=explore_enabled, kernel_enabled=kernel_enabled,
+            )
+            evidence = dict(norm[1])
+            if target != PHASE_EXPLORE:
+                evidence["explore_skipped"] = True
+            return target, norm[0], evidence
         return None
 
     if current == PHASE_FRAMEWORK_PR:
@@ -1448,7 +1672,15 @@ def compute_next_phase(
             )),
         )
         if norm is not None:
-            return PHASE_EXPLORE, norm[0], norm[1]
+            # FRAMEWORK_PR → EXPLORE normally; --no-explore collapses
+            # straight to KERNEL (or SWEEP when --no-kernel too).
+            target = _post_prelude_target(
+                explore_enabled=explore_enabled, kernel_enabled=kernel_enabled,
+            )
+            evidence = dict(norm[1])
+            if target != PHASE_EXPLORE:
+                evidence["explore_skipped"] = True
+            return target, norm[0], evidence
         return None
 
     if current == PHASE_EXPLORE:
@@ -1479,6 +1711,11 @@ def compute_next_phase(
             )),
         )
         if norm is not None:
+            # Non-terminal "no more leverage" → wind down to SWEEP,
+            # skipping the KERNEL hop (the steward / safety net judged
+            # there is no leverage left to chase). SWEEP → CLOSE follows.
+            if norm[0] == "no_more_leverage":
+                return PHASE_SWEEP, norm[0], norm[1]
             if kernel_enabled:
                 return PHASE_KERNEL, norm[0], norm[1]
             return PHASE_SWEEP, "no_kernel_skipped", {
@@ -1605,6 +1842,7 @@ __all__ = [
     "ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX",
     "ESCALATE_HINT_SKIP_TO_CLOSE",
     "ESCALATE_HINT_SKIP_TO_KERNEL",
+    "ESCALATE_HINT_SKIP_TO_SWEEP",
     "ESCALATE_HINT_VOCAB",
     "PHASE_ALLOWED_ACTIONS",
     "PHASE_CLOSE",
@@ -1645,5 +1883,6 @@ __all__ = [
     "phase_index",
     "session_remaining_seconds",
     "should_force_exit_explore",
+    "warm_replay_in_flight",
     "wants_steward_assessment",
 ]

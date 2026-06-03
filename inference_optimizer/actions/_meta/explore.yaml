@@ -36,16 +36,16 @@ params_schema:
     description: |
       Required. List of variant dicts. Each variant has at least:
         - name: str (unique within the round)
-        - extra_args / extra_sglang_args: str (sglang/vllm CLI flags)
+        - extra_args / extra_server_args: str (sglang/vllm CLI flags)
         - extra_envs: dict[str,str]
-        - provenance: "default_grid" | "llm_direct" | "specialist:<domain>"
+        - provenance: "llm_direct" | "default_grid" | "specialist:<domain-or-tag>" | "dynamic"
         - kb_evidence / pr_evidence / source_evidence: optional list
   base_extra_args:
     type: string
     description: |
       Current stack-accumulated baseline args. ExploreExecutor merges
       this into each variant's effective server_args. Coordinator
-      derives from ``current_best.extra_sglang_args`` when omitted.
+      derives from ``current_best.extra_server_args`` when omitted.
   benchmark_script:
     type: string
     description: |

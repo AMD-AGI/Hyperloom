@@ -49,9 +49,14 @@ try:
     )
 except ImportError:  # pragma: no cover — exercised only in IO-only test envs
 
+    # MUST stay byte-for-byte identical to
+    # ``framework_agent.repo_map._FRAMEWORK_TO_REPO_URL``. A cross-
+    # module sync test in ``framework-agent/tests/test_repo_map.py``
+    # enforces equality whenever both packages are on the test path.
     _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
         "sglang": "https://github.com/sgl-project/sglang.git",
         "vllm":   "https://github.com/ROCm/vllm.git",
+        "atom":   "https://github.com/ROCm/ATOM.git",
     }
 
     def repo_url_for_framework(framework: str) -> str:
@@ -185,11 +190,18 @@ async def phase_discover(
     gaps: list[dict[str, str]],
     session_dir: Path,
     repo_url: str = "",
+    keywords: list[str] | None = None,
     max_candidates: int = 5,
     batch_id: str = "",
     timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     """FRAMEWORK_PR-phase batch discovery shim.
+
+    ``keywords`` (when non-empty) is an explicit keyword override the
+    composer derives from the workload taxonomy + profile bottleneck; fa
+    uses it verbatim for the primus-cortex AND-search and skips its own
+    ``extract_keywords`` step. Empty / ``None`` preserves the legacy
+    behaviour (fa extracts keywords from the gap text).
 
     Returns the parsed payload from ``fa phase-discover``:
     ``{batch_id, framework, repo_url, candidates: [...]}``.
@@ -205,6 +217,11 @@ async def phase_discover(
         "max_search_candidates": int(max_candidates),
         "batch_id":  batch_id,
     }
+    kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
+    if kw:
+        # Dedup preserving order so the request stays deterministic.
+        seen: set[str] = set()
+        request["keywords"] = [k for k in kw if not (k in seen or seen.add(k))]
     return await _invoke_fa_phase(
         subcommand="phase-discover",
         request=request,

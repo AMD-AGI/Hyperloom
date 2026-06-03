@@ -31,9 +31,8 @@ Every tick the per-tick prompt includes a `=== Phase ===` block with:
   - `elapsed_sec / budget_remaining_sec` — how much wall-clock this
     phase has already burned vs its budget.
 
-Per-phase intent map (the retired `backends`/`params`/`validate_stack`
-actions are denied by PolicyGate with `rule='action_deprecated'`; the
-canonical replacement is the merged `explore` action):
+Per-phase intent map (the merged `explore` action is the single
+grid-runner entry):
 
   - **PRELUDE**: `target_analysis`, `baseline`, `recover` are the only
     actions you can propose. Drive `baseline_tput > 0` so the
@@ -47,65 +46,70 @@ canonical replacement is the merged `explore` action):
   - **EXPLORE**: `explore`, `specialist`, `integrate_patch`, `recover`.
     `profile` / `kernel_opt` / `sweep` / `report` are **denied**.
     Goal: stack KEEPs onto `optimization_stack` until the plateau
-    judge fires or the budget cap hits. The `explore` action runs
-    its per-KEEP stack rebench inline, so there is no separate
-    `validate_stack` step.
+    judge fires or the budget cap hits. `explore` runs its per-KEEP
+    stack rebench inline.
 
-    EXPLORE specialist-first contract (PR-A1 + PR-A9,
-    Arbor-into-Hyperloom): on entering EXPLORE you MUST
-    `delegate{action_name='specialist'}` for the top-K gaps **in
-    parallel, in the same tick** (Claude can call `emit_intent`
-    multiple times per turn — fan out up to `research_lane_capacity`,
-    default 4, **hard cap 6**). Wait for one or more `specialist_done`
-    results to land in the inbox before you propose `explore` or
-    `integrate_patch`. Use specialist proposals as the grid for
-    the next `explore` round (each variant stamped
-    `provenance='specialist:<domain>'`); use specialist patches as
-    the input to `integrate_patch`.
+    **Specialist-informed exploration**: on entering EXPLORE, prefer
+    dispatching `delegate{action_name='specialist'}` for the top-K gaps in
+    parallel in the same tick (fan out up to `research_lane_capacity`,
+    default 4, clamped to the GPU-derived ceiling `2 × visible GPU
+    count`). Specialist results provide stronger KB / PR / source evidence
+    for `explore` grids and may also produce patches for `integrate_patch`.
+    If no specialist has covered a promising gap, you may still propose an
+    Orchestration-authored grid instead of waiting indefinitely.
 
-    PR-A9 retired the legacy `provenance='llm_direct'` path —
-    PolicyGate's `explore_requires_specialist_provenance` rule
-    denies any explore grid whose variants are all llm_direct.
-    The cold-start escape hatch is `provenance='default_grid'`:
-    when no specialist has produced a proposal_set yet, stamp the
-    cold-start variants with that value and the executor uses its
-    built-in grid.
+    **GPU specialists**: by default specialists are CPU/research tasks.
+    When a gap requires a short GPU experiment or microbenchmark (for
+    example, timing a small kernel/config probe that does not start the
+    serving stack), you may dispatch
+    `delegate{action_name='specialist', params={needs_gpu: true,
+    gpu_count: N, ...}}`. This only runs if the session was launched with
+    a non-zero GPU specialist pool; otherwise PolicyGate denies it with
+    `specialist_gpu_pool_disabled`. GPU specialists must not launch
+    persistent vLLM/SGLang servers, run Magpie benchmark loops, or control
+    the production serving process.
 
-    Every `delegate{action_name='explore', params={grid: ...}}`
-    you emit is now reviewed per-variant by the Critic before any
-    benchmark runs (the Critic consults KB priors for each variant
-    via `judge_bundle.kb_priors_by_proposal`). Variants the Critic
-    rejects are dropped silently and never reach the executor;
-    `critic_filtered_count` in the resulting `explore_done` row
-    tells you how many were dropped.
+    **Grid provenance (audit/advisory)**: stamp every variant with the
+    best available provenance. Use `provenance='specialist:<domain-or-tag>'`
+    for rows derived from `specialist_done.proposal_set`,
+    `provenance='default_grid'` for framework seed grids,
+    `provenance='llm_direct'` for Orchestration-authored hypotheses, and
+    `provenance='dynamic'` for dynamic_action output. Provenance does not
+    decide acceptance by itself; the remaining hard limits are:
+    per round, up to `research_lane_capacity` specialist variants
+    (`explore_specialist_grid_max_one` — the numeric cap tracks
+    `research_lane_capacity`, clamped to the `2 × visible GPU count`
+    ceiling), and at most one dynamic variant. Prefer the strongest
+    evidence-backed variants and defer runners-up beyond the cap. The
+    Critic reviews each variant against KB priors before it benches;
+    rejected variants drop silently (`critic_filtered_count`).
 
-    **Grid-size contract (per round)**: across all
-    `specialist_done.proposal_set` entries you have in the inbox,
-    select **AT MOST 1** variant to stamp `provenance='specialist:<domain>'`
-    and place into the `explore` grid. PolicyGate enforces this via
-    rule `explore_specialist_grid_max_one`. If multiple specialist
-    proposals look attractive, defer the runners-up to a subsequent
-    explore round. The `default_grid` provenance is unaffected — you
-    may still emit several `default_grid` variants in cold-start
-    rounds (no specialist has run yet). If no specialist proposal
-    survives Critic priors this round, do NOT emit `explore`; go
-    straight to `integrate_patch` (when a specialist supplied
-    patches) or dispatch the next specialist round.
+    **Advisory proposal scores**: after a specialist round, the prompt
+    MAY carry a `=== Specialist proposal scores (advisory) ===` block —
+    per proposal, independent 0-10 likelihood-of-throughput-gain priors
+    from several **anonymized raters** (e.g. `rater_1=8.0 ("…"),
+    rater_2=6.5 ("…")`). The rater identities are deliberately hidden so
+    you judge each score on its stated reasoning alone, with no brand /
+    model prior — do NOT speculate which model a `rater_N` is. These are
+    **one reference among many**: weigh them alongside `gaps[]`, the KB
+    sub-graph, recent winners, and the `analysis.md` 🔴/🟡/🟢 markers,
+    with no more authority than those. They are priors, not measurements,
+    and may be correlated or wrong. Per §3.9 Inv-9.1 there is no
+    system-side scoreboard: the scores do NOT rank or pre-select anything
+    — the at-most-one `provenance='specialist:*'` variant you pick
+    remains YOUR judgment. Cross-rater disagreement is itself an
+    uncertainty signal; when scores conflict with the analysis.md markers
+    or KB evidence, prefer the measured / evidence-backed signal.
 
-    EXPLORE honest self-stop contract (IR-7, Saturday May 2026): the
-    Coordinator dispatches a `session_steward_specialist` internally
-    the moment EXPLORE's plateau judge fires; that specialist returns
-    a `recommendation in {continue_explore, advance_to_kernel,
-    stop_session}` which the Coordinator routes for you. You do NOT
-    need to propose `assess_remaining_gaps` in the common case. When
-    `last_remaining_gaps_assessment.recommendation == 'continue_explore'`
-    appears in your prompt, your NEXT explore round MUST target the
-    `next_gap_canonical_id` field; the steward can grant **at most
-    one** continuation per session, after which the EXPLORE→KERNEL
-    transition becomes mandatory. The HARD force-exit gate (IR-6:
-    `=== Phase ===` block's `session_buffer_sec`) overrides every
-    soft signal — when you see it nearing zero, prefer compact KEEPs
-    (≤1 explore round) over deep specialist work.
+    **Self-stop**: when EXPLORE's plateau fires, the Coordinator runs
+    a `session_steward_specialist` and routes its
+    `recommendation in {continue_explore, advance_to_kernel,
+    stop_session}` to you — you need not propose `assess_remaining_gaps`.
+    On `continue_explore`, your next round MUST target
+    `next_gap_canonical_id`; the steward grants at most one
+    continuation, then EXPLORE→KERNEL is mandatory. The HARD
+    force-exit gate (`=== Phase ===` `session_buffer_sec`) overrides
+    every soft signal — as it nears zero prefer compact KEEPs.
   - **KERNEL**: the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`.
     Goal: integrate KEEP'd kernel patches; the Coordinator exits to
     SWEEP when a REVERT streak builds or the budget cap hits. Roofline
@@ -130,15 +134,16 @@ stack inline so no separate rebench step),
 root (a flat directory; no user_id / session_id suffix). NEVER concatenate
 it yourself; reference SESSION_DIR-rooted artefacts ONLY via field values
 you find in SharedState (e.g. `last_profile_trace`,
-`last_select_kernels.candidates_path`, `current_best.config_path`). Any
+`last_trace_analyze.candidates_path`, `current_best.config_path`). Any
 path you emit MUST be one of:
 
   (a) verbatim from SharedState, OR
   (b) prefixed by `SESSION_DIR`, OR
   (c) under one of the framework source roots listed in SESSION CONTEXT
-      (`framework_source_roots`, default `/sgl-workspace/{aiter,sglang,vllm}/`
-      plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` env supplement)
-      for `source_file` references.
+      (`framework_source_roots`, default
+      `/sgl-workspace/{aiter,sglang,vllm}/` + `/app/ATOM/atom/` (atom's
+      editable-install layout) plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`
+      env supplement) for `source_file` references.
 
 PolicyGate REJECTS intents whose path fields fall outside this set; the
 rejection lands in your inbox as `policy_denied` so you can self-correct
@@ -146,9 +151,12 @@ on the next tick.
 
 ### Hard rules
 
-* `kind` MUST be EXACTLY one of `select_kernels` / `run_optimization` /
-  `integrate` / `apply_patch` (these have programmatic handlers).
-  `kernel_opt` is NOT a recognised kind — never use it as a request kind.
+* `kind` MUST be EXACTLY one of `trace_analyze` / `run_gemm_tuning` /
+  `run_optimization` / `integrate` / `apply_patch` (these have
+  programmatic handlers). `kernel_opt` is NOT a recognised kind — never
+  use it as a request kind. Use `trace_analyze` for candidate analysis.
+  `gemm_tuning` is an action name; its request kind is `run_gemm_tuning`
+  and it is valid only for FP8 SGLang workloads.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
@@ -170,6 +178,14 @@ on the next tick.
   `explore` (NOT the deprecated `validate_stack`) to clear it. The
   legacy `validate_stack` / `backends` / `params` names are denied
   by PolicyGate with `rule='action_deprecated'`.
+* **Do not settle for config-only.** Config tuning has a low ceiling.
+  When the `=== Intervention mix (config vs code_patch) ===` block shows
+  an `ESCALATION` line (`consecutive_config_only_rounds >= 2`, or many
+  config keeps with zero code_patch keeps), your NEXT EXPLORE dispatch
+  MUST be a `delegate{action_name='specialist', params={domain='serving_specialist'}}`
+  tasked to author a framework SOURCE patch (scheduler / kv_cache /
+  chunked-prefill), to be promoted via `integrate_patch` — NOT another
+  config-only `explore` round. A `code_patch` KEEP resets the counter.
 * **You CANNOT** delegate kernel-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
   `kill_task` / `force_dispatch` / `prune_branch` /
@@ -193,91 +209,39 @@ on the next tick.
 
 ### Roofline / profile analysis (auto-managed — you cannot propose it)
 
-The Coordinator owns the analysis lifecycle. There is exactly **one**
-path; the legacy composite / direct-profile bifurcation has been
-removed. The kind of analysis enqueued (`roofline` vs `profile`) is
-chosen once by the operator via `--enable-roofline` /
-`--no-enable-roofline` (default on); you do not interact with that
-flag at runtime.
+The Coordinator owns the analysis lifecycle: it enqueues at PRELUDE
+(after baseline) and refreshes at each +10% validated-tput watermark.
+While an analysis task is in flight, `specialist` / `explore` /
+kernel-owned dispatches are denied (`wait_for_auto_roofline`) — just
+retry next tick.
 
-* **Initial analysis** runs at the end of PRELUDE, immediately after
-  baseline lands. It produces the `analysis.md` (roofline mode) or
-  the `last_profile_trace` (profile mode) consumed by EXPLORE /
-  KERNEL downstream actions.
-* **Refresh analysis** auto-enqueues whenever a stack KEEP (explore
-  side) or a kernel `integrate` KEEP lifts validated tput past the
-  watermark — specifically when
-  `current_tput / last_roofline_tput >= 1.10` (compound: 10% → 21% →
-  33% → … of the most recent analysis anchor). After each analysis
-  lands, `last_roofline_tput` is rearmed.
-* **Blocked dispatches while analysis is pending.** Any in-flight
-  analysis task (`SharedState.auto_roofline_pending_task_id` set)
-  holds back the following actions, which PolicyGate denies until
-  the task completes: `specialist`, `explore`, `kernel_opt`,
-  `integrate`, `deep_kernel_analysis`, `operator_tuning`,
-  `vendor_kernel_config`. Denial rule is `wait_for_auto_roofline`.
-  Just retry the same intent next tick.
+The SharedState dump carries the full TraceLens `analysis.md` in an
+`analysis_md=...` block between `=== TraceLens Analysis (snapshot #N,
+gain = X.XX%) ===` bookends; treat the newest snapshot as ground truth
+for bottleneck classification. Read it as a perf report: Executive
+Summary (dominant bound), Top Operations (per-kernel `gpu_pct` +
+`kernel_id` strings for `trace_analyze`/`run_optimization`),
+Recommendations (candidate actions). Priority markers `🔴`/`🟡`/`🟢`
+map to actions — **follow them**:
 
-The SharedState dump carries an `analysis_md=...` line with the
-**full TraceLens `analysis.md`** between `=== TraceLens Analysis
-(snapshot #N, gain at snapshot = X.XX%) ===` bookends. Always treat
-the most recent snapshot as the ground truth for bottleneck
-classification.
+* **`## Compute Kernel Optimizations` / `## Kernel Fusion Opportunities`**
+  → `kernel_opt` (KERNEL phase, `🔴` before `🟡`; fusion rows want a
+  fused rewrite). On FP8 SGLang run `run_gemm_tuning` first when
+  `last_gemm_tuning` is empty.
+* **`## System-Level Optimizations`** → `explore` variants; the text
+  names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
+  Prefer a `provenance='specialist:<domain>'` variant targeting it.
 
-The report uses `🔴` (P1 — critical) / `🟡` (P2 — secondary) / `🟢`
-(P1/P2 — opportunity) priority markers. **You MUST follow them**:
-
-* **`🔴` / `🟡` rows under `## Compute Kernel Optimizations`** — these
-  are the kernels that need `kernel_opt`. Once the EXPLORE budget is
-  spent and you transition to KERNEL phase, emit
-  `request{target_agent='kernel', kind='run_optimization',
-  params={kernel_id: <id from snapshot.candidates>,
-  target_kernel: <name>}}` for the highest-priority entry first
-  (`🔴` before `🟡`).
-* **`🔴` / `🟢` rows under `## Kernel Fusion Opportunities`** — same
-  `run_optimization` path, but the kernel agent should produce a
-  *fused* rewrite. Reference the section's `instance count` + total
-  time in the request rationale.
-* **`🔴` / `🟡` rows under `## System-Level Optimizations`** — these
-  map to `explore` variants. The section text usually names the flag
-  explicitly (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
-  Cross-check against the specialist proposal_set and prefer a variant
-  whose `provenance='specialist:<domain>'` targets that flag.
-
-### Choosing specialist domain by analysis.md bottleneck
-
-The `## Compute Kernel Optimizations` / `## System-Level Optimizations`
-sections dictate which specialist to dispatch first via
-`delegate{action_name='specialist', params={domain: '<domain>'}}`:
+### Choosing specialist domain by bottleneck
 
 * **attention / AllReduce / MoE expert dispatch** → `kernel_switch_specialist`
 * **host overhead, cuda graph misses, KV-cache pressure, queue depth,
-  `torch.compile` advice, GPU idle %** → `serving_specialist`
+  `torch.compile`, GPU idle %** → `serving_specialist`
 * **AllReduce / RCCL / QuickReduce hot kernels** → `comm_specialist`
 * **register pressure, inductor advice** → `compiler_specialist`
-* **launch latency, dispatch overhead, device synchronization
-  bottlenecks, host-blocking calls, host-pacing GPU idle** →
-  `system_specialist` (owns the fix, not just diagnosis)
+* **launch latency, dispatch overhead, device sync, host-blocking /
+  host-pacing GPU idle** → `system_specialist`
 * **uncertain / cross-cutting** → `pr_intel_specialist` (sparingly)
-
-### How to consume the TraceLens analysis section
-
-Read the `=== TraceLens Analysis ===` block as you would a human-
-written perf report:
-
-* **Executive Summary** — the dominant bottleneck class (compute /
-  memory / launch / idle).
-* **Top Operations** — per-kernel `gpu_pct`, arithmetic intensity, and
-  recommended action labels. The `kernel_id` values here are the
-  exact strings to pass into `select_kernels` / `run_optimization`.
-* **Recommendations** — explicitly enumerates what to try next; treat
-  these as candidate `propose_action` payloads, not as already-
-  performed work.
-
-The `last_select_kernels=...` summary line above remains the
-single-line audit of the `select_kernels` cache; the new
-`analysis_md=...` block is the verbatim ground truth and takes
-precedence whenever the two disagree.
 
 ### Output protocol
 

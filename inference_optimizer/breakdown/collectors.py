@@ -971,7 +971,7 @@ def collect_final(
         "validated_at_stack_len":            val_stack_len,
         "validated_ts":                      str(state.get("cumulative_gain_validated_ts") or ""),
         "stack_changed_after_validation":    stack_len > val_stack_len > 0,
-        "extra_sglang_args":                 str(cb.get("extra_sglang_args") or ""),
+        "extra_server_args":                 str(cb.get("extra_server_args") or ""),
         "extra_envs":                        dict(cb.get("extra_envs") or {}),
         "action_path":                       action_path,
         "ttft_mean_ms":                      ttft,
@@ -1076,8 +1076,17 @@ def _build_final_invocation(
 # ---------------------------------------------------------------------------
 # §5 Phase timeline
 # ---------------------------------------------------------------------------
+# Action labels whose ``<action>_attempts`` lists feed the phase timeline
+# and capability tallies. Carries BOTH the post-merge ``explore`` action
+# and the legacy ``backends`` / ``params`` / ``validate_stack`` names so
+# that breakdown can reprocess archived (pre-merge) sessions, whose
+# state.json still writes the legacy ``*_attempts`` lists, alongside
+# current sessions that write ``explore_attempts``. Missing lists are
+# skipped harmlessly, so a session only ever populates its own vocabulary.
 _AUDIT_ACTIONS = (
-    "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+    "baseline", "profile", "explore",
+    "backends", "params", "validate_stack",
+    "sweep",
 )
 
 
@@ -1173,8 +1182,8 @@ def _capability_for_action(
     ``optimization_stack`` as a fallback: every stack entry whose
     ``action`` matches counts as a KEEP (the stack only collects
     successfully promoted entries by construction). Without this fallback
-    sessions that had a clear ``backends:vllm_kv_fp8`` final.action_path
-    would still report ``backends: not_attempted`` in capability_summary.
+    sessions that had a clear ``explore:vllm_kv_fp8`` final.action_path
+    would still report ``explore: not_attempted`` in capability_summary.
     """
     attempts_list = state.get(f"{action}_attempts") or []
     n_attempts = len(attempts_list) if isinstance(attempts_list, list) else 0
@@ -1186,7 +1195,7 @@ def _capability_for_action(
     # Fallback / augmentation from optimization_stack — only adopted
     # entries land here. Counts an entry once per action; the kernel
     # integrate path uses ``action="integrate"`` so it does not collide
-    # with backends/params/sweep here.
+    # with explore/sweep here.
     stack = state.get("optimization_stack") or []
     if isinstance(stack, list):
         stack_keeps = sum(
@@ -1233,6 +1242,11 @@ def collect_capability_summary(
     geak_cap = _from_invocations(geak_invocations)
     oob_cap = _from_invocations(oob_invocations)
 
+    # Legacy capability rows. Archived (pre-merge) sessions carry their
+    # search activity under ``backends_search`` / ``params_search`` and
+    # the ``validate_stack`` action; surface those rows so breakdown can
+    # reprocess them. On a current (post-merge) session these rows are
+    # ``not_attempted`` while ``explore`` (below) carries the activity.
     backends = _capability_for_action(state, "backends")
     backends_search = state.get("backends_search") or {}
     if isinstance(backends_search, dict):
@@ -1257,6 +1271,11 @@ def collect_capability_summary(
                 default=None,
             )
 
+    validate = _capability_for_action(state, "validate_stack")
+    validate["last_validated_gain_pct"] = _to_float(
+        state.get("cumulative_gain_validated")
+    )
+
     sweep_cap = _capability_for_action(state, "sweep")
     last_sweep = state.get("last_sweep") or {}
     if isinstance(last_sweep, dict):
@@ -1269,17 +1288,13 @@ def collect_capability_summary(
         if sweep_cap.get("attempts", 0) > 0:
             sweep_cap["status"] = "completed"
 
-    validate = _capability_for_action(state, "validate_stack")
-    validate["last_validated_gain_pct"] = _to_float(
+    # merged explore action capability row (KB_design §3.4). Carries
+    # the unified explore_search ledger activity, including the
+    # validated cumulative gain previously surfaced by validate_stack.
+    explore = _capability_for_action(state, "explore")
+    explore["last_validated_gain_pct"] = _to_float(
         state.get("cumulative_gain_validated")
     )
-
-    # merged explore action capability row (KB_design §3.4 +
-    # §3.12 §4.2 "兼容 alias"). The backends / params / validate_stack
-    # rows stay alongside to keep legacy resume reports readable. On a
-    # pure session those legacy rows will be ``not_attempted`` while
-    # ``explore`` carries the activity.
-    explore = _capability_for_action(state, "explore")
     explore_search = state.get("explore_search") or {}
     if isinstance(explore_search, dict):
         explore["tested"] = len(explore_search.get("tested") or {})
@@ -1310,8 +1325,8 @@ def collect_capability_summary(
     return {
         "geak":           geak_cap,
         "oob":            oob_cap,
-        # primary row; backends/params/validate_stack are
-        # kept as compatibility aliases.
+        # primary (post-merge) row; backends / params / validate_stack
+        # are kept as compatibility rows for archived sessions.
         "explore":        explore,
         "backends":       backends,
         "params":         params,
@@ -1329,6 +1344,12 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
     Single source of truth per Inv-12.2: the row never diverges from
     the ``specialist_runs`` section because both read the same
     SharedState ledger.
+
+    The headline counts (``status`` / ``attempts`` / ``keeps`` /
+    ``tested``) aggregate across every domain. ``by_specialist``
+    breaks them out per SpecialistDomain.key so the dashboard can
+    render six (or seven, including session_steward) per-specialist
+    cards without re-aggregating client-side.
     """
     rounds = state.get("specialist_rounds") or []
     if not isinstance(rounds, list) or not rounds:
@@ -1337,16 +1358,61 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
             "attempts":  0,
             "keeps":     0,
             "tested":    0,
+            "by_specialist": _empty_by_specialist_capability(),
         }
+
     attempts = 0
     proposals_total = 0
     proposals_kept = 0
+    # Per-domain counters. Seeded with the catalogue so consumers
+    # iterate every known specialist without presence checks; unknown
+    # domain strings still in state survive (forward compat with new
+    # SpecialistDomain entries).
+    by_specialist_raw: dict[str, dict[str, int]] = {
+        d: {"attempts": 0, "keeps": 0, "tested": 0, "rejected": 0}
+        for d in _SPECIALIST_DOMAIN_KEYS
+    }
+
     for r in rounds:
         if not isinstance(r, dict):
             continue
         attempts += 1
         proposals_total += int(r.get("proposals_total") or 0)
         proposals_kept += int(r.get("proposals_kept") or 0)
+
+        # Per-domain tallies. Trust ``domain_breakdown`` when the
+        # Coordinator wrote it (most accurate, especially for parallel
+        # multi-domain rounds); otherwise fall back to ``domains[]``
+        # split evenly across the round's totals.
+        round_breakdown = r.get("domain_breakdown")
+        if isinstance(round_breakdown, dict) and round_breakdown:
+            for dom, payload in round_breakdown.items():
+                if not isinstance(payload, dict):
+                    continue
+                bucket = by_specialist_raw.setdefault(str(dom), {
+                    "attempts": 0, "keeps": 0, "tested": 0, "rejected": 0,
+                })
+                bucket["attempts"] += int(payload.get("dispatched") or 0)
+                bucket["keeps"] += int(payload.get("proposals_kept") or 0)
+                bucket["tested"] += int(payload.get("proposals_total") or 0)
+                bucket["rejected"] += int(payload.get("proposals_rejected") or 0)
+        else:
+            # Round predates ``domain_breakdown``; impute equal share
+            # across the round's knowledge-domain tags (or the legacy
+            # ``domains[]`` list) so the per-domain numbers add up to the
+            # parent row even on legacy rounds.
+            domains = r.get("tags") or r.get("domains") or []
+            if isinstance(domains, list) and domains:
+                share_total = int(r.get("proposals_total") or 0) // len(domains)
+                share_kept = int(r.get("proposals_kept") or 0) // len(domains)
+                for dom in domains:
+                    bucket = by_specialist_raw.setdefault(str(dom), {
+                        "attempts": 0, "keeps": 0, "tested": 0, "rejected": 0,
+                    })
+                    bucket["attempts"] += 1
+                    bucket["tested"] += share_total
+                    bucket["keeps"] += share_kept
+
     if attempts == 0:
         status = "not_attempted"
     elif proposals_kept > 0:
@@ -1355,11 +1421,44 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
         status = "tried"
     else:
         status = "attempted"
+
+    # Materialize the by_specialist dict with status derived per-domain.
+    by_specialist: dict[str, dict[str, Any]] = {}
+    for dom, raw in by_specialist_raw.items():
+        if raw["attempts"] == 0:
+            dom_status = "not_attempted"
+        elif raw["keeps"] > 0:
+            dom_status = "kept"
+        elif raw["tested"] > 0:
+            dom_status = "tried"
+        else:
+            dom_status = "attempted"
+        by_specialist[dom] = {
+            "status":   dom_status,
+            "attempts": raw["attempts"],
+            "keeps":    raw["keeps"],
+            "tested":   raw["tested"],
+        }
+
     return {
-        "status":   status,
-        "attempts": attempts,
-        "keeps":    proposals_kept,
-        "tested":   proposals_total,
+        "status":         status,
+        "attempts":       attempts,
+        "keeps":          proposals_kept,
+        "tested":         proposals_total,
+        "by_specialist":  by_specialist,
+    }
+
+
+def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
+    """Seed every catalogue domain with a not_attempted CapabilityEntry.
+
+    Stable-shape contract: the dashboard never has to ``KeyError``-
+    guard when iterating ``capability_summary.specialist.by_specialist``
+    on a session that didn't dispatch every domain.
+    """
+    return {
+        d: {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 0}
+        for d in _SPECIALIST_DOMAIN_KEYS
     }
 
 
@@ -1648,7 +1747,7 @@ def _read_kernel_candidates(
     kernel agent uses to decide what to optimize.
 
     Resolves the file via:
-      1. ``state.last_select_kernels.candidates_path`` — orchestrator-recorded path
+      1. ``state.last_trace_analyze.candidates_path`` — orchestrator-recorded path
       2. ``session_dir / kernel-agent / runs / <session_id> / kernel_candidates.json``
          (new layout after the all-artefacts-under-USER_DATA_PATH migration)
       3. ``session_dir / kernel-agent / **/kernel_candidates.json`` glob fallback (new)
@@ -1656,8 +1755,13 @@ def _read_kernel_candidates(
          kernel_candidates.json`` (legacy double-nested layout from pre-migration
          sessions, kept for breakdown replay of historical runs)
       5. ``session_dir / kernel-agent-workspace / **/kernel_candidates.json`` glob fallback
+
+    Legacy ``state.last_select_kernels`` field (pre-M4) was removed
+    in this branch; historical state.json that still carries it is
+    silently ignored — the on-disk glob fallbacks above keep
+    breakdown replay working on old sessions.
     """
-    sk = state.get("last_select_kernels") or {}
+    sk = state.get("last_trace_analyze") or {}
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
     candidate_paths: list[Path] = []
     if raw_path:
@@ -1698,7 +1802,7 @@ def _read_kernel_candidates(
             hk = data.get("hot_kernels")
             if isinstance(hk, list):
                 return hk
-    # Final fallback: state.last_select_kernels.hot_kernels_top15.
+    # Final fallback: state.last_trace_analyze.hot_kernels_top15.
     # This is what the orchestrator actually copied out of
     # kernel_candidates.json — usually the same shape, just truncated to
     # 15. Used when the on-disk file is missing (e.g. test fixtures or
@@ -1883,7 +1987,7 @@ def _collect_detected_kernels(
     # 3) lifecycle stamps (selected / geak / oob / adopted_by / final_decision)
     selected_ids = {
         str(e.get("kernel_id") or "")
-        for e in ((state.get("last_select_kernels") or {}).get("hot_kernels_top15") or [])
+        for e in ((state.get("last_trace_analyze") or {}).get("hot_kernels_top15") or [])
         if isinstance(e, dict)
     }
     geak_idx = _index_invocations_by_kernel(geak)
@@ -1956,7 +2060,7 @@ def _collect_detected_kernels(
 
 
 def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
-    sk = state.get("last_select_kernels") or {}
+    sk = state.get("last_trace_analyze") or {}
     if not isinstance(sk, dict):
         return []
     out: list[dict[str, Any]] = []
@@ -2051,7 +2155,7 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "kernel_id":         str(ent.get("kernel_id") or ""),
                 "patch_path":        str(ent.get("patch_path") or ""),
                 "target_file":       str(ent.get("target_file") or ""),
-                "extra_sglang_args": str(ent.get("extra_sglang_args") or ""),
+                "extra_server_args": str(ent.get("extra_server_args") or ""),
                 "e2e_gain_pct":      _to_float(ent.get("best_gain_pct")),
                 "validated":         True,
                 "last_status":       str(ent.get("last_status") or ""),
@@ -2131,7 +2235,7 @@ def _shape_ledger(
         return {
             "name":              str(e.get("name") or ""),
             "fingerprint":       str(e.get("fingerprint") or ""),
-            "extra_sglang_args": str(e.get("extra_sglang_args") or ""),
+            "extra_server_args": str(e.get("extra_server_args") or ""),
             "extra_envs":        dict(e.get("extra_envs") or {}),
             "output_throughput": _to_float(e.get("output_throughput") or e.get("tput")),
             "gain_pct":          _to_float(e.get("gain_pct")),
@@ -2211,14 +2315,28 @@ def collect_param_search(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    # Post-merge sessions carry the unified ``explore_search`` ledger;
+    # archived (pre-merge) sessions carry the legacy ``params_search`` /
+    # ``backends_search`` ledgers. Emit all three so breakdown reprocesses
+    # both vintages — each session only populates its own ledgers, the
+    # others ``_shape_ledger`` into empty shells.
+    explore_ledger = _shape_ledger(state.get("explore_search"))
+    explore_ledger["winner_history"] = list(state.get("params_winner_history") or [])
+    explore_ledger["no_promote_streak"] = int(
+        state.get("params_no_promote_streak") or 0
+    )
+
     params_ledger = _shape_ledger(state.get("params_search"))
     params_ledger["winner_history"] = list(state.get("params_winner_history") or [])
-    params_ledger["no_promote_streak"] = int(state.get("params_no_promote_streak") or 0)
+    params_ledger["no_promote_streak"] = int(
+        state.get("params_no_promote_streak") or 0
+    )
 
     backends_ledger = _shape_ledger(state.get("backends_search"))
 
     baseline_tput = _to_float(state.get("baseline_tput"))
     return {
+        "explore":                 explore_ledger,
         "params":                  params_ledger,
         "backends":                backends_ledger,
         "synergy_attempted":       list(state.get("synergy_attempted") or []),
@@ -2606,24 +2724,95 @@ def collect_telemetry(
 # ---------------------------------------------------------------------------
 # §14 Attribution
 # ---------------------------------------------------------------------------
+# Catalogue of the 7 SpecialistDomain.key strings
+# (specialist_domains.SPECIALIST_DOMAIN_KEYS). Kept inline rather than
+# imported so the breakdown package stays free of orchestrator deps —
+# the breakdown module is meant to be readable by tools running
+# offline against a session_dir tarball.
+_SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
+    "serving_specialist",
+    "kernel_switch_specialist",
+    "comm_specialist",
+    "compiler_specialist",
+    "system_specialist",
+    "pr_intel_specialist",
+    "session_steward_specialist",
+    "research_scout_specialist",
+)
+
+
+def _normalize_specialist_key(provenance: str) -> str:
+    """Map a raw ``provenance`` string to a stable specialist key.
+
+    The orchestrator stamps four shapes of provenance on explore
+    winners:
+
+    * ``"specialist:<domain>"`` — the canonical case for v0.8+ runs.
+      Strip the prefix so the consumer iterates one bare key per
+      catalogue entry instead of having to special-case the prefix.
+    * ``"default_grid"`` — cold-start grid run when no specialist has
+      produced a proposal_set yet.
+    * ``"llm_direct"`` — orchestration LLM authored the variant
+      directly.
+    * ``"legacy:<action>"`` — resume of a pre-v0.8 session whose
+      promoted actions predate the specialist split. Folded under
+      ``"legacy_<action>"`` so it doesn't pollute the specialist
+      catalogue while still being inspectable.
+
+    Empty / unknown values become ``"unknown"`` so the by_domain dict
+    is never keyed by ``""``.
+    """
+    s = (provenance or "").strip()
+    if not s:
+        return "unknown"
+    if s.startswith("specialist:"):
+        # Trust the orchestrator's domain string verbatim — adding a new
+        # SpecialistDomain in specialist_domains.py shouldn't require a
+        # parallel update here.
+        return s[len("specialist:"):] or "unknown"
+    if s.startswith("legacy:"):
+        return f"legacy_{s[len('legacy:'):]}"
+    return s
+
+
 def _action_family(action: str) -> str:
     """Map an action label to a family for source_breakdown bucketing."""
     s = (action or "").lower()
     if s.startswith("kernel_opt") or s == "integrate":
         return "kernel"
+    # Legacy stack-entry action labels from archived sessions.
     if s == "backends":
         return "backends"
     if s == "params":
         return "params"
-    if s == "sweep":
-        return "sweep"
     if s == "validate_stack":
         return "validate"
+    if s == "sweep":
+        return "sweep"
     # merged explore action. Bucketed into
     # its own ``explore`` family so the attribution table can show a
     # single row that subsumes the legacy backends + params buckets.
     if s == "explore":
         return "explore"
+    # FRAMEWORK_PR (PRELUDE → FRAMEWORK_PR → EXPLORE).
+    # Surfaces upstream PR-driven KEEPs as their own headline row in
+    # ``source_breakdown`` so the dashboard's per-source totals reconcile
+    # against ``validated_total_pct``. Without this, framework_pr KEEPs
+    # fell through to ``"other"`` and silently disappeared from the
+    # leaderboard's per-source columns (manifest of: Params=0% +
+    # Backends=1.74% + Kernel=0% summing to ≪ Validated=22.85%).
+    if s == "framework_pr":
+        return "framework_pr"
+    # GEMM_TUNING (KERNEL phase entry lever).
+    # FP8 GEMM tuning runs as the deterministic operator-level
+    # KERNEL-entry step before source-level kernel_opt; ``coordinator``
+    # promotes a successful tune (best_speedup > 1.0) into
+    # ``optimization_stack`` with ``action="gemm_tuning"``. We bucket
+    # these KEEPs separately from generic ``kernel`` so the dashboard
+    # can attribute speedup to the deterministic tuner vs source-level
+    # GEAK/OOB rewrites — same pattern as framework_pr.
+    if s == "gemm_tuning":
+        return "gemm_tuning"
     return "other"
 
 
@@ -2636,7 +2825,7 @@ def _promote_legacy_gain_entries(
     State written by older Coordinator versions stored per-entry
     ``cum_gain_after`` floats only. Cross-reference the parallel
     ``state.optimization_stack`` to recover action / variant_name / ts /
-    extra_sglang_args, and compute ``delta_pct`` as the diff against the
+    extra_server_args, and compute ``delta_pct`` as the diff against the
     prior entry's ``cum_gain_after``. Entries the legacy ledger left as
     ``None`` (seeded / resumed sessions) become objects with
     ``cum_gain_after = delta_pct = None`` so index-alignment with
@@ -2662,15 +2851,82 @@ def _promote_legacy_gain_entries(
             "cum_gain_before": prev_cum,
             "cum_gain_after": cum_after,
             "delta_pct": delta,
-            "extra_sglang_args": str(
-                se.get("extra_sglang_args")
-                or se.get("candidate_extra_sglang_args")
+            "extra_server_args": str(
+                se.get("extra_server_args")
+                or se.get("candidate_extra_server_args")
                 or ""
             ),
         })
         if cum_after is not None:
             prev_cum = cum_after
     return out
+
+
+# ---------------------------------------------------------------------------
+# §13b Roofline (PR #321 single-path + watermark refresh model)
+# ---------------------------------------------------------------------------
+def collect_roofline(
+    state: dict[str, Any],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Surface the per-session roofline comparison for breakdown
+    consumers.
+
+    Reads :attr:`SharedState.roofline_snapshots` (append-only history
+    written by :meth:`SharedState.record_trace_analyze`) and shapes a
+    single entry suitable for the ``Roofline`` renderer in
+    :mod:`breakdown.reporters._renderers.roofline`.
+
+    The shape matches what the renderer expects:
+
+    .. code-block:: python
+
+        [{
+            "source_path": str,            # state.json (authoritative source)
+            "mode":        "single_snapshot" | "before_after",
+            "baseline":    {snapshot_id, ts, compute_pct, idle_pct,
+                            comm_pct, top_bottleneck, top_kernel: {...},
+                            analysis_md_path, trace_input},
+            "latest":      {... same keys ...},
+            "delta":       {compute_pct, idle_pct, comm_pct,
+                            top_kernel_efficiency_pct},   # only when before_after
+        }]
+
+    Returns an empty list when ``state.roofline_snapshots`` is absent /
+    empty (no roofline action ever completed). Best-effort: parsing
+    errors are recorded in ``warnings`` and the section degrades to an
+    empty list rather than blocking the whole breakdown export.
+    """
+    snapshots = state.get("roofline_snapshots")
+    if not isinstance(snapshots, list) or not snapshots:
+        return []
+    try:
+        # Lazy import to keep the breakdown package free of orchestrator
+        # imports at module load time (avoids the circular import path
+        # ``orchestrator → breakdown → orchestrator``).
+        from ..orchestrator.roofline_snapshot import (
+            build_roofline_comparison_from_history,
+        )
+        cmp = build_roofline_comparison_from_history(snapshots)
+    except Exception as exc:  # noqa: BLE001 — defensive
+        warnings.append(
+            f"collect_roofline: failed to build comparison from "
+            f"roofline_snapshots ({len(snapshots)} entries): "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return []
+    if not cmp:
+        return []
+    entry: dict[str, Any] = {
+        "source_path": "state.json#roofline_snapshots",
+        "mode": cmp.get("mode") or "single_snapshot",
+        "baseline": cmp.get("baseline") or {},
+        "latest": cmp.get("latest") or {},
+    }
+    delta = cmp.get("delta")
+    if isinstance(delta, dict) and delta:
+        entry["delta"] = delta
+    return [entry]
 
 
 def collect_attribution(
@@ -2726,11 +2982,25 @@ def collect_attribution(
     # total as the ground-truth denominator.
     validated_total = _to_float(state.get("cumulative_gain_validated")) or 0.0
     family_totals: dict[str, float] = {
-        "kernel": 0.0, "backends": 0.0, "params": 0.0,
-        "sweep": 0.0, "validate": 0.0, "other": 0.0,
-        # explore family (subsumes backends+params on v0.8
-        # sessions; legacy buckets stay populated on legacy resume).
+        "kernel": 0.0, "sweep": 0.0, "other": 0.0,
+        # Legacy buckets — populated when reprocessing archived
+        # (pre-merge) sessions whose optimization_stack entries carry
+        # the ``backends`` / ``params`` / ``validate_stack`` action.
+        "backends": 0.0, "params": 0.0, "validate": 0.0,
+        # explore family — the unified EXPLORE action that subsumes
+        # the former backends + params buckets on current sessions.
         "explore": 0.0,
+        # FRAMEWORK_PR family. Stays separate from the
+        # legacy ``other`` bucket so the dashboard can surface a
+        # dedicated ``framework_pr_pct_of_total`` row that reconciles
+        # against ``validated_total_pct``.
+        "framework_pr": 0.0,
+        # GEMM_TUNING family. The FP8 A8W8 block-scale GEMM tuner runs
+        # at KERNEL entry and contributes its own row so the dashboard
+        # can show "deterministic tuner vs source-level kernel rewrite"
+        # separately. Separate from ``kernel`` family so a tuner KEEP
+        # doesn't get blended with GEAK/OOB attribution.
+        "gemm_tuning": 0.0,
     }
     for e in entries:
         if not isinstance(e, dict):
@@ -2788,7 +3058,20 @@ def collect_attribution(
             "oob_pct_of_total":      round(oob_total, 2),
             # primary row.
             "explore_pct_of_total":  round(family_totals.get("explore", 0.0), 2),
-            # Legacy bucket aliases — preserved for legacy resume reports.
+            # FRAMEWORK_PR phase row. Tracks gain
+            # attributable to upstream PR adoption (between PRELUDE
+            # and EXPLORE). Always emitted (0.0 when the phase is
+            # disabled or contributed nothing) so the dashboard can
+            # iterate the catalogue without presence checks.
+            "framework_pr_pct_of_total": round(family_totals.get("framework_pr", 0.0), 2),
+            # GEMM_TUNING row (KERNEL-entry deterministic FP8 GEMM
+            # tuner). Always emitted (0.0 when the workload is not
+            # FP8 / the tuner skipped / no KEEP); the dashboard can
+            # iterate without presence checks.
+            "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
+            # Legacy bucket rows — preserved so archived-session reports
+            # reconcile (0.0 on current sessions, where activity is in
+            # ``explore_pct_of_total``).
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
             "sweep_pct_of_total":    round(family_totals.get("sweep", 0.0), 2),
@@ -2881,8 +3164,20 @@ def _collect_phase_breakdown(
 
     phase_buckets: dict[str, dict[str, Any]] = {
         "prelude": {"total_gain_pct": 0.0},
+        # FRAMEWORK_PR is the dedicated upstream-PR bake-in
+        # phase between PRELUDE and EXPLORE. KEEPs here come from
+        # framework_pr action entries (one ts/gain per adopted PR).
+        "framework_pr": {"total_gain_pct": 0.0, "by_pr": {}},
         "explore": {"total_gain_pct": 0.0, "by_domain": {}},
         "kernel":  {"total_gain_pct": 0.0, "by_kernel_id": {}},
+        # GEMM_TUNING is the deterministic FP8 GEMM tuner that runs
+        # at KERNEL entry. Logically inside the KERNEL phase but
+        # bucketed separately so the dashboard can split deterministic
+        # tuner gain from source-level GEAK/OOB rewrites.
+        # ``by_tuned_file`` keys on ``state.optimization_stack[].tuned_file``
+        # (absolute path to the produced CSV) so each adopted tune is
+        # individually attributable.
+        "gemm_tuning": {"total_gain_pct": 0.0, "by_tuned_file": {}},
         "sweep":   {"total_gain_pct": 0.0},
         "close":   {"total_gain_pct": 0.0},
         "unattributed": {"total_gain_pct": 0.0},
@@ -2912,16 +3207,26 @@ def _collect_phase_breakdown(
             ts_f = 0.0
         phase = _phase_for(ts_f).lower()
         action = str(e.get("action") or "").lower()
+        fam = _action_family(action)
+        # ``gemm_tuning`` runs *inside* the KERNEL phase but is bucketed
+        # separately so the dashboard can split deterministic-tuner
+        # gain from source-level GEAK/OOB rewrite gain. Override the
+        # phase mapping by action family whenever the entry is a
+        # gemm_tuning entry, regardless of phase_history's coarser
+        # KERNEL label.
+        if fam == "gemm_tuning":
+            phase = "gemm_tuning"
         # When phase_history isn't usable, fall back to the action
         # family so we still bucket something usefully.
-        if phase not in phase_buckets:
-            fam = _action_family(action)
+        elif phase not in phase_buckets:
             if fam in ("explore", "backends", "params"):
                 phase = "explore"
             elif fam == "kernel":
                 phase = "kernel"
             elif fam == "sweep":
                 phase = "sweep"
+            elif fam == "framework_pr":
+                phase = "framework_pr"
             else:
                 phase = "unattributed"
         bucket = phase_buckets[phase]
@@ -2931,19 +3236,55 @@ def _collect_phase_breakdown(
         if phase == "explore":
             by_domain = bucket.setdefault("by_domain", {})
             fp = str(e.get("fingerprint") or e.get("variant_fingerprint") or "")
-            prov = (
+            raw_prov = (
                 provenance_by_fp.get(fp)
                 or str(e.get("provenance") or "")
                 or "default_grid"
             )
-            by_domain[prov] = round(
-                float(by_domain.get(prov, 0.0)) + float(delta), 2,
+            # Normalize to a bare specialist key (strip ``specialist:``
+            # prefix; fold ``legacy:*`` into ``legacy_*``). Without this
+            # the dashboard had to manually splice the prefix every time
+            # it iterated by_domain — error-prone and easy to miss when
+            # the orchestrator adds a new SpecialistDomain.
+            domain = _normalize_specialist_key(raw_prov)
+            by_domain[domain] = round(
+                float(by_domain.get(domain, 0.0)) + float(delta), 2,
             )
         elif phase == "kernel":
             by_kid = bucket.setdefault("by_kernel_id", {})
             kid = str(e.get("kernel_id") or e.get("action_kernel_id") or "?")
             by_kid[kid] = round(
                 float(by_kid.get(kid, 0.0)) + float(delta), 2,
+            )
+        elif phase == "framework_pr":
+            # variant_name on framework_pr entries is the PR ref
+            # (``PR:<repo>#<num>`` / ``PR:<num>``); fall back to the
+            # entry's ``ref`` field when present, else ``?`` so the
+            # bucket key is always a string.
+            by_pr = bucket.setdefault("by_pr", {})
+            pr_key = (
+                str(e.get("variant_name") or "").strip()
+                or str(e.get("ref") or "").strip()
+                or "?"
+            )
+            by_pr[pr_key] = round(
+                float(by_pr.get(pr_key, 0.0)) + float(delta), 2,
+            )
+        elif phase == "gemm_tuning":
+            # Coordinator stamps the tuned CSV path on each
+            # ``optimization_stack[]`` entry; use that as the bucket
+            # key so the dashboard can show "this tune of this CSV"
+            # individually. Fall back to ``variant_name`` (currently
+            # always ``"a8w8_blockscale_tuned_gemm"``) and finally
+            # ``"?"`` so the key is always a string.
+            by_tuned = bucket.setdefault("by_tuned_file", {})
+            tuned_key = (
+                str(e.get("tuned_file") or "").strip()
+                or str(e.get("variant_name") or "").strip()
+                or "?"
+            )
+            by_tuned[tuned_key] = round(
+                float(by_tuned.get(tuned_key, 0.0)) + float(delta), 2,
             )
 
     # Drop the empty-by-default unattributed bucket when nothing
@@ -2989,7 +3330,7 @@ def _reconstruct_gain_ledger(
             "cum_gain_before":   round(cum_before, 4),
             "cum_gain_after":    round(cum_after, 4),
             "delta_pct":         delta,
-            "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+            "extra_server_args": str(entry.get("extra_server_args") or ""),
         })
         cum_before = cum_after
     return out
@@ -2998,6 +3339,508 @@ def _reconstruct_gain_ledger(
 # ---------------------------------------------------------------------------
 # source_files map
 # ---------------------------------------------------------------------------
+_KERNEL_ROOFLINE_REL_PATH = "reports/kernel_roofline.json"
+
+
+# ---------------------------------------------------------------------------
+# Roofline — optimization-progress curve (Dashboard 对接清单 §2)
+# ---------------------------------------------------------------------------
+# Default ratio of vendor-peak HBM bandwidth that's actually achievable.
+# Vendor specs are theoretical maxima; sustained throughput is bounded
+# by memory-controller scheduling, cache-line granularity, thermal /
+# power throttling, and (for multi-GPU) XGMI arbitration. 70% is the
+# conservative target Hyperloom optimizes against — see Dashboard-
+# Roofline 对接清单 §2 for rationale.
+DEFAULT_ROOFLINE_TARGET_RATIO = 0.70
+
+
+def collect_roofline_progress(
+    session_dir: Path,
+    state: dict[str, Any],
+    manifest: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Build the ``roofline_progress`` section feeding the
+    optimization-progress chart (Dashboard-Roofline 对接清单 §2).
+
+    Originally exported as the top-level ``roofline`` field, but that
+    name collided with the markdown-report renderer's existing
+    ``roofline`` list contract (per-final.json comparison snapshots
+    produced by :func:`collect_roofline`, populated from
+    ``state.roofline_snapshots``). After the merge of #368 + #370 the
+    two collectors silently shadowed each other in the same file
+    (Python kept the second definition); the dashboard chart payload
+    won and the markdown report's Roofline section started rendering
+    empty. Renaming this one to ``roofline_progress`` resolves the
+    clash — both surfaces are now stable, addressable independently,
+    and free to evolve.
+
+    Pulls everything from in-memory ``state`` + ``manifest``; never
+    re-runs benchmarks. The dashboard reads sbd alone — no
+    ``state.json`` walk on the consumer side.
+
+    Output shape (RooflineProgress TypedDict):
+
+    * ``trajectory[]`` — 1 baseline point + N KEEP points, sorted by
+      ts. Always at least one point (baseline) when ``baseline_tput``
+      is known; empty when the session never finished baseline.
+    * ``ceiling_tok_per_sec`` / ``target_tok_per_sec`` —
+      ``state.roofline_snapshots[-1]`` (latest snapshot, not [0]; the
+      ceiling can drift across re-runs as the snapshot pipeline
+      refines its peak estimate). ``None`` when no snapshot exists;
+      ``ceiling_available`` is the explicit boolean flag.
+    * ``current_best_tput`` — last trajectory point's tput, validated
+      against ``state.current_best.tput`` when present.
+    * ``current_best_pct_of_*`` — convenience ratios for the dashboard
+      callout. ``None`` when the ceiling is missing.
+    * ``snapshots[]`` — full passthrough of ``state.roofline_snapshots``
+      for tooltips / drill-downs.
+
+    Never raises; structured failures land in ``warnings`` and the
+    section becomes a partial dict.
+    """
+    # ── Trajectory: baseline + each KEEP ────────────────────────────────
+    baseline_tput = _to_float(state.get("baseline_tput")) or 0.0
+    trajectory: list[dict[str, Any]] = []
+    if baseline_tput > 0:
+        trajectory.append({
+            "ts":         str(manifest.get("created_at_utc") or ""),
+            "tput":       baseline_tput,
+            "label":      "baseline",
+            "action":     "baseline",
+            "gain_pct":   0.0,
+            "flags":      "",
+            "extra_envs": {},
+        })
+
+    stack = state.get("optimization_stack") or []
+    if isinstance(stack, list):
+        # The stack is already in promotion order, but sort by ts as a
+        # belt-and-braces guard against legacy paths that prepended.
+        ordered = sorted(
+            (e for e in stack if isinstance(e, dict)),
+            key=lambda e: str(e.get("ts") or ""),
+        )
+        for entry in ordered:
+            tput = _to_float(entry.get("tput"))
+            if tput is None or tput <= 0:
+                continue
+            gain_pct = (
+                ((tput - baseline_tput) / baseline_tput * 100.0)
+                if baseline_tput > 0 else 0.0
+            )
+            trajectory.append({
+                "ts":         str(entry.get("ts") or ""),
+                "tput":       tput,
+                "label":      str(entry.get("variant_name") or entry.get("action") or ""),
+                "action":     str(entry.get("action") or ""),
+                "gain_pct":   round(gain_pct, 4),
+                "flags":      str(entry.get("candidate_extra_server_args") or ""),
+                "extra_envs": dict(entry.get("extra_envs") or {}),
+            })
+
+    # ── Reference lines: ceiling + target ───────────────────────────────
+    snapshots_raw = state.get("roofline_snapshots") or []
+    snapshots: list[dict[str, Any]] = []
+    if isinstance(snapshots_raw, list):
+        for snap in snapshots_raw:
+            if isinstance(snap, dict):
+                snapshots.append(_normalize_roofline_snapshot(snap))
+
+    # Use the LATEST snapshot for headline numbers — the ceiling
+    # estimate refines as the watermark roofline pipeline reruns.
+    latest_snap = snapshots[-1] if snapshots else None
+    ceiling_tok = (
+        _to_float(latest_snap.get("theoretical_peak_tok_per_sec"))
+        if latest_snap else None
+    )
+    ceiling_available = ceiling_tok is not None and ceiling_tok > 0
+    target_tok = (
+        round(ceiling_tok * DEFAULT_ROOFLINE_TARGET_RATIO, 4)
+        if ceiling_available else None
+    )
+
+    # ── Headline numbers ────────────────────────────────────────────────
+    current_best_tput = (
+        trajectory[-1]["tput"] if trajectory else 0.0
+    )
+    cumulative_gain_pct = _to_float(state.get("cumulative_gain")) or 0.0
+    pct_of_ceiling = (
+        round(current_best_tput / ceiling_tok * 100.0, 4)
+        if ceiling_available and current_best_tput > 0 else None
+    )
+    pct_of_target = (
+        round(current_best_tput / target_tok * 100.0, 4)
+        if (target_tok and target_tok > 0 and current_best_tput > 0) else None
+    )
+
+    out: dict[str, Any] = {
+        "ceiling_tok_per_sec":          ceiling_tok,
+        "target_tok_per_sec":           target_tok,
+        "ceiling_ratio_target":         DEFAULT_ROOFLINE_TARGET_RATIO,
+        "ceiling_available":            ceiling_available,
+        "trajectory":                   trajectory,
+        "baseline_tput":                baseline_tput,
+        "current_best_tput":            current_best_tput,
+        "cumulative_gain_pct":          round(cumulative_gain_pct, 4),
+        "current_best_pct_of_ceiling":  pct_of_ceiling,
+        "current_best_pct_of_target":   pct_of_target,
+        "roofline_failure_streak":      _to_int(state.get("roofline_failure_streak")) or 0,
+        "snapshots":                    snapshots,
+    }
+    if latest_snap:
+        out["snapshot_top_bottleneck"] = str(latest_snap.get("top_bottleneck") or "")
+        within = _to_float(latest_snap.get("within_roofline_pct"))
+        if within is not None:
+            out["snapshot_within_roofline_pct"] = within
+        gap = _to_float(latest_snap.get("gap_to_roofline_pct"))
+        if gap is not None:
+            out["snapshot_gap_to_roofline_pct"] = gap
+
+    # Sanity check: trajectory tail should match state.current_best.tput
+    # when both are known. A divergence means the stack wasn't fully
+    # promoted (resume mid-promotion) — surface it instead of hiding.
+    cb_tput = _to_float((state.get("current_best") or {}).get("tput"))
+    if (
+        cb_tput is not None and cb_tput > 0
+        and current_best_tput > 0
+        and abs(cb_tput - current_best_tput) / max(cb_tput, 1.0) > 0.001
+    ):
+        warnings.append(
+            f"roofline.current_best_tput ({current_best_tput:.2f}) does not "
+            f"match state.current_best.tput ({cb_tput:.2f}); the trajectory "
+            f"may be missing a promotion event."
+        )
+    return out
+
+
+def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
+    """Coerce one ``state.roofline_snapshots[]`` entry to the schema."""
+    top_kernel_raw = snap.get("top_kernel") or {}
+    top_kernel: dict[str, Any] = {}
+    if isinstance(top_kernel_raw, dict):
+        top_kernel = {
+            "name":           str(top_kernel_raw.get("name") or ""),
+            "bound_type":     str(top_kernel_raw.get("bound_type") or ""),
+            "efficiency_pct": _to_float(top_kernel_raw.get("efficiency_pct")) or 0.0,
+            "gpu_pct":        _to_float(top_kernel_raw.get("gpu_pct")) or 0.0,
+        }
+    return {
+        "snapshot_id":                  _to_int(snap.get("snapshot_id")) or 0,
+        "ts":                           str(snap.get("ts") or ""),
+        "achieved_tok_per_sec":         _to_float(snap.get("achieved_tok_per_sec")) or 0.0,
+        "theoretical_peak_tok_per_sec": _to_float(snap.get("theoretical_peak_tok_per_sec")) or 0.0,
+        "within_roofline_pct":          _to_float(snap.get("within_roofline_pct")) or 0.0,
+        "gap_to_roofline_pct":          _to_float(snap.get("gap_to_roofline_pct")) or 0.0,
+        "compute_pct":                  _to_float(snap.get("compute_pct")) or 0.0,
+        "idle_pct":                     _to_float(snap.get("idle_pct")) or 0.0,
+        "comm_pct":                     _to_float(snap.get("comm_pct")) or 0.0,
+        "top_bottleneck":               str(snap.get("top_bottleneck") or ""),
+        "top_kernel":                   top_kernel,
+        "analysis_md_path":             str(snap.get("analysis_md_path") or ""),
+        "kernel_roofline_path":         str(snap.get("kernel_roofline_path") or ""),
+        "trace_input":                  str(snap.get("trace_input") or ""),
+    }
+
+
+def collect_kernel_roofline(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Mirror ``<session_dir>/reports/kernel_roofline.json`` into the
+    breakdown's ``kernel_roofline`` section.
+
+    The kernel-agent watermark roofline pipeline writes this file once
+    per successful trace analysis (minute-cadence on a live session,
+    once at end-of-session post-mortem). The dashboard renders one row
+    per kernel for the "Kernel Roofline 表格" panel
+    (Dashboard-Roofline 对接清单 §1).
+
+    File missing → empty dict + warning. Malformed JSON → empty dict +
+    warning (``_load_json_safe`` already records the parse error).
+    Non-list ``kernels`` field is replaced with ``[]`` so the consumer
+    can iterate unconditionally.
+
+    Each kernel entry's fields are coerced through the standard helpers
+    so an upstream type change (e.g. ``call_count`` arriving as a JSON
+    float) doesn't break the dashboard's downstream parsers.
+    """
+    path = session_dir / _KERNEL_ROOFLINE_REL_PATH
+    if not path.exists():
+        # Quiet on absence — most sessions never run the roofline
+        # pipeline and a warning would clutter every breakdown.
+        return {}
+    blob = _load_json_safe(path, warnings)
+    if not isinstance(blob, dict):
+        warnings.append(
+            f"kernel_roofline: {_KERNEL_ROOFLINE_REL_PATH} is not a JSON object"
+        )
+        return {}
+
+    raw_kernels = blob.get("kernels")
+    if raw_kernels is None:
+        kernels: list[dict[str, Any]] = []
+    elif not isinstance(raw_kernels, list):
+        warnings.append(
+            "kernel_roofline.kernels is not a list; dropping entries"
+        )
+        kernels = []
+    else:
+        kernels = [_normalize_kernel_roofline_entry(k) for k in raw_kernels
+                   if isinstance(k, dict)]
+
+    out: dict[str, Any] = {
+        "schema_version":         _to_int(blob.get("schema_version")) or 1,
+        "source":                 str(blob.get("source") or ""),
+        "analysis_md_path":       str(blob.get("analysis_md_path") or ""),
+        "kernel_candidates_path": str(blob.get("kernel_candidates_path") or ""),
+        "trace_input":            str(blob.get("trace_input") or ""),
+        "trace_input_type":       str(blob.get("trace_input_type") or ""),
+        "kernels":                kernels,
+    }
+    return out
+
+
+def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
+    """Coerce one kernel entry to the schema shape with stable types."""
+    return {
+        "kernel_id":             str(raw.get("kernel_id") or ""),
+        "name":                  str(raw.get("name") or ""),
+        "source_file":           str(raw.get("source_file") or ""),
+        "kernel_category":       str(raw.get("kernel_category") or ""),
+        "bound_type":            str(raw.get("bound_type") or ""),
+        "arithmetic_intensity":  _to_float(raw.get("arithmetic_intensity")) or 0.0,
+        "flops_per_byte":        _to_float(raw.get("flops_per_byte")) or 0.0,
+        "efficiency_percent":    _to_float(raw.get("efficiency_percent")) or 0.0,
+        "gpu_pct":               _to_float(raw.get("gpu_pct")) or 0.0,
+        "call_count":            _to_int(raw.get("call_count")) or 0,
+        "duration_us":           _to_float(raw.get("duration_us")) or 0.0,
+        "reusable_native_kernel": bool(raw.get("reusable_native_kernel")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Kernel Optimization Summary (Breakdown 面板对接文档 §A1; PR #399)
+# ---------------------------------------------------------------------------
+_KERNEL_OPT_SUMMARY_REL_PATH = "reports/kernel_optimization_summary.json"
+
+
+def collect_kernel_optimization_summary(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Mirror ``<session_dir>/reports/kernel_optimization_summary.json``
+    into the breakdown's ``kernel_optimization_summary`` section
+    (Breakdown 面板对接文档 §A1).
+
+    The file is produced deterministically by the ``report`` action
+    (``orchestrator.kernel_attempt_summary.build_kernel_optimization_summary``),
+    which runs as CLOSE step 1 — strictly *before* the
+    ``session_breakdown`` action (step 2) writes this breakdown — so the
+    report is already on disk for a normally-closed session. Mirroring
+    it here lets the dashboard read sbd alone instead of walking the
+    ``reports/`` + kernel-agent tree itself.
+
+    Behaviour (matches :func:`collect_kernel_roofline`):
+
+    * File missing → ``{}``, **no warning**. Offline / pre-#399 sessions
+      and any session where the ``report`` action never ran simply won't
+      have it; the dashboard hides Block 1 on an empty dict.
+    * Malformed / non-object JSON → ``{}`` + warning (never raises).
+    * Otherwise the report is mirrored **verbatim** (so producer-side
+      field additions ride through without a breakdown schema change),
+      apart from light shape guards on the containers the dashboard
+      iterates (``by_kernel`` list; ``totals`` /
+      ``*_breakdown`` / ``field_glossary`` objects), plus an added
+      ``report_path`` rel-link to the source file.
+    """
+    path = session_dir / _KERNEL_OPT_SUMMARY_REL_PATH
+    if not path.exists():
+        # Quiet on absence — keeps breakdowns of legacy / non-report
+        # sessions warning-free (mirrors collect_kernel_roofline).
+        return {}
+    blob = _load_json_safe(path, warnings)
+    if not isinstance(blob, dict):
+        warnings.append(
+            f"kernel_optimization_summary: {_KERNEL_OPT_SUMMARY_REL_PATH} "
+            "is not a JSON object"
+        )
+        return {}
+
+    out = dict(blob)
+
+    raw_by_kernel = out.get("by_kernel")
+    if raw_by_kernel is None:
+        out["by_kernel"] = []
+    elif not isinstance(raw_by_kernel, list):
+        warnings.append(
+            "kernel_optimization_summary.by_kernel is not a list; dropping entries"
+        )
+        out["by_kernel"] = []
+    else:
+        # Drop any non-dict rows so the dashboard can iterate safely;
+        # otherwise pass each row through verbatim (nested verification /
+        # backend_ladder shapes documented in §A1.4).
+        out["by_kernel"] = [r for r in raw_by_kernel if isinstance(r, dict)]
+
+    for key in (
+        "totals", "rejection_breakdown", "unattempted_reason_breakdown",
+        "failure_reason_breakdown", "field_glossary",
+    ):
+        val = out.get(key)
+        if val is not None and not isinstance(val, dict):
+            warnings.append(
+                f"kernel_optimization_summary.{key} is not an object; dropping"
+            )
+            out[key] = {}
+
+    takeaways = out.get("top_takeaways")
+    if takeaways is not None and not isinstance(takeaways, list):
+        warnings.append(
+            "kernel_optimization_summary.top_takeaways is not a list; dropping"
+        )
+        out["top_takeaways"] = []
+
+    out["report_path"] = _rel(path, session_dir) or _KERNEL_OPT_SUMMARY_REL_PATH
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Conc Sweep Summary (Breakdown 面板对接文档 §A2; PR #399)
+# ---------------------------------------------------------------------------
+_CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
+
+
+def collect_conc_sweep_summary(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Mirror ``<session_dir>/reports/conc_sweep_summary.json`` into the
+    breakdown's ``conc_sweep_summary`` section (Breakdown 面板对接文档 §A2).
+
+    Produced by the ``conc_sweep`` action during SWEEP (well before
+    CLOSE), so it is already on disk when sbd exports. Surfacing it here
+    extends the single-CONC headline gain into the full baseline-vs-
+    current_best CONC ladder for the dashboard's dual-curve chart.
+
+    Behaviour:
+
+    * File missing → ``{}``, **no warning** (conc_sweep often disabled /
+      skipped; the dashboard hides Block 2 on an empty dict).
+    * Malformed / non-object JSON → ``{}`` + warning (never raises).
+    * Otherwise mirrored **verbatim** + an added ``report_path``. The
+      only shape guard is on ``comparison`` (the array the dual-curve
+      chart iterates directly).
+
+    IMPORTANT — do **not** synthesize the optional blocks: when the
+    producer writes ``status="skipped"`` it intentionally omits
+    ``baseline`` / ``optimized`` / ``comparison`` / ``summary`` (§A2.4),
+    and ``roofline_ceiling`` (§A2.9) is absent on older products.
+    Consumers must branch on ``status`` before reading those keys; we
+    pass through exactly what the producer wrote.
+    """
+    path = session_dir / _CONC_SWEEP_SUMMARY_REL_PATH
+    if not path.exists():
+        return {}
+    blob = _load_json_safe(path, warnings)
+    if not isinstance(blob, dict):
+        warnings.append(
+            f"conc_sweep_summary: {_CONC_SWEEP_SUMMARY_REL_PATH} "
+            "is not a JSON object"
+        )
+        return {}
+
+    out = dict(blob)
+
+    comparison = out.get("comparison")
+    if comparison is not None and not isinstance(comparison, list):
+        warnings.append(
+            "conc_sweep_summary.comparison is not a list; dropping entries"
+        )
+        out["comparison"] = []
+
+    out["report_path"] = _rel(path, session_dir) or _CONC_SWEEP_SUMMARY_REL_PATH
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Optimization stack — raw KEEP ledger passthrough
+# ---------------------------------------------------------------------------
+# ``state.optimization_stack[]`` is the authoritative ordered list of
+# every promotion the Coordinator has accepted in this session. Other
+# breakdown sections summarise it for specific consumers
+# (``final.action_path`` is a label-only string list,
+# ``attribution.gain_per_stack_entry`` is the gain ledger,
+# ``roofline_progress.trajectory`` is the chart-friendly view) but
+# none of them carry the full per-entry metadata downstream tooling
+# may need — e.g. ``tuned_file`` / ``final_report_path`` on a
+# ``gemm_tuning`` entry, or ``workspace`` for arbitrary KEEPs.
+#
+# This passthrough surfaces the raw stack at sbd top level so
+# consumers that need the full evidence set can read sbd alone (no
+# state.json walk on the consumer side, matching the dashboard
+# read-once contract).
+#
+# Field shape mirrors the in-state-dict shape; entries are coerced
+# defensively (string/None/dict) so downstream tooling never has to
+# guard against type drift.
+def collect_optimization_stack(
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Mirror ``state.optimization_stack[]`` to the breakdown.
+
+    Returns ``[]`` when the field is absent or empty (pre-baseline /
+    fresh session). Never raises.
+    """
+    stack = state.get("optimization_stack") or []
+    if not isinstance(stack, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in stack:
+        if not isinstance(entry, dict):
+            continue
+        out.append(_normalize_optimization_stack_entry(entry))
+    return out
+
+
+def _normalize_optimization_stack_entry(raw: dict[str, Any]) -> dict[str, Any]:
+    """Coerce one stack entry to the schema shape with stable types.
+
+    Unknown / future fields pass through verbatim under their raw
+    keys so the schema can lag the state writer without losing data
+    (forward compatibility — see Inv-10.1 fact-layer compat).
+    """
+    # Known fields — coerced types
+    out: dict[str, Any] = {
+        "action":                       str(raw.get("action") or ""),
+        "variant_name":                 str(raw.get("variant_name") or ""),
+        "candidate_extra_server_args":  str(raw.get("candidate_extra_server_args") or ""),
+        "extra_envs":                   dict(raw.get("extra_envs") or {}),
+        "tput":                         _to_float(raw.get("tput")),
+        "ts":                           str(raw.get("ts") or ""),
+        "workspace":                    raw.get("workspace"),
+    }
+    # gemm_tuning-specific evidence (optional, only populated by the
+    # Coordinator's ``_promote_gemm_tuning_keep`` path).
+    if "tuned_file" in raw:
+        out["tuned_file"] = str(raw.get("tuned_file") or "")
+    if "final_report_path" in raw:
+        out["final_report_path"] = str(raw.get("final_report_path") or "")
+    if "source" in raw:
+        out["source"] = str(raw.get("source") or "")
+    if "gain_pct" in raw:
+        out["gain_pct"] = _to_float(raw.get("gain_pct"))
+    if "kernel_id" in raw:
+        out["kernel_id"] = str(raw.get("kernel_id") or "")
+    if "fingerprint" in raw:
+        out["fingerprint"] = str(raw.get("fingerprint") or "")
+    if "provenance" in raw:
+        out["provenance"] = str(raw.get("provenance") or "")
+    if "task_id" in raw:
+        out["task_id"] = str(raw.get("task_id") or "")
+    return out
+
+
 def collect_source_files(
     session_dir: Path,
     baseline_path: str | None,
@@ -3139,20 +3982,21 @@ def collect_kb_provenance(
 
     Three sources merged into one section:
 
-    1. SharedState (``state.json``) — ``cortex_session_id``,
-       ``cortex_session_summary`` (T4 result), ``warm_start_*``
-       snapshots, ``pending_kb_edges`` (T2 hypothesize edges not yet
-       verified).
+    1. SharedState (``state.json``) — ``cortex_session_id`` (hyperloom-
+       local id, NOT a KB sid) + ``warm_start_*`` snapshots.
     2. NDJSON queues (``runtime/cortex/.kb_*.ndjson``) — counts of
        drained / dead-letter rows. The flusher daemon writes one
        ``drain_bookmark`` per round; we just sum the deltas.
     3. Synchronous audit log (``runtime/cortex/.kb_audit.jsonl``) — per
-       Cortex CLI call status. Useful for diagnosing T0 / T4 sync
-       failures from the breakdown JSON alone.
+       Cortex CLI call status. Useful for diagnosing T0 sync failures
+       from the breakdown JSON alone.
 
     Returns a stable shape (always the same keys, even on a `--degraded-kb`
     session) so downstream readers (claw-stats-service) don't have to
-    branch.
+    branch. ``commit_summary`` / ``pending_edges`` / ``edges_promoted``
+    / ``edges_negated`` keys are kept (always empty) for back-compat
+    with claw-stats-service consumers that pre-date the T2/T3 protocol
+    retirement; remove in a future schema bump.
     """
     from ..session_paths import (
         cortex_audit_jsonl as _audit_path,
@@ -3161,7 +4005,6 @@ def collect_kb_provenance(
         cortex_flusher_pid as _flusher_pid_path,
         cortex_flusher_status_json as _flusher_status_path,
         cortex_pending_ndjson as _pending_path,
-        cortex_sid_file as _sid_path,
         pr_monitor_status_json as _pr_status_path,
     )
 
@@ -3220,7 +4063,6 @@ def collect_kb_provenance(
     flushed_path = _flushed_path(session_dir)
     dl_path = _dl_path(session_dir)
     audit_path = _audit_path(session_dir)
-    sid_path = _sid_path(session_dir)
 
     audit_tail = _read_last_n_audit(audit_path, n=50)
     # Status counts aggregated across the audit tail.
@@ -3229,38 +4071,11 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
-    # ``points_created[]`` aggregation (KB_design §3.12 §4.4 +
-    # §3.13 M4 §4). We walk the *full* audit log (not just the tail) so
+    # ``points_created[]`` aggregation: walk the *full* audit log so
     # one entry per (canonical_id, kind) is exposed even on long
-    # sessions; ``set`` dedups in case the same point was re-proposed
-    # mid-session. Only rows with op='propose_point' and a non-empty
-    # canonical_id qualify; we surface kind/authority/source so the
-    # ``pr_node`` rows (M4) are distinguishable from
-    # ``optimization_node`` / ``workload_node`` / ``issue_node``.
-    #
-    # same walk also aggregates verify outcomes into
-    # ``edges_promoted`` / ``edges_negated`` lists so the breakdown
-    # reader can answer "which edges did this session promote /
-    # refute?" without re-parsing NDJSON. We look for both async
-    # (``op=enqueue, envelope_op=verify``) and sync
-    # (``op=cli, args=['session','verify',...]``) rows; dedup by edge_id
-    # so a flushed enqueue + its later sync replay don't double-count.
+    # sessions; ``set`` dedups re-proposed rows.
     points_created: list[dict[str, Any]] = []
     points_by_kind: dict[str, int] = {}
-    edges_promoted: list[str] = []
-    edges_negated: list[str] = []
-    _seen_verify_edges: set[str] = set()
-
-    def _record_verify(edge_id: str, outcome: str) -> None:
-        if not edge_id or edge_id in _seen_verify_edges:
-            return
-        outcome_l = (outcome or "").strip().lower()
-        if outcome_l == "confirmed":
-            edges_promoted.append(edge_id)
-            _seen_verify_edges.add(edge_id)
-        elif outcome_l == "refuted":
-            edges_negated.append(edge_id)
-            _seen_verify_edges.add(edge_id)
 
     try:
         if audit_path.exists():
@@ -3276,84 +4091,60 @@ def collect_kb_provenance(
                         continue
                     if not isinstance(row, dict):
                         continue
-                    op_name = str(row.get("op") or "")
-                    if op_name == "propose_point":
-                        canonical = str(row.get("canonical_id") or "").strip()
-                        kind = str(row.get("kind") or "").strip()
-                        if not canonical or not kind:
-                            continue
-                        key = (canonical, kind)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        points_created.append({
-                            "canonical_id": canonical,
-                            "kind":         kind,
-                            "authority":    str(row.get("authority") or ""),
-                            "source":       str(row.get("source") or ""),
-                            "status":       str(row.get("status") or ""),
-                            "ts":           str(row.get("ts") or ""),
-                        })
-                        points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
-                    elif (
-                        op_name == "enqueue"
-                        and str(row.get("envelope_op") or "") == "verify"
-                    ):
-                        _record_verify(
-                            str(row.get("payload_edge") or ""),
-                            str(row.get("payload_outcome") or ""),
-                        )
-                    elif op_name == "cli":
-                        args = row.get("args") or []
-                        if (
-                            isinstance(args, list)
-                            and len(args) >= 4
-                            and args[0] == "session"
-                            and args[1] == "verify"
-                        ):
-                            edge_id = ""
-                            outcome = ""
-                            i = 2
-                            while i < len(args) - 1:
-                                if args[i] == "--edge":
-                                    edge_id = str(args[i + 1] or "")
-                                    i += 2
-                                elif args[i] == "--outcome":
-                                    outcome = str(args[i + 1] or "")
-                                    i += 2
-                                else:
-                                    i += 1
-                            _record_verify(edge_id, outcome)
+                    if str(row.get("op") or "") != "propose_point":
+                        continue
+                    canonical = str(row.get("canonical_id") or "").strip()
+                    kind = str(row.get("kind") or "").strip()
+                    if not canonical or not kind:
+                        continue
+                    key = (canonical, kind)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    points_created.append({
+                        "canonical_id": canonical,
+                        "kind":         kind,
+                        "authority":    str(row.get("authority") or ""),
+                        "source":       str(row.get("source") or ""),
+                        "status":       str(row.get("status") or ""),
+                        "ts":           str(row.get("ts") or ""),
+                    })
+                    points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
     except OSError as exc:
         warnings.append(f"kb_provenance: failed to scan {audit_path}: {exc!r}")
 
     cortex_sid = (state.get("cortex_session_id") or "").strip()
-    if not cortex_sid and sid_path.exists():
-        try:
-            cortex_sid = sid_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            cortex_sid = ""
-
-    commit_summary = state.get("cortex_session_summary") or {}
-    pending_edges = state.get("pending_kb_edges") or []
     warm = state.get("warm_start_recipe") or {}
     pitfalls = state.get("warm_start_pitfalls") or []
+    lessons = state.get("warm_start_lessons") or []
+    # GAP 1 — warm-recipe replay outcome (one-shot reproduce of the KB
+    # best_config at PRELUDE). Empty dict before the replay completes /
+    # when ``--no-warm-replay`` was set; otherwise carries:
+    #   {status, expected_gain_pct, actual_gain_pct,
+    #    warm_recipe_tier, warm_recipe_conf, replay_task_id, reason}
+    warm_replay_outcome = state.get("warm_replay_outcome") or {}
 
     out: dict[str, Any] = {
         "cortex_session_id":      cortex_sid,
         "warm_start_ts":          state.get("warm_start_ts") or "",
         "warm_start_recipe_seen": bool(warm and warm.get("raw")),
+        "warm_start_recipe_tier": str(warm.get("tier") or "") if isinstance(warm, dict) else "",
         "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
+        "warm_start_lesson_count": len(lessons) if isinstance(lessons, list) else 0,
+        # GAP 1 — operator-visible replay summary. The outcome dict is
+        # passed through verbatim so dashboards can render status
+        # transitions over time.
+        "warm_replay": dict(warm_replay_outcome) if isinstance(warm_replay_outcome, dict) else {},
+        "warm_replay_attempted":   bool(state.get("warm_replay_attempted")),
+        "warm_history_injected":   bool(state.get("warm_history_injected")),
         "stack_fingerprint":      manifest.get("stack_fingerprint") or {},
-        "pending_edges": [
-            {
-                "proposal_msg_id": row.get("proposal_msg_id", ""),
-                "edge_id":         row.get("edge_id", ""),
-                "action":          row.get("action", ""),
-                "ts":              row.get("ts", ""),
-            }
-            for row in pending_edges if isinstance(row, dict)
-        ],
+        # Always-empty back-compat lists (T2 hypothesize protocol retired).
+        # Consumers that diff session_breakdown.json for "pending edges"
+        # / "edges_promoted" must stop relying on these in a follow-up
+        # schema bump.
+        "pending_edges":          [],
+        "edges_promoted":         [],
+        "edges_negated":          [],
         "queue": {
             "pending_lines":     _count_lines(pending_path),
             "flushed_bookmarks": _count_lines(flushed_path),
@@ -3361,23 +4152,15 @@ def collect_kb_provenance(
         },
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
-        # full session points-created roll-up (KB_design §3.12
-        # §4.4). Sorted by canonical_id for stable diffing.
         "points_created":        sorted(
             points_created, key=lambda r: r.get("canonical_id", ""),
         ),
         "points_by_kind":        points_by_kind,
-        # KB_gaps/Gap-08 / per-edge T3
-        # verify roll-up. Sorted for stable diffing.
-        "edges_promoted":        sorted(edges_promoted),
-        "edges_negated":         sorted(edges_negated),
+        # Empty placeholder kept for back-compat with claw-stats-service.
         "commit_summary": {
-            "status":             str(commit_summary.get("status") or "")
-                if isinstance(commit_summary, dict) else "",
-            "promoted_edges":     list(commit_summary.get("promoted_edges") or [])
-                if isinstance(commit_summary, dict) else [],
-            "derived_summary_id": str(commit_summary.get("derived_summary_id") or "")
-                if isinstance(commit_summary, dict) else "",
+            "status":             "",
+            "promoted_edges":     [],
+            "derived_summary_id": "",
         },
         "flusher_status": _collect_flusher_status(
             session_dir,
@@ -3462,6 +4245,31 @@ def _collect_flusher_status(
 # ---------------------------------------------------------------------------
 # specialist_runs section
 # ---------------------------------------------------------------------------
+def _coerce_round_id(value: Any) -> int | str:
+    """Normalise a ``specialist_rounds[*].round_id`` for the breakdown.
+
+    ``record_specialist_round`` stores ``round_id`` as a string — it may
+    be a numeric round counter ("3"), an explore-round label
+    ("explore-001"), or a task-id hash when a single specialist task is
+    the round anchor. Return an int when the value is purely numeric so
+    downstream numeric consumers keep working, otherwise preserve the
+    string. Empty / None collapses to ``0``. Never raises.
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if text.lstrip("-").isdigit():
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    return text
+
+
 def collect_specialist_runs(
     session_dir: Path,
     state: dict[str, Any],
@@ -3518,25 +4326,41 @@ def collect_specialist_runs(
     for raw in rounds:
         if not isinstance(raw, dict):
             continue
+        # ``record_specialist_round`` writes singular ``domain`` /
+        # ``task_id`` (one specialist task anchors a round) and a bare
+        # ``confidence``; tolerate both the plural / aggregated shapes
+        # (multi-task rounds) and the singular shapes so neither form is
+        # silently dropped.
+        domains = list(raw.get("domains") or [])
+        if not domains and raw.get("domain"):
+            domains = [str(raw.get("domain"))]
         entry: dict[str, Any] = {
-            "round_id":          int(raw.get("round_id") or 0),
+            "round_id":          _coerce_round_id(raw.get("round_id")),
             "dispatched_at":     str(raw.get("dispatched_at") or ""),
             "completed_at":      str(raw.get("completed_at") or ""),
-            "domains":           list(raw.get("domains") or []),
+            "domains":           domains,
+            "tags":              list(raw.get("tags") or []),
             "parallelism":       int(raw.get("parallelism") or 0),
             "proposals_total":   int(raw.get("proposals_total") or 0),
             "proposals_kept":    int(raw.get("proposals_kept") or 0),
             "proposals_rejected": int(raw.get("proposals_rejected") or 0),
             "proposals_skipped": int(raw.get("proposals_skipped") or 0),
             "kb_edge_ids":       list(raw.get("kb_edge_ids") or []),
-            "confidence_avg":    _to_float(raw.get("confidence_avg")),
+            "confidence_avg":    _to_float(
+                raw.get("confidence_avg")
+                if raw.get("confidence_avg") is not None
+                else raw.get("confidence")
+            ),
             "domain_breakdown":  _normalize_specialist_domain_breakdown(
                 raw.get("domain_breakdown"),
             ),
             "notes":             list(raw.get("notes") or []),
         }
-        # Attach transcript refs from runs/specialist/.
+        # Attach transcript refs from runs/specialist/. Tolerate the
+        # singular ``task_id`` anchor when no ``task_ids`` list exists.
         task_ids = list(raw.get("task_ids") or [])
+        if not task_ids and raw.get("task_id"):
+            task_ids = [str(raw.get("task_id"))]
         transcripts: list[dict[str, Any]] = []
         for tid in task_ids:
             tid_str = str(tid)
@@ -3591,11 +4415,14 @@ def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
         v = mapping.get(task_id)
         if isinstance(v, str):
             return v
-    # Fallback: if the round has exactly one domain we can attribute
-    # the task to it without ambiguity.
-    domains = round_entry.get("domains") or []
+    # Fallback: if the round has exactly one knowledge-domain tag (or
+    # one legacy domain) we can attribute the task to it without
+    # ambiguity.
+    domains = round_entry.get("tags") or round_entry.get("domains") or []
     if isinstance(domains, list) and len(domains) == 1:
         return str(domains[0])
+    if round_entry.get("domain"):
+        return str(round_entry.get("domain"))
     return ""
 
 

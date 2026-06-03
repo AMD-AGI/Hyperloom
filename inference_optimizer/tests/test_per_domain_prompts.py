@@ -66,12 +66,13 @@ def test_specialist_domains_m5_covers_all_six():
     logs ``generic prompt template`` notes for M6-only domains.
 
     IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow. We
-    keep the assertion shape (M5 still covers the full catalogue) but
-    bump the expected count.
+    ``session_steward_specialist`` for the honest self-stop flow; the
+    read-only ``research_scout_specialist`` is the 8th. We keep the
+    assertion shape (M5 still covers the full catalogue) but bump the
+    expected count.
     """
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 7
+    assert len(SPECIALIST_DOMAINS_M5) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +83,21 @@ def test_serving_specialist_mentions_scheduler_and_kv_cache():
     for marker in (
         "serving_specialist", "scheduler", "cuda_graph", "kv_cache",
         "max-num-seqs",
+    ):
+        assert marker.lower() in text.lower(), f"missing {marker!r}"
+
+
+def test_serving_specialist_has_source_patch_playbook():
+    """Capability layer (Arbor-into-Hyperloom): the serving focus must
+    guide AUTHORING source patches (not just config flags) and carry the
+    distilled framework safety priors (ALWAYS_ON / NEVER_TOUCH)."""
+    text = _build("serving_specialist")
+    for marker in (
+        "Source-patch playbook",   # the code-authoring section
+        "block_manager",            # kv-cache module mapping
+        "add_seq_group",            # upstream call-order contract to preserve
+        "NEVER_TOUCH",              # safety classification from Arbor KB
+        "VLLM_ROCM_USE_AITER",      # ALWAYS_ON umbrella flag
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
@@ -303,11 +319,12 @@ def _valid_done_payload(
 # ===========================================================================
 def test_specialist_domains_catalogue_has_six_entries():
     """IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow.
-    The test name stays for git-blame continuity but the assertion
-    tracks the actual count.
+    ``session_steward_specialist`` for the honest self-stop flow; the
+    read-only ``research_scout_specialist`` is the 8th. The test name
+    stays for git-blame continuity but the assertion tracks the actual
+    count.
     """
-    assert len(SPECIALIST_DOMAINS) == 7
+    assert len(SPECIALIST_DOMAINS) == 8
     assert SPECIALIST_DOMAIN_KEYS == frozenset(
         d.key for d in SPECIALIST_DOMAINS
     )
@@ -400,8 +417,8 @@ def test_R2_unknown_domain_denied(gate):
                 },
             },
         ))
-    assert exc.value.rule == "specialist_dispatch_source"
-    assert "domain" in (exc.value.hint or "")
+    assert exc.value.rule == "specialist_unknown_domain"
+    assert "tag" in (exc.value.hint or "")
 
 
 def test_R2_missing_gap_denied(gate):
@@ -812,10 +829,7 @@ def test_specialist_tool_denylist_excludes_kb_write_paths():
     remain blocked because the KB lifecycle is Coordinator-owned.
     """
     for forbidden in (
-        "mcp__cortex_kb__hypothesize",
-        "mcp__cortex_kb__ingest_attempt",
-        "mcp__cortex_kb__verify",
-        "mcp__cortex_kb__commit",
+        "mcp__cortex_kb__propose_point",
     ):
         assert forbidden in SPECIALIST_TOOL_DENYLIST
         assert forbidden not in DEFAULT_SPECIALIST_TOOLS
@@ -907,5 +921,6 @@ def test_research_lane_capacity_is_core_state_field():
     """LLM cannot raise research_lane_capacity mid-flight."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
     assert "research_lane_capacity" in CORE_STATE_FIELDS
+    assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
     assert "specialist_rounds" in CORE_STATE_FIELDS
     assert "last_specialist" in CORE_STATE_FIELDS

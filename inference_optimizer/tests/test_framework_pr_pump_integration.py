@@ -38,8 +38,45 @@ from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 
 
+# Cross-cutting framework parametrisation. Add new frameworks here
+# when Hyperloom learns to drive them; the per-test parametrisation
+# reads this constant so a single edit propagates everywhere.
+_FRAMEWORK_PARAMETRISATION: tuple[str, ...] = ("sglang", "vllm", "atom")
+
+
+# Synthetic per-framework candidate fixtures used by the parametrised
+# happy-path test. Each entry yields a single-candidate batch that
+# looks like a real ``fa phase-discover`` payload for that framework.
+_FRAMEWORK_CANDIDATES: dict[str, dict[str, Any]] = {
+    "sglang": {
+        "pr_url":   "https://github.com/sgl-project/sglang/pull/1",
+        "diff_url": "https://github.com/sgl-project/sglang/pull/1.diff",
+        "repo":     "sgl-project/sglang",
+        "ref":      "perf/x",
+        "title":    "perf: moe gemm fastpath",
+        "framework": "sglang",
+    },
+    "vllm": {
+        "pr_url":   "https://github.com/ROCm/vllm/pull/2",
+        "diff_url": "https://github.com/ROCm/vllm/pull/2.diff",
+        "repo":     "ROCm/vllm",
+        "ref":      "perf/y",
+        "title":    "perf: paged attention prefill",
+        "framework": "vllm",
+    },
+    "atom": {
+        "pr_url":   "https://github.com/ROCm/ATOM/pull/3",
+        "diff_url": "https://github.com/ROCm/ATOM/pull/3.diff",
+        "repo":     "ROCm/ATOM",
+        "ref":      "perf/z",
+        "title":    "perf: MTP scheduler + aiter fused_moe",
+        "framework": "atom",
+    },
+}
+
+
 class _StateStub:
-    def __init__(self) -> None:
+    def __init__(self, framework: str = "sglang") -> None:
         self.phase = "FRAMEWORK_PR"
         self.framework_pr_phase_done = False
         self.framework_pr_discover_failures = 0
@@ -49,7 +86,7 @@ class _StateStub:
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
         self.model = "test-model"
-        self.framework = "sglang"
+        self.framework = framework
         self.gpu_type = "MI300X"
         self.baseline_tput = 0.0
         self._saves = 0
@@ -163,14 +200,29 @@ class _CoordinatorStub:
         self,
         tmp_path: Path,
         critic: _ScriptedCriticBackend | None,
+        *,
+        framework: str = "sglang",
     ) -> None:
         self.session_dir = tmp_path
-        self.shared_state = _StateStub()
+        self.shared_state = _StateStub(framework=framework)
         self.tasks = _TasksStub()
         self.framework_pr_discover_timeout_sec = 0.0
+        self._framework = framework
         self.backends: dict[str, Any] = {}
         if critic is not None:
             self.backends["critic"] = critic
+
+    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+        # Pin to a single repo so these pump scenarios keep their
+        # one-batch / one-task accounting. Cross-repo fan-out is covered
+        # in test_framework_pr_discover_directed.py.
+        return [_fa_client.repo_url_for_framework(framework or self._framework)]
+
+    def _framework_pr_known_candidate_ids(self) -> set[str]:
+        return Coordinator._framework_pr_known_candidate_ids(self)  # type: ignore[arg-type]
+
+    def _framework_pr_tried_refs(self) -> list[str]:
+        return Coordinator._framework_pr_tried_refs(self)  # type: ignore[arg-type]
 
 
 def _pump(stub: _CoordinatorStub) -> None:
@@ -178,46 +230,65 @@ def _pump(stub: _CoordinatorStub) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 1 — discover → approve → enqueue
+# Scenario 1 — discover → approve → enqueue (parametrised across frameworks)
 
 
+@pytest.mark.parametrize("framework", _FRAMEWORK_PARAMETRISATION)
 def test_pump_happy_path_discover_approve_enqueue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    framework: str,
 ):
     """A single-candidate batch is discovered, Critic approves, and
     the pump enqueues exactly one ``framework_pr`` task. No progress
-    rows are written by the pump (the executor owns those)."""
-    async def _discover(**_: Any) -> dict[str, Any]:
+    rows are written by the pump (the executor owns those).
+
+    Parametrised across sglang / vllm / atom so the happy path is
+    pinned for every supported framework. The atom case confirms the
+    pump does not raise on ``framework=atom`` (repo URL resolves) and
+    that the Critic prompt assembly handles atom candidates with no
+    special-casing required."""
+    captured_framework: dict[str, str] = {}
+
+    async def _discover(**kwargs: Any) -> dict[str, Any]:
+        captured_framework["framework"] = str(kwargs.get("framework") or "")
         return {
-            "batch_id": "batch-happy",
-            "candidates": [{
-                "pr_url":   "https://github.com/sgl-project/sglang/pull/1",
-                "diff_url": "https://github.com/sgl-project/sglang/pull/1.diff",
-                "repo":     "sgl-project/sglang",
-                "ref":      "perf/x",
-                "title":    "perf: moe gemm fastpath",
-                "framework": "sglang",
-            }],
+            "batch_id": f"batch-{framework}",
+            "candidates": [dict(_FRAMEWORK_CANDIDATES[framework])],
         }
 
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     critic = _ScriptedCriticBackend(["approve"])
-    stub = _CoordinatorStub(tmp_path, critic)
+    stub = _CoordinatorStub(tmp_path, critic, framework=framework)
 
     _pump(stub)
 
+    # The pump forwarded the framework verbatim to phase_discover.
+    assert captured_framework["framework"] == framework
     # One discover round, one Critic call, one task created.
     assert len(stub.shared_state.framework_pr_batches) == 1
     assert critic.call_count == 1
     assert len(stub.tasks.created) == 1
     assert stub.tasks.created[0]["kind"] == "framework_pr"
+    # The enqueued task's candidate carries the per-framework fixture.
+    enqueued = stub.tasks.created[0]["params"]["candidate"]
+    assert enqueued["framework"] == framework
+    assert enqueued["pr_url"] == _FRAMEWORK_CANDIDATES[framework]["pr_url"]
     # No progress rows yet (the executor writes those).
     assert stub.shared_state.framework_pr_phase_progress == []
     # Critic decision cached.
     decisions = stub.shared_state.framework_pr_critic_decisions
     assert len(decisions) == 1
     assert decisions[0]["verdict"] == "approve"
+
+
+def test_pump_integration_parametrised_over_all_three_frameworks():
+    """G4 cross-cutting static guard: the parametrisation list must
+    cover exactly the three frameworks Hyperloom drives. A future add
+    (e.g. trtllm) requires extending the constant + fixture dict
+    together, surfacing the dependency in code review."""
+    assert set(_FRAMEWORK_PARAMETRISATION) == {"sglang", "vllm", "atom"}
+    assert set(_FRAMEWORK_CANDIDATES.keys()) == set(_FRAMEWORK_PARAMETRISATION)
 
 
 # ---------------------------------------------------------------------------

@@ -35,7 +35,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Mapping
 
-from ..cortex_kb_client import CortexKBClient
+# cortex_kb_client retired alongside the v1 graph KB. KnowledgePlane
+# now treats ``cortex_kb`` as an opaque optional client whose only
+# requirement is the legacy ``_post`` / ``propose_point`` /
+# ``enabled`` surface — which under the v2 design is never wired
+# (cli passes ``cortex_kb=None``), so the cortex_* methods on this
+# class are dead code retained only for grep-stability with old
+# call-sites.
 from ..paths import asset_actions_dir
 from .pr_monitor import (
     DEFAULT_PR_FEED_PER_REPO_LIMIT,
@@ -162,7 +168,7 @@ class KnowledgePlane:
     by :meth:`reset_round_caches`.
     """
 
-    cortex_kb: CortexKBClient | None = None
+    cortex_kb: Any = None  # legacy /v1/points client (always None under v2)
     pr_monitor: PRMonitorClient | None = None
     domain_repos: dict[str, DomainRepos] = field(default_factory=dict)
     pr_feed_window_days: int = DEFAULT_PR_FEED_WINDOW_DAYS
@@ -178,8 +184,8 @@ class KnowledgePlane:
     def from_clients(
         cls,
         *,
-        cortex_kb: CortexKBClient | None,
-        pr_monitor: PRMonitorClient | None,
+        cortex_kb: Any = None,
+        pr_monitor: PRMonitorClient | None = None,
         domain_repos: dict[str, DomainRepos] | None = None,
         pr_feed_window_days: int = DEFAULT_PR_FEED_WINDOW_DAYS,
         pr_feed_per_repo_limit: int = DEFAULT_PR_FEED_PER_REPO_LIMIT,
@@ -209,7 +215,14 @@ class KnowledgePlane:
 
     @property
     def cortex_enabled(self) -> bool:
-        return self.cortex_kb is not None and self.cortex_kb.enabled
+        # ``self.cortex_kb`` may be a legacy CortexKBClient (which
+        # has an ``.enabled`` attr) or ``None`` (the v2-default).
+        # Tolerant getattr so a future caller passing the v2
+        # RecipeKB dispatcher here doesn't AttributeError.
+        return (
+            self.cortex_kb is not None
+            and bool(getattr(self.cortex_kb, "enabled", True))
+        )
 
     def resolve_domain_repos(self, domain: str) -> DomainRepos | None:
         """Look up domain config; returns None for unknown domains."""
@@ -556,6 +569,79 @@ class KnowledgePlane:
             "warnings": warnings,
         }
 
+    def select_kb_for_domains(
+        self,
+        tags: list[str],
+        *,
+        budget_steps: int = 4,
+        budget_branches: int = 20,
+        hw_slug: str | None = None,
+    ) -> dict[str, Any]:
+        """Traverse the Cortex KB for each knowledge-domain tag and merge.
+
+        Each tag selects a KB anchor (knowledge-domain tags are anchors;
+        specialist keys are resolved to their anchor). The per-tag
+        traversals are merged with order-preserving dedup so the prompt
+        builder renders a single combined ``## 4. KB SUB-GRAPH`` block.
+
+        Fail-soft: a tag whose traversal fails contributes its warnings
+        only; an empty tag list yields an empty merged subgraph.
+        """
+        from .specialist_domains import domain_for_tag
+
+        anchors: list[str] = []
+        merged: dict[str, Any] = {
+            "anchor": "",
+            "anchors": [],
+            "tags": [],
+            "domain": "",
+            "points": [],
+            "neighbors": [],
+            "paths": [],
+            "candidates": [],
+            "warnings": [],
+        }
+        seen: dict[str, set[str]] = {
+            "points": set(), "neighbors": set(),
+            "paths": set(), "candidates": set(),
+        }
+
+        def _extend(key: str, values: list[str]) -> None:
+            bucket = merged[key]
+            for v in values:
+                if v not in seen[key]:
+                    seen[key].add(v)
+                    bucket.append(v)
+
+        for tag in tags:
+            dom = domain_for_tag(tag)
+            # ``select_kb_for_domain`` resolves a catalogue key to its
+            # anchor; pass the catalogue key when known, else the tag
+            # itself (treated as the anchor by the fallback path).
+            lookup = dom.key if dom is not None else str(tag)
+            sub = self.select_kb_for_domain(
+                lookup,
+                budget_steps=budget_steps,
+                budget_branches=budget_branches,
+                hw_slug=hw_slug,
+            )
+            anchor = str(sub.get("anchor") or "").strip()
+            if anchor and anchor not in anchors:
+                anchors.append(anchor)
+            merged["tags"].append(str(tag))
+            _extend("points", list(sub.get("points") or []))
+            _extend("neighbors", list(sub.get("neighbors") or []))
+            _extend("paths", list(sub.get("paths") or []))
+            _extend("candidates", list(sub.get("candidates") or []))
+            for w in sub.get("warnings") or []:
+                if w not in merged["warnings"]:
+                    merged["warnings"].append(w)
+
+        merged["anchors"] = anchors
+        merged["anchor"] = anchors[0] if anchors else ""
+        merged["domain"] = ",".join(merged["tags"])
+        return merged
+
     def pr_feed_warm_all_domains(
         self,
         *,
@@ -698,31 +784,6 @@ class KnowledgePlane:
             authority=authority,
             evidence=evidence,
             source=source,
-            idempotency_key=idempotency_key,
-        )
-
-    def cortex_hypothesize(
-        self,
-        *,
-        sid: str,
-        from_canonical: str,
-        to_canonical: str,
-        edge_type: str = "hypothetical",
-        reason: str = "",
-        attrs: Mapping[str, Any] | None = None,
-        evidence: list[str] | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        if not self.cortex_enabled:
-            return {"status": "skip_disabled", "tentative_edge_id": ""}
-        return self.cortex_kb.hypothesize(  # type: ignore[union-attr]
-            sid=sid,
-            from_canonical=from_canonical,
-            to_canonical=to_canonical,
-            edge_type=edge_type,
-            reason=reason,
-            attrs=attrs,
-            evidence=evidence,
             idempotency_key=idempotency_key,
         )
 

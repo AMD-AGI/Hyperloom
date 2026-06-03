@@ -255,6 +255,7 @@ def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch
     """TP env var must override yaml hardcode (was 1, becomes 8)."""
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -279,6 +280,7 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -309,6 +311,7 @@ def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
     actually sees enough GPUs to start."""
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -869,71 +872,69 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path):
-    """B2: FRAMEWORK=atom must short-circuit ProfileExecutor to a
-    structured skipped result BEFORE any Magpie subprocess is launched.
-    atom (Magpie v1) has no torch_profiler wiring — running the full
-    profile path would either silently no-op or, worse, crash because
-    sglang/vllm-specific --profiler-config flags get injected into
-    EXTRA_ATOM_ARGS. Verified by checking the result dict shape AND
-    that no subprocess machinery (BaselineExecutor.__call__ /
-    run_with_session_kill) ran."""
+    """FRAMEWORK=atom now falls through to the normal profile path.
+
+    The atom Magpie wrapper bridges PROFILE=1 to atom's torch profiler,
+    so the historical structured ``skipped`` short-circuit is retired.
+    """
     monkeypatch.setenv("FRAMEWORK", "atom")
+    # Anchor session/runs paths under the test tmp dir. Without this the
+    # executor falls back to the ``/workspace/hyperloom`` default, which is
+    # not writable on a clean CI runner (PermissionError on ``/workspace``).
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     pe = ProfileExecutor()
-    # If the short-circuit fails, the executor would try to materialize a
-    # YAML and shell out to Magpie. Sentinel-patch the parent __call__ so
-    # we can prove it was never reached.
+    # Sentinel-patch the parent __call__ so we can prove the normal path
+    # is reached without launching Magpie in this unit test.
     called = {"parent": False}
 
-    async def _explode(self, ctx):  # pragma: no cover — must not run
+    async def _fake_parent(self, ctx):
         called["parent"] = True
         return {"status": "succeeded"}
 
-    monkeypatch.setattr(BaselineExecutor, "__call__", _explode)
+    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
 
     task = SimpleNamespace(params={}, task_id="t-atom-profile")
     ctx = SimpleNamespace(task=task, extra=None)
 
     result = await pe(ctx)
 
-    assert result["status"] == "skipped"
-    assert result["error_class"] == "atom_no_profiler"
-    assert "torch_profiler" in result["error"]
-    assert called["parent"] is False, (
-        "ProfileExecutor must short-circuit BEFORE BaselineExecutor.__call__"
-    )
+    assert result["status"] == "succeeded"
+    assert called["parent"] is True
 
 
 @pytest.mark.asyncio
 async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
-    """B2: FRAMEWORK=atom must short-circuit RooflineExecutor at its
-    entrypoint, returning status=skipped without invoking profile or
-    trace_analyze sub-steps. Critical because the composite would
-    otherwise treat a skipped profile_result as a failure (the existing
-    _failed("profile", ...) branch) and pollute roofline_failure_streak."""
+    """FRAMEWORK=atom now attempts the normal roofline profile sub-step."""
     from inference_optimizer.orchestrator.action_executors.roofline import (
         RooflineExecutor,
     )
 
     monkeypatch.setenv("FRAMEWORK", "atom")
-    # RooflineExecutor requires shared_state, but the atom guard returns
-    # before touching it — a sentinel object is enough.
     rexec = RooflineExecutor(shared_state=SimpleNamespace())
 
-    # Sentinel: prove the lazy import / sub-step orchestration never runs.
+    # Sentinel: prove the lazy import / sub-step orchestration is reached.
     import inference_optimizer.orchestrator.action_executors.profile as profile_mod
 
-    async def _explode(_ctx):  # pragma: no cover — must not run
+    async def _explode(_ctx):
         raise AssertionError("profile_executor must not be invoked under atom")
 
     monkeypatch.setattr(profile_mod, "profile_executor", _explode)
 
-    task = SimpleNamespace(params={}, task_id="t-atom-roofline")
-    ctx = SimpleNamespace(task=task, extra=None)
+    task = SimpleNamespace(
+        params={},
+        task_id="t-atom-roofline",
+        idempotency_key="t-atom-roofline",
+        requires_lanes=[],
+        allowed_tools=[],
+        side_effects=[],
+        lease_ttl_sec=0,
+    )
+    ctx = SimpleNamespace(task=task, lease=None, extra=None)
 
     result = await rexec(ctx)
-    assert result["status"] == "skipped"
-    assert result["error_class"] == "atom_no_profiler"
-    assert result["framework"] == "atom"
+    assert result["status"] == "failed"
+    assert result["phase"] == "profile"
+    assert "profile_executor raised" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -1232,8 +1233,8 @@ async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monke
         session_dir=session_dir,
     )
     assert res["candidates_path"] == "/tmp/kernel_candidates.json"
-    assert "--roofline-json" in captured["cmd"]
-    assert "/tmp/roofline.json" in captured["cmd"]
+    assert "--roofline-json" not in captured["cmd"]
+    assert "/tmp/roofline.json" not in captured["cmd"]
     assert "--capture-folder" in captured["cmd"]
     assert "/tmp/capture_traces" in captured["cmd"]
 
@@ -1495,11 +1496,11 @@ async def test_trace_analyze_handler_missing_trace_input(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, monkeypatch):
+async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, monkeypatch):
     # N15 made HYPERLOOM_KERNEL_AGENT_ROOT a lazy env read; delenv is
     # the correct way to exercise the "not configured" branch.
     monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir)},
         session_dir=session_dir,
     )
@@ -2086,6 +2087,7 @@ def test_handlers_dispatch_table():
     """P2-2 only registered trace_analyze + run_optimization. P2-4
     added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
     assert krh.has_handler("trace_analyze")
+    assert krh.has_handler("run_gemm_tuning")
     assert krh.has_handler("run_optimization")
     assert not krh.has_handler("totally_unknown_kind")
 
@@ -2459,7 +2461,7 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     with patch.object(krh, "_run_kernel_backend_sequence",
                        side_effect=fake_sequence):
         await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy"},
+            payload={"candidates_path": "/dummy", "max_parallel": 3},
             candidates=candidates,
             session_dir=session_dir,
             record_partial=record_partial,

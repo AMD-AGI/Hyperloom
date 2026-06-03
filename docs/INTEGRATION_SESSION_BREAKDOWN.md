@@ -141,7 +141,7 @@ downstream consumers:
 | `throughput_tok_s_per_gpu`         | Validated end-of-session throughput. The headline number.                                 |
 | `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.throughput_tok_s_per_gpu`. The headline %.         |
 | `action_path`                      | Ordered list of `action:variant` labels that made the final stack — the recipe.            |
-| `extra_sglang_args`                | The exact extra args needed to reproduce the final config.                                 |
+| `extra_server_args`                | The exact extra args needed to reproduce the final config.                                 |
 | `extra_envs`                       | The exact env overrides needed to reproduce the final config (allowlisted, no secrets).    |
 | `invocation`                       | Same shape as `baseline.invocation`; lets a consumer replay the final benchmark.          |
 | `closing_phase_entered`            | True iff Coordinator entered the closing phase cleanly (vs SIGTERM exit).                  |
@@ -202,7 +202,7 @@ The same `kernel_id` appears in multiple lists as it progresses.
 
 Two ledgers (`params`, `backends`) of `ParamSearchEntry` records:
 every tested variant with `status` ∈ `accepted` / `rejected` /
-`tested`, the `extra_sglang_args` / `extra_envs` it injected, the
+`tested`, the `extra_server_args` / `extra_envs` it injected, the
 `output_throughput` it measured, and the resulting `gain_pct`. Also
 includes `synergy_attempted`, `discovered_flags`, and
 `backend_winners_history`.
@@ -283,7 +283,7 @@ investigation than the breakdown summarises.
     "pid": 12345,
     "session_dir": "/workspace/hyperloom",
     "tick_count": 89,
-    "image": "lmsysorg/sglang:v0.5.11-rocm720-mi30x"
+    "image": "lmsysorg/sglang:v0.5.11-rocm720-mi30x-profilerfix"
   },
 
   "workload": {
@@ -336,7 +336,7 @@ investigation than the breakdown summarises.
     "validated_at_stack_len": 4,
     "validated_ts": "2026-05-17T13:48:01Z",
     "stack_changed_after_validation": false,
-    "extra_sglang_args": "--nsa-decode-backend aiter --enable-mixed-chunk --enable-aiter-allreduce-fusion",
+    "extra_server_args": "--nsa-decode-backend aiter --enable-mixed-chunk --enable-aiter-allreduce-fusion",
     "extra_envs": {},
     "action_path": [
       "backends:nsa_decode_aiter",

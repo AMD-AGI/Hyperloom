@@ -14,22 +14,13 @@ and ``remove-select-kernels-action-gate``):
   the kernel_id has not yet been integrated into ``optimization_stack``
   (and is not on ``rejected_kernel_ids``).
 
-Two former gates have been demoted; this file holds reverse regressions
-for both:
-
-* ``pmc_roofline`` has been physically removed (PMC counter / rocprof
-  collection is no longer part of the action catalogue — the F1
-  composite ``roofline`` action superseded it). The reverse-regression
-  tests below assert no leftover ``pmc_roofline must run before …``
-  denial fires for any other action.
-* ``select_kernels`` is now enforced ONLY at the REQUEST layer for
-  ``run_optimization`` (see ``_sequence_denial_for_request``). Action-
-  layer explore actions (``params`` / ``backends`` / ``sweep`` /
-  ``report``) are never gated on a fresh ``last_select_kernels`` cache.
+``trace_analyze`` is now enforced ONLY at the REQUEST layer for
+``run_optimization`` (see ``_sequence_denial_for_request``). Action-
+layer explore actions (``explore`` / ``sweep`` / ``report``) are never
+gated on a fresh ``last_trace_analyze`` cache.
 
 These tests exercise each remaining gate's open / closed transitions
-plus the matching ``_sequence_denial_for_action`` deny / allow pairs,
-and the reverse regressions for the two demoted gates.
+plus the matching ``_sequence_denial_for_action`` deny / allow pairs.
 """
 
 from __future__ import annotations
@@ -94,7 +85,7 @@ def _seed_post_baseline(coord: Coordinator) -> None:
     Includes writing the target_baseline.json marker — the
     ``target_analysis`` gate now fires unconditionally and would otherwise
     mask the downstream gates these tests target. Also populates
-    ``last_select_kernels`` matching the trace so the P3 analyze gate
+    ``last_trace_analyze`` matching the trace so the P3 analyze gate
     (TODO 3/5) is open by default; tests targeting integrate / validate_stack
     don't care about the analyze gate and would otherwise be masked by it.
     """
@@ -102,10 +93,31 @@ def _seed_post_baseline(coord: Coordinator) -> None:
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_select_kernels = {
+    s.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/x.json",
     }
+
+
+def test_trace_analyze_cache_satisfies_analyze_gate(session_dir):
+    """Roofline writes last_trace_analyze; KERNEL must not loop on select."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(coord.session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {}
+    s.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/kernel_candidates.json",
+        "hot_kernels_top15": [],
+        "reusable_native_kernel_ids": [],
+    }
+
+    todo = coord._required_next_step()
+
+    assert "TODO 3/5" not in todo
+    assert "select_kernels" not in todo
 
 
 # ===========================================================================
@@ -198,66 +210,13 @@ def test_target_analysis_denial_clears_after_baseline_json_written(session_dir):
     _write_baseline_json(session_dir)
     # baseline gate now applies (baseline_tput is 0). target_analysis no
     # longer blocks; the next gate down (baseline) is what speaks up.
-    # KB_gaps/Dead-C — exercise the gate via the v0.8 canonical
-    # ``explore`` action (the legacy ``backends`` name is denied earlier
-    # at PolicyGate ``action_deprecated`` and never reaches this layer).
+    # Exercise the gate via the canonical ``explore`` action.
     denied = coord._sequence_denial_for_action("explore")
     assert isinstance(denied, PolicyDenied)
     assert "baseline must run first" in str(denied)
     # target_analysis -> the gate has just been satisfied so it should
     # also pass through cleanly.
     assert coord._sequence_denial_for_action("baseline") is None
-
-
-# ===========================================================================
-# pmc_roofline gate — REMOVED (the action itself was retired in favour
-# of the F1 composite ``roofline``). The reverse regressions below
-# guard against any leftover hard-gate ever coming back.
-# ===========================================================================
-def test_no_pmc_roofline_mention_in_required_next_step(session_dir):
-    """``_required_next_step`` must never name the retired
-    ``pmc_roofline`` action."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_select_kernels = {
-        "trace_input": "/tmp/profile.tar.gz",
-        "candidates_path": "/tmp/x.json",
-    }
-    todo = coord._required_next_step()
-    assert "pmc_roofline" not in todo
-    assert todo == ""
-
-
-def test_no_pmc_roofline_denial_for_any_action(session_dir):
-    """No surviving rule may produce a denial whose message contains
-    ``pmc_roofline must run before …``."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    for action in ("explore", "sweep", "report", "profile", "roofline"):
-        denied = coord._sequence_denial_for_action(action)
-        if denied is None:
-            continue
-        assert "pmc_roofline must run before" not in str(denied), (
-            f"{action!r} still hits a removed pmc_roofline gate: {denied!s}"
-        )
-
-
-def test_no_pmc_roofline_action_in_sequence_actions(session_dir):
-    """The Coordinator's ``sequence_actions`` set must not contain
-    ``pmc_roofline``; otherwise an LLM proposing the retired name would
-    receive a sequence denial instead of the canonical
-    ``unknown_action`` PolicyGate denial.
-    """
-    coord = Coordinator(session_dir, backends=_backends_full())
-    # Calling _sequence_denial_for_action with a name not in the set
-    # short-circuits to ``None`` regardless of state.
-    assert coord._sequence_denial_for_action("pmc_roofline") is None
 
 
 # ===========================================================================
@@ -311,7 +270,7 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
     assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
     todo = coord._required_next_step()
     # P3 renumbered the integrate gate from 3/4 to 4/5 (analyze is the
-    # new 3/5). `_seed_post_baseline` populates last_select_kernels so
+    # new 3/5). `_seed_post_baseline` populates last_trace_analyze so
     # the analyze gate is satisfied; the integrate gate is what fires.
     assert "TODO 4/5" in todo
     assert "integrate is required now" in todo
@@ -356,11 +315,8 @@ def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
         coord, kernel_id="k-rmsnorm", decision="KEEP",
         source_file="/p/rmsnorm.py",
     )
-    # v0.8 M3 / KB_gaps/Dead-C — the canonical EXPLORE-phase actions
-    # (``explore`` + ``sweep``) must be denied while ``integrate`` is
-    # required. Legacy ``backends`` / ``params`` / ``validate_stack`` are
-    # already denied earlier at the PolicyGate ``action_deprecated`` rule
-    # so they never reach this sequence gate.
+    # The canonical EXPLORE-phase actions (``explore`` + ``sweep``)
+    # must be denied while ``integrate`` is required.
     for action in ("explore", "sweep"):
         denied = coord._sequence_denial_for_action(action)
         assert isinstance(denied, PolicyDenied), (
@@ -369,13 +325,10 @@ def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
         assert denied.rule == "execution_order"
         assert "integrate must run first" in str(denied)
         assert "k-rmsnorm" in (denied.hint or "")
-    # integrate / report bypass the integrate gate; legacy
-    # ``validate_stack`` no longer appears in ``sequence_actions`` and
-    # short-circuits early. ``report``'s own PR-C hot-kernel gate is
-    # separately covered below.
+    # integrate / report bypass the integrate gate. ``report``'s own
+    # PR-C hot-kernel gate is separately covered below.
     assert coord._sequence_denial_for_action("integrate") is None
     assert coord._sequence_denial_for_action("report") is None
-    assert coord._sequence_denial_for_action("validate_stack") is None
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +348,9 @@ def test_report_denied_when_hot_reusable_kernels_untried(session_dir):
     being reusable hot kernels with zero attempts. The new gate must
     deny report and surface the untried set in the hint.
 
-    Requires N19c to be unlocked so the hot_kernel_unfinished rule
-    activates -- simulated here via cheap-exhausted (last_delta < EPS).
+    Requires the kernel_opt request gate to be open so the
+    hot_kernel_unfinished rule activates -- a roofline snapshot on
+    record opens it.
     """
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
@@ -409,8 +363,7 @@ def test_report_denied_when_hot_reusable_kernels_untried(session_dir):
          "source_file": "/sgl/aiter/ops/rmsnorm.py"},
     ])
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    coord.shared_state.backends_attempts = [{"variant_name": "x"}]
-    coord.shared_state.last_cheap_delta_gain = 0.05  # below EPS
+    coord.shared_state.explore_attempts = [{"variant_name": "x"}]
 
     denied = coord._sequence_denial_for_action("report")
     assert isinstance(denied, PolicyDenied)
@@ -463,9 +416,8 @@ def test_required_next_step_surfaces_untried_hot_kernels(session_dir):
     """``_required_next_step`` should also surface the TODO 4a line so
     Orchestration sees the explicit list when no KEEP is pending.
 
-    Requires N19c unlocked (cheap exhausted) -- otherwise the TODO is
-    intentionally hidden to avoid the death-spiral covered by the
-    test below.
+    Requires the kernel_opt request gate open (roofline snapshot on
+    record) -- otherwise the TODO is intentionally hidden.
     """
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
@@ -476,8 +428,7 @@ def test_required_next_step_surfaces_untried_hot_kernels(session_dir):
          "source_file": "/p/rmsnorm.py"},
     ])
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    coord.shared_state.backends_attempts = [{"variant_name": "x"}]
-    coord.shared_state.last_cheap_delta_gain = 0.05  # below EPS
+    coord.shared_state.explore_attempts = [{"variant_name": "x"}]
     todo = coord._required_next_step()
     assert "TODO 4a/5" in todo
     # Highest gpu_pct first
@@ -501,109 +452,56 @@ def test_report_gate_inactive_when_no_reusable_hot_kernel_above_threshold(
 
 
 # ---------------------------------------------------------------------------
-# PR-C death-spiral guard: hot_kernel_unfinished must yield to N19c
-# (reproduces session 20260523T014653Z bug)
+# PR-C hot-kernel report gate: ``_kernel_opt_unlocked`` opens once a
+# roofline snapshot exists (or the escape hatch is set).
 # ---------------------------------------------------------------------------
-def _seed_post_cheap_round(coord, *, snapshot_id=1, last_delta=0.77):
-    """Mimic 'cheap action ran once'. On this branch
-    ``_kernel_opt_unlocked`` reads the F3-5 ``gain_per_stack_entry``
-    ledger (window=3, EPSILON=0.5%) instead of main's v0.6
-    ``backends_attempts`` + ``last_cheap_delta_gain``, so we seed the
-    last-3 deltas at ``last_delta`` and flip the
-    ``gain_driven_kernel_opt`` toggle on.
-
-    With ``last_delta=0.77`` (>= 0.5) the gate is CLOSED; with
-    ``last_delta=0.1`` (< 0.5) the gate is OPEN.
-    """
+def _seed_roofline_snapshot(coord, *, snapshot_id=1):
+    """Mark a roofline snapshot as recorded so ``_kernel_opt_unlocked``
+    reports the kernel_opt request gate as open."""
     coord.shared_state.last_trace_analyze = dict(
         coord.shared_state.last_trace_analyze or {}
     )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = snapshot_id
-    coord.shared_state.gain_driven_kernel_opt = True
-    coord.shared_state.gain_per_stack_entry = [
-        {"delta_pct": float(last_delta)} for _ in range(3)
-    ]
 
 
-def test_report_gate_yields_when_kernel_opt_locked_by_n19c(session_dir):
-    """20260523T014653Z death-spiral repro:
-
-    1. Cheap round produced +0.77% delta (> EPSILON=0.3%)
-       -> N19c locks kernel_opt
-    2. PR-C's untried_hot_reusable_kernels has k001/k002/k005/k008
-       -> hot_kernel_unfinished previously denied `report`
-    3. LLM tried run_optimization -> N19c denied execution_order
-    4. 10 consecutive execution_order denials -> policy_loop auto-stop
-
-    Fix: report's hot_kernel_unfinished rule must yield when
-    ``_kernel_opt_unlocked()`` returns False. The LLM can then either
-    propose another cheap round (preferred -- cheap is still earning)
-    or emit ``report`` if no cheap actions are left.
-    """
+def test_report_gate_fires_once_snapshot_exists(session_dir):
+    """With a roofline snapshot on record, ``_kernel_opt_unlocked`` is
+    open and PR-C's hot_kernel_unfinished rule denies ``report`` while
+    reusable hot kernels remain untried."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_trace_analyze(coord, hot_kernels=[
         {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
-        {"kernel_id": "k002", "gpu_pct": 47.9, "reusable_native_kernel": True,
+    ])
+    _seed_roofline_snapshot(coord, snapshot_id=1)
+
+    assert coord._kernel_opt_unlocked() is True
+    denied = coord._sequence_denial_for_action("report")
+    assert isinstance(denied, PolicyDenied)
+    assert denied.rule == "hot_kernel_unfinished"
+
+
+def test_report_gate_closed_without_snapshot(session_dir):
+    """Without a roofline snapshot (and no escape hatch),
+    ``_kernel_opt_unlocked`` is closed so hot_kernel_unfinished does
+    not push the LLM toward kernel_opt."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    _seed_trace_analyze(coord, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
     ])
-    _seed_post_cheap_round(coord, snapshot_id=1, last_delta=0.77)
 
-    # N19c is locked (cheap still earning)
     assert coord._kernel_opt_unlocked() is False
-    # ... so hot_kernel_unfinished must NOT deny report
     denied = coord._sequence_denial_for_action("report")
     if denied is not None:
         assert denied.rule != "hot_kernel_unfinished", denied
 
 
-def test_required_next_step_hides_todo_4a_when_kernel_opt_locked(session_dir):
-    """Symmetric to the report-gate yield: TODO 4a must not push the
-    LLM toward `run_optimization` if N19c will just reject it."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
-    _seed_post_cheap_round(coord, snapshot_id=1, last_delta=0.77)
-
-    todo = coord._required_next_step()
-    assert "TODO 4a" not in todo, (
-        f"TODO 4a leaked while N19c locks kernel_opt: {todo!r}"
-    )
-
-
-def test_report_gate_fires_again_after_cheap_exhausts(session_dir):
-    """Once cheap delta falls below EPSILON, N19c unlocks and PR-C
-    re-activates -- gate must fire again."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
-    # First: cheap still earning -> gate yields
-    _seed_post_cheap_round(coord, snapshot_id=1, last_delta=0.77)
-    denied_1 = coord._sequence_denial_for_action("report")
-    assert denied_1 is None or denied_1.rule != "hot_kernel_unfinished"
-
-    # Then: cheap exhausted (delta drops below F3-5 epsilon=0.5%) ->
-    # gate fires
-    coord.shared_state.gain_per_stack_entry = [
-        {"delta_pct": 0.1} for _ in range(3)
-    ]
-    assert coord._kernel_opt_unlocked() is True
-    denied_2 = coord._sequence_denial_for_action("report")
-    assert isinstance(denied_2, PolicyDenied)
-    assert denied_2.rule == "hot_kernel_unfinished"
-
-
 def test_report_gate_active_with_escape_hatch(session_dir, monkeypatch):
-    """ALLOW_EARLY_KERNEL_OPT bypasses N19c -> kernel_opt is
-    immediately dispatchable -> hot_kernel_unfinished fires even
-    without a prior cheap round."""
+    """ALLOW_EARLY_KERNEL_OPT unlocks kernel_opt unconditionally ->
+    hot_kernel_unfinished fires even without a roofline snapshot."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
@@ -611,7 +509,7 @@ def test_report_gate_active_with_escape_hatch(session_dir, monkeypatch):
         {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
     ])
-    # No cheap round at all; escape hatch unlocks kernel_opt.
+    # No snapshot at all; escape hatch unlocks kernel_opt.
     assert coord._kernel_opt_unlocked() is True
     denied = coord._sequence_denial_for_action("report")
     assert isinstance(denied, PolicyDenied)
@@ -619,41 +517,41 @@ def test_report_gate_active_with_escape_hatch(session_dir, monkeypatch):
 
 
 # ===========================================================================
-# select_kernels gate — DEMOTED. Action-layer gate has been removed; the
+# trace_analyze gate — DEMOTED. Action-layer gate has been removed; the
 # request-layer gate on ``run_optimization`` remains as the only enforcement
 # point. Reverse regressions guard against the action-layer gate coming back
 # AND assert the request-layer gate stays in place.
 # ===========================================================================
-def test_select_kernels_gate_does_not_block_explore_actions(session_dir):
-    """With ``last_profile_trace`` set and ``last_select_kernels`` cache
+def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
+    """With ``last_profile_trace`` set and ``last_trace_analyze`` cache
     empty, ``_sequence_denial_for_action`` must NOT deny any explore
-    action with ``select_kernels must run first``."""
+    action with ``trace_analyze must run first``."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     # Cache deliberately empty; would have triggered the old gate.
-    s.last_select_kernels = {}
+    s.last_trace_analyze = {}
     for action in ("explore", "sweep", "report", "profile", "roofline"):
         denied = coord._sequence_denial_for_action(action)
         if denied is None:
             continue
-        assert "select_kernels must run first" not in str(denied), (
-            f"{action!r} hit the removed select_kernels action-layer "
+        assert "trace_analyze must run first" not in str(denied), (
+            f"{action!r} hit the removed trace_analyze action-layer "
             f"gate: {denied!s}"
         )
 
 
-def test_analyze_gate_surfaces_select_kernels_todo_when_cache_stale(session_dir):
-    """When ``last_profile_trace`` is set but ``last_select_kernels`` is
+def test_analyze_gate_surfaces_trace_analyze_todo_when_cache_stale(session_dir):
+    """When ``last_profile_trace`` is set but ``last_trace_analyze`` is
     empty/stale, ``_required_next_step()`` surfaces a TODO 3/5 (analyze)
-    guidance prompt telling the LLM to emit a `select_kernels` REQUEST
+    guidance prompt telling the LLM to emit a `trace_analyze` REQUEST
     before any kernel_opt cycle.
 
     NB: This is a GUIDANCE-only gate. ``_sequence_denial_for_action``
     still does NOT block explore actions (params/backends/sweep) on a
-    stale cache — see ``test_select_kernels_gate_does_not_block_explore_actions``
+    stale cache — see ``test_trace_analyze_gate_does_not_block_explore_actions``
     which remains valid. The TODO only adds an LLM-visible prompt; it
     does not add a new action-layer denial.
     """
@@ -662,25 +560,31 @@ def test_analyze_gate_surfaces_select_kernels_todo_when_cache_stale(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_select_kernels = {}
+    s.last_trace_analyze = {}
     todo = coord._required_next_step()
     assert "TODO 3/5" in todo
     assert "analyze is required now" in todo
-    assert "select_kernels" in todo
+    assert "trace_analyze" in todo
     assert "trace_input" in todo
 
 
-def test_analyze_gate_clears_when_cache_matches_trace(session_dir):
-    """Once ``last_select_kernels.trace_input`` matches the current
-    ``last_profile_trace``, the P3 analyze gate clears and the chain
+def test_analyze_gate_clears_when_trace_analyze_cache_matches_trace(session_dir):
+    """REGRESSION: this is the test that would have caught the
+    KERNEL-phase ``trace_analyze`` request loop. Once
+    ``last_trace_analyze.trace_input`` matches the current
+    ``last_profile_trace`` — the canonical cache populated by
+    RooflineExecutor — the P3 analyze gate must clear and the chain
     falls through to the next guard (integrate / validate_stack /
-    empty)."""
+    empty). Previously the guard read the removed
+    ``last_select_kernels`` field, which Roofline never wrote, so the
+    TODO 3/5 stayed open forever and the LLM kept re-emitting
+    ``trace_analyze`` every tick."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_select_kernels = {
+    s.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/cands.json",
     }
@@ -690,9 +594,9 @@ def test_analyze_gate_clears_when_cache_matches_trace(session_dir):
     assert todo == ""
 
 
-def test_select_kernels_gate_still_blocks_run_optimization_request(session_dir):
+def test_trace_analyze_gate_still_blocks_run_optimization_request(session_dir):
     """The request-layer gate on ``run_optimization`` MUST still fire
-    when ``last_select_kernels`` is stale. This is the sole remaining
+    when ``last_trace_analyze`` is stale. This is the sole remaining
     enforcement point that keeps ``kernel_opt`` from running without
     candidates."""
     coord = Coordinator(session_dir, backends=_backends_full())
@@ -700,21 +604,15 @@ def test_select_kernels_gate_still_blocks_run_optimization_request(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_select_kernels = {}
+    s.last_trace_analyze = {}
     denied = coord._sequence_denial_for_request("kernel", "run_optimization")
     assert isinstance(denied, PolicyDenied)
     assert denied.rule == "execution_order"
-    # Main M4 renamed the prerequisite from ``select_kernels`` to
-    # ``trace_analyze``; both names refer to the same request kind
-    # via the back-compat alias, so accept either wording.
-    assert (
-        "trace_analyze must run first" in str(denied)
-        or "select_kernels must run first" in str(denied)
-    )
+    assert "trace_analyze must run first" in str(denied)
 
 
-def test_select_kernels_request_itself_passes(session_dir):
-    """``select_kernels`` REQUEST itself bypasses
+def test_trace_analyze_request_itself_passes(session_dir):
+    """``trace_analyze`` REQUEST itself bypasses
     ``_sequence_denial_for_request``'s prerequisite check (it IS the
     prerequisite). Baseline + profile prerequisites still apply."""
     coord = Coordinator(session_dir, backends=_backends_full())
@@ -722,12 +620,37 @@ def test_select_kernels_request_itself_passes(session_dir):
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_select_kernels = {}
-    assert coord._sequence_denial_for_request("kernel", "select_kernels") is None
+    s.last_trace_analyze = {}
+    assert coord._sequence_denial_for_request("kernel", "trace_analyze") is None
 
 
-def test_select_kernels_gate_clears_run_opt_request_when_cache_fresh(session_dir):
-    """Once ``last_select_kernels.trace_input`` matches the current
+def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
+    """The pre-M4 ``select_kernels`` request kind was removed in this
+    branch (dispatch table + back-compat alias). The
+    ``_sequence_denial_for_request`` carve-out for ``trace_analyze`` no
+    longer applies to ``select_kernels``; since ``get_handler`` returns
+    None for the dropped kind, the request short-circuits with no
+    denial (no handler, no prerequisite chain to evaluate), and the
+    LLM-side prompt template wording in
+    ``inference_optimizer/orchestrator/system_prompts/`` is the
+    canonical source of truth telling the model to emit
+    ``kind='trace_analyze'`` instead."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    # The legacy kind has no handler now → request-prerequisite gate
+    # short-circuits to None (the unknown-kind path is the LLM's
+    # responsibility to avoid).
+    from inference_optimizer.orchestrator.kernel_request_handlers import (
+        get_handler,
+    )
+    assert get_handler("select_kernels") is None
+    assert get_handler("trace_analyze") is not None
+
+
+def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir):
+    """Once ``last_trace_analyze.trace_input`` matches the current
     ``last_profile_trace``, the request-layer gate clears and
     ``run_optimization`` is allowed through."""
     coord = Coordinator(session_dir, backends=_backends_full())
@@ -735,7 +658,7 @@ def test_select_kernels_gate_clears_run_opt_request_when_cache_fresh(session_dir
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_select_kernels = {
+    s.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/cands.json",
     }

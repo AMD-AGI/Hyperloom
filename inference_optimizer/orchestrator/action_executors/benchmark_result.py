@@ -61,6 +61,23 @@ _DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
 )
 _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 
+# Slack subtracted from ``subprocess_started_unix`` before comparing it
+# against a candidate leak's ``st_mtime``. The cutoff exists to reject
+# *stale* leaks from a previous run or an earlier grid variant, which are
+# always seconds-to-hours older than the current launch. A file written
+# *after* the launch can nonetheless report an ``st_mtime`` slightly
+# *behind* the ``time.time()`` we snapshot as ``subprocess_started_unix``:
+# filesystem mtime resolution is coarser than the monotonic-ish wall clock
+# (commonly 1s on NFS, and even on local ext4 we measured the freshly
+# written file's mtime trailing the pre-write clock by several ms). The old
+# 1e-3 (1ms) tolerance was below that skew, so genuinely fresh salvage
+# candidates were misclassified as stale and dropped — silently failing a
+# benchmark whose result had actually been written. One full second is
+# comfortably larger than any observed clock-vs-mtime skew / FS granularity,
+# yet far smaller than the multi-second gaps that separate genuinely stale
+# prior-run leaks, so it preserves the staleness guard without false drops.
+_MTIME_GATE_SLACK_SEC: float = 1.0
+
 
 def _to_float(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
@@ -144,10 +161,13 @@ def _rescue_candidate_paths(
        (currently ``/workspace/inferencex_result.json``).
 
     When ``subprocess_started_unix`` is provided, candidates whose mtime
-    is **earlier** than that timestamp are dropped. This guards against
-    a stale leak from a *previous* run masquerading as the current
-    run's result — without the cutoff we'd risk re-promoting a stale
-    1761.6 tok/s number after a fresh run silently failed.
+    is **earlier** than that timestamp (minus :data:`_MTIME_GATE_SLACK_SEC`)
+    are dropped. This guards against a stale leak from a *previous* run
+    masquerading as the current run's result — without the cutoff we'd risk
+    re-promoting a stale 1761.6 tok/s number after a fresh run silently
+    failed. The slack absorbs the skew between the wall clock used for
+    ``subprocess_started_unix`` and the coarser filesystem mtime resolution
+    so a leak written just after launch is not misjudged as stale.
 
     The function intentionally never raises: any I/O error on a single
     candidate is swallowed (the file is just skipped) so the caller's
@@ -180,7 +200,7 @@ def _rescue_candidate_paths(
                 mtime = path.stat().st_mtime
             except OSError:
                 return
-            if mtime + 1e-3 < float(subprocess_started_unix):
+            if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
                 return
         candidates.append(path)
 
@@ -365,7 +385,9 @@ def harvest_leaked_artifacts(
                         mtime = match.stat().st_mtime
                     except OSError:
                         continue
-                    if mtime + 1e-3 < float(subprocess_started_unix):
+                    if mtime + _MTIME_GATE_SLACK_SEC < float(
+                        subprocess_started_unix
+                    ):
                         continue
                 destination_path = destination / match.name
                 try:
@@ -408,6 +430,8 @@ def _merge_raw_result(
         measurement["ttft_mean_ms"] = _to_float(raw.get("mean_ttft_ms"))
     if measurement.get("ttft_p99_ms") is None:
         measurement["ttft_p99_ms"] = _to_float(raw.get("p99_ttft_ms"))
+    if measurement.get("tpot_mean_ms") is None:
+        measurement["tpot_mean_ms"] = _to_float(raw.get("mean_tpot_ms"))
     if measurement.get("e2el_mean_ms") is None:
         measurement["e2el_mean_ms"] = _first_float(
             raw.get("mean_e2el_ms"),
@@ -441,6 +465,7 @@ def extract_benchmark_measurement(
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
     ttft = latency.get("ttft") or {}
+    tpot = latency.get("tpot") or {}
     e2el = latency.get("e2el") or {}
 
     measurement: dict[str, Any] = {
@@ -459,6 +484,7 @@ def extract_benchmark_measurement(
         "duration_seconds": _to_float(throughput.get("duration_seconds")),
         "ttft_mean_ms": _to_float(ttft.get("mean_ms")),
         "ttft_p99_ms": _to_float(ttft.get("p99_ms")),
+        "tpot_mean_ms": _to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": _to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": _to_float(e2el.get("p99_ms")),
         "raw_result_path": None,
@@ -480,6 +506,7 @@ def extract_benchmark_measurement(
     if workspace is not None and measurement.get("raw_result_path"):
         warnings.append("raw_inferencex_result_used")
 
+    _derive_tpot_if_missing(measurement, report)
     measurement["valid_measurement"] = is_valid_measurement(measurement)
 
     # Second-chance salvage: try documented Magpie leak destinations
@@ -522,8 +549,49 @@ def extract_benchmark_measurement(
                         f"{rescue_path}"
                     )
                 break
+        _derive_tpot_if_missing(measurement, report)
         measurement["valid_measurement"] = is_valid_measurement(measurement)
     return measurement
+
+
+def _derive_tpot_if_missing(
+    measurement: dict[str, Any],
+    report: dict[str, Any] | None,
+) -> None:
+    """Fill ``tpot_mean_ms`` from ``(e2el - ttft) / (osl - 1)`` when absent.
+
+    Best-effort: only derives when end-to-end and TTFT latencies are
+    available and an output sequence length greater than 1 can be
+    resolved from the report. Leaves the field untouched otherwise.
+    """
+    if measurement.get("tpot_mean_ms") is not None:
+        return
+    e2el = _to_float(measurement.get("e2el_mean_ms"))
+    ttft = _to_float(measurement.get("ttft_mean_ms"))
+    if e2el is None or ttft is None or e2el <= ttft:
+        return
+    osl = _resolve_osl(report)
+    if osl is None or osl <= 1:
+        return
+    measurement["tpot_mean_ms"] = (e2el - ttft) / (osl - 1)
+
+
+def _resolve_osl(report: dict[str, Any] | None) -> int | None:
+    """Pull the output sequence length from common report locations."""
+    if not isinstance(report, dict):
+        return None
+    candidates: list[Any] = [report.get("osl"), report.get("output_len")]
+    for section_key in ("config", "request", "params", "workload"):
+        section = report.get(section_key)
+        if isinstance(section, dict):
+            candidates.extend(
+                section.get(k) for k in ("osl", "output_len", "max_tokens")
+            )
+    for value in candidates:
+        n = _to_int(value)
+        if n is not None and n > 0:
+            return n
+    return None
 
 
 def is_valid_measurement(result: dict[str, Any] | None) -> bool:

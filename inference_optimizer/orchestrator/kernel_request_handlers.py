@@ -43,6 +43,7 @@ import logging
 import os
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -96,26 +97,59 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    # Production vLLM wheel install layout (system dist-packages). Keep
-    # this in sync with ``kernel-agent/tools/tracelens_analysis.py`` so
-    # both the kernel-agent classifier and the orchestrator-side gate
-    # in ``run_optimization_handler`` agree on what counts as a
-    # reusable framework source.
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-)
+# Shape sources trusted for kernel-opt dispatch. TraceLens emits
+# ``torch_trace``; ``tuning_csv`` is reserved for a profiled tuning sweep.
+_ALLOWED_SHAPE_PROVENANCE = frozenset({"torch_trace", "tuning_csv"})
+def _reusable_source_roots() -> tuple[str, ...]:
+    """Framework install roots for patchability checks (dynamic discovery).
+
+    Sourced from :func:`framework_paths.resolve_patch_target_roots` so the
+    orchestrator gate, PolicyGate and ``apply_kernel_patch`` share one set
+    of roots (importlib + glob discovery + static fallbacks, incl. atom).
+    Callers here lower-case the source path before the substring check, so
+    we also emit a lower-case variant of every root (e.g. ``/app/ATOM/atom/``
+    -> ``/app/atom/atom/``) to keep the case-insensitive match working.
+    """
+    from .framework_paths import resolve_patch_target_roots
+
+    roots = resolve_patch_target_roots()
+    out: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        for variant in (root, root.lower()):
+            if variant and variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    # FlyDSL kernel checkout(s) used as $DSL2_ROOT for PR #668
+    # pseudo_op::moe_flydsl_* candidates. Kept in sync with the kernel-agent
+    # classifier (`tracelens_analysis._flydsl_reusable_roots`) so the
+    # orchestrator gate and the classifier agree on FlyDSL patchability;
+    # without this the in-loop run_optimization gate would reject FlyDSL
+    # sources the classifier already admitted.
+    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
+        val = (os.environ.get(env_key, "") or "").strip()
+        if val:
+            cand = (val.rstrip("/") + "/").lower()
+            if cand not in seen:
+                seen.add(cand)
+                out.append(cand)
+    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+        if default not in seen:
+            seen.add(default)
+            out.append(default)
+    return tuple(out)
 _APPLY_TOOL_MODULE: Any | None = None
+# GEAK is FIRST per SKILL.md "high-priority handoff" contract: every kernel
+# Claude/Codex can rewrite, GEAK can rewrite too, and GEAK's GPU-only
+# benchmark loop typically converges faster than the dialogue-based
+# Claude/Codex backends. Keeping claude/codex first (the historical order)
+# meant that batch dispatch via :func:`_run_kernel_backend_sequence` always
+# burned the first attempt slots on Claude before GEAK could see the
+# kernel — which silently violated the contract surfaced in SKILL.md
+# §"choose_backends" / "Default ladder" and made user requests like
+# "run GEAK on this kernel" inert when the LLM stopped at a Claude KEEP.
+# Cursor stays last because :func:`_backend_order` drops it from the
+# auto-derived ladder when ``CURSOR_API_KEY`` is unset.
 _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 # Soft upper bound on concurrent ``_run_kernel_backend_sequence`` coroutines
 # inside ``_run_optimization_batch``. The real GPU scheduling happens one
@@ -132,6 +166,7 @@ _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 # ``KERNEL_OPT_MAX_PARALLEL`` env (>=1).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
+_DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
 
 
 @functools.lru_cache(maxsize=1)
@@ -216,6 +251,7 @@ _CANDIDATE_ENV_PREFIXES = (
     "VLLM_",
     "AITER_",
     "TRITON_",
+    "FLYDSL_",
     "HIPBLASLT_",
     "PYTORCH_TUNABLEOP_",
 )
@@ -253,7 +289,7 @@ def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     if any(marker in lower_file for marker in _RUNTIME_GENERATED_SOURCE_MARKERS):
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root in lower_file for root in _reusable_source_roots())
     return False
 
 
@@ -325,7 +361,13 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     framework = str(bench.get("framework") or "").strip().lower()
-    server_key = "EXTRA_VLLM_ARGS" if framework == "vllm" else "EXTRA_SGLANG_ARGS"
+    # Route through the single source of truth for the per-framework
+    # env name so an atom session reads ``EXTRA_ATOM_ARGS`` (rather
+    # than defaulting to ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS``,
+    # which would drop atom-side flags and surface an empty
+    # ``server_args`` context to TraceLens / GEAK / Cursor).
+    from .action_executors._grid_runner import server_args_env_name
+    server_key = server_args_env_name(framework)
     server_args = str(envs.get(server_key) or "").strip()
     workload = {
         out_key: _coerce_runtime_value(envs[src_key])
@@ -470,7 +512,7 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "source_file": source_file,
         }
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root in lower_file for root in _reusable_source_roots()):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",
@@ -480,6 +522,100 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "source_file": source_file,
         }
     payload.setdefault("source_file", source_file)
+    return None
+
+
+def _allow_empty_kernel_shape(payload: dict) -> bool:
+    """Escape hatch (default off) for the non-empty-shape dispatch gate.
+
+    Set per-request via ``payload['allow_empty_kernel_shape']`` or
+    globally via ``HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1``.
+    """
+    if bool(payload.get("allow_empty_kernel_shape")):
+        return True
+    return str(
+        os.environ.get("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_kernel_shape_and_paths(
+    payload: dict, *, session_dir: Path,
+) -> HandlerResult | None:
+    """Reject a kernel-opt dispatch that has no trace-anchored shape or
+    whose source / workspace paths do not exist.
+
+    Kernel shapes in Hyperloom come only from TraceLens trace extraction;
+    a candidate that reached dispatch with an empty ``shapes`` list would
+    burn a GEAK / OOB budget with no shape anchor. The check guides the
+    Orchestration back to ``trace_analyze`` instead. ``shape_provenance``
+    is surfaced for audit and lets a future non-trace source be rejected.
+    """
+    # ``dry_run`` exercises the dispatch plumbing without launching a
+    # backend, so there is no GPU budget to protect and the fake fixture
+    # paths used by tests need not exist.
+    if bool(payload.get("dry_run")):
+        return None
+    candidate = _load_candidate_metadata(payload)
+    kernel_id = str(payload.get("kernel_id") or "")
+    name = str(candidate.get("name") or payload.get("kernel_name") or kernel_id)
+
+    shapes = candidate.get("shapes")
+    if not isinstance(shapes, list):
+        shapes = []
+    provenance = str(
+        candidate.get("shape_provenance")
+        or payload.get("shape_provenance")
+        or ""
+    ).strip()
+    if not shapes and not _allow_empty_kernel_shape(payload):
+        return {
+            "status": "failed",
+            "error_class": "empty_kernel_shape",
+            "error": (
+                "selected kernel candidate has no trace-anchored shape; "
+                "re-run trace_analyze to capture shapes before optimizing "
+                "(or pass --allow-empty-kernel-shape to override)"
+            ),
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "shape_provenance": provenance,
+        }
+    if provenance and provenance not in _ALLOWED_SHAPE_PROVENANCE:
+        return {
+            "status": "failed",
+            "error_class": "untrusted_shape_provenance",
+            "error": (
+                f"shape_provenance={provenance!r} is not a trusted source; "
+                f"expected one of {sorted(_ALLOWED_SHAPE_PROVENANCE)}"
+            ),
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "shape_provenance": provenance,
+        }
+
+    source_file = str(
+        payload.get("source_file") or candidate.get("source_file") or ""
+    ).strip()
+    if source_file and not Path(source_file).exists():
+        return {
+            "status": "failed",
+            "error_class": "missing_source_path",
+            "error": f"kernel source path does not exist: {source_file}",
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "source_file": source_file,
+        }
+    workspace_path = str(
+        payload.get("workspace_path") or session_dir or ""
+    ).strip()
+    if workspace_path and not Path(workspace_path).exists():
+        return {
+            "status": "failed",
+            "error_class": "missing_workspace_path",
+            "error": f"kernel workspace path does not exist: {workspace_path}",
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+        }
     return None
 
 
@@ -562,6 +698,57 @@ def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
         if str(item.get("kernel_id") or "") == kernel_id:
             return str(item.get("source_file") or "")
     return ""
+
+
+def _fill_integrate_defaults_from_state(
+    payload: dict, *, session_dir: Path,
+) -> dict:
+    """Pull ``base_tput`` / ``config_path`` / ``extra_server_args`` defaults from SharedState.
+
+    Sibling of ``_resolve_integrate_payload`` but runs *before* the
+    ``base_tput > 0`` hard-check at the top of ``integrate_handler``.
+    ``_resolve_integrate_payload`` already handles ``patch_path`` /
+    ``source_file`` defaulting; the three fields filled here are the
+    other Magpie re-baseline inputs that Orchestration tends to omit
+    when it sends a bare ``{"kernel_id": ...}`` payload.
+
+    Always returns a (shallow) copy of ``payload`` so the caller can
+    treat it as a fresh dict; never raises on a missing SharedState
+    snapshot (returns the input dict unchanged in that case).
+    """
+    from .shared_state import SharedState
+
+    resolved = dict(payload)
+    state = SharedState.load_or_init(session_dir)
+
+    if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
+        bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        if bt > 0:
+            resolved["base_tput"] = bt
+
+    if not resolved.get("config_path"):
+        cfg = getattr(state, "baseline_config_path", "") or ""
+        if cfg:
+            resolved["config_path"] = cfg
+
+    # Field was renamed ``extra_sglang_args`` -> ``extra_server_args``
+    # (framework-neutral; see compat.payload_aliases). SharedState.load
+    # migrates the legacy key on disk, so ``current_best`` carries the
+    # canonical key after load — read canonical first, keep a read-only
+    # legacy fallback for any in-flight pre-migration dict, and always
+    # WRITE the canonical key so the downstream integrate flow
+    # (read_extra_server_args) resolves it without a deprecation warning.
+    current_best = getattr(state, "current_best", None) or {}
+    if not resolved.get("extra_server_args") and isinstance(current_best, dict):
+        cb_args = (
+            current_best.get("extra_server_args")
+            or current_best.get("extra_sglang_args")
+            or ""
+        )
+        if cb_args:
+            resolved["extra_server_args"] = cb_args
+
+    return resolved
 
 
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
@@ -670,6 +857,185 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
 
 
 # ---------------------------------------------------------------------------
+def _normalize_precision(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _gemm_tuning_timeout_sec(payload: dict) -> int:
+    raw = payload.get("timeout_sec") or os.environ.get(
+        "HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC",
+        "",
+    )
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        value = _DEFAULT_GEMM_TUNING_TIMEOUT_SEC
+    return max(60, value)
+
+
+def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
+    raw = payload.get("workspace_path")
+    if raw:
+        return Path(raw)
+    suffix = str(payload.get("task_id") or payload.get("request_id") or "").strip()
+    if not suffix:
+        suffix = f"request_{int(time.time())}"
+    return Path(session_dir) / "runs" / "gemm_tuning" / suffix
+
+
+def _write_gemm_tuning_benchmark_script(
+    *,
+    workspace: Path,
+    model_path: str,
+    framework: str,
+    gpu_type: str,
+    tp: int,
+    conc: int,
+    isl: int,
+    osl: int,
+) -> Path:
+    """Create an isolated benchmark wrapper for GEAK GEMM tuning.
+
+    The wrapper uses a distinct default port and delegates lifecycle cleanup
+    to the benchmark script's own PID/trap handling. It deliberately avoids
+    global `pgrep sglang` cleanup so it cannot kill the main optimizer's
+    benchmark server when GEMM tuning runs inside a live session.
+    """
+    runner = f"/hyperloom/InferenceX/benchmarks/{framework}_{gpu_type}.sh"
+    path = workspace / "geak_gemm_benchmark.sh"
+    path.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+export MODEL={shlex.quote(model_path)}
+export TP={int(tp)}
+export CONC={int(conc)}
+export ISL={int(isl)}
+export OSL={int(osl)}
+export RANDOM_RANGE_RATIO="${{RANDOM_RANGE_RATIO:-1}}"
+export NUM_PROMPTS="${{NUM_PROMPTS:-320}}"
+export NUM_WARMUPS="${{NUM_WARMUPS:-8}}"
+export RUN_EVAL="${{RUN_EVAL:-false}}"
+export RESULT_DIR="${{RESULT_DIR:-$PWD/gemm_benchmark_result}}"
+export RESULT_FILENAME="${{RESULT_FILENAME:-bench_serving.json}}"
+export PORT="${{PORT:-18888}}"
+export PATH="/opt/node20/bin:/opt/venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export INFERENCEX_PATH="/hyperloom/InferenceX"
+mkdir -p "$RESULT_DIR"
+cd "$INFERENCEX_PATH"
+exec {shlex.quote(runner)}
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+async def run_gemm_tuning_handler(
+    payload: dict, *, session_dir: Path,
+) -> HandlerResult:
+    """Run GEAK's FP8 block-scale GEMM tuning workflow.
+
+    This is intentionally separate from ``run_optimization``: it tunes
+    vendor/aiter GEMM dispatch configuration before source-level kernel
+    rewrites spend GEAK/OOB budget on individual reusable native kernels.
+    """
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    precision = _normalize_precision(payload.get("precision") or state.precision)
+    if precision != "fp8":
+        return {
+            "status": "skipped",
+            "decision": "REVERT",
+            "error_class": "fp8_only_action",
+            "error": f"GEAK GEMM tuning only applies to FP8 workloads (precision={precision or '(unset)'})",
+            "precision": precision,
+        }
+    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
+    if framework != "sglang":
+        return {
+            "status": "skipped",
+            "decision": "REVERT",
+            "error_class": "unsupported_framework",
+            "error": f"GEAK GEMM tuning first version supports SGLang only (framework={framework or '(unset)'})",
+            "framework": framework,
+            "precision": precision,
+        }
+    root_err = _kernel_agent_root_error()
+    if root_err:
+        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
+
+    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
+    if not model_path:
+        return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
+    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
+    conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 0)
+    isl = int(payload.get("isl") or state.isl or os.environ.get("ISL") or 0)
+    osl = int(payload.get("osl") or state.osl or os.environ.get("OSL") or 0)
+    gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "").strip().lower()
+    benchmark_script = str(
+        payload.get("benchmark_script")
+        or os.environ.get("GEAK_GEMM_BENCHMARK_SCRIPT")
+        or ""
+    ).strip()
+    if not benchmark_script:
+        if not gpu_type:
+            gpu_type = "mi355x"
+        benchmark_script = str(_write_gemm_tuning_benchmark_script(
+            workspace=workspace,
+            model_path=model_path,
+            framework=framework,
+            gpu_type=gpu_type,
+            tp=tp,
+            conc=conc,
+            isl=isl,
+            osl=osl,
+        ))
+    geak_config = str(payload.get("config") or os.environ.get("GEAK_CONFIG") or "").strip()
+    baseline_tput = payload.get("baseline_tput")
+    if baseline_tput is None:
+        baseline_tput = state.baseline_tput
+
+    input_json = workspace / "gemm_tuning_input.json"
+    input_payload = {
+        "cwd": str(workspace),
+        "model_path": model_path,
+        "benchmark_script": benchmark_script,
+        "framework": framework,
+        "precision": precision,
+        "gpu_type": gpu_type,
+        "tp": tp,
+        "conc": conc,
+        "isl": isl,
+        "osl": osl,
+        "baseline_tput": float(baseline_tput or 0.0),
+    }
+    if geak_config:
+        input_payload["config"] = geak_config
+    if payload.get("dry_run"):
+        input_payload["dry_run"] = True
+    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    cmd = [
+        "python3",
+        str(_kernel_agent_tool_path("gemm_tuning.py")),
+        "--input-json", str(input_json),
+    ]
+
+    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_tuning_timeout_sec(payload))
+    result = _shape_tool_result(rc, stdout, stderr)
+    result.setdefault("workspace", str(workspace))
+    result.setdefault("precision", precision)
+    result.setdefault("framework", framework)
+    result.setdefault("model_path", model_path)
+    result.setdefault("benchmark_script", benchmark_script)
+    return result
+
+
+# ---------------------------------------------------------------------------
 async def trace_analyze_handler(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
@@ -753,7 +1119,7 @@ async def trace_analyze_handler(
     #     correct steady-state window — without these the splitter falls
     #     back to in-trace heuristics that can yield 0 chunks
     #     (`trace_split_no_steady_state`) and collapse the whole
-    #     select_kernels / kernel_opt / integrate chain.
+    #     trace_analyze / kernel_opt / integrate chain.
     # (2) downstream below to enrich result.hot_kernels and the
     #     kernel_candidates artifact with the same runtime context.
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
@@ -786,9 +1152,9 @@ async def trace_analyze_handler(
     # Without these, the splitter has historically had to guess the
     # mixed-window selection's PD ratio from heuristics; on workloads
     # where heuristics miss, all three steady-state windows come back
-    # empty and `select_kernels` returns
+    # empty and `trace_analyze` returns
     # ``status=failed error=trace_split_no_steady_state``, blocking the
-    # entire kernel-optimization chain (select_kernels -> kernel_opt ->
+    # entire kernel-optimization chain (trace_analyze -> kernel_opt ->
     # integrate -> operator_tuning -> deep_kernel_analysis).
     split_conc = payload.get("split_conc") or workload.get("conc")
     if split_conc not in (None, ""):
@@ -822,8 +1188,10 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    if payload.get("roofline_json"):
-        cmd += ["--roofline-json", str(payload["roofline_json"])]
+    # PR-E: ``--roofline-json`` CLI param retired with the
+    # ``pmc_roofline`` action (2486a19). No producer for that JSON
+    # remains; the payload key is now silently ignored if a stale
+    # caller still passes it.
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
@@ -850,6 +1218,8 @@ async def trace_analyze_handler(
         # offered the kernels they expected.
         if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
             result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
+        if isinstance(artifacts, dict) and artifacts.get("kernel_roofline"):
+            result["kernel_roofline_path"] = str(artifacts["kernel_roofline"])
 
         # A failed TraceLens run is a hard trace-quality / integration
         # failure, not a valid "empty candidates" signal. Keep
@@ -1447,9 +1817,10 @@ async def _run_optimization_single(
                          override via payload or ``HYPERLOOM_GEAK_BUDGET_MIN``
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
-        extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
+        extra_server_args: SGLang runtime flags for GEAK metadata (optional)
         enable_rag:      default True; false disables GEAK RAG tools
         enable_xs_memory: default True; false disables GEAK cross-session memory
+        test_command:     test command from unittest skill (passed to GEAK --test-command)
         dry_run:         default False (testing)
 
     Returns the tool's JSON output verbatim under ``result``.
@@ -1460,6 +1831,11 @@ async def _run_optimization_single(
     guard = _validate_reusable_native_kernel(payload)
     if guard is not None:
         return guard
+    shape_guard = _validate_kernel_shape_and_paths(
+        payload, session_dir=session_dir,
+    )
+    if shape_guard is not None:
+        return shape_guard
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
@@ -1495,8 +1871,13 @@ async def _run_optimization_single(
         cmd += ["--source-file", str(payload["source_file"])]
     if target_platform:
         cmd += ["--target-platform", str(target_platform)]
-    if payload.get("extra_sglang_args"):
-        cmd += ["--extra-sglang-args", str(payload["extra_sglang_args"])]
+    extra_args = str(
+        payload.get("extra_server_args")
+        or payload.get("extra_sglang_args")
+        or ""
+    ).strip()
+    if extra_args:
+        cmd += ["--extra-sglang-args", extra_args]
     if payload.get("candidates_path"):
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
@@ -1521,6 +1902,8 @@ async def _run_optimization_single(
         cmd += ["--disable-rag"]
     if payload.get("enable_xs_memory") is False:
         cmd += ["--disable-xs-memory"]
+    if payload.get("test_command"):
+        cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     geak_budget_min = _geak_budget_minutes(payload)
@@ -1632,7 +2015,7 @@ async def integrate_handler(
         target_file:       inductor cache file to patch (informational)
         kernel_id:         label used in result + bus events
         config_path:       Magpie YAML for the re-baseline run
-        extra_sglang_args: extra flags layered onto the Magpie envs
+        extra_server_args: extra flags layered onto the Magpie envs
         keep_threshold_pct: KEEP if gain > X% (default 1.0)
         budget_minutes:    re-baseline timeout (default 20)
 
@@ -1652,8 +2035,17 @@ async def integrate_handler(
     """
     from .action_executors.baseline import BaselineExecutor
     from .action_executors.benchmark_result import is_valid_measurement
+    from .shared_state import SharedState
     from .sub_agent_runner import RunnerContext
     from .task_registry import Task
+
+    # Orchestration often calls integrate with just {kernel_id} — the
+    # already-materialised baseline / current-best config lives in
+    # SharedState. Fill it in before the hard ``base_tput > 0`` check so
+    # a well-prepared session_dir is self-sufficient and we don't fail
+    # the integrate task with a phantom "missing base_tput" when the
+    # number is right there on disk.
+    payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
     base_tput = float(payload.get("base_tput", 0.0))
     if base_tput <= 0:
@@ -1696,10 +2088,15 @@ async def integrate_handler(
         }
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
-    extra_args = str(payload.get("extra_sglang_args", "") or "").strip()
+    # ``payload`` arrives via the integrate_patch sub-agent envelope;
+    # route the read through the compat helper so a legacy
+    # ``extra_sglang_args`` envelope still resolves (with a single
+    # DeprecationWarning logged via stacklevel=3).
+    from ..compat.payload_aliases import read_extra_server_args
+    extra_args = read_extra_server_args(payload).strip()
 
     # Build a Task wrapper around BaselineExecutor (which expects an
-    # RunnerContext with a Task in it). The "extra_sglang_args" hand-
+    # RunnerContext with a Task in it). The "extra_server_args" hand-
     # off goes via the task params even though baseline_executor doesn't
     # use them yet — kept for forward compat (P3 will inject EXTRA_SGLANG_ARGS).
     from ..session_paths import runs_dir
@@ -1714,7 +2111,7 @@ async def integrate_handler(
             "config_path": payload.get("config_path"),
             "output_dir":  str(workspace),
             "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )
@@ -1737,7 +2134,7 @@ async def integrate_handler(
         )
         try:
             await restart_server_for_round(
-                extra_sglang_args=extra_args,
+                extra_server_args=extra_args,
                 framework=os.environ.get("FRAMEWORK") or None,
                 model_path=(
                     str(payload.get("model_path") or "").strip()
@@ -1812,31 +2209,25 @@ async def integrate_handler(
         "gain_pct":    gain_pct,
         "report_path": bench_result.get("report_path"),
         "workspace":   bench_result.get("workspace"),
-        "extra_sglang_args": extra_args,
+        "extra_server_args": extra_args,
         "apply_result": apply_result,
         "revert_result": revert_result,
     }
 
 
 # ---------------------------------------------------------------------------
-# F1-2 (roofline composite) + main M4 — back-compat alias.
+# Kernel-agent programmatic dispatch table.
 #
-# Hyperloom main renamed ``select_kernels_handler`` to
+# Main M4 renamed ``select_kernels_handler`` to
 # ``trace_analyze_handler`` (the function does TraceLens analysis +
 # kernel selection in a single pass, so the new name is more accurate).
-# The M4 merge adopts main's canonical ``trace_analyze_handler`` name;
-# the back-compat alias below keeps the ~30 legacy callsites that import
-# ``select_kernels_handler`` working unchanged.
-select_kernels_handler = trace_analyze_handler
-
+# This branch dropped the legacy ``select_kernels`` alias entirely; the
+# canonical kind is ``trace_analyze``. RooflineExecutor (F1-2) calls
+# the function directly; the dispatch entry below is for LLM-driven
+# requests routed via ``Coordinator._handle_request``.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
-    "select_kernels":   trace_analyze_handler,
-    # ``trace_analyze`` dispatch routes to the same handler as
-    # ``select_kernels`` — RooflineExecutor (F1-2) calls the function
-    # directly, but explicit dispatch entries keep the action-table
-    # symmetric for future PolicyGate / audit code that keys on the
-    # request kind.
     "trace_analyze":    trace_analyze_handler,
+    "run_gemm_tuning":  run_gemm_tuning_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
     "apply_patch":      integrate_handler,   # alias — same flow
@@ -1857,7 +2248,7 @@ __all__ = [
     "get_handler",
     "has_handler",
     "integrate_handler",
+    "run_gemm_tuning_handler",
     "run_optimization_handler",
-    "select_kernels_handler",
     "trace_analyze_handler",
 ]

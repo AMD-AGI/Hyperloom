@@ -163,30 +163,25 @@ _FLAG_PATTERN = re.compile(r"--[a-z][a-z0-9_-]+")
 
 
 def _extract_proposed_flags(state: dict[str, Any]) -> list[str]:
-    """Pull every `--flag-name` mentioned in any params/backends
-    variant the LLM proposed (across attempts_history)."""
+    """Pull every `--flag-name` mentioned in any explore variant the
+    LLM proposed (across attempts_history)."""
     found: list[str] = []
-    for action in ("backends", "params"):
-        attempts = state.get(f"{action}_attempts") or []
-        if not isinstance(attempts, list):
-            continue
+    attempts = state.get("explore_attempts") or []
+    if isinstance(attempts, list):
         for entry in attempts:
             if not isinstance(entry, dict):
                 continue
-            args = str(entry.get("extra_sglang_args") or "")
+            args = str(entry.get("extra_server_args") or "")
             if args:
                 found.extend(_FLAG_PATTERN.findall(args))
-    # Also walk params_search.tested / backends_search.tested for
-    # fingerprints that may not have ended up in attempts (idempotency
-    # short-circuits).
-    for key in ("params_search", "backends_search"):
-        sub = state.get(key) or {}
-        tested = sub.get("tested") if isinstance(sub, dict) else None
-        if not isinstance(tested, dict):
-            continue
+    # Also walk explore_search.tested for fingerprints that may not
+    # have ended up in attempts (idempotency short-circuits).
+    sub = state.get("explore_search") or {}
+    tested = sub.get("tested") if isinstance(sub, dict) else None
+    if isinstance(tested, dict):
         for snap in tested.values():
             if isinstance(snap, dict):
-                args = str(snap.get("extra_sglang_args") or "")
+                args = str(snap.get("extra_server_args") or "")
                 if args:
                     found.extend(_FLAG_PATTERN.findall(args))
     return found
@@ -230,10 +225,8 @@ def _count_analysis_md_references(state: dict[str, Any]) -> int:
                 if kw.lower() in reason.lower():
                     count += 1
                     break
-    for action in ("backends", "params", "comm_optimization"):
-        attempts = state.get(f"{action}_attempts") or []
-        if not isinstance(attempts, list):
-            continue
+    attempts = state.get("explore_attempts") or []
+    if isinstance(attempts, list):
         for entry in attempts:
             if not isinstance(entry, dict):
                 continue

@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Reuse HuggingFaceClient from the existing script — single source of truth
@@ -323,6 +324,8 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
             return 0
     if batch_size <= 0 or pool_size <= 0:
         return 0
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+        return _cron_batch_index(pool_size, batch_size)
     run_number = (os.environ.get("GITHUB_RUN_NUMBER") or "").strip()
     try:
         rn = int(run_number)
@@ -332,6 +335,40 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
     # GITHUB_RUN_NUMBER is 1-based; subtract one so the first run maps to
     # slice 0 rather than slice 1.
     return (rn - 1) % batches
+
+
+def _cron_batch_index(pool_size: int, batch_size: int) -> int:
+    """Deterministic production-pool rotation for the 8-hour production cron.
+
+    Manual workflow dispatches increment GitHub's run number, so using
+    ``GITHUB_RUN_NUMBER`` for schedule rotation makes the next cron batch depend
+    on ad-hoc smoke runs. Instead, schedule uses the UTC 8-hour slot:
+    00:00-07:59 => slot 0, 08:00-15:59 => slot 1, 16:00-23:59 => slot 2.
+    The epoch is pinned to the production pool date so every operator can
+    predict the slice before cron fires.
+    """
+    batches = max((pool_size + batch_size - 1) // batch_size, 1)
+    epoch = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    now_raw = (os.environ.get("INPUT_CRON_NOW") or "").strip()
+    if now_raw:
+        try:
+            now_utc = datetime.fromisoformat(now_raw.replace("Z", "+00:00"))
+        except ValueError:
+            now_utc = datetime.now(timezone.utc)
+    else:
+        now_utc = datetime.now(timezone.utc)
+    now_utc = now_utc.astimezone(timezone.utc)
+    days = (now_utc.date() - epoch.date()).days
+    eight_hour_slot = min(now_utc.hour // 8, 2)
+    slot = max(days, 0) * 3 + eight_hour_slot
+    batch_index = slot % batches
+    print(
+        "cron rotation: "
+        f"utc_time={now_utc.isoformat()} epoch={epoch.date().isoformat()} "
+        f"slot={slot} batches={batches} batch_index={batch_index}",
+        file=sys.stderr,
+    )
+    return batch_index
 
 
 def _slice_entries(entries: list[dict | str]) -> list[dict | str]:

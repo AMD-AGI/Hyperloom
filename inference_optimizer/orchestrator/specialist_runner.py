@@ -49,6 +49,7 @@ from .specialist_domains import (
     SPECIALIST_DOMAINS_M5,
     SpecialistDomain,
     get_domain,
+    normalize_dispatch_tags,
 )
 from .specialist_subprocess import (
     SpecialistSubprocessConfig,
@@ -66,6 +67,20 @@ from .system_prompts.specialist_prompt_builder import (
 
 
 log = logging.getLogger(__name__)
+
+
+def _extra_focus_tags(
+    params: dict[str, Any], domain: "SpecialistDomain",
+) -> tuple[str, ...]:
+    """Knowledge-domain tags beyond the primary domain's own anchor.
+
+    Used to append extra per-domain focus blocks for a multi-tag
+    dispatch. The primary domain's anchor is dropped so its focus block
+    is not rendered twice.
+    """
+    tags = normalize_dispatch_tags(params)
+    primary_anchor = (domain.kb_anchor or "").strip()
+    return tuple(t for t in tags if t and t != primary_anchor)
 
 
 # v0.8 §3.11 R4 / R5 — canonical external tool registry lives in
@@ -291,7 +306,9 @@ class SpecialistRunner:
         self.per_turn_max_seconds = float(per_turn_max_seconds)
         self.knowledge_plane = knowledge_plane
 
-    def _resolve_tools(self) -> tuple[str, ...]:
+    def _resolve_tools(
+        self, task_allowed_tools: list[str] | tuple[str, ...] | None = None,
+    ) -> tuple[str, ...]:
         """Return the per-task tool whitelist.
 
         Gated on:
@@ -299,11 +316,17 @@ class SpecialistRunner:
         * KnowledgePlane PR Monitor / Cortex KB availability — strips
           ``mcp__pr_monitor__*`` / ``mcp__cortex_kb__*`` whenever the
           corresponding surface is disabled.
+        * Per-task ``Task.allowed_tools`` when the dispatcher supplied a
+          narrower surface (research_scout is the canonical read-only case).
         * Always enforces :data:`SPECIALIST_TOOL_DENYLIST` last
           (defense in depth — caller may have extended ``default_tools``
           carelessly).
         """
-        tools = list(self.default_tools)
+        tools = (
+            list(task_allowed_tools)
+            if task_allowed_tools
+            else list(self.default_tools)
+        )
         plane = self.knowledge_plane
         if plane is not None:
             try:
@@ -422,6 +445,10 @@ class SpecialistRunner:
             notes.append(f"worktree_setup_failed:{worktree_err}")
         workspace_for_prompt = worktree or workspace
 
+        allocated_gpu_ids = tuple(
+            int(g) for g in ((ctx.extra or {}).get("gpu_ids") or [])
+        )
+
         # Assemble prompts.
         if prompt_inputs is None:
             prompt_inputs = SpecialistPromptInputs(
@@ -439,14 +466,20 @@ class SpecialistRunner:
                 # a valid SpecialistPromptInputs.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 sub_kind=str(params.get("sub_kind") or ""),
+                extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(
                     params.get("warm_start_pitfalls") or []
                 ),
+                warm_start_lessons=list(
+                    params.get("warm_start_lessons") or []
+                ),
+                session_snapshot=dict(params.get("session_snapshot") or {}),
                 pr_feed=list(params.get("pr_feed") or []),
                 pr_monitor_available=bool(
                     params.get("pr_monitor_available", True)
                 ),
+                framework=str(params.get("framework") or ""),
                 framework_source_roots=tuple(
                     params.get("framework_source_roots") or ()
                 ),
@@ -454,10 +487,17 @@ class SpecialistRunner:
                     params.get("source_hint_directories") or ()
                 ),
                 gpu_type=str(params.get("gpu_type") or ""),
+                allocated_gpu_ids=allocated_gpu_ids,
                 tp=int(params.get("tp") or 0),
                 hbm_gb=float(params.get("hbm_gb") or 0.0),
                 peak_tflops=float(params.get("peak_tflops") or 0.0),
                 arch_notes=str(params.get("arch_notes") or ""),
+                target_gap_notes=str(params.get("target_gap_notes") or ""),
+                already_proven=[
+                    p for p in (params.get("already_proven") or [])
+                    if isinstance(p, dict)
+                ],
+                research_hints=str(params.get("research_hints") or ""),
                 # Workload context — populated by
                 # Coordinator._warm_specialist_params from SharedState.
                 # Zero/empty means "Coordinator did not plumb this
@@ -468,6 +508,11 @@ class SpecialistRunner:
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
+                # GAP 8 — runtime fingerprint surfaced to the prompt so
+                # ``_format_version_note`` can annotate version-mismatched
+                # lessons / pitfalls. Both empty when the Coordinator
+                # didn't warm them (legacy callers / pre-PR sessions).
+                framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(
                     str(workspace_for_prompt) if workspace_for_prompt else ""
                 ),
@@ -499,7 +544,9 @@ class SpecialistRunner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             notes=notes,
-            resolved_tools=self._resolve_tools(),
+            resolved_tools=self._resolve_tools(
+                getattr(ctx.task, "allowed_tools", None),
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -668,6 +715,7 @@ class SpecialistRunner:
                 user_prompt=prep.user_prompt,
                 allowed_tools=prep.resolved_tools,
                 max_turns=prep.max_turns,
+                gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
             )
         )
         self._append_transcript(workspace, 1, {
@@ -727,6 +775,9 @@ class SpecialistRunner:
         gap = prep.gap
         workspace = prep.workspace
         notes = list(extra_notes)
+        gpu_ids = [
+            int(g) for g in ((ctx.extra or {}).get("gpu_ids") or [])
+        ]
 
         if specialist_done_payload is None:
             reason = backend_error or (
@@ -738,6 +789,8 @@ class SpecialistRunner:
                 domain=domain.key,
                 reason=reason,
             )
+            if gpu_ids:
+                done_payload["allocated_gpu_ids"] = list(gpu_ids)
             self._write_specialist_done(workspace, done_payload)
             return SpecialistRunResult(
                 task_id=ctx.task.task_id,
@@ -762,6 +815,8 @@ class SpecialistRunner:
             "gap_canonical_id", ""
         )
         done_payload["domain"] = domain.key
+        if gpu_ids:
+            done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
         # Hard truncate proposal_set to the single-source-of-truth cap.
@@ -792,17 +847,62 @@ class SpecialistRunner:
             done_payload["summary"] = (
                 "specialist emitted done without summary"[:480]
             )
-        # PR-A2: Merge subprocess-discovered patches into
-        # ``patches_written`` so downstream Coordinator bookkeeping +
-        # IntegratePatchExecutor see them. If the agent already filled
-        # ``patches_written`` from inside Bash, prefer its list over the
-        # filesystem scan (the agent may carry intent about which
-        # patches to apply in which order via numeric prefix).
-        existing_patches = done_payload.get("patches_written") or []
-        if not (
-            isinstance(existing_patches, list) and existing_patches
-        ) and patches_written:
-            done_payload["patches_written"] = patches_written
+        # PR-A2 + B4: reconcile the agent's self-reported ``patches_written``
+        # against the filesystem. The agent may list patches it intends to
+        # apply (ordered by numeric prefix), but we must NEVER trust that
+        # claim blindly: a worktree that was never materialised, a write
+        # that did not land, or an LLM that reported a path without creating
+        # the file would otherwise propagate a DANGLING ``patches_written``
+        # entry downstream — ``integrate_patch`` then finds nothing under
+        # ``worktree/patches/`` and the "patch" is silently a no-op. So we
+        # keep only claimed paths that actually exist on disk (resolved
+        # against the worktree first, then the workspace) and union them
+        # with the verified filesystem scan, preserving the agent's order.
+        claimed = done_payload.get("patches_written") or []
+        if not isinstance(claimed, list):
+            claimed = []
+        search_bases = [b for b in (prep.worktree, workspace) if b is not None]
+
+        def _resolve_existing_patch(p: Any) -> str | None:
+            raw = Path(str(p))
+            candidates = [raw] if raw.is_absolute() else []
+            for base in search_bases:
+                candidates.append(base / raw)
+            for c in candidates:
+                try:
+                    if c.is_file():
+                        return str(c)
+                except OSError:
+                    continue
+            return None
+
+        validated: list[str] = []
+        missing: list[str] = []
+        for p in claimed:
+            resolved = _resolve_existing_patch(p)
+            if resolved is not None:
+                validated.append(resolved)
+            else:
+                missing.append(str(p))
+        # Union with the filesystem scan (already verified-existing abs paths).
+        for p in patches_written:
+            if p not in validated:
+                validated.append(p)
+        # Dedupe while preserving order.
+        _seen: set[str] = set()
+        deduped: list[str] = []
+        for p in validated:
+            if p not in _seen:
+                _seen.add(p)
+                deduped.append(p)
+        done_payload["patches_written"] = deduped
+        if missing:
+            # The agent claimed patches that never materialised on disk;
+            # record it so the session_breakdown audit + operators can see
+            # the dangling claim instead of a phantom integrate_patch.
+            notes.append(
+                "patches_claimed_but_missing:" + ",".join(missing[:8])
+            )
 
         self._write_specialist_done(workspace, done_payload)
         status = "succeeded"
@@ -847,6 +947,12 @@ class SpecialistRunner:
         downstream collectors can surface it.
         """
         if self.subprocess_config is None or workspace is None:
+            return None, None, ""
+        params = ctx.task.params or {}
+        readonly = bool(params.get("readonly")) or (
+            str(params.get("domain") or "").strip() == "research_scout_specialist"
+        )
+        if readonly:
             return None, None, ""
         base = _pick_worktree_base(self.subprocess_config.framework_source_roots)
         if base is None:

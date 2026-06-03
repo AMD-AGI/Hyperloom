@@ -374,12 +374,32 @@ def build_manifest(
         "research_lane_capacity": int(
             getattr(args, "research_lane_capacity", 1) or 1
         ) if args is not None else 1,
+        "gpu_specialist_capacity": int(
+            getattr(args, "gpu_specialist_capacity", 0) or 0
+        ) if args is not None else 0,
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": (
             getattr(args, "kb_degraded_reason", None) if args is not None else None
         ),
         "pr_degraded_reason": (
             getattr(args, "pr_degraded_reason", None) if args is not None else None
+        ),
+        # GAP 1 — Warm-recipe replay flags. Persisted into manifest so
+        # robustness_monitor.sh resume / cross-machine resume picks up
+        # the same gate thresholds rather than reverting to defaults.
+        # The ``warm_replay_enabled`` field is the inverted form of
+        # ``--no-warm-replay`` so the YAML reads more naturally.
+        "warm_replay_enabled": (
+            not bool(getattr(args, "no_warm_replay", False))
+            if args is not None else True
+        ),
+        "warm_replay_min_confidence": (
+            float(getattr(args, "warm_replay_min_confidence", 0.7) or 0.7)
+            if args is not None else 0.7
+        ),
+        "warm_replay_min_reproduce_pct": (
+            float(getattr(args, "warm_replay_min_reproduce_pct", 0.8) or 0.8)
+            if args is not None else 0.8
         ),
     }
 

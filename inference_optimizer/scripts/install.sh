@@ -39,6 +39,43 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 # $HYPERLOOM_RUNTIME_DIR.
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+DOTENV_LOADED_COUNT=0
+
+load_dotenv_no_clobber() {
+  DOTENV_LOADED_COUNT=0
+  [ -f "$REPO_ROOT/.env" ] || return 0
+  local loaded=0
+  local raw key value
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    [ -z "$raw" ] && continue
+    case "$raw" in \#*) continue ;; esac
+    case "$raw" in export\ *) raw="${raw#export }" ;; esac
+    case "$raw" in *=*) ;; *) continue ;; esac
+    key="${raw%%=*}"
+    value="${raw#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    [ -z "$key" ] && continue
+    if [ -z "${!key:-}" ]; then
+      export "$key=$value"
+      loaded=$((loaded + 1))
+    fi
+  done < "$REPO_ROOT/.env"
+  DOTENV_LOADED_COUNT="$loaded"
+  return 0
+}
+
+# Load .env before deriving USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR so a
+# freshly-copied .env.template can be the single configuration entrypoint.
+# The loader is no-clobber: explicit shell exports always win.
+load_dotenv_no_clobber
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
@@ -110,6 +147,66 @@ run() {
     "$@"
   fi
 }
+
+# Preflight credential validation. Mirrors the gate in
+# kernel-agent/scripts/install.sh so users invoking the inference-optimizer
+# installer directly (the canonical entrypoint) get the same fail-fast
+# behaviour as users running kernel-agent on its own. Without this, a
+# missing SAFE_API_KEY / OPENAI_BASE_URL slips past pip install, Magpie
+# clone, InferenceX clone (~10+ minutes of work) and only surfaces when the
+# chained kernel-agent installer reaches GEAK config generation.
+#
+# Loader (env wins; never overwrites a key that is already set):
+#   env > $REPO_ROOT/.env
+#
+# Strict mode by design: --check-only / --dry-run is the only path that
+# downgrades the die to a warn (introspection mode, no install runs).
+preflight_load_dotenv() {
+  load_dotenv_no_clobber
+  if [ "${DOTENV_LOADED_COUNT:-0}" -gt 0 ]; then
+    log "loaded ${DOTENV_LOADED_COUNT} missing var(s) from $REPO_ROOT/.env (env wins)"
+  fi
+}
+
+preflight_validate_credentials() {
+  preflight_load_dotenv
+  local missing=()
+  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
+  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
+  if [ "${#missing[@]}" -eq 0 ]; then
+    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+    return 0
+  fi
+  local env_file_status
+  if [ -f "$REPO_ROOT/.env" ]; then
+    env_file_status="present"
+  else
+    env_file_status="not found"
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
+         "continuing because --check-only / --dry-run is active. The " \
+         "chained kernel-agent installer will still fail later unless " \
+         "these are set before a real install."
+    return 0
+  fi
+  cat >&2 <<EOF
+[inference-optimizer ERROR] Missing required credential(s): ${missing[*]}
+
+Tried loading from:
+  - shell environment
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+
+Fix one of:
+  1. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
+  2. Export directly into the shell before re-running:
+       export SAFE_API_KEY=sk-xxxxx
+       export OPENAI_BASE_URL=https://gateway.example.com/v1
+EOF
+  exit 2
+}
+preflight_validate_credentials
 
 # --- 0. Resolve PYTHON ---
 # On hyperloom / sgl-workspace containers the canonical ROCm stack lives in
@@ -312,14 +409,18 @@ PY
 }
 
 # --- 2. Magpie ---
+# The install state is the checkout under $MAGPIE_DIR (default:
+# $USER_DATA_PATH/runtime/Magpie), not whatever `import Magpie` resolves
+# from the driver Python. Editable installs from older sessions can stay
+# importable and otherwise mask a missing per-workspace checkout.
 ensure_magpie() {
   log "ensuring Magpie at ${MAGPIE_DIR}"
-  if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
-    log "Magpie already importable"
-    return 0
-  fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "Magpie not importable (check-only mode, skipping clone/install)"
+    if [ -f "$MAGPIE_DIR/setup.py" ] || [ -f "$MAGPIE_DIR/pyproject.toml" ]; then
+      log "Magpie checkout present at ${MAGPIE_DIR}"
+    else
+      warn "Magpie checkout missing at ${MAGPIE_DIR} (check-only mode, skipping clone/install)"
+    fi
     return 0
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
@@ -332,7 +433,7 @@ ensure_magpie() {
   if [ "$DRY_RUN" -eq 0 ]; then
     "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
     "$PYTHON" -c "import Magpie" >/dev/null
-    log "Magpie installed OK"
+    log "Magpie installed OK from ${MAGPIE_DIR}"
   fi
 }
 
@@ -566,6 +667,18 @@ PY
     return 0
   fi
   log "discovered framework roots: $roots"
+  # Emit a framework-bucketed one-liner so operators (and the
+  # preflight grep) can tell at a glance whether atom was picked up.
+  local roots_summary
+  roots_summary="$(ROOTS_INPUT="$roots" "$PYTHON" - <<'PY'
+import os
+from inference_optimizer.orchestrator.framework_paths import summarise_framework_root_discovery
+print(summarise_framework_root_discovery(os.environ.get("ROOTS_INPUT", "")))
+PY
+)"
+  if [ -n "$roots_summary" ]; then
+    log "discovered framework roots: $roots_summary"
+  fi
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
     log "would append INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=$roots to ${KERNEL_AGENT_ENV}"
     return 0

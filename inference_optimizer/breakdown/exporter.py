@@ -171,6 +171,62 @@ def build(
                                         ),
                                         warnings,
                                         default=[])
+    # Raw ``state.optimization_stack[]`` passthrough so downstream
+    # tooling can see the full per-entry evidence (tuned_file /
+    # workspace / etc.) without having to re-read state.json. Pure
+    # mirror; never raises.
+    optimization_stack = _safe_collect("optimization_stack",
+                                        lambda: collectors.collect_optimization_stack(state),
+                                        warnings,
+                                        default=[])
+    # Hot-kernel roofline table (Dashboard §1). Pulls
+    # ``<sd>/reports/kernel_roofline.json`` so dashboards consume sbd
+    # exclusively and never have to walk the kernel-agent tree.
+    kernel_roofline    = _safe_collect("kernel_roofline",
+                                        lambda: collectors.collect_kernel_roofline(
+                                            sd, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
+    # Kernel-agent attempt outcome summary (Breakdown 面板对接文档 §A1).
+    # Mirrors ``<sd>/reports/kernel_optimization_summary.json`` (written
+    # by the report action at CLOSE step 1, before this export at step
+    # 2). Empty dict when absent → dashboard hides Block 1.
+    kernel_optimization_summary = _safe_collect(
+        "kernel_optimization_summary",
+        lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
+        warnings,
+        default={})
+    # Post-optimization concurrency sweep (Breakdown 面板对接文档 §A2).
+    # Mirrors ``<sd>/reports/conc_sweep_summary.json`` (written by the
+    # conc_sweep action during SWEEP). Empty dict when absent →
+    # dashboard hides Block 2.
+    conc_sweep_summary = _safe_collect(
+        "conc_sweep_summary",
+        lambda: collectors.collect_conc_sweep_summary(sd, warnings),
+        warnings,
+        default={})
+    # Per-snapshot roofline comparison list driving the markdown-
+    # report ``## Roofline`` section. Built from
+    # ``state.roofline_snapshots`` history.
+    roofline           = _safe_collect("roofline",
+                                        lambda: collectors.collect_roofline(
+                                            state, warnings,
+                                        ),
+                                        warnings,
+                                        default=[])
+    # Optimization-progress curve (Dashboard §2). Stack ledger +
+    # ceiling/target reference lines, derived from state.json so the
+    # dashboard reads sbd alone. Used to be exported as ``roofline``
+    # but that clashed with the list-shaped section above used by the
+    # markdown renderer; renamed to ``roofline_progress`` so both
+    # surfaces coexist.
+    roofline_progress  = _safe_collect("roofline_progress",
+                                        lambda: collectors.collect_roofline_progress(
+                                            sd, state, manifest, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
 
     source_files = collectors.collect_source_files(
         sd,
@@ -221,6 +277,30 @@ def build(
         "kb_provenance":       kb_provenance,
         # specialist sub-agent dispatch records.
         "specialist_runs":     specialist_runs,
+        # Raw KEEP ledger passthrough. Mirrors
+        # ``state.optimization_stack[]`` verbatim. Empty list on
+        # pre-baseline / fresh sessions.
+        "optimization_stack":  optimization_stack,
+        # Hot-kernel roofline table (Dashboard-Roofline 对接清单 §1).
+        # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
+        # absent — the dashboard hides the table on empty.
+        "kernel_roofline":     kernel_roofline,
+        # Kernel-agent attempt outcome summary (Breakdown 面板对接文档
+        # §A1). Mirror of ``reports/kernel_optimization_summary.json``;
+        # empty dict on absence (dashboard hides Block 1).
+        "kernel_optimization_summary": kernel_optimization_summary,
+        # Post-optimization concurrency sweep (Breakdown 面板对接文档
+        # §A2). Mirror of ``reports/conc_sweep_summary.json``; empty
+        # dict on absence (dashboard hides Block 2).
+        "conc_sweep_summary":  conc_sweep_summary,
+        # Per-snapshot roofline comparison list (markdown-report
+        # source). Built from ``state.roofline_snapshots``.
+        "roofline":            roofline,
+        # Optimization-progress curve (Dashboard-Roofline 对接清单 §2).
+        # Always populated when baseline ran; ``ceiling_available`` is
+        # False on sessions that never ran the watermark roofline
+        # pipeline (dashboard hides the reference lines).
+        "roofline_progress":   roofline_progress,
 
         "warnings":            warnings,
         "source_files":        source_files,
@@ -401,8 +481,7 @@ def write_minimal_final_report(
         "",
         _fmt_attempt(getattr(state, "last_baseline", None), "last_baseline"),
         _fmt_attempt(getattr(state, "last_profile", None), "last_profile"),
-        _fmt_attempt(getattr(state, "last_backends", None), "last_backends"),
-        _fmt_attempt(getattr(state, "last_params", None), "last_params"),
+        _fmt_attempt(getattr(state, "last_explore", None), "last_explore"),
         _fmt_attempt(state.last_sweep, "last_sweep"),
         "",
         f"## Structured detail",

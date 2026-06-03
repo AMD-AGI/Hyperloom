@@ -33,7 +33,12 @@ from inference_optimizer.orchestrator.action_executors._canonical_fingerprint im
     canonical_fingerprint,
 )
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
+    apply_compatibility_filter,
     variant_fingerprint,
+)
+from inference_optimizer.orchestrator.action_executors.explore import (
+    _atom_default_grid,
+    _default_grid_for_framework,
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.resource_lock import (
@@ -138,141 +143,13 @@ def test_canonical_fingerprint_matches_variant_fingerprint():
 
 
 # ===========================================================================
-# SharedState — explore_search legacy migration
-# ===========================================================================
-def test_explore_search_migration_unions_legacy_ledgers():
-    fp_attn = variant_fingerprint("--attention-backend aiter", {})
-    fp_max_seqs = variant_fingerprint("--max-num-seqs 512", {})
-    fp_triton = variant_fingerprint("--decode-attention-backend triton", {})
-    raw = {
-        "backends_search": {
-            "schema_version": 1,
-            "tested": {
-                fp_attn: {
-                    "name": "attn_aiter",
-                    "extra_sglang_args": "--attention-backend aiter",
-                    "extra_envs": {},
-                    "status": "succeeded",
-                    "tput": 1500.0, "gain_pct": 5.0,
-                    "round_id": "backends-001",
-                },
-                fp_triton: {
-                    "name": "decode_triton",
-                    "extra_sglang_args": "--decode-attention-backend triton",
-                    "extra_envs": {},
-                    "status": "succeeded",
-                    "tput": 750.0, "gain_pct": -25.0,
-                    "round_id": "backends-001",
-                },
-            },
-            "accepted": [{
-                "name": "attn_aiter",
-                "extra_sglang_args": "--attention-backend aiter",
-                "extra_envs": {},
-                "fingerprint": fp_attn,
-                "gain_pct": 5.0,
-            }],
-            "rejected": [{
-                "name": "decode_triton",
-                "extra_sglang_args": "--decode-attention-backend triton",
-                "extra_envs": {},
-                "fingerprint": fp_triton,
-                "reason": "not_keep", "gain_pct": -25.0,
-            }],
-            "name_index": {}, "cursor": 2,
-        },
-        "params_search": {
-            "schema_version": 2,
-            "tested": {
-                fp_max_seqs: {
-                    "name": "max_seqs_512",
-                    "extra_sglang_args": "--max-num-seqs 512",
-                    "extra_envs": {},
-                    "gain_pct": 2.5,
-                    "round_id": "params-001",
-                },
-            },
-            "accepted": [{
-                "name": "max_seqs_512",
-                "extra_sglang_args": "--max-num-seqs 512",
-                "extra_envs": {},
-                "fingerprint": fp_max_seqs,
-                "gain_pct": 2.5,
-            }],
-            "rejected": [], "name_index": {}, "cursor": 1,
-        },
-        "backend_winners_history": [{
-            "round_id": "backends-001",
-            "variant_name": "attn_aiter",
-            "gain_pct": 5.0,
-            "extra_sglang_args": "--attention-backend aiter",
-            "extra_envs": {},
-            "ts": "2026-05-01T00:00:30",
-        }],
-        "params_winner_history": [{
-            "round_id": "params-001",
-            "variant_name": "max_seqs_512",
-            "gain_pct": 2.5, "tput": 1450.0,
-            "ts": "2026-05-01T00:02:00",
-        }],
-        "synergy_attempted": ["attn_aiter+max_seqs_512"],
-    }
-
-    state = SharedState.from_dict(raw)
-    es = state.explore_search
-
-    # All three fingerprints made it across (no name collisions, no
-    # accidental dedup).
-    assert set(es["tested"].keys()) == {fp_attn, fp_triton, fp_max_seqs}
-    # Accepted bucket is the union (attn_aiter + max_seqs_512).
-    assert {a["name"] for a in es["accepted"]} == {"attn_aiter", "max_seqs_512"}
-    # Rejected fingerprints don't appear in accepted (so a re-promote
-    # wouldn't be double-counted).
-    rejected_fps = {r["fingerprint"] for r in es["rejected"]}
-    accepted_fps = {a["fingerprint"] for a in es["accepted"]}
-    assert not (rejected_fps & accepted_fps)
-    # winners_history merges both lists, in stable order.
-    assert len(es["winners_history"]) == 2
-    # Synergy combo string was normalized to a sorted list.
-    assert es["synergy_attempted"] == [["attn_aiter", "max_seqs_512"]]
-    # provenance is stamped on every row so the ledger origin is clear.
-    for row in es["tested"].values():
-        assert row["provenance"].startswith("legacy:")
-
-
-def test_explore_search_migration_is_idempotent():
-    """Re-loading the same raw state.json must not double-count entries."""
-    fp_attn = variant_fingerprint("--attention-backend aiter", {})
-    raw = {
-        "backends_search": {
-            "schema_version": 1,
-            "tested": {fp_attn: {
-                "name": "attn_aiter",
-                "extra_sglang_args": "--attention-backend aiter",
-                "extra_envs": {},
-                "status": "succeeded",
-                "tput": 1500.0, "gain_pct": 5.0,
-            }},
-            "accepted": [],
-            "rejected": [],
-            "name_index": {}, "cursor": 1,
-        },
-    }
-    state_a = SharedState.from_dict(raw)
-    # Round-trip through to_dict / from_dict to mimic resume.
-    state_b = SharedState.from_dict(state_a.to_dict())
-    assert state_a.explore_search["tested"] == state_b.explore_search["tested"]
-    assert state_a.explore_search["winners_history"] == state_b.explore_search["winners_history"]
-
-
-# ===========================================================================
 # SharedState — record_explore_accepted / apply_explore_search_update
 # ===========================================================================
 def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {
         "name": "vllm_kv_fp8",
-        "extra_sglang_args": "--kv-cache-dtype fp8",
+        "extra_server_args": "--kv-cache-dtype fp8",
         "extra_envs": {},
         "output_throughput": 1500.0,
         "gain_pct": 4.0,
@@ -289,7 +166,7 @@ def test_apply_explore_search_update_preserves_accepted():
     state = SharedState()
     state.record_explore_accepted({
         "name": "a",
-        "extra_sglang_args": "--flag-a",
+        "extra_server_args": "--flag-a",
         "fingerprint": "aa" * 8,
         "gain_pct": 3.0,
     })
@@ -298,7 +175,7 @@ def test_apply_explore_search_update_preserves_accepted():
     state.apply_explore_search_update({
         "schema_version": 1,
         "tested": {"bb" * 8: {
-            "name": "b", "extra_sglang_args": "--flag-b",
+            "name": "b", "extra_server_args": "--flag-b",
             "extra_envs": {}, "outcome": "REVERT",
         }},
         "rejected": [{
@@ -402,7 +279,7 @@ async def test_explore_executor_auto_derives_variant_timeout(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name="v_smoke",
-            extra_sglang_args="--smoke",
+            extra_server_args="--smoke",
             extra_envs={},
             status="succeeded",
             output_throughput=805.0,
@@ -465,7 +342,7 @@ async def test_explore_executor_safety_margin_param_overrides_default(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name="v_smoke",
-            extra_sglang_args="--smoke",
+            extra_server_args="--smoke",
             extra_envs={},
             status="succeeded",
             output_throughput=805.0,
@@ -531,7 +408,7 @@ async def test_explore_executor_roofline_hard_gate_drops_saturated_variants(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name=gv.name,
-            extra_sglang_args=gv.extra_sglang_args,
+            extra_server_args=gv.extra_server_args,
             extra_envs=dict(gv.extra_envs),
             status="succeeded",
             output_throughput=805.0,
@@ -620,7 +497,7 @@ async def test_explore_executor_roofline_gate_disabled_by_default(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name=gv.name,
-            extra_sglang_args=gv.extra_sglang_args,
+            extra_server_args=gv.extra_server_args,
             extra_envs=dict(gv.extra_envs),
             status="succeeded",
             output_throughput=805.0,
@@ -683,7 +560,7 @@ async def test_explore_executor_explicit_variant_timeout_wins(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name="v_smoke",
-            extra_sglang_args="--smoke",
+            extra_server_args="--smoke",
             extra_envs={},
             status="succeeded",
             output_throughput=805.0,
@@ -743,7 +620,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
         if "v00_v_keep" in slug:
             tput = 840.0   # +5% vs base 800
         elif "v01_v_revert" in slug:
-            tput = 800.4   # +0.05% — below 0.2% threshold
+            tput = 800.4   # +0.05% — below 1.0% threshold
         elif "stack_rebench" in slug:
             tput = 845.0   # stable for the KEEP'd variant
         else:
@@ -847,7 +724,7 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
                 "tested": {fp_dup: {
                     "fingerprint": fp_dup,
                     "name": "previous_run_name",
-                    "extra_sglang_args": "--dup-flag",
+                    "extra_server_args": "--dup-flag",
                     "extra_envs": {},
                     "outcome": "REVERT",
                 }},
@@ -941,34 +818,38 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
     assert "stack_unstable" in rejected_reasons
 
 
-def test_default_stack_stable_pct_lowered_to_noise_band():
-    """Fix B unit-pin: the module default ``DEFAULT_STACK_STABLE_PCT``
-    must equal :data:`DEFAULT_KEEP_THRESHOLD_PCT` so the stack-rebench
-    gate stays inside the ±1 % inter-run noise band (the 0.5 % floor
-    used to silently downgrade real +0.3 % wins on MI300X)."""
+def test_default_keep_and_stack_stable_thresholds():
+    """Pin the per-variant KEEP threshold and the stack-rebench
+    stability floor. The KEEP gate is 1.0 %; the rebench floor sits
+    below it (0.5 %) so a genuine win that loses a little headroom when
+    layered onto the cumulative stack is not immediately evicted."""
     from inference_optimizer.orchestrator.action_executors.explore import (
         DEFAULT_KEEP_THRESHOLD_PCT,
         DEFAULT_STACK_STABLE_PCT,
     )
-    # Pin: defaults must match — both gates speak the same noise floor.
-    assert DEFAULT_STACK_STABLE_PCT == DEFAULT_KEEP_THRESHOLD_PCT == 0.2
+    assert DEFAULT_KEEP_THRESHOLD_PCT == 1.0
+    assert DEFAULT_STACK_STABLE_PCT == 0.5
+    # The rebench floor must not exceed the single-variant KEEP gate.
+    assert DEFAULT_STACK_STABLE_PCT <= DEFAULT_KEEP_THRESHOLD_PCT
 
 
 def test_stack_stable_floor_arithmetic_at_new_default():
-    """Fix B integration-pin: a rebench at +0.3 % vs baseline now sits
-    above ``base * (1 + 0.2/100)`` and would NOT trigger KEEP_UNSTABLE
-    eviction. Under the legacy 0.5 % default the same rebench was
-    below the floor — this test guards against any future revert."""
+    """Integration-pin: a rebench at +0.6 % vs baseline sits above
+    ``base * (1 + 0.5/100)`` and would NOT trigger KEEP_UNSTABLE
+    eviction, while a +0.3 % rebench falls below the 0.5 % floor and is
+    evicted. Guards the stability-floor arithmetic against drift."""
     from inference_optimizer.orchestrator.action_executors.explore import (
         DEFAULT_STACK_STABLE_PCT,
     )
-    base = 4438.83   # mirrors the real-run baseline_tput in the bug report
-    rebench_tput = base * 1.003   # +0.3 %, just inside the noise band
+    base = 4438.83
     stable_floor = base * (1.0 + DEFAULT_STACK_STABLE_PCT / 100.0)
-    assert rebench_tput > stable_floor, (
-        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT} would "
-        f"still reject +0.3% rebenches; floor={stable_floor:.2f}, "
-        f"rebench={rebench_tput:.2f}"
+    assert base * 1.006 > stable_floor, (
+        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.6% "
+        f"rebench should clear floor={stable_floor:.2f}"
+    )
+    assert base * 1.003 < stable_floor, (
+        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.3% "
+        f"rebench should fall below floor={stable_floor:.2f}"
     )
 
 
@@ -1152,7 +1033,7 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
 
 
 # ===========================================================================
-# breakdown.capability_summary — explore row + legacy aliases
+# breakdown.capability_summary — explore row + legacy compat rows
 # ===========================================================================
 def test_capability_summary_has_explore_row_with_legacy_aliases():
     state = {
@@ -1175,7 +1056,289 @@ def test_capability_summary_has_explore_row_with_legacy_aliases():
     assert cap["explore"]["best_gain_pct"] == 4.2
     assert cap["explore"]["keep_unstable_count"] == 1
     assert cap["explore"]["winners_history"] == 1
-    # Legacy aliases still emitted (KB_design §3.12 §4.2).
+    # Legacy compat rows stay emitted so archived (pre-merge) sessions
+    # still render; on a current session they are ``not_attempted``.
     assert "backends" in cap
     assert "params" in cap
     assert "validate_stack" in cap
+    assert cap["backends"]["status"] == "not_attempted"
+    assert cap["params"]["status"] == "not_attempted"
+
+
+# ===========================================================================
+# _atom_default_grid + framework dispatch
+# ===========================================================================
+def _names(variants):
+    return [v.name for v in variants]
+
+
+def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
+    """MoE + MLA + MTP-capable model class (e.g. ``moe_mla``) unlocks
+    the full atom seed grid. Acceptance gate: >= 5 variants; each
+    gated branch present.
+    """
+    grid = _atom_default_grid(
+        model_class="moe_mla", conc=64, isl=1024, osl=1024,
+    )
+    names = _names(grid)
+    assert len(grid) >= 5, f"too few variants: {names}"
+    # Base coverage.
+    assert "atom_level_2" in names
+    # ``atom_level_3`` not emitted: atom_mi*x.sh injects ``--level 3``
+    # as the bare baseline, so adding a level-3 variant here would A/B
+    # against itself.
+    assert "atom_level_3" not in names
+    assert "atom_prefix_cache" in names
+    # Model-class-gated branches.
+    assert "atom_ep" in names, "MoE branch missing for moe_mla"
+    assert "atom_dp_attn" in names, "MLA branch missing for moe_mla"
+    assert "atom_mtp_3" in names, "MTP branch missing for moe_mla"
+    assert "atom_mtp_1" in names
+    # CONC bracket variant emitted because conc > 0.
+    assert "atom_cudagraph_bracket" in names
+
+
+def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
+    """Dense model class must NOT emit MoE / MLA / MTP variants —
+    those flags would either fail flag-compat or crash atom on
+    startup.
+    """
+    grid = _atom_default_grid(
+        model_class="dense", conc=8, isl=512, osl=512,
+    )
+    names = _names(grid)
+    assert "atom_ep" not in names
+    assert "atom_dp_attn" not in names
+    assert "atom_mtp_3" not in names
+    assert "atom_mtp_1" not in names
+    # Basic variants still present.
+    assert "atom_level_2" in names
+    # ``atom_level_3`` not emitted; see the rationale comment in the
+    # default-grid test above.
+    assert "atom_level_3" not in names
+    assert "atom_prefix_cache" in names
+
+
+def test_atom_default_grid_fp8_model_emits_kv_fp8():
+    grid = _atom_default_grid(
+        model_class="moe_fp8", conc=16, isl=512, osl=512,
+    )
+    names = _names(grid)
+    assert "atom_kv_fp8" in names
+    # FP8 + MoE gate the EP variant on too.
+    assert "atom_ep" in names
+
+
+def test_atom_default_grid_non_fp8_omits_kv_fp8():
+    grid = _atom_default_grid(model_class="dense", conc=8)
+    names = _names(grid)
+    assert "atom_kv_fp8" not in names
+
+
+def test_atom_default_grid_variants_have_unique_names():
+    """Round-trip every supported model class through the grid and
+    assert names are unique within each grid (the EXPLORE ledger keys
+    by name within a single round).
+    """
+    for mc in ("dense", "moe", "moe_mla", "moe_mla_nsa", "moe_fp8", ""):
+        grid = _atom_default_grid(model_class=mc, conc=32)
+        names = _names(grid)
+        assert len(names) == len(set(names)), (
+            f"duplicate names in atom grid for model_class={mc!r}: {names}"
+        )
+
+
+def test_atom_default_grid_names_use_atom_prefix():
+    grid = _atom_default_grid(model_class="moe_mla", conc=64)
+    for v in grid:
+        assert v.name.startswith("atom_"), (
+            f"variant name does not start with 'atom_': {v.name!r}"
+        )
+
+
+def test_atom_default_grid_variants_carry_default_grid_provenance():
+    grid = _atom_default_grid(model_class="moe_mla", conc=64)
+    for v in grid:
+        # ``provenance`` is stashed onto the dataclass instance.
+        assert getattr(v, "provenance", None) == "default_grid", (
+            f"variant {v.name!r} provenance not set to default_grid"
+        )
+
+
+def test_atom_default_grid_conc_zero_omits_cudagraph_bracket():
+    """When the Coordinator can't supply CONC, the bracket variant is
+    skipped (would otherwise emit an empty / nonsensical list).
+    """
+    grid = _atom_default_grid(model_class="dense", conc=0)
+    assert "atom_cudagraph_bracket" not in _names(grid)
+
+
+def test_default_grid_for_framework_atom_returns_seeded_grid():
+    grid = _default_grid_for_framework(
+        "atom", model_class="moe_mla", conc=64, isl=1024, osl=1024,
+    )
+    assert grid, "atom framework should produce a non-empty default grid"
+    assert any(v.name == "atom_level_2" for v in grid)
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "", "unknown"])
+def test_default_grid_for_framework_non_atom_returns_empty(framework):
+    """Sglang / vllm rely on LLM-emitted variants (no programmatic
+    seed exists today). Unknown frameworks must also return ``[]``
+    rather than crash.
+    """
+    grid = _default_grid_for_framework(
+        framework, model_class="moe_mla", conc=64,
+    )
+    assert grid == []
+
+
+def _write_atom_baseline_yaml(path: Path) -> None:
+    """Atom-flavoured base YAML for gap-G1 cold-start wiring tests."""
+    cfg = {
+        "benchmark": {
+            "framework": "atom",
+            "model": "/wekafs/models/Qwen-Qwen3-32B",
+            "precision": "fp8",
+            "run_mode": "local",
+            "envs": {"TP": 4, "CONC": 64, "ISL": 1024, "OSL": 1024},
+            "benchmark_script": "atom_mi355x.sh",
+            "timeout_seconds": 600,
+            "profiler": {
+                "torch_profiler": {"enabled": False},
+                "system_profiler": {"enabled": False},
+                "tracelens": {"enabled": False},
+            },
+            "gpu_selection": {"auto": False},
+        },
+    }
+    with path.open("w") as f:
+        yaml.safe_dump(cfg, f)
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_atom_empty_grid_seeds_default_grid(
+    sub_agent_runner, tmp_path, monkeypatch,
+):
+    """When the orchestration LLM emits an empty grid on an atom
+    session, ExploreExecutor must NOT return
+    ``error_class='empty_grid'`` — it must fall through to
+    ``_default_grid_for_framework('atom', ...)`` and run those
+    variants.
+
+    Bench is mocked so the test asserts *only* the wiring (empty grid
+    → seed grid loaded, executor proceeds to grid runner), not the
+    seed's per-variant outcome which is gated by the Magpie / atom
+    server.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_atom.yaml"
+    _write_atom_baseline_yaml(base)
+
+    # Sandbox MODEL_PATH so compatibility_filter doesn't auto-drop
+    # MoE/MLA variants.
+    monkeypatch.setenv("MODEL_PATH", "/wekafs/models/Qwen-Qwen3-32B")
+    monkeypatch.setenv("FRAMEWORK", "atom")
+
+    received_grid: list[list[str]] = []
+
+    # Monkeypatch the ``run_grid`` symbol bound INSIDE the explore
+    # module (the executor imports it at module-load time, so
+    # patching ``_grid_runner.run_grid`` would miss the call site).
+    from inference_optimizer.orchestrator.action_executors import (
+        explore as explore_mod,
+    )
+
+    async def _capture_run_grid(**kwargs):
+        received_grid.append([v.name for v in (kwargs.get("grid") or [])])
+        return []
+
+    monkeypatch.setattr(explore_mod, "run_grid", _capture_run_grid)
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "base_tput":   800.0,
+            "grid":        [],
+            "model_class": "moe_mla",
+        },
+        idempotency_key="ex-atom-empty-seeded",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+
+    await sub.run_task(task)
+
+    # ``run_grid`` is called once per variant (variants stream one at
+    # a time through the executor). Each invocation should carry
+    # exactly one atom_ seed variant.
+    assert received_grid, "run_grid was not invoked by the seed path"
+    flat_names = [n for sub in received_grid for n in sub]
+    assert all(n.startswith("atom_") for n in flat_names), (
+        f"non-atom variants reached run_grid via the seed: {flat_names!r}"
+    )
+    # The full seed for moe_mla + CONC>0 has at least 5 variants; the
+    # executor may have stopped earlier (every per-variant call
+    # returned []), so we assert lower-bound coverage.
+    assert "atom_level_2" in flat_names
+    assert "atom_ep" in flat_names
+    assert "atom_dp_attn" in flat_names
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
+    sub_agent_runner, tmp_path,
+):
+    """Inverse of the atom test: sglang / vllm have NO programmatic
+    seed today (intentional — see ``_default_grid_for_framework``);
+    an empty grid on those frameworks must continue to return
+    ``error_class='empty_grid'`` so the orchestration LLM is forced
+    to emit variants. Regression guard against accidentally seeding
+    sglang from the atom branch.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_sglang.yaml"
+    _write_baseline_yaml(base)
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "base_tput":   800.0,
+            "grid":        [],
+        },
+        idempotency_key="ex-sglang-empty-still-fails",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    res = await sub.run_task(task)
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "empty_grid"
+
+
+def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
+    monkeypatch,
+):
+    """When the atom help-text probe is unavailable (e.g. test sandbox
+    with no atom installed), ``apply_compatibility_filter`` MUST NOT
+    drop any atom seed variant — it treats absent help text as
+    "defer to graceful runtime failure".
+
+    Guarantees the seed grid is never silently emptied by the
+    compatibility filter on test boxes.
+    """
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    # Force the help-text probe to return empty (simulates atom not
+    # importable). The filter must not drop any of the seed variants.
+    from inference_optimizer.orchestrator.action_executors import (
+        _grid_runner,
+    )
+    monkeypatch.setattr(
+        _grid_runner, "_probe_server_help_text", lambda fw: "",
+    )
+
+    grid = _atom_default_grid(model_class="moe_mla", conc=64)
+    kept, dropped = apply_compatibility_filter(grid)
+    assert kept == grid, (
+        f"compatibility filter dropped seed variants when help-text "
+        f"probe is empty; dropped={dropped}"
+    )

@@ -177,10 +177,17 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # Cortex KB integration.
     "cortex_session_id",
     "cortex_session_summary",
-    "pending_kb_edges",
     "warm_start_recipe",
     "warm_start_pitfalls",
+    "warm_start_lessons",
     "warm_start_ts",
+    # GAP 5 KB tag completeness.
+    "stack_fingerprint_meta",
+    "baseline_workload_extra",
+    # GAP 1 warm-recipe replay.
+    "warm_replay_attempted",
+    "warm_replay_outcome",
+    "warm_history_injected",
     # phase state machine (Coordinator-only writer).
     "phase",
     "phase_started_ts",
@@ -192,6 +199,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "specialist_domain_empty_streak",
     "last_specialist",
     "research_lane_capacity",
+    "gpu_specialist_capacity",
     # phase-machine escalation plumbing.
     "pending_escalate_hint",
     "last_consumed_escalate_hint",
@@ -199,15 +207,20 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "plateau_overrides",
     # CLOSE phase sequencer flag.
     "close_sequence_done",
-    # explore search ledger (v0.6 backends/params
-    # search fields retained for resume parity).
+    # unified explore search ledger.
     "explore_search",
-    "backends_search",
-    "params_search",
     # structured gaps ledger.
     "gaps",
-    # monotonic experiment counter.
-    "session_iter_index",
+    # dynamic_action aggregate view + round counter
+    # (Coordinator-only writer; LLM cannot self-narrate dispatch
+    # outcomes via UPDATE_STATE).
+    "dynamic_actions",
+    "dynamic_action_round_count",
+    # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled
+    # search depth knob).
+    "framework_pr_max_candidates",
+    # Advisory model-architecture profile (launcher / state.json owned).
+    "model_arch",
 })
 
 

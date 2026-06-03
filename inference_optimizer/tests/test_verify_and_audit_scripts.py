@@ -92,13 +92,11 @@ def _exp_state(*, gain: float = 6.5) -> dict:
             {"ts": "2026-05-19T09:42:00+00:00"},
             {"ts": "2026-05-19T10:12:00+00:00"},
         ],
-        "backends_attempts": [
+        "explore_attempts": [
             {"ts": "2026-05-19T09:50:00+00:00",
-             "extra_sglang_args": "--known-flag-a --known-flag-c"},
-        ],
-        "params_attempts": [
+             "extra_server_args": "--known-flag-a --known-flag-c"},
             {"ts": "2026-05-19T09:55:00+00:00",
-             "extra_sglang_args": "--known-flag-b"},
+             "extra_server_args": "--known-flag-b"},
         ],
         "cumulative_gain_validated_ts": "2026-05-19T10:30:00+00:00",
         "discovered_flags": {
@@ -262,7 +260,7 @@ def test_audit_detects_hallucinated_flag(tmp_path, capsys):
     hallucinated."""
     state = _exp_state(gain=4.0)
     # Remove --known-flag-c from discovered namespace; it was still
-    # used in backends_attempts → should now register as hallucination
+    # used in explore_attempts → should now register as hallucination
     state["discovered_flags"]["sglang"]["backend_flags"] = [
         "--known-flag-a", "--known-flag-b",  # drop --known-flag-c
     ]

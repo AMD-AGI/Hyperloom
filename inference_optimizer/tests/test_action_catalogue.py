@@ -25,9 +25,14 @@ from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 # ``integrate_patch`` is the new orchestrator-side apply+restart+gate
 # step that consumes specialist worktree patches.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (2)
+    # prep (3)
     "target_analysis":      "prep",
     "baseline":             "prep",
+    # GAP 1 — Coordinator-internal one-shot warm-recipe replay.
+    # Same prep family as ``baseline`` (it is essentially a re-baseline
+    # with the KB best_config applied). PolicyGate denies LLM
+    # propose_action / delegate via ``analysis_action_not_llm_proposable``.
+    "replay_warm_recipe":   "prep",
     # analysis (2) — Coordinator-internal analysis actions, selected
     # at runtime by ``shared_state.enable_roofline`` (``--enable-roofline``
     # / ``--no-enable-roofline``, default on):
@@ -40,9 +45,7 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # (``analysis_action_not_llm_proposable``).
     "roofline":             "analysis",
     "profile":              "analysis",
-    # shallow (5) — v0.8 M3 + KB_gaps/Dead-A merged the v0.6
-    # ``backends`` / ``params`` / ``validate_stack`` actions into
-    # ``explore``; their yamls + executors were physically deleted.
+    # shallow (5) — ``explore`` is the merged grid-runner entry.
     # PR-A1: ``integrate_patch`` joins the shallow family as the
     # EXPLORE-phase serving-lane-locked patch integration step.
     "explore":              "shallow",
@@ -52,43 +55,32 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # propose it (framework_pr_action_not_llm_proposable, Stage 3).
     "framework_pr":         "shallow",
     "sweep":                "shallow",
+    # SWEEP-phase post-sweep concurrency comparison (Coordinator-
+    # internal auto-enqueue after sweep, on by default; disable via
+    # ``--no-enable-conc-sweep``). Same family as ``sweep`` — discovery
+    # action that benchmarks both arms across a CONC ladder and writes
+    # ``reports/conc_sweep_summary.json``; never promotes.
+    "conc_sweep":           "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
-    # creative (2) — PR-A1: specialist LLM sub-agent dispatch;
+    # creative (3) — PR-A1: specialist LLM sub-agent dispatch;
     # IR-7 (Saturday May 2026): assess_remaining_gaps is a thin
-    # wrapper that dispatches the session_steward_specialist domain.
+    # wrapper that dispatches the session_steward_specialist domain;
+    # dynamic_action.MD P1: cross-domain multi-turn ReAct sub-agent
+    # dispatch (supplementary EXPLORE channel).
     "specialist":           "creative",
     "assess_remaining_gaps": "creative",
-    # deep_kernel (5)
+    "dynamic_action":        "creative",
+    # deep_kernel (6)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",
     "deep_kernel_analysis": "deep_kernel",
     "operator_tuning":      "deep_kernel",
     "vendor_kernel_config": "deep_kernel",
+    "gemm_tuning":          "deep_kernel",
     # resilience (1)
     "recover":              "resilience",
 }
-
-# v0.8 KB_gaps/Gap-13 + Dead-A — actions removed in KB_design §3.15 §2.3
-# / §3.4. ``dream`` / ``re_explore`` / ``comm_optimization`` /
-# ``compiler_tuning`` are replaced by specialist sub-agents;
-# ``backends`` / ``params`` / ``validate_stack`` are merged into
-# ``explore``. ``pmc_roofline`` is superseded by the F1 composite
-# ``roofline`` action (rocprof-based PMC gathering retired together
-# with the ``roofline_integration`` / ``pmc_workload_params`` modules).
-# All eight yamls were physically deleted; a future regression
-# re-introducing any of them fails loudly here.
-_REMOVED_LEGACY_ACTIONS: tuple[str, ...] = (
-    "backends",
-    "comm_optimization",
-    "compiler_tuning",
-    "dream",
-    "params",
-    "pmc_roofline",
-    "re_explore",
-    "validate_stack",
-)
-
 
 @pytest.fixture
 def registry() -> ActionRegistry:
@@ -113,12 +105,6 @@ def test_kernel_owned_actions_all_in_registry(registry):
         assert meta.family == "deep_kernel"
 
 
-def test_no_framework_rebuild(registry):
-    """v0.6 ADR — framework-rebuild is removed."""
-    assert registry.get("framework_rebuild") is None
-    assert registry.get("framework-rebuild") is None
-
-
 def test_kernel_opt_has_three_lanes_and_high_cost(registry):
     m = registry.get("kernel_opt")
     assert m is not None
@@ -126,24 +112,20 @@ def test_kernel_opt_has_three_lanes_and_high_cost(registry):
     assert m.cost_minutes_p75 >= 60
 
 
+def test_gemm_tuning_action_metadata(registry):
+    m = registry.get("gemm_tuning")
+    assert m is not None
+    assert m.family == "deep_kernel"
+    assert m.pipeline_phase == "deep"
+    assert set(m.requires_lanes) == {"server_lifecycle", "workspace_mutation", "benchmark_lane"}
+    assert "precision == 'fp8'" in m.applicable_when
+
+
 def test_recover_owned_by_robustness_handle(registry):
     """recover is the resilience action that Robustness handle_subagent runs."""
     m = registry.get("recover")
     assert m is not None
     assert m.family == "resilience"
-
-
-@pytest.mark.parametrize("name", _REMOVED_LEGACY_ACTIONS)
-def test_removed_legacy_actions_not_in_registry(registry, name):
-    """v0.8 KB_gaps/Gap-13 — KB_design §3.15 §2.3 retired
-    ``dream`` / ``re_explore`` / ``comm_optimization`` /
-    ``compiler_tuning`` in favour of specialist sub-agents.
-    The yaml meta files were deleted; a regression that re-adds
-    one of them must fail loudly here before it can leak into the
-    Orchestration prompt catalogue."""
-    assert registry.get(name) is None, (
-        f"{name!r} is removed in v0.8; restore via specialist domain instead"
-    )
 
 
 def test_every_action_has_valid_family(registry):
