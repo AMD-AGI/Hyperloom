@@ -6,27 +6,20 @@ NOT fall back to /wekafs/HyperloomV2 — those trees drift and are not
 reproducible. If clone fails: ABORT with gain_pct=0.0 and
 actions_taken=["aborted: source checkout failed"].
 
-  # If Claw mounted USER_DATA_PATH on wekafs, align RESULT_DIR to it so the
-  # V2 session_dir and its artifacts share one persistent tree.
-  case "${USER_DATA_PATH:-}" in
-    /hyperloom/*|/wekafs/*)
-      : "${RESULT_DIR:=$USER_DATA_PATH}"
-      echo "[CI_PATH] aligned RESULT_DIR=$RESULT_DIR with USER_DATA_PATH (already persistent in wekafs)"
-      ;;
-    *)
-      : "${RESULT_DIR:=/workspace/hyperloom/}"
-      echo "[CI_PATH] RESULT_DIR=$RESULT_DIR is sandbox-ephemeral; the V2 session_dir under wekafs is the persistent copy CI reads"
-      ;;
-  esac
-  export RESULT_DIR
+  # Production: USER_DATA_PATH is the wekafs path Claw mounts for this run.
+  # The V2 session_dir + audit files live directly under it (already
+  # persistent — CI reads them straight from wekafs, no copy needed).
+  : "${USER_DATA_PATH:=/workspace/hyperloom}"
+  export USER_DATA_PATH
+  echo "[CI_PATH] USER_DATA_PATH=$USER_DATA_PATH (persistent session + artifact root)"
   export HYPERLOOM_SOURCE_REPO="${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}"
   export HYPERLOOM_SOURCE_REF="${HYPERLOOM_SOURCE_REF:-main}"
-  # Clone OUTSIDE $RESULT_DIR so the ~100MB shallow checkout is not mirrored
-  # into the persistent tree on every run. The audit files written below
-  # (hyperloom_source_commit.txt + source_commits.json) still live in
-  # $RESULT_DIR so they remain with the session.
+  # Clone OUTSIDE $USER_DATA_PATH so the ~100MB shallow checkout is not
+  # mirrored into the persistent tree on every run. The audit files written
+  # below (hyperloom_source_commit.txt + source_commits.json) still live
+  # under $USER_DATA_PATH so they remain with the session.
   export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/workspace/Hyperloom-main}"
-  mkdir -p "$RESULT_DIR"
+  mkdir -p "$USER_DATA_PATH"
   mkdir -p "$(dirname "$HYPERLOOM_SOURCE_DIR")"
   rm -rf "$HYPERLOOM_SOURCE_DIR"
   # 1) shallow clone main (always works regardless of HYPERLOOM_SOURCE_REF).
@@ -45,7 +38,7 @@ actions_taken=["aborted: source checkout failed"].
     git checkout --detach FETCH_HEAD
   fi
   HYPERLOOM_SOURCE_COMMIT=$(git rev-parse HEAD)
-  printf '%s\n' "$HYPERLOOM_SOURCE_COMMIT" > "$RESULT_DIR/hyperloom_source_commit.txt"
+  printf '%s\n' "$HYPERLOOM_SOURCE_COMMIT" > "$USER_DATA_PATH/hyperloom_source_commit.txt"
   python3 - <<'PY'
 import json, os, subprocess
 def git_out(args):
@@ -54,7 +47,7 @@ def git_out(args):
     except Exception:
         return ""
 source_dir = os.environ.get("HYPERLOOM_SOURCE_DIR", "")
-result_dir = os.environ.get("RESULT_DIR", "/workspace/hyperloom/")
+result_dir = os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")
 # Strip the embedded token from the remote URL we record (the token is OK
 # inside the sandbox env but should never end up in a persisted artifact).
 def _sanitize(url: str) -> str:

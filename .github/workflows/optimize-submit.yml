@@ -290,7 +290,10 @@ jobs:
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
-          INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours }}
+          # Schedule runs the production pool at an 8h per-task optimizer
+          # budget (matches the 8-hour cron cadence); dispatch keeps its input
+          # (default 12).
+          INPUT_MAX_HOURS:        ${{ github.event_name == 'schedule' && '8' || github.event.inputs.max_hours }}
           # Cron rotates through the production pool — operators can't go
           # back and re-fetch sandbox state after the fact, so force
           # `--all-artifacts=true` on schedule. workflow_dispatch keeps
@@ -328,7 +331,7 @@ jobs:
           # for these two critical values. SaFE consumes them and renders the
           # generated prompt tail consistently with the CI prefix.
           ARGS+=(--max-hours "${INPUT_MAX_HOURS:-12}")
-          ARGS+=(--results-path '$RESULT_DIR')
+          ARGS+=(--results-path '$USER_DATA_PATH')
           # Hard guarantee: SaFE promptPrefix MUST be non-empty. Workflow
           # input is only populated on workflow_dispatch — for schedule
           # trigger we fall back to ci/prompt_prefix.txt (single source of
