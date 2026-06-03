@@ -865,34 +865,6 @@ class Coordinator:
         except ValueError:
             self._backend_error_streak_threshold = 5
 
-        # Per-agent consecutive ``BackendError`` streak. Successful turns
-        # reset the counter for that agent; a streak crossing
-        # ``_backend_error_streak_threshold`` records a single
-        # ``backend_unhealthy`` observation so operators (and the
-        # robustness reactor, which tails Coordinator events) notice the
-        # subprocess transport is degraded — particularly relevant for
-        # the robustness-agent / critic-agent subprocess backends whose
-        # in-loop failures otherwise would only show up as scattered
-        # ``backend_error`` events. The escalation observation fires once
-        # per crossing, then the counter must reset and re-arm before it
-        # can fire again, so we never spam the inbox.
-        self._backend_error_streak: dict[str, int] = {
-            name: 0 for name in self.role_registry
-        }
-        self._backend_error_alarm_armed: dict[str, bool] = {
-            name: True for name in self.role_registry
-        }
-        try:
-            self._backend_error_streak_threshold: int = max(
-                1,
-                int(os.environ.get(
-                    "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-                    "5",
-                )),
-            )
-        except ValueError:
-            self._backend_error_streak_threshold = 5
-
         # Stable tick order derived from the live role_registry. Must NOT
         # use the module-level `roles_for_run()` which is a cached hardcoded
         # tuple containing "kernel" even when --no-kernel stripped it.
@@ -4389,6 +4361,26 @@ class Coordinator:
     # ==================================================================
     # Bounded test interface
     # ==================================================================
+    async def _replay_resume_if_needed(self) -> None:
+        """Rebuild in-memory state once for a resumed session.
+
+        Shared by ``tick()`` and ``run()``: replay the event log, drain
+        proposals that were blocked on a now-complete analysis task, and
+        abandon non-terminal dynamic_action dispatches. No-op when the
+        session is fresh or already rebuilt.
+        """
+        if not (self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]):
+            return
+        await self.replay_for_resume()
+        # The analysis task may have completed during shutdown, so the
+        # normal drain hook in ``_promote_to_shared_state`` will not fire
+        # on restart; kick it explicitly to re-check the roofline gate.
+        if self._proposals_awaiting_roofline:
+            await self._drain_proposals_awaiting_roofline()
+        # Transition orphaned dynamic_action dispatches to ABANDONED and
+        # clean up their worktree + git branch.
+        self._resume_abandon_dynamic_actions()
+
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for **every** agent.
 
@@ -4401,21 +4393,7 @@ class Coordinator:
         non-empty session, it lazily reruns ``replay_for_resume()`` so
         in-memory state catches up before any new reactor work runs.
         """
-        if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
-            await self.replay_for_resume()
-            # Replay rebuilt ``_proposals_awaiting_roofline`` from
-            # ``proposal_materialize_blocked`` observations. If the
-            # analysis task already completed during shutdown, the
-            # normal drain hook in ``_promote_to_shared_state`` will
-            # not fire on restart, so kick the drain explicitly. It
-            # re-checks the roofline gate per proposal and re-queues
-            # any that are still blocked.
-            if self._proposals_awaiting_roofline:
-                await self._drain_proposals_awaiting_roofline()
-            # Sweep non-terminal dynamic_action dispatches: walk the
-            # artefact dir + SharedState summary, transition each to
-            # ABANDONED, and clean up the orphan worktree + git branch.
-            self._resume_abandon_dynamic_actions()
+        await self._replay_resume_if_needed()
         for _ in range(n):
             self.shared_state.increment_tick()
             for name in self._tick_roles:
@@ -4518,17 +4496,7 @@ class Coordinator:
                 log.info("Coordinator.run: signal handlers not installed (%s)", exc)
                 previous_handlers = {}
 
-        if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
-            await self.replay_for_resume()
-            # Same drain reasoning as ``tick(...)`` — see the comment
-            # there. Without this, a session that restarted while
-            # analysis was complete but deferred proposals were still
-            # queued would never re-dispatch them.
-            if self._proposals_awaiting_roofline:
-                await self._drain_proposals_awaiting_roofline()
-            # Symmetric dynamic_action resume sweep for the long-run
-            # entry point.
-            self._resume_abandon_dynamic_actions()
+        await self._replay_resume_if_needed()
 
         tick_n = 0
         stop_reason = ""
