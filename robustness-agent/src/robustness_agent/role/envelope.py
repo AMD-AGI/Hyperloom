@@ -199,6 +199,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "specialist_domain_empty_streak",
     "last_specialist",
     "research_lane_capacity",
+    "gpu_specialist_capacity",
     # phase-machine escalation plumbing.
     "pending_escalate_hint",
     "last_consumed_escalate_hint",
