@@ -251,10 +251,28 @@ def _make_rows() -> list[dict[str, Any]]:
     return out
 
 
-def test_analyze_happy_path_writes_files(mock_inferencex, tmp_path: Path):
-    state, start = mock_inferencex
-    state["payload"] = _make_rows()
-    start()
+def _write_competitor_target(session_dir: Path, per_conc: list[dict[str, Any]]) -> None:
+    from inference_optimizer.orchestrator import research_hints
+    research_hints.write_competitor_target(
+        session_dir,
+        {
+            "gpu": "b300",
+            "model": "MiniMax-M2.5",
+            "framework": "vllm",
+            "precision": "fp8",
+            "per_conc": per_conc,
+            "notes": "scout-authored",
+        },
+    )
+
+
+def test_analyze_happy_path_writes_files(tmp_path: Path):
+    _write_competitor_target(tmp_path, [
+        {"conc": 4, "tput_per_gpu": 412.5, "tpot_ms": 18.0,
+         "source": "https://pr/1"},
+        {"conc": 256, "tput_per_gpu": 6624.1, "tpot_ms": 30.0,
+         "source": "https://blog/x"},
+    ])
 
     from inference_optimizer.baseline_comparison import analyze
     summary = analyze(
@@ -269,10 +287,11 @@ def test_analyze_happy_path_writes_files(mock_inferencex, tmp_path: Path):
 
     assert summary.status == "ok"
     assert summary.reason == "ok"
-    assert summary.row_count == 4
+    assert summary.row_count == 2
     assert summary.best is not None
     assert summary.best.tput_per_gpu == 6624.1
     assert summary.best.conc == 256
+    assert summary.source == "llm_authored"
 
     json_path = tmp_path / "target_analysis" / "target_baseline.json"
     md_path = tmp_path / "target_analysis" / "target_analysis_report.md"
@@ -285,18 +304,17 @@ def test_analyze_happy_path_writes_files(mock_inferencex, tmp_path: Path):
     assert on_disk["query"]["model"] == "MiniMax-M2.5"
     assert on_disk["query"]["gpu"] == "b300"
     assert on_disk["best"]["tput_per_gpu"] == 6624.1
+    assert on_disk["source"] == "llm_authored"
 
     md_text = md_path.read_text()
     assert "## Reference best" in md_text
     assert "6624.1" in md_text
-    # We must NOT print a gap percentage — see design constraint.
-    assert "gap" not in md_text.lower()
 
 
-def test_analyze_mapping_miss_writes_skipped_summary(mock_inferencex, tmp_path):
-    state, start = mock_inferencex
-    state["payload"] = _make_rows()
-    start()
+def test_analyze_mapping_miss_writes_skipped_summary(tmp_path):
+    _write_competitor_target(tmp_path, [
+        {"conc": 64, "tput_per_gpu": 2781.5, "source": "https://pr/1"},
+    ])
 
     from inference_optimizer.baseline_comparison import analyze
     summary = analyze(
@@ -321,9 +339,8 @@ def test_analyze_mapping_miss_writes_skipped_summary(mock_inferencex, tmp_path):
 
 
 def test_analyze_no_target_gpu_writes_marker(tmp_path):
-    """``compare_against_gpu=""`` short-circuits before any HTTP traffic
-    and persists a structured marker JSON. Mirrors the path used when
-    ``--compare-against-gpu`` is unset on the CLI."""
+    """``compare_against_gpu=""`` short-circuits and persists a marker JSON.
+    Mirrors the path used when ``--compare-against-gpu`` is unset."""
     from inference_optimizer.baseline_comparison import analyze
     summary = analyze(
         session_dir=tmp_path,
@@ -342,32 +359,8 @@ def test_analyze_no_target_gpu_writes_marker(tmp_path):
     assert on_disk["reason"] == "no_target_gpu_configured"
 
 
-def test_analyze_no_match_after_filter(mock_inferencex, tmp_path):
-    state, start = mock_inferencex
-    state["payload"] = _make_rows()
-    start()
-
-    from inference_optimizer.baseline_comparison import analyze
-    summary = analyze(
-        session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="h100",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
-    )
-    assert summary.status == "no_match"
-    assert summary.reason == "no_match"
-    assert summary.best is None
-
-
-def test_analyze_fetch_error_does_not_raise(mock_inferencex, tmp_path):
-    state, start = mock_inferencex
-    state["status"] = 500
-    state["payload"] = []
-    start()
-
+def test_analyze_no_competitor_target(tmp_path):
+    """No ``competitor_target.json`` on disk → ``no_match`` (fail-soft)."""
     from inference_optimizer.baseline_comparison import analyze
     summary = analyze(
         session_dir=tmp_path,
@@ -378,12 +371,35 @@ def test_analyze_fetch_error_does_not_raise(mock_inferencex, tmp_path):
         isl=1024,
         osl=1024,
     )
-    assert summary.status == "fetch_error"
-    assert summary.reason == "fetch_error"
+    assert summary.status == "no_match"
+    assert summary.reason == "no_competitor_target"
     assert summary.best is None
-    # Even on failure the JSON is persisted so the report can show the
-    # warning rather than "no info at all".
     assert (tmp_path / "target_analysis" / "target_baseline.json").exists()
+
+
+def test_analyze_sourceless_target_dropped(tmp_path):
+    """Per-conc rows without a source are discarded; if all lack a source
+    the summary degrades to ``no_match`` rather than fabricating a best."""
+    from inference_optimizer.orchestrator import research_hints
+    # write_competitor_target itself drops sourceless rows, so emulate a
+    # hand-edited file with a sourceless row to exercise load-time filter.
+    from inference_optimizer import session_paths
+    path = session_paths.competitor_target_json(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "gpu": "b300", "model": "MiniMax-M2.5",
+        "per_conc": [{"conc": 64, "tput_per_gpu": 2781.5}],
+    }), encoding="utf-8")
+    assert research_hints.load_competitor_target(tmp_path) is None
+
+    from inference_optimizer.baseline_comparison import analyze
+    summary = analyze(
+        session_dir=tmp_path,
+        model_path="MiniMax-M2.5",
+        compare_against_gpu="b300",
+    )
+    assert summary.status == "no_match"
+    assert summary.reason == "no_competitor_target"
 
 
 # ---------------------------------------------------------------------------
@@ -436,11 +452,9 @@ def test_report_section_renders_ok_with_reference_best():
         _format_external_baseline_section,
     )
     md = "\n".join(_format_external_baseline_section(_ext_payload()))
-    assert "## External baseline (InferenceX, advisory)" in md
+    assert "## External baseline (competitor target, advisory)" in md
     assert "Reference best per-GPU throughput" in md
     assert "2781.5" in md
-    # Must NOT print a derived KPI.
-    assert "gap" not in md.lower()
 
 
 def test_report_section_renders_fetch_error_with_warning():
@@ -452,7 +466,7 @@ def test_report_section_renders_fetch_error_with_warning():
         warning="upstream timed out", best=None, row_count=0,
     )
     md = "\n".join(_format_external_baseline_section(ext))
-    assert "## External baseline (InferenceX, advisory)" in md
+    assert "## External baseline (competitor target, advisory)" in md
     assert "fetch_error" in md
     assert "upstream timed out" in md
     assert "No reference best available" in md

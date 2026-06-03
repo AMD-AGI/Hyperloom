@@ -66,12 +66,13 @@ def test_specialist_domains_m5_covers_all_six():
     logs ``generic prompt template`` notes for M6-only domains.
 
     IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow. We
-    keep the assertion shape (M5 still covers the full catalogue) but
-    bump the expected count.
+    ``session_steward_specialist`` for the honest self-stop flow; the
+    read-only ``research_scout_specialist`` is the 8th. We keep the
+    assertion shape (M5 still covers the full catalogue) but bump the
+    expected count.
     """
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 7
+    assert len(SPECIALIST_DOMAINS_M5) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -318,11 +319,12 @@ def _valid_done_payload(
 # ===========================================================================
 def test_specialist_domains_catalogue_has_six_entries():
     """IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow.
-    The test name stays for git-blame continuity but the assertion
-    tracks the actual count.
+    ``session_steward_specialist`` for the honest self-stop flow; the
+    read-only ``research_scout_specialist`` is the 8th. The test name
+    stays for git-blame continuity but the assertion tracks the actual
+    count.
     """
-    assert len(SPECIALIST_DOMAINS) == 7
+    assert len(SPECIALIST_DOMAINS) == 8
     assert SPECIALIST_DOMAIN_KEYS == frozenset(
         d.key for d in SPECIALIST_DOMAINS
     )
@@ -415,8 +417,8 @@ def test_R2_unknown_domain_denied(gate):
                 },
             },
         ))
-    assert exc.value.rule == "specialist_dispatch_source"
-    assert "domain" in (exc.value.hint or "")
+    assert exc.value.rule == "specialist_unknown_domain"
+    assert "tag" in (exc.value.hint or "")
 
 
 def test_R2_missing_gap_denied(gate):
@@ -919,5 +921,6 @@ def test_research_lane_capacity_is_core_state_field():
     """LLM cannot raise research_lane_capacity mid-flight."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
     assert "research_lane_capacity" in CORE_STATE_FIELDS
+    assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
     assert "specialist_rounds" in CORE_STATE_FIELDS
     assert "last_specialist" in CORE_STATE_FIELDS

@@ -82,6 +82,7 @@ def _make_fake_claude(
       (whatever directory is passed via ``--add-dir``) and exits 0.
     * ``done_with_patch``: writes done.json AND a patch under
       ``<worktree>/patches/001_test.patch`` referenced in done.patches_written.
+    * ``done_with_env``: writes a done file that echoes GPU visibility env vars.
     * ``crash``: exits non-zero without writing anything.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -112,7 +113,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 WORKTREE="${{ADD_DIRS[0]:-}}"
-WORKSPACE="${{ADD_DIRS[1]:-${{ADD_DIRS[0]:-}}}}"
+WORKSPACE="${{ADD_DIRS[1]:-}}"
+if [[ -n "$WORKTREE" && -f "$WORKTREE/prompt.md" ]]; then
+  WORKSPACE="$WORKTREE"
+fi
 """
     if behavior == "done_only":
         body += f"""
@@ -148,6 +152,24 @@ new file mode 100644
 EOF
 cat > "$WORKSPACE/specialist_done.json" <<'EOF'
 {patch_payload}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_env":
+        body += """
+cat > "$WORKSPACE/specialist_done.json" <<EOF
+{
+  "gap_canonical_id": "gap.test.example",
+  "domain": "serving_specialist",
+  "proposal_set": [],
+  "patches_written": [],
+  "empty": true,
+  "summary": "env echo",
+  "confidence": 0.0,
+  "hip_visible": "$HIP_VISIBLE_DEVICES",
+  "cuda_visible": "$CUDA_VISIBLE_DEVICES",
+  "rocr_visible": "$ROCR_VISIBLE_DEVICES"
+}
 EOF
 exit 0
 """
@@ -222,6 +244,15 @@ def test_kb_write_tools_remain_denied():
         "mcp__cortex_kb__propose_point",
     ):
         assert kb_tool in SPECIALIST_TOOL_DENYLIST
+
+
+def test_task_allowed_tools_override_default_patch_tools():
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig())
+    tools = runner._resolve_tools(["Read", "Grep", "Glob", "Write"])
+    assert tools == ("Read", "Grep", "Glob", "Write")
+    assert "Edit" not in tools
+    assert "MultiEdit" not in tools
+    assert "Bash" not in tools
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +333,76 @@ async def test_subprocess_path_harvests_done_file(
     assert (workspace / "specialist_done.json").exists()
     assert (workspace / "process.log").exists()
     assert (workspace / "worktree").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_subprocess_path_injects_allocated_gpu_env(
+    tmp_path: Path, fake_framework_repo: Path,
+):
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_env")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    config = SpecialistSubprocessConfig(
+        claude_executable=str(fake_claude),
+        model="",
+        framework_source_roots=(str(fake_framework_repo),),
+        per_turn_max_seconds=30.0,
+        poll_interval_seconds=0.2,
+    )
+    runner = SpecialistRunner(
+        subprocess_config=config,
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    ctx = _make_runner_ctx("t-spec-gpu")
+    ctx.extra["gpu_ids"] = [2, 3]
+
+    result = await runner.run(ctx)
+
+    assert result.status == "succeeded"
+    assert result.specialist_done["hip_visible"] == "2,3"
+    assert result.specialist_done["cuda_visible"] == "2,3"
+    assert result.specialist_done["rocr_visible"] == "2,3"
+    assert result.specialist_done["allocated_gpu_ids"] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_readonly_research_scout_skips_worktree(
+    tmp_path: Path, fake_framework_repo: Path,
+):
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    config = SpecialistSubprocessConfig(
+        claude_executable=str(fake_claude),
+        model="",
+        framework_source_roots=(str(fake_framework_repo),),
+        per_turn_max_seconds=30.0,
+        poll_interval_seconds=0.2,
+    )
+    runner = SpecialistRunner(
+        subprocess_config=config,
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    ctx = _make_runner_ctx("t-spec-scout")
+    ctx.task.params.update({
+        "domain": "research_scout_specialist",
+        "gap_canonical_id": "gap.research_scout.round0",
+        "readonly": True,
+    })
+    ctx.task.allowed_tools = ["Read", "Grep", "Glob", "Write"]
+
+    result = await runner.run(ctx)
+
+    assert result.status == "succeeded"
+    workspace = session_dir / "runs" / "specialist" / "t-spec-scout"
+    assert (workspace / "specialist_done.json").exists()
+    assert not (workspace / "worktree").exists()
 
 
 @pytest.mark.asyncio
