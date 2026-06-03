@@ -40,8 +40,14 @@ from typing import Any, ClassVar, Mapping
 # requirement is the legacy ``_post`` / ``propose_point`` /
 # ``enabled`` surface — which under the v2 design is never wired
 # (cli passes ``cortex_kb=None``), so the cortex_* methods on this
-# class are dead code retained only for grep-stability with old
-# call-sites.
+# class stay inert in production: ``cortex_enabled`` is False and the
+# specialist KB warmup short-circuits to an empty subgraph.
+#
+# Compat (decision pending): the cortex_* methods + ``cortex_kb_constants``
+# are only exercised by tests that inject a fake v1 client. Remove them
+# once the "drop old Cortex v1 graph KB" decision lands; the canonical
+# cross-session knowledge path is RecipeKB (``recipe_kb/``), not this
+# graph surface.
 from ..paths import asset_actions_dir
 from .pr_monitor import (
     DEFAULT_PR_FEED_PER_REPO_LIMIT,
