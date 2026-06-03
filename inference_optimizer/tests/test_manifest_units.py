@@ -86,6 +86,21 @@ class TestDescribeDep:
         assert out["commit"] == "abc1234"
         assert out["remote"] == "https://x/y.git"
 
+    def test_first_env_var_wins(self, tmp_path, monkeypatch):
+        """MAGPIE_PATH (preferred) wins over the legacy MAGPIE_DIR fallback."""
+        monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "preferred"))
+        monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "legacy"))
+        out = mf._describe_dep("MAGPIE_PATH", "MAGPIE_DIR")
+        assert out["path"] == str(tmp_path / "preferred")
+
+    def test_falls_back_to_legacy_env_var(self, tmp_path, monkeypatch):
+        """Only the legacy MAGPIE_DIR is set → fallback is honoured
+        (backward compatibility for the MAGPIE_DIR → MAGPIE_PATH rename)."""
+        monkeypatch.delenv("MAGPIE_PATH", raising=False)
+        monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "legacy"))
+        out = mf._describe_dep("MAGPIE_PATH", "MAGPIE_DIR")
+        assert out["path"] == str(tmp_path / "legacy")
+
 
 # ---------------------------------------------------------------------------
 # _detect_image
