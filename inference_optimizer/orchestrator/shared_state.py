@@ -18,6 +18,10 @@ fields:
                                 structured + free-text notes) loaded from
                                 the launcher's ``$USER_DATA_PATH/model_arch.json``;
                                 prompt-context only, no deterministic gating
+    model_architectures list  — config.json ``architectures``; stamped into
+                                the recipe-snapshot ``extras`` as a KB tag
+    model_type          str   — config.json ``model_type``; stamped into
+                                the recipe-snapshot ``extras`` as a KB tag
     target_summary      str   — set by `target_analysis` action
     baseline_tput       float — tok/s/GPU after `baseline` action
     baseline_accuracy   float — GSM8K score after `baseline`
@@ -316,6 +320,16 @@ class SharedState:
     # filter / framework gap token / recipe key stay on ``model_class``).
     # Empty dict means "no profile available"; renderers omit the block.
     model_arch: dict = field(default_factory=dict)
+    # KB tags lifted verbatim from the model weights' ``config.json``
+    # (``architectures`` list + ``model_type`` string). Populated at
+    # fresh-launch by ``cli._load_model_config_tags``; resume rehydrates
+    # the persisted values from state.json. Stamped into the recipe-snapshot
+    # ``extras`` on every KB write (T0 anchor + KEEP/REVERT/CLOSE amend) so a
+    # fine-tuned model carries the same architecture identity as the base
+    # model it derives from. Empty (``[]`` / ``""``) means "config.json
+    # absent or unreadable".
+    model_architectures: list[str] = field(default_factory=list)
+    model_type: str = ""
     framework: str = ""
     gpu_type: str = ""
     # Workload metadata mirrored from manifest.json at session start
@@ -552,6 +566,10 @@ class SharedState:
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
+    # Last Coordinator-side exception caught by the tick-loop resilience
+    # guard. Coordinator-only; gives postmortems a traceback without relying
+    # on harness stdout.
+    last_tick_exception: dict[str, Any] = field(default_factory=dict)
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
@@ -1740,6 +1758,29 @@ class SharedState:
     def increment_crash_count(self, by: int = 1) -> int:
         self.crash_count += by
         return self.crash_count
+
+    def record_tick_exception(
+        self,
+        *,
+        tick: int,
+        stage: str,
+        exc_type: str,
+        message: str,
+        traceback_text: str,
+        agent: str = "",
+    ) -> dict[str, Any]:
+        """Persist a compact Coordinator exception summary for postmortems."""
+        entry = {
+            "tick": int(tick or 0),
+            "ts": _now_iso(),
+            "stage": str(stage or ""),
+            "agent": str(agent or ""),
+            "type": str(exc_type or ""),
+            "message": str(message or "")[:1000],
+            "traceback": str(traceback_text or "")[:12000],
+        }
+        self.last_tick_exception = entry
+        return entry
 
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
         """Merge a non-empty changes dict into this state.

@@ -246,6 +246,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "policy_loop",
     "baseline_failed",
     "emergency",
+    "coordinator_exception",
     "signal",
     "unknown",
     "custom",
