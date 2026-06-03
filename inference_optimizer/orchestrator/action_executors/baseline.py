@@ -38,17 +38,24 @@ import importlib.util
 import json
 import logging
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from ...compat.payload_aliases import read_extra_server_args
 from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from ._grid_runner import sanitize_result_dir, sanitize_script_name
-from ._subprocess_kill import run_with_session_kill
+from ._subprocess_kill import (
+    _process_group_alive,
+    _signal_group,
+    run_with_session_kill,
+)
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -60,6 +67,43 @@ from .benchmark_result import (
 
 
 log = logging.getLogger(__name__)
+
+
+# Magpie's built-in InferenceX benchmark scripts that honour
+# ``MAGPIE_RUN_PHASE=server``/``client`` and therefore support the
+# server_lifecycle reuse protocol. Static mirror of Magpie's
+# ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` — duplicated (not imported) so
+# Hyperloom keeps no import-time dependency on Magpie internals (Magpie is
+# not importable in the unit-test sandbox). Keep in sync with Magpie. The
+# cold-start double-run guard only engages when the resolved benchmark
+# script is one of these; any other script (model-specific InferenceX
+# scripts, exotic GPU types without a generic Magpie script) falls back to
+# the legacy single round. ``atom_*`` per AMD-AGI/Magpie#34 (atom-as-a-
+# framework requires that PR, which also ships the phase-aware atom
+# scripts, so listing them here can never outrun Magpie support).
+MAGPIE_BUILTIN_SCRIPTS = frozenset(
+    {
+        "vllm_mi300x.sh",
+        "vllm_mi355x.sh",
+        "sglang_mi300x.sh",
+        "sglang_mi355x.sh",
+        "atom_mi300x.sh",
+        "atom_mi355x.sh",
+    }
+)
+
+# Default HTTP port Magpie's server_lifecycle binds the persistent server
+# on when ``benchmark.envs.PORT`` is unset (matches Magpie's
+# ``benchmarker._reuse_benchmark_port`` fallback). The double-run guard
+# pins it explicitly into the per-round YAML so Magpie's reuse keying and
+# our defensive teardown agree on the same port.
+BASELINE_REUSE_PORT_DEFAULT = 8888
+
+# Server-boot budget for the persistent server phase (server_lifecycle).
+# In lifecycle mode Magpie applies ``timeout_seconds`` to the client phase
+# only and gates server startup by this value. Matches Magpie's own
+# default; override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
+BASELINE_SERVER_READY_TIMEOUT_SEC = 2700
 
 
 # Legacy module-level constant kept pointing at the sglang yaml so existing
@@ -377,6 +421,331 @@ class BaselineExecutor:
             hook_result.setdefault("output_dir", str(output_dir))
             return hook_result
 
+        # Cold-start "warmup artifact" guard. The baseline action is the
+        # FIRST step of the optimization flow, so the server is always
+        # freshly booted for the model under test. The first benchmark
+        # window therefore pays one-time cold-start costs (kernel JIT /
+        # torch.compile first-compile, CUDA/HIP-graph first-capture,
+        # KV-cache cold allocation, GPU not yet at boost clocks); the
+        # client-side ``--num-warmups`` (hardcoded ``2 * CONC`` in
+        # InferenceX's bench scripts) is far too small to absorb those.
+        # Taking that contaminated number as the baseline inflates every
+        # later gain into a fictitious 1600%+ "improvement" (see
+        # hyperloom_models_jun1.csv rows tagged ``warmup``).
+        #
+        # Fix: run the benchmark TWICE against the SAME persistent server
+        # via Magpie's ``server_lifecycle`` reuse protocol. Round 1 boots
+        # the server and runs a full client load (paying every one-time
+        # cold cost); round 2 re-attaches to the now-hot server (client
+        # only, no restart) and its throughput is the clean baseline. This
+        # eliminates ALL cold-start contamination — not just on-disk JIT
+        # caches but also CUDA-graph capture, allocator and clock warmup —
+        # because round 2 never restarts the server.
+        #
+        # Eligibility (else fall back to the legacy single round):
+        #   * env ``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN`` not disabled,
+        #   * single-node (server_lifecycle is local-only; multi-node uses
+        #     a long-lived RayJob server with no per-benchmark cold start),
+        #   * the resolved benchmark script is a Magpie built-in that
+        #     honours ``MAGPIE_RUN_PHASE`` (server_lifecycle requirement),
+        #   * the profiler is off (server_lifecycle + persistent server is
+        #     incompatible with torch_profiler unless cleanup=true).
+        lifecycle = self._resolve_lifecycle_params(materialized_config_path)
+        double_run = self._double_run_enabled() and lifecycle["eligible"]
+
+        common = {
+            "timeout_sec": timeout_sec,
+            "override_result_dir": override_result_dir,
+            "resolved_model": resolved_model,
+            "materialized_config_path": materialized_config_path,
+            "params": params,
+            "ctx": ctx,
+        }
+
+        if not double_run:
+            if self._double_run_enabled() and not lifecycle["eligible"]:
+                log.info(
+                    "baseline_executor: cold-start double-run not eligible "
+                    "(%s); running single round.", lifecycle["reason"],
+                )
+            return await self._run_single_benchmark(
+                config_path=config_path, output_dir=output_dir, **common,
+            )
+
+        framework = lifecycle["framework"]
+        port = lifecycle["port"]
+        # pid_dir is SHARED across both rounds (Magpie keys the persistent
+        # server by ``<pid_dir>/<framework>_<port>.{pid,json}``) so round 2
+        # discovers the server round 1 left running. Use the task root so
+        # it is isolated per baseline task and torn down with it.
+        pid_dir = output_dir
+        try:
+            # Round 1 (warmup): boot + run server, leave it running
+            # (cleanup=false) so round 2 can re-attach. Throughput is
+            # discarded — it carries the cold-start contamination.
+            warmup_dir = output_dir / "warmup_round"
+            warmup_cfg = self._write_lifecycle_config(
+                materialized_config_path, warmup_dir,
+                cleanup=False, pid_dir=pid_dir, port=port,
+            )
+            log.info(
+                "baseline_executor: cold-start guard — warmup round "
+                "(discarded, boots persistent server) in %s", warmup_dir,
+            )
+            warmup_result = await self._run_single_benchmark(
+                config_path=warmup_cfg, output_dir=warmup_dir, **common,
+            )
+            if warmup_result.get("status") != "succeeded":
+                # Hard failure in the warmup round (server never came up,
+                # timeout, etc.) almost certainly recurs, so skip the
+                # measured round. The finally block tears down any server
+                # the warmup round may have left half-booted.
+                warmup_result.setdefault("nonfatal_warnings", [])
+                warmup_result["nonfatal_warnings"].append(
+                    "baseline_warmup_round_failed",
+                )
+                log.warning(
+                    "baseline_executor: warmup round failed (error_class=%s)"
+                    "; skipping measured round",
+                    warmup_result.get("error_class"),
+                )
+                return warmup_result
+            warmup_tput = warmup_result.get("output_throughput")
+            warmup_runtime = warmup_result.get("subprocess_runtime_sec")
+
+            # Round 2 (measured): re-attach to the hot server (client
+            # only). cleanup=true tears the server down after this round
+            # on the happy path; the finally block is the safety net.
+            measure_dir = output_dir / "measure_round"
+            measure_cfg = self._write_lifecycle_config(
+                materialized_config_path, measure_dir,
+                cleanup=True, pid_dir=pid_dir, port=port,
+            )
+            log.info(
+                "baseline_executor: cold-start guard — measured baseline "
+                "round in %s (warmup tput=%.1f tok/s discarded, reusing "
+                "hot server)", measure_dir, warmup_tput or 0.0,
+            )
+            result = await self._run_single_benchmark(
+                config_path=measure_cfg, output_dir=measure_dir, **common,
+            )
+            if result.get("status") == "succeeded":
+                result.setdefault("nonfatal_warnings", [])
+                result["nonfatal_warnings"].append(
+                    "baseline_double_run_discarded_first",
+                )
+                result["warmup_round_tput"] = warmup_tput
+                # Overtime-kill anchor fix: the Coordinator promotes
+                # ``subprocess_runtime_sec`` into
+                # ``SharedState.baseline_runtime_sec``, which the
+                # ExploreExecutor turns into the per-variant soft-kill
+                # deadline (``baseline_runtime_sec * kill_ratio``). Explore
+                # variants each RESTART the server (full server-boot +
+                # client), but round 2 here reused the hot server
+                # (client-only), so its wall-clock is far too small an
+                # anchor and would soft-kill normal variants as
+                # KILLED_OVERTIME. Report round 1's FULL server-boot +
+                # client wall-clock as the anchor instead (it matches the
+                # explore variants' run profile); keep round 2's client-only
+                # time under a separate key for transparency / debugging.
+                if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
+                    result["measure_round_runtime_sec"] = result.get(
+                        "subprocess_runtime_sec",
+                    )
+                    result["subprocess_runtime_sec"] = round(
+                        float(warmup_runtime), 2,
+                    )
+                _hot = result.get("output_throughput") or 0.0
+                _cold = warmup_tput or 0.0
+                log.info(
+                    "baseline_executor: cold-start guard — measured "
+                    "baseline=%.1f tok/s (warmup=%.1f tok/s discarded; "
+                    "artifact would have been +%.0f%%)",
+                    _hot, _cold,
+                    ((_hot / _cold - 1.0) * 100.0) if _cold > 0 else 0.0,
+                )
+            return result
+        finally:
+            # Defensive teardown: guarantees no persistent server leaks
+            # regardless of which round failed. Idempotent — on the happy
+            # path round 2's cleanup=true already removed the pid/meta
+            # files, so this is a no-op.
+            self._teardown_lifecycle_server(
+                pid_dir=pid_dir, framework=framework, port=port,
+            )
+
+    @staticmethod
+    def _double_run_enabled() -> bool:
+        return os.environ.get(
+            "INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1",
+        ).strip().lower() not in ("0", "false", "no", "")
+
+    def _resolve_lifecycle_params(
+        self, materialized_config_path: Path,
+    ) -> dict[str, Any]:
+        """Inspect the materialized YAML to decide server_lifecycle
+        eligibility for the cold-start double-run.
+
+        Returns a dict with ``eligible`` (bool), ``framework`` (str),
+        ``port`` (int) and ``reason`` (str, populated when ineligible).
+        """
+        info: dict[str, Any] = {
+            "eligible": False,
+            "framework": "",
+            "port": BASELINE_REUSE_PORT_DEFAULT,
+            "reason": "",
+        }
+        try:
+            with Path(materialized_config_path).open(encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            info["reason"] = f"could not read materialized config: {exc}"
+            return info
+        bench = cfg.get("benchmark") or {}
+        info["framework"] = str(bench.get("framework") or "").lower()
+        envs = bench.get("envs") or {}
+        try:
+            info["port"] = int(envs.get("PORT", BASELINE_REUSE_PORT_DEFAULT))
+        except (TypeError, ValueError):
+            info["port"] = BASELINE_REUSE_PORT_DEFAULT
+
+        from ._multi_node_env import is_multi_node
+        if is_multi_node():
+            info["reason"] = "multi-node (server_lifecycle is local-only)"
+            return info
+
+        script_name = Path(str(bench.get("benchmark_script") or "")).name
+        if script_name not in MAGPIE_BUILTIN_SCRIPTS:
+            info["reason"] = (
+                f"benchmark_script={script_name!r} is not a Magpie built-in "
+                f"({sorted(MAGPIE_BUILTIN_SCRIPTS)})"
+            )
+            return info
+
+        profiler_on = bool(
+            (bench.get("profiler") or {})
+            .get("torch_profiler", {})
+            .get("enabled")
+        )
+        if profiler_on:
+            info["reason"] = "torch_profiler enabled (incompatible with reuse)"
+            return info
+
+        info["eligible"] = True
+        return info
+
+    def _write_lifecycle_config(
+        self,
+        base_config_path: Path,
+        dest_dir: Path,
+        *,
+        cleanup: bool,
+        pid_dir: Path,
+        port: int,
+    ) -> Path:
+        """Render a per-round YAML that injects ``benchmark.server_lifecycle``
+        on top of the materialized baseline config.
+
+        Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches to
+        the server round 1 left running. Only ``cleanup`` differs (round 1
+        persists the server, round 2 tears it down).
+        """
+        with Path(base_config_path).open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        bench = cfg.setdefault("benchmark", {})
+        ready_timeout = int(os.environ.get(
+            "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC",
+            BASELINE_SERVER_READY_TIMEOUT_SEC,
+        ))
+        bench["server_lifecycle"] = {
+            "enabled": True,
+            "cleanup": bool(cleanup),
+            "force_reuse": False,
+            "pid_dir": str(pid_dir),
+            "server_ready_timeout_s": ready_timeout,
+        }
+        # Pin PORT so Magpie's reuse keying and our teardown agree.
+        envs = bench.setdefault("envs", {})
+        envs["PORT"] = int(port)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out = Path(dest_dir) / "baseline_lifecycle.yaml"
+        with out.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+        return out
+
+    def _teardown_lifecycle_server(
+        self, *, pid_dir: Path, framework: str, port: int,
+    ) -> None:
+        """Best-effort teardown of a persistent server left by the
+        double-run rounds. Idempotent and never raises (safe in finally).
+
+        On the happy path round 2's ``cleanup=true`` already removed the
+        pid/meta files and killed the server, so this is a no-op. It only
+        does real work on the abnormal paths (warmup-round failure, an
+        exception between rounds, or a round 2 timeout that skipped
+        Magpie's own cleanup).
+        """
+        base = Path(pid_dir)
+        tag = f"{framework}_{port}"
+        pid_file = base / f"{tag}.pid"
+        meta_file = base / f"{tag}.json"
+        server_pid: int | None = None
+        server_pgid: int | None = None
+        try:
+            if pid_file.exists():
+                parts = pid_file.read_text(encoding="utf-8").split()
+                if parts:
+                    server_pid = int(parts[0])
+                if len(parts) > 1:
+                    server_pgid = int(parts[1])
+        except (OSError, ValueError):
+            # Best-effort: proceed with whatever (if anything) was parsed
+            # before the error. Teardown is defensive and must never raise.
+            pass
+
+        if server_pid is not None and os.name == "posix":
+            # The persistent server is setsid'd into its own session, so
+            # its pgid equals its pid unless the pid file recorded one.
+            pgid = server_pgid if server_pgid is not None else server_pid
+            _signal_group(pgid, signal.SIGTERM)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if not _process_group_alive(pgid):
+                    break
+                time.sleep(0.1)
+            if _process_group_alive(pgid):
+                _signal_group(pgid, signal.SIGKILL)
+            log.info(
+                "baseline_executor: lifecycle teardown — reaped persistent "
+                "server pgid=%d (%s:%d)", pgid, framework, port,
+            )
+        for p in (pid_file, meta_file):
+            try:
+                p.unlink()
+            except OSError:
+                # File already gone (round 2 cleanup=true removed it) or
+                # unremovable; either way teardown must not raise.
+                pass
+
+    async def _run_single_benchmark(
+        self,
+        *,
+        config_path: Path,
+        output_dir: Path,
+        timeout_sec: int,
+        override_result_dir: str | None,
+        resolved_model: str,
+        materialized_config_path: Path,
+        params: dict[str, Any],
+        ctx: RunnerContext,
+    ) -> dict[str, Any]:
+        """Run one Magpie benchmark subprocess and parse its result.
+
+        This is the single-round execution core extracted from
+        ``__call__`` so the cold-start guard can invoke it twice (warmup
+        round + measured round). ``output_dir`` is the per-round slot the
+        Magpie workspace and harvested artifacts land under.
+        """
         cmd = [
             self.magpie_python, "-m", "Magpie", "-v", "benchmark",
             "--benchmark-config", str(config_path),

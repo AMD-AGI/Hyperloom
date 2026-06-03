@@ -181,21 +181,90 @@ def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
     return best
 
 
+def _compute_within_and_gap(
+    *,
+    peak: float,
+    achieved: float,
+) -> tuple[float | None, float | None]:
+    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both
+    ``None`` when either input is non-positive so the renderer stays
+    placeholder-friendly."""
+    if peak <= 0 or achieved <= 0:
+        return None, None
+    within = round(achieved / peak * 100.0, 2)
+    return within, round(100.0 - within, 2)
+
+
 def build_roofline_snapshot(
     *,
     snapshot_id: int | None,
     ts: str,
     analysis_md_path: str,
+    theoretical_peak_tok_per_sec: float = 0.0,
+    achieved_tok_per_sec: float = 0.0,
+    mem_ceiling_tok_per_sec: float = 0.0,
+    cmp_ceiling_tok_per_sec: float = 0.0,
+    bound_kind: str = "unknown",
 ) -> dict[str, Any]:
-    """Materialise one side (baseline or latest) of the comparison."""
+    """Materialise one side (baseline or latest) of the comparison.
+
+    ``theoretical_peak_tok_per_sec`` is the two-sided roofline ceiling
+    ``min(T_mem, T_cmp)`` produced by
+    ``roofline_ceiling.compute_roofline_breakdown_from_state``; constant
+    across all snapshots in a session. The decomposition is also
+    persisted via ``roofline_mem_ceiling_tok_per_sec`` /
+    ``roofline_cmp_ceiling_tok_per_sec`` / ``roofline_bound_kind`` so
+    reports can show which side dominated (``"memory"`` / ``"compute"``
+    / ``"unknown"``). ``achieved_tok_per_sec`` is the benchmark
+    ``output_throughput`` measured at the time the snapshot was recorded
+    (baseline_tput for snapshot #1, current_best.tput afterwards).
+    All five default to 0/"unknown" so legacy callers that don't pass
+    them produce ``None`` in the derived percentage fields, preserving
+    the existing placeholder-friendly renderer contract.
+    """
+    within, gap = _compute_within_and_gap(
+        peak=theoretical_peak_tok_per_sec,
+        achieved=achieved_tok_per_sec,
+    )
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
         "ts": ts or "",
+        # 9fe4609 sidecar pointer — caller (SharedState.record_trace_analyze)
+        # overwrites with the real path; stays empty for offline /
+        # synthetic callers that only have an analysis.md.
+        "kernel_roofline_path": "",
         "compute_pct": None,
         "idle_pct": None,
         "comm_pct": None,
         "top_bottleneck": None,
         "top_kernel": None,
+        # Two-sided roofline ceiling. ``theoretical_peak_tok_per_sec``
+        # stays as min(mem, cmp) for backward-compat with the existing
+        # dashboard renderer; the two new ``roofline_*_ceiling_*``
+        # fields and ``roofline_bound_kind`` surface T_mem / T_cmp /
+        # the dominant side independently. All ``None`` when ceiling
+        # is unavailable (see ``roofline_ceiling`` safe-degrade paths).
+        "theoretical_peak_tok_per_sec": (
+            float(theoretical_peak_tok_per_sec)
+            if theoretical_peak_tok_per_sec > 0 else None
+        ),
+        "roofline_mem_ceiling_tok_per_sec": (
+            float(mem_ceiling_tok_per_sec)
+            if mem_ceiling_tok_per_sec > 0 else None
+        ),
+        "roofline_cmp_ceiling_tok_per_sec": (
+            float(cmp_ceiling_tok_per_sec)
+            if cmp_ceiling_tok_per_sec > 0 else None
+        ),
+        "roofline_bound_kind": (
+            str(bound_kind) if bound_kind else "unknown"
+        ),
+        "achieved_tok_per_sec": (
+            float(achieved_tok_per_sec)
+            if achieved_tok_per_sec > 0 else None
+        ),
+        "within_roofline_pct": within,
+        "gap_to_roofline_pct": gap,
     }
     if not analysis_md_path:
         return snap
@@ -227,6 +296,71 @@ def _num_delta(latest: float | None, baseline: float | None) -> float | None:
     if latest is None or baseline is None:
         return None
     return round(latest - baseline, 2)
+
+
+def build_roofline_comparison_from_history(
+    snapshots: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Build the ``roofline_comparison`` block straight from
+    :attr:`SharedState.roofline_snapshots` (preferred entry point post
+    PR #321).
+
+    Each entry in ``snapshots`` is the already-parsed dict written by
+    :meth:`SharedState.record_trace_analyze` (shape:
+    ``snapshot_id`` / ``ts`` / ``analysis_md_path`` / ``trace_input``
+    / ``compute_pct`` / ``idle_pct`` / ``comm_pct`` / ``top_bottleneck``
+    / ``top_kernel``). Returns ``None`` when history is empty so the
+    report-side caller can omit the section.
+
+    The list is append-only with ``snapshots[0]`` carrying the baseline
+    snapshot; ``snapshots[-1]`` carries the most recent watermark
+    refresh. Same snapshot_id (i.e. history length 1) → single_snapshot
+    mode; distinct ids → before_after with a populated ``delta`` block.
+    """
+    snapshots = list(snapshots or [])
+    if not snapshots:
+        return None
+    baseline = dict(snapshots[0])
+    latest = dict(snapshots[-1])
+    base_id = baseline.get("snapshot_id")
+    latest_id = latest.get("snapshot_id")
+    same_snapshot = (
+        isinstance(base_id, int)
+        and isinstance(latest_id, int)
+        and base_id == latest_id
+    )
+    mode = "single_snapshot" if same_snapshot else "before_after"
+    out: dict[str, Any] = {
+        "mode": mode,
+        "baseline": baseline,
+        "latest": latest,
+    }
+    if mode == "before_after":
+        base_eff = (baseline.get("top_kernel") or {}).get("efficiency_pct")
+        lat_eff = (latest.get("top_kernel") or {}).get("efficiency_pct")
+        out["delta"] = {
+            "compute_pct": _num_delta(
+                latest.get("compute_pct"), baseline.get("compute_pct"),
+            ),
+            "idle_pct": _num_delta(
+                latest.get("idle_pct"), baseline.get("idle_pct"),
+            ),
+            "comm_pct": _num_delta(
+                latest.get("comm_pct"), baseline.get("comm_pct"),
+            ),
+            "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
+            "within_roofline_pct": _num_delta(
+                latest.get("within_roofline_pct"),
+                baseline.get("within_roofline_pct"),
+            ),
+            # Dashboard surfaces gap-to-roofline shrinkage as the main
+            # "X% within roofline" delta (negative = closer to ceiling).
+            "gap_to_roofline_pct": _num_delta(
+                latest.get("gap_to_roofline_pct"),
+                baseline.get("gap_to_roofline_pct"),
+            ),
+        }
+    return out
 
 
 def build_roofline_comparison(
@@ -274,6 +408,16 @@ def build_roofline_comparison(
             "idle_pct": _num_delta(latest.get("idle_pct"), baseline.get("idle_pct")),
             "comm_pct": _num_delta(latest.get("comm_pct"), baseline.get("comm_pct")),
             "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
+            "within_roofline_pct": _num_delta(
+                latest.get("within_roofline_pct"),
+                baseline.get("within_roofline_pct"),
+            ),
+            # Dashboard surfaces gap-to-roofline shrinkage as the main
+            # "X% within roofline" delta (negative = closer to ceiling).
+            "gap_to_roofline_pct": _num_delta(
+                latest.get("gap_to_roofline_pct"),
+                baseline.get("gap_to_roofline_pct"),
+            ),
         }
     return out
 
@@ -285,8 +429,29 @@ def _fmt_delta(val: float | None) -> str:
     return f"{sign}{val:.1f}"
 
 
+def _fmt_tput(v: float | None) -> str:
+    """Format ``output_throughput`` cell; one decimal place + tok/s unit."""
+    if not isinstance(v, (int, float)) or v <= 0:
+        return "—"
+    return f"{float(v):.1f} tok/s"
+
+
+def _fmt_pct_cell(v: float | None) -> str:
+    """Format a percentage cell; ``—`` when missing."""
+    if not isinstance(v, (int, float)):
+        return "—"
+    return f"{float(v):.1f}%"
+
+
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
-    """Render the compact Base / Opt / Δ markdown table."""
+    """Render the compact Base / Opt / Δ markdown table.
+
+    The decode-roofline ceiling (``theoretical_peak_tok_per_sec``) is a
+    session-level constant — same value on every history snapshot — so
+    we render it once as a single full-width row above the Base/Opt
+    columns. Achieved / within / gap then vary across snapshots and
+    use the regular Base/Opt/Δ layout.
+    """
 
     def cell(v: float | None) -> str:
         return f"{v:.1f}%" if isinstance(v, float) else "—"
@@ -296,7 +461,21 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     delta = cmp.get("delta") or {}
     mode = cmp.get("mode") or "single_snapshot"
 
-    lines: list[str] = []
+    # Ceiling stays constant across snapshots; surface once before the
+    # Base/Opt table. Fall back to whichever side carries it.
+    peak = baseline.get("theoretical_peak_tok_per_sec")
+    if not isinstance(peak, (int, float)) or peak <= 0:
+        peak = latest.get("theoretical_peak_tok_per_sec")
+    ceiling_lines: list[str] = []
+    if isinstance(peak, (int, float)) and peak > 0:
+        ceiling_lines.append(
+            f"**Theoretical peak (decode memory-roofline ceiling):** "
+            f"{float(peak):.1f} tok/s  "
+            f"_(single-source ceiling; baseline / latest compared against it)_"
+        )
+        ceiling_lines.append("")
+
+    lines: list[str] = list(ceiling_lines)
     if mode == "single_snapshot":
         snap = baseline
         lines.extend([
@@ -311,6 +490,18 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         lines.append(f"| Top kernel efficiency | {cell(tk.get('efficiency_pct'))} |")
         if tk.get("name"):
             lines.append(f"| Top kernel | `{tk.get('name')}` |")
+        lines.append(
+            f"| Achieved output_throughput | "
+            f"{_fmt_tput(snap.get('achieved_tok_per_sec'))} |"
+        )
+        lines.append(
+            f"| Within roofline % | "
+            f"{_fmt_pct_cell(snap.get('within_roofline_pct'))} |"
+        )
+        lines.append(
+            f"| Gap to roofline % | "
+            f"{_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |"
+        )
         lines.append("")
         return lines
 
@@ -341,5 +532,22 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
             f"| Top kernel | `{btk.get('name') or '—'}` | "
             f"`{ltk.get('name') or '—'}` | — |"
         )
+    lines.append(
+        f"| Achieved output_throughput | "
+        f"{_fmt_tput(baseline.get('achieved_tok_per_sec'))} | "
+        f"{_fmt_tput(latest.get('achieved_tok_per_sec'))} | — |"
+    )
+    lines.append(
+        f"| Within roofline % | "
+        f"{_fmt_pct_cell(baseline.get('within_roofline_pct'))} | "
+        f"{_fmt_pct_cell(latest.get('within_roofline_pct'))} | "
+        f"{_fmt_delta(delta.get('within_roofline_pct'))} |"
+    )
+    lines.append(
+        f"| Gap to roofline % | "
+        f"{_fmt_pct_cell(baseline.get('gap_to_roofline_pct'))} | "
+        f"{_fmt_pct_cell(latest.get('gap_to_roofline_pct'))} | "
+        f"{_fmt_delta(delta.get('gap_to_roofline_pct'))} |"
+    )
     lines.append("")
     return lines

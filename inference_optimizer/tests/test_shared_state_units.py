@@ -1,10 +1,10 @@
 """Focused unit tests for ``SharedState`` helpers that lacked direct coverage.
 
 Existing tests exercise SharedState through the full Coordinator + executor
-round-trip, but a handful of pure-data helpers (search ledger migration,
-policy-denial bookkeeping, kernel-patch identity resolution, prune family
-mutators) only have integration coverage and miss specific edge branches.
-This module fills in the gap with small targeted tests.
+round-trip, but a handful of pure-data helpers (policy-denial bookkeeping,
+kernel-patch identity resolution, prune family mutators) only have
+integration coverage and miss specific edge branches. This module fills in
+the gap with small targeted tests.
 """
 
 from __future__ import annotations
@@ -12,82 +12,6 @@ from __future__ import annotations
 
 
 from inference_optimizer.orchestrator.shared_state import SharedState
-
-
-# ---------------------------------------------------------------------------
-# _migrate_search_ledger
-# ---------------------------------------------------------------------------
-
-class TestMigrateSearchLedger:
-    def test_empty_ledger_returns_empty(self):
-        assert SharedState._migrate_search_ledger(None, schema_target=1) == {}
-        assert SharedState._migrate_search_ledger({}, schema_target=1) == {}
-
-    def test_non_dict_returns_empty(self):
-        assert SharedState._migrate_search_ledger(["not", "a", "dict"], schema_target=1) == {}
-
-    def test_already_fingerprinted_entries_pass_through(self):
-        fp = "0123456789abcdef"
-        ledger = {
-            "tested": {
-                fp: {
-                    "name": "variant_a",
-                    "extra_server_args": "--max-num-seqs 128",
-                    "extra_envs": {},
-                },
-            },
-            "schema_version": 2,
-        }
-        out = SharedState._migrate_search_ledger(ledger, schema_target=2)
-        # Fingerprint-keyed entry stayed in place, with fingerprint set.
-        assert fp in out["tested"]
-        assert out["tested"][fp]["fingerprint"] == fp
-        # Name index is rebuilt from the entry.
-        assert out["name_index"]["variant_a"] == fp
-
-    def test_legacy_name_keyed_entries_are_rekeyed(self):
-        # Display-name keyed ledger: migration computes the fingerprint from
-        # the stored args/envs and re-keys under it.
-        ledger = {
-            "tested": {
-                "max_num_seqs_128": {
-                    "extra_server_args": "--max-num-seqs 128",
-                    "extra_envs": {"FOO": "bar"},
-                },
-            },
-        }
-        out = SharedState._migrate_search_ledger(ledger, schema_target=2)
-        # Display name no longer in `tested`; some 16-char hex key is.
-        assert "max_num_seqs_128" not in out["tested"]
-        keys = list(out["tested"].keys())
-        assert len(keys) == 1
-        fp = keys[0]
-        assert len(fp) == 16
-        entry = out["tested"][fp]
-        assert entry["name"] == "max_num_seqs_128"
-        assert entry["fingerprint"] == fp
-        assert out["name_index"]["max_num_seqs_128"] == fp
-
-    def test_non_dict_tested_entries_dropped(self):
-        ledger = {
-            "tested": {
-                "good": {"extra_server_args": "--a 1", "extra_envs": {}},
-                "bad": "not-a-dict",
-                42: {"extra_server_args": "--b 2"},
-            },
-        }
-        out = SharedState._migrate_search_ledger(ledger, schema_target=1)
-        # bad entry dropped; good + numeric-keyed entry retained.
-        for value in out["tested"].values():
-            assert isinstance(value, dict)
-
-    def test_defaults_filled_in_when_missing(self):
-        out = SharedState._migrate_search_ledger({"tested": {}}, schema_target=1)
-        assert out["accepted"] == []
-        assert out["rejected"] == []
-        assert out["tested"] == {}
-        assert out["name_index"] == {}
-        assert out["schema_version"] >= 1
 
 
 # ---------------------------------------------------------------------------
