@@ -2758,13 +2758,13 @@ def main() -> int:
                     f"TraceLens root not found: {tl_root} "
                     "(set TRACELENS_ROOT or pass --tracelens-root)"
                 )
-            if tl_internal_root is not None:
-                if not tl_internal_root.exists():
-                    raise FileNotFoundError(
-                        f"TraceLens-internal root not found: {tl_internal_root} "
-                        "(set TRACELENS_INTERNAL_ROOT or pass --tracelens-internal-root)"
-                    )
-            else:
+            if tl_internal_root is not None and not tl_internal_root.exists():
+                append_log(log_path,
+                    f"TraceLens-internal root not found: {tl_internal_root}; "
+                    "falling back to open-source-only "
+                    "(provide an existing internal checkout to enable)")
+                tl_internal_root = None
+            if tl_internal_root is None:
                 append_log(log_path,
                     "TraceLens-internal: not provided "
                     "(open-source-only; set TRACELENS_INTERNAL_ROOT to enable)")

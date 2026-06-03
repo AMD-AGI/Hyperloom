@@ -139,13 +139,38 @@ def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> No
     assert "export TL_EXTENSION='TraceLens_internal'" in env_text
 
 
+def test_local_setup_internal_missing_path_falls_back_to_oss_only(tmp_path: Path) -> None:
+    # TRACELENS_INTERNAL_ROOT set to a non-existent path: Hyperloom never clones
+    # internal (no URL kept), so it must warn and fall back to open-source-only.
+    remotes = tmp_path / "remotes"
+    primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
+    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
+    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
+
+    result = _run_local_setup(
+        tmp_path,
+        env={
+            "PRIMUS_CLAW_REPO": str(primus),
+            "INFERENCEX_REPO": str(inferencex),
+            "TRACELENS_REPO": str(tracelens_public),
+            "TRACELENS_REF": "HEAD",
+            "TRACELENS_INTERNAL_ROOT": str(tmp_path / "nope" / "TraceLens-internal"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
+    assert "TRACELENS_INTERNAL_ROOT" not in env_text
+    assert "TL_EXTENSION" not in env_text
+    assert "falling back to open-source-only" in result.stderr
+
+
 def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
     existing_oob = tmp_path / "existing" / "Primus-Claw" / "OOB"
     existing_oob.mkdir(parents=True)
     remotes = tmp_path / "remotes"
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
     tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    tracelens_internal = _git_repo(remotes / "TraceLens-internal", {"README.md": "tracelens-internal\n"})
 
     result = _run_local_setup(
         tmp_path,
@@ -154,8 +179,6 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
             "INFERENCEX_REPO": str(inferencex),
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
-            "TRACELENS_INTERNAL_REPO": str(tracelens_internal),
-            "TRACELENS_INTERNAL_REF": "HEAD",
         },
     )
 

@@ -22,12 +22,11 @@ PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
 TRACELENS_REF="${TRACELENS_REF:-release/hyperloom_integration_v0.5.0}"
-TRACELENS_INTERNAL_REPO="${TRACELENS_INTERNAL_REPO:-https://github.com/AMD-AGI/TraceLens-internal.git}"
-TRACELENS_INTERNAL_REF="${TRACELENS_INTERNAL_REF:-release/hyperloom_integration_v0.5.0}"
 # Preferred container-local checkout for the public repo when operators install
-# TraceLens manually. The internal extension has NO default path: it is used
-# only when TRACELENS_INTERNAL_ROOT is explicitly set (open-source-only
-# otherwise). There is no separate on/off toggle.
+# TraceLens manually. The internal extension is private: Hyperloom keeps NO
+# repo URL, ref, or default path for it. It is used only when an operator
+# explicitly sets TRACELENS_INTERNAL_ROOT to an existing checkout
+# (open-source-only otherwise). There is no separate on/off toggle.
 TRACELENS_DEFAULT_ROOT="${TRACELENS_DEFAULT_ROOT:-/workspace/TraceLens}"
 
 usage() {
@@ -51,8 +50,8 @@ Advanced env overrides:
   OOB_SRC, INFERENCEX_PATH, TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT,
   PRIMUS_CLAW_REPO, INFERENCEX_REPO,
   TRACELENS_REPO, TRACELENS_REF,
-  TRACELENS_INTERNAL_REPO, TRACELENS_INTERNAL_REF
-  TRACELENS_INTERNAL_ROOT (set to enable the optional internal extension)
+  TRACELENS_INTERNAL_ROOT (path to an existing internal extension checkout;
+    set to enable it, otherwise open-source-only)
 EOF
 }
 
@@ -242,14 +241,16 @@ resolve_tracelens() {
     return 0
   fi
 
+  # Internal is never cloned by Hyperloom (no URL is kept). The operator must
+  # provide an existing checkout; a missing path falls back to open-source-only.
   TRACELENS_INTERNAL_ROOT="$internal_root"
-  if [ -d "$TRACELENS_INTERNAL_ROOT" ]; then
-    log "TRACELENS_INTERNAL_ROOT: using existing ${TRACELENS_INTERNAL_ROOT}"
-  else
-    clone_or_update "TraceLens-internal" "$TRACELENS_INTERNAL_REPO" "$TRACELENS_INTERNAL_ROOT" "$TRACELENS_INTERNAL_REF"
+  if [ ! -d "$TRACELENS_INTERNAL_ROOT" ]; then
+    warn "TRACELENS_INTERNAL_ROOT set but not found: ${TRACELENS_INTERNAL_ROOT}; falling back to open-source-only (provide an existing internal checkout to enable)"
+    unset TRACELENS_INTERNAL_ROOT
+    return 0
   fi
   export TRACELENS_INTERNAL_ROOT
-  log "TRACELENS_INTERNAL_ROOT: ${TRACELENS_INTERNAL_ROOT}"
+  log "TRACELENS_INTERNAL_ROOT: using existing ${TRACELENS_INTERNAL_ROOT}"
 }
 
 resolve_oob_src() {

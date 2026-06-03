@@ -319,18 +319,17 @@ need the internal extension:
 git clone https://github.com/AMD-AGI/TraceLens.git
 cd TraceLens && pip install -e .
 
-# OPTIONAL: internal extension (roofline gap, gains, MI355/MI455 MAF).
-# Skip for the open-source-only report.
-git clone https://github.com/AMD-AGI/TraceLens-internal.git
-cd TraceLens-internal && pip install -e .
-
 TraceLens_generate_perf_report_pytorch_inference --help
 ```
 
+OPTIONAL internal extension (internal users only): if you have access to it,
+install your own checkout (`pip install -e .`) and set `$TRACELENS_INTERNAL_ROOT`
+to its path. Hyperloom keeps no internal URL/path and never clones it.
+
 Container default for the public repo: `/workspace/TraceLens`
 (`TRACELENS_ROOT`). The internal extension has **no default path**: it is used
-ONLY when `$TRACELENS_INTERNAL_ROOT` is set to its checkout (recommended
-`/workspace/TraceLens-internal`). Presence of that env var is the sole switch —
+ONLY when `$TRACELENS_INTERNAL_ROOT` is set to an existing checkout you provide.
+Presence of that env var is the sole switch —
 there is no separate toggle. When set, `TL_EXTENSION` is exported and added to
 the orchestrator prompt so the analysis skill can locate the rehydration module;
 when unset, Hyperloom stays on the open-source-only report.

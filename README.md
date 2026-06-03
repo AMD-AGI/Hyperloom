@@ -4,7 +4,7 @@ An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperlo
 
 <p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
-Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. Hyperloom uses the public TraceLens package (`TRACELENS_ROOT`) by default (open-source-only report). The [TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/) extension — roofline numbers, gains estimates, and MI355/MI455 MAF data — is **optional**: set `TRACELENS_INTERNAL_ROOT` to its checkout path to enable it; leave it unset to stay on the open-source-only report. There is no separate on/off toggle.
+Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. Hyperloom uses the public TraceLens package (`TRACELENS_ROOT`) by default (open-source-only report). An optional internal TraceLens extension — roofline numbers, gains estimates, and MI355/MI455 MAF data — can be enabled by internal users who set `TRACELENS_INTERNAL_ROOT` to point at their own internal checkout (path self-provided); leave it unset to stay on the open-source-only report. There is no separate on/off toggle.
 
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. 
 
@@ -98,7 +98,7 @@ docker run -d \
 
 If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
 
-**Install TraceLens inside the container** (required once per container). The public repo is required; the internal extension is optional (only set `TRACELENS_INTERNAL_ROOT` if you install it):
+**Install TraceLens inside the container** (required once per container):
 
 ```bash
 # On the host
@@ -108,29 +108,22 @@ docker exec -it <container> bash
 # Inside the container — public repo (required)
 git clone https://github.com/AMD-AGI/TraceLens.git
 cd TraceLens && pip install -e .
-
-# OPTIONAL: internal extension (roofline numbers, gains, MI355/MI455 MAF).
-# Skip this if you only need the open-source report.
-git clone https://github.com/AMD-AGI/TraceLens-internal.git
-cd TraceLens-internal && pip install -e .
 ```
 
-Recommended container paths (match the defaults below):
+Recommended container path (matches the default below):
 
 ```bash
 git clone https://github.com/AMD-AGI/TraceLens.git /workspace/TraceLens
 cd /workspace/TraceLens && pip install -e .
-# OPTIONAL internal extension:
-git clone https://github.com/AMD-AGI/TraceLens-internal.git /workspace/TraceLens-internal
-cd /workspace/TraceLens-internal && pip install -e .
 ```
 
-If the checkouts already exist on the host, mount them instead of cloning (the internal mount is optional):
+If the checkout already exists on the host, mount it instead of cloning:
 
 ```bash
 -v /path/on/host/TraceLens:/workspace/TraceLens:rw
--v /path/on/host/TraceLens-internal:/workspace/TraceLens-internal:rw
 ```
+
+> **Optional internal extension (internal users only).** If you have access to the internal TraceLens extension, install your checkout (`pip install -e .`) and set `TRACELENS_INTERNAL_ROOT` to its path. Hyperloom does not clone it and ships no internal URL/path; leave `TRACELENS_INTERNAL_ROOT` unset for the open-source-only report.
 
 #### 2. Connect Cursor to the Runtime Environment
 
@@ -190,7 +183,7 @@ TRACELENS_ROOT=/workspace/TraceLens
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
 | `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1` |
 | `TRACELENS_ROOT` | TraceLens public repo checkout (`pip install -e .`; skills, patches, CLI, analysis orchestrator) | `/workspace/TraceLens` |
-| `TRACELENS_INTERNAL_ROOT` (optional) | TraceLens-internal repo checkout (`pip install -e .`; rehydration module). Set only to enable the internal extension; unset => open-source-only. | `/workspace/TraceLens-internal` |
+| `TRACELENS_INTERNAL_ROOT` (optional, internal users) | Path to your own internal TraceLens extension checkout (`pip install -e .`; rehydration module). Hyperloom never clones it. Set only to enable the internal extension; unset => open-source-only. | (self-provided) |
 | `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to skip cursor and only use claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 

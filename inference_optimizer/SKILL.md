@@ -112,9 +112,9 @@ Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
 `/workspace/TraceLens`; public [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens))
 with an **optional** internal extension at `$TRACELENS_INTERNAL_ROOT` (no
-default; set it to opt in, otherwise open-source-only;
-[AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal)
-— rehydration module). See README Local Mode step 1. The per-version
+default; internal users set it to their own existing checkout to opt in,
+otherwise open-source-only; rehydration module — Hyperloom keeps no internal
+URL/path). See README Local Mode step 1. The per-version
 `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
 TraceLens is required by `_server_patcher`),
 `$OOB_SRC` / `$HYPERLOOM_BUNDLE`,

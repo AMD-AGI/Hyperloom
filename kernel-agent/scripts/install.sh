@@ -651,9 +651,8 @@ ensure_tracelens() {
   if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens" ]; then
     TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens"
   fi
-  if [ ! -d "$TRACELENS_INTERNAL_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens-internal" ]; then
-    TRACELENS_INTERNAL_ROOT="${HYPERLOOM_BUNDLE}/TraceLens-internal"
-  fi
+  # Internal extension is opt-in via TRACELENS_INTERNAL_ROOT only; no implicit
+  # bundle/default path is probed (keeps internal location out of this repo).
 
   if [ ! -d "$TRACELENS_ROOT" ]; then
     if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
@@ -690,11 +689,10 @@ ensure_tracelens() {
   fi
 
   if [ ! -d "$TRACELENS_INTERNAL_ROOT" ]; then
-    if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
-      warn "TraceLens-internal root not found: $TRACELENS_INTERNAL_ROOT"
-      return
-    fi
-    die "TraceLens-internal root not found: $TRACELENS_INTERNAL_ROOT"
+    warn "TRACELENS_INTERNAL_ROOT set but not found: $TRACELENS_INTERNAL_ROOT; falling back to open-source-only (provide an existing internal checkout to enable)"
+    TRACELENS_INTERNAL_ROOT=""
+    export TRACELENS_ROOT
+    return 0
   fi
   # Read-only source guard (mirrors the OOB cp -r pattern). When
   # $TRACELENS_INTERNAL_ROOT is on a read-only mount (the WekaFS default), pip
