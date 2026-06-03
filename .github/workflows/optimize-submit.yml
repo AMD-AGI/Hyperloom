@@ -32,10 +32,12 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Production large-B pool: 100 models every 8 hours. The matrix generator
-  # rotates deterministically by UTC 8-hour slot.
+  # Production large-B pool: 100 models every 8 hours, firing at UTC
+  # 04:00 / 12:00 / 20:00 (Beijing 12:00 / 20:00 / 04:00). The matrix
+  # generator rotates deterministically by UTC 8-hour slot — these hours
+  # map cleanly to hour//8 -> 0 / 1 / 2 so the rotation stays continuous.
   schedule:
-    - cron: '0 */8 * * *'
+    - cron: '0 4,12,20 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
