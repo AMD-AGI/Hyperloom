@@ -368,6 +368,30 @@ class SharedState:
     # After deterministic FP8 GEMM tuning succeeds, continue into source-level
     # kernel_opt by default. Operators can disable this for a GEMM-only run.
     continue_kernel_after_gemm: bool = True
+    # SWEEP-phase post-sweep concurrency sweep. On by default;
+    # operator opts out via ``--no-enable-conc-sweep`` /
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``. When True, the
+    # Coordinator auto-enqueues a ``conc_sweep`` task right after the
+    # SWEEP-entry sweep task lands (see ``_on_sweep_task_completed``);
+    # the executor runs baseline + current_best across the
+    # ``conc_sweep_concs`` ladder bounded by
+    # ``conc_sweep_total_budget_sec`` total wall-clock.
+    conc_sweep_enabled: bool = True
+    # CONC ladder used by the conc_sweep action. Default mirrors
+    # ``orchestrator.conc_sweep.DEFAULT_CONCS``. Empty list short-
+    # circuits the executor with skip_reason=empty_conc_list.
+    conc_sweep_concs: list[int] = field(
+        default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128],
+    )
+    # Total wall-clock budget (seconds) for the whole conc_sweep
+    # action. Default 9000 (~2.5h). 0 disables the gate so the
+    # executor runs every variant until the per-variant timeout
+    # alone caps it.
+    conc_sweep_total_budget_sec: int = 9000
+    # Per-variant Magpie subprocess timeout (seconds). Default 1800
+    # (~30 min). Effective timeout is clamped to the remaining total
+    # budget so the last variant cannot overshoot the deadline.
+    conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
@@ -711,6 +735,11 @@ class SharedState:
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
+    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE can
+    # exit on conc_sweep completion (not only sweep completion). Carries
+    # status / skip_reason / summary so phase_state.exit_normal_sweep
+    # treats succeeded / partial / completed / skipped as terminal.
+    last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Kernel-opt response tracking — Coordinator records the most recent
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
@@ -2558,6 +2587,10 @@ class SharedState:
             summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
+                # TraceLens derive_kernel_category bucket (MoE / LayerNorm /
+                # GEMM / ...). Without this passthrough downstream consumers
+                # (kernel_attempt_summary by_kernel rows) get an empty string.
+                "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
                 "bottleneck": entry.get("bottleneck"),
                 "bound_type": entry.get("bound_type"),
@@ -2735,6 +2768,31 @@ class SharedState:
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
+        }
+
+    def record_conc_sweep(self, result: dict[str, Any]) -> None:
+        """Record conc_sweep task completion (mirrors record_sweep).
+
+        Bug #12 fix: ``phase_state.exit_normal_sweep`` previously only
+        looked at ``last_sweep.status`` to fire ``sweep_done``. When the
+        SWEEP phase reaches its terminal state via conc_sweep alone (e.g.
+        sweep was singleton-blocked or completed in a prior session and
+        only conc_sweep runs in this resume), the phase had no exit
+        signal and idled until ``sweep_budget_exhausted``. Writing
+        ``last_conc_sweep.status`` lets ``exit_normal_sweep`` return
+        ``conc_sweep_done`` and the SWEEP→CLOSE transition fires
+        immediately after conc_sweep settles.
+        """
+        if not isinstance(result, dict):
+            return
+        self.last_conc_sweep = {
+            "ts":               _now_iso(),
+            "status":           str(result.get("status") or "succeeded"),
+            "skip_reason":      str(result.get("skip_reason") or ""),
+            "was_skipped":      bool(result.get("was_skipped", False)),
+            "budget_exhausted": bool(result.get("budget_exhausted", False)),
+            "summary":          dict(result.get("summary") or {}),
+            "workspace":        str(result.get("workspace") or ""),
         }
 
     # ------------------------------------------------------------------
