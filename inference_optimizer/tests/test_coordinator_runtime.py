@@ -223,6 +223,25 @@ class _AlwaysFailingBackend(Backend):
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
 
 
+class _AlwaysCrashingBackend(Backend):
+    """Backend that raises an unexpected exception from ``run``."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
+        self.calls += 1
+        raise RuntimeError(f"simulated {self.name} unexpected crash #{self.calls}")
+
+
 @pytest.mark.asyncio
 async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
     session_dir, monkeypatch,
@@ -263,6 +282,28 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         assert promoted["severity"] == "high"
         assert promoted["agent"] == "robustness"
         assert "subprocess backend has failed" in promoted["hint"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_backend_exception_records_last_tick_exception(session_dir):
+    backends = _build_backends({})
+    backends["orchestration"] = _AlwaysCrashingBackend("orchestration")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(1)
+        assert c.shared_state.crash_count == 1
+        assert c.shared_state.last_tick_exception["stage"] == "reactor_pass"
+        assert c.shared_state.last_tick_exception["agent"] == "orchestration"
+        assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
+        assert (
+            "simulated orchestration unexpected crash"
+            in c.shared_state.last_tick_exception["message"]
+        )
+
+        persisted = SharedState.load_or_init(session_dir)
+        assert persisted.last_tick_exception == c.shared_state.last_tick_exception
     finally:
         await c.stop()
 
