@@ -17,7 +17,7 @@ tree (created by Coordinator) holds cross-task GEAK/OOB work artefacts
 keyed by `kernel_id`. Default `USER_DATA_PATH` is `/workspace/hyperloom`.
 Do not write outside `$USER_DATA_PATH` except for reading user-provided
 trace/source paths, the TraceLens public source at
-`$TRACELENS_ROOT` (default `/workspace/TraceLens`), and — when enabled —
+`$TRACELENS_ROOT` (default `/wekafs/hyperloom/TraceLens-internal`), and — when enabled —
 the optional TraceLens-internal source at `$TRACELENS_INTERNAL_ROOT`
 (no default; set it to opt in, otherwise open-source-only).
 The legacy `WORKSPACE_PATH` env was retired during the
@@ -62,7 +62,7 @@ are accepted as no-ops for backwards compat):
 - Node.js 20 + npm when they are missing (required for the `claude` /
   `codex` npm CLIs)
 - TraceLens public editable install from `$TRACELENS_ROOT`
-  (default `/workspace/TraceLens`), plus the optional internal extension
+  (default `/wekafs/hyperloom/TraceLens-internal`), plus the optional internal extension
   from `$TRACELENS_INTERNAL_ROOT` only when that var is set (no default;
   unset => open-source-only), and verifies
   `TraceLens_generate_perf_report_pytorch_inference --help`
@@ -326,7 +326,7 @@ OPTIONAL internal extension (internal users only): if you have access to it,
 install your own checkout (`pip install -e .`) and set `$TRACELENS_INTERNAL_ROOT`
 to its path. Hyperloom keeps no internal URL/path and never clones it.
 
-Container default for the public repo: `/workspace/TraceLens`
+Default base repo: `/wekafs/hyperloom/TraceLens-internal` (shared cluster checkout)
 (`TRACELENS_ROOT`). The internal extension has **no default path**: it is used
 ONLY when `$TRACELENS_INTERNAL_ROOT` is set to an existing checkout you provide.
 Presence of that env var is the sole switch —
@@ -351,7 +351,7 @@ If `install.sh` did not finish or the CLI is unexpectedly missing, run a
 manual editable install + smoke test before analysis:
 
 ```bash
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 cd "$TRACELENS_ROOT" && pip install -e .
 # OPTIONAL internal extension — only if TRACELENS_INTERNAL_ROOT is set:
 [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && cd "$TRACELENS_INTERNAL_ROOT" && pip install -e .

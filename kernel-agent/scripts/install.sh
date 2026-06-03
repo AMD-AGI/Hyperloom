@@ -70,13 +70,13 @@ _resolve_magpie_python() {
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
-# TraceLens public repo is required; the internal extension is OPTIONAL.
-#   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (public: skills, patches, CLI, analysis orchestrator)
+# TraceLens base repo is required; the internal extension is OPTIONAL.
+#   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
 #   2. AMD-AGI/TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (internal: rehydration module)
-# Hyperloom defaults to the open-source-only setup. The internal extension is
-# used ONLY when $TRACELENS_INTERNAL_ROOT is set (env / .env); leave it unset to
-# stay open-source-only. There is no separate on/off toggle.
-TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
+# Default base points at the shared cluster checkout (a complete TraceLens).
+# The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
+# (env / .env); leave it unset for the base-only report. No separate toggle.
+TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirrors when source roots are on a read-only mount (e.g. /wekafs/...).
 TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"

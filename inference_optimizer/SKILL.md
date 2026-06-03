@@ -110,7 +110,8 @@ the pinned session dir, and `paths.db_path_for(sd)` =
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`/workspace/TraceLens`; public [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens))
+`/wekafs/hyperloom/TraceLens-internal`, the shared cluster checkout; base repo
+[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens))
 with an **optional** internal extension at `$TRACELENS_INTERNAL_ROOT` (no
 default; internal users set it to their own existing checkout to opt in,
 otherwise open-source-only; rehydration module — Hyperloom keeps no internal
@@ -443,7 +444,7 @@ CLI:
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 # Optional internal extension; export only to enable it (open-source-only if unset):
 # export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 

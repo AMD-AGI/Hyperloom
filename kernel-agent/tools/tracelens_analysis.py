@@ -456,7 +456,7 @@ RUNTIME_API_NAMES = {
     "cudadevicesynchronize",
     "cudastreamsynchronize",
 }
-DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens"
+DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
 # Internal extension is opt-in: no default path. It is used only when
 # TRACELENS_INTERNAL_ROOT (env) or --tracelens-internal-root is set; an empty
 # value keeps Hyperloom on the open-source-only report.

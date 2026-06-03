@@ -197,6 +197,9 @@ class KernelAgentToolTests(unittest.TestCase):
             timeout=30,
             env={
                 **os.environ,
+                # Point at missing paths explicitly so the "not found" warning is
+                # deterministic regardless of the on-disk default checkout.
+                "TRACELENS_ROOT": str(ROOT / "missing-tracelens-root"),
                 "TRACELENS_INTERNAL_ROOT": str(ROOT / "missing-tracelens"),
                 "HYPERLOOM_BUNDLE": str(ROOT / "missing-bundle"),
             },
@@ -212,7 +215,7 @@ class KernelAgentToolTests(unittest.TestCase):
         skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
-        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"', install_text)
+        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
         # Internal extension is opt-in: no default path (open-source-only unless
         # TRACELENS_INTERNAL_ROOT is explicitly set).
         self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)
@@ -282,7 +285,7 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('chmod 600 "$env_file"', install_text)
         self.assertIn("GEAK_MEMORY_STORE_PATH", ray_runtime_text)
         self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
-        self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens"', trace_tool_text)
+        self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"', trace_tool_text)
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens}"', install_text)
         self.assertNotIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
