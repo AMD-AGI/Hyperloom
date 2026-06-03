@@ -19,9 +19,14 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
 # QUARK_ROOT defaults to the canonical checkout location on Hyperloom hosts.
 # Operators should override when their checkout lives elsewhere — the runner's
-# resolve_quark_root() honours $QUARK_ROOT as the first fallback after the
-# explicit kwarg.
-QUARK_ROOT="${QUARK_ROOT:-/scratch/kewang/workspace/Quark}"
+# resolution honours $QUARK_ROOT as the first fallback after the explicit kwarg.
+# Keep this in sync with DEFAULT_QUARK_ROOT in quantization_agent/driver/retry.py.
+QUARK_ROOT="${QUARK_ROOT:-/wekafs/hyperloom/Quark}"
+
+# Upstream git URL for the Quark repo. Empty on purpose: fill this in once the
+# Quark repo is open-sourced so this installer can clone it when QUARK_ROOT is
+# absent. Mirrors DEFAULT_QUARK_GIT_URL in retry.py.
+QUARK_GIT_URL="${QUARK_GIT_URL:-}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
