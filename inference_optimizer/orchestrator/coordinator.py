@@ -593,6 +593,7 @@ class Coordinator:
         cortex_kb: RecipeKB | None = None,
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
+        proposal_scorer: Any = None,
         warm_replay_enabled: bool = True,
         warm_replay_min_confidence: float = 0.7,
         warm_replay_min_reproduce_pct: float = 0.8,
@@ -632,6 +633,14 @@ class Coordinator:
         # (no warmup; specialist still runs but sees empty knowledge
         # surface).
         self.knowledge_plane: Any = knowledge_plane
+        # ProposalScorer facade (advisory). When non-None, a non-empty
+        # specialist ``proposal_set`` is scored by one or more gateway
+        # models in ``_record_specialist_result``; the scores ride on
+        # the specialist round entry under ``ensemble_scores`` and are
+        # surfaced to Orchestration as one reference among many (parallel
+        # to gaps / KB / analysis.md). ``None`` keeps the legacy path
+        # (no scoring). Never gates anything (Inv-9.1: no scoreboard).
+        self._proposal_scorer: Any = proposal_scorer
         # phase budget percentages (KB_design §3.8 §5.3 +
         # §3.13 M2 §7). ``None`` means library defaults; CLI flags
         # populate this dict from ``--max-minutes-<phase>-pct``. We
@@ -1874,6 +1883,7 @@ class Coordinator:
         # PR that another repo's serving overlap already produced, padding
         # the batch with duplicates that the plateau judge then counts.
         seen_ids = self._framework_pr_known_candidate_ids()
+        primary_repo_url = repo_urls[0] if repo_urls else ""
         # Normalise each candidate so the executor's slug helper has
         # consistent fields and the progress ledger has a stable id.
         norm: list[dict[str, Any]] = []
@@ -1887,10 +1897,21 @@ class Coordinator:
             if cand_id and cand_id in seen_ids:
                 continue
             seen_ids.add(cand_id)
+            # Stamp the repo URL the candidate came from so the executor's
+            # checkout-head path knows whether the PR lives in the live
+            # framework_root's origin (same-repo, fetchable) or a foreign
+            # repo (must fall back to diff_url). fa already returns a
+            # ``repo_url`` per candidate when known; otherwise fall back to
+            # the batch's primary repo URL.
+            discovered_repo_url = str(
+                c.get("repo_url") or c.get("discovered_repo_url")
+                or primary_repo_url
+            )
             norm.append({
                 **c,
                 "candidate_id": cand_id,
                 "batch_id": batch_id,
+                "discovered_repo_url": discovered_repo_url,
             })
         if not norm:
             return False
@@ -4648,6 +4669,18 @@ class Coordinator:
             if gaps_block:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
+            # Advisory multi-model proposal scores (ProposalScorer).
+            # One reference among many — parallel to gaps / KB /
+            # analysis.md, NOT a ranking directive (Inv-9.1). Section
+            # omitted entirely when no recent round carries scores.
+            try:
+                scores_block = self.shared_state.to_proposal_scores_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: proposal_scores_summary failed")
+                scores_block = ""
+            if scores_block:
+                sections.append("=== Specialist proposal scores (advisory) ===")
+                sections.append(scores_block)
 
         # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
@@ -8221,6 +8254,33 @@ class Coordinator:
         round_entry = self._build_specialist_round_entry(
             task=task, done_payload=done_payload, source=source,
         )
+        # Advisory multi-model scoring of the proposal_set. Purely
+        # informational — the scores ride on the round entry and surface
+        # to Orchestration as one reference among many; they gate
+        # nothing. Defensive: any scorer failure leaves the entry
+        # score-free and the run continues unchanged.
+        _scorer = getattr(self, "_proposal_scorer", None)
+        if _scorer is not None and proposals:
+            try:
+                scores = await _scorer.score(
+                    gap={
+                        "domain": domain,
+                        "gap_canonical_id": done_payload.get(
+                            "gap_canonical_id", ""
+                        ),
+                        "gap_symptom": (task.params or {}).get("gap_symptom"),
+                        "gap_evidence": (task.params or {}).get("gap_evidence"),
+                        "summary": done_payload.get("summary", ""),
+                    },
+                    proposals=proposals,
+                )
+                if scores and scores.get("models"):
+                    round_entry["ensemble_scores"] = scores
+            except Exception:  # noqa: BLE001 — advisory; never block
+                log.exception(
+                    "specialist bookkeeping: proposal scoring failed for "
+                    "task=%s (continuing without scores)", task.task_id,
+                )
         try:
             self.shared_state.record_specialist_round(round_entry)
         except Exception:  # noqa: BLE001
