@@ -1,11 +1,5 @@
 Use the inference-optimization skill from a fresh Hyperloom checkout for this model.
 
-CRITICAL — Fresh Source Checkout (REQUIRED): run the optimizer from a freshly
-cloned Hyperloom tree (CI injects an authenticated HYPERLOOM_SOURCE_REPO). Do
-NOT fall back to /wekafs/HyperloomV2 — those trees drift and are not
-reproducible. If clone fails: ABORT with gain_pct=0.0 and
-actions_taken=["aborted: source checkout failed"].
-
   # Production: USER_DATA_PATH is the wekafs path Claw mounts for this run.
   # The V2 session_dir + audit files live directly under it (already
   # persistent — CI reads them straight from wekafs, no copy needed).
@@ -69,9 +63,6 @@ if result_dir:
     with open(os.path.join(result_dir, "source_commits.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 PY
-
-Then run the skill at $HYPERLOOM_SOURCE_DIR/inference_optimizer/SKILL.md from
-that directory (cd "$HYPERLOOM_SOURCE_DIR").
 
   export CORTEX_KB_URL=https://global.primus-safe.amd.com/knowledge-base
   export NODE_TLS_REJECT_UNAUTHORIZED=0
