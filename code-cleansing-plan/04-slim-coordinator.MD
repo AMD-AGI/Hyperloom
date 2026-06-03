@@ -251,6 +251,9 @@
 - 删除重复 helper 和重复注释。
 - 更新后的行为测试。
 
+本阶段第一批消重的执行记录见
+`code-cleansing-plan/04-slim-coordinator/01-execution-status.MD`。
+
 ## 完成标准
 
 完成后应达到:
