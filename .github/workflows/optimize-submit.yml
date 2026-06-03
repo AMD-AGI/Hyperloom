@@ -31,8 +31,10 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Cron is intentionally disabled while optimize-thunder runs the full
-  # 3B-12B pool. Keep manual dispatch for targeted submit runs.
+  # Production large-B pool: 10 models every 8 hours. The matrix generator
+  # rotates deterministically by UTC 8-hour slot.
+  schedule:
+    - cron: '0 */8 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
@@ -186,7 +188,7 @@ jobs:
       # refreshed only when we want to bring in newly-published models.
       INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_hf_2026-05-25.json' || github.event.inputs.candidates_file }}
       INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
-      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '60' || github.event.inputs.batch_size }}
+      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '10' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
       # Schedule no longer excludes leaderboard-known models — that was for
