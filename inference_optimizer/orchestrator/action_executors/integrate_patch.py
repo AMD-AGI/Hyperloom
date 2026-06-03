@@ -84,6 +84,11 @@ DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIME
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp in ISO 8601 format.
+    """
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
 
@@ -94,6 +99,14 @@ def _resolve_framework_root(explicit: str | None) -> Path | None:
     Precedence: explicit param → first existing entry of
     ``resolve_source_file_allowlist()``. Returns None when nothing
     resolves (executor returns ``apply_failed`` in that case).
+
+    Args:
+        explicit (str | None): Caller-provided framework source root
+            override, if any.
+
+    Returns:
+        Path | None: The resolved framework source directory, or
+        ``None`` when nothing usable resolves.
     """
     if explicit:
         p = Path(explicit)
@@ -121,8 +134,20 @@ def _git_apply(
     framework_root: Path, patch_path: Path, *, three_way: bool = False,
     check_only: bool = False,
 ) -> tuple[bool, str]:
-    """Run ``git apply [-3] -p1 [--check] <patch>`` inside
-    ``framework_root``. Returns ``(ok, stderr)``."""
+    """Run ``git apply [-3] -p1 [--check] <patch>`` inside ``framework_root``.
+
+    Args:
+        framework_root (Path): Directory to run ``git apply`` in.
+        patch_path (Path): The patch file to apply.
+        three_way (bool): Pass ``-3`` for a three-way merge. Defaults to
+            ``False``.
+        check_only (bool): Pass ``--check`` for a dry run. Defaults to
+            ``False``.
+
+    Returns:
+        tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is ``True`` on
+        return code 0.
+    """
     cmd = ["git", "-C", str(framework_root), "apply", "-p1"]
     if three_way:
         cmd.append("-3")
@@ -141,9 +166,19 @@ def _git_apply(
 def _git_apply_reverse(
     framework_root: Path, patch_path: Path,
 ) -> tuple[bool, str]:
-    """Reverse-apply ``patch_path`` (``git apply -R -p1``) — used as
-    the REVERT path. We try ``-R`` first; if it fails we fall back to
-    ``git checkout`` which discards every uncommitted change."""
+    """Reverse-apply ``patch_path`` (``git apply -R -p1``) as the REVERT path.
+
+    We try ``-R`` first; the caller falls back to ``git checkout`` (which
+    discards every uncommitted change) when this fails.
+
+    Args:
+        framework_root (Path): Directory to run ``git apply -R`` in.
+        patch_path (Path): The patch file to reverse-apply.
+
+    Returns:
+        tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is ``True`` on
+        return code 0.
+    """
     cmd = ["git", "-C", str(framework_root), "apply", "-R", "-p1", str(patch_path)]
     try:
         cp = subprocess.run(
@@ -158,7 +193,16 @@ def _git_apply_reverse(
 
 def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     """``git checkout -- .`` to discard every uncommitted change.
-    Last-resort REVERT path when individual reverse-apply fails."""
+
+    Last-resort REVERT path when individual reverse-apply fails.
+
+    Args:
+        framework_root (Path): Directory to run ``git checkout`` in.
+
+    Returns:
+        tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is ``True`` on
+        return code 0.
+    """
     cmd = ["git", "-C", str(framework_root), "checkout", "--", "."]
     try:
         cp = subprocess.run(
@@ -184,6 +228,18 @@ def _resolve_patch_paths(
 
     Each entry is normalised to an absolute Path; missing entries are
     silently dropped (with a log line).
+
+    Args:
+        specialist_workspace (Path): The specialist task workspace used
+            to resolve relative patch entries and scan for patch files.
+        explicit_patches (list[str] | None): Caller-provided patch list,
+            taking top precedence.
+        done_payload (dict[str, Any] | None): Parsed
+            ``specialist_done.json``; its ``patches_written`` is used
+            when no explicit list is given.
+
+    Returns:
+        list[Path]: Absolute paths of the existing patch files to apply.
     """
     candidates: list[str] = []
     if explicit_patches:
@@ -229,6 +285,15 @@ def _resolve_patch_paths(
 
 
 def _read_done_payload(workspace: Path) -> dict[str, Any] | None:
+    """Read and parse ``specialist_done.json`` from a workspace.
+
+    Args:
+        workspace (Path): The specialist task workspace directory.
+
+    Returns:
+        dict[str, Any] | None: The parsed payload, or ``None`` when the
+        file is absent or cannot be parsed.
+    """
     done = workspace / "specialist_done.json"
     if not done.exists():
         return None
@@ -252,6 +317,18 @@ class IntegratePatchExecutor:
         variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
     ):
+        """Initialize the integrate-patch executor.
+
+        Args:
+            session_dir (Path | str | None): Session output directory;
+                auto-resolved when ``None``.
+            default_config_path (Path | str | None): Fallback benchmark
+                config path, if any.
+            variant_timeout_sec (int): Per-variant benchmark hard timeout.
+                Defaults to :data:`DEFAULT_VARIANT_TIMEOUT_SEC`.
+            keep_threshold_pct (float): Minimum gain to KEEP a patch.
+                Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
+        """
         self.session_dir = (
             Path(session_dir) if session_dir else _resolve_session_dir()
         )
@@ -262,6 +339,21 @@ class IntegratePatchExecutor:
         self.keep_threshold_pct = float(keep_threshold_pct)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Apply a specialist's patches/config changes and benchmark them.
+
+        Resolves the completed specialist's patches and config changes,
+        applies them against the framework source root, benchmarks the
+        result with KEEP/REVERT gating, and reverts on regression.
+
+        Args:
+            ctx: The action runner context carrying the task and params
+                (notably ``specialist_task_id``).
+
+        Returns:
+            dict[str, Any]: The integration result payload (status plus
+            applied/reverted patches and config changes), or a failure
+            dict on error.
+        """
         params = dict(ctx.task.params or {})
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
@@ -558,6 +650,14 @@ class IntegratePatchExecutor:
         provenance string. Returns ``None`` for legacy / kernel
         specialist outputs so the KB writeback hook is a strict
         no-op for them.
+
+        Args:
+            done_payload (dict[str, Any] | None): Parsed
+                ``specialist_done.json`` containing the proposal set.
+
+        Returns:
+            dict[str, Any] | None: The matching framework-PR proposal,
+            or ``None`` when none is present.
         """
         if not isinstance(done_payload, dict):
             return None
@@ -590,6 +690,17 @@ class IntegratePatchExecutor:
         useless to future ``fa phase-discover`` runs). Errors during
         the write are logged + swallowed so a flaky shared filesystem
         cannot fail an otherwise-successful integrate.
+
+        Args:
+            done_payload (dict[str, Any] | None): Parsed specialist
+                payload used to locate the framework-PR proposal.
+            outcome (str): Integration outcome label recorded in the KB.
+            tps_delta_pct (float): Measured throughput delta percentage.
+            extra (dict[str, Any]): Runner extras carrying shared state
+                (used to derive the session id).
+
+        Returns:
+            None: Side-effecting KB write; nothing is returned.
         """
         proposal = self._find_framework_pr_proposal(done_payload)
         if proposal is None:
@@ -636,8 +747,17 @@ class IntegratePatchExecutor:
     def _revert_patches(
         self, framework_root: Path | None, applied: list[Path],
     ) -> list[Path]:
-        """Reverse-apply the patches we already applied. Returns the
-        patches actually reverted (best-effort)."""
+        """Reverse-apply the patches we already applied (best-effort).
+
+        Args:
+            framework_root (Path | None): The framework source root the
+                patches were applied to.
+            applied (list[Path]): Patches that were applied, in apply
+                order (reverted in reverse).
+
+        Returns:
+            list[Path]: The patches that were actually reverted.
+        """
         reverted: list[Path] = []
         if framework_root is None or not applied:
             return reverted
@@ -678,9 +798,20 @@ class IntegratePatchExecutor:
         """Run a 1-variant Magpie bench under the patched server, then
         evaluate the accuracy gate.
 
-        Returns ``(bench_result_dict, gate_evidence)``. ``bench_result``
-        carries the variant's throughput; ``gate_evidence`` carries
-        ``accuracy_pass`` (True / False / None).
+        ``bench_result`` carries the variant's throughput; ``gate_evidence``
+        carries ``accuracy_pass`` (True / False / None).
+
+        Args:
+            params (dict[str, Any]): Task params (config path, model,
+                GPU, script/result-dir overrides, etc.).
+            output_root (Path): Workspace directory for the bench run.
+            config_changes_applied (dict[str, str]): Config changes that
+                were applied for this patch.
+            specialist_task_id (str): The originating specialist task id.
+
+        Returns:
+            tuple[dict[str, Any], dict[str, Any]]:
+            ``(bench_result_dict, gate_evidence)``.
         """
         # Resolve base config (same pattern as ExploreExecutor).
         config_path = Path(

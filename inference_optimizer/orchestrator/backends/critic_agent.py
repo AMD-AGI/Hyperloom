@@ -138,8 +138,16 @@ _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 def _extract_review_json(text: str) -> dict[str, Any] | None:
     """Pull the first valid review JSON out of a model reply.
 
-    Returns ``None`` if nothing parseable shows up; callers fall back to an
-    empty review (commit-review will then emit a heartbeat).
+    Prefers a fenced ```json block, then falls back to a bare object containing
+    ``review_verdicts``, trimming trailing prose until it parses.
+
+    Args:
+        text (str): The raw model reply that may contain a review JSON object.
+
+    Returns:
+        dict[str, Any] | None: The first dict containing ``review_verdicts``, or
+        ``None`` if nothing parseable shows up (callers fall back to an empty
+        review and commit-review then emits a heartbeat).
     """
     if not text:
         return None
@@ -193,6 +201,13 @@ def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
     ``tool_calls`` array. We reconstruct the minimum dict shape rather
     than calling ``msg.model_dump()`` so the serializer stays compatible
     with both pydantic v1 and v2 SDK builds.
+
+    Args:
+        msg (Any): The OpenAI assistant message object that issued tool calls.
+
+    Returns:
+        dict[str, Any]: A minimal ``role="assistant"`` message dict carrying the
+        content and reconstructed ``tool_calls`` array.
     """
     return {
         "role": "assistant",
@@ -213,7 +228,16 @@ def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
-    """Real implementation — runs ``python -m runtime.cli <phase> ...``."""
+    """Real implementation — runs ``python -m runtime.cli <phase> ...``.
+
+    Args:
+        call (RuntimeCall): The invocation descriptor with phase, request /
+            review / output paths, working directory, and subprocess env.
+
+    Raises:
+        BackendError: If a ``commit-review`` call is missing its review path,
+            the subprocess times out, cannot start, or exits non-zero.
+    """
     cmd = [
         sys.executable, "-m", "runtime.cli", call.phase,
         "--request", str(call.request_path),
@@ -266,6 +290,13 @@ def _proposal_provenance_literal(proposal: dict[str, Any]) -> str:
     Comparison is case-sensitive — ``DYNAMIC`` / ``Dynamic`` are not
     accepted as ``dynamic`` so this layer agrees with the runner
     validator.
+
+    Args:
+        proposal (dict[str, Any]): A single judge_bundle proposal entry.
+
+    Returns:
+        str: The stripped ``provenance`` literal (top-level preferred, then
+        nested under ``params``), or an empty string when absent.
     """
     if not isinstance(proposal, dict):
         return ""
@@ -286,6 +317,11 @@ def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None
 
     Idempotent: a re-injection on the same bundle leaves the dict
     unchanged. Specialist-only bundles are no-ops.
+
+    Args:
+        judge_bundle (dict[str, Any]): The prepared judge bundle to mutate in
+            place; its ``review_constraints`` are updated when a dynamic
+            proposal is present.
     """
     proposals = judge_bundle.get("proposals") or []
     if not isinstance(proposals, list):
@@ -414,6 +450,18 @@ class CriticAgentBackend:
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Validate config, wire transports, and resolve static context.
+
+        Normalises paths, verifies ``runtime/cli.py`` exists and adds the root
+        to ``sys.path``, validates ``kb_mode``, selects the real or test runtime
+        caller, constructs the Codex/OpenAI client (or its factory), resolves
+        the per-session static context (explicit or from ``manifest.json``), and
+        initialises optional web tools.
+
+        Raises:
+            BackendError: If ``runtime/cli.py`` is missing, ``kb_mode`` is
+                invalid, the OpenAI SDK is unavailable, or no API key is set.
+        """
         self.critic_agent_root = Path(self.critic_agent_root)
         self.session_dir = Path(self.session_dir)
         if not (self.critic_agent_root / "runtime" / "cli.py").is_file():
@@ -603,7 +651,31 @@ class CriticAgentBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
-        """One Critic turn — run the prepare → reason → commit pipeline."""
+        """One Critic turn — run the prepare → reason → commit pipeline.
+
+        Writes the ``coordinator_inbox`` request, runs ``prepare-review`` to get
+        a judge bundle, enriches its ``review_constraints`` (action policy and
+        cross-domain rules), drives Codex reasoning when proposals exist, runs
+        ``commit-review`` to produce the intent envelope, validates it, and
+        records per-turn telemetry.
+
+        Args:
+            prompt (str): The Coordinator-rendered inbox prompt for this turn.
+            system_prompt (str | None): Optional system prompt forwarded into
+                the Codex reasoning call.
+            tools (list[str] | None): Unused; the Critic exposes no tool palette
+                to the Coordinator.
+            max_turns (int): Unused; the Critic is single-turn.
+
+        Returns:
+            BackendTurnResult: The validated review intents plus model, KB, and
+            session metadata.
+
+        Raises:
+            BackendError: If the judge bundle or emit file cannot be read, or
+                ``emit.json`` is missing a dict ``intent_envelope``.
+            NoIntentEmitted: If the committed envelope fails intent validation.
+        """
         del tools, max_turns  # Critic is single-turn / no tool palette.
 
         turn_idx = self._turn_idx
@@ -772,6 +844,15 @@ class CriticAgentBackend:
     # Helpers
     # ------------------------------------------------------------------
     def _allocate_workdir(self, turn_idx: int) -> Path:
+        """Create and return a per-turn workdir, pruning stale ones first.
+
+        Args:
+            turn_idx (int): Zero-based index of the current turn, used as the
+                zero-padded subdirectory name.
+
+        Returns:
+            Path: The created ``<session>/critic-workdir/<turn>/`` directory.
+        """
         root = self.session_dir / "critic-workdir"
         root.mkdir(parents=True, exist_ok=True)
         self._prune_old_workdirs(root, keep=CRITIC_AGENT_WORKDIR_KEEP_COUNT)
@@ -781,7 +862,15 @@ class CriticAgentBackend:
 
     @staticmethod
     def _prune_old_workdirs(root: Path, *, keep: int) -> None:
-        """Remove all but the ``keep`` most recent ``<turn>/`` subdirs."""
+        """Remove all but the ``keep`` most recent ``<turn>/`` subdirs.
+
+        Best-effort: listing and removal errors are swallowed so a janitor
+        hiccup never fails the turn.
+
+        Args:
+            root (Path): The ``critic-workdir`` parent directory to prune.
+            keep (int): Number of most recent turn subdirectories to retain.
+        """
         try:
             entries = sorted(
                 (p for p in root.iterdir() if p.is_dir()),
@@ -834,6 +923,11 @@ class CriticAgentBackend:
         regression is that critic verdicts revert to the legacy
         ``needs_review`` / ``critic_unavailable`` fallback until the
         manifest is restored.
+
+        Returns:
+            dict[str, Any]: The derived per-session context (model, framework,
+            and any available non-critical keys), or an empty dict on any read
+            error.
         """
         path = manifest_path(self.session_dir)
         try:
@@ -879,6 +973,19 @@ class CriticAgentBackend:
         return ctx
 
     def _build_runtime_env(self) -> dict[str, str]:
+        """Build the subprocess environment for ``runtime.cli`` invocations.
+
+        Co-locates session memory and the KB dead-letter dir under the session,
+        sets the KB client mode and the robustness session-dir hint, and in
+        ``live`` KB mode merges ``kb_env`` and requires ``KB_BASE_URL``.
+
+        Returns:
+            dict[str, str]: A copy of the current environment with the
+            critic-agent runtime variables applied.
+
+        Raises:
+            BackendError: If ``kb_mode == "live"`` but ``KB_BASE_URL`` is unset.
+        """
         env = dict(os.environ)
         # Co-locate session memory inside the Coordinator session so it's
         # cleaned up with the session and follows the per-session lifecycle
@@ -920,7 +1027,22 @@ class CriticAgentBackend:
         judge_bundle: dict[str, Any],
         system_prompt: str | None,
     ) -> tuple[dict[str, Any], str, str | None]:
-        """Drive Codex once with the judge bundle; return (review, raw, finish)."""
+        """Drive Codex with the judge bundle and parse a review object.
+
+        Builds the skill-preamble + judge-bundle + output-format user prompt,
+        runs the (optionally tool-using) reasoning loop, and extracts the review
+        JSON, falling back to an empty verdict list when nothing parses.
+
+        Args:
+            judge_bundle (dict[str, Any]): The prepared judge bundle to reason
+                over.
+            system_prompt (str | None): Optional system prompt sent as the
+                leading system message.
+
+        Returns:
+            tuple[dict[str, Any], str, str | None]: The parsed review dict, the
+            raw model text, and the final finish reason.
+        """
         preamble = self._load_skill_preamble()
         bundle_text = json.dumps(
             {
@@ -980,6 +1102,18 @@ class CriticAgentBackend:
         Never raises for tool-execution failures — the failing tool call
         is reported back to the model as a synthetic ``tool`` message so
         it can react (mirrors Primus-Claw's behaviour).
+
+        Args:
+            messages (list[dict[str, Any]]): The running chat-completions
+                message list; mutated in place as tool calls and results are
+                appended.
+
+        Returns:
+            tuple[str, str | None]: The final assistant text and its finish
+            reason.
+
+        Raises:
+            BackendError: If any Codex chat-completion API call fails.
         """
         tools = self._web_tool_schemas
         max_turns = self._web_tool_max_turns if tools else 0
@@ -1039,7 +1173,16 @@ class CriticAgentBackend:
         return final.message.content or "", getattr(final, "finish_reason", None)
 
     async def _execute_tool_call(self, tool_call: Any) -> str:
-        """Dispatch one OpenAI tool_call to the configured web client."""
+        """Dispatch one OpenAI tool_call to the configured web client.
+
+        Args:
+            tool_call (Any): The OpenAI tool-call object carrying the function
+                name and JSON-encoded arguments.
+
+        Returns:
+            str: The tool's result text, or an ``Error: ...`` string when the
+            arguments are malformed or the tool is unknown/disabled.
+        """
         fn = getattr(tool_call, "function", None)
         name = getattr(fn, "name", "") if fn else ""
         raw_args = getattr(fn, "arguments", "") if fn else ""
@@ -1061,6 +1204,16 @@ class CriticAgentBackend:
         return f"Error: unknown or disabled tool {name!r}"
 
     def _load_skill_preamble(self) -> str:
+        """Load and cache the critic-agent skill/action markdown preamble.
+
+        Reads ``SKILL.md`` and ``actions/review_coordinator_inbox.md`` from the
+        critic-agent root, concatenating whatever is readable. Missing files are
+        skipped (the prompt just gets thinner). The result is memoised.
+
+        Returns:
+            str: The combined preamble text, or an empty string when no source
+            files could be read.
+        """
         if self._skill_preamble is not None:
             return self._skill_preamble
         parts: list[str] = []

@@ -19,6 +19,23 @@ from ray_runtime import ensure_ray_cluster, quiet_ray_init, safe_runtime_env
 
 def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,
                           num_gpus: int = 1) -> str:
+    """Build the safety/system prompt enforced on the OOB sub-agent.
+
+    Encodes the hard rules (absolute output paths, no writes outside the
+    workspace, time budget, GPU usage hints, no invented benchmark
+    numbers) tailored to the given repo, budget, and GPU count.
+
+    Args:
+        kernel_repo (str): Repo path the agent must not write to; when
+            empty, a default set of system paths is forbidden instead.
+        budget_minutes (float): Hard wall-clock budget; a soft deadline
+            at 85% is computed from it.
+        num_gpus (int): Number of GPUs available, used to choose
+            single-GPU vs ``torchrun`` multi-GPU guidance.
+
+    Returns:
+        str: The fully rendered system-prompt text.
+    """
     forbidden = (kernel_repo
                  or "/sgl-workspace, /opt, /usr, /etc, "
                     "/sgl-workspace/aiter, /sgl-workspace/sglang")
@@ -65,6 +82,29 @@ def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
                source_file: str, max_turns: int, timeout_s: int,
                extra_files: list[str] | None = None,
                kernel_repo: str = "", num_gpus: int = 1) -> list[str]:
+    """Assemble the ``oob run`` argument vector.
+
+    Args:
+        agent (str): OOB agent to run (``claude`` / ``codex`` /
+            ``cursor``).
+        prompt_file (Path): Task prompt file (``--prompt-file``).
+        output_dir (Path): Output directory (``-o``).
+        source_file (str): Optional input kernel file (``-f``); omitted
+            when empty.
+        max_turns (int): Max agent turns (``--max-turns``).
+        timeout_s (int): Run timeout in seconds; also drives the system
+            prompt's minute budget.
+        extra_files (list[str] | None): Additional files to copy in
+            (repeated ``-f``).
+        kernel_repo (str): Repo path forwarded to the system prompt.
+        num_gpus (int): GPU count forwarded to the system prompt.
+
+    Returns:
+        list[str]: The full ``oob`` command vector.
+
+    Raises:
+        FileNotFoundError: If the ``oob`` CLI is not on ``PATH``.
+    """
     if not shutil.which("oob"):
         raise FileNotFoundError("oob CLI not in PATH; run install.sh --with-oob")
     cmd = [
@@ -95,6 +135,14 @@ def _parse_oob_init(stdout: str) -> dict[str, str]:
     Parse the trailing JSON object first; fall back to scanning ndjson
     `system/init` events if the trailing block is missing (e.g. when the
     run was killed mid-stream).
+
+    Args:
+        stdout (str): Full captured stdout from ``oob run --json``.
+
+    Returns:
+        dict[str, str]: Mapping with ``cli_workspace``, ``session_id``,
+            and ``thread_id`` keys; values default to empty strings when
+            not discoverable.
     """
     info = {"cli_workspace": "", "session_id": "", "thread_id": ""}
     if not stdout:
@@ -156,6 +204,29 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
                 max_turns: int, num_gpus: int, timeout_s: int,
                 extra_files: list[str] | None = None,
                 kernel_repo: str = "") -> dict:
+    """Run an OOB submission inside a Ray GPU task.
+
+    Initializes Ray (quietly), renders the safety system prompt, then
+    dispatches a ``num_gpus``-pinned remote task that invokes ``oob
+    run``. The parsed OOB init metadata is merged into the result.
+
+    Args:
+        agent (str): OOB agent to run.
+        prompt_file (Path): Task prompt file.
+        output_dir (Path): Output directory.
+        source_file (str): Optional input kernel file.
+        max_turns (int): Max agent turns.
+        num_gpus (int): GPUs to reserve for the remote task.
+        timeout_s (int): Run timeout in seconds.
+        extra_files (list[str] | None): Additional files to copy in.
+        kernel_repo (str): Repo path forwarded to the system prompt.
+
+    Returns:
+        dict: Result mapping including ``returncode``, ``stdout_tail``,
+            ``stderr_tail``, ``stdout``, ``gpu_ids``, ``elapsed_s``,
+            ``cmd``, plus the merged ``cli_workspace`` / ``session_id`` /
+            ``thread_id`` attribution keys.
+    """
     import ray
     runtime_env = quiet_ray_init()
     system_prompt_text = _safety_system_prompt(
@@ -165,6 +236,26 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
     def _task(agent: str, prompt_file_str: str, output_dir_str: str,
               source_file: str, max_turns: int, timeout_s: int,
               extra_files: list[str], system_prompt: str) -> dict:
+        """Ray worker body: run the ``oob`` CLI on this node's GPUs.
+
+        Self-contained (no kernel-agent imports) because Ray workers do
+        not inherit the driver's ``sys.path``.
+
+        Args:
+            agent (str): OOB agent to run.
+            prompt_file_str (str): Task prompt file path.
+            output_dir_str (str): Output directory path.
+            source_file (str): Optional input kernel file.
+            max_turns (int): Max agent turns.
+            timeout_s (int): Run timeout in seconds.
+            extra_files (list[str]): Additional files to copy in.
+            system_prompt (str): Pre-rendered safety system prompt.
+
+        Returns:
+            dict: Result mapping with ``returncode``, ``stdout_tail``,
+                ``stderr_tail``, ``stdout``, ``gpu_ids``, ``elapsed_s``,
+                and ``cmd``.
+        """
         # Self-contained: workers don't share driver sys.path.
         import os as _os, shutil as _shutil, subprocess as _sp, time as _t
         if not _shutil.which("oob"):
@@ -233,6 +324,28 @@ def run_via_cli(agent: str, prompt_file: Path, output_dir: Path, source_file: st
                 max_turns: int, timeout_s: int,
                 extra_files: list[str] | None = None,
                 kernel_repo: str = "", num_gpus: int = 1) -> dict:
+    """Run an OOB submission directly via subprocess (no Ray).
+
+    Builds the command via :func:`_build_cmd`, runs it with the current
+    GPU-visibility env, and merges parsed OOB init metadata into the
+    result.
+
+    Args:
+        agent (str): OOB agent to run.
+        prompt_file (Path): Task prompt file.
+        output_dir (Path): Output directory.
+        source_file (str): Optional input kernel file.
+        max_turns (int): Max agent turns.
+        timeout_s (int): Run timeout in seconds.
+        extra_files (list[str] | None): Additional files to copy in.
+        kernel_repo (str): Repo path forwarded to the system prompt.
+        num_gpus (int): GPU count forwarded to the system prompt.
+
+    Returns:
+        dict: Result mapping with ``returncode``, ``stdout_tail``,
+            ``stderr_tail``, ``stdout``, ``gpu_ids``, ``elapsed_s``,
+            ``cmd``, plus merged attribution keys.
+    """
     cmd = _build_cmd(agent, prompt_file, output_dir, source_file, max_turns, timeout_s,
                      extra_files=extra_files, kernel_repo=kernel_repo, num_gpus=num_gpus)
     gpu_ids = os.environ.get("ROCR_VISIBLE_DEVICES") \
@@ -273,6 +386,28 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
            max_turns: int = 100, timeout_s: int = 1800, num_gpus: int = 1,
            prefer_ray: bool = True, extra_files: list[str] | None = None,
            kernel_repo: str = "") -> dict:
+    """Submit an OOB run, preferring Ray with a CLI fallback.
+
+    Ensures the output directory exists, then (when ``prefer_ray``)
+    starts/attaches to a Ray cluster and runs via :func:`run_via_ray`,
+    returning a structured error dict on any Ray failure. When Ray is
+    not preferred, runs via :func:`run_via_cli`.
+
+    Args:
+        agent (str): OOB agent to run.
+        prompt_file (Path): Task prompt file.
+        output_dir (Path): Output directory; created if absent.
+        source_file (str): Optional input kernel file.
+        max_turns (int): Max agent turns.
+        timeout_s (int): Run timeout in seconds.
+        num_gpus (int): GPUs to reserve for the Ray task.
+        prefer_ray (bool): When True, try Ray first; otherwise use CLI.
+        extra_files (list[str] | None): Additional files to copy in.
+        kernel_repo (str): Repo path forwarded to the system prompt.
+
+    Returns:
+        dict: The result mapping from the chosen submission path.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     if prefer_ray:
         try:
@@ -304,6 +439,11 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
 
 
 def main() -> int:
+    """CLI entry point: parse args, submit, and print the JSON result.
+
+    Returns:
+        int: 0 when the submission's ``returncode`` is 0, otherwise 1.
+    """
     parser = argparse.ArgumentParser(description="kernel-agent self-contained OOB submitter")
     parser.add_argument("--agent", required=True, choices=["claude", "codex", "cursor"])
     parser.add_argument("--prompt-file", required=True)

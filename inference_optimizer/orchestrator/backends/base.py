@@ -31,6 +31,16 @@ def parse_call_timeout_env(env_name: str, *, default: float) -> float:
     not a positive finite float — a malformed knob must not be a fatal
     boot-time error for the orchestrator. Mis-parses are logged at WARNING
     so the operator sees the fallback in the boot logs.
+
+    Args:
+        env_name (str): Name of the environment variable to read the timeout
+            from.
+        default (float): Fallback timeout in seconds used when the variable is
+            unset, empty, or not a positive finite float.
+
+    Returns:
+        float: The parsed positive finite timeout in seconds, or ``default``
+        when the variable is missing or malformed.
     """
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
@@ -85,7 +95,23 @@ class Backend(Protocol):
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         max_turns: int = 1,
-    ) -> BackendTurnResult: ...
+    ) -> BackendTurnResult:
+        """Run one logical turn for the given prompt and return its intents.
+
+        Args:
+            prompt (str): The user/turn prompt to send to the backend.
+            system_prompt (str | None): Optional system prompt establishing the
+                backend's role and rules for this turn.
+            tools (list[str] | None): Optional list of tool names the backend is
+                allowed to use this turn.
+            max_turns (int): Maximum number of internal agentic sub-turns the
+                backend may take to produce its result.
+
+        Returns:
+            BackendTurnResult: The intents emitted this turn plus any raw text
+            and metadata.
+        """
+        ...
 
 
 __all__ = ["Backend", "BackendError", "BackendTurnResult", "parse_call_timeout_env"]

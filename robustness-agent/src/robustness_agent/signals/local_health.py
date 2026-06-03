@@ -30,6 +30,29 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class LocalHealthConfig:
+    """Thresholds for the LocalProbe-derived health rules.
+
+    Attributes:
+        gpu_temp_warn_c (float): GPU temperature (Celsius) at/above which a
+            MEDIUM thermal symptom fires.
+        gpu_temp_crit_c (float): GPU temperature (Celsius) at/above which a HIGH
+            thermal symptom fires.
+        disk_used_warn_pct (float): Non-SHM mountpoint used-percent for a MEDIUM
+            disk-pressure symptom.
+        disk_used_crit_pct (float): Non-SHM mountpoint used-percent for a HIGH
+            disk-pressure symptom.
+        shm_mountpoints (tuple[str, ...]): Mountpoints treated as shared memory
+            (stricter thresholds, handled separately from disk).
+        shm_used_warn_pct (float): SHM used-percent for a MEDIUM symptom.
+        shm_used_crit_pct (float): SHM used-percent for a HIGH symptom.
+        ray_head_unreachable_severity (str): Severity label used when the Ray
+            head is unreachable.
+        fd_warn_used_pct (float): File-descriptor used-percent for a MEDIUM
+            symptom.
+        fd_crit_used_pct (float): File-descriptor used-percent for a HIGH
+            symptom.
+    """
+
     gpu_temp_warn_c: float = 90.0
     gpu_temp_crit_c: float = 100.0
     # ``disk_pressure`` thresholds (percentage of mountpoint used). 6h
@@ -98,6 +121,18 @@ def evaluate_local_health_signals(
     *,
     config: LocalHealthConfig | None = None,
 ) -> list[Symptom]:
+    """Run all LocalProbe-only health rules and aggregate their symptoms.
+
+    Args:
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected LocalProbe source data.
+        config (LocalHealthConfig | None): Thresholds; defaults to
+            :class:`LocalHealthConfig` when ``None``.
+
+    Returns:
+        list[Symptom]: All local-health symptoms found this tick, possibly
+            empty.
+    """
     cfg = config or LocalHealthConfig()
     out: list[Symptom] = []
     out.extend(_server_unreachable(data))
@@ -111,6 +146,17 @@ def evaluate_local_health_signals(
 
 
 def _server_unreachable(data: SourceData) -> list[Symptom]:
+    """Emit ``local_server_unreachable`` for each failed local HTTP probe.
+
+    Severity is HIGH when every probed target is unreachable, otherwise MEDIUM.
+
+    Args:
+        data (SourceData): Collected source data including
+            ``local_server_health``.
+
+    Returns:
+        list[Symptom]: One symptom per unreachable probe target, possibly empty.
+    """
     if not data.local_server_health:
         return []
     bad = [entry for entry in data.local_server_health if not entry.get("reachable")]
@@ -147,6 +193,17 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
 
 
 def _log_error_symptoms(data: SourceData) -> list[Symptom]:
+    """Emit ``log_error_pattern`` symptoms grouped by matched log pattern.
+
+    Patterns in :data:`_HIGH_SEVERITY_PATTERNS` fire HIGH; all others MEDIUM.
+
+    Args:
+        data (SourceData): Collected source data including
+            ``local_log_errors``.
+
+    Returns:
+        list[Symptom]: One symptom per matched pattern, possibly empty.
+    """
     if not data.local_log_errors:
         return []
     by_pattern: dict[str, list[dict[str, Any]]] = {}
@@ -187,6 +244,15 @@ def _gpu_thermal_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
+    """Emit ``gpu_thermal_high`` for GPUs over the warn/crit temperature.
+
+    Args:
+        data (SourceData): Collected source data including ``local_gpu``.
+        cfg (LocalHealthConfig): Thresholds (provides warn/crit temperatures).
+
+    Returns:
+        list[Symptom]: One symptom per over-temperature GPU, possibly empty.
+    """
     gpus = data.local_gpu.get("gpus") if isinstance(data.local_gpu, dict) else None
     if not isinstance(gpus, list):
         return []
@@ -233,6 +299,15 @@ def _disk_pressure_symptoms(
     populates: ``{mountpoint: {used_pct, used_gb, free_gb, total_gb}}``.
     SHM mountpoints are handled by :func:`_shm_pressure_symptoms` (it
     has stricter thresholds) so we skip them here to avoid double-firing.
+
+    Args:
+        data (SourceData): Collected source data including ``local_disk``.
+        cfg (LocalHealthConfig): Thresholds (provides disk warn/crit percents
+            and the SHM mountpoint set to skip).
+
+    Returns:
+        list[Symptom]: One ``disk_pressure`` symptom per stressed mountpoint,
+            possibly empty.
     """
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
@@ -294,6 +369,15 @@ def _shm_pressure_symptoms(
     SKILL preflight requires ≥ 16 GiB free at boot; we surface this at
     runtime so the operator catches it before the next server start
     fails opaquely with ``shared memory allocation failed``.
+
+    Args:
+        data (SourceData): Collected source data including ``local_disk``.
+        cfg (LocalHealthConfig): Thresholds (provides SHM warn/crit percents
+            and the SHM mountpoint set).
+
+    Returns:
+        list[Symptom]: One ``shm_pressure`` symptom per stressed SHM mountpoint,
+            possibly empty.
     """
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
@@ -355,6 +439,13 @@ def _ray_head_dead_symptoms(data: SourceData) -> list[Symptom]:
     * ``{"healthy": True, ...}`` → healthy, no symptom.
     * ``{"healthy": False, "reason": "...", ...}`` → fire HIGH so
       Orchestration prunes ``kernel_opt`` (which submits Ray tasks).
+
+    Args:
+        data (SourceData): Collected source data including ``local_ray``.
+
+    Returns:
+        list[Symptom]: A one-element list with the ``ray_head_dead`` symptom
+            when the Ray head is unhealthy, otherwise an empty list.
     """
     ray_info = getattr(data, "local_ray", None)
     if not isinstance(ray_info, dict) or not ray_info:
@@ -394,6 +485,14 @@ def _fd_pressure_symptoms(
     unreadable). Magpie/Ray long-runs leak sockets; ``ulimit -n``
     hitting the wall manifests as agent_stall(kernel) but the real
     cause is here.
+
+    Args:
+        data (SourceData): Collected source data including ``local_fd``.
+        cfg (LocalHealthConfig): Thresholds (provides FD warn/crit percents).
+
+    Returns:
+        list[Symptom]: A one-element list with the ``fd_pressure`` symptom when
+            FD usage crosses a threshold, otherwise an empty list.
     """
     fd_info = getattr(data, "local_fd", None)
     if not isinstance(fd_info, dict) or not fd_info:

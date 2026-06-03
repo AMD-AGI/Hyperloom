@@ -52,11 +52,21 @@ if TYPE_CHECKING:  # pragma: no cover — type-only
 
 # ---------------------------------------------------------------------------
 def _value_is_present(value: Any) -> bool:
-    """Treat a value as present iff it is a non-empty string OR a
+    """Return whether a value counts as "present" for payload checks.
+
+    Treats a value as present iff it is a non-empty string OR a
     non-empty container (dict/list/tuple/set). ``None`` and whitespace-
     only strings count as absent. Used by the delegate required-payload
     check, where ``reason`` is a short string and ``evidence`` is a dict
-    (per-GPU snapshot, consecutive_hits, ...)."""
+    (per-GPU snapshot, consecutive_hits, ...).
+
+    Args:
+        value (Any): the candidate value to test for presence.
+
+    Returns:
+        bool: True if the value is a non-empty string, a non-empty
+            container, or any other non-``None`` scalar; False otherwise.
+    """
     if value is None:
         return False
     if isinstance(value, str):
@@ -76,6 +86,15 @@ def _delegate_field_present(payload: dict[str, Any], field_name: str) -> bool:
     location so PolicyGate is the chokepoint regardless of the producer's
     payload-shape choice — see ``robustness_agent/role/envelope.py``
     ``build_delegate`` and ``recover_executor.__call__``.
+
+    Args:
+        payload (dict[str, Any]): the delegate intent payload to inspect.
+        field_name (str): the field whose presence is being checked.
+
+    Returns:
+        bool: True if ``field_name`` is present at the top level of
+            ``payload`` or nested under ``payload["params"]``; False
+            otherwise.
     """
     if _value_is_present(payload.get(field_name)):
         return True
@@ -99,6 +118,19 @@ class PolicyDenied(RuntimeError):
 
     def __init__(self, reason: str, *, rule: str | None = None,
                  hint: str | None = None):
+        """Initialise the denial with a human-readable reason and metadata.
+
+        Args:
+            reason (str): human-readable explanation passed to the base
+                ``RuntimeError``; surfaced in logs and the policy_denied
+                observation event.
+            rule (str | None): short identifier of the rule that fired,
+                used by the Coordinator to classify the denial. Defaults
+                to ``None``.
+            hint (str | None): optional one-line, agent-actionable
+                suggestion describing the canonical fix. Defaults to
+                ``None``.
+        """
         super().__init__(reason)
         self.rule = rule
         self.hint = hint
@@ -428,6 +460,17 @@ ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = (
 # error messages; specialist intents go through ``_validate_specialist_*``
 # directly so the conventional role.allowed_intents matrix doesn't fire.
 class _SpecialistPseudoRole:
+    """Minimal stand-in role used when path-validating specialist intents.
+
+    Specialist intents are routed through ``_validate_specialist_*`` rather
+    than the conventional ``role.allowed_intents`` matrix, so the path
+    containment check only needs a ``name`` attribute for its error
+    messages. This stub supplies that single field.
+
+    Attributes:
+        name (str): the synthetic role name, always ``"specialist"``.
+    """
+
     name = "specialist"
 
 
@@ -541,9 +584,13 @@ def _trace_path_allowlist() -> tuple[str, ...]:
 
     Returns the set of path prefixes (each terminated by ``/``) that
     PolicyGate accepts for ``TRACE_PATH_LIKE_FIELDS`` values escaping
-    ``session_dir``. The trailing ``/`` is load-bearing — without it a
+    ``session_dir``.     The trailing ``/`` is load-bearing — without it a
     ``str.startswith`` check would match a sibling dir whose name shares
     the prefix as a substring.
+
+    Returns:
+        tuple[str, ...]: the accepted path prefixes, each terminated by a
+            trailing ``/``, resolved from ``mn_profile_trace_root()``.
     """
     from ..paths import mn_profile_trace_root
     root = str(mn_profile_trace_root()).rstrip("/") + "/"
@@ -697,6 +744,18 @@ class PolicyGate:
     strict_phase: bool = False
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
+        """Apply environment overrides for the strict-mode toggles.
+
+        Lets ``$INFERENCE_OPTIMIZER_STRICT_PATHS`` and
+        ``$INFERENCE_OPTIMIZER_STRICT_PATHS`` (truthy values ``1`` /
+        ``true`` / ``yes``) enable :attr:`strict_paths` and
+        :attr:`strict_phase` respectively, so callers (and tests) can opt
+        in without threading a constructor arg through every Coordinator
+        call site. Explicitly-set constructor values are never downgraded.
+
+        Returns:
+            None.
+        """
         # Allow env to enable strict mode without threading a constructor
         # arg through every Coordinator caller (tests use a monkeypatched
         # env to opt in).
@@ -716,7 +775,8 @@ class PolicyGate:
     def validate_intent(self, from_agent: str, intent: Intent) -> None:
         """Raise :class:`PolicyDenied` if the intent is not allowed.
 
-        Order of checks (cheapest first):
+        Single chokepoint invoked by the Coordinator before any
+        side-effect is committed. Order of checks (cheapest first):
 
             1. Agent must be a known role (or a ``specialist:<task_id>``
                ephemeral identity)
@@ -724,6 +784,20 @@ class PolicyGate:
             3. Per-intent type structural rules
             4. Cross-source allowlists (review_verdict / kill_task /
                robustness-only)
+
+        Args:
+            from_agent (str): name of the emitting agent, or a
+                ``specialist:<task_id>`` ephemeral identity.
+            intent (Intent): the parsed intent to validate, including its
+                type and payload.
+
+        Returns:
+            None: returns silently when the intent is allowed.
+
+        Raises:
+            PolicyDenied: if the agent is unknown, the role may not emit
+                the intent type, a structural rule fails, or a
+                cross-source allowlist rejects the intent.
         """
         # specialist sub-agents emit intents under an ephemeral
         # ``specialist:<task_id>`` identity. They get
@@ -783,7 +857,24 @@ class PolicyGate:
     def _closing_phase_denial(
         self, source: str, intent: Intent,
     ) -> PolicyDenied | None:
-        """During closing phase, only harmless intents and ``report`` proposals."""
+        """Deny side-effecting intents once the run enters its closing phase.
+
+        While ``shared_state.closing_phase`` is set, only harmless
+        communication intents (send_message / update_persona / alert /
+        ask_question / answer) and ``propose_action`` for the ``report``
+        action are permitted; everything else is rejected so the run can
+        wind down cleanly.
+
+        Args:
+            source (str): name of the emitting agent (used for context;
+                the rule applies uniformly regardless of source).
+            intent (Intent): the parsed intent under evaluation.
+
+        Returns:
+            PolicyDenied | None: a ``PolicyDenied`` describing the
+                wind-down rejection, or ``None`` when the run is not
+                closing or the intent is one of the permitted kinds.
+        """
         state = self.shared_state
         if state is None or not getattr(state, "closing_phase", False):
             return None
@@ -813,6 +904,14 @@ class PolicyGate:
         Codex roles → ``[]`` (no-tools). Claude roles → ``["emit_intent"]``
         in the legacy release; per-action Read/Bash/Edit injection happens in
         SubAgentRunner (P0-3) and via :meth:`allowed_tools_for_action`.
+
+        Args:
+            agent_name (str): name of the agent whose role is looked up in
+                :attr:`role_registry`.
+
+        Returns:
+            list[str]: ``["emit_intent"]`` for a tool-enabled Claude role,
+                or ``[]`` when the agent is unknown or is a no-tools role.
         """
         role = self.role_registry.get(agent_name)
         if role is None:
@@ -824,9 +923,14 @@ class PolicyGate:
     def allowed_tools_for_action(self, action_name: str) -> list[str]:
         """Per-action tool intersection used by SubAgentRunner.
 
-        Returns the action's declared ``allowed_tools`` from metadata, or
-        the conservative default ``["emit_intent"]`` when no
-        ActionRegistry is wired or the action is unknown.
+        Args:
+            action_name (str): the action whose declared tool list is
+                requested.
+
+        Returns:
+            list[str]: the action's declared ``allowed_tools`` from
+                metadata, or the conservative default ``["emit_intent"]``
+                when no ActionRegistry is wired or the action is unknown.
         """
         if self.action_registry is None:
             return ["emit_intent"]
@@ -839,6 +943,30 @@ class PolicyGate:
     # Per-intent validators
     # ------------------------------------------------------------------
     def _validate_delegate(self, role: "AgentRole", payload: dict[str, Any]) -> None:
+        """Validate a ``DELEGATE`` intent against the full delegate rule set.
+
+        Enforces, in order: the role's ``can_delegate_side_effects``
+        capability, presence of ``action_name``, the
+        analysis/internal-only gate, the kernel-owned-action guard, and
+        the per-action specialised paths (``specialist`` / ``dynamic_action``
+        / ``integrate_patch`` / ``explore`` / ``sweep``). It then applies
+        the FP8-only, gain-driven and explore-minimum kernel_opt gates, the
+        ActionRegistry unknown-action lookup, per-action source and
+        required-payload guards, the phase-compatibility check, and the
+        external-tool collision guards (R4 / R5).
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent.
+            payload (dict[str, Any]): the delegate intent payload, expected
+                to carry ``action_name`` and optional ``params``.
+
+        Returns:
+            None: returns silently when the delegate is permitted.
+
+        Raises:
+            PolicyDenied: if any delegate rule fails; the ``rule``
+                attribute identifies which guard fired.
+        """
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
                 f"role={role.name!r} cannot delegate side-effecting actions",
@@ -971,6 +1099,30 @@ class PolicyGate:
         )
 
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
+        """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
+
+        Requires ``action_name`` and applies the internal-only gate. The
+        ActionRegistry lookup here is soft — unknown names are only
+        rejected when a registry is wired and the action is neither
+        registered nor kernel-owned. Mirrors the delegate channel's
+        explore-grid, sweep-singleton, FP8-only, gain-driven /
+        explore-minimum kernel_opt, phase, and external-tool collision
+        gates so an LLM cannot sidestep them by proposing instead of
+        delegating.
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent.
+            payload (dict[str, Any]): the propose_action payload, expected
+                to carry ``action_name`` and optional ``params``.
+
+        Returns:
+            None: returns silently when the proposal is permitted.
+
+        Raises:
+            PolicyDenied: if ``action_name`` is missing, unknown (with a
+                registry wired), internal-only, or fails one of the
+                mirrored action gates.
+        """
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
@@ -1053,6 +1205,19 @@ class PolicyGate:
 
         Toggle: :attr:`SharedState.gain_driven_kernel_opt` (F0-10,
         default off).
+
+        Args:
+            action_name (str): the action being validated; a no-op unless
+                it equals ``"kernel_opt"``.
+
+        Returns:
+            None: returns silently when the lock does not apply or the
+                gain trend has dropped below threshold.
+
+        Raises:
+            PolicyDenied: with ``rule='n19c_gain_driven_kernel_opt'`` when
+                too few cheap-round deltas are on record or the moving
+                average is still ``>= _N19C_EPSILON_PCT``.
         """
         if action_name != "kernel_opt":
             return
@@ -1123,6 +1288,19 @@ class PolicyGate:
         without it the LLM could enter KERNEL phase and burn a
         kernel-opt lane before it knows whether cheap rounds would
         have closed the gap.
+
+        Args:
+            action_name (str): the action being validated; a no-op unless
+                it equals ``"kernel_opt"``.
+
+        Returns:
+            None: returns silently when the rule does not apply or at
+                least one successful explore round is on record.
+
+        Raises:
+            PolicyDenied: with
+                ``rule='explore_attempts_minimum_before_kernel_opt'`` when
+                no accepted explore round exists yet.
         """
         if action_name != "kernel_opt":
             return
@@ -1150,6 +1328,25 @@ class PolicyGate:
         )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
+        """Validate an ``UPDATE_STATE`` intent's ``changes`` against core fields.
+
+        Requires a non-empty ``changes`` dict. Roles with
+        ``can_mutate_core_state`` (the Coordinator) may write anything;
+        every other role is blocked from mutating any field in
+        :data:`CORE_STATE_FIELDS`.
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent.
+            payload (dict[str, Any]): the update_state payload, expected to
+                contain a ``changes`` mapping of field → new value.
+
+        Returns:
+            None: returns silently when the state transition is permitted.
+
+        Raises:
+            PolicyDenied: if ``changes`` is missing/empty, or a
+                non-privileged role attempts to mutate core state fields.
+        """
         changes = payload.get("changes")
         if not isinstance(changes, dict) or not changes:
             raise PolicyDenied(
@@ -1168,6 +1365,23 @@ class PolicyGate:
             )
 
     def _validate_send_message_topic(self, payload: dict[str, Any]) -> None:
+        """Require a non-empty ``topic`` on a ``SEND_MESSAGE`` intent.
+
+        Unknown topics are intentionally not rejected here — the
+        Coordinator soft-degrades them to ``"observation"`` (DESIGN
+        §13.2) — so agents can still surface unstructured observations.
+
+        Args:
+            payload (dict[str, Any]): the send_message payload, expected to
+                carry a ``topic`` string.
+
+        Returns:
+            None: returns silently when a topic is present.
+
+        Raises:
+            PolicyDenied: with ``rule='payload'`` when ``topic`` is missing
+                or blank.
+        """
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyDenied("send_message missing topic", rule="payload")
@@ -1176,6 +1390,28 @@ class PolicyGate:
         # can still surface unstructured observations.
 
     def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
+        """Validate a ``REQUEST`` intent against the routing matrix.
+
+        Checks that the role may emit a REQUEST at all (per
+        :data:`REQUEST_ROUTING`), that ``target_agent`` is in the role's
+        allowed-target set, and that ``kind`` is present. For
+        orchestration→kernel requests the ``kind`` is treated as the action
+        name, so the internal-only, phase, FP8-only and external-tool
+        collision guards are applied to it as defense in depth.
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent.
+            payload (dict[str, Any]): the request payload, expected to
+                carry ``target_agent`` and ``kind``.
+
+        Returns:
+            None: returns silently when the request is permitted.
+
+        Raises:
+            PolicyDenied: if the role cannot emit REQUEST, the target is
+                missing/disallowed, ``kind`` is missing, or one of the
+                applied action guards fires.
+        """
         targets = REQUEST_ROUTING.get(role.name)
         if not targets:
             raise PolicyDenied(
@@ -1213,6 +1449,20 @@ class PolicyGate:
         )
 
     def _validate_response(self, payload: dict[str, Any]) -> None:
+        """Require ``in_reply_to`` and ``kind`` on a ``RESPONSE`` intent.
+
+        Args:
+            payload (dict[str, Any]): the response payload, expected to
+                carry ``in_reply_to`` (the message id being answered) and
+                ``kind``.
+
+        Returns:
+            None: returns silently when both fields are present.
+
+        Raises:
+            PolicyDenied: with ``rule='payload'`` when ``in_reply_to`` or
+                ``kind`` is missing or blank.
+        """
         in_reply_to = str(payload.get("in_reply_to", "")).strip()
         if not in_reply_to:
             raise PolicyDenied("response missing in_reply_to", rule="payload")
@@ -1221,6 +1471,29 @@ class PolicyGate:
             raise PolicyDenied("response missing kind", rule="payload")
 
     def _validate_review_verdict(self, role: "AgentRole", payload: dict[str, Any]) -> None:
+        """Validate a ``REVIEW_VERDICT`` intent (Critic-only).
+
+        Enforces that the source role is on
+        :data:`REVIEW_VERDICT_SOURCE_ALLOWLIST`, that
+        ``target_proposal_msg_id`` is present, and that exactly one of the
+        single ``verdict`` field or the per-variant ``verdict_map`` is
+        supplied. Every verdict string (single or per-variant) must belong
+        to the closed :data:`REVIEW_VERDICTS` vocabulary.
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent.
+            payload (dict[str, Any]): the review_verdict payload, carrying
+                ``target_proposal_msg_id`` and either ``verdict`` or
+                ``verdict_map``.
+
+        Returns:
+            None: returns silently when the verdict is well-formed.
+
+        Raises:
+            PolicyDenied: if the role is not a Critic, the target id is
+                missing, neither/both verdict forms are present, or a
+                verdict string is outside ``REVIEW_VERDICTS``.
+        """
         if role.name not in REVIEW_VERDICT_SOURCE_ALLOWLIST:
             raise PolicyDenied(
                 f"role={role.name!r} cannot emit review_verdict "
@@ -1306,6 +1579,21 @@ class PolicyGate:
         :data:`INTERNAL_ONLY_ACTION_NAMES`. Fires *before* the
         kernel-owned / phase / unknown gates, so the canonical hint
         always wins.
+
+        Args:
+            action_name (str): the action being validated.
+            intent_kind (str): the channel the action arrived on
+                (``delegate`` / ``propose_action`` / ``request``), echoed
+                into the denial message.
+
+        Returns:
+            None: returns silently when the action is not internal-only.
+
+        Raises:
+            PolicyDenied: with
+                ``rule='framework_pr_action_not_llm_proposable'`` or
+                ``rule='analysis_action_not_llm_proposable'`` when the LLM
+                proposes a Coordinator-internal action.
         """
         if not action_name:
             return
@@ -1377,6 +1665,24 @@ class PolicyGate:
         initialised, the rule is a no-op (Inv-2.1 doesn't apply to a
         run that hasn't entered the machine yet — Coordinator sets
         phase before the first reactor tick anyway).
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent
+                (carried for parity with the other validators; the phase
+                rule itself is role-agnostic).
+            action_name (str): the action whose phase legality is checked.
+            intent_kind (str): the channel the action arrived on, recorded
+                on the audit entry in warn-only mode.
+
+        Returns:
+            None: returns silently when the action is phase-legal, when
+                phase state is uninitialised, or (in non-strict mode) after
+                recording a warn-only denial.
+
+        Raises:
+            PolicyDenied: with ``rule='phase_incompatible'`` when
+                :attr:`strict_phase` is True and the action is not allowed
+                in the current phase.
         """
         state = self.shared_state
         if state is None:
@@ -1431,6 +1737,20 @@ class PolicyGate:
         serving lane and may patch the wrong framework path, so enforce the
         precision contract at the intent boundary. The handler repeats the
         same check as defense in depth for programmatic callers.
+
+        Args:
+            action_name (str): the action being validated; a no-op unless
+                it is in :data:`FP8_ONLY_ACTIONS`.
+            intent_kind (str): the channel the action arrived on, echoed
+                into the denial hint.
+
+        Returns:
+            None: returns silently when the action is not FP8-only or the
+                session precision is ``fp8``.
+
+        Raises:
+            PolicyDenied: with ``rule='fp8_only_action'`` when an FP8-only
+                action is requested on a non-FP8 session.
         """
         if not action_name or action_name not in FP8_ONLY_ACTIONS:
             return
@@ -1470,6 +1790,19 @@ class PolicyGate:
         via the propose / delegate / request channels (or an
         operator extension accidentally registers an action with a
         cortex_kb name). KB_design §3.11 §4.4 / Inv-11.3.
+
+        Args:
+            action_name (str): the action name / request kind to check
+                against :data:`KB_WRITE_TOOL_NAMES`.
+            intent_kind (str): the channel the name arrived on, echoed into
+                the denial message.
+
+        Returns:
+            None: returns silently when the name is not a KB write surface.
+
+        Raises:
+            PolicyDenied: with ``rule='kb_write_unauthorized'`` when the
+                name collides with a Cortex KB write tool.
         """
         if not action_name:
             return
@@ -1507,6 +1840,24 @@ class PolicyGate:
         only; the four primary agents (orchestration / kernel /
         critic / robustness) never reach for them through an intent.
         KB_design §3.11 §4.5.
+
+        Args:
+            role_name (str): the emitting role, looked up in
+                :data:`TOOL_WHITELIST_BY_ROLE`.
+            action_name (str): the action name / request kind to check
+                against the known external tool names.
+            intent_kind (str): the channel the name arrived on (carried for
+                parity with the sibling guards).
+
+        Returns:
+            None: returns silently when the name is not an external tool,
+                is a KB write (handled by R4), or is allowed for the role
+                and current phase.
+
+        Raises:
+            PolicyDenied: with ``rule='tool_whitelist_role'`` when the role
+                may not invoke the tool, or ``rule='tool_whitelist_phase'``
+                when the tool is restricted to other phases.
         """
         if not action_name:
             return
@@ -1575,6 +1926,22 @@ class PolicyGate:
 
         ``phase`` overrides the live ``shared_state.phase`` — handy in
         unit tests that don't wire a SharedState.
+
+        Args:
+            tool_name (str): the canonical tool name to validate.
+            source_role (str): the role attempting the invocation.
+            phase (str | None): optional phase override; falls back to
+                ``shared_state.phase`` when omitted. Defaults to ``None``.
+
+        Returns:
+            None: returns silently (implicitly allowed) when the tool is
+                permitted or is an internal tool PolicyGate does not gate.
+
+        Raises:
+            PolicyDenied: when ``tool_name`` is empty, is a KB write
+                (``kb_write_unauthorized``), is not whitelisted for the
+                role (``tool_whitelist_role``), or is restricted to other
+                phases (``tool_whitelist_phase``).
         """
         tool_name = (tool_name or "").strip()
         if not tool_name:
@@ -1662,6 +2029,19 @@ class PolicyGate:
 
         Empty grid (or grid omitted) is NOT denied here — the executor
         surfaces a structured ``empty_grid`` failure instead.
+
+        Args:
+            payload (dict[str, Any]): the explore intent payload; the grid
+                is read from ``payload["params"]["grid"]``.
+
+        Returns:
+            None: returns silently when at least one variant carries a
+                permitted provenance, or when no grid is present.
+
+        Raises:
+            PolicyDenied: with
+                ``rule='explore_requires_specialist_provenance'`` when
+                every variant uses the legacy ``llm_direct`` provenance.
         """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -1733,6 +2113,10 @@ class PolicyGate:
         ``MAX_RESEARCH_LANE_CAPACITY``); falls back to
         ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` (1) when SharedState
         is unavailable or the field is unset / non-positive.
+
+        Returns:
+            int: the maximum number of ``provenance='specialist:*'``
+                variants allowed in one explore round (always ``>= 1``).
         """
         ss = getattr(self, "shared_state", None)
         rlc = 0
@@ -1750,6 +2134,28 @@ class PolicyGate:
     def _validate_explore_grid_size(
         self, payload: dict[str, Any],
     ) -> None:
+        """Cap the number of specialist- and dynamic-sourced explore variants.
+
+        Counts variants whose ``provenance`` starts with ``specialist:``
+        and denies when they exceed :meth:`_effective_specialist_grid_cap`
+        (tracking ``research_lane_capacity``). Independently caps
+        ``provenance='dynamic'`` variants at
+        :data:`MAX_DYNAMIC_SOURCED_VARIANTS`. ``default_grid`` variants are
+        unconstrained (cold-start path).
+
+        Args:
+            payload (dict[str, Any]): the explore intent payload; the grid
+                is read from ``payload["params"]["grid"]``.
+
+        Returns:
+            None: returns silently when the grid is absent or within both
+                caps.
+
+        Raises:
+            PolicyDenied: with ``rule='explore_specialist_grid_max_one'`` or
+                ``rule='dynamic_sourced_variant_cap_exceeded'`` when a cap
+                is exceeded.
+        """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
             return
@@ -1848,6 +2254,21 @@ class PolicyGate:
         second sweep with a custom grid (e.g. ``CONC=128``). The
         denial-then-bypass pattern keeps the override on the audit
         trail (Inv-9.4).
+
+        Args:
+            payload (dict[str, Any]): the sweep intent payload; honours
+                ``params.bypass_sweep_singleton`` as an escape hatch.
+            intent_kind (str): the channel the sweep arrived on, echoed
+                into the override hint.
+
+        Returns:
+            None: returns silently when no auto-sweep is recorded for the
+                active SWEEP phase or the bypass flag is set.
+
+        Raises:
+            PolicyDenied: with ``rule='sweep_phase_singleton'`` when an
+                auto-enqueued sweep already exists in the current SWEEP
+                phase.
         """
         params = payload.get("params") or {}
         if isinstance(params, dict) and params.get("bypass_sweep_singleton"):
@@ -1907,6 +2328,21 @@ class PolicyGate:
         ``params.bypass_critic=True`` always wins so the operator can
         force-integrate (the policy_denial event will still surface
         the override on the next tick for audit).
+
+        Args:
+            payload (dict[str, Any]): the integrate_patch payload; reads
+                ``params.specialist_task_id`` and ``params.bypass_critic``.
+
+        Returns:
+            None: returns silently when the bypass flag is set or a
+                permissive Critic verdict is on record.
+
+        Raises:
+            PolicyDenied: with
+                ``rule='integrate_patch_requires_critic_verdict'`` when
+                params are malformed, the task id is missing, no verdict is
+                recorded, or the verdict is not in
+                :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS`.
         """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -1988,6 +2424,21 @@ class PolicyGate:
         - ``params.domain`` ∈ SPECIALIST_DOMAIN_KEYS.
         - ``params.gap_canonical_id`` non-empty.
         - ``params.max_turns`` (if set) ≤ SPECIALIST_MAX_TURNS_HARD_CAP.
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent; must
+                be on :data:`SPECIALIST_DISPATCH_SOURCE_ALLOWLIST`.
+            payload (dict[str, Any]): the delegate payload carrying the
+                specialist ``params`` (domain / sub_kind / gap_canonical_id
+                / max_turns).
+
+        Returns:
+            None: returns silently when the dispatch contract is satisfied.
+
+        Raises:
+            PolicyDenied: with ``rule='specialist_dispatch_source'`` when
+                the source role, params shape, domain, sub_kind, gap id, or
+                max_turns bound is invalid.
         """
         if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
             raise PolicyDenied(
@@ -2105,6 +2556,21 @@ class PolicyGate:
         ``rule=dynamic_*`` code. Group D + the IR-4 sourced cap depend
         on SharedState; the method falls open when ``shared_state`` is
         absent, keeping legacy unit-test paths stable.
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent; must
+                be on :data:`DYNAMIC_ACTION_DISPATCH_SOURCE_ALLOWLIST`.
+            payload (dict[str, Any]): the delegate payload carrying the
+                dynamic_action ``params`` (motivation_gap_text /
+                scope_domains / side_effects_declared / budget_hint).
+
+        Returns:
+            None: returns silently when every red line is satisfied.
+
+        Raises:
+            PolicyDenied: with a ``rule='dynamic_*'`` code identifying the
+                phase, source, schema, scope, side-effect, or round-cap
+                violation that fired.
         """
         state = self.shared_state
         phase = ""
@@ -2313,6 +2779,20 @@ class PolicyGate:
         SPECIALIST_DONE. Anything else fires R3
         ``specialist_done_source`` (the rule label covers the whole
         specialist intent surface — sub-rule reported in hint).
+
+        Args:
+            from_agent (str): the ``specialist:<task_id>`` ephemeral
+                identity of the emitting sub-agent.
+            intent (Intent): the parsed intent emitted by the specialist.
+
+        Returns:
+            None: returns silently for the permitted intent types
+                (specialist_done, send_message, alert).
+
+        Raises:
+            PolicyDenied: with ``rule='specialist_done_source'`` when the
+                task_id suffix is missing or the intent type is outside the
+                specialist's allowed surface.
         """
         task_id = from_agent.removeprefix(SPECIALIST_FROM_AGENT_PREFIX).strip()
         if not task_id:
@@ -2367,6 +2847,21 @@ class PolicyGate:
         delegated to the SharedState-aware caller path; PolicyGate
         here checks the structural shape so a malformed envelope
         never reaches the Coordinator dispatcher.
+
+        Args:
+            task_id (str): the specialist task id parsed from the
+                ``specialist:<task_id>`` identity (carried for parity; the
+                gap/domain cross-check happens in the caller path).
+            payload (dict[str, Any]): the specialist_done payload to
+                structurally validate.
+
+        Returns:
+            None: returns silently when the payload shape is valid.
+
+        Raises:
+            PolicyDenied: with ``rule='specialist_done_source'`` when any
+                field (gap_canonical_id / domain / proposal_set / empty /
+                summary / confidence) is missing or malformed.
         """
         gap = str(payload.get("gap_canonical_id") or "").strip()
         if not gap:
@@ -2459,6 +2954,26 @@ class PolicyGate:
                 )
 
     def _validate_kill_task(self, role: "AgentRole", payload: dict[str, Any]) -> None:
+        """Validate a ``KILL_TASK`` intent (robustness-only).
+
+        Requires the source role to be on
+        :data:`KILL_TASK_SOURCE_ALLOWLIST`, a non-empty ``task_id`` and
+        ``reason``, and a ``scope`` within :data:`KILL_TASK_ALLOWED_SCOPES`
+        (``task`` only — server/process kills stay out per IR-5).
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent.
+            payload (dict[str, Any]): the kill_task payload carrying
+                ``task_id``, ``reason`` and optional ``scope``.
+
+        Returns:
+            None: returns silently when the kill request is permitted.
+
+        Raises:
+            PolicyDenied: when the role is not allowed
+                (``kill_task_source``), ``task_id`` / ``reason`` is missing
+                (``payload``), or the scope is disallowed (``kill_scope``).
+        """
         if role.name not in KILL_TASK_SOURCE_ALLOWLIST:
             raise PolicyDenied(
                 f"role={role.name!r} cannot emit kill_task "
@@ -2481,6 +2996,16 @@ class PolicyGate:
             )
 
     def _path_under_session(self, value: str) -> bool:
+        """Return whether a path resolves inside the active session_dir.
+
+        Args:
+            value (str): the path string to test.
+
+        Returns:
+            bool: True when :attr:`session_dir` is unset (check disabled),
+                or when ``value`` resolves to or under the session
+                directory; False if it escapes or cannot be resolved.
+        """
         if self.session_dir is None:
             return True
         try:
@@ -2498,6 +3023,16 @@ class PolicyGate:
                 return False
 
     def _path_in_source_allowlist(self, value: str) -> bool:
+        """Return whether a path falls under a framework source allowlist.
+
+        Args:
+            value (str): the path string to test.
+
+        Returns:
+            bool: True when ``value`` starts with any prefix returned by
+                :func:`resolve_source_file_allowlist` (the aiter / sglang /
+                vllm source trees); False otherwise.
+        """
         s = str(value)
         return any(s.startswith(p) for p in resolve_source_file_allowlist())
 
@@ -2505,9 +3040,16 @@ class PolicyGate:
         """Match a value against runtime-resolved trace path prefixes.
 
         Used only for trace-input-style fields in multi-node mode where
-        the shared profile dir lives outside session_dir (on a cluster-
+        the         shared profile dir lives outside session_dir (on a cluster-
         shared filesystem anchored on ``$USER_DATA_PATH``; see
         :func:`_trace_path_allowlist`).
+
+        Args:
+            value (str): the path string to test.
+
+        Returns:
+            bool: True when ``value`` starts with any runtime-resolved
+                trace path prefix; False otherwise.
         """
         s = str(value)
         return any(s.startswith(p) for p in _trace_path_allowlist())
@@ -2521,11 +3063,44 @@ class PolicyGate:
         are scanned. Lists of strings are also scanned. The check is
         a no-op when either ``self.session_dir`` is None OR
         ``self.strict_paths`` is False (P0 / legacy paths).
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent, used
+                for the denial message.
+            intent_type (IntentType): the intent type, used for the denial
+                message.
+            payload (dict[str, Any]): the payload tree to scan for
+                path-like fields.
+
+        Returns:
+            None: returns silently when no path field escapes its allowed
+                root, or when the check is disabled.
+
+        Raises:
+            PolicyDenied: with ``rule='source_file_not_allowlisted'`` or
+                ``rule='path_outside_session_dir'`` when a path-like field
+                resolves outside the session dir and its allowlists.
         """
         if self.session_dir is None or not self.strict_paths:
             return
 
         def visit(node: Any, path_keys: tuple[str, ...]) -> None:
+            """Recursively scan a payload node for escaping path values.
+
+            Args:
+                node (Any): the current payload node (dict, list/tuple,
+                    string, or scalar) being walked.
+                path_keys (tuple[str, ...]): the chain of dict keys leading
+                    to ``node``; its last element is the field name used to
+                    decide which allowlist applies.
+
+            Returns:
+                None.
+
+            Raises:
+                PolicyDenied: when a path-like string escapes the session
+                    directory and its applicable allowlists.
+            """
             if isinstance(node, dict):
                 for k, v in node.items():
                     visit(v, path_keys + (str(k),))
@@ -2575,6 +3150,29 @@ class PolicyGate:
     def _validate_robustness_only(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any]
     ) -> None:
+        """Validate the robustness-only scheduling-police intents.
+
+        Covers FORCE_DISPATCH / PRUNE_BRANCH / ESCALATE_STRATEGY_CHANGE.
+        The per-intent allowlist in :data:`_ROBUSTNESS_ONLY_INTENT_SOURCES`
+        takes precedence (PRUNE_BRANCH also admits orchestration), falling
+        back to :data:`ROBUSTNESS_ONLY_SOURCE_ALLOWLIST`. PRUNE_BRANCH
+        additionally requires a non-empty ``family`` field.
+
+        Args:
+            role (AgentRole): the resolved role of the emitting agent.
+            intent_type (IntentType): the specific robustness-only intent
+                being validated.
+            payload (dict[str, Any]): the intent payload; ``family`` is
+                required for PRUNE_BRANCH.
+
+        Returns:
+            None: returns silently when the intent is permitted.
+
+        Raises:
+            PolicyDenied: with ``rule='robustness_only_source'`` when the
+                role is not allowed, or ``rule='payload'`` when a required
+                field is missing.
+        """
         # Roofline-v2 C3: per-intent source allowlist takes precedence; the
         # generic ROBUSTNESS_ONLY_SOURCE_ALLOWLIST remains the default so
         # FORCE_DISPATCH / ESCALATE_STRATEGY_CHANGE stay robustness-only.

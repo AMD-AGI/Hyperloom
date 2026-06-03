@@ -33,6 +33,16 @@ import yaml
 
 
 def _inject_extra_sglang(cfg: dict, extra: str) -> dict:
+    """Inject ``EXTRA_SGLANG_ARGS`` into a Magpie benchmark config.
+
+    Args:
+        cfg (dict): Mutable Magpie config mapping (modified in place).
+        extra (str): Extra SGLang server args; ignored when blank.
+
+    Returns:
+        dict: The same ``cfg`` mapping with ``benchmark.envs.EXTRA_SGLANG_ARGS``
+        set when ``extra`` is non-empty.
+    """
     bench = cfg.setdefault("benchmark", {})
     envs = bench.setdefault("envs", {})
     if extra.strip():
@@ -48,6 +58,18 @@ def _run_magpie(
     cwd: str,
     timeout_sec: int,
 ) -> tuple[int, str, str]:
+    """Run a Magpie benchmark subprocess and capture its output.
+
+    Args:
+        magpie_python (str): Python interpreter used to launch Magpie.
+        config_path (Path): Path to the benchmark config YAML.
+        output_dir (Path): Directory Magpie writes its run output to.
+        cwd (str): Working directory for the subprocess.
+        timeout_sec (int): Subprocess timeout in seconds.
+
+    Returns:
+        tuple[int, str, str]: ``(returncode, stdout, stderr)`` from the run.
+    """
     env = os.environ.copy()
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     cmd = [
@@ -75,6 +97,15 @@ def _run_magpie(
 
 
 def _read_report(workspace: Path) -> dict | None:
+    """Load ``benchmark_report.json`` from a workspace if present.
+
+    Args:
+        workspace (Path): Magpie benchmark workspace directory.
+
+    Returns:
+        dict | None: Parsed report mapping, or ``None`` when the file is
+        absent.
+    """
     p = workspace / "benchmark_report.json"
     if not p.exists():
         return None
@@ -91,6 +122,24 @@ async def _arm(
     cwd: str,
     variant_timeout_sec: int,
 ) -> dict:
+    """Run one throughput arm and summarize its benchmark report.
+
+    Writes a per-arm config, runs Magpie, locates the latest workspace, and
+    reads the output throughput from its benchmark report.
+
+    Args:
+        name (str): Arm label and output subdirectory name.
+        base_yaml (Path): Base config to clone for this arm.
+        extra_sglang (str): Extra SGLang args to inject for this arm.
+        work_root (Path): Root directory under which the arm slot is created.
+        magpie_python (str): Python interpreter used to launch Magpie.
+        cwd (str): Working directory for the Magpie subprocess.
+        variant_timeout_sec (int): Per-run timeout in seconds.
+
+    Returns:
+        dict: Arm result with workspace/report paths, success flag, output
+        throughput, and a stderr tail.
+    """
     slot = work_root / name
     slot.mkdir(parents=True, exist_ok=True)
     cfg = yaml.safe_load(base_yaml.read_text(encoding="utf-8"))
@@ -128,6 +177,16 @@ async def _arm(
 
 
 async def main_async() -> int:
+    """Run both throughput arms and emit the A/B comparison report.
+
+    Parses CLI arguments, runs the torch.compile-off and torch.compile-on arms
+    sequentially (shared GPU), computes the throughput ratio and percent delta,
+    then writes and prints a JSON summary.
+
+    Returns:
+        int: ``0`` when both arms succeeded, ``1`` on partial/failed arms, or
+        ``2`` when the config file is missing.
+    """
     ap = argparse.ArgumentParser(description="torch.compile A/B via Magpie")
     ap.add_argument(
         "--config",
@@ -218,6 +277,11 @@ async def main_async() -> int:
 
 
 def main() -> None:
+    """Run the async entry point and exit with its return code.
+
+    Raises:
+        SystemExit: Always, carrying the exit code from :func:`main_async`.
+    """
     raise SystemExit(asyncio.run(main_async()))
 
 

@@ -25,6 +25,13 @@ from typing import Any
 
 # ---------------------------------------------------------------------------
 class IntentType(str, Enum):
+    """Enumeration of every structured intent an agent may emit.
+
+    String-valued so the literal wire token equals the member value.
+    PolicyGate restricts which sources may emit which members; this enum
+    only defines the vocabulary shared by both transports.
+    """
+
     SEND_MESSAGE = "send_message"
     DELEGATE = "delegate"
     PROPOSE_ACTION = "propose_action"
@@ -65,6 +72,18 @@ class Intent:
 
     @classmethod
     def from_envelope_item(cls, item: dict[str, Any]) -> "Intent":
+        """Build an :class:`Intent` from one raw envelope item.
+
+        Args:
+            item (dict[str, Any]): Raw item with an ``intent_type`` key and
+                an optional ``payload`` mapping.
+
+        Returns:
+            Intent: The parsed intent with a copied payload dict.
+
+        Raises:
+            ValueError: If ``intent_type`` is not a valid :class:`IntentType`.
+        """
         intent_type = IntentType(item["intent_type"])
         return cls(type=intent_type, payload=dict(item.get("payload") or {}))
 
@@ -194,6 +213,13 @@ class IntentValidationError(RuntimeError):
     """Envelope present but schema invalid (raw + reason captured)."""
 
     def __init__(self, reason: str, raw: str | None = None):
+        """Initialise the validation error.
+
+        Args:
+            reason (str): Human-readable description of the schema problem.
+            raw (str | None): The raw envelope text, captured for repair
+                prompts / diagnostics.
+        """
         super().__init__(reason)
         self.raw = raw
 
@@ -204,9 +230,16 @@ class IntentValidationError(RuntimeError):
 def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
     """Validate the top-level envelope shape + per-intent payloads.
 
-    Returns the validated :class:`Intent` list. Raises
-    :class:`IntentValidationError` on any structural issue so the caller
-    can surface a single repair-prompt path (DESIGN §14.4).
+    Args:
+        envelope (dict[str, Any]): The decoded envelope, expected to carry
+            an ``intents`` list of ``{intent_type, payload}`` items.
+
+    Returns:
+        list[Intent]: The validated intents in envelope order.
+
+    Raises:
+        IntentValidationError: On any structural issue so the caller can
+            surface a single repair-prompt path (DESIGN §14.4).
     """
     if not isinstance(envelope, dict):
         raise IntentValidationError(f"envelope must be object, got {type(envelope).__name__}")
@@ -270,6 +303,15 @@ def _validate_review_verdict_payload(
     string vocab, variant_name vs original grid). This validator
     only enforces structural shape so callers downstream (resume
     rebuild + policy) can rely on at-most-one-present.
+
+    Args:
+        payload (dict[str, Any]): The ``review_verdict`` payload to check.
+        index (int): Position of the intent in the envelope, used for
+            error messages.
+
+    Raises:
+        IntentValidationError: If neither or both of ``verdict`` /
+            ``verdict_map`` are present, or ``verdict_map`` is malformed.
     """
     has_single = "verdict" in payload
     has_map = "verdict_map" in payload

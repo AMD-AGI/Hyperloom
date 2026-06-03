@@ -83,7 +83,11 @@ class T0Result:
 
 
 def _default_status_emitter(line: str) -> None:
-    """Default ``on_status`` — log at INFO."""
+    """Default ``on_status`` callback — log the banner line at INFO.
+
+    Args:
+        line (str): The status banner line to emit.
+    """
     log.info("%s", line)
 
 
@@ -131,43 +135,40 @@ def run_t0_anchor(
       the dispatcher and degrade silently to local-only — warm_start
       is a hint, stale data is preferable to a crashed PRELUDE.
 
-    Args
-    ----
-    kb:
-        The :class:`RecipeKB` dispatcher instance. Caller
-        constructed it with the right ``--local-kb-root`` /
-        ``--cortex-kb-url`` / ``--degraded-kb`` settings via
-        ``cli._build_recipe_kb_dispatcher``.
-    shared_state:
-        The live :class:`SharedState` whose ``cortex_session_id`` /
-        ``warm_start_*`` fields we write.
-    workload / hw:
-        Identifiers used for ``recipe_canonical_id`` + ``find_recipe``
-        + ``traps`` lookup. Mandatory; callers fall back to manifest
-        keys (cli) or shared_state attributes (Coordinator).
-    image_digest, stack_fingerprint, extra_attrs:
-        Pass-through fields for ``session begin`` ``attrs``.
-    resume:
-        ``True`` when we are picking up a pre-existing session
-        (``.kb_sid`` on disk or non-empty
-        ``shared_state.cortex_session_id``). Influences the status
-        banner but no T0 step is skipped just because resume=True.
-    fail_fast:
-        See class docstring.
-    on_status:
-        Banner emitter. Defaults to ``log.info``; cli supplies
-        ``print``.
-    session_dir:
-        Used by ``save_state`` and the ``.kb_sid`` discovery fall-
-        back. Caller MUST pass an explicit value — the dispatcher
-        doesn't carry a session_dir of its own.
-    save_state:
-        When ``True`` (default), call ``shared_state.save(session_dir)``
-        at the end so the writes survive a process crash.
+    Args:
+        kb (RecipeKB): The dispatcher instance. Caller constructed it with the
+            right ``--local-kb-root`` / ``--cortex-kb-url`` / ``--degraded-kb``
+            settings via ``cli._build_recipe_kb_dispatcher``.
+        shared_state (Any): The live :class:`SharedState` whose
+            ``cortex_session_id`` / ``warm_start_*`` fields we write.
+        workload (str): Model/workload identifier used for
+            ``recipe_canonical_id`` + ``find_recipe`` + ``traps`` lookup.
+            Callers fall back to manifest keys or shared_state attributes.
+        hw (str): Hardware identifier used alongside ``workload`` for lookup.
+        image_digest (str): Pass-through field for ``session begin`` ``attrs``.
+        stack_fingerprint (Mapping[str, str] | None): Pass-through field for
+            ``session begin`` ``attrs``.
+        extra_attrs (Mapping[str, Any] | None): Pass-through field for
+            ``session begin`` ``attrs``.
+        resume (bool): ``True`` when picking up a pre-existing session
+            (``.kb_sid`` on disk or non-empty ``shared_state.cortex_session_id``).
+            Influences the status banner but no T0 step is skipped just because
+            resume=True.
+        fail_fast (bool): Kept as a no-op for back-compat with cli callers.
+        on_status (Callable[[str], None] | None): Banner emitter. Defaults to
+            ``log.info``; cli supplies ``print``.
+        session_dir (Path | None): Used by ``save_state`` and the ``.kb_sid``
+            discovery fallback. Caller MUST pass an explicit value — the
+            dispatcher doesn't carry a session_dir of its own.
+        save_state (bool): When ``True`` (default), call
+            ``shared_state.save(session_dir)`` at the end so the writes survive
+            a process crash.
 
-    Returns
-    -------
-    :class:`T0Result` capturing the outcome.
+    Returns:
+        T0Result: Result object capturing the outcome of the anchor.
+
+    Raises:
+        ValueError: If ``session_dir`` is None.
     """
     emit = on_status or _default_status_emitter
     if session_dir is None:

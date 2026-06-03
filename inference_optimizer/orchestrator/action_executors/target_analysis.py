@@ -46,6 +46,15 @@ log = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int = 0) -> int:
+    """Read an integer environment variable with a fallback default.
+
+    Args:
+        name (str): The environment variable name.
+        default (int): Value returned when the var is unset or non-integer.
+
+    Returns:
+        int: The parsed integer, or ``default`` when unset / unparseable.
+    """
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -60,6 +69,14 @@ def _env_int(name: str, default: int = 0) -> int:
 
 
 def _env_str(name: str) -> str:
+    """Read a stripped string environment variable.
+
+    Args:
+        name (str): The environment variable name.
+
+    Returns:
+        str: The stripped value, or ``""`` when unset.
+    """
     return os.environ.get(name, "").strip()
 
 
@@ -83,6 +100,14 @@ class TargetAnalysisExecutor:
         compare_against_gpu: str,
         session_dir: Path | str | None = None,
     ):
+        """Initialize the executor with the pinned comparison reference.
+
+        Args:
+            compare_against_gpu (str): The GPU reference identifier the session
+                compares against (immutable for the session).
+            session_dir (Path | str | None): Fallback session root used when
+                the context does not supply one.
+        """
         self.compare_against_gpu = (compare_against_gpu or "").strip()
         if session_dir is not None:
             self.session_dir: Path | None = Path(session_dir)
@@ -95,6 +120,14 @@ class TargetAnalysisExecutor:
         Order: ``ctx.extra["session_dir"]`` > ``task.params["session_dir"]``
         > constructor arg > ``paths.session_dir()``. Returns ``None`` only
         when nothing resolves to an existing directory.
+
+        Args:
+            ctx (RunnerContext): The runner context whose ``extra`` /
+                ``task.params`` may carry a ``session_dir``.
+
+        Returns:
+            Path | None: The resolved session directory, or ``None`` when none
+                resolves to an existing directory.
         """
         extra = getattr(ctx, "extra", None) or {}
         cand = extra.get("session_dir")
@@ -114,6 +147,22 @@ class TargetAnalysisExecutor:
             return None
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the external-baseline comparison and persist report artefacts.
+
+        Resolves the session dir and comparison reference, invokes
+        :func:`analyze` (folding matching InferenceX rows into a
+        ``BaselineSummary`` and writing JSON / MD artefacts), and returns a
+        report-only result. Never fails the task: upstream / mapping errors are
+        recorded in the summary status and ``status="succeeded"`` is returned.
+
+        Args:
+            ctx (RunnerContext): The runner context carrying ``task.params``
+                overrides and ``extra`` (session dir).
+
+        Returns:
+            dict[str, Any]: A ``status="succeeded"`` result dict pointing at
+                the persisted artefacts plus the comparison status / reason.
+        """
         params = dict(ctx.task.params or {})
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
@@ -192,6 +241,15 @@ class TargetAnalysisExecutor:
         Keeps the dict small so the resulting ``delegated_result`` event
         isn't bloated — the heavy JSON is on disk; this payload is just
         a pointer + status.
+
+        Args:
+            ctx (RunnerContext): The runner context (for ``task.kind``).
+            summary (Any): The ``BaselineSummary`` produced by :func:`analyze`.
+            session_dir (Path): The session root the artefacts were written to.
+
+        Returns:
+            dict[str, Any]: A compact ``status="succeeded"`` result dict with
+                artefact paths and summary status fields.
         """
         from ...session_paths import target_analysis_report_md, target_baseline_json
         json_path = target_baseline_json(session_dir)

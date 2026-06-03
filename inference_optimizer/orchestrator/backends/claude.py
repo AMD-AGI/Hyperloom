@@ -86,6 +86,14 @@ def _import_sdk() -> tuple[Any, Any, Any]:
 
     Only ``claude_agent_sdk`` is supported in the legacy release — legacy
     ``claude_code_sdk`` was deprecated upstream.
+
+    Returns:
+        tuple[Any, Any, Any]: The SDK ``query`` callable, the
+        ``ClaudeAgentOptions`` class, and the imported SDK module.
+
+    Raises:
+        BackendError: If ``claude_agent_sdk`` is not installed or is missing
+            the required ``query`` / ``ClaudeAgentOptions`` symbols.
     """
     try:
         sdk = importlib.import_module("claude_agent_sdk")
@@ -162,6 +170,17 @@ class ClaudeBackend:
     mcp_tool_name: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
+        """Resolve the SDK and optionally register the ``emit_intent`` tool.
+
+        Imports the real SDK unless test seams already supply ``query`` /
+        options, records a soft warning when the API-key env var is unset,
+        disables MCP tooling in ``raw_completion`` mode, and otherwise builds
+        the in-process ``emit_intent`` MCP server config.
+
+        Raises:
+            BackendError: If the SDK cannot be imported and no test factories
+                were provided to substitute for it.
+        """
         if self.sdk_query_factory is None or self.sdk_options_cls is None:
             try:
                 query, opts_cls, mod = _import_sdk()
@@ -196,6 +215,12 @@ class ClaudeBackend:
 
     @property
     def has_emit_intent_tool(self) -> bool:
+        """Whether the ``emit_intent`` MCP tool is wired up and usable.
+
+        Returns:
+            bool: ``True`` when both the MCP server config and qualified tool
+            name are present.
+        """
         return self.mcp_server_config is not None and self.mcp_tool_name is not None
 
     # ------------------------------------------------------------------
@@ -209,6 +234,31 @@ class ClaudeBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
+        """Run one Claude turn via the SDK and collect emitted intents.
+
+        Composes the prompt, builds SDK options, invokes the agentic loop under
+        a wall-clock timeout, records cache/token telemetry on ``self.calls``,
+        and returns the validated intents. In non-raw mode an empty intent set
+        is treated as a failure.
+
+        Args:
+            prompt (str): The composed turn prompt.
+            system_prompt (str | None): Optional system prompt forwarded to the
+                SDK options.
+            tools (list[str] | None): Optional caller-provided allowed tool
+                names (the qualified ``emit_intent`` tool is added automatically).
+            max_turns (int): Agent-loop budget; falls back to
+                ``max_turns_default`` when zero.
+
+        Returns:
+            BackendTurnResult: The collected intents plus raw text and
+            cache/token metadata.
+
+        Raises:
+            BackendError: If the SDK call exceeds ``call_timeout_s``.
+            NoIntentEmitted: If no intent is parsed and ``raw_completion`` is
+                ``False``.
+        """
         full_prompt = self._compose_prompt(prompt)
         max_turns_use = max_turns or self.max_turns_default
         if self.raw_completion:
@@ -286,6 +336,15 @@ class ClaudeBackend:
 
     @staticmethod
     def _safe_int(value: Any) -> int:
+        """Coerce a possibly-missing usage value to a non-negative int.
+
+        Args:
+            value (Any): A token-count value that may be ``None`` or
+                non-numeric.
+
+        Returns:
+            int: The integer value, or ``0`` when it is falsy or not coercible.
+        """
         try:
             return int(value or 0)
         except (TypeError, ValueError):
@@ -295,6 +354,15 @@ class ClaudeBackend:
     # Internals
     # ------------------------------------------------------------------
     def _compose_prompt(self, prompt: str) -> str:
+        """Append the emit_intent output-format suffix unless in raw mode.
+
+        Args:
+            prompt (str): The base turn prompt.
+
+        Returns:
+            str: The prompt unchanged in ``raw_completion`` mode, otherwise the
+            prompt with the required output-format instructions appended.
+        """
         if self.raw_completion:
             return prompt
         return f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
@@ -306,6 +374,21 @@ class ClaudeBackend:
         max_turns: int,
         system_prompt: str | None,
     ) -> Any:
+        """Build the SDK options object for one turn.
+
+        In ``raw_completion`` mode all tools are disallowed so the model emits a
+        single text turn; otherwise the qualified ``emit_intent`` tool and MCP
+        server are wired into the allow-list. CLI stderr is captured for
+        postmortems in both modes.
+
+        Args:
+            tools (list[str]): Caller-provided allowed tool names.
+            max_turns (int): Agent-loop budget to pass through to the SDK.
+            system_prompt (str | None): Optional system prompt for the turn.
+
+        Returns:
+            Any: A constructed ``ClaudeAgentOptions`` instance.
+        """
         kwargs: dict[str, Any] = {"max_turns": max_turns}
         if self.model:
             kwargs["model"] = self.model
@@ -338,7 +421,11 @@ class ClaudeBackend:
         return self.sdk_options_cls(**kwargs)
 
     def _stderr_sink(self, line: str) -> None:
-        """Default stderr handler — append to ``self.calls`` for postmortems."""
+        """Default stderr handler — append to ``self.calls`` for postmortems.
+
+        Args:
+            line (str): One line of CLI stderr output; blank lines are dropped.
+        """
         text = line.strip()
         if text:
             self.calls.append({"stderr": text})
@@ -360,6 +447,22 @@ class ClaudeBackend:
         (lines 152-153) — the field shape is fixed by the Anthropic
         Messages API response and surfaces here because Claude Code
         forwards it on its terminal `ResultMessage`.
+
+        A terminal "error result: success" exception (max-turns reached) is
+        swallowed so any intents already collected are still returned.
+
+        Args:
+            prompt (str): The fully composed prompt to send to the SDK.
+            options (Any): The ``ClaudeAgentOptions`` instance for this turn.
+
+        Returns:
+            tuple[list[Intent], str, int, dict[str, Any]]: The collected
+            intents, the consolidated raw text, the number of emit_intent
+            tool-use blocks seen, and the most recent usage dict.
+
+        Raises:
+            Exception: Any SDK error other than the tolerated terminal
+                "error result: success" case is re-raised.
         """
         intents: list[Intent] = []
         text_chunks: list[str] = []
@@ -423,9 +526,29 @@ class ClaudeBackend:
 
     @staticmethod
     def _iter_blocks(message: Any):
+        """Return the content blocks of an SDK message as a list.
+
+        Args:
+            message (Any): An SDK message that may carry a ``content`` list.
+
+        Returns:
+            list: The message's content blocks, or an empty list when absent.
+        """
         return list(getattr(message, "content", None) or [])
 
     def _is_tool_use_for_emit_intent(self, block: Any) -> bool:
+        """Whether a content block is an ``emit_intent`` tool-use call.
+
+        Matches by class name (``ToolUseBlock`` / ``ServerToolUseBlock``) to
+        avoid depending on SDK internals, then checks the tool name.
+
+        Args:
+            block (Any): A single SDK content block.
+
+        Returns:
+            bool: ``True`` if the block is a tool-use for the (qualified or
+            bare) ``emit_intent`` tool.
+        """
         # Match by class name so we don't depend on SDK internals.
         cls_name = type(block).__name__
         if cls_name not in ("ToolUseBlock", "ServerToolUseBlock"):
@@ -434,6 +557,16 @@ class ClaudeBackend:
         return name in (EMIT_INTENT_TOOL_NAME, EMIT_INTENT_TOOL_QUALIFIED)
 
     def _parse_tool_use_block(self, block: Any) -> Intent | None:
+        """Validate one ``emit_intent`` tool-use block into an :class:`Intent`.
+
+        Args:
+            block (Any): A tool-use block whose ``input`` carries
+                ``intent_type`` and ``payload``.
+
+        Returns:
+            Intent | None: The validated intent, or ``None`` if validation
+            fails (the failure is logged, not raised).
+        """
         raw_input = getattr(block, "input", None) or {}
         try:
             envelope = {"intents": [{
@@ -448,6 +581,17 @@ class ClaudeBackend:
 
     @staticmethod
     def _extract_text(block: Any) -> str:
+        """Extract plain text from a content block across block shapes.
+
+        Handles SDK ``TextBlock`` objects, ``{"type": "text"}`` dicts, and any
+        object exposing a string ``text`` attribute.
+
+        Args:
+            block (Any): A single content block.
+
+        Returns:
+            str: The block's text, or an empty string when none is present.
+        """
         if type(block).__name__ == "TextBlock":
             return getattr(block, "text", "") or ""
         if isinstance(block, dict) and block.get("type") == "text":

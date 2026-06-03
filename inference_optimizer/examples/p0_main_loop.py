@@ -39,7 +39,14 @@ from ..paths import make_session_dir
 
 
 def _orchestration_plan() -> ScriptedPlan:
-    """Three scripted turns: propose → request kernel → done observation."""
+    """Build the scripted orchestration plan for the demo.
+
+    Three meaningful turns (propose baseline → wait → request kernel) with
+    heartbeats as the default fallthrough turn.
+
+    Returns:
+        ScriptedPlan: Plan driving the mock orchestration backend.
+    """
     return ScriptedPlan(turns=[
         # Turn 1 — propose baseline
         MockTurn(intents=[
@@ -67,11 +74,30 @@ def _orchestration_plan() -> ScriptedPlan:
 
 
 async def _baseline_executor(ctx) -> dict:
-    """Pretend to run a baseline benchmark."""
+    """Pretend to run a baseline benchmark.
+
+    Args:
+        ctx: Executor context supplied by the dispatcher (unused in this mock).
+
+    Returns:
+        dict: Mock baseline metrics (throughput, latency, source).
+    """
     return {"tput_tok_per_s_per_gpu": 1840.0, "p99_latency_ms": 152, "source": "mock"}
 
 
 async def _run_demo(ticks: int = 6) -> dict:
+    """Run the P0 main-loop demo end to end.
+
+    Builds a coordinator with the four mock agents, ticks it the requested
+    number of times, prints highlight events, and returns a count summary.
+
+    Args:
+        ticks (int): Number of coordinator ticks to run.
+
+    Returns:
+        dict: Summary with the session dir and counts of proposals, verdicts,
+        decisions, delegated results, and responses observed.
+    """
     session_dir = make_session_dir()
 
     backends = {
@@ -127,6 +153,15 @@ async def _run_demo(ticks: int = 6) -> dict:
 
 
 async def _summarize_bus(coordinator: Coordinator) -> dict[str, int]:
+    """Count recent messages per topic on the coordinator bus.
+
+    Args:
+        coordinator (Coordinator): Coordinator whose bus is sampled.
+
+    Returns:
+        dict[str, int]: Mapping of topic name to message count, omitting topics
+        with no messages.
+    """
     out: dict[str, int] = {}
     for topic in ("proposal", "review_verdict", "decision", "delegated_result",
                    "request", "response", "heartbeat", "alert"):
@@ -137,6 +172,7 @@ async def _summarize_bus(coordinator: Coordinator) -> dict[str, int]:
 
 
 def main() -> None:
+    """Run the demo synchronously and print its summary."""
     summary = asyncio.run(_run_demo())
     print()
     print("---- summary ----")

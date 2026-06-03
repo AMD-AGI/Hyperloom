@@ -39,6 +39,19 @@ def _build_summary_dict(
     *,
     external_baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Assemble the machine-readable session summary dict.
+
+    Args:
+        state (SharedState): The session's shared state.
+        ev_counts (dict[str, int]): Event counts keyed by bus topic.
+        highlights (list[dict]): Top-N highlighted decisions/verdicts.
+        external_baseline (dict[str, Any] | None): Optional external
+            baseline comparison block to embed.
+
+    Returns:
+        dict[str, Any]: The summary payload written to ``final.json``,
+        including an optional roofline-comparison block.
+    """
     summary: dict[str, Any] = {
         "session_id":       state.session_id,
         "model_name":       state.model_name,
@@ -92,6 +105,15 @@ def _build_summary_dict(
 
 
 def _format_md(summary: dict[str, Any]) -> str:
+    """Render the human-readable Markdown report from a summary dict.
+
+    Args:
+        summary (dict[str, Any]): The summary payload built by
+            :func:`_build_summary_dict`.
+
+    Returns:
+        str: The full Markdown report body.
+    """
     cb = summary.get("current_best") or {}
     cb_tput = cb.get("tput") if isinstance(cb, dict) else None
     lines: list[str] = []
@@ -177,7 +199,15 @@ def _format_md(summary: dict[str, Any]) -> str:
 
 
 def _format_steward_section(summary: dict[str, Any]) -> list[str]:
-    """IR-7 — render the session_steward verdict + history."""
+    """IR-7 — render the session_steward verdict + history.
+
+    Args:
+        summary (dict[str, Any]): The report summary dict.
+
+    Returns:
+        list[str]: Markdown lines for the steward section, or an empty
+        list when no assessment/history exists.
+    """
     assessment = summary.get("remaining_gaps_assessment") or {}
     history = summary.get("remaining_gaps_assessments_history") or []
     if not assessment and not history:
@@ -218,6 +248,13 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
     Optimizations`` or the metrics table). Best-effort: returns a
     short marker string if the file is missing / unparseable rather
     than crashing the report.
+
+    Args:
+        analysis_md_path (str): Path to the TraceLens ``analysis.md``.
+
+    Returns:
+        str: The extracted (and size-capped) executive summary block,
+        or a marker string when missing / unparseable.
     """
     if not analysis_md_path:
         return "(no analysis.md path recorded)"
@@ -270,6 +307,13 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     * ``before_after`` — at least one watermark refresh produced a
       distinct snapshot id. The section shows two Executive Summaries
       side-by-side plus the compact Base/Opt/Δ metric table.
+
+    Args:
+        cmp (dict[str, Any]): The roofline-comparison block built from
+            the snapshot history.
+
+    Returns:
+        list[str]: Markdown lines for the roofline comparison section.
     """
     from ..roofline_snapshot import format_roofline_metrics_table
 
@@ -393,6 +437,13 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
                                       written.
     * everything else              — "(InferenceX, advisory)" heading
                                       with the warning text.
+
+    Args:
+        ext (dict[str, Any]): The external-baseline block loaded by
+            :func:`_load_external_baseline`.
+
+    Returns:
+        list[str]: Markdown lines for the external-baseline section.
     """
     lines: list[str] = []
     status = str(ext.get("status") or "unknown")
@@ -483,6 +534,14 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
     Returns the parsed dict on success or ``None`` if the file does not
     exist / is unreadable. Errors are swallowed: a corrupt baseline JSON
     must never break report generation.
+
+    Args:
+        session_dir (Path): The session directory containing
+            ``target_analysis/target_baseline.json``.
+
+    Returns:
+        dict[str, Any] | None: The parsed baseline, or ``None`` when the
+        file is absent or unreadable.
     """
     try:
         from ...session_paths import target_baseline_json
@@ -499,7 +558,17 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
 
 
 def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
-    """Pick the most useful 1-line summary out of an event's payload."""
+    """Pick the most useful 1-line summary out of an event's payload.
+
+    Args:
+        payload (dict): The bus event payload.
+        topic (str): The event topic, which selects the summary format.
+        from_agent (str): The agent that emitted the event.
+
+    Returns:
+        dict[str, Any]: A highlight record with ``topic``, ``from_agent``,
+        a 1-line ``summary``, and the original ``payload``.
+    """
     summary = ""
     if topic == "proposal":
         summary = f"action_name={payload.get('action_name')}"
@@ -546,9 +615,28 @@ class ReportExecutor:
     )
 
     def __init__(self, *, max_highlights: int = 50):
+        """Initialize the report executor.
+
+        Args:
+            max_highlights (int): Maximum number of highlight events to
+                include in the report. Defaults to ``50``.
+        """
         self.max_highlights = int(max_highlights)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Generate the session's ``final.json`` and ``final.md`` reports.
+
+        Resolves the session directory, reads the shared state and bus
+        event log, builds the summary, writes both report files, and
+        optionally publishes results.
+
+        Args:
+            ctx: The action runner context carrying the task and params.
+
+        Returns:
+            dict[str, Any]: A status payload surfacing the written report
+            paths, or a failure dict when the session dir cannot resolve.
+        """
         # Resolve session dir from db path (runner doesn't get session_dir
         # directly — but the BaselineExecutor pattern means we infer from
         # task.params or parent process env). For the CLI flow, the
@@ -625,6 +713,13 @@ class ReportExecutor:
            and otherwise returns ``/workspace/hyperloom``. Returns the
            path only if it exists and contains ``state.json``.
         4. None → runner returns failed status with an error
+
+        Args:
+            ctx: The action runner context (extras and task params).
+
+        Returns:
+            Path | None: The resolved session directory, or ``None`` when
+            none could be determined.
         """
         extra = getattr(ctx, "extra", None) or {}
         if extra.get("session_dir"):
@@ -644,6 +739,15 @@ class ReportExecutor:
         Prompt/skill-driven Web runs use actions/report.md directly. This hook
         covers runs that execute the Python ReportExecutor. It is opt-in unless
         the results service URL is explicitly configured.
+
+        Args:
+            session_dir (Path): The session directory to publish from.
+            state (SharedState): The session's shared state (model/session
+                identifiers used as publish metadata).
+
+        Returns:
+            dict[str, Any]: A publish-outcome record; ``enabled`` is
+            ``False`` (with a ``reason``) when publishing is not configured.
         """
         service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
         auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()

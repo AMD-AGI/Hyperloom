@@ -41,6 +41,15 @@ _CHARS_PER_TOKEN: float = 4.0
 
 
 def _estimate_tokens(text: str) -> int:
+    """Approximate the token count of ``text`` via a chars-per-token ratio.
+
+    Args:
+        text (str): The text whose token count to estimate.
+
+    Returns:
+        int: A rough token estimate (``0`` for empty text), using
+        :data:`_CHARS_PER_TOKEN` and rounding up by one.
+    """
     if not text:
         return 0
     return int(len(text) / _CHARS_PER_TOKEN) + 1
@@ -71,6 +80,19 @@ class PromptInputs:
 
 
 def _render_seed_kit_section(seed_kit: dict[str, Any]) -> str:
+    """Render the read-only seed-kit markdown block for the turn prompt.
+
+    Formats motivation, roofline, profile keyslices, kept/reverted patches, KB
+    pitfalls, and source-root hints, emitting ``(none)`` / ``(empty)`` for
+    absent sections.
+
+    Args:
+        seed_kit (dict[str, Any]): The orchestration-curated seed kit for this
+            dynamic-action dispatch.
+
+    Returns:
+        str: The rendered ``## Seed kit`` markdown section.
+    """
     motivation = seed_kit.get("motivation_gap_text") or ""
     roofline = seed_kit.get("roofline_summary") or ""
     profile = seed_kit.get("profile_keyslices") or []
@@ -124,6 +146,15 @@ def _render_seed_kit_section(seed_kit: dict[str, Any]) -> str:
 
 
 def _render_journal_section(journal: list[JournalTurn]) -> str:
+    """Render the running journal of prior turns as a markdown block.
+
+    Args:
+        journal (list[JournalTurn]): The ordered prior-turn journal entries.
+
+    Returns:
+        str: The rendered ``## Journal`` section, or a placeholder when there
+        are no prior turns.
+    """
     if not journal:
         return "## Journal\n(no prior turns)"
     rows: list[str] = ["## Journal"]
@@ -146,7 +177,16 @@ def _truncate_journal(
     journal: list[JournalTurn],
 ) -> list[JournalTurn]:
     """Drop middle journal turns when the section would dominate the
-    prompt; keep head + tail and insert an elision marker."""
+    prompt; keep head + tail and insert an elision marker.
+
+    Args:
+        journal (list[JournalTurn]): The full prior-turn journal.
+
+    Returns:
+        list[JournalTurn]: The original list when short enough, otherwise the
+        first :data:`JOURNAL_KEEP_HEAD` and last :data:`JOURNAL_KEEP_TAIL`
+        entries with a synthetic elision marker between them.
+    """
     if len(journal) <= JOURNAL_KEEP_HEAD + JOURNAL_KEEP_TAIL:
         return list(journal)
     head = journal[:JOURNAL_KEEP_HEAD]
@@ -164,7 +204,18 @@ def _truncate_journal(
 
 def _maybe_truncate(journal: list[JournalTurn], rendered_so_far_tokens: int) -> tuple[list[JournalTurn], bool]:
     """Return ``(possibly_truncated_journal, did_truncate)`` based on
-    the running prompt token estimate."""
+    the running prompt token estimate.
+
+    Args:
+        journal (list[JournalTurn]): The full prior-turn journal.
+        rendered_so_far_tokens (int): Estimated tokens already consumed by the
+            header and seed-kit sections.
+
+    Returns:
+        tuple[list[JournalTurn], bool]: The journal (clipped if it would push
+        the prompt past the truncation threshold) and whether clipping
+        occurred.
+    """
     rendered = _render_journal_section(journal)
     if _estimate_tokens(rendered) + rendered_so_far_tokens <= int(
         INPUT_TOKEN_CAP * JOURNAL_TRUNCATE_RATIO,
@@ -174,7 +225,16 @@ def _maybe_truncate(journal: list[JournalTurn], rendered_so_far_tokens: int) -> 
 
 
 def build_system_prompt(turn_cap: int) -> str:
-    """Identity + iron rules + tool catalogue. Stable across turns."""
+    """Identity + iron rules + tool catalogue. Stable across turns.
+
+    Args:
+        turn_cap (int): Maximum number of ReAct turns the sub-agent may take,
+            surfaced in the iron rules.
+
+    Returns:
+        str: The static system prompt describing the sub-agent's role, the
+        mechanically-enforced rules, and the available tools.
+    """
     forbidden = ", ".join(sorted(FORBIDDEN_PROPOSAL_FIELDS))
     tools = ", ".join(sorted(ALL_DYNAMIC_TOOLS))
     bench_line = (
@@ -223,6 +283,14 @@ def build_turn_prompt(inputs: PromptInputs) -> tuple[str, bool]:
 
     The runner sends the returned string as the user-side message and
     pairs it with the static system prompt from :func:`build_system_prompt`.
+
+    Args:
+        inputs (PromptInputs): The dispatch id, seed kit, spec payload, journal,
+            and turn cap needed to render the prompt.
+
+    Returns:
+        tuple[str, bool]: The rendered user-side prompt body and whether the
+        journal section was mechanically truncated.
     """
     spec = inputs.spec_payload
     header_lines = [

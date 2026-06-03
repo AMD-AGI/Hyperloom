@@ -61,7 +61,17 @@ def is_high_accuracy_risk(
     extra_args: str = "",
     extra_envs: dict[str, str] | None = None,
 ) -> bool:
-    """Return True if the variant changes precision or compute paths."""
+    """Return True if the variant changes precision or compute paths.
+
+    Args:
+        extra_args (str): The variant's server args to scan for high-risk
+            CLI flags.
+        extra_envs (dict[str, str] | None): The variant's env overrides to scan
+            for high-risk keys.
+
+    Returns:
+        bool: True when the variant matches any high-risk flag / env key.
+    """
     args_lower = extra_args.lower()
     for pattern in _HIGH_RISK_CLI_PATTERNS:
         if pattern in args_lower:
@@ -79,9 +89,14 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
     benchmark workspace. We search for `results*.json` recursively and
     extract the `exact_match,strict-match` metric (GSM8K primary).
 
+    Args:
+        workspace (Path | str): The benchmark workspace to search recursively
+            for ``results*.json``.
+
     Returns:
-        {"accuracy": float, "task": str, "source_file": str}
-        or {"accuracy": None, "error": str} if not found.
+        dict[str, Any]: ``{"accuracy": float, "task": str, "metric": str,
+            "source_file": str}`` on success, or ``{"accuracy": None,
+            "error": str}`` when no result / metric is found.
     """
     workspace = Path(workspace)
     # Magpie writes eval results in various locations; search broadly.
@@ -131,6 +146,15 @@ def accuracy_passed(
     """Return True if accuracy drop is within tolerance.
 
     threshold=0.05 means: if baseline_accuracy=0.80, new must be >= 0.75.
+
+    Args:
+        baseline_accuracy (float): The baseline accuracy score. ``<= 0`` skips
+            the gate (returns True).
+        new_accuracy (float): The candidate variant's accuracy score.
+        threshold (float): The maximum allowed accuracy drop.
+
+    Returns:
+        bool: True when the drop is within ``threshold`` (or no baseline).
     """
     if baseline_accuracy <= 0:
         # No baseline accuracy recorded; skip gate (can't compare).

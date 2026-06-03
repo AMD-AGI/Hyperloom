@@ -22,8 +22,19 @@ def winner_decision(
 ) -> tuple[bool, str]:
     """Apply throughput / accuracy / completed gates.
 
-    Returns ``(is_winner, reason)``. ``reason`` is always populated so
-    the explore summary can audit why a candidate was rejected.
+    Args:
+        req (ExploreRequest): Request whose ``baseline`` and ``thresholds``
+            supply the comparison reference and gate tolerances.
+        throughput (float | None): Measured candidate throughput, or ``None``
+            when the benchmark produced no reading.
+        accuracy (float | None): Measured candidate accuracy, or ``None`` when
+            unavailable.
+        completed (str): Benchmark completion marker, typically ``"K/N"``.
+
+    Returns:
+        tuple[bool, str]: ``(is_winner, reason)``. ``reason`` is always
+            populated so the explore summary can audit why a candidate was
+            rejected.
 
     Gate order (short-circuit on first miss):
 
@@ -76,6 +87,16 @@ def candidate_score(
     short-circuits the loop. Higher = better. Missing throughput is
     treated as 0 so failed candidates sort to the tail without crashing
     the comparator.
+
+    Args:
+        req (ExploreRequest): Request whose ``baseline`` and ``thresholds``
+            supply the comparison reference and accuracy-drop penalty scale.
+        throughput (float | None): Measured candidate throughput, or ``None``.
+        accuracy (float | None): Measured candidate accuracy, or ``None``.
+
+    Returns:
+        float: The ranking score; ``0.0`` when throughput is missing or the
+            baseline throughput is non-positive.
     """
     if throughput is None or throughput <= 0 or req.baseline.throughput <= 0:
         return 0.0

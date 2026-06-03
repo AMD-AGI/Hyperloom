@@ -33,6 +33,15 @@ def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
 
     Falls back to an empty dict (recorded as warning) so collectors can
     still surface manifest-only metadata if state is missing.
+
+    Args:
+        session_dir (Path): The hyperloom session directory.
+        warnings (list[str]): Accumulator appended to when the file is missing
+            or unparseable.
+
+    Returns:
+        dict[str, Any]: The parsed ``state.json`` contents, or an empty dict
+            on any failure.
     """
     state_path = session_dir / "state.json"
     if not state_path.exists():
@@ -46,6 +55,17 @@ def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
 
 
 def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
+    """Read ``manifest.json`` as a plain dict.
+
+    Args:
+        session_dir (Path): The hyperloom session directory.
+        warnings (list[str]): Accumulator appended to when the file is missing
+            or unparseable.
+
+    Returns:
+        dict[str, Any]: The parsed ``manifest.json`` contents, or an empty
+            dict on any failure.
+    """
     manifest_path = session_dir / "manifest.json"
     if not manifest_path.exists():
         warnings.append(f"manifest.json missing at {manifest_path}")
@@ -293,6 +313,16 @@ def _safe_collect(
     A bug in one collector must never poison the whole export. Each
     failure becomes a warning entry; the section becomes ``default``
     (an empty dict / list).
+
+    Args:
+        name (str): The collector's name, used in the warning message.
+        fn (callable): Zero-argument callable that produces the section.
+        warnings (list[str]): Accumulator appended to on failure.
+        default (Any): Value to return when ``fn`` raises; an empty dict is
+            used when ``default`` is ``None``.
+
+    Returns:
+        Any: The collector's result, or ``default`` (or ``{}``) on failure.
     """
     try:
         return fn()
@@ -352,7 +382,18 @@ def write_breakdown_json(
 
 
 def _json_default(obj: Any) -> Any:
-    """Stringify objects json.dumps can't handle natively (Path, set, ...)."""
+    """Stringify objects json.dumps can't handle natively (Path, set, ...).
+
+    Args:
+        obj (Any): The object ``json.dumps`` could not serialize.
+
+    Returns:
+        Any: ``str(obj)`` for :class:`~pathlib.Path`, a sorted list for
+            ``set``.
+
+    Raises:
+        TypeError: If ``obj`` is of an unsupported type.
+    """
     if isinstance(obj, Path):
         return str(obj)
     if isinstance(obj, set):
@@ -382,6 +423,14 @@ def write_minimal_final_report(
     Returns the absolute path written. Idempotent: never overwrites a
     pre-existing ``reports/final.md`` (the sequencer's authoritative
     output).
+
+    Args:
+        session_dir (Path | str): The hyperloom session directory.
+        output_path (Path | str | None): Override target path; defaults to
+            ``<session_dir>/reports/final.md``.
+
+    Returns:
+        Path: Absolute path to the (existing or newly written) report file.
     """
     from ..orchestrator.shared_state import SharedState
     from ..session_paths import reports_dir
@@ -400,6 +449,16 @@ def write_minimal_final_report(
     breakdown_link = sd / BREAKDOWN_FILENAME
 
     def _fmt_attempt(d: dict[str, Any] | None, label: str) -> str:
+        """Format one ``last_*`` attempt record as a markdown bullet.
+
+        Args:
+            d (dict[str, Any] | None): The attempt record (or ``None``).
+            label (str): The bullet label (e.g. ``"last_sweep"``).
+
+        Returns:
+            str: A markdown bullet line; ``"(none)"`` when the record is
+                empty.
+        """
         if not isinstance(d, dict) or not d:
             return f"- **{label}**: (none)"
         ts = d.get("ts") or "-"
