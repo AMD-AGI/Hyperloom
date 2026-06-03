@@ -14,6 +14,11 @@ from inference_optimizer.orchestrator.action_registry import (
     VALID_PIPELINE_PHASES,
 )
 from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
+from inference_optimizer.orchestrator.action_surfaces import (
+    GRID_INJECTABLE_ACTIONS as SURFACE_GRID_INJECTABLE_ACTIONS,
+    INTERNAL_ONLY_ACTION_NAMES as SURFACE_INTERNAL_ONLY_ACTION_NAMES,
+    KERNEL_OWNED_ACTIONS as SURFACE_KERNEL_OWNED_ACTIONS,
+)
 
 
 # DESIGN §16.1 + v0.8 KB_design §3.4 (merged ``explore``).
@@ -103,6 +108,19 @@ def test_kernel_owned_actions_all_in_registry(registry):
         meta = registry.get(name)
         assert meta is not None, f"missing metadata for kernel-owned action: {name}"
         assert meta.family == "deep_kernel"
+
+
+def test_action_surface_constants_are_shared():
+    """Policy, prompt rendering, and CLI must not carry divergent action lists."""
+    from inference_optimizer.cli import _NOOP_KINDS_KERNEL_ONLY
+    from inference_optimizer.orchestrator import policy
+    from inference_optimizer.orchestrator.system_prompts import prompt_builder
+
+    assert policy.KERNEL_OWNED_ACTIONS is SURFACE_KERNEL_OWNED_ACTIONS
+    assert prompt_builder.KERNEL_OWNED_ACTIONS is SURFACE_KERNEL_OWNED_ACTIONS
+    assert set(_NOOP_KINDS_KERNEL_ONLY) == SURFACE_KERNEL_OWNED_ACTIONS
+    assert prompt_builder.GRID_INJECTABLE_ACTIONS is SURFACE_GRID_INJECTABLE_ACTIONS
+    assert policy.INTERNAL_ONLY_ACTION_NAMES is SURFACE_INTERNAL_ONLY_ACTION_NAMES
 
 
 def test_kernel_opt_has_three_lanes_and_high_cost(registry):
