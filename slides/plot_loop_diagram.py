@@ -1,3 +1,11 @@
+"""Render the optimization-loop flow diagram slide figure.
+
+Draws the phased pipeline (classify, baseline, profile, build) feeding into the
+DFS-style optimization loop (pop highest-scored action, execute, benchmark,
+re-score) and the sweep/report exit, then saves it as
+``docs/figs/optimization_loop.png`` for use in the slide deck. Uses the
+non-interactive ``Agg`` backend so it can run headless.
+"""
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

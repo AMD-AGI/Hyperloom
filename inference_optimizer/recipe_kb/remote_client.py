@@ -61,6 +61,19 @@ class RemoteRecipeClientError(RuntimeError):
         status: int | None = None,
         details: Mapping[str, Any] | None = None,
     ) -> None:
+        """Build the error with a category discriminator and context.
+
+        Args:
+            message (str): Human-readable error description.
+            category (str): Failure class — one of ``transport`` /
+                ``business`` / ``validation`` / ``unknown``.
+            code (str): Machine-readable error code from the server
+                envelope, if any.
+            status (int | None): HTTP status code, if a response was
+                received.
+            details (Mapping[str, Any] | None): Extra structured error
+                context; copied into ``self.details``.
+        """
         super().__init__(message)
         self.category = category
         self.code = code
@@ -77,6 +90,13 @@ def _parse_error_envelope(
     * ``business``   — ``{"detail": {"error": {"code","message","details"}}}``;
     * ``validation`` — FastAPI default ``{"detail": [{loc,msg,type},...]}``;
     * ``unknown``    — anything else.
+
+    Args:
+        resp (httpx.Response): The error response to decode.
+
+    Returns:
+        tuple[str, str, str, dict[str, Any]]: ``(category, code,
+            message, details)`` extracted from the envelope.
     """
     try:
         body = resp.json()
@@ -129,9 +149,23 @@ class _HttpTransport:
     _semaphore: threading.Semaphore = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Initialise the concurrency-limiting semaphore.
+
+        Sizes a ``threading.Semaphore`` to ``max_connections`` (at
+        least 1) so ``request`` can cap simultaneous in-flight calls.
+        """
         self._semaphore = threading.Semaphore(max(1, int(self.max_connections)))
 
     def _ensure_client(self) -> httpx.Client:
+        """Lazily build and cache the underlying ``httpx.Client``.
+
+        Created on first use so constructing the transport performs
+        no network setup. Sets the User-Agent and optional bearer
+        ``Authorization`` header and applies the connection limits.
+
+        Returns:
+            httpx.Client: The cached client instance.
+        """
         if self._client is None:
             headers: dict[str, str] = {
                 "User-Agent": "hyperloom-recipe-kb-remote",
@@ -150,6 +184,11 @@ class _HttpTransport:
         return self._client
 
     def close(self) -> None:
+        """Close and drop the cached ``httpx.Client`` if present.
+
+        Best-effort: any error raised while closing is swallowed so
+        shutdown never fails on a half-open client.
+        """
         if self._client is not None:
             try:
                 self._client.close()
@@ -172,6 +211,24 @@ class _HttpTransport:
         are wrapped under ``_value``). ``allow_404=True`` makes a
         404 NOT_FOUND return ``None`` instead of raising — used by
         ``get_recipe`` where "row absent" is a normal state.
+
+        Args:
+            method (str): HTTP method (``GET`` / ``POST`` / ...).
+            path (str): Request path relative to ``base_url``.
+            body (Mapping[str, Any] | None): JSON request body.
+            params (Mapping[str, Any] | None): Query params; ``None``
+                values are dropped.
+            allow_404 (bool): When ``True``, a 404 returns ``None``
+                instead of raising.
+
+        Returns:
+            dict[str, Any] | None: Parsed JSON object (bare lists
+                wrapped under ``_value``); ``{}`` for empty/204
+                responses; ``None`` for an allowed 404.
+
+        Raises:
+            RemoteRecipeClientError: On a non-404 4xx, exhausted
+                transport retries, or a non-JSON response.
         """
         client = self._ensure_client()
         last_exc: Exception | None = None
@@ -236,6 +293,15 @@ class _HttpTransport:
 
     @staticmethod
     def _backoff(attempt: int) -> None:
+        """Sleep for the retry backoff interval for ``attempt``.
+
+        Uses the legacy cortex multiplier schedule (200 ms x {1, 1.4,
+        4}); the multiplier index is clamped to the last entry for
+        higher attempt numbers.
+
+        Args:
+            attempt (int): Zero-based retry attempt index.
+        """
         # 200 ms x {1, 1.4, 4} — matches the legacy cortex client.
         multipliers = (1.0, 1.4, 4.0)
         idx = min(attempt, len(multipliers) - 1)
@@ -293,6 +359,13 @@ class RemoteRecipeClient:
     _transport: _HttpTransport | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Resolve config from explicit args then environment.
+
+        Fills ``kb_url`` from ``CORTEX_KB_URL`` (forcing
+        ``enabled=False`` when still unset), picks foreground vs.
+        background defaults for timeout and retries, and applies the
+        ``CORTEX_KB_*`` / ``KB_SERVICE_TOKEN`` environment overrides.
+        """
         if not self.kb_url:
             self.kb_url = (os.environ.get("CORTEX_KB_URL") or "").strip() or None
         if not self.kb_url:
@@ -337,10 +410,23 @@ class RemoteRecipeClient:
             self.token = os.environ.get("KB_SERVICE_TOKEN") or None
 
     def close(self) -> None:
+        """Close the underlying transport if one was created.
+
+        Safe to call when no transport has been lazily built yet
+        (no-op in that case).
+        """
         if self._transport is not None:
             self._transport.close()
 
     def _ensure_transport(self) -> _HttpTransport:
+        """Lazily build and cache the HTTP transport.
+
+        Constructed on first read so a disabled client never builds
+        one. Strips a trailing slash from ``kb_url`` for the base URL.
+
+        Returns:
+            _HttpTransport: The cached transport instance.
+        """
         if self._transport is None:
             self._transport = _HttpTransport(
                 base_url=str(self.kb_url).rstrip("/"),
@@ -357,11 +443,14 @@ class RemoteRecipeClient:
     def health(self) -> bool:
         """One-shot probe of ``GET /health``.
 
-        Returns ``True`` iff the service replies 200 with the
-        ``{"status": "ok"}`` body the operator preflight expects.
         Any failure (including disabled-client short-circuit)
         returns ``False`` so the caller can decide whether to
         downgrade. Never raises.
+
+        Returns:
+            bool: ``True`` iff the service replies 200 with a
+                ``{"status": "ok"}`` body; ``False`` on any failure or
+                when the client is disabled.
         """
         if not self.enabled:
             return False
@@ -388,9 +477,21 @@ class RemoteRecipeClient:
         * server returned 404 (canonical_id absent or no archive at
           ``?version=N``).
 
-        Raises :class:`RemoteRecipeClientError` on transport / 422 /
-        4xx other than 404 — the dispatcher catches and falls
-        through to the local store.
+        Args:
+            canonical_id (str): Canonical recipe identity; must be
+                non-empty.
+            version (int | None): Specific archived version, or
+                ``None`` for the live row.
+
+        Returns:
+            dict[str, Any] | None: Recipe dict, or ``None`` when the
+                client is disabled or the server returns 404.
+
+        Raises:
+            ValueError: If ``canonical_id`` is empty.
+            RemoteRecipeClientError: On transport / 422 / non-404 4xx
+                — the dispatcher catches and falls through to the
+                local store.
         """
         if not self.enabled:
             return None
@@ -420,6 +521,18 @@ class RemoteRecipeClient:
         Returns the ``history`` array verbatim. Server replies with an
         empty array for unknown ids (no 404 here per spec) so this
         method never raises on absence; disabled client returns ``[]``.
+
+        Args:
+            canonical_id (str): Canonical recipe identity; must be
+                non-empty.
+            limit (int): Maximum number of archived rows to request.
+
+        Returns:
+            list[dict[str, Any]]: Archived versions, or ``[]`` when
+                disabled / absent.
+
+        Raises:
+            ValueError: If ``canonical_id`` is empty.
         """
         if not self.enabled:
             return []
@@ -438,7 +551,12 @@ class RemoteRecipeClient:
         """``GET /recipe-snapshot/recipes`` — recent listing,
         ``updated_at DESC``.
 
-        Disabled client returns ``[]``.
+        Args:
+            limit (int): Maximum number of recipes to request.
+
+        Returns:
+            list[dict[str, Any]]: Recent recipe rows, or ``[]`` when
+                the client is disabled.
         """
         if not self.enabled:
             return []
@@ -465,6 +583,21 @@ class RemoteRecipeClient:
         Server-side validates ``order_by`` against the 6-value
         whitelist; we forward whatever was passed and trust the
         server to reject. Disabled client returns ``[]``.
+
+        Args:
+            label_match (dict[str, Any] | None): Key-value identity
+                filter.
+            metric_filters (dict[str, Any] | None): Numeric range
+                bounds per metric.
+            updated_since (str | None): ISO-8601 lower bound on
+                ``updated_at``.
+            order_by (str): Sort key forwarded to the server for
+                validation.
+            limit (int): Maximum number of rows to request.
+
+        Returns:
+            list[dict[str, Any]]: Matching recipe rows, or ``[]`` when
+                the client is disabled.
         """
         if not self.enabled:
             return []
@@ -494,7 +627,19 @@ class RemoteRecipeClient:
     ) -> list[dict[str, Any]]:
         """``GET /recipe-snapshot/recipes/{canonical_id}/attempts``.
 
-        Disabled client returns ``[]``. Spec defaults to newest-first.
+        Spec defaults to newest-first.
+
+        Args:
+            canonical_id (str): Canonical recipe identity; must be
+                non-empty.
+            limit (int): Maximum number of attempts to request.
+
+        Returns:
+            list[dict[str, Any]]: Attempt rows, or ``[]`` when the
+                client is disabled.
+
+        Raises:
+            ValueError: If ``canonical_id`` is empty.
         """
         if not self.enabled:
             return []
@@ -517,8 +662,18 @@ class RemoteRecipeClient:
     ) -> list[dict[str, Any]]:
         """``GET /recipe-snapshot/sessions/{session_id}/attempts``.
 
-        Disabled client returns ``[]``. Spec defaults to oldest-first
-        (chronological for plotting).
+        Spec defaults to oldest-first (chronological for plotting).
+
+        Args:
+            session_id (str): Session identity; must be non-empty.
+            limit (int): Maximum number of attempts to request.
+
+        Returns:
+            list[dict[str, Any]]: Attempt rows for the session, or
+                ``[]`` when the client is disabled.
+
+        Raises:
+            ValueError: If ``session_id`` is empty.
         """
         if not self.enabled:
             return []
@@ -544,10 +699,18 @@ class RemoteRecipeClient:
     ) -> dict[str, Any] | None:
         """``GET /recipe-snapshot/sessions/{session_id}/summary``.
 
-        Returns the per-session roll-up dict or ``None`` when the
-        client is disabled. The server returns
-        ``total_attempts=0`` for unknown sessions (not 404), so
-        absence is a normal-shape dict.
+        The server returns ``total_attempts=0`` for unknown sessions
+        (not 404), so absence is a normal-shape dict.
+
+        Args:
+            session_id (str): Session identity; must be non-empty.
+
+        Returns:
+            dict[str, Any] | None: Per-session roll-up dict, or
+                ``None`` when the client is disabled.
+
+        Raises:
+            ValueError: If ``session_id`` is empty.
         """
         if not self.enabled:
             return None

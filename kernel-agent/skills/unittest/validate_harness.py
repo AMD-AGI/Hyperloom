@@ -35,7 +35,15 @@ BENCHMARK_ITERATIONS_OVERRIDE = 5
 
 
 def _extract_string_literals(source: str) -> set[str]:
-    """Extract all string literal values from Python source via AST."""
+    """Extract all string literal values from Python source via AST.
+
+    Args:
+        source (str): Python source text to parse.
+
+    Returns:
+        set[str]: Every string-constant value found in the AST; an empty
+            set when the source fails to parse.
+    """
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -48,7 +56,17 @@ def _extract_string_literals(source: str) -> set[str]:
 
 
 def _has_flag_in_code(source: str, flag: str, string_literals: set[str]) -> bool:
-    """Check if a CLI flag appears in actual code (string literals), not just comments."""
+    """Check if a CLI flag appears in actual code (string literals), not just comments.
+
+    Args:
+        source (str): The harness source (unused; kept for symmetry).
+        flag (str): The CLI flag substring to look for.
+        string_literals (set[str]): String literals extracted from the
+            source via :func:`_extract_string_literals`.
+
+    Returns:
+        bool: True if any string literal contains ``flag``.
+    """
     for lit in string_literals:
         if flag in lit:
             return True
@@ -56,7 +74,15 @@ def _has_flag_in_code(source: str, flag: str, string_literals: set[str]) -> bool
 
 
 def _has_marker_in_code(source: str, marker: str) -> bool:
-    """Check if an output marker appears in non-comment code lines."""
+    """Check if an output marker appears in non-comment code lines.
+
+    Args:
+        source (str): The harness source to scan line by line.
+        marker (str): The output-marker substring to look for.
+
+    Returns:
+        bool: True if ``marker`` appears on a line that is not a comment.
+    """
     for line in source.splitlines():
         stripped = line.lstrip()
         if stripped.startswith("#"):
@@ -67,6 +93,20 @@ def _has_marker_in_code(source: str, marker: str) -> bool:
 
 
 def static_check(harness_path: str) -> tuple[bool, list[str]]:
+    """Statically validate a harness against the GEAK contract.
+
+    Parses the file and checks for the required CLI flags, output
+    markers, GEAK contract keywords, and GPU-event timing, without
+    executing the harness.
+
+    Args:
+        harness_path (str): Path to the harness ``.py`` file.
+
+    Returns:
+        tuple[bool, list[str]]: ``(ok, errors)`` where ``ok`` is True
+            only when ``errors`` is empty; each error string describes a
+            missing requirement or a syntax/IO failure.
+    """
     errors: list[str] = []
 
     if not os.path.isfile(harness_path):
@@ -125,6 +165,22 @@ def static_check(harness_path: str) -> tuple[bool, list[str]]:
 
 
 def _run_mode(harness_path: str, mode: str, env: dict) -> dict:
+    """Execute the harness in one mode and inspect its output.
+
+    Runs ``python <harness> --<mode>`` with a timeout, then checks the
+    exit code and stdout for the expected GEAK markers.
+
+    Args:
+        harness_path (str): Path to the harness ``.py`` file.
+        mode (str): Mode flag to pass (e.g. ``correctness``,
+            ``benchmark``).
+        env (dict): Environment for the subprocess.
+
+    Returns:
+        dict: A result mapping with ``mode``, ``ok``, ``returncode``,
+            ``elapsed_s``, ``errors``, ``stdout_tail``, and
+            ``stderr_tail`` keys.
+    """
     cmd = [sys.executable, harness_path, f"--{mode}"]
     start = time.time()
     try:
@@ -180,6 +236,20 @@ def _run_mode(harness_path: str, mode: str, env: dict) -> dict:
 
 
 def runtime_check(harness_path: str) -> tuple[bool, list[str], list[dict]]:
+    """Run the harness in correctness and benchmark modes.
+
+    Forces a small benchmark-iteration count and runs the modes in
+    sequence, stopping at the first failing mode.
+
+    Args:
+        harness_path (str): Path to the harness ``.py`` file.
+
+    Returns:
+        tuple[bool, list[str], list[dict]]: ``(ok, errors, results)``
+            where ``ok`` is True only when no mode errored, ``errors``
+            are mode-prefixed messages, and ``results`` are the per-mode
+            dicts from :func:`_run_mode`.
+    """
     env = os.environ.copy()
     env["GEAK_BENCHMARK_ITERATIONS"] = str(BENCHMARK_ITERATIONS_OVERRIDE)
 
@@ -197,6 +267,12 @@ def runtime_check(harness_path: str) -> tuple[bool, list[str], list[dict]]:
 
 
 def main():
+    """CLI entry point: validate a harness and print a JSON report.
+
+    Parses ``--static`` / ``--run`` / ``--all``, runs the requested
+    checks, prints the report to stdout, and exits 0 when valid or 1
+    otherwise (via :func:`sys.exit`).
+    """
     parser = argparse.ArgumentParser(description="Validate GEAK test harness")
     parser.add_argument("harness_path", help="Path to harness .py file")
     group = parser.add_mutually_exclusive_group(required=True)

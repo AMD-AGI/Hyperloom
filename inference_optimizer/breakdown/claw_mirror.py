@@ -39,6 +39,15 @@ def mirror_breakdown_to_claw_storage(
     """Copy ``breakdown_path`` to ``<workspace_root>/hyperloom/<sid>/``.
 
     See module docstring for the full contract. Never raises.
+
+    Args:
+        breakdown_path (Path): Absolute path to the canonical
+            ``session_breakdown.json`` to mirror.
+        session_id (str): The session id used as the mirror subdirectory name.
+
+    Returns:
+        Path | None: The absolute mirror path on success, or ``None`` if the
+            session id is empty or any copy step fails.
     """
     sid = (session_id or "").strip()
     if not sid:

@@ -16,16 +16,37 @@ class ServerHealthMonitor:
     """Poll inference server /health endpoint."""
 
     def __init__(self, server_url: str = "", timeout_s: float = 5.0):
+        """Initialise the server health monitor.
+
+        Args:
+            server_url (str): Base URL of the inference server; empty
+                disables probing until set.
+            timeout_s (float): Per-probe HTTP timeout in seconds.
+        """
         self._server_url = server_url
         self._timeout = timeout_s
         self._last_healthy: float = 0
         self._consecutive_failures: int = 0
 
     def set_server_url(self, url: str) -> None:
+        """Set the server base URL and reset the failure counter.
+
+        Args:
+            url (str): The new inference server base URL.
+        """
         self._server_url = url
         self._consecutive_failures = 0
 
     async def check(self) -> tuple[ServerHealthStatus, list[Alert]]:
+        """Probe the server and raise alerts on failure or slow response.
+
+        Escalates from warning to critical after three consecutive
+        failures, and warns when a reachable server responds slowly.
+
+        Returns:
+            tuple[ServerHealthStatus, list[Alert]]: The probe status and
+            any alerts raised this cycle.
+        """
         alerts: list[Alert] = []
 
         if not self._server_url:
@@ -65,6 +86,12 @@ class ServerHealthMonitor:
         return status, alerts
 
     async def _probe(self) -> ServerHealthStatus:
+        """Issue a single GET to the server's ``/health`` endpoint.
+
+        Returns:
+            ServerHealthStatus: Reachability, response time, status
+            code, and any error message for the probe.
+        """
         health_url = self._server_url.rstrip("/") + "/health"
         try:
             async with httpx.AsyncClient() as client:

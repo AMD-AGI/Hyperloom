@@ -151,16 +151,43 @@ _NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def _has_any_keyword(text: str, keywords: Iterable[str]) -> bool:
+    """Return whether ``text`` contains any of the given keywords.
+
+    Args:
+        text (str): Text to scan (matched case-insensitively).
+        keywords (Iterable[str]): Lower-case keywords to look for.
+
+    Returns:
+        bool: ``True`` if any keyword is a substring of ``text``.
+    """
     lower = (text or "").lower()
     return any(k in lower for k in keywords)
 
 
 def _missing_domain_mentions(text: str, scope_domains: list[str]) -> list[str]:
+    """Return scope domains not mentioned in ``text``.
+
+    Args:
+        text (str): Rationale text to scan (matched case-insensitively).
+        scope_domains (list[str]): Domains that should each be named.
+
+    Returns:
+        list[str]: Domains from ``scope_domains`` absent from ``text``.
+    """
     lower = (text or "").lower()
     return [d for d in scope_domains if d.lower() not in lower]
 
 
 def _numeric_hits(text: str) -> list[str]:
+    """Return numeric-claim substrings found in ``text``.
+
+    Args:
+        text (str): Text to scan with the numeric-claim regexes.
+
+    Returns:
+        list[str]: Every matched numeric-claim substring (e.g. ``"2x"``,
+        ``"15%"``); empty when none match.
+    """
     out: list[str] = []
     for pat in _NUMERIC_CLAIM_PATTERNS:
         for m in pat.finditer(text or ""):
@@ -187,6 +214,11 @@ class CrossDomainPreverdict:
     cross_domain_flag: bool = True
 
     def is_blocking(self) -> bool:
+        """Return whether this pre-verdict blocks the proposal.
+
+        Returns:
+            bool: ``True`` when the verdict is ``reject`` or ``revise``.
+        """
         return self.verdict in {"reject", "revise"}
 
 
@@ -208,6 +240,15 @@ def classify_proposal_for_critic(
 
     The ``provenance`` match is strict + case-sensitive so a forged
     ``DYNAMIC`` / ``Dynamic`` cannot slip past this layer.
+
+    Args:
+        proposal_payload (dict[str, Any]): Proposal whose ``provenance``
+            decides whether cross-domain constraints apply.
+
+    Returns:
+        tuple[str, dict[str, Any]]: ``(bundle_action_class,
+        review_constraints)``. The constraints carry ``cross_domain`` and
+        the rule descriptors only for dynamic-provenance proposals.
     """
     provenance = str(
         (proposal_payload or {}).get("provenance") or "",
@@ -231,7 +272,18 @@ def classify_proposal_for_critic(
 
 
 def is_cross_domain_proposal(proposal_payload: dict[str, Any]) -> bool:
-    """Convenience predicate; mirrors :func:`classify_proposal_for_critic`."""
+    """Return whether a proposal is treated as cross-domain.
+
+    Convenience predicate; mirrors
+    :func:`classify_proposal_for_critic`.
+
+    Args:
+        proposal_payload (dict[str, Any]): Proposal to classify.
+
+    Returns:
+        bool: ``True`` when the proposal carries dynamic provenance and
+        thus cross-domain review constraints.
+    """
     _, rc = classify_proposal_for_critic(proposal_payload)
     return bool(rc.get("cross_domain"))
 
@@ -250,6 +302,16 @@ def run_mechanical_cross_domain_checks(
     violations and otherwise falls through to ``approve`` so the
     LLM-critic still gets the final say. ``applied_rules`` records
     the full id list (passed + failed) for audit.
+
+    Args:
+        proposal_payload (dict[str, Any]): Proposal under review,
+            supplying provenance, scope domains, and rationale text.
+        spec_scope_domains (list[str]): Authoritative scope domains from
+            the spec, used as the truth set for per-domain coverage.
+
+    Returns:
+        CrossDomainPreverdict: The mechanical verdict with reason codes,
+        reviewer notes, and the list of applied rules.
     """
     pre = CrossDomainPreverdict(verdict="approve", cross_domain_flag=True)
 
@@ -363,7 +425,24 @@ def build_critic_verdict_envelope(
     applied_rules: list[str] | None = None,
     cross_domain_flag: bool = True,
 ) -> dict[str, Any]:
-    """Build the on-disk shape with field-set closure enforced."""
+    """Build the on-disk verdict shape with field-set closure enforced.
+
+    Args:
+        dyn_id (str): Dynamic-action identifier the verdict applies to.
+        verdict (str): One of :data:`ALLOWED_VERDICTS` (case-insensitive).
+        reason_codes (list[str] | None): Machine-readable reason codes.
+        reviewer_notes (list[str] | str | None): Free-text notes; a
+            single string is wrapped into a list.
+        applied_rules (list[str] | None): Rule ids that were evaluated.
+        cross_domain_flag (bool): Whether cross-domain rules applied.
+
+    Returns:
+        dict[str, Any]: The closed verdict envelope.
+
+    Raises:
+        ValueError: If ``verdict`` is not allowed or the envelope would
+            contain a field outside :data:`CRITIC_VERDICT_FIELDS`.
+    """
     v = (verdict or "").strip().lower()
     if v not in ALLOWED_VERDICTS:
         raise ValueError(
@@ -401,7 +480,15 @@ def write_critic_verdict(
     """Persist ``critic_verdict.json`` under the dyn_id artefact dir.
 
     Caller is expected to have validated the envelope via
-    :func:`build_critic_verdict_envelope`. Returns the path written.
+    :func:`build_critic_verdict_envelope`.
+
+    Args:
+        session_dir (Path): Session directory holding the artefact tree.
+        dyn_id (str): Dynamic-action identifier for the artefact dir.
+        envelope (dict[str, Any]): Verdict envelope to serialise.
+
+    Returns:
+        Path: The path the verdict JSON was written to.
     """
     target = dynamic_action_critic_verdict_path(session_dir, dyn_id)
     target.parent.mkdir(parents=True, exist_ok=True)

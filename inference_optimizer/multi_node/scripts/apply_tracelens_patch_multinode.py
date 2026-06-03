@@ -99,16 +99,32 @@ _GIT_TIMEOUT_SEC = 30
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line; stdout is reserved for the
-    final JSON document the dashboard caller parses."""
+    """Stderr-only timestamped log line.
+
+    stdout is reserved for the final JSON document the dashboard caller
+    parses, so all progress chatter goes to stderr.
+
+    Args:
+        msg (str): The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[tracelens_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _versioned_patches_subdir_name(version: str) -> str | None:
-    """``0.5.11`` -> ``sglang_0_5_11``. Tolerates ``-rc1`` / ``+local``
-    suffixes (same logic as _server_patcher._versioned_patches_subdir_name)."""
+    """Derive the per-version patches subdir name from a version string.
+
+    ``0.5.11`` -> ``sglang_0_5_11``. Tolerates ``-rc1`` / ``+local``
+    suffixes (same logic as _server_patcher._versioned_patches_subdir_name).
+
+    Args:
+        version (str): The installed sglang version string.
+
+    Returns:
+        str | None: The subdir name (e.g. ``sglang_0_5_11``), or ``None`` if
+        the version cannot be parsed into dotted numeric components.
+    """
     text = (version or "").strip()
     if not text:
         return None
@@ -139,6 +155,15 @@ def _resolve_sglang_install(sglang_module_path: Path) -> tuple[Path, int] | None
     Returns ``None`` only if none of these layouts match — caller fail-softs.
     Mirrors the intent of ``_server_patcher._resolve_sglang_apply_root``
     but adds namespace-dir handling.
+
+    Args:
+        sglang_module_path (Path): An anchor path into the sglang install
+            (a module ``__file__`` or a namespace-package directory).
+
+    Returns:
+        tuple[Path, int] | None: ``(apply_root, strip)`` where ``strip`` is
+        the ``-p<N>`` level for ``git apply``, or ``None`` if no known
+        layout matched.
     """
     resolved = sglang_module_path.resolve()
     # Pass 1: walk up the ancestor chain looking for the ``sglang/``
@@ -173,7 +198,16 @@ def _resolve_sglang_install(sglang_module_path: Path) -> tuple[Path, int] | None
 
 
 def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
-    """True iff ``path`` exists and contains every marker substring."""
+    """Check whether a file contains every marker substring.
+
+    Args:
+        path (Path): File to inspect.
+        markers (tuple[str, ...]): Substrings that must all be present.
+
+    Returns:
+        bool: ``True`` iff ``path`` is readable and contains every marker;
+        ``False`` otherwise (including when the file cannot be read).
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -182,8 +216,17 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
 
 
 def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
-    """Run ``git <args>``; return ``(rc, stdout, stderr)``. Never raises
-    for a non-zero exit — caller inspects ``rc`` to branch."""
+    """Run ``git <args>`` and capture its result.
+
+    Never raises for a non-zero exit — caller inspects ``rc`` to branch.
+
+    Args:
+        args (tuple[str, ...]): Arguments appended after ``git``.
+        cwd (Path): Working directory for the git invocation.
+
+    Returns:
+        tuple[int, str, str]: ``(returncode, stdout, stderr)``.
+    """
     proc = subprocess.run(  # noqa: S603
         ["git", *args],
         cwd=str(cwd),
@@ -205,6 +248,17 @@ def _apply_on_pod(
     Returns a dict summary (host, status, version, patches, skipped reason
     if any). Never raises — wraps failures into ``status=failed`` so the
     caller sees them via ``ray.get`` without exception propagation.
+
+    Args:
+        tracelens_root (str): Path to the TraceLens checkout that hosts the
+            sglang roofline patch sets.
+        sglang_version_pin (str | None): Optional advisory version pin;
+            logged on mismatch but never enforced.
+
+    Returns:
+        dict[str, Any]: Per-pod summary including ``host``, ``status``
+        (``applied`` / ``skipped`` / ``failed``), ``sglang_version``,
+        ``patches_applied``, and ``error`` / ``elapsed_sec`` fields.
     """
     host = socket.gethostname()
     started = time.time()
@@ -394,8 +448,18 @@ def _actor_apply(
     tracelens_root: str,
     sglang_version_pin: str | None,
 ) -> dict[str, Any]:
-    """Ray actor entrypoint. Pinned to one node via NodeAffinityScheduling
-    so every pod (head + workers) runs the patcher exactly once."""
+    """Ray actor entrypoint that patches one pod.
+
+    Pinned to one node via NodeAffinityScheduling so every pod (head +
+    workers) runs the patcher exactly once.
+
+    Args:
+        tracelens_root (str): Path to the TraceLens checkout on the pod.
+        sglang_version_pin (str | None): Optional advisory version pin.
+
+    Returns:
+        dict[str, Any]: The per-pod summary from :func:`_apply_on_pod`.
+    """
     return _apply_on_pod(
         tracelens_root=tracelens_root,
         sglang_version_pin=sglang_version_pin,
@@ -407,7 +471,18 @@ def _fanout_to_all_nodes(
     tracelens_root: str,
     sglang_version_pin: str | None,
 ) -> list[dict[str, Any]]:
-    """Spawn one actor per alive node; collect all summaries."""
+    """Spawn one actor per alive node and collect all summaries.
+
+    Args:
+        tracelens_root (str): Path to the TraceLens checkout on the pods.
+        sglang_version_pin (str | None): Optional advisory version pin.
+
+    Returns:
+        list[dict[str, Any]]: One per-pod summary dict per alive node.
+
+    Raises:
+        RuntimeError: If ``ray.nodes()`` reports no alive nodes.
+    """
     ray.init(address="auto", ignore_reinit_error=True)
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:
@@ -431,6 +506,17 @@ def _fanout_to_all_nodes(
 
 
 def main() -> int:
+    """Parse CLI arguments, fan out the patch to all pods, and aggregate.
+
+    Validates ``--tracelens-root`` and the presence of ``git``, fans the
+    patcher out to every alive node, then prints an aggregate JSON document
+    (overall status plus per-pod summaries) to stdout.
+
+    Returns:
+        int: ``0`` if every pod was applied or skipped; ``1`` on a per-pod
+        failure; ``2`` for invalid inputs / missing git; ``3`` if the Ray
+        fan-out itself aborted.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tracelens-root",

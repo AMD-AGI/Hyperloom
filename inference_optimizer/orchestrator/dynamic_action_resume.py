@@ -69,6 +69,12 @@ class AbandonedSweepResult:
     summary_missing: list[str] = field(default_factory=list)
 
     def to_log_line(self) -> str:
+        """Render the sweep counts as a single boot-log line.
+
+        Returns:
+            str: One-line summary of abandoned, skipped-terminal,
+            artifact-missing, and summary-missing counts.
+        """
         return (
             f"dynamic_action resume sweep: "
             f"abandoned={len(self.abandoned)} "
@@ -79,6 +85,11 @@ class AbandonedSweepResult:
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string.
+
+    Returns:
+        str: Timestamp with microsecond precision in UTC.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -86,21 +97,43 @@ def _now_iso() -> str:
 # git helpers — best-effort cleanup of the per-dyn_id worktree + branch
 # ---------------------------------------------------------------------------
 def _branch_name_for(dyn_id: str) -> str:
-    """Branch name created by ``DynamicActionRunner._setup_worktree``."""
+    """Return the branch name created by the dynamic-action runner.
+
+    Args:
+        dyn_id (str): Dynamic-action identifier.
+
+    Returns:
+        str: Branch name (``dynamic-<dyn_id>``) used for the worktree.
+    """
     return f"dynamic-{dyn_id}"
 
 
 def _resolve_dynamic_worktree(session_dir: Path, dyn_id: str) -> Path:
-    """Path created by ``DynamicActionRunner._setup_worktree``."""
+    """Return the per-dyn_id worktree path used by the runner.
+
+    Args:
+        session_dir (Path): Session directory holding the runs tree.
+        dyn_id (str): Dynamic-action identifier.
+
+    Returns:
+        Path: ``<session_dir>/runs/dynamic/<dyn_id>/worktree``.
+    """
     return (
         Path(session_dir) / "runs" / "dynamic" / dyn_id / "worktree"
     )
 
 
 def _pick_worktree_base(framework_source_roots: tuple[str, ...]) -> Path | None:
-    """First ``framework_source_root`` that is a git checkout.
+    """Return the first ``framework_source_root`` that is a git checkout.
 
     Inlined to keep this module free of orchestrator imports.
+
+    Args:
+        framework_source_roots (tuple[str, ...]): Candidate root paths.
+
+    Returns:
+        Path | None: The first directory containing a ``.git`` entry, or
+        ``None`` when none qualifies.
     """
     for r in framework_source_roots:
         p = Path(r)
@@ -112,8 +145,18 @@ def _pick_worktree_base(framework_source_roots: tuple[str, ...]) -> Path | None:
 
 
 def _delete_branch(base: Path, branch: str) -> bool:
-    """``git branch -D <branch>`` inside ``base``. Returns True on
-    success or when the branch did not exist."""
+    """Force-delete a git branch inside a checkout.
+
+    Runs ``git branch -D <branch>`` inside ``base``.
+
+    Args:
+        base (Path): Git checkout to run the command in.
+        branch (str): Branch name to delete.
+
+    Returns:
+        bool: ``True`` on success or when the branch did not exist;
+        ``False`` if git failed to spawn or returned another error.
+    """
     try:
         cp = subprocess.run(
             ["git", "-C", str(base), "branch", "-D", branch],
@@ -145,8 +188,21 @@ def _cleanup_worktree_and_branch(
     dyn_id: str,
     framework_source_roots: tuple[str, ...] = (),
 ) -> str:
-    """Drop the per-dyn_id worktree + branch; return one of
-    :data:`WORKTREE_CLEANUP_OUTCOMES`."""
+    """Drop the per-dyn_id worktree and its branch.
+
+    Attempts ``git worktree remove`` then ``shutil.rmtree`` for the
+    worktree, followed by branch deletion, logging each failure.
+
+    Args:
+        session_dir (Path): Session directory holding the runs tree.
+        dyn_id (str): Dynamic-action identifier.
+        framework_source_roots (tuple[str, ...]): Candidate git
+            checkouts used to locate the worktree base.
+
+    Returns:
+        str: One of :data:`WORKTREE_CLEANUP_OUTCOMES` (``success``,
+        ``partial``, or ``skipped``).
+    """
     worktree = _resolve_dynamic_worktree(session_dir, dyn_id)
     base = _pick_worktree_base(framework_source_roots)
     if not worktree.exists() and base is None:
@@ -203,7 +259,22 @@ def _append_abandoned_history(
     worktree_cleanup_outcome: str,
     artifact_missing: bool,
 ) -> None:
-    """Append one ``abandoned_on_resume`` row via the unified writer."""
+    """Append one ``abandoned_on_resume`` row via the unified writer.
+
+    Args:
+        session_dir (Path): Session directory holding dispatch history.
+        dyn_id (str): Dynamic-action identifier.
+        previous_status (str): Status the dyn_id held before the sweep.
+        coordinator_session_id (str): Identifier of the resuming
+            coordinator session.
+        worktree_cleanup_outcome (str): One of
+            :data:`WORKTREE_CLEANUP_OUTCOMES`.
+        artifact_missing (bool): Whether the artefact dir was absent.
+
+    Raises:
+        ValueError: If ``worktree_cleanup_outcome`` is not a recognised
+            cleanup outcome.
+    """
     if worktree_cleanup_outcome not in WORKTREE_CLEANUP_OUTCOMES:
         raise ValueError(
             f"worktree_cleanup_outcome={worktree_cleanup_outcome!r} not "
@@ -228,6 +299,16 @@ def _append_abandoned_history(
 def _load_spec_for_recovery(
     session_dir: Path, dyn_id: str,
 ) -> dict[str, Any] | None:
+    """Load ``spec.json`` for a dyn_id to backfill recovery state.
+
+    Args:
+        session_dir (Path): Session directory holding the spec file.
+        dyn_id (str): Dynamic-action identifier.
+
+    Returns:
+        dict[str, Any] | None: Parsed spec contents, or ``None`` when
+        the file is missing, unreadable, or invalid JSON.
+    """
     spec_path = dynamic_action_spec_path(session_dir, dyn_id)
     if not spec_path.is_file():
         return None
@@ -247,9 +328,18 @@ def _seed_recovery_summary(
     dyn_id: str,
     spec: dict[str, Any],
 ) -> None:
-    """Synthesise a ``DISPATCHED`` summary row from ``spec.json`` so a
-    subsequent ``DISPATCHED → ABANDONED`` write is accepted by the
-    transition validator."""
+    """Synthesise a ``DISPATCHED`` summary row from ``spec.json``.
+
+    Seeds the row so a subsequent ``DISPATCHED → ABANDONED`` write is
+    accepted by the transition validator.
+
+    Args:
+        shared_state (Any): SharedState whose
+            ``record_dynamic_action_outcome`` is called.
+        dyn_id (str): Dynamic-action identifier.
+        spec (dict[str, Any]): Parsed spec contents used to populate the
+            synthesised row.
+    """
     payload = spec.get("payload") or {}
     motivation = str(payload.get("motivation_gap_text") or "")
     if len(motivation) > MOTIVATION_GAP_SHORT_MAX_CHARS:
@@ -289,6 +379,18 @@ def resume_abandon_dynamic_actions(
 
     Sweeps both the artefact dir and the SharedState summary map.
     Safe to invoke multiple times — terminal statuses are no-ops.
+
+    Args:
+        session_dir (Path): Session directory to sweep.
+        shared_state (Any): SharedState holding dynamic-action summaries.
+        coordinator_session_id (str): Identifier of the resuming
+            coordinator session, recorded on each row.
+        framework_source_roots (tuple[str, ...]): Candidate git
+            checkouts used for worktree cleanup.
+
+    Returns:
+        AbandonedSweepResult: Per-invocation summary of the dyn_ids
+        abandoned, skipped, or missing artefacts/summaries.
     """
     result = AbandonedSweepResult()
     session_dir = Path(session_dir)
@@ -339,6 +441,27 @@ def _process_one(
     summaries: dict[str, Any],
     result: AbandonedSweepResult,
 ) -> None:
+    """Process one dyn_id during the abandoned sweep.
+
+    Recovers a missing summary from ``spec.json`` when needed, skips
+    terminal statuses, cleans up the worktree/branch, records the
+    ABANDONED outcome, and appends history + telemetry. Mutates
+    ``result`` to track the outcome category.
+
+    Args:
+        dyn_id (str): Dynamic-action identifier to process.
+        session_dir (Path): Session directory holding artefacts.
+        shared_state (Any): SharedState updated with the outcome.
+        coordinator_session_id (str): Identifier of the resuming
+            coordinator session.
+        framework_source_roots (tuple[str, ...]): Candidate git
+            checkouts used for worktree cleanup.
+        artefact_dyn_ids (set[str]): Dyn_ids that have an artefact dir.
+        summaries (dict[str, Any]): SharedState summary map keyed by
+            dyn_id.
+        result (AbandonedSweepResult): Accumulator mutated in place with
+            the categorised outcome.
+    """
     artefact_present = dyn_id in artefact_dyn_ids
     summary = summaries.get(dyn_id) if isinstance(summaries, dict) else None
     previous_status_raw = (

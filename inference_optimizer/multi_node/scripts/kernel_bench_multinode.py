@@ -64,12 +64,27 @@ _STREAM_TAIL_BYTES = 32 * 1024
 
 
 def _log(msg: str) -> None:
+    """Write a timestamped progress line to stderr and flush it.
+
+    Args:
+        msg (str): The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kernel_bench_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _tail_bytes(s: str | None, limit: int) -> str:
+    """Return the trailing portion of a string up to a byte limit.
+
+    Args:
+        s (str | None): The source text, or ``None``.
+        limit (int): Maximum number of trailing characters to keep.
+
+    Returns:
+        str: The last ``limit`` characters of ``s`` (or all of it if
+        shorter); an empty string when ``s`` is falsy.
+    """
     if not s:
         return ""
     if len(s) <= limit:
@@ -82,6 +97,17 @@ def _stage_files(workspace: Path, files_b64: dict[str, str]) -> list[str]:
 
     Relative paths starting with ``/`` or containing ``..`` are rejected
     so the staging cannot write outside the workspace dir.
+
+    Args:
+        workspace (Path): Root directory into which files are written.
+        files_b64 (dict[str, str]): Mapping of relative path to
+            base64-encoded file content.
+
+    Returns:
+        list[str]: Absolute paths of the files that were written.
+
+    Raises:
+        ValueError: If any relative path is absolute or contains ``..``.
     """
     staged: list[str] = []
     for rel, b64 in (files_b64 or {}).items():
@@ -103,9 +129,29 @@ def _bench_remote(
     result_glob: str,
     timeout_sec: int,
 ) -> dict:
-    """Run a kernel micro-benchmark on THIS pod (head). The caller
-    pre-pins us to a GPU-bearing node via NodeAffinitySchedulingStrategy
-    and ``num_gpus=1``; we don't need to query Ray for resources here."""
+    """Run a kernel micro-benchmark on THIS pod (head).
+
+    The caller pre-pins us to a GPU-bearing node via
+    NodeAffinitySchedulingStrategy and ``num_gpus=1``; we don't need to
+    query Ray for resources here. Stages helper files, runs the bench
+    command in the workspace, and reads back matching result artifacts.
+
+    Args:
+        workspace (str): Absolute directory used as the bench CWD.
+        bench_command (str): Shell command run via ``bash -lc``.
+        files_b64_json (str): JSON object mapping relative paths to
+            base64-encoded helper file content.
+        result_glob (str): Glob (relative to workspace) of result files to
+            read back.
+        timeout_sec (int): Hard timeout for the bench command, in seconds.
+
+    Returns:
+        dict: Summary with host, workspace, staged files, return code,
+        elapsed time, stdout/stderr tails, and read-back artifacts.
+
+    Raises:
+        ValueError: If ``files_b64_json`` is not valid JSON.
+    """
     host = socket.gethostname()
     ws = Path(workspace)
     ws.mkdir(parents=True, exist_ok=True)
@@ -176,10 +222,19 @@ def _bench_remote(
 
 
 def _pick_gpu_node() -> str:
-    """Return the head-pod node id; that is where we want to run the
-    bench because (a) it has GPUs and (b) it co-locates with the
-    dashboard caller's context. Falls back to any alive GPU node if
-    head detection fails."""
+    """Return the head-pod node id to run the bench on.
+
+    Prefers the head pod because (a) it has GPUs and (b) it co-locates
+    with the dashboard caller's context. Falls back to any alive GPU node
+    if head detection fails.
+
+    Returns:
+        str: The Ray ``NodeID`` to pin the bench actor to.
+
+    Raises:
+        RuntimeError: If there are no alive nodes, or no alive node with
+            at least one GPU when falling back.
+    """
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:
         raise RuntimeError("no alive Ray nodes for kernel bench")
@@ -201,6 +256,16 @@ def _pick_gpu_node() -> str:
 
 
 def _do_bench(args: argparse.Namespace) -> int:
+    """Schedule the bench actor on a GPU node and emit its JSON result.
+
+    Args:
+        args (argparse.Namespace): Parsed ``bench`` subcommand arguments
+            (``workspace``, ``bench_command``, ``files_b64_json``,
+            ``result_glob``, ``timeout_sec``).
+
+    Returns:
+        int: ``0`` if the bench command exited 0, otherwise ``1``.
+    """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     node_id = _pick_gpu_node()
     _log(f"bench: node_id={node_id[:16]} workspace={args.workspace}")
@@ -237,6 +302,12 @@ def _do_bench(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """Parse CLI arguments and dispatch the ``bench`` subcommand.
+
+    Returns:
+        int: Process exit code; the bench result code, or ``2`` if no
+        recognized subcommand was given.
+    """
     p = argparse.ArgumentParser(
         prog="kernel_bench_multinode.py",
         description=(

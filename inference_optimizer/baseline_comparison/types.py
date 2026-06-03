@@ -43,6 +43,12 @@ class BaselineQuery:
     osl: int = 0
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the query into a plain JSON-safe dict.
+
+        Returns:
+            dict[str, Any]: The query fields (model, gpu, framework,
+                precision, isl, osl) as a flat dictionary.
+        """
         return {
             "model":     self.model,
             "gpu":       self.gpu,
@@ -72,6 +78,12 @@ class BaselinePoint:
     date:                 str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the data point into a plain JSON-safe dict.
+
+        Returns:
+            dict[str, Any]: The point's throughput, concurrency, latency,
+                and date fields as a flat dictionary.
+        """
         return {
             "tput_per_gpu":        self.tput_per_gpu,
             "output_tput_per_gpu": self.output_tput_per_gpu,
@@ -127,6 +139,12 @@ class BaselineSummary:
     reason:     str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the summary (and its nested points) to a JSON-safe dict.
+
+        Returns:
+            dict[str, Any]: The full on-disk artefact shape, with the
+                nested query and baseline points recursively serialised.
+        """
         return {
             "query":             self.query.to_dict(),
             "fetched_at":        self.fetched_at,
@@ -141,6 +159,18 @@ class BaselineSummary:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "BaselineSummary":
+        """Reconstruct a summary from its persisted dict representation.
+
+        Missing or malformed fields are tolerated and coerced to sensible
+        defaults so that loading a partial / older artefact never raises.
+
+        Args:
+            d (dict[str, Any]): A dictionary previously produced by
+                :meth:`to_dict` (or a compatible subset).
+
+        Returns:
+            BaselineSummary: The reconstructed summary instance.
+        """
         q = d.get("query") or {}
         best_raw = d.get("best")
         return cls(

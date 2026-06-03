@@ -67,6 +67,15 @@ def _build_grid(
 
     Each variant overrides ``CONC`` / ``ISL`` / ``OSL`` envs in the YAML
     so the same Magpie shell reuses our existing baseline machinery.
+
+    Args:
+        conc_values (list[int]): Concurrency levels to sweep.
+        isl_osl_configs (list[str]): ``"<ISL>:<OSL>"`` shape strings.
+        num_prompts_factor (int): Multiplier applied to CONC for NUM_PROMPTS.
+        base_extra_args (str): Server args layered into every variant.
+
+    Returns:
+        list[GridVariant]: One variant per valid (CONC, ISL, OSL) combo.
     """
     out: list[GridVariant] = []
     for conc in conc_values:
@@ -95,6 +104,15 @@ def _build_grid(
 
 
 def _result_dict(v: VariantResult) -> dict[str, Any]:
+    """Convert a VariantResult to a dict with conc/isl/osl pulled out.
+
+    Args:
+        v (VariantResult): The variant result to serialize.
+
+    Returns:
+        dict[str, Any]: ``v.to_dict()`` augmented with int ``conc`` / ``isl``
+            / ``osl`` keys extracted from the variant's ``extra_envs``.
+    """
     d = v.to_dict()
     # Pull conc/isl/osl out of extra_envs so consumers don't have to
     # parse them.
@@ -106,7 +124,14 @@ def _result_dict(v: VariantResult) -> dict[str, Any]:
 
 
 def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Naive O(N²) Pareto for (max output_throughput, min e2el_mean_ms)."""
+    """Naive O(N²) Pareto for (max output_throughput, min e2el_mean_ms).
+
+    Args:
+        entries (list[dict[str, Any]]): Sweep result entries to filter.
+
+    Returns:
+        list[dict[str, Any]]: The non-dominated subset of succeeded entries.
+    """
     succ = [e for e in entries if e["status"] == "succeeded"
             and isinstance(e.get("output_throughput"), (int, float))
             and isinstance(e.get("e2el_mean_ms"), (int, float))]
@@ -141,6 +166,18 @@ class SweepExecutor:
         default_num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
         variant_timeout_sec: int = 2400,
     ):
+        """Initialize the sweep executor with grid + launch defaults.
+
+        Args:
+            default_config_path (Path | str | None): Default base Magpie YAML;
+                resolved from ``$FRAMEWORK`` at call time when ``None``.
+            session_dir (Path | str | None): Session root for per-task
+                workspaces; resolved automatically when ``None``.
+            default_conc_values (list[int] | None): Default concurrency levels.
+            default_isl_osl_configs (list[str] | None): Default ISL:OSL shapes.
+            default_num_prompts_factor (int): Default NUM_PROMPTS multiplier.
+            variant_timeout_sec (int): Default per-variant timeout in seconds.
+        """
         # None = resolve at call time from $FRAMEWORK (sglang/vllm). Tests
         # that pass an explicit fixture path keep their override.
         self.default_config_path = (
@@ -155,6 +192,21 @@ class SweepExecutor:
         self.variant_timeout_sec = variant_timeout_sec
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the full CONC × (ISL, OSL) sweep and map the Pareto frontier.
+
+        Materializes the workload config, builds the variant grid, runs it via
+        ``run_grid``, and computes the Pareto front plus the best variant per
+        concurrency level.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` (sweep knobs /
+                config) and ``extra`` (workspace).
+
+        Returns:
+            dict[str, Any]: A result dict with ``status``, ``grid_size``,
+                ``sweep_grid``, ``pareto_front``, ``best_for_each_conc`` and
+                ``workspace``.
+        """
         params = ctx.task.params or {}
         config_path = Path(
             params.get("config_path")

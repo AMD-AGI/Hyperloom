@@ -13,6 +13,19 @@ _MAX_ROWS = 20
 
 @register_renderer("critic_robustness")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the critic-robustness section: critic/self-consistency checks.
+
+    Normalizes both legacy (prompt-only string) and structured entry
+    shapes, surfaces a pass/fail table when verdicts exist, and marks the
+    section skipped (with a warning) when entries carry no actionable
+    payload.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered critic-robustness section.
+    """
     cr = breakdown.get("critic_robustness") or []
     if not cr:
         return RenderedSection(

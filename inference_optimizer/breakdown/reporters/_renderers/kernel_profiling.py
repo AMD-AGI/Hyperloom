@@ -17,6 +17,15 @@ _MAX_KERNEL_ROWS = 15
 
 
 def _session_root(breakdown: dict[str, Any]) -> Path | None:
+    """Resolve the on-disk session root from the breakdown.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        Path | None: The session directory as a :class:`~pathlib.Path`, or
+            ``None`` when ``session.session_dir`` is absent.
+    """
     session = breakdown.get("session") or {}
     raw = session.get("session_dir")
     if not raw:
@@ -25,6 +34,17 @@ def _session_root(breakdown: dict[str, Any]) -> Path | None:
 
 
 def _read_log_tail(session_root: Path | None, rel_path: str | None) -> str:
+    """Read the last few lines of a log file relative to the session root.
+
+    Args:
+        session_root (Path | None): The session directory, or ``None``.
+        rel_path (str | None): Path to the log file relative to the session
+            root, or ``None``.
+
+    Returns:
+        str: Up to ``_CLI_LOG_TAIL_LINES`` trailing lines of the file, or an
+            empty string when inputs are missing or the file is unreadable.
+    """
     if not session_root or not rel_path:
         return ""
     path = session_root / rel_path
@@ -40,6 +60,15 @@ def _read_log_tail(session_root: Path | None, rel_path: str | None) -> str:
 
 
 def _kernel_rows(kernels: list[dict[str, Any]]) -> list[list[Any]]:
+    """Build table rows for the top-k profiled kernels.
+
+    Args:
+        kernels (list[dict[str, Any]]): Parsed top-kernel records.
+
+    Returns:
+        list[list[Any]]: Up to ``_MAX_KERNEL_ROWS`` rows of
+            ``[kernel_id, name, gpu_pct, duration_us, bottleneck]``.
+    """
     rows: list[list[Any]] = []
     for k in kernels[:_MAX_KERNEL_ROWS]:
         rows.append([
@@ -54,6 +83,19 @@ def _kernel_rows(kernels: list[dict[str, Any]]) -> list[list[Any]]:
 
 @register_renderer("kernel_profiling")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the kernel-profiling section from recorded profile runs.
+
+    Lists each profile / TraceLens run with its launch args, artifact
+    paths and top-k kernel table, optionally including a CLI log tail when
+    the detail level is verbose. Skipped when no runs were recorded.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, or a skipped placeholder when
+            there are no profiling runs.
+    """
     runs = breakdown.get("kernel_profiling") or []
     detail_level = str(breakdown.get("detail_level") or "standard")
     session_root = _session_root(breakdown)

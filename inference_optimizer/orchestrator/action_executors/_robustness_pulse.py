@@ -46,6 +46,14 @@ _OFF_VALUES = frozenset({"0", "false", "no", "off", ""})
 
 
 def _enabled() -> bool:
+    """Return whether the robustness pulse should run in this environment.
+
+    Disabled under pytest and when ``HYPERLOOM_GRID_ROBUSTNESS_PULSE`` is set
+    to an off value.
+
+    Returns:
+        bool: True when the pulse is enabled, else False.
+    """
     # Disable inside pytest — the pulse spawns a real Python subprocess
     # (``python -m robustness_agent.runtime.cli tick``) that bypasses test
     # subprocess mocks and can write into a host session directory.
@@ -57,6 +65,12 @@ def _enabled() -> bool:
 
 
 def _resolve_session_dir() -> Path | None:
+    """Resolve the session dir from the robustness/session env vars.
+
+    Returns:
+        Path | None: The first existing directory named by
+            ``ROBUSTNESS_AGENT_SESSION_DIR`` or ``SESSION_DIR``, else ``None``.
+    """
     for env_key in ("ROBUSTNESS_AGENT_SESSION_DIR", "SESSION_DIR"):
         raw = os.environ.get(env_key, "").strip()
         if raw:
@@ -67,6 +81,16 @@ def _resolve_session_dir() -> Path | None:
 
 
 def _build_request(session_dir: Path, *, tick_index: int) -> dict[str, Any]:
+    """Build the one-shot robustness-agent tick request payload.
+
+    Args:
+        session_dir (Path): The session directory the tick should run against.
+        tick_index (int): The monotonic tick index for this pulse.
+
+    Returns:
+        dict[str, Any]: The ``coordinator_inbox`` request dict (LLM RCA
+            disabled) to hand to the robustness-agent CLI.
+    """
     session_id = session_dir.name or "default"
     return {
         "kind": "coordinator_inbox",
@@ -88,6 +112,14 @@ async def pulse(*, tick_index: int = 0, timeout_s: float = _PULSE_TIMEOUT_SEC) -
 
     Always safe to ``await`` from inside another asyncio task — failures
     are logged at DEBUG and swallowed.
+
+    Args:
+        tick_index (int): The monotonic tick index for this pulse.
+        timeout_s (float): Hard wall-clock budget for the tick subprocess.
+
+    Returns:
+        bool: True on a clean (exit-0) tick; False on disabled / missing
+            session / spawn failure / timeout / non-zero exit.
     """
     if not _enabled():
         return False

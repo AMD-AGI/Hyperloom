@@ -92,6 +92,9 @@ def _resolve_poll_timeout_s() -> int:
 
     Resolution: ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env > ``_DEFAULT_POLL_TIMEOUT_S``.
     Large-model / JIT runs should set 1800 (30 min) in the launcher env.
+
+    Returns:
+        int: The poll budget in seconds (at least 1).
     """
     raw = (os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S") or "").strip()
     if raw:
@@ -106,7 +109,18 @@ def _resolve_poll_timeout_s() -> int:
 
 
 def _poll_timeout_from_args(args: argparse.Namespace) -> int:
-    """CLI flag wins; else env/default from :func:`_resolve_poll_timeout_s`."""
+    """Resolve the poll timeout for a subcommand.
+
+    The ``--poll-timeout`` CLI flag wins; otherwise falls back to the
+    env/default from :func:`_resolve_poll_timeout_s`.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (may carry
+            ``poll_timeout``).
+
+    Returns:
+        int: The poll budget in seconds (at least 1).
+    """
     pt = getattr(args, "poll_timeout", None)
     if pt is not None:
         return max(1, int(pt))
@@ -134,6 +148,12 @@ def _normalize_extra_args(s: str | None) -> str:
     callers compare equal. Order-sensitive — argv order may matter to the
     framework (e.g. last-wins for repeated flags) so we deliberately do
     NOT sort.
+
+    Args:
+        s (str | None): The raw extra-args string, or ``None``.
+
+    Returns:
+        str: The whitespace-normalized arg string (empty if input falsy).
     """
     return " ".join((s or "").split())
 
@@ -150,9 +170,23 @@ class WorkloadTerminalFailure(RuntimeError):
     """Raised when SaFE reports the workload has entered a terminal failure
     phase (Failed / Stopped / Cancelled). Carries the diagnostic snapshot
     for the hyperloom controller to log / act on. Exit code -> 2.
+
+    Attributes:
+        label (str): The poll label that detected the failure.
+        phase (str): The terminal SaFE phase (Failed / Stopped / Cancelled).
+        diag (str): One-line human-readable diagnostic.
+        snapshot (dict[str, Any]): Structured failure snapshot.
     """
 
     def __init__(self, label: str, phase: str, diag: str, snapshot: dict[str, Any]) -> None:
+        """Initialize the terminal-failure error.
+
+        Args:
+            label (str): The poll label that detected the failure.
+            phase (str): The terminal SaFE phase.
+            diag (str): One-line human-readable diagnostic.
+            snapshot (dict[str, Any]): Structured failure snapshot.
+        """
         super().__init__(f"{label} terminal phase={phase}: {diag}")
         self.label = label
         self.phase = phase
@@ -171,6 +205,12 @@ class TransientFailure(RuntimeError):
 
 
 def _load_state() -> dict[str, Any]:
+    """Load the CLI state file as a dict.
+
+    Returns:
+        dict[str, Any]: The parsed state, or an empty dict if the file is
+        missing or unreadable.
+    """
     if not STATE_FILE.is_file():
         return {}
     try:
@@ -181,6 +221,11 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(state: dict[str, Any]) -> None:
+    """Write the CLI state dict to the state file as pretty JSON.
+
+    Args:
+        state (dict[str, Any]): The state to persist.
+    """
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -197,6 +242,12 @@ def _checkpoint_create_rayjob_state(
     polling for ``phase=Running`` would not see ``/tmp/multi_node_state.json``
     yet and would call ``create_workload`` again, leaking a second RayJob per
     sandbox. See SKILL idempotency / one-RayJob-per-session rule.
+
+    Args:
+        wid (str): The workload id to checkpoint.
+        workspace (str): The SaFE workspace id.
+        args (argparse.Namespace): Parsed ``create-rayjob`` args (provides
+            ``nodes``, ``gpus_per_node``, ``image``).
     """
     prev = _load_state()
     old = (prev.get("rayjob_id") or "").strip()
@@ -255,6 +306,16 @@ def _write_rayjob_meta(
     is logged at WARN and swallowed. Meta is audit data, not a critical
     path of RayJob creation; failing the workload because we couldn't
     write a sidecar JSON would be a worse outcome than missing the meta.
+
+    Args:
+        wid (str): The RayJob workload id.
+        workspace (str): The SaFE workspace id.
+        session_id (str | None): Parent sandbox session id; when empty the
+            function is a no-op.
+        owner_id (str | None): Owner workload id, if any.
+        display_name (str): Human-readable workload name.
+        nodes (int): Total node count.
+        gpus_per_node (int): GPUs per node.
     """
     if not session_id:
         return
@@ -281,7 +342,17 @@ def _write_rayjob_meta(
 
 
 def _require_state(*keys: str) -> dict[str, Any]:
-    """Load state and assert all required keys are present."""
+    """Load state and assert all required keys are present.
+
+    Args:
+        *keys (str): State keys that must be present and truthy.
+
+    Returns:
+        dict[str, Any]: The loaded state.
+
+    Raises:
+        RuntimeError: If any required key is missing or falsy.
+    """
     state = _load_state()
     missing = [k for k in keys if not state.get(k)]
     if missing:
@@ -297,7 +368,14 @@ def _require_state(*keys: str) -> dict[str, Any]:
 
 
 def ray_gcs_address(head_pod_ip: str) -> str:
-    """Ray driver address for ``ray.init(address=...)`` (GCS on head, default port)."""
+    """Ray driver address for ``ray.init(address=...)`` (GCS on head, default port).
+
+    Args:
+        head_pod_ip (str): The head pod IP.
+
+    Returns:
+        str: ``<ip>:6379`` for a non-empty IP, otherwise an empty string.
+    """
     ip = (head_pod_ip or "").strip()
     if not ip:
         return ""
@@ -305,6 +383,14 @@ def ray_gcs_address(head_pod_ip: str) -> str:
 
 
 def _b64(s: str) -> str:
+    """Base64-encode a string as ASCII.
+
+    Args:
+        s (str): The text to encode (UTF-8).
+
+    Returns:
+        str: The base64-encoded value as an ASCII string.
+    """
     return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
 
@@ -313,13 +399,28 @@ def _wrap_for_dash(body: str) -> str:
     /bin/sh (dash) on the sglang:202604290707 image. Dash rejects
     ``set -o pipefail``; bash accepts it. We base64-encode the body and pipe it
     into bash so the outer shell only needs ``echo``/``base64``/``bash``.
+
+    Args:
+        body (str): The bash entrypoint body to wrap.
+
+    Returns:
+        str: A ``/bin/sh``-safe one-liner that decodes and runs ``body``
+        under bash.
     """
     enc = _b64(body)
     return f"echo {enc} | base64 -d | bash"
 
 
 def _parse_kv_list(values: list[str] | None) -> dict[str, str]:
-    """Convert ['K=V', 'K2=V2', ...] into a dict; ignore malformed entries."""
+    """Convert ['K=V', 'K2=V2', ...] into a dict; ignore malformed entries.
+
+    Args:
+        values (list[str] | None): The raw ``K=V`` tokens, or ``None``.
+
+    Returns:
+        dict[str, str]: The parsed key/value mapping; malformed or
+        empty-key tokens are skipped.
+    """
     out: dict[str, str] = {}
     if not values:
         return out
@@ -343,6 +444,10 @@ def _credential_fanout() -> dict[str, str]:
     ``OOB_BASE_URL`` / ``ANTHROPIC_CUSTOM_HEADERS`` are passed through
     as-is from sandbox env (they are cluster-specific values that the
     SaFE platform sets on the sandbox at start time).
+
+    Returns:
+        dict[str, str]: The credential / base-URL env vars to inject into
+        the RayJob (only non-empty values are included).
     """
     safe_key = os.environ.get("SAFE_API_KEY", "").strip()
     out: dict[str, str] = {}
@@ -367,7 +472,15 @@ def _credential_fanout() -> dict[str, str]:
 
 
 def _is_safe_get_workload_404(exc: BaseException) -> bool:
-    """True when SaFE GET workload returns 404 (transient right after create)."""
+    """Check whether an exception is a transient SaFE GET-workload 404.
+
+    Args:
+        exc (BaseException): The exception to classify.
+
+    Returns:
+        bool: ``True`` if ``exc`` is a SaFE 404 on a GET workload endpoint
+        (expected briefly right after create), otherwise ``False``.
+    """
     return (
         isinstance(exc, safe_client.SafeApiError)
         and exc.status == 404
@@ -406,6 +519,30 @@ def _short_poll(
     On poll timeout: raise :class:`TransientFailure` (exit code 1) so
     the controller knows it's safe to rerun the same subcommand to keep
     waiting.
+
+    Args:
+        label (str): Human-readable label for log lines.
+        fetch (callable): Zero-arg callable returning ``(state_obj, summary)``.
+        is_ok (callable): Predicate on ``state_obj`` indicating success.
+        is_fail (callable): Predicate on ``state_obj`` indicating terminal
+            failure.
+        interval_s (int): Seconds to sleep between polls.
+        timeout_s (int): Maximum seconds to poll before timing out.
+        failure_diag (callable | None): Optional ``state_obj`` ->
+            ``(diag, snapshot)`` builder for richer terminal-failure errors.
+        quiet_fetch_error_grace_s (float): Window during which a matching
+            fetch error is logged quietly instead of as a warning.
+        is_quiet_fetch_error (Callable[[BaseException], bool] | None):
+            Predicate selecting which fetch errors are quiet.
+
+    Returns:
+        Any: The final ``state_obj`` once ``is_ok`` is satisfied.
+
+    Raises:
+        WorkloadTerminalFailure: On terminal failure when ``failure_diag``
+            is provided.
+        RuntimeError: On terminal failure when ``failure_diag`` is absent.
+        TransientFailure: If no terminal state is reached before timeout.
     """
     started = time.monotonic()
     attempt = 0
@@ -466,6 +603,13 @@ def _summarize_workload_failure(workload: dict[str, Any]) -> tuple[str, dict[str
     decide whether to give up vs surface a useful error.
 
     Returns (one_line_summary, snapshot_dict). Snapshot is JSON-safe.
+
+    Args:
+        workload (dict[str, Any]): A SaFE GetWorkloadResponse.
+
+    Returns:
+        tuple[str, dict[str, Any]]: ``(one_line_summary, snapshot_dict)``
+        where the snapshot is JSON-serializable.
     """
     phase = str(workload.get("phase") or "?")
     msg = str(workload.get("message") or "").strip()
@@ -530,6 +674,12 @@ def _find_head_pod_ip(workload: dict) -> str:
       1. ``podId`` contains ``-head-`` and ``podIP`` is set.
       2. ``resourceId == 0`` (legacy when submitter was not resource 0).
       3. first pod with non-empty ``podIP``.
+
+    Args:
+        workload (dict): A SaFE GetWorkloadResponse with a ``pods`` list.
+
+    Returns:
+        str: The selected head pod IP, or an empty string if none found.
     """
     pods = workload.get("pods") or []
     if not pods:
@@ -552,7 +702,25 @@ def _find_head_pod_ip(workload: dict) -> str:
 
 
 def cmd_create_rayjob(args: argparse.Namespace) -> int:
-    """Create the RayJob, checkpoint ``rayjob_id`` early, then poll for Running."""
+    """Create the RayJob, checkpoint ``rayjob_id`` early, then poll for Running.
+
+    Reuses an existing non-terminal workload from state (unless
+    ``--recreate``), persists the state file, and prints the merged state
+    as JSON.
+
+    Args:
+        args (argparse.Namespace): Parsed ``create-rayjob`` arguments.
+
+    Returns:
+        int: ``0`` on success.
+
+    Raises:
+        RuntimeError: If no workspace can be resolved.
+        WorkloadTerminalFailure: If the workload enters a terminal failure
+            phase while polling.
+        TransientFailure: If polling times out before the workload is
+            Running.
+    """
     extra_env = _parse_kv_list(args.extra_env)
     extra_labels = _parse_kv_list(args.extra_label)
     # User extra_env takes precedence over our credential fanout, except
@@ -673,6 +841,11 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
             info("--no-wait set; not polling for Running")
         else:
             def _fetch():
+                """Fetch the workload and summarize its phase.
+
+                Returns:
+                    tuple: ``(workload_dict, summary_str)`` for the poll loop.
+                """
                 wl = safe.get_workload(wid)
                 phase = wl.get("phase", "?")
                 summary = f"phase={phase}"
@@ -735,6 +908,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     heredoc-style entrypoint so the pod doesn't need filesystem access
     to the sandbox. Pass ``--script PATH`` to override with a script
     that's already pod-visible (e.g. baked into the image).
+
+    Args:
+        args (argparse.Namespace): Parsed ``bootstrap`` arguments.
+
+    Returns:
+        int: ``0`` on success.
     """
     state = _require_state("rayjob_id", "head_pod_ip")
     head_ip = state["head_pod_ip"]
@@ -760,6 +939,11 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         info(f"submission_id={sub_id}")
 
         def _fetch():
+            """Fetch the bootstrap job and summarize its status.
+
+            Returns:
+                tuple: ``(job_dict, summary_str)`` for the poll loop.
+            """
             j = ray.get_job(sub_id)
             return j, f"status={j.get('status', '?')}"
 
@@ -787,7 +971,14 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Sanity-check the toolchain bootstrap installed inside the RayJob."""
+    """Sanity-check the toolchain bootstrap installed inside the RayJob.
+
+    Args:
+        args (argparse.Namespace): Parsed ``verify`` arguments.
+
+    Returns:
+        int: ``0`` on success.
+    """
     state = _require_state("head_pod_ip")
     head_ip = state["head_pod_ip"]
 
@@ -811,6 +1002,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
         info(f"submission_id={sub_id}")
 
         def _fetch():
+            """Fetch the verify job and summarize its status.
+
+            Returns:
+                tuple: ``(job_dict, summary_str)`` for the poll loop.
+            """
             j = ray.get_job(sub_id)
             return j, f"status={j.get('status', '?')}"
 
@@ -848,6 +1044,15 @@ def _read_pod_script(name: str) -> str:
     Splitting the bash into separate files (vs inlining strings) keeps
     each one independently readable / editable / oob-optimizable, which
     is what the ``scripts_subset=all_three`` decision optimizes for.
+
+    Args:
+        name (str): Filename of the script under ``multi_node/scripts/``.
+
+    Returns:
+        str: The script file contents.
+
+    Raises:
+        RuntimeError: If the named script does not exist on disk.
     """
     p = _SCRIPTS_DIR / name
     if not p.is_file():
@@ -872,6 +1077,18 @@ def _build_restart_entrypoint(
 
     Strict IR-5 (no ``pkill -f sglang``): kill_server.sh uses the PID file
     that launch_server.sh wrote in the previous cycle.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (framework, model, tp,
+            extra_args, no_wait_health).
+        pid_file (str): Path the launcher writes/reads the server PID to.
+        log_file (str): Path the launcher writes the server log to.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+
+    Raises:
+        RuntimeError: If ``args.framework`` is not ``sglang`` or ``vllm``.
     """
     framework = args.framework.lower()
     if framework not in ("sglang", "vllm"):
@@ -917,7 +1134,16 @@ _MN_ENTRYPOINT_PREAMBLE = (
 
 
 def _build_kill_single_entrypoint(pid_file: str) -> str:
-    """Head-pod entrypoint that only runs kill_server.sh (IR-5 PID-file kill)."""
+    """Compose a head-pod entrypoint that runs only kill_server.sh.
+
+    Uses the IR-5 PID-file kill (no ``pkill -f``).
+
+    Args:
+        pid_file (str): Path to the PID file the kill script reads.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     kill_sh = _read_pod_script("kill_server.sh")
     return (
         "set -euo pipefail; "
@@ -936,12 +1162,28 @@ def _exec_kill_submission(
     label: str,
     args: argparse.Namespace,
 ) -> str:
-    """Submit a kill entrypoint via Ray Dashboard and poll to SUCCEEDED. Returns submission_id."""
+    """Submit a kill entrypoint via Ray Dashboard and poll to SUCCEEDED.
+
+    Args:
+        head_ip (str): IP of the Ray head pod's dashboard.
+        entrypoint (str): The kill entrypoint shell command to submit.
+        label (str): Human-readable label used in log lines and polling.
+        args (argparse.Namespace): Parsed CLI args (poll interval/timeout,
+            print_logs).
+
+    Returns:
+        str: The Ray Dashboard submission id of the kill job.
+    """
     with ray_dashboard.RayDashboardClient(head_ip) as ray:
         kill_sub = ray.submit_job(_wrap_for_dash(entrypoint))
         info(f"{label} submission_id={kill_sub}")
 
         def _fetch_kill():
+            """Fetch the kill job status for the poll loop.
+
+            Returns:
+                tuple[dict, str]: The job dict and a short status message.
+            """
             j = ray.get_job(kill_sub)
             return j, f"kill status={j.get('status', '?')}"
 
@@ -965,6 +1207,13 @@ def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
 
     Sends 1 entrypoint to the head pod; kill_multinode.py uses ray
     actors to fan out kills to every worker pod's PID files.
+
+    Args:
+        pid_dir (str): Directory holding the per-rank PID files.
+        grace_sec (int): Seconds to wait before escalating the kill.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("kill_multinode.py")
     return (
@@ -986,6 +1235,14 @@ def _extract_launcher_summary(launch_logs: str) -> dict:
     text after stripping trailing whitespace, and try to ``json.loads``
     that span. Returns ``{}`` on any failure (caller treats missing
     fields as fatal).
+
+    Args:
+        launch_logs (str): Raw interleaved stdout/stderr job logs from the
+            dashboard for the launch submission.
+
+    Returns:
+        dict: The parsed launcher summary, or ``{}`` if none could be
+            recovered.
     """
     if not launch_logs:
         return {}
@@ -1032,6 +1289,16 @@ def _build_multinode_launch_entrypoint(
     cleared BEFORE this entrypoint runs (sequenced by cmd_restart_server),
     otherwise rank 0's old process holds :8888 and the new process
     fails to bind.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (model, tp, framework,
+            extra_args, no_wait_health, …).
+        nnodes (int): Number of nodes to spread one rank per.
+        pid_dir (str): Directory the launcher writes per-rank PID files to.
+        log_dir (str): Directory the launcher writes per-rank logs to.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("launch_multinode.py")
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
@@ -1138,6 +1405,17 @@ def _build_multinode_router_entrypoint(
     Embedding the script lets us update ``launch_router.py`` in this
     repo and have changes take effect on the next restart-server
     without rebuilding the RayJob image.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (framework, optional
+            ``pd_vllm_router_cmd``).
+        prefill_url (str): URL of the prefill server group.
+        decode_url (str): URL of the decode server group.
+        pid_dir (str): Directory the router PID file is written to.
+        log_dir (str): Directory the router log file is written to.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("launch_router.py")
     public_port = 8888
@@ -1178,6 +1456,16 @@ def _build_multinode_apply_patch_entrypoint(
     Why heredoc embedding: same reason as launch_multinode.py — keeps
     the pod-side script versioned in this repo and updatable without
     rebuilding the RayJob image.
+
+    Args:
+        target_path (str): File path each pod should patch.
+        patch_b64 (str): Base64-encoded unified-diff patch payload.
+        backup_dir (str): Directory each pod writes its backup into.
+        kernel_id (str): Identifier of the kernel being patched.
+        timeout_sec (int): Per-pod apply timeout in seconds.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("kernel_patch_multinode.py")
     return (
@@ -1206,6 +1494,15 @@ def _build_multinode_revert_patch_entrypoint(
     was returned by the matching ``apply`` call; callers MUST persist
     it (we recommend the kernel-agent manifest) so revert can reach
     the same pods even after a sandbox restart.
+
+    Args:
+        target_path (str): File path each pod should revert.
+        backup_map_json (str): JSON per-host map of backup file paths
+            produced by the matching ``apply`` call.
+        timeout_sec (int): Per-pod revert timeout in seconds.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("kernel_patch_multinode.py")
     return (
@@ -1237,6 +1534,15 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
     The in-pod script is idempotent (sentinel grep before applying), so
     the controller can call this on every ``restart_server_for_round``
     without worrying about double-patching.
+
+    Args:
+        tracelens_root (str): Shared wekafs path where the TraceLens patch
+            set lives, forwarded to each pod.
+        sglang_version_pin (str): Optional SGLang version pin; when empty
+            no pin flag is added.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("apply_tracelens_patch_multinode.py")
     pin_arg = ""
@@ -1268,6 +1574,17 @@ def _build_multinode_kernel_bench_entrypoint(
     a SINGLE GPU-bearing node (the head). Multi-rank micro-benchmark
     isn't a sandbox-side concern — the per-kernel optimization loop
     scales by parallel candidate count at a higher layer.
+
+    Args:
+        workspace (str): Pod-side workspace directory for the bench run.
+        bench_command (str): Shell command that runs the micro-benchmark.
+        files_b64_json (str): JSON map of base64-encoded files to stage
+            into the workspace before running.
+        result_glob (str): Glob the script collects result files from.
+        timeout_sec (int): Bench timeout in seconds.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("kernel_bench_multinode.py")
     return (
@@ -1292,6 +1609,14 @@ def _extract_pod_json(logs: str) -> dict | None:
     prefixed ``[kernel_..._multinode TS]``) so we isolate the JSON by
     finding the last ``{`` whose matching ``}`` reaches end-of-text
     after stripping trailing whitespace.
+
+    Args:
+        logs (str): Raw interleaved stdout/stderr job-logs blob from the
+            dashboard.
+
+    Returns:
+        dict | None: The parsed JSON payload, or ``None`` when none could
+            be recovered.
     """
     if not logs:
         return None
@@ -1343,12 +1668,28 @@ def _submit_and_collect_pod_json(
     Used by cmd_apply_patch / cmd_revert_patch / cmd_kernel_bench. Keeps
     the dashboard plumbing in one place so the three commands stay
     short and parallel in shape.
+
+    Args:
+        head_ip (str): IP of the Ray head pod's dashboard.
+        entrypoint (str): The entrypoint shell command to submit.
+        label (str): Human-readable label for log lines and polling.
+        poll_interval (int): Seconds between status polls.
+        poll_timeout (int): Overall poll timeout in seconds.
+
+    Returns:
+        tuple[int, dict | None, str]: ``(returncode, parsed_dict_or_None,
+            full_logs)``.
     """
     with ray_dashboard.RayDashboardClient(head_ip) as ray:
         sub_id = ray.submit_job(_wrap_for_dash(entrypoint))
         info(f"{label} submission_id={sub_id}")
 
         def _fetch():
+            """Fetch the submission status for the poll loop.
+
+            Returns:
+                tuple[dict, str]: The job dict and a short status message.
+            """
             j = ray.get_job(sub_id)
             return j, f"{label} status={j.get('status', '?')}"
 
@@ -1393,6 +1734,14 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
     Stdout: the same JSON document kernel_patch_multinode.py emits,
     re-printed verbatim so sandbox-side callers (apply_kernel_patch.py
     multi-node dispatch) can parse it deterministically.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (patch_file,
+            target_path, kernel_id, backup_dir, timeout_sec, polling).
+
+    Returns:
+        int: A process exit code (``EXIT_OK`` on success, otherwise a
+            config / transient error code).
     """
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
@@ -1438,6 +1787,14 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
     received it. ``--backup-map-json`` is the per-host map returned by
     the matching ``apply-patch`` call; callers MUST pass it through
     unchanged so the right backups are read on each pod.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (target_path,
+            backup_map_json, timeout_sec, polling).
+
+    Returns:
+        int: A process exit code (``EXIT_OK`` on success, otherwise a
+            config / transient error code).
     """
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
@@ -1512,6 +1869,14 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     ``apply_tracelens_patch_multinode.py`` emits, re-printed verbatim.
 
     Multi-node only.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (tracelens_root,
+            sglang_version_pin, polling).
+
+    Returns:
+        int: A process exit code (``EXIT_OK`` on success, otherwise a
+            config / transient error code).
     """
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
@@ -1574,6 +1939,15 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
     The sandbox calls this when ``is_multi_node()`` is True and the
     kernel-agent micro-benchmark step would otherwise try to compile +
     run on the sandbox (which lacks GPUs in multi-node mode).
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (workspace,
+            bench_command, files_b64_json, result_glob, timeout_sec,
+            polling).
+
+    Returns:
+        int: A process exit code (``EXIT_OK`` on success, otherwise a
+            config / transient error code).
     """
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
@@ -1626,6 +2000,14 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
       across every node, wiring sglang/vllm with --nnodes / --node-rank /
       --dist-init-addr per upstream multi-node docs. The agent runs ONE
       restart-server invocation; the driver inside the pod handles the rest.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (framework, model, tp,
+            ep, pd_mode, pid_file, log_file, extra_args, polling, …).
+
+    Returns:
+        int: A process exit code (``EXIT_OK`` on success, otherwise a
+            config / transient error code).
     """
     state = _require_state("head_pod_ip")
     head_ip = state["head_pod_ip"]
@@ -1743,6 +2125,11 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             _save_state(state)
 
             def _fetch_launch():
+                """Fetch the launch job status for the poll loop.
+
+                Returns:
+                    tuple[dict, str]: The job dict and a short status message.
+                """
                 j = ray.get_job(launch_sub)
                 return j, f"launch status={j.get('status', '?')}"
 
@@ -1808,6 +2195,11 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                      f"(detaches launch_router.py; dashboard exits when router is alive)")
 
                 def _fetch_router():
+                    """Fetch the router job status for the poll loop.
+
+                    Returns:
+                        tuple[dict, str]: The job dict and a short status message.
+                    """
                     j = ray.get_job(router_sub)
                     return j, f"router status={j.get('status', '?')}"
 
@@ -1888,6 +2280,11 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         info(f"submission_id={sub_id} (entrypoint will exit after launch; server keeps running via nohup)")
 
         def _fetch():
+            """Fetch the restart job status for the poll loop.
+
+            Returns:
+                tuple[dict, str]: The job dict and a short status message.
+            """
             j = ray.get_job(sub_id)
             return j, f"status={j.get('status', '?')}"
 
@@ -1915,7 +2312,19 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
 
 def cmd_kill_inference(args: argparse.Namespace) -> int:
-    """Kill vllm/sglang on the RayJob without starting replacements (free GPUs)."""
+    """Kill vllm/sglang on the RayJob without starting replacements.
+
+    Frees the GPUs (single- or multi-node aware) without launching a new
+    server. Used before kernel-agent GPU tasks.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (pid_file, polling,
+            print_logs).
+
+    Returns:
+        int: A process exit code (``EXIT_OK`` on success, otherwise a
+            config error code).
+    """
     state = _require_state("head_pod_ip")
     head_ip = state["head_pod_ip"]
     nnodes = int(state.get("nodes") or 1)
@@ -1964,7 +2373,18 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
 
 
 def cmd_stop_rayjob(args: argparse.Namespace) -> int:
-    """Stop the RayJob via SaFE REST. Idempotent."""
+    """Stop the RayJob via SaFE REST. Idempotent.
+
+    Optionally deletes the workload and/or clears the local state file.
+    Does nothing (returns success) when no workload id is known.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (workload_id, delete,
+            clear_state).
+
+    Returns:
+        int: A process exit code (always ``EXIT_OK`` here).
+    """
     state = _load_state()
     wid = args.workload_id or state.get("rayjob_id")
     if not wid:
@@ -1990,6 +2410,11 @@ def cmd_stop_rayjob(args: argparse.Namespace) -> int:
 
 
 def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
+    """Register the shared ``--poll-interval`` / ``--poll-timeout`` flags.
+
+    Args:
+        p (argparse.ArgumentParser): The (sub)parser to add the flags to.
+    """
     p.add_argument("--poll-interval", type=int, default=_DEFAULT_POLL_INTERVAL_S,
                    help=f"seconds between polls (default {_DEFAULT_POLL_INTERVAL_S})")
     p.add_argument(
@@ -2006,6 +2431,16 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argparse parser with every subcommand.
+
+    Registers the ``create-rayjob`` / ``restart-server`` / ``kill-
+    inference`` / ``apply-patch`` / ``revert-patch`` / ``apply-tracelens-
+    patch`` / ``kernel-bench`` / ``stop-rayjob`` subparsers and their
+    flags.
+
+    Returns:
+        argparse.ArgumentParser: The fully-configured argument parser.
+    """
     p = argparse.ArgumentParser(
         prog="python3 -m inference_optimizer.multi_node",
         description=(
@@ -2272,6 +2707,13 @@ def main(argv: list[str] | None = None) -> int:
     * 3   — config error: missing env / required arg / bad input. Rerun
             won't help; fix the inputs.
     * 130 — Ctrl-C / SIGINT
+
+    Args:
+        argv (list[str] | None): Optional argument vector to parse; when
+            ``None``, ``sys.argv`` is used.
+
+    Returns:
+        int: The process exit code (see the codes documented above).
     """
     parser = build_parser()
     args = parser.parse_args(argv)
