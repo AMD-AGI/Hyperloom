@@ -287,6 +287,37 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path):
     assert "baseline_warmup_round_failed" in result.get("nonfatal_warnings", [])
 
 
+def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
+    """Atom is a Magpie built-in (phase-aware) framework per
+    AMD-AGI/Magpie#34, so an atom baseline engages the lifecycle
+    double-run just like vllm/sglang."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="atom")
+    output_dir = tmp_path / "ws"
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+    assert captured[0]["benchmark"]["benchmark_script"] == "atom_mi300x.sh"
+    assert captured[0]["benchmark"]["server_lifecycle"]["enabled"] is True
+
+
 def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
     """The overtime-kill anchor (``subprocess_runtime_sec`` ->
     ``baseline_runtime_sec``) must reflect round 1's FULL server-boot +
