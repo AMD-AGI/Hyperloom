@@ -175,37 +175,12 @@ verify in place). Run this snippet after the three artifacts are written:
     # stays at the canonical path.
     cp "$_v2_bd" "$PERSIST_SCAN_DIR/session_breakdown_v2.json" 2>/dev/null \
       && echo "[PERSIST V2] copied to $PERSIST_SCAN_DIR/session_breakdown_v2.json"
-    # Also seed the V2 session dir with the CI contract files. This keeps
-    # /wekafs/users/<uid>/<model>/<ts>/ self-contained even if the top-level
-    # RESULT_DIR files are later pruned.
-    for _f in ci_metrics.json optimization_report.md; do
-      [ -f "$PERSIST_SCAN_DIR/$_f" ] && [ ! -f "$_v2_sess/$_f" ] \
-        && cp "$PERSIST_SCAN_DIR/$_f" "$_v2_sess/$_f" 2>/dev/null \
-        && echo "[PERSIST V2] copied contract $_f -> $_v2_sess/$_f"
-    done
     # Also pull manifest.json + state.json + any phase* subdirs if V2
     # produced them; these only exist when V2 reached its finalize step.
     for _f in manifest.json state.json optimizer_runs.json; do
       [ -f "$_v2_sess/$_f" ] && cp "$_v2_sess/$_f" "$PERSIST_SCAN_DIR/$_f" 2>/dev/null \
         && echo "[PERSIST V2] copied $_f"
     done
-    if [ -n "${HYPERLOOM_IMAGE:-}" ] && [ -f "$_v2_sess/manifest.json" ]; then
-      python3 - "$_v2_sess/manifest.json" "$HYPERLOOM_IMAGE" <<'PY'
-import json, sys
-path, image = sys.argv[1:3]
-try:
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    if isinstance(data, dict) and not data.get("image"):
-        data["image"] = image
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-        print(f"[PERSIST V2] backfilled manifest image: {image}")
-except Exception as exc:
-    print(f"[PERSIST V2] manifest image backfill skipped: {exc}", file=sys.stderr)
-PY
-    fi
     # Mirror the full V2 session dir under a sub-folder for forensic depth.
     mkdir -p "$PERSIST_SCAN_DIR/v2_session"
     cp -a "$_v2_sess/." "$PERSIST_SCAN_DIR/v2_session/" 2>/dev/null \
