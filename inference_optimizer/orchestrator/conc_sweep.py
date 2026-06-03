@@ -603,13 +603,17 @@ async def run_conc_sweep(
         rdir.mkdir(parents=True, exist_ok=True)
         json_path = rdir / "conc_sweep_summary.json"
         csv_path = rdir / "conc_sweep_raw.csv"
+        # Self-referential paths must be set BEFORE the dump so the
+        # on-disk JSON carries them; downstream consumers (frontend
+        # "download CSV" button, report.py pointer) read the file,
+        # not the in-memory payload.
+        payload["report_json_path"] = json_path.as_posix()
+        payload["report_csv_path"] = csv_path.as_posix()
         json_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False, default=str),
             encoding="utf-8",
         )
         _write_csv(csv_path, baseline_points + optimized_points)
-        payload["report_json_path"] = json_path.as_posix()
-        payload["report_csv_path"] = csv_path.as_posix()
         # final.json pointer is added by report.py at CLOSE -- the
         # action runs strictly before CLOSE so report.py can read
         # this file freshly. See ``_write_conc_sweep_pointer`` there.

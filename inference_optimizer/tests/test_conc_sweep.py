@@ -402,6 +402,13 @@ def test_run_conc_sweep_happy_path_writes_reports(
     disk = json.loads(summary_path.read_text())
     assert disk["status"] == "succeeded"
     assert disk["summary"]["successful_pairs"] == 3
+    # Self-referential paths must land in the on-disk JSON so the
+    # frontend can read them straight off the report file instead of
+    # re-deriving from session_dir. Regression for a payload-mutation-
+    # after-write bug discovered during the breakdown_api_integration
+    # review.
+    assert disk["report_json_path"] == summary_path.as_posix()
+    assert disk["report_csv_path"] == csv_path.as_posix()
 
     rows = list(csv.DictReader(csv_path.open()))
     assert len(rows) == 6  # 3 baseline + 3 optimized
