@@ -88,9 +88,12 @@ def _locate_yaml() -> Path | None:
          relative to the package root. Works for editable installs and
          wheel installs alike.
 
-    Returns ``None`` when the package is not importable in this
-    interpreter (e.g. ``install.sh --check-only`` invoked before GEAK's
-    pip install ran).
+    Returns:
+        Path | None: Absolute path to the bundled strategy YAML, or
+            ``None`` when the override points at a missing file or the
+            ``minisweagent`` package is not importable in this
+            interpreter (e.g. ``install.sh --check-only`` invoked before
+            GEAK's pip install ran).
     """
     override = os.environ.get("HYPERLOOM_GEAK_PROMPT_YAML", "").strip()
     if override:
@@ -114,6 +117,10 @@ def _atomic_write(target: Path, content: str) -> None:
     Python processes (e.g. a long-running GEAK run started before
     install.sh re-runs). Atomic replace prevents a half-written YAML
     from being parsed.
+
+    Args:
+        target (Path): Destination file to overwrite in place.
+        content (str): Full text to write.
     """
     with tempfile.NamedTemporaryFile(
         "w", dir=str(target.parent), delete=False, encoding="utf-8",
@@ -130,10 +137,12 @@ def _atomic_write(target: Path, content: str) -> None:
 def ensure_geak_prompt_patched() -> tuple[bool, str]:
     """Patch the bundled YAML in-place; idempotent and fail-soft.
 
-    Returns ``(ok, message)`` where ``ok`` is True on success or
-    already-patched, False on any fail-soft outcome (file missing,
-    upstream block changed, write failed, …). ``message`` is a short
-    human-readable status suitable for the install-script log.
+    Returns:
+        tuple[bool, str]: ``(ok, message)`` where ``ok`` is True on
+            success or already-patched, and False on any fail-soft
+            outcome (file missing, upstream block changed, write
+            failed, …). ``message`` is a short human-readable status
+            suitable for the install-script log.
     """
     yaml_path = _locate_yaml()
     if yaml_path is None:
@@ -166,7 +175,13 @@ def main() -> int:
     Exit code 0 always when ``$HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED != 1``
     (default), so the patcher cannot block install on a fail-soft
     outcome. Set the env to ``1`` to make missing-or-failed patch
-    fatal (CI / production guard rails)."""
+    fatal (CI / production guard rails).
+
+    Returns:
+        int: Process exit code — 0 on success/noop, or when the patch
+            is not marked required; 1 only when the patch failed and
+            ``$HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED == '1'``.
+    """
     ok, msg = ensure_geak_prompt_patched()
     status = "OK" if ok else "WARN"
     print(f"[geak-prompt-patcher] {status}: {msg}")

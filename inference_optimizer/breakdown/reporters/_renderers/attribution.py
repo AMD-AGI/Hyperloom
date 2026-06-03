@@ -17,6 +17,19 @@ from ..base import Decision, RenderedSection, fmt_pct, md_table, register_render
 
 @register_renderer("attribution")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the source-attribution section: gain split across sources.
+
+    Surfaces the per-source breakdown table, the collector's authoritative
+    attribution method label, and any assumption notes. Skipped when no
+    per-source split is available (single-source or unmined attribution).
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, marked skipped when there is no
+            per-source split to show.
+    """
     a = breakdown.get("attribution") or {}
     sb = a.get("source_breakdown") or {}
     notes = a.get("notes") or []

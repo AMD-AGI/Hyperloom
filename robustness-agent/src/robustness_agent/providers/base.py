@@ -18,22 +18,60 @@ class MetricsProvider(ABC):
 
     @abstractmethod
     async def get_gpu_metrics(self, gpu_id: Optional[int] = None) -> list[GpuSnapshot]:
+        """Return current GPU snapshots.
+
+        Args:
+            gpu_id (Optional[int]): If given, restrict the result to this GPU.
+
+        Returns:
+            list[GpuSnapshot]: The current GPU snapshots.
+        """
         ...
 
     @abstractmethod
     async def get_gpu_history(self, gpu_id: int, window_seconds: int) -> list[GpuSnapshot]:
+        """Return GPU snapshots over a trailing time window.
+
+        Args:
+            gpu_id (int): The GPU identifier to query.
+            window_seconds (int): Width of the trailing window, in seconds.
+
+        Returns:
+            list[GpuSnapshot]: Snapshots within the window.
+        """
         ...
 
     @abstractmethod
     async def get_process_list(self) -> list[ProcessInfo]:
+        """Return the current process list.
+
+        Returns:
+            list[ProcessInfo]: One entry per tracked process.
+        """
         ...
 
     @abstractmethod
     async def get_disk_usage(self, path: str = "/") -> list[DiskSnapshot]:
+        """Return disk usage for a path.
+
+        Args:
+            path (str): Filesystem path to inspect.
+
+        Returns:
+            list[DiskSnapshot]: One entry per relevant mount.
+        """
         ...
 
     @abstractmethod
     async def get_fault_events(self, since: float) -> list[FaultEvent]:
+        """Return fault events newer than a timestamp.
+
+        Args:
+            since (float): Lower-bound Unix timestamp for returned faults.
+
+        Returns:
+            list[FaultEvent]: The matching fault events.
+        """
         ...
 
     @abstractmethod

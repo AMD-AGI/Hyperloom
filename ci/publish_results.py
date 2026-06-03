@@ -22,6 +22,22 @@ DEFAULT_SERVICE_URL = "http://core42.primus-safe.amd.com/hyperloom-results"
 
 
 def load_results(path: Path) -> list[dict[str, Any]]:
+    """Load result records from a JSON or NDJSON file.
+
+    Handles three on-disk shapes: a ``.ndjson`` file with one JSON object per
+    line, a JSON object wrapping a ``results`` list (or a single schema-versioned
+    result), and a top-level JSON list of result objects.
+
+    Args:
+        path (Path): Path to the results file to read.
+
+    Returns:
+        list[dict[str, Any]]: The parsed result records, or an empty list if
+        the payload does not match any recognized shape.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+    """
     if not path.exists():
         raise FileNotFoundError(f"input file not found: {path}")
 
@@ -58,6 +74,13 @@ def _normalize_submitted_at(results: list[dict[str, Any]]) -> list[dict[str, Any
     still lands in the row's ``raw_result`` JSONB blob, so consumers can
     reconstruct the timestamp without a backend round-trip. Drop this
     function once the ingest path accepts ISO strings directly.
+
+    Args:
+        results (list[dict[str, Any]]): Result records to normalize.
+
+    Returns:
+        list[dict[str, Any]]: Copies of the records with ``run.submitted_at``
+        relocated to ``run.submitted_at_iso``.
     """
     cleaned: list[dict[str, Any]] = []
     for r in results:
@@ -93,6 +116,21 @@ def publish(
         asyncpg re-establishes a connection.
       * Postgres liveness-probe restarts can briefly make the whole
         endpoint unreachable (HTTP 5xx / connection refused).
+
+    Args:
+        results (list[dict[str, Any]]): Result records to publish.
+        url (str): Base URL of the results service; ``/api/import`` is appended.
+        token (str): Optional bearer token for the ``Authorization`` header.
+        timeout (int): Per-request timeout in seconds.
+        max_retries (int): Maximum number of POST attempts before giving up.
+        initial_backoff_s (float): Initial backoff delay in seconds, doubled
+            (capped at 60s) after each failed attempt.
+
+    Returns:
+        dict: The decoded JSON response from a successful import.
+
+    Raises:
+        RuntimeError: If all attempts fail or the final response is non-2xx.
     """
     import time
     import requests
@@ -144,6 +182,14 @@ def publish(
 
 
 def main() -> int:
+    """Parse CLI arguments, load results, and publish them.
+
+    Skips publishing (returning success) when no service URL is configured or
+    when the input file contains no results.
+
+    Returns:
+        int: Process exit code (``0`` on success or skip).
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, help="normalized_results.json or .ndjson")
     parser.add_argument(

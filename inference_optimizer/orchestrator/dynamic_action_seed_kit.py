@@ -74,13 +74,30 @@ class SeedKitResult:
 
 
 def estimate_tokens(text: str) -> int:
-    """Char-based token estimator (~4 chars per token)."""
+    """Char-based token estimator (~4 chars per token).
+
+    Args:
+        text (str): Text to estimate token count for.
+
+    Returns:
+        int: Estimated token count (0 for empty text).
+    """
     if not text:
         return 0
     return int(len(text) / _CHARS_PER_TOKEN) + 1
 
 
 def _truncate(text: str, max_chars: int) -> str:
+    """Truncate text to a character budget with an ellipsis.
+
+    Args:
+        text (str): Text to truncate (``None`` treated as empty).
+        max_chars (int): Maximum length of the returned string.
+
+    Returns:
+        str: The original text, or a trimmed copy ending in ``...`` when
+        it exceeds ``max_chars``.
+    """
     text = text or ""
     if len(text) <= max_chars:
         return text
@@ -88,9 +105,18 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 def _is_kernel_only_entry(entry: dict[str, Any]) -> bool:
-    """True for patches whose action is kernel-only; defensively
-    filtered out of the seed kit even though PolicyGate already
-    rejects kernel-only scope at dispatch."""
+    """Return whether a patch entry has a kernel-only action.
+
+    Such entries are defensively filtered out of the seed kit even
+    though PolicyGate already rejects kernel-only scope at dispatch.
+
+    Args:
+        entry (dict[str, Any]): Patch entry with an optional ``action``.
+
+    Returns:
+        bool: ``True`` when the action starts with ``kernel_`` or equals
+        ``integrate``.
+    """
     action = str(entry.get("action") or "").strip().lower()
     return action.startswith("kernel_") or action == "integrate"
 
@@ -99,9 +125,18 @@ def _is_kernel_only_entry(entry: dict[str, Any]) -> bool:
 # Section assemblers
 # ---------------------------------------------------------------------------
 def _roofline_summary(state: Any) -> str:
-    """One-paragraph roofline digest from
-    ``last_trace_analyze.analysis_md_text``; empty when the cache is
-    cold."""
+    """Build a one-paragraph roofline digest from the trace cache.
+
+    Reads ``last_trace_analyze.analysis_md_text`` and truncates it to
+    the roofline char budget.
+
+    Args:
+        state (Any): SharedState snapshot with ``last_trace_analyze``.
+
+    Returns:
+        str: The truncated digest, or an empty string when the cache is
+        cold.
+    """
     snap = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(snap, dict):
         return ""
@@ -110,9 +145,20 @@ def _roofline_summary(state: Any) -> str:
 
 
 def _profile_keyslices(state: Any, scope_domains: list[str]) -> list[dict[str, Any]]:
-    """Top-N hot kernels from ``last_trace_analyze.hot_kernels_top15``,
-    sorted by ``gpu_pct`` descending. ``scope_domains`` is reserved
-    for future domain-affinity filtering."""
+    """Select the top hot kernels from the trace cache.
+
+    Reads ``last_trace_analyze.hot_kernels_top15`` and returns the
+    highest-``gpu_pct`` entries up to :data:`MAX_PROFILE_KEYSLICES`.
+
+    Args:
+        state (Any): SharedState snapshot with ``last_trace_analyze``.
+        scope_domains (list[str]): Dispatch scope domains, reserved for
+            future domain-affinity filtering.
+
+    Returns:
+        list[dict[str, Any]]: Cleaned kernel entries sorted by
+        ``gpu_pct`` descending; empty when the cache is cold.
+    """
     snap = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(snap, dict):
         return []
@@ -135,9 +181,20 @@ def _profile_keyslices(state: Any, scope_domains: list[str]) -> list[dict[str, A
 
 
 def _kept_patches(state: Any) -> list[dict[str, Any]]:
-    """Most recent KEEP'd variants from ``explore_search.accepted``;
-    falls back to ``optimization_stack`` when ``explore_search`` is
-    absent."""
+    """Collect the most recent kept variants.
+
+    Pulls KEEP'd variants from ``explore_search.accepted``, falling back
+    to ``optimization_stack`` when ``explore_search`` is absent, and
+    drops kernel-only entries.
+
+    Args:
+        state (Any): SharedState snapshot with ``explore_search`` and/or
+            ``optimization_stack``.
+
+    Returns:
+        list[dict[str, Any]]: Up to :data:`MAX_KEPT_PATCHES` rows with
+        name, action, gain, and truncated rationale.
+    """
     accepted = []
     search = getattr(state, "explore_search", None) or {}
     if isinstance(search, dict):
@@ -162,7 +219,18 @@ def _kept_patches(state: Any) -> list[dict[str, Any]]:
 
 
 def _reverted_patches(state: Any) -> list[dict[str, Any]]:
-    """Most recent REVERT entries from ``explore_search.rejected``."""
+    """Collect the most recent reverted variants.
+
+    Pulls REVERT entries from ``explore_search.rejected`` and drops
+    kernel-only entries.
+
+    Args:
+        state (Any): SharedState snapshot with ``explore_search``.
+
+    Returns:
+        list[dict[str, Any]]: Up to :data:`MAX_REVERTED_PATCHES` rows
+        with name, reason, and gain; empty when none are present.
+    """
     search = getattr(state, "explore_search", None) or {}
     if not isinstance(search, dict):
         return []
@@ -184,11 +252,24 @@ def _reverted_patches(state: Any) -> list[dict[str, Any]]:
 def _kb_pitfalls(
     state: Any, scope_domains: list[str], motivation: str,
 ) -> list[dict[str, Any]]:
-    """Filter ``warm_start_pitfalls`` by substring overlap with
-    ``scope_domains`` ∪ keywords extracted from ``motivation``.
+    """Filter warm-start pitfalls by keyword overlap.
 
-    Substring containment only (no LLM scoring). Top-K returned in
-    source order; the warm cache is already ranked by relevance."""
+    Matches ``warm_start_pitfalls`` against ``scope_domains`` ∪ keywords
+    extracted from ``motivation`` using substring containment only (no
+    LLM scoring). Top-K are returned in source order, which the warm
+    cache already ranks by relevance.
+
+    Args:
+        state (Any): SharedState snapshot with ``warm_start_pitfalls``.
+        scope_domains (list[str]): Dispatch scope domains, used as
+            match keywords.
+        motivation (str): Motivation text whose tokens (length >= 4) are
+            added as match keywords.
+
+    Returns:
+        list[dict[str, Any]]: Up to :data:`MAX_KB_PITFALLS` rows with
+        truncated text and domain; empty when none match.
+    """
     raw = getattr(state, "warm_start_pitfalls", None) or []
     if not isinstance(raw, list) or not raw:
         return []
@@ -221,8 +302,12 @@ def _kb_pitfalls(
 
 
 def _source_root_hints() -> list[str]:
-    """Resolved framework source roots; empty when the env var is
-    unset."""
+    """Return the resolved framework source roots.
+
+    Returns:
+        list[str]: Resolved source-file allowlist roots; empty when the
+        governing env var is unset.
+    """
     return list(resolve_source_file_allowlist())
 
 
@@ -246,6 +331,20 @@ def assemble_seed_kit(
     or more best-effort sources came back empty. Raises
     :class:`SeedKitAssemblyError` on token overflow or schema
     violation; the Coordinator rolls back the dispatch.
+
+    Args:
+        state (Any): SharedState snapshot supplying the seed sections.
+        payload (dict[str, Any]): Validated dispatch payload carrying
+            ``motivation_gap_text`` and ``scope_domains``.
+
+    Returns:
+        SeedKitResult: The composed payload, a ``degraded`` flag, and the
+        estimated total token count.
+
+    Raises:
+        SeedKitAssemblyError: If the motivation text is empty, a
+            disallowed field is emitted, or the estimated token count
+            exceeds :data:`MAX_SEED_KIT_TOKENS`.
     """
     motivation_raw = str(payload.get("motivation_gap_text") or "").strip()
     if not motivation_raw:

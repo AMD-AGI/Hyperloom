@@ -39,6 +39,11 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 def _log(msg: str) -> None:
+    """Write a timestamped progress line to stderr and flush it.
+
+    Args:
+        msg (str): The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kill_multinode {ts}] {msg}\n")
     sys.stderr.flush()
@@ -57,6 +62,15 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
 
     A single sweep covers both modes; pid files only exist for the
     mode that was actually launched, so unused patterns are no-ops.
+
+    Args:
+        pid_dir (str): Directory holding the rank/prefill/decode/router PID
+            files written by ``launch_multinode.py``.
+        grace_sec (int): Seconds to wait between SIGTERM and SIGKILL.
+
+    Returns:
+        dict: Per-PID summary with ``killed``, ``stale``, and ``missing``
+        lists of PID-file names (or ``name:pid`` strings).
     """
     summary: dict[str, list] = {"killed": [], "stale": [], "missing": []}
     p = Path(pid_dir)
@@ -162,6 +176,16 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
 
 
 def main() -> int:
+    """Parse CLI arguments and fan out kill actors across all alive nodes.
+
+    Connects to the in-pod Ray cluster, schedules one pinned kill actor per
+    alive node, collects each node's kill summary, and prints the aggregate
+    as JSON to stdout.
+
+    Returns:
+        int: Process exit code; ``0`` on success even when some nodes had
+        nothing to kill.
+    """
     p = argparse.ArgumentParser(
         prog="kill_multinode.py",
         description="Kill every multi-node server process spawned by launch_multinode.py.",

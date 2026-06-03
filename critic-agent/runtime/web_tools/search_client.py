@@ -64,6 +64,23 @@ class WebSearchInput:
 
     @classmethod
     def from_payload(cls, raw: dict, max_results_cap: int) -> "WebSearchInput":
+        """Validate raw LLM tool arguments into a normalized input.
+
+        Applies min-query-length, allowed/blocked mutual exclusion, the
+        ``site`` shorthand, ``max_results`` clamping, and freshness
+        normalisation.
+
+        Args:
+            raw (dict): The raw JSON arguments emitted by the LLM.
+            max_results_cap (int): Upper bound applied to ``max_results``.
+
+        Returns:
+            WebSearchInput: The validated, normalized input.
+
+        Raises:
+            ValueError: If the query is too short or both allowed and
+                blocked domains are supplied.
+        """
         query = str(raw.get("query") or "").strip()
         if len(query) < _MIN_QUERY_LEN:
             raise ValueError(
@@ -105,6 +122,17 @@ class WebSearchInput:
 
 
 def _normalize_str_list(value: object) -> tuple[str, ...]:
+    """Coerce an arbitrary value into a tuple of trimmed lowercase strings.
+
+    Accepts a single string (wrapped) or a list/tuple; anything else yields
+    an empty tuple. Empty items are dropped.
+
+    Args:
+        value (object): The value to normalise.
+
+    Returns:
+        tuple[str, ...]: Cleaned string entries.
+    """
     if value is None:
         return ()
     if isinstance(value, str):
@@ -132,6 +160,16 @@ class _LeakyBucket:
     """
 
     def __init__(self, capacity: int, *, time_fn=time.monotonic) -> None:
+        """Initialise a full bucket.
+
+        Args:
+            capacity (int): Token capacity, refilled linearly over one minute.
+            time_fn (Callable[[], float]): Monotonic clock, injectable for
+                tests.
+
+        Raises:
+            ValueError: If ``capacity`` is less than 1.
+        """
         if capacity < 1:
             raise ValueError("capacity must be >= 1")
         self._capacity = float(capacity)
@@ -141,6 +179,12 @@ class _LeakyBucket:
         self._last = time_fn()
 
     def try_consume(self) -> bool:
+        """Attempt to consume one token, refilling first based on elapsed time.
+
+        Returns:
+            bool: True when a token was available and consumed; False when
+            the bucket is empty (request should be rejected).
+        """
         now = self._time()
         elapsed = max(0.0, now - self._last)
         self._tokens = min(self._capacity, self._tokens + elapsed * self._refill_per_s)
@@ -170,6 +214,7 @@ class WebSearchClient:
     call_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
+        """Initialise the rate limiter from config after dataclass init."""
         if not self.providers:
             log.info("WebSearchClient constructed with empty provider chain")
         self._rate_limiter = _LeakyBucket(self.config.search_rate_limit_per_min)
@@ -178,8 +223,16 @@ class WebSearchClient:
         """Run a single ``web_search`` call.
 
         ``payload`` is the raw JSON object the LLM emitted as the tool
-        arguments. Returns the formatted result string to feed back to
-        the model.
+        arguments. Validates the input, enforces the rate limit, applies the
+        domain denylist, then tries each provider in the chain.
+
+        Args:
+            payload (dict): The raw JSON tool arguments from the LLM.
+
+        Returns:
+            str: The formatted result string to feed back to the model;
+            an ``Error: ...`` string on validation/rate-limit/provider
+            failure (never raises for ordinary failures).
         """
         self.call_count += 1
         try:
@@ -239,6 +292,16 @@ class WebSearchClient:
 
 
 def _host_in(url: str, domains: Sequence[str]) -> bool:
+    """Report whether a URL's host matches or is a subdomain of any domain.
+
+    Args:
+        url (str): The URL to inspect.
+        domains (Sequence[str]): Domains to match against.
+
+    Returns:
+        bool: True when the host equals or ends with ``.<domain>`` for any
+        entry; False on match failure or unparseable URL.
+    """
     try:
         host = (urlparse(url).hostname or "").lower()
     except (ValueError, AttributeError):
@@ -247,6 +310,16 @@ def _host_in(url: str, domains: Sequence[str]) -> bool:
 
 
 def _format_results(query: str, hits: Sequence[SearchHit]) -> str:
+    """Render hits into the LLM-facing result string with a cite reminder.
+
+    Args:
+        query (str): The original search query.
+        hits (Sequence[SearchHit]): The results to format.
+
+    Returns:
+        str: The formatted result text, always ending with the cite-source
+        reminder and truncated if it exceeds the output cap.
+    """
     parts: list[str] = [f'Web search results for query: "{query}"', ""]
     if not hits:
         parts.append("No links found.")

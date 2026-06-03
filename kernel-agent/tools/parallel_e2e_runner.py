@@ -48,15 +48,41 @@ sys.path.pop(0)
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO-8601 string.
+
+    Returns:
+        str: The timezone-aware current time formatted via
+            ``datetime.isoformat()``.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
+    """Write ``data`` as pretty-printed, sorted JSON, creating parents.
+
+    Args:
+        path (Path): Destination file; parent directories are created.
+        data (dict[str, Any]): JSON-serializable mapping to write.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def load_env_file(path: Path) -> dict[str, str]:
+    """Parse a ``KEY=VALUE`` env file and derive provider-key aliases.
+
+    Reads simple ``KEY=VALUE`` lines (ignoring blanks/comments, stripping
+    surrounding quotes), then fills common cross-provider fallbacks
+    (e.g. deriving Anthropic/OpenAI/OOB/GEAK keys and base URLs from
+    ``SAFE_API_KEY`` / ``AMD_API_KEY`` / ``*_BASE_URL``).
+
+    Args:
+        path (Path): Path to the env file. A missing file yields ``{}``.
+
+    Returns:
+        dict[str, str]: The parsed environment with derived aliases
+            applied.
+    """
     env: dict[str, str] = {}
     if not path.exists():
         return env
@@ -95,6 +121,16 @@ def _extract_trailing_json(text: str) -> dict[str, Any]:
 
     kernel_optimization.py prints non-JSON lines (e.g. ray.init banner) before
     its result JSON; we tolerate that by scanning from the end.
+
+    Args:
+        text (str): Combined stdout text that ends with a JSON object.
+
+    Returns:
+        dict[str, Any]: The parsed trailing JSON object.
+
+    Raises:
+        ValueError: If ``text`` is empty.
+        json.JSONDecodeError: If no valid JSON object can be parsed.
     """
     if not text:
         raise ValueError("empty stdout")
@@ -127,6 +163,22 @@ def _extract_trailing_json(text: str) -> dict[str, Any]:
 
 
 def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: Path) -> dict[str, Any]:
+    """Run a subprocess, tee output to a log, and parse trailing JSON.
+
+    Args:
+        cmd (list[str]): The command vector to execute.
+        env (dict[str, str]): Environment for the subprocess. Keyword-only.
+        timeout_s (int): Subprocess timeout in seconds. Keyword-only.
+        log_path (Path): File to append the command and its combined
+            stdout/stderr to. Keyword-only.
+
+    Returns:
+        dict[str, Any]: The parsed trailing JSON object from stdout.
+
+    Raises:
+        RuntimeError: If the command exits non-zero.
+        subprocess.TimeoutExpired: If it exceeds ``timeout_s``.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log:
         log.write("$ " + " ".join(cmd) + "\n")
@@ -146,13 +198,29 @@ def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: P
 
 
 def _ensure_ray_via_helper(num_gpus: int, log_path: Path) -> bool:
-    """Use the kernel-agent self-contained ray_runtime helper."""
+    """Use the kernel-agent self-contained ray_runtime helper.
+
+    Args:
+        num_gpus (int): GPUs to request when starting a head node.
+        log_path (Path): File for Ray lifecycle output.
+
+    Returns:
+        bool: True if this call started Ray (caller should stop it),
+            False if a cluster was already running.
+    """
     sys.path.insert(0, str(ROOT / "tools" / "backends"))
     from ray_runtime import ensure_ray_cluster  # type: ignore
     return ensure_ray_cluster(num_gpus=num_gpus, log_path=log_path)
 
 
 def _stop_ray_via_helper(started: bool, log_path: Path) -> None:
+    """Stop Ray via the ray_runtime helper if this runner started it.
+
+    Args:
+        started (bool): The return value from
+            :func:`_ensure_ray_via_helper`.
+        log_path (Path): File for Ray lifecycle output.
+    """
     sys.path.insert(0, str(ROOT / "tools" / "backends"))
     from ray_runtime import stop_ray_if_owned  # type: ignore
     stop_ray_if_owned(started, log_path=log_path)
@@ -161,6 +229,25 @@ def _stop_ray_via_helper(started: bool, log_path: Path) -> None:
 def choose_candidate(candidates: list[dict[str, Any]],
                      kernel_name: str = "",
                      kernel_id: str = "") -> dict[str, Any]:
+    """Select a hot-kernel candidate from the analyzed list.
+
+    Resolution order: by ``kernel_id`` if given, else by ``kernel_name``,
+    else the first candidate with an existing patchable ``source_file``,
+    else the first candidate overall.
+
+    Args:
+        candidates (list[dict[str, Any]]): Hot-kernel candidate dicts.
+        kernel_name (str): Optional exact kernel name to match.
+        kernel_id (str): Optional kernel id to match; takes precedence
+            over ``kernel_name``.
+
+    Returns:
+        dict[str, Any]: The selected candidate dict.
+
+    Raises:
+        RuntimeError: If a requested id/name is not found, or the
+            candidate list is empty.
+    """
     if kernel_id:
         for c in candidates:
             if c.get("kernel_id") == kernel_id:
@@ -192,6 +279,32 @@ def run_one_attempt(
     harness_path: str,
     num_gpus: int = 1,
 ) -> dict[str, Any]:
+    """Run a single backend optimization attempt via kernel_optimization.py.
+
+    Builds and runs the per-attempt ``kernel_optimization.py`` command
+    (with the resolved workspace, kernel, budgets, and GPU count) and
+    captures its result, never raising on subprocess failure.
+
+    Args:
+        backend (str): Backend name (e.g. ``geak`` / ``claude``).
+            Keyword-only.
+        replica (int): Replica index for this backend. Keyword-only.
+        gpu_id (int): GPU id label for reporting (Ray assigns real
+            devices). Keyword-only.
+        args (argparse.Namespace): Parsed runner args. Keyword-only.
+        run_dir (Path): Session run directory for logs. Keyword-only.
+        env (dict[str, str]): Base environment for the subprocess.
+            Keyword-only.
+        kernel_id (str): Kernel id to optimize. Keyword-only.
+        source_file (str): Optional source file path. Keyword-only.
+        harness_path (str): Optional test-harness path. Keyword-only.
+        num_gpus (int): GPUs to request for this attempt. Keyword-only.
+
+    Returns:
+        dict[str, Any]: An attempt record with ``backend``, ``replica``,
+            ``gpu_id``, ``num_gpus``, ``status``, ``elapsed_s``,
+            ``log_path``, and the nested ``result`` payload.
+    """
     # Do NOT set HIP/ROCR/CUDA_VISIBLE_DEVICES here. Ray assigns them inside
     # workers; forcing them on the driver clashes with set_visible_accelerator_ids.
     local_env = {
@@ -242,6 +355,15 @@ def run_one_attempt(
 
 
 def write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
+    """Write the run summary as both JSON and a Markdown report.
+
+    Args:
+        run_dir (Path): Directory to write ``parallel_e2e_summary.json``
+            and ``parallel_e2e_summary.md`` into.
+        summary (dict[str, Any]): The accumulated run summary, including
+            ``session_id``, ``model_path``, ``parallel_results``, and
+            ``patch_retest_status``.
+    """
     write_json(run_dir / "parallel_e2e_summary.json", summary)
     lines = [
         "# Kernel Agent Parallel E2E Summary",
@@ -274,6 +396,16 @@ def write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
 
 
 def main() -> int:
+    """CLI entry point: drive the full parallel end-to-end run.
+
+    Parses args, loads the env file, analyzes (or reuses) the trace,
+    selects a hot kernel, fans out backend attempts across Ray-managed
+    GPUs, writes the summary, and prints a final status JSON.
+
+    Returns:
+        int: 0 on success, 1 on any failure (the error is also recorded
+            in the summary and printed as JSON).
+    """
     parser = argparse.ArgumentParser(description="Run Kernel Agent real parallel E2E")
     parser.add_argument("--model-path", default="/wekafs/models/Qwen3-30B-A3B")
     parser.add_argument(

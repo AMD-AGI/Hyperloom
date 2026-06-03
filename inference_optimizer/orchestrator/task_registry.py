@@ -49,11 +49,34 @@ TERMINAL_STATES = frozenset({"succeeded", "cancelled", "needs_manual_review"})
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 @dataclass
 class Task:
+    """A delegated task row persisted in the ``tasks`` table.
+
+    Attributes:
+        task_id (str): Unique task identifier.
+        kind (str): The task kind/action name.
+        state (str): Current lifecycle state (one of :data:`TASK_STATES`).
+        params (dict): Action parameters.
+        idempotency_key (str): UNIQUE key used to de-duplicate re-creations.
+        requires_lanes (list[str]): Resource lanes the task needs.
+        allowed_tools (list[str]): Tool whitelist for the task.
+        side_effects (list[str]): Declared side effects.
+        lease_ttl_sec (int): Lease TTL in seconds.
+        attempts (int): Number of run attempts so far.
+        history (list[dict]): Recorded state-transition history.
+        created_at (str): ISO creation timestamp.
+        updated_at (str): ISO last-update timestamp.
+    """
+
     task_id: str
     kind: str
     state: str
@@ -70,6 +93,15 @@ class Task:
 
     @classmethod
     def from_row(cls, row) -> "Task":
+        """Build a :class:`Task` from a ``tasks`` table row.
+
+        Args:
+            row: A mapping-like DB row with the ``tasks`` columns; JSON columns
+                are decoded.
+
+        Returns:
+            Task: The reconstructed task instance.
+        """
         return cls(
             task_id=row["task_id"],
             kind=row["kind"],
@@ -88,16 +120,34 @@ class Task:
 
 
 class IllegalTransition(RuntimeError):
+    """Raised when a requested task state transition is not allowed."""
+
     pass
 
 
 class TaskNotFound(RuntimeError):
+    """Raised when a task lookup by ``task_id`` finds no row."""
+
     pass
 
 
 # ---------------------------------------------------------------------------
 class TaskRegistry:
+    """State machine + persistence layer for delegated tasks.
+
+    Wraps the ``tasks`` SQLite table and enforces the allowed lifecycle
+    transitions documented at module level.
+
+    Attributes:
+        db (SqliteConnection): The backing SQLite connection.
+    """
+
     def __init__(self, db: SqliteConnection):
+        """Initialise the registry.
+
+        Args:
+            db (SqliteConnection): The backing SQLite connection.
+        """
         self.db = db
 
     async def create_or_return_existing(
@@ -118,6 +168,20 @@ class TaskRegistry:
         was already in the DB (any state, including terminal); callers should
         treat this as a duplicate-emission signal instead of silently
         proceeding as if a fresh task was queued.
+
+        Args:
+            kind (str): The task kind/action name.
+            params (dict): Action parameters.
+            idempotency_key (str): UNIQUE de-duplication key.
+            requires_lanes (list[str] | None): Resource lanes needed.
+            allowed_tools (list[str] | None): Tool whitelist for the task.
+            side_effects (list[str] | None): Declared side effects.
+            lease_ttl_sec (int): Lease TTL in seconds. Defaults to ``0``.
+            task_id (str | None): Explicit id; a random hex id when ``None``.
+
+        Returns:
+            tuple[Task, bool]: ``(task, was_existing)`` where ``was_existing``
+                is ``True`` when an existing row was returned.
         """
         existing = await self.db.fetchone(
             "SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,)
@@ -182,6 +246,19 @@ class TaskRegistry:
     ) -> Task:
         """Thin wrapper around :meth:`create_or_return_existing` for callers
         that don't need the ``was_existing`` signal (most legacy callers).
+
+        Args:
+            kind (str): The task kind/action name.
+            params (dict): Action parameters.
+            idempotency_key (str): UNIQUE de-duplication key.
+            requires_lanes (list[str] | None): Resource lanes needed.
+            allowed_tools (list[str] | None): Tool whitelist for the task.
+            side_effects (list[str] | None): Declared side effects.
+            lease_ttl_sec (int): Lease TTL in seconds. Defaults to ``0``.
+            task_id (str | None): Explicit id; a random hex id when ``None``.
+
+        Returns:
+            Task: The created or pre-existing task.
         """
         task, _was_existing = await self.create_or_return_existing(
             kind=kind,
@@ -196,6 +273,17 @@ class TaskRegistry:
         return task
 
     async def get(self, task_id: str) -> Task:
+        """Fetch a single task by id.
+
+        Args:
+            task_id (str): The task identifier.
+
+        Returns:
+            Task: The matching task.
+
+        Raises:
+            TaskNotFound: If no row matches ``task_id``.
+        """
         row = await self.db.fetchone(
             "SELECT * FROM tasks WHERE task_id=?", (task_id,)
         )
@@ -209,6 +297,25 @@ class TaskRegistry:
         new_state: str,
         evidence: dict[str, Any] | None = None,
     ) -> Task:
+        """Transition a task to a new state, recording history.
+
+        Increments ``attempts`` when entering ``running`` from ``queued`` or
+        ``failed``.
+
+        Args:
+            task_id (str): The task identifier.
+            new_state (str): The target state (must be in :data:`TASK_STATES`).
+            evidence (dict[str, Any] | None): Optional evidence recorded in the
+                transition history entry.
+
+        Returns:
+            Task: The task after the transition.
+
+        Raises:
+            ValueError: If ``new_state`` is not a known state.
+            TaskNotFound: If no row matches ``task_id``.
+            IllegalTransition: If the transition is not permitted.
+        """
         if new_state not in TASK_STATES:
             raise ValueError(f"unknown state: {new_state!r}")
         async with self.db.transaction() as cur:
@@ -242,18 +349,40 @@ class TaskRegistry:
         return await self.get(task_id)
 
     async def queued(self) -> list[Task]:
+        """Return all queued tasks ordered oldest-first.
+
+        Returns:
+            list[Task]: Queued tasks sorted by creation time.
+        """
         rows = await self.db.fetchall(
             "SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC"
         )
         return [Task.from_row(r) for r in rows]
 
     async def running(self) -> list[Task]:
+        """Return all running tasks ordered least-recently-updated-first.
+
+        Returns:
+            list[Task]: Running tasks sorted by update time.
+        """
         rows = await self.db.fetchall(
             "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC"
         )
         return [Task.from_row(r) for r in rows]
 
     async def by_state(self, state: str) -> list[Task]:
+        """Return all tasks in the given state.
+
+        Args:
+            state (str): The state to filter on (must be in
+                :data:`TASK_STATES`).
+
+        Returns:
+            list[Task]: Matching tasks ordered by update time.
+
+        Raises:
+            ValueError: If ``state`` is not a known state.
+        """
         if state not in TASK_STATES:
             raise ValueError(f"unknown state: {state!r}")
         rows = await self.db.fetchall(
@@ -264,7 +393,11 @@ class TaskRegistry:
     async def cancel_family(self, family_kinds: list[str]) -> list[str]:
         """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch).
 
-        Returns the list of cancelled task_ids.
+        Args:
+            family_kinds (list[str]): Task kinds whose queued rows to cancel.
+
+        Returns:
+            list[str]: The cancelled task ids.
         """
         if not family_kinds:
             return []

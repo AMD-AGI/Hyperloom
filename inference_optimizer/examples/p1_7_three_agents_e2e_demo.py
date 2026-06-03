@@ -47,6 +47,14 @@ from ..paths import make_session_dir
 
 
 def _check_env() -> None:
+    """Verify an LLM API token is set and warn on a bad GPU env var.
+
+    Exits with status 2 when no recognized API token is configured, and warns
+    when ``HIP_VISIBLE_DEVICES`` is set.
+
+    Raises:
+        SystemExit: When no API token environment variable is configured.
+    """
     if not any(os.environ.get(n) for n in (
         "SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
     )):
@@ -123,6 +131,21 @@ _KERNEL_PROMPT = (
 
 
 async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
+    """Run the P1-7 three-real-agents end-to-end demo.
+
+    Seeds SharedState, wires real Claude orchestration/kernel and real Codex
+    critic backends (robustness stays mock), registers the baseline executor
+    and prep stubs, ticks the loop, and prints events, highlights, final state,
+    and per-backend call counts.
+
+    Args:
+        ticks (int): Number of coordinator ticks to run.
+        claude_model (str): Claude model name for orchestration and kernel.
+        codex_model (str): Codex model name for the critic.
+
+    Returns:
+        int: Process exit code (always ``0`` on completion).
+    """
     session_dir = make_session_dir()
     print(f"Session dir: {session_dir}")
 
@@ -149,6 +172,14 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
     # Stub prep executors — DESIGN §16 prereq actions; not exercised in
     # this smoke run because the orch prompt skips them.
     async def _noop_prep(ctx) -> dict:
+        """No-op prep executor stub used by the smoke demo.
+
+        Args:
+            ctx: Executor context supplying ``ctx.task.kind``.
+
+        Returns:
+            dict: A success result echoing the task kind.
+        """
         return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop"}
     for kind in ("target_analysis", "report"):
         coordinator.sub.register_executor(kind, _noop_prep)
@@ -213,6 +244,11 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
 
 
 def main() -> None:
+    """Check the environment then run the demo, exiting with its code.
+
+    Raises:
+        SystemExit: Carrying the exit code returned by :func:`_run`.
+    """
     _check_env()
     ticks = int(os.environ.get("COORDINATOR_TICKS", "4"))
     claude_model = os.environ.get("CLAUDE_MODEL", "claude-opus-4-7")

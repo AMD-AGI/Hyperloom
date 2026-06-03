@@ -39,6 +39,12 @@ class RobustnessAgent:
     """Main agent class — orchestrates monitors, checks, and RCA."""
 
     def __init__(self, config: Config):
+        """Initialise the legacy agent and its conductor handles.
+
+        Args:
+            config (Config): Resolved configuration providing the
+                conductor DB path and check thresholds.
+        """
         self.config = config
         self._provider: Any = None
         self._conductor_reader = ConductorReader(config.conductor_db_path)
@@ -205,7 +211,14 @@ class RobustnessAgent:
     # -- alert handling --
 
     def _handle_alerts(self, alerts: list[Alert]) -> None:
-        """Persist and forward alerts to Coordinator and RCA engine."""
+        """Persist and forward alerts to Coordinator and RCA engine.
+
+        Records each alert in the bounded history, emits it to the
+        Coordinator, and feeds it to the RCA engine.
+
+        Args:
+            alerts (list[Alert]): Alerts produced during a check cycle.
+        """
         for alert in alerts:
             self._alert_history.append(alert)
             log.warning("[%s] %s: %s", alert.severity.value, alert.check_name, alert.summary)
@@ -217,6 +230,12 @@ class RobustnessAgent:
             self._alert_history = self._alert_history[-500:]
 
     def _gather_rca_context(self) -> dict[str, Any]:
+        """Collect supplementary context for an RCA run.
+
+        Returns:
+            dict[str, Any]: Optional ``agent_last_activity`` ages and
+            ``active_leases`` pulled from the conductor reader.
+        """
         context: dict[str, Any] = {}
         activity = self._conductor_reader.get_agent_last_activity()
         if activity:
@@ -229,6 +248,15 @@ class RobustnessAgent:
         return context
 
     def _execute_rca_action(self, finding: Any) -> None:
+        """Emit the Coordinator intent recommended by an RCA finding.
+
+        Dispatches on ``finding.action_type`` to emit a kill-task,
+        prune-branch, escalate, or no-op intent.
+
+        Args:
+            finding (Any): The RCA finding carrying ``action_type``,
+                ``action_payload``, and ``root_cause``.
+        """
         if finding.action_type == "kill_task":
             task_id = finding.action_payload.get("task_id", "")
             if task_id:

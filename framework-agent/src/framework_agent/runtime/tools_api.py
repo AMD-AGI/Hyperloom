@@ -36,7 +36,16 @@ from ..sources.primus_cortex import (
 
 
 def _pr_to_candidate(pr: GitHubPr, repo_url: str, source: str) -> Candidate:
-    """Map a GitHubPr record into the shared Candidate shape."""
+    """Map a GitHubPr record into the shared Candidate shape.
+
+    Args:
+        pr (GitHubPr): Source PR record from a discovery backend.
+        repo_url (str): Repo URL to record on the candidate.
+        source (str): Origin tag (e.g. ``"primus_cortex"`` or ``"github"``).
+
+    Returns:
+        Candidate: A candidate carrying the PR ref, repo, title, and URL.
+    """
     return Candidate(
         ref=pr.ref,
         repo=repo_url,
@@ -70,8 +79,29 @@ def find_relevant_prs_smart(
     * Results are de-duped by ``(repo_url, ref)`` preserving the
       first occurrence so primus_cortex entries win ties.
 
-    Returns an empty list when ``repos`` is empty / None and no
-    primus_cortex_url is set (no work to do).
+    Args:
+        gap_description (str): Free-text gap used to drive GitHub keyword
+            search.
+        repos (list[str] | None): Repo URLs to query. Empty/None short-circuits
+            to ``[]``.
+        primus_cortex_url (str | None): Base URL of the primus_cortex service;
+            when set, each repo is queried there (hard-fail on transport error).
+        primus_timeout_sec (float): Per-request primus_cortex timeout. Defaults
+            to 10.0.
+        limit_per_repo (int): Max PRs to take per repo per source. Defaults to 5.
+        primus_state (str): PR state filter for primus_cortex. Defaults to
+            ``"open"``.
+        primus_label (str | None): Optional label filter for primus_cortex.
+        include_github (bool): Whether to also consult anonymous GitHub Search.
+            Defaults to True.
+
+    Returns:
+        list[Candidate]: De-duped candidates by ``(repo_url, ref)`` preserving
+            first occurrence (primus_cortex wins ties); empty when there is no
+            work to do.
+
+    Raises:
+        PrimusCortexError: Propagated when a primus_cortex query fails.
     """
     if not repos:
         return []
@@ -127,10 +157,23 @@ def fetch_pr_audit_material(
                             JSON patch array)
       pr_files.json       - {repo, number, files: [...]} payload
 
-    Returns the absolute paths in a dict suitable for downstream
-    logging / metadata. Hard-fails (raises ``PrimusCortexError``)
-    when primus_cortex transport / parse errors occur, mirroring the
-    explorer's stage-3 policy.
+    Hard-fails (raises ``PrimusCortexError``) when primus_cortex transport /
+    parse errors occur, mirroring the explorer's stage-3 policy.
+
+    Args:
+        repo_url (str): Git URL of the repo; parsed to an ``owner/name`` slug.
+        pr_number (int): PR number to fetch material for.
+        out_dir (Path | str): Directory to write ``pr.patches`` and
+            ``pr_files.json`` into (created if missing).
+        primus_cortex_url (str): Base URL of the primus_cortex service.
+        primus_timeout_sec (float): Per-request timeout. Defaults to 30.0.
+
+    Returns:
+        dict[str, str]: Absolute paths under keys ``patches_path`` and
+            ``files_json_path``, suitable for downstream logging / metadata.
+
+    Raises:
+        PrimusCortexError: On primus_cortex transport or parse errors.
     """
     out = Path(out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -163,7 +206,16 @@ def fetch_pr_audit_material(
 
 
 def _coerce_dict(value: dict | Path | str | None) -> dict:
-    """Accept a dict, a Path to a JSON file, or a str path; return dict."""
+    """Accept a dict, a Path to a JSON file, or a str path; return dict.
+
+    Args:
+        value (dict | Path | str | None): A dict (returned as-is), a path to a
+            JSON file, or ``None``.
+
+    Returns:
+        dict: The dict value, the parsed JSON object, or ``{}`` when the input
+            is missing, unreadable, or not a JSON object.
+    """
     if value is None:
         return {}
     if isinstance(value, dict):
@@ -179,7 +231,16 @@ def _coerce_dict(value: dict | Path | str | None) -> dict:
 
 
 def _metric_float(data: dict, keys: Iterable[str]) -> float | None:
-    """Return the first int/float among ``keys`` in ``data``."""
+    """Return the first int/float among ``keys`` in ``data``.
+
+    Args:
+        data (dict): Mapping to look up.
+        keys (Iterable[str]): Candidate keys checked in order.
+
+    Returns:
+        float | None: The first numeric value coerced to float, or ``None`` if
+            no key holds a numeric value.
+    """
     for k in keys:
         v = data.get(k)
         if isinstance(v, (int, float)):
@@ -204,9 +265,27 @@ def evaluate_candidate_outcome(
     invalid inputs trigger a ``False`` verdict with a reason rather
     than raising.
 
-    Returns a dict with keys ``winner`` (bool), ``reason`` (str),
-    ``throughput``, ``accuracy``, ``throughput_ratio`` so callers can
-    log + decide without re-parsing the same fields.
+    Args:
+        benchmark (dict | Path | str | None): Benchmark data or a path to its
+            JSON; missing/invalid yields a non-winner verdict.
+        accuracy (dict | Path | str | None): Accuracy data or a path to its
+            JSON. Defaults to None.
+        baseline_throughput (float): Positive baseline throughput for the ratio
+            gate.
+        baseline_accuracy (float | None): Baseline accuracy enabling the
+            accuracy-drop gate. Defaults to None.
+        min_throughput_ratio (float): Minimum candidate/baseline ratio to pass.
+            Defaults to 1.05.
+        max_accuracy_drop (float): Maximum tolerated accuracy drop. Defaults to
+            0.05.
+
+    Returns:
+        dict: Verdict with keys ``winner`` (bool), ``reason`` (str),
+            ``throughput``, ``accuracy``, ``throughput_ratio``, and
+            ``completed``.
+
+    Raises:
+        ValueError: If ``baseline_throughput`` is not a positive float.
     """
     if baseline_throughput is None or baseline_throughput <= 0:
         raise ValueError("baseline_throughput must be a positive float")

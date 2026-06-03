@@ -46,6 +46,36 @@ SESSION_DIR_CANDIDATES: list[Path] = [
 
 @dataclass
 class Config:
+    """Runtime configuration for the Robustness Agent.
+
+    Holds every tunable knob the agent uses: auto-detected service
+    endpoints, monitoring intervals, alert thresholds, LLM RCA settings,
+    and the many M1/M1.5 reactor signal parameters. Most fields have
+    sensible defaults; the discovered service URLs and LLM credentials
+    are populated by :meth:`discover`.
+
+    Attributes:
+        session_dir (Path): Directory containing the session's storage
+            (including ``conductor.db``).
+        robust_analyzer_url (str): Auto-detected robust-analyzer
+            endpoint; empty means local-only mode.
+        robustness_server_url (str): Primary M1 data source endpoint;
+            empty means skip the server and use only the local probe.
+        llm_model (str): Model name used for LLM-driven root-cause
+            analysis.
+        llm_base_url (str): LLM API base URL discovered from the sandbox.
+        llm_api_key (str): LLM API key discovered from the sandbox.
+        llm_rca_enabled (Optional[bool]): Tri-state RCA activation flag;
+            ``None`` auto-enables when credentials are present.
+        metrics_window_s (int): Rolling window, in seconds, over which
+            metrics-based signals are evaluated.
+
+    Note:
+        Many additional threshold, interval, and per-signal fields exist
+        on this dataclass; see the inline comments grouped by signal
+        family (A–L) for their meaning.
+    """
+
     session_dir: Path = field(default_factory=lambda: Path("/tmp/robustness-session"))
 
     # Filled by auto-detection; empty means local-only mode.
@@ -56,6 +86,11 @@ class Config:
 
     @property
     def conductor_db_path(self) -> Path:
+        """Filesystem path to the session's conductor SQLite database.
+
+        Returns:
+            Path: ``session_dir/storage/conductor.db``.
+        """
         return self.session_dir / "storage" / "conductor.db"
 
     # -- monitoring intervals (seconds) --
@@ -320,7 +355,15 @@ class Config:
 
     @classmethod
     async def discover(cls) -> "Config":
-        """Auto-detect all configuration from the runtime environment."""
+        """Auto-detect all configuration from the runtime environment.
+
+        Discovers the session directory, probes the robust-analyzer and
+        robustness-server endpoints, and reads LLM credentials from the
+        sandbox environment.
+
+        Returns:
+            Config: A new instance populated with the discovered values.
+        """
         session_dir = _discover_session_dir()
         analyzer_url = await _probe_robust_analyzer()
         server_url = await _probe_robustness_server()
@@ -345,7 +388,16 @@ class Config:
 
 
 def _discover_session_dir() -> Path:
-    """Find session directory by scanning well-known paths."""
+    """Find session directory by scanning well-known paths.
+
+    Checks the ``SESSION_DIR`` environment variable, then the known
+    candidate paths and the current working directory for a
+    ``storage/conductor.db`` marker.
+
+    Returns:
+        Path: The discovered session directory, or the last candidate
+        as a fallback when none is found.
+    """
     if "SESSION_DIR" in os.environ:
         p = Path(os.environ["SESSION_DIR"])
         if p.exists():
@@ -370,7 +422,12 @@ def _discover_session_dir() -> Path:
 
 
 async def _probe_robust_analyzer() -> str:
-    """Try known robust-analyzer endpoints, return first reachable one."""
+    """Try known robust-analyzer endpoints, return first reachable one.
+
+    Returns:
+        str: The first candidate URL whose ``/health`` endpoint returns
+        200, or an empty string if none are reachable.
+    """
     for url in ROBUST_ANALYZER_CANDIDATES:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
@@ -386,7 +443,12 @@ async def _probe_robust_analyzer() -> str:
 
 
 async def _probe_robustness_server() -> str:
-    """Probe known robustness-server endpoints + ROBUSTNESS_SERVER_URL env."""
+    """Probe known robustness-server endpoints + ROBUSTNESS_SERVER_URL env.
+
+    Returns:
+        str: The first candidate URL whose ``/healthz`` endpoint returns
+        200, or an empty string if none are reachable.
+    """
     candidates: list[str] = []
     env_url = os.environ.get("ROBUSTNESS_SERVER_URL", "").strip()
     if env_url:
@@ -408,7 +470,13 @@ async def _probe_robustness_server() -> str:
 
 
 def _discover_llm_credentials() -> tuple[str, str]:
-    """Pick up LLM credentials already in the Claw sandbox environment."""
+    """Pick up LLM credentials already in the Claw sandbox environment.
+
+    Returns:
+        tuple[str, str]: A ``(base_url, api_key)`` pair read from the
+        sandbox environment variables; either element may be empty if
+        unset.
+    """
     base_url = os.environ.get("OPENAI_BASE_URL", "")
     api_key = (
         os.environ.get("SAFE_API_KEY", "")

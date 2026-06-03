@@ -272,6 +272,14 @@ def _slug(value: str, default: str) -> str:
     3. Versions like ``0.4.5+abcdef0`` — common for editable installs
        — keep their ``+``/digits but lose dots-as-path-separators on
        Windows-ish filesystems.
+
+    Args:
+        value (str): Raw identity component to normalize.
+        default (str): Fallback slug returned when ``value`` is empty.
+
+    Returns:
+        str: Lowercased, basename-reduced slug with whitespace/slashes mapped
+        to underscores, or ``default`` when the input is empty.
     """
     raw = (value or "").strip()
     if not raw:
@@ -326,6 +334,18 @@ def recipe_canonical_id(
     well-formed (5 colons, 6 segments). Callers are encouraged to
     use :func:`detect_framework_version` to fill ``framework_version``
     when the operator did not pass ``--framework-version`` explicitly.
+
+    Args:
+        model (str): Model identifier (path or name).
+        hardware (str): Hardware/GPU identifier.
+        framework (str): Inference framework slug (e.g. ``sglang``).
+        framework_version (str): Framework version string.
+        precision (str): Precision identifier (e.g. ``fp8``).
+
+    Returns:
+        str: Canonical id of the form
+        ``inference:{model}:{hardware}:{framework}:{framework_version}:{precision}``
+        with empty components replaced by their ``DEFAULT_*_SLUG``.
     """
     return (
         f"inference:"
@@ -353,6 +373,17 @@ def canonical_labels(
     canonical_id string. Slug values match the ones used in
     :func:`recipe_canonical_id` so a search round-trip never disagrees
     with the id derivation.
+
+    Args:
+        model (str): Model identifier (path or name).
+        hardware (str): Hardware/GPU identifier.
+        framework (str): Inference framework slug.
+        framework_version (str): Framework version string.
+        precision (str): Precision identifier.
+
+    Returns:
+        dict[str, str]: Mapping of the five label keys to their slugged values,
+        matching the components of the canonical id.
     """
     return {
         F_LABEL_MODEL:             _slug(model,             DEFAULT_MODEL_SLUG),
@@ -390,6 +421,14 @@ def detect_framework_version(framework: str) -> str:
     a dry-run on a CI box without GPU stacks). Callers should treat
     a result equal to the default slug as "operator should pass
     ``--framework-version`` explicitly to scope the recipe row".
+
+    Args:
+        framework (str): Framework slug whose package version is detected.
+
+    Returns:
+        str: Slugged installed version, or
+        :data:`DEFAULT_FRAMEWORK_VERSION_SLUG` when the framework is unknown
+        or its package cannot be imported.
     """
     fw_slug = _slug(framework, "")
     if not fw_slug:
@@ -427,6 +466,14 @@ def format_recipe_path(template: str, canonical_id: str) -> str:
     server accepts those raw too, so this helper does a flat
     substitution and trusts the caller to have already chosen a
     canonical_id from ``recipe_canonical_id``.
+
+    Args:
+        template (str): Path template containing the ``{canonical_id}``
+            placeholder.
+        canonical_id (str): Canonical id substituted verbatim (slashes kept).
+
+    Returns:
+        str: ``template`` with ``{canonical_id}`` replaced by ``canonical_id``.
     """
     return template.replace("{canonical_id}", canonical_id)
 

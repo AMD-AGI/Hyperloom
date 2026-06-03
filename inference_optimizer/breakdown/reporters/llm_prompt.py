@@ -80,6 +80,16 @@ You MUST:
 
 
 def _section_input(rendered: RenderedSection) -> dict[str, Any]:
+    """Project a rendered section into the JSON shape the LLM receives.
+
+    Args:
+        rendered (RenderedSection): The section to project.
+
+    Returns:
+        dict[str, Any]: A JSON-friendly dict with the section id, title,
+            skipped flag, key facts, decisions and warnings (the markdown
+            block is deliberately excluded so the LLM cannot rewrite it).
+    """
     return {
         "section_id":  rendered.section_id,
         "title":       rendered.title,
@@ -107,6 +117,15 @@ def build_user_prompt(
     Returns a JSON string (not a dict) because the LLM's chat input is
     a string and we want the exact bytes the model receives to be
     inspectable in logs.
+
+    Args:
+        rendered (list[RenderedSection]): All rendered sections; skipped
+            sections are excluded from the prompt.
+        global_facts (GlobalFacts): The deterministic cross-section fact pack.
+
+    Returns:
+        str: A pretty-printed, sorted JSON string containing ``global_facts``
+            and the non-skipped ``sections``.
     """
     payload = {
         "global_facts": global_facts.as_prompt_dict(),
@@ -126,6 +145,14 @@ def parse_llm_response(raw: str) -> dict[str, Any]:
     prompt forbidding them. On any failure returns
     ``{"executive_summary": "", "section_narratives": {}}`` so the
     deterministic-only output path is still usable.
+
+    Args:
+        raw (str): The raw text returned by the LLM.
+
+    Returns:
+        dict[str, Any]: A dict with keys ``"executive_summary"`` (str) and
+            ``"section_narratives"`` (dict of section id to paragraph), with
+            empty defaults on any parse failure.
     """
     text = (raw or "").strip()
     if text.startswith("```"):

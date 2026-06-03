@@ -78,11 +78,28 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO string.
+
+    Returns:
+        str: ``datetime.now(UTC)`` formatted with microsecond resolution.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _expand_lanes(lanes: list[str]) -> list[str]:
-    """Expand requested lanes by transitive conflicts; sort deterministically."""
+    """Expand requested lanes by transitive conflicts; sort deterministically.
+
+    Args:
+        lanes (list[str]): Requested lane names; each must be in
+            :data:`KNOWN_LANES`.
+
+    Returns:
+        list[str]: The requested lanes plus their :data:`LANE_CONFLICTS`,
+            de-duplicated and sorted for deterministic acquire ordering.
+
+    Raises:
+        ValueError: If any requested lane is not a known lane.
+    """
     out: set[str] = set()
     for lane in lanes:
         if lane not in KNOWN_LANES:
@@ -117,6 +134,12 @@ class LaneBusy(RuntimeError):
     """
 
     def __init__(self, busy_lanes: list[str]):
+        """Initialise with the lanes that triggered the cross-lane conflict.
+
+        Args:
+            busy_lanes (list[str]): Lanes whose cross-lane mutex blocked
+                the acquire; stored on ``self.busy_lanes``.
+        """
         super().__init__(f"lanes busy: {busy_lanes!r}")
         self.busy_lanes = busy_lanes
 
@@ -132,6 +155,12 @@ class LaneFull(RuntimeError):
     """
 
     def __init__(self, full_lanes: list[str]):
+        """Initialise with the lanes that were at capacity.
+
+        Args:
+            full_lanes (list[str]): Lanes at their per-lane capacity cap;
+                stored on ``self.full_lanes``.
+        """
         super().__init__(f"lanes full: {full_lanes!r}")
         self.full_lanes = full_lanes
 
@@ -149,6 +178,12 @@ class SqliteLeaseBackend:
     """
 
     def __init__(self, db: SqliteConnection):
+        """Bind the backend to a SQLite connection.
+
+        Args:
+            db (SqliteConnection): The unified WAL DB connection used for
+                all lease reads / writes.
+        """
         self.db = db
 
     async def acquire_many(
@@ -178,6 +213,23 @@ class SqliteLeaseBackend:
         Inv-7.1 is enforced via ``DEFAULT_LANE_CAPACITIES``: serving
         lanes default to capacity 1, so any second holder still raises
         LaneFull immediately.
+
+        Args:
+            lanes (list[str]): Requested lanes (expanded by transitive
+                conflicts before acquire).
+            holder_id (str): Unique holder id; a retry from the same holder
+                is idempotent (acts as a TTL refresh).
+            task_id (str): Task that owns the lease.
+            action (str): Action name recorded on the lease.
+            ttl_sec (int): Lease lifetime in seconds.
+
+        Returns:
+            Lease: The acquired lease covering all expanded lanes.
+
+        Raises:
+            ValueError: If ``lanes`` is empty.
+            LaneFull: If a multi-holder lane is at capacity (or disabled).
+            LaneBusy: If a single-holder lane has a different live holder.
         """
         if not lanes:
             raise ValueError("acquire_many called with no lanes")
@@ -323,6 +375,14 @@ class SqliteLeaseBackend:
         keys on the composite ``(lane, holder_id)`` PK so a
         multi-holder lane (research_lane with capacity > 1) only
         bumps this holder's row, not the others.
+
+        Args:
+            lease (Lease): The lease whose lanes should be refreshed.
+            ttl_sec (int): New lifetime in seconds from now.
+
+        Raises:
+            StaleLeaseError: If the number of updated rows does not match
+                the lease's lane count (lease no longer ours).
         """
         new_expires_iso = datetime.fromtimestamp(
             time.time() + ttl_sec, tz=timezone.utc
@@ -342,9 +402,17 @@ class SqliteLeaseBackend:
                 )
 
     async def release(self, lease: Lease) -> int:
-        """Drop every (lane, holder_id) row this lease owns. Other
-        holders on the same lane are untouched (Inv-7.3 atomic
-        release for one holder)."""
+        """Drop every (lane, holder_id) row this lease owns.
+
+        Other holders on the same lane are untouched (Inv-7.3 atomic
+        release for one holder).
+
+        Args:
+            lease (Lease): The lease to release.
+
+        Returns:
+            int: Number of lease rows deleted.
+        """
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
             cur.execute(
@@ -355,10 +423,15 @@ class SqliteLeaseBackend:
             return cur.rowcount
 
     async def reap_expired(self) -> list[dict]:
-        """Sweep expired rows; emits one ``lease_expired`` event per stale
-        (lane, holder_id) row. v0.8 M6 keys deletion on both columns so
-        a multi-holder lane reaps only the holders whose TTL fired —
-        live holders on the same lane keep their leases."""
+        """Sweep expired rows; emit one ``lease_expired`` event per stale row.
+
+        v0.8 M6 keys deletion on both ``(lane, holder_id)`` columns so a
+        multi-holder lane reaps only the holders whose TTL fired — live
+        holders on the same lane keep their leases.
+
+        Returns:
+            list[dict]: The reaped lease rows (as dicts) that were deleted.
+        """
         now_iso_str = _now_iso()
         reaped: list[dict] = []
         async with self.db.transaction() as cur:
@@ -395,9 +468,14 @@ class SqliteLeaseBackend:
         return reaped
 
     async def active_lanes(self) -> list[str]:
-        """Return the **distinct** lane names with at least one live
-        holder. Callers use this for capacity / breakdown observation;
-        ``lane_holders`` returns the multi-holder shape."""
+        """Return the distinct lane names with at least one live holder.
+
+        Callers use this for capacity / breakdown observation;
+        :meth:`lane_holders` returns the multi-holder count shape.
+
+        Returns:
+            list[str]: Distinct lane names that currently have a live row.
+        """
         rows = await self.db.fetchall(
             "SELECT DISTINCT lane FROM leases WHERE expires_at > ?",
             (_now_iso(),),
@@ -405,9 +483,13 @@ class SqliteLeaseBackend:
         return [r["lane"] for r in rows]
 
     async def lane_holders(self) -> dict[str, int]:
-        """Return ``{lane: live_holder_count}`` for every lane with at
-        least one live row. Used by the breakdown ``lane_timeline``
-        collector + by dispatchers to gauge research_lane occupancy.
+        """Return ``{lane: live_holder_count}`` for lanes with live rows.
+
+        Used by the breakdown ``lane_timeline`` collector + by dispatchers
+        to gauge research_lane occupancy.
+
+        Returns:
+            dict[str, int]: Map of lane name to its live holder count.
         """
         rows = await self.db.fetchall(
             "SELECT lane, COUNT(*) AS n FROM leases "
@@ -418,8 +500,14 @@ class SqliteLeaseBackend:
 
     async def lane_capacities(self) -> dict[str, int]:
         """Return ``{lane: capacity}`` for every row in ``lane_capacity``.
+
         Falls back to :data:`storage.schema.DEFAULT_LANE_CAPACITIES`
-        when the table is missing (legacy DB never opened with v0.8)."""
+        when the table is missing (legacy DB never opened with v0.8).
+
+        Returns:
+            dict[str, int]: Map of lane name to capacity, defaults merged
+                with any rows present in the ``lane_capacity`` table.
+        """
         try:
             rows = await self.db.fetchall(
                 "SELECT lane, capacity FROM lane_capacity"
@@ -442,6 +530,12 @@ class ResourceLockManager:
     """
 
     def __init__(self, backend: SqliteLeaseBackend):
+        """Wrap a lease backend and initialise the per-process counters.
+
+        Args:
+            backend (SqliteLeaseBackend): The backend doing the actual
+                lease reads / writes.
+        """
         self.backend = backend
         # Per-process counters. The
         # leases DB is the authoritative source for current state;
@@ -452,6 +546,20 @@ class ResourceLockManager:
         self._counters: dict[str, dict[str, int]] = {}
 
     async def acquire_many(self, lanes: list[str], **kwargs) -> Lease:
+        """Acquire lanes via the backend, updating lifetime counters.
+
+        Args:
+            lanes (list[str]): Lanes to acquire.
+            **kwargs: Forwarded to :meth:`SqliteLeaseBackend.acquire_many`
+                (``holder_id`` / ``task_id`` / ``action`` / ``ttl_sec``).
+
+        Returns:
+            Lease: The acquired lease.
+
+        Raises:
+            LaneFull: Re-raised after bumping the lane's full counter.
+            LaneBusy: Re-raised after bumping the lane's busy counter.
+        """
         try:
             lease = await self.backend.acquire_many(lanes, **kwargs)
         except LaneFull as exc:
@@ -479,6 +587,14 @@ class ResourceLockManager:
         both map to ``None``. Distinguishing the two is the caller's
         job via :meth:`acquire_many` when needed; the concurrent
         dispatch path treats them identically (retry next tick).
+
+        Args:
+            lanes (list[str]): Lanes to acquire.
+            **kwargs: Forwarded to :meth:`acquire_many`.
+
+        Returns:
+            Lease | None: The acquired lease, or None when any requested
+                lane is busy or full.
         """
         try:
             return await self.acquire_many(lanes, **kwargs)
@@ -486,34 +602,83 @@ class ResourceLockManager:
             return None
 
     async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
+        """Refresh a lease's TTL via the backend.
+
+        Args:
+            lease (Lease): The lease to refresh.
+            ttl_sec (int): New lifetime in seconds.
+
+        Returns:
+            None: Delegates to :meth:`SqliteLeaseBackend.heartbeat`.
+        """
         return await self.backend.heartbeat(lease, ttl_sec=ttl_sec)
 
     async def release(self, lease: Lease) -> int:
+        """Release a lease and bump each lane's release counter.
+
+        Args:
+            lease (Lease): The lease to release.
+
+        Returns:
+            int: Number of lease rows deleted by the backend.
+        """
         n = await self.backend.release(lease)
         for lane in lease.lanes:
             self._bump_counter(lane, "release_count")
         return n
 
     async def reap_expired(self) -> list[dict]:
+        """Sweep expired leases via the backend.
+
+        Returns:
+            list[dict]: The reaped lease rows.
+        """
         return await self.backend.reap_expired()
 
     async def active_lanes(self) -> list[str]:
+        """Return the distinct lanes with at least one live holder.
+
+        Returns:
+            list[str]: Distinct active lane names.
+        """
         return await self.backend.active_lanes()
 
     async def lane_holders(self) -> dict[str, int]:
+        """Return ``{lane: live_holder_count}`` via the backend.
+
+        Returns:
+            dict[str, int]: Live holder count per lane.
+        """
         return await self.backend.lane_holders()
 
     async def lane_capacities(self) -> dict[str, int]:
+        """Return ``{lane: capacity}`` via the backend.
+
+        Returns:
+            dict[str, int]: Capacity per lane.
+        """
         return await self.backend.lane_capacities()
 
     def counters_snapshot(self) -> dict[str, dict[str, int]]:
-        """Return per-lane lifetime counters (acquire / release / busy /
-        full counts). Cheap; in-memory copy."""
+        """Return per-lane lifetime counters (acquire / release / busy / full).
+
+        Cheap; returns an in-memory deep-ish copy so callers can't mutate
+        the live counters.
+
+        Returns:
+            dict[str, dict[str, int]]: Map of lane name to its counter dict.
+        """
         return {
             lane: dict(d) for lane, d in self._counters.items()
         }
 
     def _bump_counter(self, lane: str, field: str) -> None:
+        """Increment one per-lane lifetime counter by 1.
+
+        Args:
+            lane (str): Lane whose counter dict is updated.
+            field (str): Counter key to increment (e.g. ``"acquire_count"``).
+        """
         d = self._counters.setdefault(lane, {})
         d[field] = int(d.get(field, 0)) + 1
 

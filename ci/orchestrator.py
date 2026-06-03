@@ -76,6 +76,15 @@ PROMPT_TEMPLATE_PR = (CI_DIR / "prompt_template_pr.md").read_text()
 
 
 def load_config(config_path: str | None = None) -> dict:
+    """Load the CI configuration YAML.
+
+    Args:
+        config_path (str | None): Path to the config file; defaults to
+            ``ci/ci-config.yaml`` when None.
+
+    Returns:
+        dict: The parsed configuration.
+    """
     path = Path(config_path) if config_path else CI_DIR / "ci-config.yaml"
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -97,6 +106,22 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         wekafs-deployed snapshot. Requires both git_ref (PR head sha)
         and gh_token (any GitHub token that can clone AMD-AGI/Hyperloom;
         the workflow passes the per-run GITHUB_TOKEN).
+
+    Args:
+        merged (dict): The merged per-model config (model, framework,
+            precision, ISL/OSL configs, GPU/topology knobs, etc.).
+        pr_mode (bool): When True, use the PR template that git-clones the PR
+            head commit inside the sandbox.
+        git_ref (str | None): PR head SHA; required when ``pr_mode`` is True.
+        gh_token (str | None): GitHub token able to clone the repo; required
+            when ``pr_mode`` is True.
+
+    Returns:
+        str: The rendered agent prompt.
+
+    Raises:
+        ValueError: If ``pr_mode`` is True but ``git_ref`` or ``gh_token`` is
+            missing.
     """
     isl, osl = merged["isl_osl_configs"][0]
     ifx_text = format_benchmark_for_prompt(
@@ -189,7 +214,19 @@ _TRUNCATION_BACKOFF_S = 60                # 1min — fast retry, truncations are
 
 
 def _is_stream_truncated(status: str, sse_events: list[dict], elapsed_s: float) -> bool:
-    """Detect Vertex AI stream truncation: session 'completed' suspiciously fast with no work."""
+    """Detect Vertex AI stream truncation.
+
+    A session is suspected truncated when it reports ``completed`` suspiciously
+    fast while performing very few tool calls.
+
+    Args:
+        status (str): The session's final status string.
+        sse_events (list[dict]): The collected SSE events.
+        elapsed_s (float): Wall-clock duration of the session in seconds.
+
+    Returns:
+        bool: True if the stream looks truncated.
+    """
     if status != "completed":
         return False
     if elapsed_s > _STREAM_TRUNCATION_MAX_ELAPSED_S:
@@ -208,6 +245,12 @@ def _detect_vertex_overloaded(sse_events: list[dict]) -> bool:
     The error is usually emitted within the last few events before the session
     terminates. Scan a window large enough to catch it but small enough to
     avoid false positives from `overloaded` appearing in user content.
+
+    Args:
+        sse_events (list[dict]): The collected SSE events.
+
+    Returns:
+        bool: True if an ``overloaded_error`` is detected in the event tail.
     """
     # Inspect tail of the stream — last 50 events is enough for any real session.
     for evt in sse_events[-50:]:
@@ -246,6 +289,19 @@ def run_model(
     pr_mode + git_ref + gh_token are forwarded to render_prompt to switch
     between schedule path (/wekafs/HyperloomV2) and PR-approve path
     (sandbox-internal git clone of PR head). See render_prompt() docstring.
+
+    Args:
+        claw (ClawClient): Client used to create/drive the agent session.
+        merged (dict): The merged per-model config.
+        nfs_base (str): Base NFS path where results are collected.
+        sandbox_timeout (int): Maximum sandbox runtime in seconds.
+        pr_mode (bool): Forwarded to :func:`render_prompt`.
+        git_ref (str | None): PR head SHA, forwarded to :func:`render_prompt`.
+        gh_token (str | None): GitHub token, forwarded to :func:`render_prompt`.
+
+    Returns:
+        dict: A result record describing the run (status, session id, metrics,
+        and result directory).
     """
     model_name = merged["model_hf"].split("/")[-1]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
@@ -306,7 +362,17 @@ def run_model(
         attempt_start = time.time()
 
         def _monitor():
+            """Subscribe to the session SSE stream and record events.
+
+            Runs in a background thread, appending each event to ``sse_events``
+            and logging assistant/tool activity as it arrives.
+            """
             def _on_event(evt):
+                """Handle a single SSE event: record it and log notable activity.
+
+                Args:
+                    evt (dict): The SSE event payload.
+                """
                 sse_events.append(evt)
                 evt_type = evt.get("type", "")
                 if evt_type == "chatDelta" and evt.get("sender") == "assistant":
@@ -481,6 +547,16 @@ def run_model(
 
 
 def main():
+    """Parse CLI arguments and run the CI orchestration flow.
+
+    Loads the config, resolves the model subset, runs each model (or prints
+    prompts in ``--dry-run``), and writes the markdown/JSON/GitHub summary
+    reports and optional webhook notification.
+
+    Returns:
+        None: Nothing is returned; the process exits non-zero (via
+            ``sys.exit``) only when every model failed.
+    """
     parser = argparse.ArgumentParser(description="Hyperloom CI/CD Orchestrator")
     parser.add_argument("--config", default=None, help="Path to ci-config.yaml")
     parser.add_argument("--models", default=None,
@@ -545,6 +621,14 @@ def main():
     # DSR1 both look up `dsr1-fp8-mi300x-sglang` in amd-master.yaml but expose
     # distinct keys to the matrix).
     def _entry_key(m: dict) -> str:
+        """Return a model entry's effective matrix key.
+
+        Args:
+            m (dict): A ci-config model entry.
+
+        Returns:
+            str: The explicit ``key`` if present, else ``inferenceX_key``.
+        """
         return m.get("key") or m["inferenceX_key"]
 
     model_list = config.get("models", [])
@@ -799,7 +883,18 @@ def main():
 
 
 def _send_webhook(webhook: str, summary: dict):
-    """Send notification via webhook. Uses Adaptive Card for Teams, plain text fallback."""
+    """Send a run notification via webhook.
+
+    Builds an Adaptive Card (Teams) for the first model in the summary, with a
+    plain-text fallback.
+
+    Args:
+        webhook (str): The destination webhook URL.
+        summary (dict): The JSON summary produced by :func:`generate_json_summary`.
+
+    Returns:
+        None: Nothing is returned; the card is POSTed as a side effect.
+    """
     import requests as req
     r = summary["models"][0] if summary["models"] else {}
     model = r.get("model", "unknown")
@@ -808,10 +903,29 @@ def _send_webhook(webhook: str, summary: dict):
     trigger = summary.get("trigger", "manual")
 
     def _val(key, fmt=".2f"):
+        """Format a metric value from the first model row.
+
+        Args:
+            key (str): The metric key to look up.
+            fmt (str): Format spec applied when the value is present.
+
+        Returns:
+            str: The formatted value, or ``"N/A"`` when missing.
+        """
         v = r.get(key)
         return f"{v:{fmt}}" if v is not None else "N/A"
 
     def _row(label, value, color=None):
+        """Build an Adaptive Card table row with a label and value cell.
+
+        Args:
+            label (str): The left-hand label text.
+            value: The right-hand value (coerced to ``str``).
+            color: Optional text color for the value cell.
+
+        Returns:
+            dict: The TableRow element dict.
+        """
         items = [{"type": "TextBlock", "text": str(value)}]
         if color:
             items[0]["color"] = color

@@ -34,6 +34,15 @@ _DEPRECATION_MESSAGE: str = (
 
 
 def _coerce_str(value: Any) -> str:
+    """Coerce an arbitrary payload value to a string.
+
+    Args:
+        value (Any): The value pulled from the payload dict.
+
+    Returns:
+        str: ``value`` unchanged when it is already a string, an empty
+            string when it is None, otherwise ``str(value)``.
+    """
     if value is None:
         return ""
     if isinstance(value, str):
@@ -51,6 +60,15 @@ def read_extra_server_args(payload: dict, *, default: str = "") -> str:
     2. Legacy key present (canonical absent) -> emit one
        ``DeprecationWarning`` and return the coerced legacy value.
     3. Neither key present -> return ``default``.
+
+    Args:
+        payload (dict): The decoded JSON envelope passed to the runtime.
+        default (str): Value returned when neither key is present.
+            Keyword-only. Defaults to an empty string.
+
+    Returns:
+        str: The coerced value of the canonical key, the legacy key, or
+            ``default``, per the resolution order above.
     """
     if CANONICAL_KEY in payload:
         return _coerce_str(payload[CANONICAL_KEY])
