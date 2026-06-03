@@ -1198,8 +1198,17 @@ async def run_optimization_handler(
     candidates = _batch_kernel_candidates(payload, session_dir=session_dir)
     if len(candidates) <= 1:
         single_payload = dict(payload)
-        if candidates and not single_payload.get("kernel_id"):
-            single_payload["kernel_id"] = candidates[0].get("kernel_id")
+        if candidates:
+            # Reconcile the LLM-supplied kernel_id against the real
+            # TraceLens candidate. The Orchestration LLM frequently echoes an
+            # operator name or a hallucinated id (e.g. ``aiter.silu_and_mul``,
+            # ``kn001``) that does not match the candidate's ``k00x`` id;
+            # forwarding it verbatim made the kernel-agent CLI crash with a
+            # KeyError. Fall back to the real candidate id when the supplied
+            # id is missing or unknown so the kernel actually gets optimized.
+            single_payload["kernel_id"] = _reconcile_kernel_id(
+                single_payload.get("kernel_id"), candidates,
+            )
         single_payload["_single_kernel"] = True
         return await _run_optimization_single(single_payload, session_dir=session_dir)
     return await _run_optimization_batch(
@@ -1294,6 +1303,48 @@ def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
         if kid:
             in_flight.add(kid)
     return in_flight
+
+
+def _normalize_kernel_id(value: str) -> str:
+    """Fold hallucinated ``kn``/``rn`` prefixes onto the real ``k`` numbering.
+
+    Mirrors ``kernel_optimization._normalize_kernel_id`` at the orchestrator
+    boundary so the reconciliation here and the kernel-agent CLI agree.
+    """
+    s = str(value or "").strip().lower()
+    for prefix in ("kn", "rn"):
+        if s.startswith(prefix) and s[len(prefix):].isdigit():
+            return "k" + s[len(prefix):]
+    return s
+
+
+def _reconcile_kernel_id(
+    requested: Any, candidates: list[dict[str, Any]],
+) -> str:
+    """Resolve the LLM-supplied kernel_id to a real candidate id.
+
+    Resolution order: exact ``kernel_id``/``name`` match, then normalized
+    ``kernel_id`` match, otherwise fall back to the first candidate. The
+    fallback is safe here because this path only runs when there is a single
+    eligible candidate, so "the kernel the LLM meant" is unambiguous.
+    """
+    req = str(requested or "")
+    if req:
+        for cand in candidates:
+            if str(cand.get("kernel_id") or "") == req or str(cand.get("name") or "") == req:
+                return req
+        target = _normalize_kernel_id(req)
+        for cand in candidates:
+            cid = str(cand.get("kernel_id") or "")
+            if _normalize_kernel_id(cid) == target:
+                return cid
+    fallback = str(candidates[0].get("kernel_id") or "")
+    if req and req != fallback:
+        log.warning(
+            "kernel_id %r did not match any candidate %s; falling back to %r",
+            req, [str(c.get("kernel_id") or "") for c in candidates], fallback,
+        )
+    return fallback
 
 
 def _batch_kernel_candidates(
