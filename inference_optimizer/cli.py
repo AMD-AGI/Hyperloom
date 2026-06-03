@@ -3340,17 +3340,36 @@ def _build_recipe_kb_dispatcher(
         gbrain_remote = build_gbrain_remote_from_env()
         if gbrain_remote is not None and gbrain_remote.enabled:
             kb = RecipeKB(local=local_store, remote=gbrain_remote)
-            # Close the loop: mirror local recipe writes into gbrain (the
-            # read cache) so a future session's remote read returns the
-            # champion config, not a bare anchor. Local write stays
-            # authoritative; the mirror is best-effort. Falls back to the
-            # bare dispatcher if the write-side MCP can't be built.
-            from .recipe_kb.gbrain_ingest import (
-                GbrainMirroringRecipeKB,
-                build_mirror_mcp_from_env,
+            # Mirror policy (``RECIPE_KB_MIRROR_MODE``, default ``external``):
+            #   * ``external`` (default) — the optimizer does NOT mirror; an
+            #     out-of-band service (hyperloom-recipe-mirror CronJob) ingests
+            #     the local store into gbrain, keeping gbrain off the write
+            #     path. REQUIRES that CronJob to be deployed: until it runs,
+            #     new champions persist locally only (durable iff
+            #     USER_DATA_PATH is the injected persistent path) and won't
+            #     appear in gbrain.
+            #   * ``inline`` — close the loop in-process: each local recipe
+            #     write is best-effort mirrored into gbrain (the read cache)
+            #     so a future session's remote read returns the champion
+            #     config. Local write stays authoritative.
+            mirror_mode = (
+                os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
             )
-            mirror_mcp = build_mirror_mcp_from_env()
-            return GbrainMirroringRecipeKB(kb, mirror_mcp) if mirror_mcp is not None else kb
+            if mirror_mode == "inline":
+                # Opt-in best-effort in-process mirror. Falls back to the bare
+                # dispatcher if the write-side MCP can't be built.
+                from .recipe_kb.gbrain_ingest import (
+                    GbrainMirroringRecipeKB,
+                    build_mirror_mcp_from_env,
+                )
+                mirror_mcp = build_mirror_mcp_from_env()
+                return (
+                    GbrainMirroringRecipeKB(kb, mirror_mcp)
+                    if mirror_mcp is not None
+                    else kb
+                )
+            # ``external`` (default): no in-process mirror.
+            return kb
         # Selected but not configured: stay local-only rather than
         # silently falling back to the cortex kb-service.
         return RecipeKB(local=local_store, remote=None)
