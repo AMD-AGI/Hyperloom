@@ -86,6 +86,21 @@ def test_serving_specialist_mentions_scheduler_and_kv_cache():
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
+def test_serving_specialist_has_source_patch_playbook():
+    """Capability layer (Arbor-into-Hyperloom): the serving focus must
+    guide AUTHORING source patches (not just config flags) and carry the
+    distilled framework safety priors (ALWAYS_ON / NEVER_TOUCH)."""
+    text = _build("serving_specialist")
+    for marker in (
+        "Source-patch playbook",   # the code-authoring section
+        "block_manager",            # kv-cache module mapping
+        "add_seq_group",            # upstream call-order contract to preserve
+        "NEVER_TOUCH",              # safety classification from Arbor KB
+        "VLLM_ROCM_USE_AITER",      # ALWAYS_ON umbrella flag
+    ):
+        assert marker.lower() in text.lower(), f"missing {marker!r}"
+
+
 def test_kernel_switch_specialist_mentions_aiter_and_attention_backends():
     text = _build("kernel_switch_specialist")
     for marker in (
@@ -812,10 +827,7 @@ def test_specialist_tool_denylist_excludes_kb_write_paths():
     remain blocked because the KB lifecycle is Coordinator-owned.
     """
     for forbidden in (
-        "mcp__cortex_kb__hypothesize",
-        "mcp__cortex_kb__ingest_attempt",
-        "mcp__cortex_kb__verify",
-        "mcp__cortex_kb__commit",
+        "mcp__cortex_kb__propose_point",
     ):
         assert forbidden in SPECIALIST_TOOL_DENYLIST
         assert forbidden not in DEFAULT_SPECIALIST_TOOLS

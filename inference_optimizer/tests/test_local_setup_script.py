@@ -101,7 +101,7 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert f"export REPO_ROOT='{REPO_ROOT}'" in env_text
     assert f"export OOB_SRC='{tmp_path / 'deps' / 'Primus-Claw' / 'OOB'}'" in env_text
     assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
-    assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens-internal'}'" in env_text
+    assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
     assert secret not in env_text
 
 
@@ -176,4 +176,7 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"HYPERLOOM_DEPS_ROOT={expected_deps}" in result.stdout
     assert str(expected_deps / "Primus-Claw") in result.stdout
-    assert "release/hyperloom_integration_0.3.1" in result.stdout
+    # Default TraceLens is now the open-source AMD-AGI/TraceLens on ``main``
+    # (PR #668 landed there); the internal release ref is opt-in only.
+    assert str(expected_deps / "TraceLens") in result.stdout
+    assert "checkout main" in result.stdout

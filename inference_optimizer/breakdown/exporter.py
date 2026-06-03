@@ -171,6 +171,14 @@ def build(
                                         ),
                                         warnings,
                                         default=[])
+    # Raw ``state.optimization_stack[]`` passthrough so downstream
+    # tooling can see the full per-entry evidence (tuned_file /
+    # workspace / etc.) without having to re-read state.json. Pure
+    # mirror; never raises.
+    optimization_stack = _safe_collect("optimization_stack",
+                                        lambda: collectors.collect_optimization_stack(state),
+                                        warnings,
+                                        default=[])
     # Hot-kernel roofline table (Dashboard §1). Pulls
     # ``<sd>/reports/kernel_roofline.json`` so dashboards consume sbd
     # exclusively and never have to walk the kernel-agent tree.
@@ -180,11 +188,23 @@ def build(
                                         ),
                                         warnings,
                                         default={})
-    # Optimization-progress curve (Dashboard §2). Stack ledger +
-    # ceiling/target reference lines, derived from state.json so the
-    # dashboard reads sbd alone.
+    # Per-snapshot roofline comparison list driving the markdown-
+    # report ``## Roofline`` section. Built from
+    # ``state.roofline_snapshots`` history.
     roofline           = _safe_collect("roofline",
                                         lambda: collectors.collect_roofline(
+                                            state, warnings,
+                                        ),
+                                        warnings,
+                                        default=[])
+    # Optimization-progress curve (Dashboard §2). Stack ledger +
+    # ceiling/target reference lines, derived from state.json so the
+    # dashboard reads sbd alone. Used to be exported as ``roofline``
+    # but that clashed with the list-shaped section above used by the
+    # markdown renderer; renamed to ``roofline_progress`` so both
+    # surfaces coexist.
+    roofline_progress  = _safe_collect("roofline_progress",
+                                        lambda: collectors.collect_roofline_progress(
                                             sd, state, manifest, warnings,
                                         ),
                                         warnings,
@@ -239,15 +259,22 @@ def build(
         "kb_provenance":       kb_provenance,
         # specialist sub-agent dispatch records.
         "specialist_runs":     specialist_runs,
+        # Raw KEEP ledger passthrough. Mirrors
+        # ``state.optimization_stack[]`` verbatim. Empty list on
+        # pre-baseline / fresh sessions.
+        "optimization_stack":  optimization_stack,
         # Hot-kernel roofline table (Dashboard-Roofline 对接清单 §1).
         # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
         # absent — the dashboard hides the table on empty.
         "kernel_roofline":     kernel_roofline,
+        # Per-snapshot roofline comparison list (markdown-report
+        # source). Built from ``state.roofline_snapshots``.
+        "roofline":            roofline,
         # Optimization-progress curve (Dashboard-Roofline 对接清单 §2).
         # Always populated when baseline ran; ``ceiling_available`` is
         # False on sessions that never ran the watermark roofline
         # pipeline (dashboard hides the reference lines).
-        "roofline":            roofline,
+        "roofline_progress":   roofline_progress,
 
         "warnings":            warnings,
         "source_files":        source_files,
@@ -428,8 +455,7 @@ def write_minimal_final_report(
         "",
         _fmt_attempt(getattr(state, "last_baseline", None), "last_baseline"),
         _fmt_attempt(getattr(state, "last_profile", None), "last_profile"),
-        _fmt_attempt(getattr(state, "last_backends", None), "last_backends"),
-        _fmt_attempt(getattr(state, "last_params", None), "last_params"),
+        _fmt_attempt(getattr(state, "last_explore", None), "last_explore"),
         _fmt_attempt(state.last_sweep, "last_sweep"),
         "",
         f"## Structured detail",
