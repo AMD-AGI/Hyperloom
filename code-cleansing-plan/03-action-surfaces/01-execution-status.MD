@@ -113,6 +113,25 @@ Why:
 - `_RUNS_ACTIONS_FALLBACK` still exists only for registry-load failure,
   and is guarded against the registry-derived set.
 
+### Added phase allowlist drift guard
+
+`test_action_catalogue.py` now verifies:
+
+- every phase-allowed action has live metadata,
+- no phase allowlist contains retired action names,
+- kernel-owned actions are allowed only through the KERNEL phase surface,
+- framework PR internal actions are allowed in FRAMEWORK_PR,
+- grid-injectable actions appear in the phase allowlist,
+- Coordinator-internal actions must either be phase-allowed or explicitly
+  listed in `PHASE_ALLOWLIST_BYPASS_ACTIONS`.
+
+Added `action_surfaces.PHASE_ALLOWLIST_BYPASS_ACTIONS` for the one
+intentional bypass:
+
+- `replay_warm_recipe` is constructed directly by the Coordinator's
+  PRELUDE warm-start logic and should not appear in the LLM-facing phase
+  allowlist.
+
 ### Removed stale action-surface comments
 
 Updated comments that described `specialist` as yaml-less and removed stale references to retired `setup`, `classify`, `backends`, `params`, and `validate_stack` as current action semantics.
