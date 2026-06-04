@@ -96,6 +96,23 @@ Drift guard added:
 - full mode includes kernel-owned actions,
 - no-kernel mode excludes kernel-owned actions.
 
+### Removed stale run-workspace special case
+
+`session_paths._runs_actions()` now derives the run-workspace action set
+only from registry metadata and `_RUNS_WORKSPACE_PHASES`.
+
+Removed:
+
+- the explicit `specialist` union in `_runs_actions()`,
+- tests and comments that described `specialist` as yaml-less.
+
+Why:
+
+- `specialist.yaml` now exists and loads through `ActionRegistry`.
+- The path whitelist no longer needs a bespoke exception for this action.
+- `_RUNS_ACTIONS_FALLBACK` still exists only for registry-load failure,
+  and is guarded against the registry-derived set.
+
 ### Removed stale action-surface comments
 
 Updated comments that described `specialist` as yaml-less and removed stale references to retired `setup`, `classify`, `backends`, `params`, and `validate_stack` as current action semantics.
