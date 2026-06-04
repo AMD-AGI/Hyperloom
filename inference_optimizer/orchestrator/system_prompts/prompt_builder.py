@@ -275,13 +275,8 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
         )
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
-    # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is a synthetic LLM
-    # sub-agent dispatch (no propose_action wrapper — go straight to
-    # delegate with the per-payload contract enforced by PolicyGate's
-    # ``specialist_dispatch_source``). ``integrate_patch`` is the
-    # serving-lane-locked follow-up that consumes a specialist's worktree
-    # patches; expose it as a direct delegate too so the LLM does not
-    # waste a tick proposing it first.
+    # Specialist is an LLM sub-agent delegate. integrate_patch consumes
+    # specialist worktree patches and should be directly delegatable.
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
