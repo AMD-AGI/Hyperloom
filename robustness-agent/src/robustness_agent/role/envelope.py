@@ -156,6 +156,7 @@ ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({
 CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "current_best",
     "stop_reason",
+    "last_tick_exception",
     "cumulative_gain",
     # Coordinator-owned validated cumulative gain trio.
     "cumulative_gain_validated",
@@ -221,6 +222,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "framework_pr_max_candidates",
     # Advisory model-architecture profile (launcher / state.json owned).
     "model_arch",
+    # Architecture-identity tags lifted from config.json (recipe-snapshot
+    # KB tags). Fact-layer; locked to mirror upstream
+    # ``policy.CORE_STATE_FIELDS``.
+    "model_architectures",
+    "model_type",
 })
 
 

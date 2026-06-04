@@ -666,6 +666,13 @@ Pick the next id from `last_trace_analyze.reusable_native_kernel_ids`
 (NEVER from raw `hot_kernels_top15` — vendor binaries reject as
 `non_reusable_kernel`); if that list is empty, don't propose kernel_opt.
 
+The `kernel_id` MUST be one of those ids copied verbatim (e.g. `k001`).
+NEVER invent an id and NEVER pass an operator name (e.g. `aten::mm`,
+`aiter.silu_and_mul`) or any token from `analysis_md` — operator names
+are non-unique (several kernels share `aten::mm`) and are rejected.
+`skipped_kernels_top` lists operators TraceLens detected but cannot
+rewrite (each with a `skip_reason`); they are off-limits, not targets.
+
   request{target_agent: 'kernel', kind: 'run_optimization',
           params: {kernel_id: <picked kernel_id>,
                    source_file: <hot_kernels[i].source_file>,

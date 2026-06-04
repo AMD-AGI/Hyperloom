@@ -965,6 +965,64 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
     return data
 
 
+def _load_model_config_tags(model_path: str) -> dict:
+    """Best-effort loader for KB architecture tags from ``config.json``.
+
+    Reads ``<model_path>/config.json`` (the HF weights dir) and lifts the
+    two architecture-identity fields the recipe-snapshot KB stamps as
+    ``extras`` tags:
+
+      * ``architectures`` — a list like ``["LlamaForCausalLM"]``.
+      * ``model_type``    — a string like ``"llama"``.
+
+    Both are shared by a base model and the models fine-tuned from it, so
+    stamping them lets a fine-tuned recipe be recognised as carrying the
+    base model's architecture identity.
+
+    Soft-degrade contract (never blocks launch): a missing / unreadable /
+    invalid-JSON / non-dict ``config.json`` returns ``{}``. Individual
+    fields are normalised (``architectures`` -> list of non-empty strings;
+    ``model_type`` -> stripped string) and a key is omitted entirely when
+    its normalised value is empty, so callers can ``.get(key, default)``
+    without re-checking for ``[]`` / ``""``.
+    """
+    if not model_path:
+        return {}
+    cfg_path = Path(model_path) / "config.json"
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logging.warning("model_config_tags_unreadable: %s (%s)", cfg_path, exc)
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logging.warning("model_config_tags_invalid_json: %s (%s)", cfg_path, exc)
+        return {}
+    if not isinstance(data, dict):
+        logging.warning(
+            "model_config_tags_not_a_dict: %s (got %s)",
+            cfg_path,
+            type(data).__name__,
+        )
+        return {}
+    out: dict = {}
+    arches_raw = data.get("architectures")
+    if isinstance(arches_raw, list):
+        arches = [str(a).strip() for a in arches_raw if str(a or "").strip()]
+        if arches:
+            out["architectures"] = arches
+    elif isinstance(arches_raw, str) and arches_raw.strip():
+        # Tolerate a scalar ``architectures`` by wrapping it in a list.
+        out["architectures"] = [arches_raw.strip()]
+    model_type = str(data.get("model_type") or "").strip()
+    if model_type:
+        out["model_type"] = model_type
+    return out
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -1139,6 +1197,11 @@ def _seed_shared_state(
         args, "explore_roofline_hard_gate", False,
     ))
 
+    # KB architecture tags from the model weights' config.json
+    # (``architectures`` + ``model_type``). Fresh-launch only — resume
+    # rehydrates the persisted values from state.json (see load_or_init).
+    _cfg_tags = _load_model_config_tags(str(args.model))
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -1153,6 +1216,11 @@ def _seed_shared_state(
         model_arch=_load_model_arch(
             _workspace_root_resolve(), Path(args.model).name
         ),
+        # Architecture-identity tags lifted from config.json; stamped into
+        # the recipe-snapshot ``extras`` so a fine-tuned model carries the
+        # base model's identity (see ``_load_model_config_tags``).
+        model_architectures=_cfg_tags.get("architectures", []),
+        model_type=_cfg_tags.get("model_type", ""),
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI / env at fresh-session time
@@ -1931,6 +1999,12 @@ def _validate_credentials() -> None:
     sys.exit(2)
 
 
+def _is_placeholder_tracelens_path(value: str) -> bool:
+    """Treat .env.template's bare ``\\`` and whitespace-only values as unset."""
+    stripped = value.strip()
+    return stripped in ("", "\\")
+
+
 def _load_dotenv_fallback() -> None:
     """Env always wins over .env. If SAFE_API_KEY or OPENAI_BASE_URL is
     missing from os.environ, source ``$REPO_ROOT/.env`` (defaults to
@@ -1958,6 +2032,8 @@ def _load_dotenv_fallback() -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        if key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT") and _is_placeholder_tracelens_path(value):
+            continue
         if key not in os.environ:
             os.environ[key] = value
             loaded += 1

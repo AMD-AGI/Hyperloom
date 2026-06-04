@@ -118,7 +118,10 @@ Options:
 Env overrides:
   REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
   MAGPIE_DIR, INFERENCEX_REPO, INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
-  PYTHON, TRACELENS_ROOT, USER_DATA_PATH,
+  PYTHON, TRACELENS_ROOT,
+  TRACELENS_INTERNAL_ROOT (set to enable the optional internal extension;
+    unset => open-source-only),
+  USER_DATA_PATH,
   HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT,
   PATCH_MAGPIE (=1; set 0 only if upstream Magpie atomic-write
   PR is already merged into your clone)
@@ -607,6 +610,9 @@ chain_kernel_agent() {
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
   export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
   [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
+  # Forward the optional internal extension path when provided; unset =>
+  # kernel-agent installer stays open-source-only (no separate toggle).
+  [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && export TRACELENS_INTERNAL_ROOT
   local args=()
   [ "$CHECK_ONLY" -eq 1 ] && args+=(--check-only)
   [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)

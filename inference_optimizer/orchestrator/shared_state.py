@@ -18,6 +18,10 @@ fields:
                                 structured + free-text notes) loaded from
                                 the launcher's ``$USER_DATA_PATH/model_arch.json``;
                                 prompt-context only, no deterministic gating
+    model_architectures list  — config.json ``architectures``; stamped into
+                                the recipe-snapshot ``extras`` as a KB tag
+    model_type          str   — config.json ``model_type``; stamped into
+                                the recipe-snapshot ``extras`` as a KB tag
     target_summary      str   — set by `target_analysis` action
     baseline_tput       float — tok/s/GPU after `baseline` action
     baseline_accuracy   float — GSM8K score after `baseline`
@@ -316,6 +320,16 @@ class SharedState:
     # filter / framework gap token / recipe key stay on ``model_class``).
     # Empty dict means "no profile available"; renderers omit the block.
     model_arch: dict = field(default_factory=dict)
+    # KB tags lifted verbatim from the model weights' ``config.json``
+    # (``architectures`` list + ``model_type`` string). Populated at
+    # fresh-launch by ``cli._load_model_config_tags``; resume rehydrates
+    # the persisted values from state.json. Stamped into the recipe-snapshot
+    # ``extras`` on every KB write (T0 anchor + KEEP/REVERT/CLOSE amend) so a
+    # fine-tuned model carries the same architecture identity as the base
+    # model it derives from. Empty (``[]`` / ``""``) means "config.json
+    # absent or unreadable".
+    model_architectures: list[str] = field(default_factory=list)
+    model_type: str = ""
     framework: str = ""
     gpu_type: str = ""
     # Workload metadata mirrored from manifest.json at session start
@@ -552,6 +566,10 @@ class SharedState:
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
+    # Last Coordinator-side exception caught by the tick-loop resilience
+    # guard. Coordinator-only; gives postmortems a traceback without relying
+    # on harness stdout.
+    last_tick_exception: dict[str, Any] = field(default_factory=dict)
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
@@ -1741,6 +1759,29 @@ class SharedState:
         self.crash_count += by
         return self.crash_count
 
+    def record_tick_exception(
+        self,
+        *,
+        tick: int,
+        stage: str,
+        exc_type: str,
+        message: str,
+        traceback_text: str,
+        agent: str = "",
+    ) -> dict[str, Any]:
+        """Persist a compact Coordinator exception summary for postmortems."""
+        entry = {
+            "tick": int(tick or 0),
+            "ts": _now_iso(),
+            "stage": str(stage or ""),
+            "agent": str(agent or ""),
+            "type": str(exc_type or ""),
+            "message": str(message or "")[:1000],
+            "traceback": str(traceback_text or "")[:12000],
+        }
+        self.last_tick_exception = entry
+        return entry
+
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
         """Merge a non-empty changes dict into this state.
 
@@ -2668,6 +2709,31 @@ class SharedState:
             if reusable and kid:
                 reusable_ids.append(str(kid))
 
+        # Project the skipped (non-routable) candidates so the prompt can
+        # show the LLM that these operators were *seen* but cannot be
+        # optimized (e.g. "source file not resolved"). Without this the
+        # structured block renders an empty candidate list whenever
+        # hot_kernels is empty, leaving analysis.md's operator names as the
+        # only kernel identifiers in the prompt -- which the LLM then echoes
+        # as a hallucinated kernel_id (operator names are also non-unique,
+        # e.g. several k00x all named ``aten::mm``). Surfacing (id, name,
+        # reason) lets the LLM avoid re-requesting them by id.
+        skipped = result.get("skipped_kernels") or []
+        skipped_summary: list[dict[str, Any]] = []
+        if isinstance(skipped, list):
+            skipped_sorted = sorted(
+                (e for e in skipped if isinstance(e, dict)),
+                key=lambda e: float(e.get("gpu_pct") or 0.0),
+                reverse=True,
+            )
+            for entry in skipped_sorted[:15]:
+                skipped_summary.append({
+                    "kernel_id": entry.get("kernel_id"),
+                    "name": entry.get("name"),
+                    "skip_reason": entry.get("skip_reason") or "",
+                    "gpu_pct": entry.get("gpu_pct"),
+                })
+
         raw_warnings = result.get("trace_health_warnings") or []
         warnings_cleaned: list[dict[str, Any]] = []
         if isinstance(raw_warnings, list):
@@ -2711,6 +2777,7 @@ class SharedState:
             "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,
             "kernel_roofline_top15": kernel_roofline,
+            "skipped_kernels_top": skipped_summary,
             "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
@@ -4777,6 +4844,24 @@ class SharedState:
             f"candidates_path={blob.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
+        # When there are no routable candidates, surface the skipped
+        # operators (id:name:reason) so the LLM sees they were detected but
+        # cannot be rewritten -- rather than an empty list that pushes it to
+        # echo analysis.md operator names as a (non-unique, invalid)
+        # kernel_id. Suppressed when candidates exist to keep the
+        # steady-state prompt format stable.
+        skipped_suffix = ""
+        if not ids:
+            sk = blob.get("skipped_kernels_top") or []
+            rendered_sk = [
+                f"{s.get('kernel_id')}:{s.get('name')}:{s.get('skip_reason') or '?'}"
+                for s in sk
+                if isinstance(s, dict) and s.get("kernel_id")
+            ]
+            if rendered_sk:
+                skipped_suffix = (
+                    f" skipped_kernels_top=[{'; '.join(rendered_sk)}]"
+                )
         # T3 / T4 finishing-touches: when TraceLens emitted a routing
         # signal (high GPU idle → prefer params; permanent failure →
         # don't keep waiting on kernel candidates), surface it inline
@@ -4789,7 +4874,7 @@ class SharedState:
         # gratuitous additions.
         warnings = blob.get("trace_health_warnings") or []
         if not warnings:
-            return base
+            return base + skipped_suffix
         rendered: list[str] = []
         for w in warnings:
             if not isinstance(w, dict):
@@ -4805,7 +4890,7 @@ class SharedState:
                 rendered.append(f"{code}({','.join(extras)})")
             else:
                 rendered.append(code)
-        return f"{base} warnings=[{'; '.join(rendered)}]"
+        return f"{base}{skipped_suffix} warnings=[{'; '.join(rendered)}]"
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:

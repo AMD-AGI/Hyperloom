@@ -1229,10 +1229,10 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
     (heredoc-embedded).
 
     Unlike apply-patch (which carries the patch payload base64-encoded in
-    the entrypoint), this one only forwards ``$TRACELENS_ROOT`` because the
-    patches live on a wekafs path mounted on every pod and the in-pod
-    script reads them directly. Avoids inflating the entrypoint by ~50KB
-    of patch bytes per restart.
+    the entrypoint), this one only forwards ``$TRACELENS_ROOT`` (public
+    TraceLens checkout) because the patches live on a wekafs path mounted
+    on every pod and the in-pod script reads them directly. Avoids
+    inflating the entrypoint by ~50KB of patch bytes per restart.
 
     The in-pod script is idempotent (sentinel grep before applying), so
     the controller can call this on every ``restart_server_for_round``
@@ -1529,7 +1529,7 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     if not tracelens_root:
         err(
             "apply-tracelens-patch requires --tracelens-root or "
-            "$TRACELENS_ROOT to point at the TraceLens-internal checkout "
+            "$TRACELENS_ROOT to point at the TraceLens checkout "
             "(must be visible from every pod, typically a wekafs path)"
         )
         return EXIT_CONFIG_ERROR
@@ -2220,7 +2220,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--tracelens-root", default=None,
         help=(
-            "absolute path to TraceLens-internal checkout (must be visible "
+            "absolute path to public TraceLens checkout (must be visible "
             "from every pod, typically /wekafs/...). Defaults to "
             "$TRACELENS_ROOT."
         ),
