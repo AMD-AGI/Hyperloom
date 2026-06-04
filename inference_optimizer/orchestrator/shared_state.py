@@ -405,10 +405,6 @@ class SharedState:
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
-    # Consecutive ticks with no queued/running work, no pending proposals,
-    # no current action, and no stack growth. The tick loop resets it on
-    # any progress and can use it to close an otherwise idle session.
-    consecutive_silent_ticks: int = 0
     # Path to the YAML the baseline executor materialized with the operator's
     # workload envs (CONC/ISL/OSL/TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/...).
     # Coordinator injects this into params/backends/sweep tasks as
