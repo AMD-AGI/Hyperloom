@@ -92,7 +92,8 @@ def _resolve_magpie_python() -> str:
 
     Order: $MAGPIE_PYTHON env (only when it can actually ``import Magpie``)
     > first `python3` on PATH that can ``import Magpie``
-    > /opt/venv/bin/python (if it exists).
+    > /opt/venv/bin/python (the canonical Magpie venv baked into the
+    Hyperloom image) as the unconditional last resort.
 
     A stale ``$MAGPIE_PYTHON`` that points at an interpreter WITHOUT Magpie
     must NOT be trusted blindly: ``kernel-agent/scripts/install.sh`` resolves
@@ -101,12 +102,23 @@ def _resolve_magpie_python() -> str:
     ``ModuleNotFoundError: No module named 'Magpie'`` (surfaced as
     ``subprocess_nonzero`` / baseline_failed). We validate the env value and
     fall through to auto-detection instead.
+
+    The last resort is returned unconditionally — we never fall back to a
+    PATH ``python3`` we already proved cannot ``import Magpie``, since
+    returning it would just resurface ``ModuleNotFoundError`` at benchmark
+    time. If even the canonical interpreter lacks Magpie the subprocess
+    fails loudly on an actionable path rather than silently benchmarking
+    with a Magpie-less ``/usr/bin/python3``.
     """
     def _can_import_magpie(py: str) -> bool:
         try:
+            # NB: ``run_with_session_kill`` always captures stdout/stderr via
+            # PIPE internally and does NOT accept ``capture_output`` — passing
+            # it raises TypeError, which the broad ``except`` would swallow as
+            # "cannot import", silently disabling the whole probe.
             proc = run_with_session_kill(
                 [py, "-c", "import Magpie"],
-                capture_output=True, timeout=10,
+                timeout=10,
             )
             return getattr(proc, "returncode", 1) == 0
         except Exception:
@@ -128,11 +140,7 @@ def _resolve_magpie_python() -> str:
     if candidate and _can_import_magpie(candidate):
         return candidate
 
-    fallback = Path("/opt/venv/bin/python")
-    if fallback.exists():
-        return str(fallback)
-
-    return candidate or "/opt/venv/bin/python"
+    return "/opt/venv/bin/python"
 
 
 def _resolve_session_dir() -> Path:
