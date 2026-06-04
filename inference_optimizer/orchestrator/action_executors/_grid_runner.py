@@ -90,13 +90,18 @@ def variant_fingerprint(
 def _resolve_magpie_python() -> str:
     """Resolve the Python interpreter for Magpie subprocesses.
 
-    Order: $MAGPIE_PYTHON env > first `python3` on PATH that can
-    ``import Magpie`` > /opt/venv/bin/python (if it exists).
-    """
-    env_val = os.environ.get("MAGPIE_PYTHON", "").strip()
-    if env_val:
-        return env_val
+    Order: $MAGPIE_PYTHON env (only when it can actually ``import Magpie``)
+    > first `python3` on PATH that can ``import Magpie``
+    > /opt/venv/bin/python (if it exists).
 
+    A stale ``$MAGPIE_PYTHON`` that points at an interpreter WITHOUT Magpie
+    must NOT be trusted blindly: ``kernel-agent/scripts/install.sh`` resolves
+    the value BEFORE Magpie is pip-installed, so a fresh env can bake in e.g.
+    ``/usr/bin/python3`` — using it makes every Magpie benchmark fail with
+    ``ModuleNotFoundError: No module named 'Magpie'`` (surfaced as
+    ``subprocess_nonzero`` / baseline_failed). We validate the env value and
+    fall through to auto-detection instead.
+    """
     def _can_import_magpie(py: str) -> bool:
         try:
             proc = run_with_session_kill(
@@ -106,6 +111,18 @@ def _resolve_magpie_python() -> str:
             return getattr(proc, "returncode", 1) == 0
         except Exception:
             return False
+
+    env_val = os.environ.get("MAGPIE_PYTHON", "").strip()
+    if env_val:
+        if _can_import_magpie(env_val):
+            return env_val
+        log.warning(
+            "MAGPIE_PYTHON=%s cannot import Magpie; ignoring it and "
+            "auto-detecting an interpreter that can. (A stale value is often "
+            "baked into kernel-agent.env.sh when install.sh resolved it "
+            "before Magpie was pip-installed.)",
+            env_val,
+        )
 
     candidate = shutil.which("python3")
     if candidate and _can_import_magpie(candidate):
