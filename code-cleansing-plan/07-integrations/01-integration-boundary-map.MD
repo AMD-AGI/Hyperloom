@@ -25,8 +25,9 @@ This is a cleanup guide, not a second source of truth. Runtime source remains th
 - Main-package responsibility: build the proposal packet, run prepare/commit, validate the verdict envelope, degrade on missing context.
 - critic-agent responsibility: the review bundle and model judgment.
 - Contract surfaces: `request.json` / `judge_bundle.json` / `review.json` / `emit.json`, `review_verdict` envelope.
-- Modes: `mock`, `agent`, `codex_bare` (CLI `_VALID_CRITIC_BACKENDS`). Default `agent`.
-- Decision pending: whether `codex_bare` is still production-supported; keep until decided.
+- Modes: `mock`, `agent` (CLI `_VALID_CRITIC_BACKENDS`). Default `agent`.
+- Removed: legacy `codex_bare` direct chat-completion critic path. Use
+  `--critic-agent` for production or `--critic-mock` for offline smoke.
 
 ## Robustness Integration
 
