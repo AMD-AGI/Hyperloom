@@ -70,8 +70,8 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
-    # Upstream KB_gaps/Gap-11: the ``verdict``/``verdict_map``
-    # choice is mutually exclusive but at least one of them must be
+    # The ``verdict``/``verdict_map`` choice is mutually exclusive but
+    # at least one of them must be
     # present. intent_parser only enforces the structural
     # ``target_proposal_msg_id`` here; the verdict-payload mutual
     # exclusion lives in ``policy._validate_review_verdict_payload``.
@@ -121,8 +121,8 @@ ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset({
 })
 
 
-# Severities accepted by ``alert`` and ``escalate_strategy_change`` per
-# DESIGN v0.6 13.2. ``high`` raises priority 0 broadcasts.
+# Severities accepted by ``alert`` and ``escalate_strategy_change``.
+# ``high`` raises priority 0 broadcasts.
 ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 
 
@@ -182,10 +182,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "warm_start_pitfalls",
     "warm_start_lessons",
     "warm_start_ts",
-    # GAP 5 KB tag completeness.
+    # KB tag completeness.
     "stack_fingerprint_meta",
     "baseline_workload_extra",
-    # GAP 1 warm-recipe replay.
+    # warm-recipe replay.
     "warm_replay_attempted",
     "warm_replay_outcome",
     "warm_history_injected",
