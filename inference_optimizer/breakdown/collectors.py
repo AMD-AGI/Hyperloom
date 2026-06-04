@@ -1086,15 +1086,152 @@ def _build_final_invocation(
 _AUDIT_ACTIONS = (
     "baseline", "profile", "explore",
     "backends", "params", "validate_stack",
-    "sweep",
+    "sweep", "roofline",
 )
 
 
+def _parse_iso_unix(ts: Any) -> float | None:
+    """Best-effort ISO-8601 -> unix seconds. ``None`` on any failure."""
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    s = str(ts).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except ValueError:
+        return None
+
+
+def _iso_z(ts: Any) -> str:
+    """Normalise any ISO-8601 timestamp to a canonical ``...Z`` UTC form.
+
+    The two timeline sources disagree on suffix: the journal emits
+    ``2026-06-02T06:08:30Z`` while ``state.phase_history`` rows carry
+    ``2026-06-02T06:08:08+00:00``. Mixing them leaves segment boundary
+    rows in the ``+00:00`` shape, which strict front-end date parsers
+    render blank, and makes the lexicographic window comparison fragile
+    at equal-second boundaries. Collapsing both to second-precision
+    ``Z`` keeps display and ``[entered_ts, exit_ts)`` matching consistent.
+    Returns the input unchanged when it is empty or unparseable.
+    """
+    if ts is None:
+        return ""
+    s = str(ts).strip()
+    if not s:
+        return ""
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return s
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _load_optimization_journal(
+    session_dir: Path | None, warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Read ``reports/optimization_journal.json`` entries.
+
+    The journal is the orchestrator's own append-only, atomically-flushed
+    decision log (one row per KEEP / REVERT / no_promote, carrying
+    ``phase`` + ``ts`` + ``kind`` + ``change`` + ``outcome`` + gain). It
+    is the canonical action ledger and — unlike the per-action
+    ``*_attempts`` audit lists — already records the target_analysis /
+    roofline / specialist / explore-winner decisions that the audit lists
+    omit. Returns ``[]`` when absent (legacy sessions); callers then fall
+    back to the audit-list scrape alone.
+    """
+    if session_dir is None:
+        return []
+    data = _load_json_safe(
+        session_dir / "reports" / "optimization_journal.json", warnings,
+    )
+    if not isinstance(data, dict):
+        return []
+    entries = data.get("entries")
+    return entries if isinstance(entries, list) else []
+
+
+def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
+    """Map one optimization_journal entry to a phase_timeline event.
+
+    Keeps the journal's ``phase`` so :func:`collect_phase_segments` can
+    bucket the event by its declared phase (exact) instead of guessing
+    from the ``ts`` window (which mis-files boundary actions such as the
+    PRELUDE baseline).
+    """
+    metric = e.get("throughput_after")
+    metric_kind = "output_throughput" if metric is not None else None
+    if metric is None and e.get("gain_pct") is not None:
+        metric = e.get("gain_pct")
+        metric_kind = "gain_pct"
+    change = str(e.get("change") or "")
+    kind = str(e.get("kind") or "")
+    # ``kind == "other"`` is the journal's catch-all bucket (target_analysis /
+    # roofline / specialist / explore quant candidates / sweep ...). The real
+    # operation name lives in ``change`` -- surface that as the action so the
+    # timeline shows the actual step instead of an opaque "other".
+    if kind and kind.lower() != "other":
+        action = kind
+    else:
+        action = change or kind or "other"
+    return {
+        "ts":              _iso_z(e.get("ts")),
+        "action":          action,
+        "task_id":         str(e.get("task_id") or ""),
+        "kernel_id":       None,
+        "status":          "",
+        "decision":        str(e.get("outcome") or ""),
+        "key_metric":      _to_float(metric),
+        "key_metric_kind": metric_kind,
+        "workspace":       None,
+        "error_class":     e.get("error_class"),
+        "phase":           str(e.get("phase") or ""),
+        "change":          change,
+        "extras":          {k: v for k, v in (
+            ("variant_name", e.get("variant_name")),
+            ("reason", e.get("reason")),
+        ) if v},
+    }
+
+
 def collect_phase_timeline(
+    session_dir: Path | None,
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
+    """Flat, chronological action timeline.
+
+    Merges two complementary sources so no action family is dropped:
+
+    * ``reports/optimization_journal.json`` — the canonical decision log
+      (target_analysis / baseline / roofline / specialist / explore
+      winners / sweep). Carries ``phase`` for exact segment attribution.
+    * the per-action ``*_attempts`` audit lists + ``kernel_opt`` /
+      ``kernel_integrate`` histories — add per-attempt rows (incl.
+      failures) and the kernel lanes the journal records only as a single
+      KEEP.
+
+    Events are de-duplicated by ``(action, ts-to-second, change)`` with
+    the journal copy winning, then sorted by ``ts``. Passing
+    ``session_dir=None`` degrades gracefully to the audit-list scrape
+    (used by unit fixtures that have no on-disk journal).
+    """
     events: list[dict[str, Any]] = []
+
+    # ── Source 1: canonical journal (preferred; carries phase) ──
+    for e in _load_optimization_journal(session_dir, warnings):
+        if isinstance(e, dict):
+            events.append(_journal_entry_to_event(e))
+
+    # ── Source 2: per-action audit lists (complementary / legacy) ──
     for action in _AUDIT_ACTIONS:
         attempts = state.get(f"{action}_attempts") or []
         if not isinstance(attempts, list):
@@ -1113,6 +1250,8 @@ def collect_phase_timeline(
                 "key_metric_kind": entry.get("key_metric_kind"),
                 "workspace":      entry.get("workspace"),
                 "error_class":    entry.get("error_class"),
+                "phase":          "",
+                "change":         action,
                 "extras":         dict(entry.get("extras") or {}),
             })
 
@@ -1133,8 +1272,11 @@ def collect_phase_timeline(
                     "status":      "",
                     "decision":    str(h.get("decision") or ""),
                     "key_metric":  None,
+                    "key_metric_kind": None,
                     "workspace":   None,
                     "error_class": None,
+                    "phase":       "",
+                    "change":      f"kernel_opt:{kid}",
                     "extras":      {},
                 })
 
@@ -1147,23 +1289,45 @@ def collect_phase_timeline(
             for a in ent.get("attempts") or []:
                 if not isinstance(a, dict):
                     continue
+                kid = str(ent.get("kernel_id") or "")
                 events.append({
                     "ts":          a.get("ts") or "",
                     "action":      "integrate",
                     "task_id":     "",
-                    "kernel_id":   str(ent.get("kernel_id") or ""),
+                    "kernel_id":   kid,
                     "status":      str(a.get("status") or ""),
                     "decision":    str(a.get("decision") or ""),
                     "key_metric":  _to_float(a.get("gain_pct")),
                     "key_metric_kind": "gain_pct",
                     "workspace":   a.get("workspace"),
                     "error_class": None,
+                    "phase":       "",
+                    "change":      f"integrate:{kid}",
                     "extras":      {"patch_path": ent.get("patch_path"),
                                     "report_path": a.get("report_path")},
                 })
 
-    events.sort(key=lambda e: e.get("ts") or "")
-    return events
+    # Canonicalise every ts to ``...Z`` so journal (Z) and legacy audit /
+    # phase_history (+00:00) rows dedup, sort and render consistently.
+    for ev in events:
+        ev["ts"] = _iso_z(ev.get("ts"))
+
+    # De-dup: journal rows are appended first and win on collision.
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for ev in events:
+        key = (
+            str(ev.get("action") or ""),
+            (str(ev.get("ts") or ""))[:19],
+            str(ev.get("change") or ev.get("task_id") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ev)
+
+    deduped.sort(key=lambda e: e.get("ts") or "")
+    return deduped
 
 
 # ---------------------------------------------------------------------------
@@ -1228,16 +1392,62 @@ def collect_capability_summary(
     oob_invocations: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
-    # GEAK / OOB driven by actual invocations on disk (most reliable)
+    # Final integrate (e2e) outcome per kernel. A kernel-opt KEEP that was
+    # REVERTED at integrate is NOT a real adoption -- end-to-end throughput
+    # regressed and the patch never entered the final stack -- so it must
+    # not inflate the geak/oob "kept" tally. Reading the integrate decision
+    # + e2e gain here keeps capability_summary in lock-step with
+    # kernel_lifecycle.final_decision (which already reads integrate).
+    integ = state.get("kernel_integrate_attempts") or {}
+    integ_by_kid: dict[str, dict[str, Any]] = {}
+    if isinstance(integ, dict):
+        for ent in integ.values():
+            if not isinstance(ent, dict):
+                continue
+            kid = str(ent.get("kernel_id") or "")
+            if not kid:
+                continue
+            integ_by_kid[kid] = {
+                "decision": str(ent.get("last_decision") or "").upper(),
+                "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
+            }
+
+    # GEAK / OOB driven by actual invocations on disk (most reliable),
+    # reconciled against the integrate (e2e) verdict.
     def _from_invocations(invs: list[dict[str, Any]]) -> dict[str, Any]:
         attempts = len(invs)
-        keeps = sum(1 for v in invs if v.get("decision") == "KEEP")
+        adopted = 0
+        reverted = 0
+        best_e2e: float | None = None
+        for v in invs:
+            if v.get("decision") != "KEEP":
+                continue
+            outcome = integ_by_kid.get(str(v.get("kernel_id") or ""))
+            if outcome is None:
+                # micro-KEEP with no integrate record -> stands as kept.
+                adopted += 1
+                continue
+            g = outcome["e2e_gain_pct"]
+            if g is not None and (best_e2e is None or g > best_e2e):
+                best_e2e = g
+            if outcome["decision"] in ("REVERT", "REJECT"):
+                reverted += 1
+            else:
+                adopted += 1
         status = (
-            "kept"          if keeps > 0 else
+            "kept"          if adopted > 0 else
+            "reverted"      if reverted > 0 else
             "attempted"     if attempts > 0 else
             "not_attempted"
         )
-        return {"status": status, "attempts": attempts, "keeps": keeps}
+        row: dict[str, Any] = {
+            "status": status, "attempts": attempts, "keeps": adopted,
+        }
+        if reverted:
+            row["reverts"] = reverted
+        if best_e2e is not None:
+            row["e2e_gain_pct"] = best_e2e
+        return row
 
     geak_cap = _from_invocations(geak_invocations)
     oob_cap = _from_invocations(oob_invocations)
@@ -1626,7 +1836,32 @@ def _stamp_kernel_level_decisions(
                 str(a.get("ts") or ""),
             )
 
-        best = max(atts, key=_attempt_key)
+        # Attribute the kernel-level KEEP to the backend the agent actually
+        # adopted: ``verification.best_attempt_id`` (exact) then
+        # ``best_backend``. The per-attempt ``micro_speedup`` is usually
+        # absent in ``optimization_attempts.jsonl`` (the speedup lives only
+        # in verification.json), so the bare micro/ts heuristic would tie-
+        # break onto whichever attempt ran last -- frequently a FAILED lane
+        # -- and mislabel it as the winner. Falls back to the heuristic only
+        # when verification carries no backend hint.
+        best = None
+        if isinstance(verification, dict):
+            want_id = str(verification.get("best_attempt_id") or "")
+            want_backend = str(verification.get("best_backend") or "").lower()
+            if want_id:
+                best = next(
+                    (a for a in atts if str(a.get("attempt_id") or "") == want_id),
+                    None,
+                )
+            if best is None and want_backend:
+                cands = [
+                    a for a in atts
+                    if str(a.get("backend") or "").lower() == want_backend
+                ]
+                if cands:
+                    best = max(cands, key=_attempt_key)
+        if best is None:
+            best = max(atts, key=_attempt_key)
 
         if decision:
             best["decision"] = decision
@@ -1676,6 +1911,27 @@ def _shape_kernel_metadata(
     }
 
 
+def _infer_run_dir_kernel_id(run_dir: Path) -> str:
+    """Recover the kernel id for a run dir whose ``optimization_attempts``
+    rows omit ``kernel_id``.
+
+    The kernel agent writes exactly one ``results/<kid>.json`` +
+    ``verification/<kid>.json`` per optimised kernel. When a run dir holds a
+    single such kid we can confidently attribute every id-less attempt in
+    that run to it; ambiguous (multi-kid) run dirs are left untouched so we
+    never mis-file an attempt.
+    """
+    kids: set[str] = set()
+    for sub in ("results", "verification"):
+        d = run_dir / sub
+        if not d.is_dir():
+            continue
+        for p in d.glob("*.json"):
+            if p.stem:
+                kids.add(p.stem)
+    return next(iter(kids)) if len(kids) == 1 else ""
+
+
 def collect_kernel_invocations(
     session_dir: Path,
     warnings: list[str],
@@ -1691,8 +1947,32 @@ def collect_kernel_invocations(
     run_dirs = _kernel_agent_run_dirs(session_dir)
     for run_dir in run_dirs:
         attempts = _load_jsonl_safe(run_dir / "optimization_attempts.jsonl", warnings)
-        for att in attempts:
-            inv = _parse_invocation_attempt(att, run_dir, session_dir, warnings)
+        parsed = [
+            _parse_invocation_attempt(att, run_dir, session_dir, warnings)
+            for att in attempts
+        ]
+        # Backfill kernel_id for attempts whose jsonl row omitted it (some
+        # kernel-agent versions never stamp kernel_id into
+        # optimization_attempts.jsonl). Without a kernel_id the invocation
+        # can neither be attributed to its detected kernel (-> UI shows
+        # "not_attempted") nor get its KEEP/REVERT decision stamped, even
+        # though capability_summary still counts it in the global totals --
+        # which is exactly the "attempts>0 but per-kernel not_attempted"
+        # mismatch operators see.
+        if any(not (inv.get("kernel_id") or "") for inv in parsed):
+            inferred = _infer_run_dir_kernel_id(run_dir)
+            if inferred:
+                for inv in parsed:
+                    if inv.get("kernel_id"):
+                        continue
+                    inv["kernel_id"] = inferred
+                    rp = run_dir / "results" / f"{inferred}.json"
+                    vp = run_dir / "verification" / f"{inferred}.json"
+                    if inv.get("result_path") is None and rp.exists():
+                        inv["result_path"] = _rel(rp, session_dir) or str(rp)
+                    if inv.get("verification_path") is None and vp.exists():
+                        inv["verification_path"] = _rel(vp, session_dir) or str(vp)
+        for inv in parsed:
             backend = inv.get("backend") or ""
             if not backend:
                 inv["backend"] = "unknown"
@@ -1800,7 +2080,13 @@ def _read_kernel_candidates(
         data = _load_json_safe(path, warnings)
         if isinstance(data, dict):
             hk = data.get("hot_kernels")
-            if isinstance(hk, list):
+            # Only accept a NON-empty list. An on-disk ``hot_kernels: []``
+            # (the kernel-agent sometimes writes an empty candidates file for
+            # a later trace round) must not short-circuit the
+            # ``state.hot_kernels_top15`` fallback below -- otherwise detected
+            # kernels vanish even though the orchestrator recorded them, and
+            # any optimised kernel (k0xx) loses its row + geak/oob verdict.
+            if isinstance(hk, list) and hk:
                 return hk
     # Final fallback: state.last_trace_analyze.hot_kernels_top15.
     # This is what the orchestrator actually copied out of
@@ -1996,6 +2282,7 @@ def _collect_detected_kernels(
     integ = state.get("kernel_integrate_attempts") or {}
     adopted_kids: set[str] = set()
     reverted_kids: set[str] = set()
+    integ_gain_by_kid: dict[str, float | None] = {}
     if isinstance(integ, dict):
         for ent in integ.values():
             if not isinstance(ent, dict):
@@ -2003,6 +2290,7 @@ def _collect_detected_kernels(
             kid = str(ent.get("kernel_id") or "")
             if not kid:
                 continue
+            integ_gain_by_kid[kid] = _to_float(ent.get("best_gain_pct"))
             dec = ent.get("last_decision")
             if dec == "KEEP":
                 adopted_kids.add(kid)
@@ -2017,6 +2305,10 @@ def _collect_detected_kernels(
         entry["selected_for_optimization"] = kid in selected_ids
         entry["geak"] = geak_idx.get(kid)  # None if lane never touched this kid
         entry["oob"] = oob_idx.get(kid)
+        # e2e (integrate) gain so the table shows WHY a micro-KEPT kernel was
+        # reverted (regressed end-to-end) rather than just a bare verdict.
+        if kid in integ_gain_by_kid:
+            entry["integrate_gain_pct"] = integ_gain_by_kid[kid]
         if kid in adopted_kids:
             # Disambiguate which lane's patch was kept.
             g_kept = bool(entry["geak"] and entry["geak"]["decision"] in ("KEEP", "PARTIAL"))
@@ -3895,68 +4187,156 @@ def collect_phase_segments(
         {
             "phase":            "EXPLORE",
             "entered_ts":       "...iso...",
+            "entered_unix":     float | None,
             "exit_ts":          "...iso..." | "",
+            "exit_unix":        float | None,
             "exit_reason":      "plateau_explore",
             "evidence":         {...},
-            "actions":          [<events from phase_timeline within window>...],
+            "events":           [<sub-events folded into this phase>...],
+            "actions":          [<phase_timeline events in this phase>...],
             "elapsed_seconds":  float | None,
         }
 
-    Ordering matches ``phase_history`` (chronological insertion order).
+    Only ``phase_history`` rows that carry a non-empty ``to_phase`` are
+    real phase transitions and become segment boundaries. Rows without it
+    (e.g. ``{"event": "framework_pr_phase_done"}``) are *sub-events* — we
+    fold them into the segment whose window contains them instead of
+    letting them spawn a phantom empty-named segment that also splits the
+    surrounding phase in two.
+
+    A segment's exit comes from the *next transition* (not the next raw
+    row), so ``exit_unix`` / ``exit_reason`` / ``elapsed_seconds`` line up
+    with the real phase boundary. Both numeric (`*_unix`) and ISO
+    (`*_ts`) representations are always emitted, derived from each other
+    when only one is present.
+
+    Action attribution prefers each event's own ``phase`` (journal-sourced
+    events carry it) so boundary actions such as the PRELUDE baseline land
+    in the right phase; events without a ``phase`` fall back to the
+    ``[entered_ts, exit_ts)`` window.
+
     Empty when ``phase_history`` is missing — readers fall back to the
     flat ``phase_timeline`` (v1 shape).
     """
     history = state.get("phase_history") or []
     if not isinstance(history, list) or not history:
         return []
+
+    rows = [r for r in history if isinstance(r, dict)]
+    transitions = [r for r in rows if str(r.get("to_phase") or "")]
+    sub_events = [r for r in rows if not str(r.get("to_phase") or "")]
+
+    def _unix(row: dict[str, Any]) -> float | None:
+        u = row.get("ts_unix")
+        if isinstance(u, (int, float)):
+            return float(u)
+        return _parse_iso_unix(row.get("ts"))
+
     segments: list[dict[str, Any]] = []
-    for idx, row in enumerate(history):
-        if not isinstance(row, dict):
-            continue
-        entered_ts = str(row.get("ts") or "")
-        entered_unix = row.get("ts_unix")
-        if not isinstance(entered_unix, (int, float)):
-            entered_unix = None
-        # Exit info comes from the *next* row (its ``ts`` is when we
-        # left the current segment). The last segment is open.
+    proxy_seen = False
+    for idx, row in enumerate(transitions):
+        entered_ts = _iso_z(row.get("ts"))
+        entered_unix = _unix(row)
         exit_ts = ""
         exit_unix: float | None = None
         exit_reason = ""
-        if idx + 1 < len(history) and isinstance(history[idx + 1], dict):
-            nxt = history[idx + 1]
-            exit_ts = str(nxt.get("ts") or "")
+        if idx + 1 < len(transitions):
+            nxt = transitions[idx + 1]
+            exit_ts = _iso_z(nxt.get("ts"))
             exit_reason = str(nxt.get("reason") or "")
-            nxt_unix = nxt.get("ts_unix")
-            if isinstance(nxt_unix, (int, float)):
-                exit_unix = float(nxt_unix)
+            exit_unix = _unix(nxt)
         elapsed: float | None = None
         if entered_unix is not None and exit_unix is not None:
             elapsed = max(0.0, float(exit_unix) - float(entered_unix))
-        # Bucket the flat ``phase_timeline`` events by ``ts`` window.
-        actions_in_window: list[dict[str, Any]] = []
-        for ev in phase_timeline or []:
-            if not isinstance(ev, dict):
-                continue
-            ts = str(ev.get("ts") or "")
-            if not ts:
-                continue
-            if entered_ts and ts < entered_ts:
-                continue
-            if exit_ts and ts >= exit_ts:
-                continue
-            actions_in_window.append(ev)
         evidence_dict = dict(row.get("evidence") or {})
         segments.append({
             "phase":           str(row.get("to_phase") or ""),
             "from_phase":      str(row.get("from_phase") or ""),
             "entered_ts":      entered_ts,
-            "entered_unix":    float(entered_unix) if entered_unix is not None else None,
+            "entered_unix":    entered_unix,
             "exit_ts":         exit_ts,
+            "exit_unix":       exit_unix,
             "exit_reason":     exit_reason,
             "evidence":        evidence_dict,
-            "actions":         actions_in_window,
+            "events":          [],
+            "actions":         [],
             "elapsed_seconds": elapsed,
         })
+
+    def _owner_by_window(ts: str) -> dict[str, Any] | None:
+        """Return the segment whose ``[entered_ts, exit_ts)`` ISO window
+        holds ``ts``. ISO-8601 sorts lexicographically, so string compare
+        matches chronological order (same convention as the v1 collector).
+        """
+        if not ts:
+            return segments[-1] if segments else None
+        for s in segments:
+            lo_ts, hi_ts = s["entered_ts"], s["exit_ts"]
+            if lo_ts and ts < lo_ts:
+                continue
+            if hi_ts and ts >= hi_ts:
+                continue
+            return s
+        return segments[-1] if segments else None
+
+    # Fold non-transition rows (sub-events) into their containing segment.
+    for ev in sub_events:
+        ev_evidence = dict(ev.get("evidence") or {})
+        if ev_evidence.get("r09_provisional") or (
+            str(ev_evidence.get("evidence") or "") == "m2_proxy"
+        ):
+            proxy_seen = True
+        ev_ts = _iso_z(ev.get("ts"))
+        s = _owner_by_window(ev_ts)
+        if s is not None:
+            s["events"].append({
+                "event":  str(ev.get("event") or ev.get("reason") or ""),
+                "reason": str(ev.get("reason") or ""),
+                "ts":     ev_ts,
+                "evidence": ev_evidence,
+            })
+
+    # Attribute timeline actions: prefer the event's declared ``phase``
+    # (journal-sourced), else the ts window.
+    phase_to_segs: dict[str, list[dict[str, Any]]] = {}
+    for s in segments:
+        phase_to_segs.setdefault(s["phase"], []).append(s)
+    for ev in phase_timeline or []:
+        if not isinstance(ev, dict):
+            continue
+        ts = str(ev.get("ts") or "")
+        if not ts:
+            continue
+        target = None
+        ev_phase = str(ev.get("phase") or "")
+        if ev_phase and ev_phase in phase_to_segs:
+            cands = phase_to_segs[ev_phase]
+            if len(cands) == 1:
+                target = cands[0]
+            else:
+                for s in cands:
+                    lo_ts, hi_ts = s["entered_ts"], s["exit_ts"]
+                    if lo_ts and ts < lo_ts:
+                        continue
+                    if hi_ts and ts >= hi_ts:
+                        continue
+                    target = s
+                    break
+                target = target or cands[0]
+        if target is None:
+            target = _owner_by_window(ts)
+        if target is not None:
+            target["actions"].append(ev)
+
+    if proxy_seen:
+        # KB_gaps/Gap-15 / KB_design §3.14 R-09 — surface a single
+        # session-level marker so dashboards can flag legacy-proxy
+        # exits without scraping per-segment evidence.
+        warnings.append(
+            "plateau_proxy_provisional: legacy params_no_promote_streak "
+            "proxy fired (R-09); set INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 "
+            "once the fleet is fully v0.8 to fail closed"
+        )
     return segments
 
 
