@@ -601,18 +601,16 @@ tput). Per-variant `extra_envs` still win (applied last).
 
 ## Critic Backend Selection
 
-The Critic role has three backend modes, picked by mutually-exclusive
-CLI flags. Default is `--critic-agent` (no flag needed).
+The Critic role has two backend modes. Default is `--critic-agent` (no
+flag needed).
 
 | Flag | Backend class | Behaviour |
 |---|---|---|
 | (none) / `--critic-agent` | `CriticAgentBackend` | Drives the standalone `critic-agent/` skill runtime via `python -m runtime.cli prepare-review` → Codex chat completion → `python -m runtime.cli commit-review`. Adds KB priors lookup (with circuit-breaker for unreachable services), per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
 | `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
-| `--critic-codex-bare` | `CodexBackend` | Legacy direct chat-completion path with no KB / session memory / `review_constraints`. Available for debugging the LLM layer in isolation. (`--critic-real` is a hidden back-compat alias.) |
 
 Default is overridable per pod via
-`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent` /
-`codex_bare`).
+`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent`).
 
 ### Required env when `--critic-agent` is active
 
@@ -627,9 +625,9 @@ Default is overridable per pod via
 
 `_preflight()` checks `CRITIC_AGENT_ROOT` resolves to a real directory
 with `runtime/cli.py`, then runs `python -m runtime.cli --help` (5s
-timeout) before the Coordinator boots. Missing or broken runtime
-aborts the run with a clear error pointing at `--critic-mock` /
-`--critic-codex-bare` as bypasses.
+timeout) before the Coordinator boots. Missing or broken runtime aborts
+the run with a clear error pointing at `--critic-mock` as the offline
+bypass.
 
 ### Per-turn artefacts (audit trail)
 
@@ -777,8 +775,8 @@ echo $! > "$PID_FILE"
 shell can die on SSH disconnect.
 
 Critic defaults to `--critic-agent`; Robustness defaults to `--robustness-agent`.
-See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock` /
-`--critic-codex-bare` overrides; pod-level overrides via
+See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock`;
+pod-level overrides via
 `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` /
 `INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND`.
 
@@ -1010,8 +1008,8 @@ gate is intentional — opus-4-5 / haiku silently degraded prior runs.
 ### Critic-agent runtime errors
 
 Inspect `$SESSION_DIR/critic-workdir/<latest>/{request,judge_bundle,review,emit}.json`.
-Bypass with `--critic-mock` (offline / smoke) or `--critic-codex-bare` (legacy
-direct Codex). See `## Critic Backend Selection`.
+Bypass with `--critic-mock` for offline / smoke runs. See
+`## Critic Backend Selection`.
 
 | Symptom | Fix |
 |---|---|
