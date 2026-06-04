@@ -284,7 +284,7 @@ class RooflineExecutor:
         except Exception as exc:  # noqa: BLE001
             # Stale cache invariant: failure leaves last_profile_trace
             # pointing at the new trace but no fresh analysis_md_text
-            # for it. Clear the cache so the prompt renderer (N5) shows
+            # for it. Clear the cache so the prompt renderer shows
             # "(no TraceLens snapshot yet)" instead of stale advice
             # tied to the previous trace.
             self.shared_state.last_trace_analyze = {}
