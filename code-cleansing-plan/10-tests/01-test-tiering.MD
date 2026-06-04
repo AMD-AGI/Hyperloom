@@ -78,6 +78,19 @@ Do NOT execute until the noted gate clears:
 - Delete compatibility tests only AFTER the resume / breakdown-reader / alias decisions say the old path is dropped.
 - No retired-feature positive tests to delete (none exist).
 
+## Deleted In Follow-Up
+
+- `test_prompt_renders_gain_values.py` — removed as an implementation-detail
+  prompt formatter test. It asserted private `SharedState._format_*`
+  string details and old `backend_winners_history` rendering after that
+  field had been downgraded to old-session read-only compatibility.
+
+Retained coverage:
+
+- prompt-builder / prompt-visibility tests for prompt structure,
+- SharedState persistence/evolution tests for state shape,
+- breakdown/report smoke tests for user-facing output.
+
 ## Risk Control
 
 - Keep every Tier 0 contract test.

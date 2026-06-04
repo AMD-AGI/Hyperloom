@@ -37,10 +37,27 @@ Added `code-cleansing-plan/10-tests/01-test-tiering.MD`:
 
 So this step delivers the classification + minimal set (required outputs) and defers the churny deletions to gated follow-ups, consistent with the safe, single-purpose commit cadence used in earlier steps.
 
+## Follow-Up Deletion
+
+### Removed private prompt formatter micro-test
+
+Deleted `inference_optimizer/tests/test_prompt_renders_gain_values.py`.
+
+Reason:
+
+- It primarily asserted private `SharedState._format_explore_search()` and
+  `_format_backend_winners_history()` string details.
+- The only old-session field it covered, `backend_winners_history`, is now
+  a read-only compatibility field after Step 05.
+- Higher-level prompt, SharedState, and breakdown tests cover the
+  user-facing behavior without locking private formatter internals.
+
 ## Verification
 
 - Tier-0 minimal set: 201 passed in ~8s.
 - Lint: no errors (docs only).
+- Follow-up deletion verification: shared-state, prompt, and breakdown
+  tests pass (199 passed).
 
 ## Next Safe Follow-Ups
 
