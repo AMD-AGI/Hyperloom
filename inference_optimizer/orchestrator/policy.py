@@ -1162,17 +1162,17 @@ class PolicyGate:
             raise PolicyDenied(
                 "review_verdict missing target_proposal_msg_id", rule="payload",
             )
-        #         # accept either the legacy single ``verdict`` field or the
-        # per-variant ``verdict_map``. The intent_parser already
-        # enforced mutual exclusion + structural shape; here we
-        # validate the *content* (verdict strings must be in the
-        # closed REVIEW_VERDICTS vocab).
+        # Accept either the legacy single ``verdict`` field or the
+        # per-variant ``verdict_map``. The protocol-layer validator
+        # (protocol/intent) already enforced mutual exclusion +
+        # structural shape; here we validate the *content* (verdict
+        # strings must be in the closed REVIEW_VERDICTS vocab).
         has_single = "verdict" in payload
         verdict_map = payload.get("verdict_map")
         has_map = isinstance(verdict_map, dict) and bool(verdict_map)
         if has_single == has_map:
-            # Both or neither — defense in depth (intent_parser
-            # should have caught this already).
+            # Both or neither — defense in depth (the protocol-layer
+            # validator should have caught this already).
             raise PolicyDenied(
                 "review_verdict: exactly one of 'verdict' or "
                 "'verdict_map' must be present",
