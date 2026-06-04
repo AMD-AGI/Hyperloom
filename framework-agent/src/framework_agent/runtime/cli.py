@@ -66,8 +66,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
         {
             "required": ["framework", "repo_url", "baseline"],
             "subcommands_available": [
-                "schema", "candidates", "explore", "kb",
-                "phase-discover", "phase-fetch", "phase-emit-proposal",
+                "schema", "candidates", "explore", "kb", "phase-discover",
             ],
             "subcommands_planned": [],
             "search_modes_supported": ["primus_cortex", "github"],
