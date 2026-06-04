@@ -28,10 +28,9 @@ from typing import Any, TypedDict
 #: (additively) the ``kernel_optimization_summary`` /
 #: ``conc_sweep_summary`` sections mirrored from
 #: ``reports/kernel_optimization_summary.json`` and
-#: ``reports/conc_sweep_summary.json`` (PR #399 lishuoshuo). Inv-12.1
-#: guarantees a v0.6 / v1 reader can still consume the file because v2
-#: only *adds* fields — the version string does not bump for additive
-#: sections.
+#: ``reports/conc_sweep_summary.json``. Additive-only: a v1 reader can
+#: still consume v2 because new versions only *add* fields — the version
+#: string does not bump for additive sections.
 SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 
 
@@ -667,9 +666,9 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
-    # Retired field — was populated by the T2 hypothesize hook (now
-    # gone). Kept on the schema so claw-stats-service readers that
-    # destructure specialist_runs[] don't break; always empty.
+    # Retired field, kept on the schema (always empty) so
+    # claw-stats-service readers that destructure specialist_runs[]
+    # don't break.
     kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
