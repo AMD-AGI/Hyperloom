@@ -1004,8 +1004,7 @@ class SharedState:
     # (PolicyGate adds it to CORE_STATE_FIELDS); LLM agents can read
     # via prompt injection but cannot update_state. Empty string
     # signals "phase machine not yet initialised" — Coordinator
-    # initialises on construction. legacy resume infers a value via
-    # :func:`phase_state.infer_phase_from_state`.
+    # initialises on construction.
     phase: str = ""
     # ISO UTC timestamp the current phase was entered. Used by
     # observability (breakdown.phase_segments) and the budget judge.

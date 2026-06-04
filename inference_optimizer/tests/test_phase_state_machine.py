@@ -205,35 +205,6 @@ def test_compute_next_phase_terminal_overrides_phase():
     assert out[2].get("terminal") is True
 
 
-def test_infer_phase_for_v06_session():
-    # baseline_tput zero → PRELUDE
-    state = SimpleNamespace(baseline_tput=0.0, stop_reason="")
-    assert phase_state.infer_phase_from_state(state)[0] == "PRELUDE"
-    # baseline + optimization stack non-empty → EXPLORE
-    state = SimpleNamespace(
-        baseline_tput=1.0, stop_reason="",
-        last_sweep={}, last_kernel_opt={}, optimization_stack=[{}], kernel_enabled=True,
-    )
-    assert phase_state.infer_phase_from_state(state)[0] == "EXPLORE"
-    # last_kernel_opt seen, kernel enabled → KERNEL
-    state = SimpleNamespace(
-        baseline_tput=1.0, stop_reason="",
-        last_sweep={}, last_kernel_opt={"id": "k1"}, kernel_enabled=True,
-        optimization_stack=[],
-    )
-    assert phase_state.infer_phase_from_state(state)[0] == "KERNEL"
-    # last_sweep present → SWEEP
-    state = SimpleNamespace(
-        baseline_tput=1.0, stop_reason="",
-        last_sweep={"grid_size": 4}, last_kernel_opt={}, kernel_enabled=True,
-        optimization_stack=[],
-    )
-    assert phase_state.infer_phase_from_state(state)[0] == "SWEEP"
-    # stop_reason set → CLOSE
-    state = SimpleNamespace(baseline_tput=1.0, stop_reason="time_exhausted")
-    assert phase_state.infer_phase_from_state(state)[0] == "CLOSE"
-
-
 # ===========================================================================
 # SharedState writer
 # ===========================================================================
