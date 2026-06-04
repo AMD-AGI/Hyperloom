@@ -13,8 +13,9 @@ Per-variant flow:
    (rename-resistant; LLM/specialist/default_grid all collapse to the
    same row when content matches).
 2. Render the variant's Magpie YAML, run E2E bench.
-3. Immediate KEEP/REVERT decision (0.2% gain threshold + accuracy gate
-   when the variant trips ``_accuracy_gate.is_high_accuracy_risk``).
+3. Immediate KEEP/REVERT decision (``DEFAULT_KEEP_THRESHOLD_PCT`` gain
+   threshold, 1.0% + accuracy gate when the variant trips
+   ``_accuracy_gate.is_high_accuracy_risk``).
 4. KEEP triggers an inlined stack rebench: re-bench the cumulative
    stack including the just-KEEP'd variant. If the rebench tput is
    below the configurable threshold (default: baseline_tput * 1.005),
