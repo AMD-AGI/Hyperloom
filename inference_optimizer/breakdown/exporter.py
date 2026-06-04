@@ -163,7 +163,7 @@ def build(
     # specialist sub-agent dispatch records. Built
     # from ``state.specialist_rounds`` + the on-disk transcripts so
     # capability_summary.specialist and specialist_runs always agree
-    # (Inv-12.2 single source).
+    # (single source).
     specialist_runs    = _safe_collect("specialist_runs",
                                         lambda: collectors.collect_specialist_runs(
                                             sd, state, warnings,
@@ -270,8 +270,8 @@ def build(
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
         "attribution":         attribution,
-        # Cortex KB integration audit (KB_design §3.13 M1 §4
-        # "kb_provenance"). Added as a new top-level section rather than
+        # Cortex KB integration audit ("kb_provenance"). Added as a new
+        # top-level section rather than
         # bumping ``schema_version`` because every field is optional; the
         # v1 reader simply ignores it.
         "kb_provenance":       kb_provenance,
