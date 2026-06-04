@@ -95,6 +95,12 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
     assert "max_position_embeddings=2048" in final_md
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_context_window_too_small"
+    # PR-review-1: fail-fast exits before cli's coordinator.run try/finally, so
+    # it MUST emit session_breakdown.json itself — otherwise CI's delivery
+    # contract turns a clean skip into "Missing artifacts".
+    breakdown = sd / "session_breakdown.json"
+    assert breakdown.exists()
+    assert json.loads(breakdown.read_text(encoding="utf-8"))
 
 
 def test_preflight_passes_for_4096_model(tmp_path, monkeypatch):
@@ -126,3 +132,38 @@ def test_preflight_2048_passes_when_headroom_lowered(tmp_path, monkeypatch):
     sd = tmp_path / "session2048b"
     _seed_state(sd, monkeypatch)
     assert cli._preflight_context_window(_args(str(model), 1024, 1024), sd) is False
+
+
+# ---------------------------------------------------------------------------
+# MAX_MODEL_LEN resolution — clamp to the native window (no context stretch).
+# ---------------------------------------------------------------------------
+# Policy: MAX_MODEL_LEN = ISL+OSL+headroom, but never above the model's
+# max_position_embeddings. sglang ignores MAX_MODEL_LEN (context_length stays
+# None), but the vllm benchmark wires it into --max-model-len; an unclamped
+# ISL+OSL+4096 would exceed a small native window and crash the server (or
+# silently mis-size KV cache), defeating the "fail fast, don't stretch" policy.
+def test_max_model_len_clamped_to_native_window(tmp_path):
+    model = tmp_path / "ctx4096"
+    _write_config(model, max_position_embeddings=4096)
+    # desired = 1024 + 1024 + 4096 = 6144, native window = 4096 -> clamp to 4096.
+    assert cli._resolve_max_model_len(1024, 1024, str(model)) == 4096
+
+
+def test_max_model_len_uses_full_headroom_when_window_large(tmp_path):
+    model = tmp_path / "ctx32768"
+    _write_config(model, max_position_embeddings=32768)
+    # native window is comfortably above desired -> keep ISL+OSL+headroom.
+    assert (
+        cli._resolve_max_model_len(1024, 1024, str(model))
+        == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
+    )
+
+
+def test_max_model_len_fallback_when_maxpos_unknown(tmp_path):
+    model = tmp_path / "noconfig"
+    model.mkdir()
+    # No config.json -> cannot clamp -> keep the headroom default (prior behaviour).
+    assert (
+        cli._resolve_max_model_len(1024, 1024, str(model))
+        == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
+    )
