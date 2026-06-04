@@ -3664,66 +3664,6 @@ class SharedState:
         entry["ts"] = _now_iso()
         self.discovered_flags[fw] = entry
 
-    def push_backend_winners_round(
-        self,
-        *,
-        action: str,
-        base_tput: float,
-        base_extra_args: str,
-        winners: list[dict[str, Any]],
-        best: dict[str, Any] | None,
-        max_history: int = 20,
-    ) -> None:
-        """Append one explore round's winners (≥+1% over base) to history.
-
-        The prompt uses this before the next explore round to compose new
-        combos, retries, or sibling-flag variants from previous winners.
-        """
-        from .action_executors._grid_runner import variant_fingerprint
-        round_id = f"{action}-{len(self.backend_winners_history) + 1:03d}"
-
-        def _stamped(entry: dict[str, Any]) -> dict[str, Any]:
-            args = str(
-                entry.get("candidate_extra_server_args")
-                or entry.get("extra_server_args") or ""
-            )
-            envs = dict(entry.get("extra_envs") or {})
-            return {
-                "name": str(entry.get("name", "")),
-                "tput": entry.get("output_throughput") or entry.get("tput"),
-                "gain_pct": entry.get("gain_pct"),
-                "extra_server_args": args,
-                "extra_envs": envs,
-                "note": str(entry.get("note") or ""),
-                "fingerprint": (
-                    str(entry.get("fingerprint"))
-                    if entry.get("fingerprint")
-                    else variant_fingerprint(args, envs)
-                ),
-            }
-
-        entry = {
-            "action": str(action),
-            "round_id": round_id,
-            "base_tput": float(base_tput) if base_tput is not None else 0.0,
-            "base_extra_args": str(base_extra_args or ""),
-            "winners": [
-                _stamped(w) for w in (winners or []) if isinstance(w, dict)
-            ],
-            "best": (
-                {
-                    **_stamped(best),
-                }
-                if isinstance(best, dict) else None
-            ),
-            "ts": _now_iso(),
-        }
-        self.backend_winners_history.append(entry)
-        if len(self.backend_winners_history) > max_history:
-            self.backend_winners_history = (
-                self.backend_winners_history[-max_history:]
-            )
-
     # ------------------------------------------------------------------
     # scoring helpers removed
     # ------------------------------------------------------------------
