@@ -5693,9 +5693,9 @@ class Coordinator:
         """Route a Critic ``review_verdict`` to the per-variant or
         legacy single-verdict handler.
 
-        v0.8 KB_gaps/Gap-11: the
-        intent_parser already validated that exactly one of
-        ``verdict`` / ``verdict_map`` is present. We branch on
+        The protocol-layer validator (protocol/intent) already
+        validated that exactly one of ``verdict`` / ``verdict_map`` is
+        present. We branch on
         ``verdict_map`` first so the batch Explore path takes
         precedence; everything else (kernel_opt / integrate /
         report / specialist dispatch) falls through to the legacy
