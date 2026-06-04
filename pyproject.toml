@@ -77,8 +77,7 @@ filterwarnings = [
 #     end-to-end flows instead)
 #   * subprocess wrappers (`run_with_session_kill`, GEAK/OOB submit,
 #     Ray dashboard polling) — same reasoning
-#   * legacy / deprecated runtime entrypoints superseded by the role
-#     reactor (`robustness_agent/agent.py`, `main.py`, `rca.py`)
+#   * standalone robustness-agent reactor CLI wrapper
 #   * standalone kernel-agent tools (kernel_optimization, tracelens_*,
 #     apply_kernel_patch, geak_prompt_patcher) — these are CLI tools
 #     consumed by the runtime, not import-level libraries
@@ -105,10 +104,8 @@ omit = [
     "inference_optimizer/orchestrator/action_executors/_multi_node_env.py",
     # Breakdown LLM HTTP client.
     "inference_optimizer/breakdown/reporters/llm_client.py",
-    # Legacy robustness-agent runtime (replaced by role reactor / CLI).
-    "robustness-agent/src/robustness_agent/agent.py",
+    # Robustness-agent standalone reactor CLI wrapper.
     "robustness-agent/src/robustness_agent/main.py",
-    "robustness-agent/src/robustness_agent/rca.py",
     # Stand-alone kernel-agent CLI tools.
     "kernel-agent/tools/kernel_optimization.py",
     "kernel-agent/tools/tracelens_analysis.py",
