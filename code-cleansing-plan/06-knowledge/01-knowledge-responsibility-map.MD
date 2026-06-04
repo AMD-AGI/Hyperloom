@@ -30,9 +30,9 @@ This is a cleanup guide, not a second source of truth. Runtime source remains th
 
 - Source: `inference_optimizer/orchestrator/knowledge_plane.py`.
 - Live role: PR feed warmup + domain repo config for specialist prompts.
-- Dead/compat: the `cortex_*` methods (`select_kb_for_domain(s)`, `cortex_propose_point`, fallback strategies) + `cortex_kb_constants` import.
-  - In production `cli` always passes `cortex_kb=None`, so `cortex_enabled` is False and these paths return empty.
-  - Still referenced by Coordinator specialist warmup (guarded by `cortex_enabled`) and by tests that inject a fake v1 client.
+- Old Cortex v1 graph traversal / write methods were removed from this
+  facade. `from_clients(cortex_kb=...)` remains as an ignored compatibility
+  parameter for older callers.
 
 ### PR feed
 
@@ -58,7 +58,8 @@ This is a cleanup guide, not a second source of truth. Runtime source remains th
 Read:
 
 - warm start: T0 anchor reads RecipeKB for the workload 5-tuple.
-- specialist prompt: KnowledgePlane PR feed (+ inert cortex subgraph today).
+- specialist prompt: KnowledgePlane PR feed, warm-start RecipeKB facts,
+  research hints, and source-root context.
 
 Write (best-effort, never aborts the run):
 
@@ -69,21 +70,25 @@ Write (best-effort, never aborts the run):
 
 No persistent knowledge should be created at proposal time.
 
-## Old KB Path Deletion Candidates (decision pending)
+## Old KB Path Deletion
 
-Per `01-baseline-contracts/03-compatibility-decisions.MD`, "drop old Cortex v1 graph KB" needs a product decision. Candidates, once the decision lands:
+Removed in the high-risk cleanup pass:
 
-- `knowledge_plane.py` cortex_* methods: `select_kb_for_domain`, `select_kb_for_domains`, `cortex_propose_point`, `cortex_commit_point` (if present), `_DOMAIN_FALLBACK_STRATEGIES`, and the `cortex_enabled` gate.
-- `cortex_kb_constants.py` entries used only by the v1 graph surface (it is also imported by `recipe_kb/` live code, so only the v1-only constants can be removed).
-- tests that inject a fake v1 client: `test_kb_pr_assembly.py`, the cortex branches in `test_pr_monitor.py` / `test_knowledge_plane.py`.
+- `knowledge_plane.py` v1 graph traversal methods:
+  `select_kb_for_domain`, `select_kb_for_domains`, and fallback strategies.
+- `knowledge_plane.py` v1 graph write helpers:
+  `cortex_propose_point`, `mint_pr_node`, `pr_node_canonical_id`.
+- Fake v1 client tests for the removed surface.
 
-Not deletable yet:
+Still retained:
 
 - the live RecipeKB path,
 - PR feed,
 - research scout,
 - optimization journal,
 - warm start / warm replay.
+- `cortex_kb_constants.py` remains because live `recipe_kb/` code imports
+  shared constants from it.
 
 ## Specialist Knowledge Input Bundle (target)
 

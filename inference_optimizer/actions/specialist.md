@@ -3,9 +3,9 @@
 ## Purpose
 
 Dispatch an LLM specialist sub-agent on the **research_lane** to investigate
-one canonical gap in depth. The specialist reads the Cortex KB sub-graph
-anchored by one or more knowledge-domain `tags`, the PR Monitor feed for
-the same tag set, and the framework source roots under `INFERENCEX_PATH`.
+one canonical gap in depth. The specialist reads advisory RecipeKB
+warm-start facts, source-backed research hints, the PR Monitor feed for the
+same tag set, and the framework source roots under `INFERENCEX_PATH`.
 It then emits exactly one `specialist_done` intent on exit (Inv-5.3 single
 exit protocol).
 
@@ -103,7 +103,8 @@ Each specialist subprocess sees:
   - identity + autonomy scope
   - hardware context
   - the gap statement + evidence
-  - KB sub-graph traversal output (anchored at `domain.kb_anchor`)
+  - optional advisory KB context, warm-start lessons / pitfalls, and
+    source-backed research hints
   - PR feed for `domain.pr_repos`
   - framework source root hints
   - the worktree path
