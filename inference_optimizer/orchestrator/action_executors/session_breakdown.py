@@ -2,9 +2,9 @@
 
 Thin wrapper around :func:`inference_optimizer.breakdown.write_breakdown_json`
 so the Coordinator / orchestration agent can refresh
-``$SESSION_DIR/session_breakdown.json`` on demand (after every
-``validate_stack`` KEEP, before a planned ``report``, when a live
-dashboard is observing this session, etc.).
+``$SESSION_DIR/session_breakdown.json`` on demand (after an ``explore``
+KEEP, before a planned ``report``, when a live dashboard is observing
+this session, etc.).
 
 The end-of-session safety net lives in ``cli.py``'s finally block — this
 action is the agent-driven path used **during** a session for live
