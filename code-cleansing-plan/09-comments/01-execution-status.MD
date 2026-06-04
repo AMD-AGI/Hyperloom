@@ -46,6 +46,27 @@ Rewrite:
 
 This is a module docstring only; no behavior change and no test asserts it.
 
+### Compressed specialist/prompt/SKILL stale wording
+
+Updated:
+
+- `inference_optimizer/SKILL.md`
+- `orchestrator/system_prompts/prompt_builder.py`
+- `orchestrator/specialist_runner.py`
+
+Changes:
+
+- Replaced stale `runs/{...,backends,params,...}` session-layout example
+  with `explore` / `sweep`.
+- Compressed the retired-module section to the current invariant:
+  do not recreate retired `backends` / `params` / `validate_stack` /
+  scoring modules.
+- Updated the user report checklist from "params accepted/rejected" to
+  "explore accepted/rejected".
+- Removed PR-A / Arbor process narrative from specialist emit-hint and
+  tool-whitelist comments while keeping the worktree and KB-write
+  invariants.
+
 ## Verification
 
 - Lint: no errors.
@@ -55,9 +76,7 @@ This is a module docstring only; no behavior change and no test asserts it.
 
 These are known drift points; defer to avoid touching prompt-asserted text in this batch:
 
-- `knowledge_plane.py` top docstring still narrates the Cortex v1 graph KB as if live (a deletion-condition note was already added below it in Step 06).
 - System prompts / SKILL long historical narrative (touch carefully; covered by prompt-visibility tests — change structure, not asserted contract lines).
-- `docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md` already carries a stale-content banner; a full rewrite is a separate doc task.
 - Coordinator / SharedState / policy in-line PR/Gap/Nxx narrative: large surface; compress incrementally.
 
 ## Risk Control Applied

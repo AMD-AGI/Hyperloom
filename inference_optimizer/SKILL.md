@@ -58,7 +58,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
         ├── state.json
         ├── storage/coordinator.db
         ├── agents/{orchestration,kernel,critic,robustness}/
-        ├── runs/{baseline,profile,roofline,backends,params,...}/<task_id>/
+        ├── runs/{baseline,profile,roofline,explore,sweep,...}/<task_id>/
         ├── kernel-agent/runs/<session_id>/
         ├── kernel-agent-workspace/<kernel_id>/
         ├── optimizer_runs/               # per-session launcher logs / PID / monitor
@@ -245,18 +245,11 @@ under **Framework Selection** below.
 
 ## Retired modules and rules (do not re-introduce)
 
-These orchestrator modules were intentionally removed; the
-`actions/_meta/*.yaml` registry + `_grid_runner.py` + the unified,
-specialist-informed EXPLORE flow replaced them. Re-adding them
-re-creates conflicting decision paths:
+The live runtime uses `actions/_meta/*.yaml`, `_grid_runner.py`, and the
+unified specialist-informed `explore` flow. Do not recreate the retired
+`backends` / `params` / `validate_stack` / scoring modules.
 
-- `orchestrator/backends.py` (the action-routing one — distinct from
-  the LLM-adapter directory `orchestrator/backends/`)
-- `orchestrator/params.py`
-- `orchestrator/validate_stack.py`
-- `orchestrator/scoring.py`
-
-Related rules that look reasonable but break things:
+Rules that look reasonable but break the current flow:
 
 - **No `framework_pr first-explore priority` rule** in
   `system_prompts/orchestration.md` — conflicts with the EXPLORE
@@ -1033,6 +1026,6 @@ Report concise status:
 
 - session id (from `manifest.json`) and log path
 - `cumulative_gain` and `current_best`
-- params accepted/rejected summary
+- explore accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
 - whether the process is still running or stopped and why

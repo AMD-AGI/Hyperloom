@@ -104,13 +104,9 @@ PR_MONITOR_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_PR_MONITOR))
 CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
 
 
-# Default tool whitelist for specialists (KB_design §3.5 §10 / §3.11 R5;
-# PR-A2 (Arbor-into-Hyperloom) added Edit / Write / MultiEdit so specialists
-# can produce source patches into their per-task git worktree under
-# ``runs/specialist/<task_id>/worktree/``. The subprocess dispatcher's
-# ``--add-dir <worktree>`` scoping keeps them out of the main
-# framework_source_roots; the orchestrator's ``integrate_patch`` action
-# is the only place where worktree patches are physically applied.
+# Default tool whitelist for specialists. Write tools are scoped to the
+# per-task worktree via ``--add-dir <worktree>``; ``integrate_patch`` is the
+# only path that applies those patches to the serving workspace.
 #
 # Note these tool names follow the Claude / Cursor convention; the actual MCP
 # server names depend on operator config.
@@ -124,8 +120,7 @@ CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
 DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     "emit_intent",
     "Read", "Grep", "Glob",
-    # PR-A2: write tools for patch authoring. Confined to the
-    # worktree via ``--add-dir`` at subprocess spawn time.
+    # Patch authoring tools, confined to the specialist worktree.
     "Edit", "Write", "MultiEdit",
     # Restricted Bash — runners may further filter via a callback. Keeping
     # ``Bash`` in the whitelist lets the LLM run rocm-smi / pgrep / cat /
@@ -136,12 +131,7 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
 
 
 # Tools explicitly denied even if the operator extends the whitelist.
-# PR-A2 lifted Edit / Write / MultiEdit out of the denylist (see
-# DEFAULT_SPECIALIST_TOOLS above); only the Cortex KB write surfaces
-# remain blocked because the KB lifecycle is Coordinator-owned (Inv-2
-# / Inv-6.1). The KB write set is sourced from
-# :data:`policy.KB_WRITE_TOOL_NAMES` so we never drift between the
-# policy and runner layers.
+# KB writes stay Coordinator-owned; the denylist mirrors PolicyGate.
 SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
