@@ -48,10 +48,31 @@ Added concise deletion-condition comments (no behavior change) to:
 
 This satisfies the plan's "every retained compatibility path needs a deletion condition" rule.
 
+### Removed a test-only legacy writer helper
+
+Removed `SharedState.push_backend_winners_round()`.
+
+Why:
+
+- No live runtime code called it.
+- It wrote the legacy `backend_winners_history` field even though
+  `explore_search` is the canonical merged ledger.
+- Existing prompt rendering still supports `backend_winners_history` as a
+  read-only old-session field.
+
+Test adjustment:
+
+- `test_prompt_renders_gain_values.py` now constructs legacy
+  `backend_winners_history` directly when testing old-session rendering,
+  instead of relying on a production writer helper.
+
 ## Verification
 
 - Lint: no errors on `shared_state.py`.
 - Tests: `test_shared_state_*`, `test_resume`, `test_payload_aliases`, `test_no_legacy_writer_sites` pass.
+- Follow-up compat cleanup verification: `test_prompt_renders_gain_values.py`,
+  `test_shared_state_evolution.py`, `test_no_legacy_writer_sites.py` pass
+  (64 passed).
 
 ## Not Done Yet
 
