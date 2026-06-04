@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "inference_optimizer" / "scripts" / "local_setup.sh"
+IO_INSTALL = REPO_ROOT / "inference_optimizer" / "scripts" / "install.sh"
+KA_INSTALL = REPO_ROOT / "kernel-agent" / "scripts" / "install.sh"
+PREFLIGHT_KB = REPO_ROOT / "inference_optimizer" / "scripts" / "preflight_kb.sh"
+
+# The default that all installers fall back to when USER_DATA_PATH is unset.
+_DEFAULT_USER_DATA_PATH = "/workspace/hyperloom"
+# Substring of the loud fallback notice each script prints to stderr.
+_FALLBACK_WARNING = "USER_DATA_PATH not set"
 
 # ``local_setup.sh`` honours these env vars when present. The optimizer
 # session shell (and CI runners) routinely export them, pointing at host
@@ -240,3 +251,137 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     # Open-source-only by default: internal extension is not requested/cloned.
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
     assert "release/hyperloom_integration_v0.5.0" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# install-harden (feature/xiaofei/install-path-and-flock):
+#   A. loud USER_DATA_PATH fallback notice across all installers
+#   B. flock around the shared source-mirror clone/build region
+# ---------------------------------------------------------------------------
+
+# Scripts that expose ``--help``. ``--help`` runs the top-of-file
+# USER_DATA_PATH resolution (and its fallback notice) and then exits 0
+# *before* any heavy / environment-coupled install work, so it is the fast,
+# hermetic way to exercise exactly the fallback-notice code path. (A full
+# ``--check-only`` / ``--dry-run`` run would clone Magpie, import
+# inference_optimizer, chain to kernel-agent, etc. — far too heavy and
+# flaky for a path-handling unit test.)
+_HELP_SCRIPTS = {
+    "inference_optimizer_install": IO_INSTALL,
+    "kernel_agent_install": KA_INSTALL,
+    "local_setup": SCRIPT,
+}
+
+
+def _run_help(
+    script: Path, tmp_path: Path, user_data_path: str | None
+) -> subprocess.CompletedProcess[str]:
+    """Run ``bash <script> --help`` with a hermetic environment.
+
+    ``REPO_ROOT`` points at an empty stub dir so no real ``.env`` is sourced;
+    ``MAGPIE_PYTHON`` / ``GEAK_RAG_INDEX_DEVICE`` are pinned so kernel-agent's
+    top-level probes do not shell out to rocm-smi or import Magpie/torch.
+    ``USER_DATA_PATH`` is exported only when ``user_data_path`` is provided;
+    otherwise it stays stripped (by ``_clean_base_env``) so the unset
+    fallback branch fires.
+    """
+    env = _clean_base_env()
+    repo_stub = tmp_path / "repo_stub"
+    repo_stub.mkdir(exist_ok=True)
+    env["REPO_ROOT"] = str(repo_stub)
+    env["MAGPIE_PYTHON"] = "python3"
+    env["GEAK_RAG_INDEX_DEVICE"] = "cpu"
+    if user_data_path is not None:
+        env["USER_DATA_PATH"] = user_data_path
+    return subprocess.run(
+        ["bash", str(script), "--help"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("script", list(_HELP_SCRIPTS.values()), ids=list(_HELP_SCRIPTS))
+def test_install_warns_loudly_when_user_data_path_unset(script: Path, tmp_path: Path) -> None:
+    result = _run_help(script, tmp_path, user_data_path=None)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert _FALLBACK_WARNING in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("script", list(_HELP_SCRIPTS.values()), ids=list(_HELP_SCRIPTS))
+def test_install_silent_when_user_data_path_set(script: Path, tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    result = _run_help(script, tmp_path, user_data_path=str(data_root))
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert _FALLBACK_WARNING not in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("script", [IO_INSTALL, KA_INSTALL], ids=["inference_optimizer", "kernel_agent"])
+def test_install_does_not_reference_default_path_when_set(script: Path, tmp_path: Path) -> None:
+    # local_setup.sh is intentionally excluded: its --help text documents the
+    # default path, so a literal-string check there is meaningless. The two
+    # install.sh entrypoints do not mention it in --help output, so when
+    # USER_DATA_PATH is set their output must not reference the fallback root.
+    data_root = tmp_path / "data"
+    result = _run_help(script, tmp_path, user_data_path=str(data_root))
+    assert result.returncode == 0, result.stderr + result.stdout
+    combined = result.stdout + result.stderr
+    assert _DEFAULT_USER_DATA_PATH not in combined, combined
+
+
+@pytest.mark.parametrize(
+    "script",
+    [IO_INSTALL, KA_INSTALL, SCRIPT, PREFLIGHT_KB],
+    ids=["inference_optimizer", "kernel_agent", "local_setup", "preflight_kb"],
+)
+def test_all_scripts_emit_user_data_path_fallback_notice(script: Path) -> None:
+    # All four installers must detect the unset case BEFORE applying the
+    # default and warn loudly. Grep-level so it also covers preflight_kb.sh,
+    # which has no --help entrypoint to drive functionally.
+    text = script.read_text(encoding="utf-8")
+    assert "_user_data_was_set" in text, script
+    assert _FALLBACK_WARNING in text, script
+
+
+@pytest.mark.parametrize("script", [IO_INSTALL, KA_INSTALL], ids=["inference_optimizer", "kernel_agent"])
+def test_install_scripts_guard_mirror_writes_with_flock(script: Path) -> None:
+    # Both install.sh entrypoints serialize the source-mirror clone/build
+    # region with an fd-based flock on $HYPERLOOM_RUNTIME_DIR/.install.lock and
+    # hand the lock to the chained installer via HYPERLOOM_INSTALL_LOCK_HELD so
+    # the inference_optimizer -> kernel-agent chain cannot self-deadlock.
+    text = script.read_text(encoding="utf-8")
+    assert ".install.lock" in text, script
+    assert "exec 9>" in text, script
+    assert "flock 9" in text, script
+    assert "HYPERLOOM_INSTALL_LOCK_HELD" in text, script
+
+
+def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
+    # Fast, real serialization check of the exact idiom the installers use
+    # (`exec 9>LOCK; flock 9; <work>`): two workers contending on one lock
+    # must run their critical sections one-at-a-time (no interleaving).
+    if shutil.which("flock") is None:
+        pytest.skip("flock not available on this host")
+    lock = tmp_path / ".install.lock"
+    order = tmp_path / "order"
+    worker_src = (
+        'exec 9>"$1"\n'
+        "flock 9\n"
+        'echo "start-$2" >> "$3"\n'
+        "sleep 0.5\n"
+        'echo "end-$2" >> "$3"\n'
+    )
+    procs = [
+        subprocess.Popen(["bash", "-c", worker_src, "worker", str(lock), tag, str(order)])
+        for tag in ("A", "B")
+    ]
+    for proc in procs:
+        assert proc.wait(timeout=30) == 0
+    lines = order.read_text(encoding="utf-8").split()
+    assert lines in (
+        ["start-A", "end-A", "start-B", "end-B"],
+        ["start-B", "end-B", "start-A", "end-A"],
+    ), f"flock did not serialize critical sections: {lines}"
