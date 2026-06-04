@@ -48,21 +48,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .orchestrator.action_executors import (
-    TargetAnalysisExecutor,
-    baseline_executor,
-    explore_executor,
-    recover_executor,
-    conc_sweep_executor,
-    report_executor,
-    session_breakdown_executor,
-    sweep_executor,
+from .cli_executors import (  # noqa: F401 - re-exported for callers/tests
+    _NOOP_KINDS_KERNEL_ONLY,
+    _REAL_EXECUTORS_FULL,
+    _build_dynamic_action_executor,
+    _build_specialist_executor,
+    _noop_prep,
+    _register_executors,
 )
-from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
-from .orchestrator.action_executors.framework_pr import FrameworkPrExecutor
-from .orchestrator.action_executors.recover import recover_executor
-from .orchestrator.action_executors.profile import profile_executor
-from .orchestrator.action_executors.roofline import make_roofline_executor
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
@@ -73,7 +66,6 @@ from .orchestrator.backends import (
 )
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
-from .protocol.action_surfaces import KERNEL_OWNED_ACTIONS
 from .orchestrator.coordinator import Coordinator
 from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 from .orchestrator.cortex_t0 import run_t0_anchor
@@ -702,10 +694,6 @@ def _autodetect_gpu_type() -> str | None:
         return None
 
 
-async def _noop_prep(ctx) -> dict:
-    return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
-
-
 def _build_backends(
     *,
     claude_model: str,
@@ -750,13 +738,11 @@ def _build_backends(
             raise ValueError(
                 "_build_backends: critic_choice='agent' requires critic_agent_root"
             )
-        # N38 (May 2026) — feed the registry-derived per-action
-        # verdict policy so the critic-agent runtime sees
-        # ``review_constraints.action_verdict_policy[<action_name>]``
-        # and approves exploration / archival actions without
-        # demanding the before/after evidence they themselves produce.
-        # Replaces the prompt-hardcoded carve-out lists N33/N35/N37
-        # had to patch one action at a time.
+        # Feed the registry-derived per-action verdict policy so the
+        # critic-agent runtime sees
+        # ``review_constraints.action_verdict_policy[<action_name>]`` and
+        # approves exploration / archival actions without demanding the
+        # before/after evidence they themselves produce.
         try:
             from inference_optimizer.orchestrator.action_registry import (
                 ActionRegistry,
@@ -1067,7 +1053,7 @@ def _seed_shared_state(
         plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
-    # EXPLORE HARD force-exit thresholds (IR-6). Either condition fires
+    # EXPLORE HARD force-exit thresholds. Either condition fires
     # an ``explore_force_exit_low_budget`` exit (overrides plateau /
     # steward / LLM proposals).
     if getattr(args, "explore_force_exit_hours_remaining", None) is not None:
@@ -1078,7 +1064,7 @@ def _seed_shared_state(
         plateau_overrides["force_exit_budget_pct"] = float(
             args.explore_force_exit_budget_pct
         )
-    # IR-7 steward controls.
+    # steward controls.
     if getattr(args, "steward_disabled", False):
         plateau_overrides["steward_disabled"] = True
     if getattr(args, "steward_continuation_cap", None) is not None:
@@ -1143,8 +1129,8 @@ def _seed_shared_state(
         # fallback on its own at use time.
         return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
 
-    # Fix E (--explore-overtime-kill-ratio): mirror the CLI value into
-    # the fresh SharedState so the ExploreExecutor can read it via the
+    # --explore-overtime-kill-ratio: mirror the CLI value into the
+    # fresh SharedState so the ExploreExecutor can read it via the
     # Coordinator-injected task.params on the very first explore round.
     # ``0`` (and any non-positive) disables the gate.
     explore_overtime_kill_ratio_raw = getattr(
@@ -1229,7 +1215,7 @@ def _seed_shared_state(
         tp=_int_env_or_arg("tp", "TP"),
         # ``ep`` mirrors the EP env var so resume in a fresh shell
         # still recovers the value — KB warm-start queries depend on
-        # it for the T2 same-shape filter.
+        # it for the same-shape filter.
         ep=_int_env_or_arg("ep", "EP"),
         precision=(
             str(getattr(args, "precision", None) or os.environ.get("PRECISION", "") or "").strip()
@@ -1350,399 +1336,6 @@ def _default_target_summary(args: argparse.Namespace) -> str:
             f"{args.target_tput} tok/s/GPU within {args.max_hours}h."
         )
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
-
-
-# --- Executor wiring tables ------------------------------------------------
-# Declarative mappings of action_kind → ExecutorFn so tests can introspect
-# what's actually wired without re-parsing the imperative body of
-# ``_register_executors``. Adding a new action with a real executor MUST
-# update these tables; the regression test in
-# ``tests/test_p1_2_full_action_catalogue.py`` enforces consistency between
-# these tables and ``session_paths._runs_actions()``.
-
-# Real executors enabled in every run mode (kernel + no-kernel).
-#
-# The merged ``explore`` action subsumes the per-variant KEEP/REVERT
-# plus the per-KEEP stack rebench; there is no standalone validation
-# action.
-_REAL_EXECUTORS_FULL: dict[str, Any] = {
-    "baseline":          baseline_executor,
-    # GAP 1 — ``replay_warm_recipe`` runs the same Magpie subprocess
-    # as ``baseline`` but applies ``warm_start_recipe.best_config``
-    # (extra_sglang_args + extra_envs) via ``task.params``. We reuse
-    # the BaselineExecutor instance because the subprocess pipeline,
-    # the cold-start timeout logic, the rescue-path salvage, and the
-    # measurement parser are all identical — the only thing that
-    # differs is which params get passed in (and the Coordinator-side
-    # interpretation of the result, see ``_promote_replay_warm_recipe``).
-    "replay_warm_recipe": baseline_executor,
-    # ``profile`` is registered so the Coordinator-internal task path
-    # (kind switched via ``--no-enable-roofline``) can dispatch it
-    # through SubAgentRunner. PolicyGate denies LLM-proposed
-    # delegate{action_name='profile'} via
-    # ``analysis_action_not_llm_proposable``, so this registration is
-    # effectively Coordinator-only.
-    "profile":           profile_executor,
-    "explore":           explore_executor,
-    "sweep":             sweep_executor,
-    # Coordinator-internal post-sweep concurrency comparison.
-    # On by default; disable via ``--no-enable-conc-sweep``. PolicyGate
-    # denies any LLM-proposed delegate{action_name='conc_sweep'}, so
-    # the only entry is the SWEEP-completion auto-enqueue hook.
-    "conc_sweep":        conc_sweep_executor,
-    "report":            report_executor,
-    "session_breakdown": session_breakdown_executor,
-    # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
-    # ``gpu_memory_leaked`` signal (Change A/B): a real executor now
-    # cleans up leaked VRAM owners and, behind
-    # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
-    # ``rocm-smi --gpureset``. See
-    # ``orchestrator/action_executors/recover.py``.
-    "recover":           recover_executor,
-}
-
-# Kernel-owned action kinds dispatched via
-# ``request{target_agent='kernel', kind=...}``. The executor body is a
-# no-op in this process — actual work happens inside the kernel agent's
-# request handlers — but the names must stay registered so SubAgentRunner
-# does not raise ``no_executor`` on a stale task.
-_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = tuple(sorted(KERNEL_OWNED_ACTIONS))
-
-
-def _build_specialist_executor(
-    args: argparse.Namespace,
-    *,
-    session_dir: Path,
-    knowledge_plane: Any,
-) -> "Callable[[Any], Awaitable[dict]]":
-    """v0.8 §3.5 / §3.13 M5 + PR-A2 (Arbor-into-Hyperloom) — build the
-    specialist executor adapter.
-
-    Returns an ``async fn(ctx: RunnerContext) -> dict`` compatible with
-    :data:`SubAgentRunner.ExecutorFn`. The adapter wraps a
-    :class:`SpecialistRunner` and translates its
-    :class:`SpecialistRunResult` dataclass into the dict the dispatcher
-    expects to publish onto the bus.
-
-    Dispatch mode (PR-A2): production wires the
-    :class:`SpecialistSubprocessDispatcher` so each specialist runs in
-    a fresh ``claude`` subprocess inside a per-task git worktree
-    (``runs/specialist/<task_id>/worktree/``). The
-    ``--specialist-dispatch-mode`` flag can fall back to the legacy M5
-    in-process :class:`ClaudeBackend` path (used by tests + when the
-    ``claude`` binary is missing from $PATH).
-
-    Backend choice: every specialist runs on Claude (matching the
-    orchestration role). The CLI flag ``--specialist-model`` overrides
-    the default model (``--claude-model``) so operators can dedicate a
-    cheaper / faster model to specialist research without touching the
-    main orchestration loop. KB_design §3.5 §6 / §3.14 R-05.
-
-    The factory captures ``session_dir`` + ``knowledge_plane`` once at
-    cli boot; the same runner instance handles every specialist task
-    for the session.
-    """
-    import shutil
-
-    from .orchestrator.specialist_mcp_config import write_specialist_mcp_config
-    from .orchestrator.specialist_runner import (
-        DEFAULT_SPECIALIST_TOOLS,
-        SpecialistRunner,
-    )
-    from .orchestrator.specialist_subprocess import SpecialistSubprocessConfig
-
-    claude_model = (
-        (getattr(args, "specialist_model", None) or args.claude_model)
-        .strip()
-    )
-    max_turns = int(getattr(args, "specialist_max_turns", 8) or 8)
-    per_turn_max_seconds = float(
-        getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0
-    )
-    dispatch_mode = (
-        str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess")
-        .strip().lower()
-    )
-
-    # PR-A2: subprocess dispatch is the production default. We fall
-    # back to in-process when (a) the operator picks ``inprocess`` or
-    # (b) the ``claude`` binary is not on $PATH (e.g. dev environments
-    # using only the in-process SDK). The fallback is logged so it's
-    # visible in the manifest.
-    # PR-A2: derive framework_source_roots from the canonical resolver so
-    # the specialist worktree is rooted at the same set the orchestration
-    # prompt + PolicyGate path-validator already trust.
-    framework_source_roots = tuple(resolve_source_file_allowlist())
-    claude_bin = shutil.which("claude") or ""
-    use_subprocess = dispatch_mode != "inprocess" and bool(claude_bin)
-    if dispatch_mode == "subprocess" and not claude_bin:
-        log.warning(
-            "specialist_dispatch_mode=subprocess requested but `claude` "
-            "binary not found on PATH; falling back to in-process backend",
-        )
-
-    if use_subprocess:
-        # Operator-supplied --specialist-mcp-config wins. When unset,
-        # auto-generate ``<session_dir>/runtime/specialist_mcp.json``
-        # from the live KnowledgePlane so the spawned claude subprocess
-        # actually has the PR Monitor MCP server wired (without it the
-        # ``mcp__pr_monitor__*`` tool names in the whitelist resolve to
-        # nothing and the specialist falls back to WebSearch).
-        mcp_config_path: str | None = str(
-            getattr(args, "specialist_mcp_config", "") or ""
-        ) or None
-        if mcp_config_path is None and knowledge_plane is not None:
-            try:
-                pr_mcp_url = knowledge_plane.specialist_mcp_url()
-            except AttributeError:
-                pr_mcp_url = ""
-            generated = write_specialist_mcp_config(
-                session_dir=session_dir,
-                pr_monitor_mcp_url=pr_mcp_url,
-            )
-            if generated is not None:
-                mcp_config_path = str(generated)
-        sub_config = SpecialistSubprocessConfig(
-            claude_executable=claude_bin or "claude",
-            model=claude_model,
-            framework_source_roots=framework_source_roots,
-            mcp_config_path=mcp_config_path,
-            per_turn_max_seconds=per_turn_max_seconds,
-        )
-        runner = SpecialistRunner(
-            subprocess_config=sub_config,
-            session_dir=session_dir,
-            default_tools=DEFAULT_SPECIALIST_TOOLS,
-            default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
-            knowledge_plane=knowledge_plane,
-        )
-    else:
-        def _backend_factory(domain: Any) -> Any:
-            # in-process Claude path (fallback).
-            return ClaudeBackend(
-                model=claude_model, max_turns_default=max_turns,
-            )
-
-        runner = SpecialistRunner(
-            backend_factory=_backend_factory,
-            session_dir=session_dir,
-            default_tools=DEFAULT_SPECIALIST_TOOLS,
-            default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
-            knowledge_plane=knowledge_plane,
-        )
-
-    async def _executor(ctx: Any) -> dict:
-        """Adapter: SubAgentRunner.run_task → SpecialistRunner.run.
-
-        The SubAgentRunner wrapper has already transitioned the task to
-        ``running`` and ``ctx.task`` is the live :class:`Task`. We
-        always return a dict (even on failure) so the dispatcher's
-        ``state.transition('succeeded', evidence={...})`` step gets a
-        well-formed payload. SpecialistRunResult's distinction between
-        ``succeeded`` / ``empty_synthesised`` / ``stale`` etc. is
-        preserved under ``result.runner_status`` for downstream
-        analytics (breakdown.specialist_runs).
-        """
-        run_result = await runner.run(ctx)
-        # Translate dataclass → dict. The Coordinator's
-        # ``_handle_intent`` Gap-03 path (when wired) will pull
-        # ``specialist_done`` out of result.payload['specialist_done'].
-        return {
-            "runner_status": run_result.status,
-            "task_id": run_result.task_id,
-            "domain": run_result.domain,
-            "gap_canonical_id": run_result.gap_canonical_id,
-            "specialist_done": run_result.specialist_done,
-            "turns_used": run_result.turns_used,
-            "workspace": run_result.workspace,
-            "transcript_path": run_result.transcript_path,
-            "done_path": run_result.done_path,
-            "error": run_result.error,
-            "notes": list(run_result.notes or []),
-            "allocated_gpu_ids": list(
-                (run_result.specialist_done or {}).get("allocated_gpu_ids") or []
-            ),
-        }
-
-    return _executor
-
-
-def _build_dynamic_action_executor(
-    args: argparse.Namespace,
-) -> "Callable[[Any], Awaitable[dict]]":
-    """Build a SubAgentRunner-compatible executor backed by
-    :class:`DynamicActionRunner`.
-
-    Production uses a real Claude backend; tests register a
-    :class:`MockBackend` through the same path. Falls back to the
-    stub executor when no ``claude`` binary is on PATH.
-    """
-    import shutil
-
-    from .orchestrator.dynamic_action_runner import (
-        DEFAULT_TURN_CAP,
-        DEFAULT_WALL_CLOCK_BUDGET_SEC,
-        DynamicActionRunner,
-    )
-    from .orchestrator.action_executors.dynamic_action import (
-        dynamic_action_executor as _stub_executor,
-    )
-    from .orchestrator.framework_paths import resolve_source_file_allowlist
-
-    claude_bin = shutil.which("claude") or ""
-    if not claude_bin:
-        log.warning(
-            "dynamic_action: `claude` binary not on PATH; falling "
-            "back to the stub executor (empty proposal_set).",
-        )
-        return _stub_executor
-
-    model = (
-        getattr(args, "dynamic_action_model", None)
-        or getattr(args, "claude_model", "")
-    ).strip()
-    turn_cap_raw = getattr(args, "dynamic_action_turn_cap", None)
-    turn_cap = int(turn_cap_raw) if turn_cap_raw else DEFAULT_TURN_CAP
-    wall_clock_raw = getattr(args, "dynamic_action_wall_clock_sec", None)
-    wall_clock = (
-        float(wall_clock_raw) if wall_clock_raw
-        else DEFAULT_WALL_CLOCK_BUDGET_SEC
-    )
-    backend = ClaudeBackend(
-        model=model, max_turns_default=1, raw_completion=True,
-    )
-    runner = DynamicActionRunner(
-        backend,
-        wall_clock_budget_sec=wall_clock,
-        turn_cap=turn_cap,
-        framework_source_roots=tuple(resolve_source_file_allowlist()),
-    )
-
-    async def _executor(ctx: Any) -> dict:
-        result = await runner.run(ctx)
-        return result.to_dict()
-
-    return _executor
-
-
-def _register_executors(
-    coordinator: Coordinator,
-    *,
-    no_kernel: bool = False,
-    compare_against_gpu: str | None = None,
-    session_dir: Path | None = None,
-    specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
-    dynamic_action_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
-) -> None:
-    """Wire all currently-available action executors.
-
-    Real executors are pulled from ``_REAL_EXECUTORS_FULL`` (always).
-    Kernel-owned kinds (whose work is done inside the kernel agent via
-    emit_intent) get ``_noop_prep`` so SubAgentRunner doesn't fail with
-    "no_executor".
-
-    When ``no_kernel`` is True, the kernel-only no-op stubs are
-    skipped. The Coordinator-
-    internal ``profile`` and ``roofline`` analysis executors are
-    registered unconditionally so PRELUDE's auto-enqueued analysis task
-    (kind switched by ``--enable-roofline``) can always dispatch.
-
-    ``target_analysis`` is *always* registered with the real
-    :class:`TargetAnalysisExecutor`. When ``compare_against_gpu`` is a
-    non-empty string, the executor fetches the matching InferenceX
-    reference; when empty / None, it writes a structured
-    ``reason='no_target_gpu_configured'`` marker JSON so the report
-    section is rendered uniformly in both cases.
-
-    ``specialist_executor`` (v0.8 §3.5 / KB_gaps/Gap-01): the
-    :func:`_build_specialist_executor` adapter, when the operator has
-    ``--research-lane-capacity > 0``. ``None`` keeps the legacy
-    behaviour where a ``delegate{action='specialist'}`` task hits
-    ``no_executor`` and fails (M3 / pre-M5 path).
-    """
-    for kind, fn in _REAL_EXECUTORS_FULL.items():
-        coordinator.sub.register_executor(kind, fn)
-
-    coordinator.sub.register_executor(
-        "target_analysis",
-        TargetAnalysisExecutor(
-            compare_against_gpu=(compare_against_gpu or "").strip(),
-            session_dir=session_dir,
-        ),
-    )
-
-    # v0.8 §3.5 + register the specialist sub-agent
-    # adapter so ``delegate{action='specialist'}`` no longer hits
-    # ``no_executor``. Gated by ``--research-lane-capacity`` upstream
-    # (cli only passes a non-None executor when capacity > 0).
-    if specialist_executor is not None:
-        coordinator.sub.register_executor("specialist", specialist_executor)
-
-    # Register the runner-driven dynamic_action executor when
-    # available; otherwise fall back to the stub.
-    if dynamic_action_executor is not None:
-        coordinator.sub.register_executor(
-            "dynamic_action", dynamic_action_executor,
-        )
-    else:
-        from .orchestrator.action_executors.dynamic_action import (
-            dynamic_action_executor as _stub_dynamic_action_executor,
-        )
-        coordinator.sub.register_executor(
-            "dynamic_action", _stub_dynamic_action_executor,
-        )
-
-    # PR-A4 (Arbor-into-Hyperloom): wire the real IntegratePatchExecutor.
-    # The executor reads the specialist's worktree patches, applies them
-    # to framework_source_roots via ``git apply``, runs a Magpie bench,
-    # and decides KEEP / REVERT. It is the single integration point —
-    # specialists never apply patches themselves (Inv-5.1 updated by
-    # PR-A2; the worktree authorisation gives them write capability,
-    # but the orchestrator-side ``integrate_patch`` is what makes those
-    # patches visible to the serving framework).
-    coordinator.sub.register_executor(
-        "integrate_patch",
-        IntegratePatchExecutor(session_dir=session_dir),
-    )
-
-    # FRAMEWORK_PR phase per-candidate executor — Coordinator-internal
-    # only (PolicyGate denies LLM ``delegate{action='framework_pr'}``
-    # via ``framework_pr_action_not_llm_proposable``).
-    coordinator.sub.register_executor(
-        "framework_pr",
-        FrameworkPrExecutor(session_dir=session_dir),
-    )
-
-    # The composite ``roofline`` action runs profile + trace_analyze
-    # atomically and surfaces analysis.md to the next orchestration
-    # tick. Coordinator auto-enqueues it at PRELUDE and on every 10%
-    # gain watermark crossing — independent of ``--no-kernel`` — so the
-    # executor is unconditionally registered. ``profile`` is the
-    # ``--no-enable-roofline`` alternative and is registered via
-    # ``_REAL_EXECUTORS_FULL`` above. PolicyGate denies LLM-proposed
-    # delegate{action_name='roofline'|'profile'} regardless of mode.
-    coordinator.sub.register_executor(
-        "roofline",
-        make_roofline_executor(shared_state=coordinator.shared_state),
-    )
-
-    if log.isEnabledFor(logging.DEBUG):
-        for required_kind in ("roofline", "profile"):
-            if required_kind not in coordinator.sub.executor_registry:
-                log.debug(
-                    "register_executors: %r missing from sub-agent registry "
-                    "(no_kernel=%s); PRELUDE analysis task will fail with "
-                    "no_executor",
-                    required_kind, no_kernel,
-                )
-
-    if no_kernel:
-        return
-
-    for kind in _NOOP_KINDS_KERNEL_ONLY:
-        coordinator.sub.register_executor(kind, _noop_prep)
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
