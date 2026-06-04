@@ -1,0 +1,20 @@
+# Golden top-level keys of manifest.json (schema_version: 1)
+# Source: test_breakdown_smoke realistic fixture (no GPU).
+# Contract: --resume reads same-version manifest; keys must stay equivalent.
+claw_session_id
+code_revision
+created_at_utc
+framework
+gpu_type
+host
+max_minutes
+model_name
+model_path
+objective
+pid
+sandbox_user_id
+schema_version
+session_dir
+session_id
+tp
+workload
