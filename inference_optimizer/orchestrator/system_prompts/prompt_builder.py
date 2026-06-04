@@ -36,7 +36,7 @@ from ..action_registry import (
     ActionRegistry,
     VALID_PIPELINE_PHASES,
 )
-from ..action_surfaces import (
+from ...protocol.action_surfaces import (
     FULL_ENABLED_ACTIONS,
     GRID_INJECTABLE_ACTIONS,
     KERNEL_OWNED_ACTIONS,
