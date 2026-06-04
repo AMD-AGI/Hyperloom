@@ -110,20 +110,16 @@ def render_model_arch_compact(arch: dict | None) -> str:
 # backend) consumes the whole run. Override via the matching env var
 # named in ``record_kernel_opt`` (1 disables the second-chance entirely).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
-# PR-C: a completed backend ladder (GEAK -> Claude -> Codex) that did
-# not produce a KEEP is the operator's definition of "this kernel
-# cannot be optimized". One such failure retires the kernel for the
-# rest of the session; the LLM does not get to re-dispatch the same
-# kernel via a fresh ``run_optimization`` request. Override via
+# A completed backend ladder (GEAK -> Claude -> Codex) without a KEEP
+# retires that kernel for the rest of the session. Override via
 # ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
 _DEFAULT_KERNEL_OPT_MAX_FAILURES = 1
-# PR-C: hot-kernel report gate threshold. Reusable hot kernels with
-# ``gpu_pct`` >= this value MUST get at least one kernel_opt attempt
-# (or be rejected after one) before ``report`` is allowed to fire.
+# Hot-kernel report gate threshold. Reusable hot kernels at or above this
+# GPU share need at least one kernel_opt attempt or explicit rejection
+# before ``report`` can fire.
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
-# PR-C: cap how many hot kernels the report-gate will demand. Even on
-# a noisy trace with 15 reusable rows, only the top-N by gpu_pct are
-# enforced -- avoids the LLM stalling on dozens of tiny kernels.
+# Only the top-N reusable hot kernels are enforced, keeping noisy traces
+# from stalling the run on dozens of tiny kernels.
 _DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
 
 # Per-action audit history cap. ``<action>_attempts`` lists keep the most
@@ -169,11 +165,8 @@ _GAPS_ATTEMPTS_HISTORY = 20
 # helpers so adding a new audit action is a one-line change.
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "sweep", "explore",
-    # F1-3 (Roofline-v2 / ) + N10: the composite
-    # ``roofline`` action runs profile + trace_analyze atomically.
-    # Audit each attempt so the prompt's RECENT ACTION ATTEMPTS block
-    # surfaces the snapshot id + analysis_md_path the executor produced
-    # (or the failure phase / error_class on the failure path).
+    # ``roofline`` runs profile + trace_analyze atomically; audit it so
+    # prompts can see the produced snapshot id / analysis path or failure.
     "roofline",
 })
 
@@ -187,9 +180,8 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "profile":  ("output_throughput", "output_throughput"),
     "sweep":    ("output_throughput", "output_throughput"),
     "explore":  ("best_gain_pct",     "gain_pct"),
-    # F1-3 + N10: ``roofline`` is an analysis composite, not a
-    # benchmark — its key metric is the monotonic snapshot id, not a
-    # throughput number.
+    # ``roofline`` is an analysis composite, so its key metric is the
+    # monotonic snapshot id rather than throughput.
     "roofline": ("snapshot_id",       "snapshot_id"),
 }
 
@@ -413,20 +405,9 @@ class SharedState:
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
-    # N33 (May 2026): consecutive coordinator ticks in which nothing
-    # happened that would advance the run -- i.e. no queued tasks, no
-    # running tasks, no pending proposals (so no LLM proposal landed
-    # this tick either) and ``current_action`` is empty. The Coordinator
-    # tick loop bumps this when its end-of-tick snapshot matches the
-    # "idle" definition above; any change (new proposal, new task,
-    # stack growth) resets it back to 0.
-    #
-    # Read by the tick loop after the wall-clock-deadline check: once
-    # this exceeds ``INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS`` (default
-    # 120 -- ~10 min at the 5s sleep used in prod), the loop calls
-    # ``_enter_closing_phase`` to enqueue the final report instead of
-    # idling until the wall-clock deadline. Reset to 0 the moment we
-    # actually enter closing.
+    # Consecutive ticks with no queued/running work, no pending proposals,
+    # no current action, and no stack growth. The tick loop resets it on
+    # any progress and can use it to close an otherwise idle session.
     consecutive_silent_ticks: int = 0
     # Path to the YAML the baseline executor materialized with the operator's
     # workload envs (CONC/ISL/OSL/TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/...).
@@ -436,50 +417,21 @@ class SharedState:
     # downstream executors fall back to materializing the shipped YAML
     # against current process env when this is empty.
     baseline_config_path: str = ""
-    # GAP 5 (KB tag completeness): runtime component versions populated
-    # by cli at boot from manifest / stack_fingerprint. Mirror of the
-    # equivalent fields written to ``recipe.attrs`` by the T0 backfill,
-    # exposed here so ``_collect_workload_tags`` can stamp them onto
-    # every lesson / pitfall write WITHOUT having to re-parse manifest
-    # at fact-write time.
-    #
-    # Shape: ``{"sglang": "0.5.11", "vllm": "0.19.0", "rocm": "6.2.0",
-    #           "aiter": "abc123", "image_digest": "sha256:..."}``.
-    # All keys optional; empty / "unknown" values are stripped before
-    # writing onto the recipe so KB attrs stays compact. Resume-safe
-    # because the field is JSON-serialised into state.json.
+    # Runtime component versions populated at boot and reused for recipe
+    # writes. Optional keys include framework/runtime versions, ROCm,
+    # aiter, and image digest; empty / unknown values are stripped.
     stack_fingerprint_meta: dict = field(default_factory=dict)
-    # GAP 5: extra workload-shape fields parsed from the materialized
-    # baseline YAML — ``max_running_requests`` / ``max_num_seqs`` /
-    # ``chunked_prefill_enabled`` / ``enable_torch_compile`` /
-    # ``quant_scheme`` / ``workload_mode``. These are *not* in the
-    # canonical id (would explode the recipe space) but they are
-    # crucial filters for the warm-start ladder and the lesson reader
-    # so future sessions can pick a closer prior.
-    #
-    # Populated by ``BaselineExecutor._promote_to_shared_state`` after
-    # the baseline YAML is materialized. Empty dict before first
-    # baseline result; downstream consumers tolerate missing keys.
+    # Extra workload-shape fields parsed from the materialized baseline
+    # YAML. They are filters for warm-start and lesson lookup, not part of
+    # the recipe canonical id.
     baseline_workload_extra: dict = field(default_factory=dict)
-    # GAP 1 (warm-recipe replay) — one-shot guard so the PRELUDE
-    # auto-enqueue path doesn't fire twice for the same session
-    # (resume safety). The Coordinator flips this to True at the
-    # moment a ``replay_warm_recipe`` task is created; the field
-    # survives resume via state.json so a robustness restart cannot
-    # accidentally double-spend the replay budget. ``False`` is the
-    # default for fresh sessions.
+    # One-shot guard for PRELUDE warm-recipe replay. Persisted so resume
+    # cannot enqueue the same replay task twice.
     warm_replay_attempted: bool = False
-    # GAP 1 supporting field — one-shot guard for
-    # ``_inject_warm_recipe_history_into_ledger``. Decoupled from
-    # ``warm_replay_attempted`` because the history injection is
-    # independent of whether the operator enabled warm replay:
-    # ``--no-warm-replay`` users still benefit from "don't retry
-    # known-failed variants". Resume-safe: persists into state.json
-    # so a robustness restart cannot double-inject the same rows.
+    # One-shot guard for injecting warm-recipe history into the explore
+    # ledger, independent of whether replay itself is enabled.
     warm_history_injected: bool = False
-    # GAP 1 — structured outcome of the warm-replay attempt so the
-    # report / prompt can render "we tried the KB best_config and
-    # got +X% (vs the recipe's claim of +Y%)". Shape::
+    # Structured warm-replay outcome for reports and prompts. Shape::
     #
     #   {
     #     "status":            "reproduced" | "drift" | "failed" | "skipped",
@@ -530,10 +482,8 @@ class SharedState:
     # cleared its inline rebench.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
-    # Length of ``optimization_stack`` at the time of the last successful
-    # inline stack rebench; used by the Coordinator to decide whether
-    # the current stack still matches the validated number, or whether
-    # the TODO 4 stack-rebench guard should fire after new KEEPs landed.
+    # Length of ``optimization_stack`` at the last successful inline stack
+    # rebench. A longer current stack means new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
     # Tput (tok/s/GPU) measured at the most recent successful roofline
     # task; serves as the watermark for the gain-driven roofline refresh
@@ -614,14 +564,9 @@ class SharedState:
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
-    # Append-only history of compact roofline snapshots used by
-    # ``report.py`` to render the ``## Roofline Comparison`` section.
-    # PR #321 retired the legacy ``last_trace_analyze_baseline``
-    # baseline-freeze field; the snapshot history preserves the first
-    # (baseline) snapshot across watermark-driven refreshes of
-    # ``last_trace_analyze`` so a real before/after comparison stays
-    # available even after multiple +10% refreshes overwrite the
-    # latest-snapshot cache.
+    # Append-only compact roofline snapshots used by ``report.py``.
+    # Keeping the first baseline snapshot preserves before/after reporting
+    # even when later +10% refreshes overwrite ``last_trace_analyze``.
     #
     # Each entry matches the shape returned by
     # :func:`orchestrator.roofline_snapshot.build_roofline_snapshot`
@@ -630,14 +575,9 @@ class SharedState:
     # ``trace_input`` for downstream re-extraction. Capped at
     # ``MAX_ROOFLINE_SNAPSHOTS`` to bound on-disk state.json size.
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
-    # N27 — outer roofline failure counter. Bumped by
-    # ``Coordinator._promote_to_shared_state`` on every failed
-    # ``roofline`` task and reset to 0 on the next successful one.
-    # The per-phase fallback in commit 6078012 ("per-phase fallback
-    # when auto-roofline fails") already handles the EXPLORE-degraded
-    # / KERNEL-fall-back-to-profile behaviour main's N27 fallback
-    # threshold targets; the counter exists here for prompt-side
-    # visibility (the LLM sees how many outer attempts failed).
+    # Outer roofline failure counter. Coordinator bumps it on failed
+    # roofline tasks and resets it on success; prompts use it for
+    # visibility while phase-specific fallbacks decide behavior.
     roofline_failure_streak: int = 0
 
     # ------------------------------------------------------------------
@@ -783,11 +723,7 @@ class SharedState:
     # merged explore action snapshot. Same
     # schema as the other ``last_<action>`` mirrors.
     last_explore: dict[str, Any] = field(default_factory=dict)
-    # Roofline-v2 N10: composite roofline action audit snapshot +
-    # rolling history. Mirrors the v0 per-action audit pattern (one
-    # dict snapshot for "what was the most recent run", one capped
-    # list for "what was the per-tick history"). Counted by N7's
-    # verify_roofline_v2 / audit_roofline_decisions scripts.
+    # Composite roofline action audit snapshot plus capped history.
     last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -795,8 +731,7 @@ class SharedState:
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     # explore audit log. Capped per _DEFAULT_ATTEMPTS_HISTORY.
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # Roofline-v2 N10: per-tick roofline audit log (capped). Records the
-    # snapshot_id / analysis_md_path each successful invocation produced.
+    # Capped roofline audit log with snapshot ids and analysis paths.
     roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results, capped at
     # ``_DEFAULT_LAST_FAILURES``. Carries the rich failure context
@@ -903,9 +838,8 @@ class SharedState:
     # specialist domain consistently fails to produce ideas
     #.
     specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
-    # IR-7 — session_steward_specialist (honest self-stop). The
-    # Coordinator dispatches this domain on EXPLORE plateau and routes
-    # the recommendation:
+    # session_steward_specialist assessment. Coordinator dispatches this
+    # domain on EXPLORE plateau and routes the recommendation:
     #   * ``continue_explore``    — inject ``next_gap_canonical_id`` into
     #                               gaps[], reset plateau counters once;
     #                               sets ``steward_continuation_used``.
@@ -923,35 +857,21 @@ class SharedState:
     # ``last_<action>`` mirrors; useful for the orchestration prompt
     # to surface "last round's specialist outcome").
     last_specialist: dict[str, Any] = field(default_factory=dict)
-    # PR-A7 (Arbor-into-Hyperloom) — per-specialist patch verdict
-    # ledger keyed by specialist task_id. The Critic role reviews a
-    # specialist's worktree patches before ``integrate_patch`` runs;
-    # values are entries from REVIEW_VERDICTS
-    # (``approve`` / ``reject`` / ``needs_review`` / ``advise`` /
-    # ``redirect``). PolicyGate's
-    # ``integrate_patch_requires_critic_verdict`` rule denies an
-    # integrate_patch delegate whose specialist_task_id is missing
-    # from this map OR carries a ``reject`` verdict — so a hostile
-    # / regressive patch never reaches the serving GPU. ``approve`` /
-    # ``advise`` allow integrate; ``needs_review`` / ``redirect``
-    # require explicit operator override via
-    # ``params.bypass_critic=True``.
+    # Per-specialist patch verdict ledger keyed by specialist task_id.
+    # Critic must approve or advise before PolicyGate allows the related
+    # ``integrate_patch`` delegate; reject / needs_review / redirect block
+    # it unless an operator explicitly bypasses review.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
-    # PR-A8 (Arbor-into-Hyperloom) — intervention-mix ledger.
-    #
+    # Intervention-mix ledger used by Robustness to detect config-only
+    # exploration loops and recommend patch-authoring specialists.
     # Each entry: ``{change_type, action, task_id, ts, delta_pct}``.
     # ``change_type`` ∈ {"config", "code_patch"}:
-    #   * "config"     — env-var / CLI-flag tweaks via the merged
-    #                    ``explore`` action (Arbor's "config agent").
+    #   * "config"     — env-var / CLI-flag tweaks via ``explore``.
     #   * "code_patch" — specialist-authored source patch promoted via
-    #                    ``integrate_patch`` (Arbor's "code agent").
-    # The Robustness role consumes this ledger to detect consecutive
-    # config-only rounds and recommend escalating to a patch-authoring
-    # specialist next round.
+    #                    ``integrate_patch``.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
-    # PR-A8 — counts the *current* run of contiguous KEEPs whose
-    # change_type is ``config``. Resets to 0 every time a ``code_patch``
-    # KEEP lands. Robustness reads this via the per-tick prompt.
+    # Current run of contiguous config KEEPs. Resets when a code_patch
+    # KEEP lands; Robustness reads this via the per-tick prompt.
     consecutive_config_only_rounds: int = 0
     # Research scout bookkeeping.
     #   * ``research_scout_enabled`` — master switch (``--no-research-scout``
@@ -993,10 +913,8 @@ class SharedState:
     # Optional CLI overrides for the depth-gate thresholds; unset keys
     # fall back to the phase_state defaults.
     depth_gate_thresholds: dict[str, int] = field(default_factory=dict)
-    # PR-A8 — total specialist dispatches in the current EXPLORE entry.
-    # Reset on phase transition into a fresh EXPLORE. Robustness's
-    # storm detector fires when this crosses the configured cap
-    # without a single non-empty proposal_set in the same window.
+    # Total specialist dispatches in the current EXPLORE entry. Reset on
+    # fresh EXPLORE entry; Robustness uses it to detect specialist storms.
     explore_specialist_dispatched_count: int = 0
     # Aggregate view of dynamic_action dispatches keyed by ``dyn_id``;
     # Coordinator-only writer (``CORE_STATE_FIELDS`` blocks LLM
@@ -1009,10 +927,8 @@ class SharedState:
     # ``PolicyGate._validate_dynamic_action_dispatch`` for the
     # ``MAX_DYNAMIC_PER_ROUND`` cap; Coordinator is the sole writer.
     dynamic_action_round_count: int = 0
-    # research_lane capacity locked at session start
-    #. M5 default is 1 (single-specialist series);
-    # M6 raises to 6 (concurrent). PolicyGate denies mid-session
-    # mutation because it's listed in CORE_STATE_FIELDS.
+    # Research-lane capacity locked at session start. PolicyGate denies
+    # mid-session mutation because this is a core state field.
     research_lane_capacity: int = 1
     # Separate GPU pool capacity for specialists that explicitly request
     # ``needs_gpu=true``. Zero disables GPU specialists. Locked at session
@@ -1050,7 +966,7 @@ class SharedState:
     # ``{framework: {"backend_flags": [...], "param_flags": [...],
     # "ts": iso, "source_path": str}}``.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
-    # Rolling per-action winners log (cap 20) used by IR-26 idea
+    # Rolling per-action winners log (cap 20) used for dynamic idea
     # generation. Schema: ``{action, round_id, base_tput,
     # winners: [{name, tput, gain_pct, extra_server_args, extra_envs}],
     # best: {...}, ts}``.
@@ -1341,9 +1257,8 @@ class SharedState:
                 "baseline_tput", "baseline_accuracy", "current_best",
                 "cumulative_gain", "cumulative_gain_validated",
                 "optimization_stack",
-                # IR-7 additions (steward); safe to lose on v0.6 → v0.8
-                # migration since the LLM treats missing assessment as
-                # "no priors".
+                # Steward fields are safe to default on old state.json:
+                # missing assessment means "no priors".
                 "last_remaining_gaps_assessment",
                 "remaining_gaps_assessments",
             )
@@ -1617,7 +1532,7 @@ class SharedState:
         return "unknown"
 
     # ------------------------------------------------------------------
-    # IR-7 — session steward assessment writer
+    # Session steward assessment writer.
     # ------------------------------------------------------------------
     _STEWARD_ASSESSMENT_HISTORY_CAP = 10
 
@@ -1989,8 +1904,7 @@ class SharedState:
           clobber a previously-recorded KEEP. Otherwise streaming
           ``record_partial`` writes from a batch's fast KEEPs would be
           erased the moment one slow sibling times out, and Orchestration
-          would never see ``last_kernel_opt.decision == "KEEP"`` -- which
-          is the only gate that opens TODO 4/5 integrate.
+          would never see the pending KEEP that opens integrate.
 
         * **Non-KEEP cannot overwrite a pending KEEP.** During a
           ``_run_optimization_batch`` fan-out, sub-results land in
@@ -2035,18 +1949,10 @@ class SharedState:
         )
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
-        # PR-C: An "infra failure" is a backend ladder that finished
-        # WITHOUT delivering any verdict at all -- subprocess timeout,
-        # batch handler exception, GEAK/OOB rc!=0, missing inputs, etc.
-        # These are distinct from REVERT (which has its own
-        # ``should_reject`` rule) and PARTIAL (which has its own
-        # ``max_partial`` streak gate); we don't double-count them.
-        # The new ``max_failures = 1`` rule covers ONLY this pure
-        # infra-failure case: Qwen3-30B-A3B-Base 164405Z burned 8h
-        # because GEAK -> Claude -> Codex timed out repeatedly on the
-        # same k002/k004 and each ladder showed up as status=failed
-        # with empty decision -- silently bumping attempts but never
-        # tripping a retire gate.
+        # A pure infra failure is a backend ladder that produced no
+        # verdict at all: timeout, handler exception, non-zero backend
+        # exit, missing inputs, etc. Keep it distinct from REVERT and
+        # PARTIAL so the retirement counters do not double-count.
         is_infra_failure = (
             decision == ""
             and (
@@ -2070,18 +1976,10 @@ class SharedState:
         })
         history = history[-10:]
         entry["attempts"] = int(entry.get("attempts", 0)) + 1
-        # PR-K: per-source attempts ledger. The dispatcher's ``_is_live``
-        # consults this dict so that promoting a kernel's source from the
-        # python @compile_ops wrapper (e.g. ``aiter/ops/moe_op.py``) to
-        # the device .cu (e.g. ``csrc/.../gemm_moe_ck2stages.cu``) does
-        # NOT inherit the wrapper's attempts counter -- the device path
-        # is treated as a fresh target with its own attempts_per_source
-        # quota. Empty ``source_file`` is normalized to ``""`` so the
-        # resume from a v1 state.json (no per-source field) is bit-for-
-        # bit transparent: every entry gets a valid key, the dispatcher
-        # falls back to ``attempts`` total when no per-source row matches
-        # the candidate's current source_file, and the cumulative
-        # ``attempts`` field above continues to reflect "any source".
+        # Per-source attempts prevent a Python wrapper and the underlying
+        # device file from sharing the same retry quota. Empty source_file
+        # keeps old state.json rows valid while preserving the cumulative
+        # attempts count above.
         per_source = dict(entry.get("attempts_per_source") or {})
         src_key = source_file or ""
         per_source[src_key] = int(per_source.get(src_key, 0)) + 1
@@ -2139,11 +2037,8 @@ class SharedState:
                 # (already assigned above) instead of failing.
                 pass
 
-        # PR-C: max_failures defaults to 1 -- a single completed backend
-        # ladder (GEAK -> Claude -> Codex) that did not produce a KEEP
-        # is the operator's definition of "this kernel cannot be
-        # optimized; do not retry". Operators that want to give a
-        # flaky GEAK/OOB a second chance can bump via env.
+        # One completed backend ladder without a KEEP retires the kernel
+        # by default; operators can raise the threshold for flaky backends.
         max_failures = _DEFAULT_KERNEL_OPT_MAX_FAILURES
         env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
         if env_f:
@@ -2184,7 +2079,7 @@ class SharedState:
         self.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
 
     # ------------------------------------------------------------------
-    # Multi-KEEP integrate queue helpers (PR-B follow-up).
+    # Multi-KEEP integrate queue helpers.
     # ------------------------------------------------------------------
     def _kernel_ids_in_optimization_stack(self) -> set[str]:
         """kernel_ids already absorbed into optimization_stack as integrate entries."""
@@ -2223,9 +2118,8 @@ class SharedState:
           2. Among the remaining KEEPs, pick the highest
              ``last_micro_speedup`` so the strongest lever lands first.
 
-        Consumers: Coordinator's ``_kernel_opt_keep_pending`` for the
-        TODO 4/5 integrate gate, plus the prompt_builder rendering used
-        by Orchestration / robustness to see how many KEEPs are queued.
+        Consumers: Coordinator's ``_kernel_opt_keep_pending`` integrate
+        gate and prompt rendering for queued KEEP visibility.
         """
         integrated_ids = self._kernel_ids_in_optimization_stack()
         integrated_sources = self._source_files_in_optimization_stack()
@@ -2303,11 +2197,8 @@ class SharedState:
         return len(self.kernel_opt_attempts or {})
 
     # ------------------------------------------------------------------
-    # PR-C: hot-kernel report gate. Drives Coordinator's "report cannot
-    # fire until every meaningful hot reusable kernel has been
-    # attempted" guard, so the LLM cannot prematurely emit `report`
-    # (Qwen3-30B-A3B-Base 164910Z bug: tick=8 -> report_emitted with
-    # k001=24% / k002=37% / k004=9.7% untouched).
+    # Hot-kernel report gate: report cannot fire until meaningful
+    # reusable hot kernels have been attempted or explicitly rejected.
     # ------------------------------------------------------------------
     def untried_hot_reusable_kernels(
         self,
@@ -2618,7 +2509,7 @@ class SharedState:
     ) -> None:
         """write the canonical 11-field ``last_trace_analyze`` dict.
 
-        Called by :class:`RooflineExecutor` (F1-2) after a successful
+        Called by :class:`RooflineExecutor` after a successful
         ``trace_analyze`` sub-step, and by the inline programmatic
         handler path in :meth:`Coordinator._handle_request` when an LLM
         emits a ``trace_analyze`` request directly. Single canonical
@@ -3113,8 +3004,7 @@ class SharedState:
         task_id: str = "",
         delta_pct: float | None = None,
     ) -> None:
-        """PR-A8 (Arbor-into-Hyperloom): append one entry to the
-        intervention-mix ledger and update ``consecutive_config_only_rounds``.
+        """Append one intervention entry and update config-only counters.
 
         ``change_type`` is normalised to lowercase. Unknown values
         ("kernel", "noop", ...) are still appended (the ledger is
@@ -3192,7 +3082,7 @@ class SharedState:
         }
 
     def bump_specialist_dispatched(self, n: int = 1) -> int:
-        """PR-A8: increment the per-EXPLORE specialist dispatch counter.
+        """Increment the per-EXPLORE specialist dispatch counter.
 
         Returns the post-increment value so callers can act on it
         inline (e.g. a robustness storm threshold).
@@ -3203,7 +3093,7 @@ class SharedState:
         return self.explore_specialist_dispatched_count
 
     def reset_specialist_dispatched(self) -> None:
-        """PR-A8: zero the per-EXPLORE specialist dispatch counter.
+        """Zero the per-EXPLORE specialist dispatch counter.
 
         Called by Coordinator on phase transition into a fresh
         EXPLORE entry.
@@ -3343,19 +3233,16 @@ class SharedState:
         }
 
     def to_intervention_mix_summary(self) -> str:
-        """PR-A8 / D3 (Arbor-into-Hyperloom): render the config-vs-code_patch
-        intervention ledger for the Orchestration per-tick prompt.
+        """Render the intervention ledger for the Orchestration prompt.
 
         Returns ``""`` when the ledger is empty (nothing recorded yet — no
         escalation possible). Otherwise returns a one-line counts summary,
         plus an ``ESCALATION`` directive when the session has been
         config-only for too long, nudging Orchestration to dispatch a
-        code-patch ``serving_specialist`` next (Arbor's "do not settle for
-        config-only" rule). ``record_intervention`` maintains the ledger;
-        this is its sole consumer.
+        code-patch ``serving_specialist`` next. ``record_intervention``
+        maintains the ledger; this is its sole consumer.
 
-        Thresholds mirror Arbor's ``get_intervention_mix`` heuristics:
-        escalate when ``consecutive_config_only_rounds >= 2`` OR the ledger
+        Escalate when ``consecutive_config_only_rounds >= 2`` OR the ledger
         is config-heavy (>= 5 config keeps) with zero code_patch keeps.
         """
         mix = self.intervention_mix or []
@@ -3375,12 +3262,9 @@ class SharedState:
                 "code_patch", "code_patch_attempt",
             )
         )
-        # B2: config explore rounds that produced measurements but KEPT
-        # nothing (all REVERT / KEEP_UNSTABLE) are recorded as
-        # ``config_attempt``. They count toward the escalation signal so
-        # repeated fruitless config tuning escalates to a code-patch
-        # ``integrate_patch`` even when the MI300X noise floor prevents
-        # any config KEEP (the failure mode that left this loop spinning).
+        # Config explore rounds that measured but kept nothing still count
+        # toward escalation, so repeated fruitless tuning can hand off to a
+        # code-patch path even without a config KEEP.
         n_config_attempt = sum(
             1 for m in mix if (m or {}).get("change_type") == "config_attempt"
         )
@@ -3594,8 +3478,7 @@ class SharedState:
     def record_specialist_patch_verdict(
         self, specialist_task_id: str, verdict: str,
     ) -> None:
-        """PR-A7 (Arbor-into-Hyperloom): record the Critic's verdict on a
-        specialist's worktree patches.
+        """Record the Critic verdict for a specialist worktree patch.
 
         Idempotent: a later verdict overwrites an earlier one (the
         Critic may produce a revised verdict after a needs_review
@@ -3615,8 +3498,7 @@ class SharedState:
     def get_specialist_patch_verdict(
         self, specialist_task_id: str,
     ) -> str:
-        """PR-A7: return the recorded patch verdict, or empty string
-        when no critic decision is on record yet."""
+        """Return the patch verdict, or empty when no Critic decision exists."""
         sid = str(specialist_task_id or "").strip()
         if not sid:
             return ""
@@ -3794,11 +3676,8 @@ class SharedState:
     ) -> None:
         """Append one explore round's winners (≥+1% over base) to history.
 
-        IR-26 (dynamic idea generation) reads this so the LLM, before
-        proposing the next backends/params round, can compose new combos /
-        retries / sibling-flag variants from what previously won. Marathon
-        equivalent: orchestrator pane's per-tick "follow-on actions"
-        synthesis (marathon/skills/SKILL.md §"Dynamic Idea Generation").
+        The prompt uses this before the next explore round to compose new
+        combos, retries, or sibling-flag variants from previous winners.
         """
         from .action_executors._grid_runner import variant_fingerprint
         round_id = f"{action}-{len(self.backend_winners_history) + 1:03d}"
@@ -3859,11 +3738,8 @@ class SharedState:
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
-    # Note: main commit 8e69732 also ports ``to_action_scores_summary``
-    # — a render helper for the legacy ``Action scores`` prompt block.
-    # KB_design §3.9 retired the scoreboard on this branch (see
-    # the retired-features list §4), so the helper
-    # has no live consumer and is intentionally omitted.
+    # Legacy action-score rendering is intentionally omitted: prompts now
+    # use factual state summaries instead of system-side numeric priority.
 
     def append_stack_gain_entry(
         self,
@@ -3874,8 +3750,7 @@ class SharedState:
         extra_server_args: str = "",
         ts: str | None = None,
     ) -> float | None:
-        """N32b: Mirror an ``optimization_stack`` append into
-        ``gain_per_stack_entry`` so the two lists stay index-aligned.
+        """Mirror an optimization_stack append into gain_per_stack_entry.
 
         Computes ``(new_tput - baseline_tput) / baseline_tput * 100``
         and appends. Returns the computed gain_pct (None when
@@ -3969,10 +3844,9 @@ class SharedState:
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
         """True iff a new KEEP has landed since the last inline stack rebench.
 
-        Used by Coordinator to surface the TODO 4 ``stack rebench
-        required`` guard in the per-tick checklist. The check is purely
-        on stack *length*: every successful inline rebench (v0.8 M3
-        explore per-KEEP loop) records
+        Used by Coordinator to surface the ``stack rebench required``
+        guard in the per-tick checklist. The check is purely on stack
+        length: every successful inline rebench records
         ``cumulative_gain_validated_stack_len``, so a longer stack means
         at least one new KEEP (e.g. from ``integrate``) came in without
         an end-to-end revalidation.
@@ -4040,7 +3914,7 @@ class SharedState:
         budget math.
 
         When in EXPLORE, an extra ``force_exit`` line surfaces how much
-        runway is left before the HARD force-exit gate (IR-6) fires.
+        runway is left before the hard force-exit gate fires.
         """
         from .phase_state import (
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
@@ -4081,8 +3955,8 @@ class SharedState:
             budget_line,
             allowed_line,
         ]
-        # EXPLORE-only: show distance to HARD force-exit (IR-6) so the
-        # LLM has a deterministic countdown alongside the soft budget.
+        # EXPLORE-only: show distance to hard force-exit alongside the
+        # soft budget.
         if phase == PHASE_EXPLORE:
             overrides = self.plateau_overrides or {}
             hours_thresh = float(overrides.get(
@@ -4466,11 +4340,9 @@ class SharedState:
             f"backend_winners_history={self._format_backend_winners_history()}",
             f"synergy_attempted={len(self.synergy_attempted)} combos",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
-            # PR-B multi-KEEP integrate queue: surfaces the full set of
-            # pending KEEPs the integrate gate will drain (strongest-
-            # first), plus the per-kernel attempts count Fix-2 reads to
-            # silence ``no_levers_found`` false positives while batch
-            # kernel_opt is in flight.
+            # Surface pending KEEPs the integrate gate will drain, plus
+            # the per-kernel attempt count used while batch kernel_opt is
+            # still in flight.
             (
                 "pending_keep_kernels="
                 f"{self.pending_keep_kernel_ids() or '(none)'}"
@@ -4770,9 +4642,8 @@ class SharedState:
         the section to hundreds of KB of opaque noise. Stripping is
         in-memory only; the on-disk file stays intact for operators.
 
-        Cherry-picked from main alongside F1-2 (RooflineExecutor); the
-        helper module ``inference_optimizer/tracelens_md.py`` lands in
-        the same commit.
+        The helper lives in ``inference_optimizer.tracelens_md`` so this
+        method stays focused on prompt formatting.
         """
         if not text:
             return text or ""
@@ -4780,7 +4651,7 @@ class SharedState:
         return strip_base64_data_urls(text)
 
     def _format_analysis_md_full(self) -> str:
-        """F1-4 (Roofline-v2 N5): inject TraceLens analysis.md verbatim.
+        """Inject TraceLens analysis.md verbatim.
 
         Roofline composite design §6.1 mandates that analysis.md is
         handed to the orchestration LLM verbatim — no truncation, no
@@ -4790,19 +4661,15 @@ class SharedState:
         SharedState dump lines.
 
         Header carries ``snapshot=N`` + ``gain at snapshot=X.XX%`` so
-        the LLM (and the orchestration.md re-profile guidance landed in
-        F1-5) can detect "report is stale, gain has moved by ≥3% since
-        snapshot" without parsing the body.
+        prompts can detect stale analysis without parsing the body.
 
         Render modes:
           * cache empty / ``analysis_md_text`` missing → one-line hint
             asking the LLM to propose ``roofline``.
           * cache populated → full report between bookends.
 
-        Cherry-picked from /wekafs/zgong/Hyperloom main @ c6f0a71
-        ``shared_state.py:2772`` ; the N27 fallback-mode branch is
-        omitted because PolicyGate fallback (F3) is not yet on this
-        branch — the simpler default-hint message stands in until F3.
+        When no report is cached, return a short hint instead of
+        fabricating analysis content.
         """
         cached = self.last_trace_analyze or {}
         md_text = cached.get("analysis_md_text") or ""
