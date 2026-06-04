@@ -41,8 +41,16 @@ from typing import Any, Mapping
 from .. import recipe_snapshot_constants as C
 from ..compat.payload_aliases import CANONICAL_KEY
 from .canonical_id import recipe_canonical_id
+from .remote_client import RemoteRecipeClientError
 
 log = logging.getLogger(__name__)
+
+# Nested env-map key used across the warm-start consumers
+# (``coordinator._maybe_enqueue_warm_replay`` / ``_inject_warm_recipe_history``)
+# and the authoritative local recipe shape (``_build_recipe_payload``). The
+# gbrain read surface mirrors this shape so a round-tripped champion config is
+# consumable verbatim by warm-replay.
+_ENVS_KEY = "extra_envs"
 
 # Listing the whole recipe type is cheap (the corpus is small) but we
 # still cap the scan so a runaway corpus can never block the main loop.
@@ -50,14 +58,19 @@ _RECIPE_SCAN_CAP = 500
 _LIST_PAGE_SIZE = 100
 
 
-class GbrainRemoteError(RuntimeError):
+class GbrainRemoteError(RemoteRecipeClientError):
     """Raised on an unrecoverable gbrain MCP interaction.
 
-    The dispatcher catches the analogous ``RemoteRecipeClientError`` and
-    degrades to the local store; we raise the same-shaped error (it
-    subclasses RuntimeError) so the existing ``on_remote_failure`` /
-    fall-through path treats a gbrain hiccup identically.
+    Subclasses :class:`RemoteRecipeClientError` so the ``RecipeKB``
+    dispatcher's existing ``except RemoteRecipeClientError`` fall-through
+    catches a gbrain transport / bad-envelope / JSON-RPC error and
+    degrades to the local store — without it, a gbrain network blip would
+    bubble straight up the warm-start path and could lose the local
+    recipe a fall-through would have surfaced.
     """
+
+    def __init__(self, message: str, *, category: str = "transport", **kwargs: Any) -> None:
+        super().__init__(message, category=category, **kwargs)
 
 
 class _GbrainMcp:
@@ -96,7 +109,19 @@ class _GbrainMcp:
                 obj = json.loads(data_lines[0]) if data_lines else {}
         except (json.JSONDecodeError, IndexError) as exc:
             raise GbrainRemoteError(f"gbrain {tool} bad envelope: {exc!r}") from exc
+        if not isinstance(obj, dict):
+            raise GbrainRemoteError(f"gbrain {tool} unexpected envelope type: {type(obj).__name__}")
+        # JSON-RPC transport-level error envelope. Without surfacing this a
+        # failed put_page / list_pages would parse as an empty success —
+        # ingest/mirror would over-count "ingested" and health() would
+        # falsely report healthy.
+        if obj.get("error") is not None:
+            raise GbrainRemoteError(f"gbrain {tool} JSON-RPC error: {obj.get('error')!r}")
         result = obj.get("result") or {}
+        # MCP tool-level error (``tools/call`` result with ``isError``):
+        # the tool ran but reported failure in-band.
+        if isinstance(result, dict) and result.get("isError"):
+            raise GbrainRemoteError(f"gbrain {tool} tool error: {result.get('content')!r}")
         content = result.get("content") or []
         if content and isinstance(content[0], dict) and content[0].get("text"):
             try:
@@ -134,23 +159,27 @@ def _json_list(value: Any) -> list[Any]:
     return []
 
 
-def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, str]:
-    """Project gbrain recipe attrs into the v2 ``best_config`` dict.
+def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
+    """Project gbrain recipe attrs into the canonical ``best_config`` dict.
 
     gbrain recipe pages carry the champion config as a flat
-    ``best_config_args`` string (+ optional ``best_config_envs`` dict);
-    the v2 ``Recipe.best_config`` is a ``dict[str, str]``. We surface the
-    sglang args under a stable key plus each env verbatim so a warm-start
-    consumer can replay them.
+    ``best_config_args`` string (+ optional ``best_config_envs`` dict).
+    We surface it in the SAME shape the authoritative local recipe
+    (``coordinator._build_recipe_payload``) and the warm-start consumers
+    (``_maybe_enqueue_warm_replay``) use: the launch args under the
+    canonical ``extra_server_args`` key and the env map NESTED under
+    ``extra_envs`` (not flattened as sibling keys). A flat env map would
+    be invisible to the consumer's nested ``best_config["extra_envs"]``
+    read and the high-confidence warm recipe would be skipped as
+    ``best_config_empty``.
     """
-    out: dict[str, str] = {}
+    out: dict[str, Any] = {}
     args = str(attrs.get("best_config_args") or "").strip()
     if args:
         out[CANONICAL_KEY] = args
     envs = attrs.get("best_config_envs")
-    if isinstance(envs, Mapping):
-        for key, val in envs.items():
-            out[str(key)] = str(val)
+    if isinstance(envs, Mapping) and envs:
+        out[_ENVS_KEY] = {str(key): str(val) for key, val in envs.items()}
     return out
 
 
@@ -248,6 +277,11 @@ class GbrainRemoteRecipeClient:
     Duck-types :class:`recipe_kb.RemoteRecipeClient`. Constructed by
     ``cli._build_recipe_kb_dispatcher`` when ``RECIPE_KB_REMOTE=gbrain``.
     """
+
+    # Capability flag read by ``RecipeKB._normalize_remote_row``: every
+    # read already returns the flat arbor (``Recipe.to_dict()``) shape, so
+    # the dispatcher must NOT re-run the v2->arbor projection on our rows.
+    returns_arbor_shape = True
 
     def __init__(
         self,
