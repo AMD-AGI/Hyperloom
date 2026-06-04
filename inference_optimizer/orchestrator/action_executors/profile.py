@@ -591,9 +591,7 @@ class ProfileExecutor(BaselineExecutor):
         return None
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        # IR-8 (atom): the historical short-circuit returned status="skipped"
-        # here because atom_mi*x.sh accepted PROFILE=1 but silently no-op'd.
-        # The Magpie atom wrapper now bridges PROFILE=1 to atom's
+        # atom: the Magpie atom wrapper bridges PROFILE=1 to atom's
         # --torch-profiler-dir CLI flag (see atom_mi*x.sh PROFILER_ARGS),
         # the atom OpenAI server exposes /start_profile and /stop_profile,
         # and the InferenceX benchmark client auto-POSTs both around the
@@ -608,7 +606,7 @@ class ProfileExecutor(BaselineExecutor):
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
         params = ctx.task.params or {}
-        # PR-B: Watermark refresh inheritance of current_best.extra_sglang_args.
+        # Watermark refresh inheritance of current_best.extra_sglang_args.
         # Coordinator._enqueue_internal_analysis_task stamps
         # ``current_best.extra_sglang_args`` into params["base_extra_args"]
         # so the profile run captures a trace that reflects the optimized

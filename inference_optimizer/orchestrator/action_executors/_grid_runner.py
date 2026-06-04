@@ -1470,7 +1470,7 @@ async def run_grid(
                 break
             continue
 
-        # Fix E (Q3c): the soft overtime gate fired. Record a synthetic
+        # Soft overtime gate fired. Record a synthetic
         # ``killed_overtime=True`` VariantResult with no tput / report
         # so the ExploreExecutor can demote this variant to the
         # ``KILLED_OVERTIME`` ledger outcome (no fingerprint promotion,
