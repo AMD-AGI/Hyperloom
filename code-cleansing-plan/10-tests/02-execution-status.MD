@@ -52,12 +52,26 @@ Reason:
 - Higher-level prompt, SharedState, and breakdown tests cover the
   user-facing behavior without locking private formatter internals.
 
+### Removed duplicate prompt asset wrapper test
+
+Deleted `inference_optimizer/tests/test_prompt_assets.py`.
+
+Reason:
+
+- It duplicated prompt-builder structure checks already covered by
+  `test_prompt_builder.py` and `test_prompt_visibility.py`.
+- It also asserted exact asset/header text and historical wrapper details
+  (`orchestration.no_kernel.md` removal), which are not external runtime
+  contracts.
+
 ## Verification
 
 - Tier-0 minimal set: 201 passed in ~8s.
 - Lint: no errors (docs only).
 - Follow-up deletion verification: shared-state, prompt, and breakdown
   tests pass (199 passed).
+- Follow-up prompt-wrapper deletion verification: prompt contract tests
+  pass (81 passed).
 
 ## Next Safe Follow-Ups
 
