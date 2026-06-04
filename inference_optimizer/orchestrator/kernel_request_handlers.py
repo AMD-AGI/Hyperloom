@@ -2345,13 +2345,10 @@ async def integrate_handler(
 # ---------------------------------------------------------------------------
 # Kernel-agent programmatic dispatch table.
 #
-# Main M4 renamed ``select_kernels_handler`` to
-# ``trace_analyze_handler`` (the function does TraceLens analysis +
-# kernel selection in a single pass, so the new name is more accurate).
-# This branch dropped the legacy ``select_kernels`` alias entirely; the
-# canonical kind is ``trace_analyze``. RooflineExecutor (F1-2) calls
-# the function directly; the dispatch entry below is for LLM-driven
-# requests routed via ``Coordinator._handle_request``.
+# ``trace_analyze_handler`` does TraceLens analysis + kernel selection in
+# a single pass. RooflineExecutor (F1-2) calls the function directly; the
+# dispatch entry below is for LLM-driven requests routed via
+# ``Coordinator._handle_request``.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze":    trace_analyze_handler,
     "run_gemm_tuning":  run_gemm_tuning_handler,
