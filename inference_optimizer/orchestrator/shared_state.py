@@ -960,20 +960,13 @@ class SharedState:
     synergy_attempted: list[str] = field(default_factory=list)
 
     # ---------------------------------------------------------------
-    # the legacy ``action_scores`` decision system was retired.
-    # The Coordinator no longer maintains a per-action numeric
-    # priority; instead the Orchestration prompt surfaces facts
-    # (phase / gaps / KB sub-graphs / specialist proposal_set) and
-    # the LLM decides. Inv-9.1 forbids any system-side priority
-    # value. Legacy fields:
-    #
-    # * ``action_scores``         — dropped from the dataclass; resume
-    #                                migration logs + discards.
-    # * ``params_no_promote_streak`` — kept as a *read-only* hint for
-    #                                  M2 / legacy resume paths so
-    #                                  ``phase_state.exit_normal_explore``
-    #                                  fallback proxy keeps working;
-    #                                  not written by Coordinator.
+    # The Coordinator maintains no per-action numeric priority; the
+    # Orchestration prompt surfaces facts (phase / gaps / KB sub-graphs
+    # / specialist proposal_set) and the LLM decides. No system-side
+    # priority value is allowed. ``action_scores`` is dropped from the
+    # dataclass (resume migration logs + discards);
+    # ``params_no_promote_streak`` is kept as a read-only resume hint
+    # (not written by Coordinator).
     #
     # Monotonic Coordinator tick counter. Bumped once per
     # ``Coordinator.run()`` / ``Coordinator.tick(n)`` iteration; kept
@@ -1019,41 +1012,33 @@ class SharedState:
     # ------------------------------------------------------------------
     # Coordinator-only writers. Listed in PolicyGate.CORE_STATE_FIELDS so
     # any LLM ``update_state`` intent that touches these is denied
-    # (Inv-1 single writer). LLM consumers read them indirectly via
+    # (single writer). LLM consumers read them indirectly via
     # prompt injection.
     #
     # ``cortex_session_id`` is the hyperloom-local session identifier
     # carried into KB fact-write attrs (``source_session_id``) for
     # cross-session traceability. It is **not** a KB-side session id
-    # (the KB session begin/commit protocol was retired); it now
-    # defaults to ``session_dir.name`` when T0 mints it.
+    # (no KB session begin/commit protocol); defaults to
+    # ``session_dir.name`` when minted.
     cortex_session_id: str = ""
-    # Retired: the KB ``session commit`` protocol was removed alongside
-    # T2/T3. The field is kept (always ``{}``) for state.json resume
-    # back-compat — the next ``state.save`` writes an empty dict and
-    # the breakdown collector tolerates a missing summary. The
-    # ``breakdown.kb_provenance.commit`` section is now derived from
-    # ``drain_pending`` results instead.
+    # Kept (always ``{}``) for state.json resume back-compat: the next
+    # ``state.save`` writes an empty dict and the breakdown collector
+    # tolerates a missing summary. ``breakdown.kb_provenance.commit`` is
+    # derived from ``drain_pending`` results instead.
     cortex_session_summary: dict[str, Any] = field(default_factory=dict)
-    # T0 snapshot of ``find-recipe`` raw output (CLI ``--format text``,
-    # one entry per recipe row). v0.8 M1 only **records** this — it is
-    # not yet injected into the orchestration prompt; that happens in M5
-    # specialist assembly. Kept as ``dict`` (parsed) so M5 can read
-    # without re-parsing. Empty dict on first-ever session for a
-    # (workload, hw) pair.
+    # Snapshot of ``find-recipe`` raw output (CLI ``--format text``, one
+    # entry per recipe row). Kept as parsed ``dict`` so specialist
+    # assembly can read without re-parsing. Empty dict on first-ever
+    # session for a (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # T0 snapshot of ``pitfalls`` output (negative priors from prior
+    # Snapshot of ``pitfalls`` output (negative priors from prior
     # REVERT / crash / OOM decisions on this (model, hardware),
     # optionally filtered by framework). List of KB point dicts
     # (each with ``{canonical_id, kind, attrs, confidence, ...}``),
     # mirroring ``warm_start_lessons``. Consumed by the specialist
-    # prompt's "§ 5c. KNOWN PITFALLS" section.
-    #
-    # Schema change history: pre-fix this field held
-    # ``[{"raw": <json_string>}]`` because the broken
-    # ``traps(symptom=...)`` reader returned an opaque JSON blob.
-    # Resume from such a snapshot is tolerated (the prompt section
-    # filters out rows without ``attrs.description``).
+    # prompt's "§ 5c. KNOWN PITFALLS" section. Resume tolerates older
+    # snapshots (the prompt section filters out rows without
+    # ``attrs.description``).
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # T0 snapshot of ``lessons`` output (positive priors from prior
     # KEEPs on this (model, hardware), optionally filtered by
@@ -1123,10 +1108,10 @@ class SharedState:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        # unified migration entry point. A v0.6 state.json
-        # has no top-level ``schema_version`` field; treat the absence as
-        # ``schema_version=1`` and run the §3.10 §5.2 field-mapping step.
-        # The function is idempotent (Inv-10.3): re-loading a v0.8
+        # Unified migration entry point. An older state.json has no
+        # top-level ``schema_version`` field; treat the absence as
+        # ``schema_version=1`` and run the field-mapping step. The
+        # function is idempotent: re-loading a current
         # state.json (``schema_version == LATEST_STATE_SCHEMA_VERSION``)
         # short-circuits the migration logging without touching the
         # fact-layer payload (Inv-10.1).
@@ -1158,7 +1143,7 @@ class SharedState:
         # list only exists to count/log them in ``warn`` mode.
         #
         # Compat (read-only): remove this drop list once old-session
-        # resume of pre-v0.8 scoreboard / select_kernels state.json is no
+        # resume of scoreboard / select_kernels state.json is no
         # longer supported.
         _legacy_drop_fields = (
             "action_scores",
@@ -1584,7 +1569,7 @@ class SharedState:
         return hint
 
     # ------------------------------------------------------------------
-    # phase machine writer (Coordinator-only, Inv-1 + Inv-8.1)
+    # phase machine writer (Coordinator-only, single writer)
     # ------------------------------------------------------------------
     def record_phase_transition(
         self,
@@ -3540,7 +3525,7 @@ class SharedState:
         merged["accepted"] = list(prior.get("accepted") or [])
         # Drop the merged_from_legacy_sig sentinel on each update so a
         # subsequent SharedState load re-runs the legacy union (defensive
-        # against an interleaved v0.6 fallback session writing into the
+        # against an interleaved fallback session writing into the
         # old ledgers between save/load cycles).
         merged.pop("merged_from_legacy_sig", None)
         self.explore_search = merged
@@ -3610,7 +3595,7 @@ class SharedState:
         self.explore_search = search
 
     # ------------------------------------------------------------------
-    # T1/T2 — search-space expansion bookkeeping
+    # search-space expansion bookkeeping
     # ------------------------------------------------------------------
     def record_discovered_flags(
         self,
@@ -3645,11 +3630,9 @@ class SharedState:
     # ------------------------------------------------------------------
     # scoring helpers removed
     # ------------------------------------------------------------------
-    # The v0.6 ``get_action_score`` / ``put_action_score`` /
-    # ``all_action_scores`` / ``to_action_scores_summary`` API has
-    # been retired. The LLM no longer consumes a system-side priority;
-    # decisions are based on facts (phase / gaps / KB / specialist
-    # rounds). ``increment_tick`` stays — it's a pure monotonic
+    # There is no action-score API: the LLM consumes no system-side
+    # priority; decisions are based on facts (phase / gaps / KB /
+    # specialist rounds). ``increment_tick`` is a pure monotonic
     # counter used by plateau / phase budget math.
     def increment_tick(self) -> int:
         """Bump the Coordinator tick counter and return the new value."""
@@ -4246,9 +4229,9 @@ class SharedState:
             # propose_action decisions in the actual report.
             f"analysis_md={self._format_analysis_md_full()}",
             # the streak counter is a *fact* the LLM may
-            # read (KEEP/REVERT counts are explicitly allowed per
-            # Inv-9.1); only system-side *priorities* (action_scores)
-            # were removed. The plateau judges also consume this on
+            # read (KEEP/REVERT counts are explicitly allowed);
+            # only system-side *priorities* (action_scores) were
+            # removed. The plateau judges also consume this on
             # legacy resume sessions when ``explore_search`` is empty.
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_explore_search()}",
@@ -4649,7 +4632,7 @@ class SharedState:
                 skipped_suffix = (
                     f" skipped_kernels_top=[{'; '.join(rendered_sk)}]"
                 )
-        # T3 / T4 finishing-touches: when TraceLens emitted a routing
+        # Finishing-touches: when TraceLens emitted a routing
         # signal (high GPU idle → prefer params; permanent failure →
         # don't keep waiting on kernel candidates), surface it inline
         # so the Orchestration LLM grounds the next ACTION on this
