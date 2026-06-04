@@ -3270,10 +3270,11 @@ class Coordinator:
         for the reactor / dispatcher tick boundary. Steps 1 and 2
         enqueue tasks then poll ``_wait_for_task_terminal`` until the
         dispatcher (which the same Coordinator.run() loop drives)
-        picks them up and finishes. Step 3 is a retired no-op; step 4
-        is a single SharedState write.
+        picks them up and finishes. Step 3 (NDJSON drain) is a retired
+        no-op; step 4 (Cortex commit) writes the recipe + journal; step
+        5 is a single SharedState write.
         """
-        log.info("CLOSE entered (from=%s); starting 4-step close sequence",
+        log.info("CLOSE entered (from=%s); starting 5-step close sequence",
                  from_phase or "<unknown>")
         await self._record_close_step("sequencer_started", status="running")
 
@@ -3331,12 +3332,12 @@ class Coordinator:
                 detail=repr(exc)[:240],
             )
 
-        # ---------------- Step 2.5: fact finalize (recipe + journal) ---
-        # Writes update_recipe + finalises the local journal
-        # (final_throughput / total_gain_pct). Runs BEFORE the NDJSON
-        # drain so the recipe write is part of the same flush. Lives
-        # outside the 4-step KB design contract — recorded as an extra
-        # close_step so the breakdown collector can see it.
+        # ---------------- Step 4: fact finalize (Cortex commit) ----------
+        # The canonical step-4 "Cortex session commit": writes
+        # update_recipe + finalises the local journal (final_throughput /
+        # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
+        # Ordered before the retired NDJSON-drain no-op (step 3) so the
+        # recipe write is part of the same flush.
         try:
             self.cortex_finalize_recipe_and_journal()
             await self._record_close_step("fact_finalize", status="done")
