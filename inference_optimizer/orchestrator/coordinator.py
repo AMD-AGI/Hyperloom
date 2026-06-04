@@ -2482,9 +2482,8 @@ class Coordinator:
         10% watermark over ``last_roofline_tput``.
 
         Bootstrap guard: returns False when ``last_roofline_tput <= 0``
-        so the PRELUDE initial roofline enqueue (driven by the
-        baseline-completion hook) is the sole entry point before the
-        first roofline lands.
+        and no previous roofline attempt failed, so the PRELUDE initial
+        roofline enqueue remains the sole first-attempt entry point.
 
         Re-arm guard: returns False when an auto-roofline task is
         already in-flight (``auto_roofline_pending_task_id`` non-empty)
@@ -2496,10 +2495,23 @@ class Coordinator:
             last_rl = float(state.last_roofline_tput or 0.0)
         except (TypeError, ValueError):
             last_rl = 0.0
-        if last_rl <= 0:
-            return False
         if (state.auto_roofline_pending_task_id or "").strip():
             return False
+        if last_rl <= 0:
+            try:
+                failure_streak = int(
+                    getattr(state, "roofline_failure_streak", 0) or 0
+                )
+            except (TypeError, ValueError):
+                failure_streak = 0
+            if failure_streak <= 0:
+                return False
+            try:
+                last_rl = float(state.baseline_tput or 0.0)
+            except (TypeError, ValueError):
+                last_rl = 0.0
+            if last_rl <= 0:
+                return False
         cur = self._current_tput_from_validated_gain()
         if cur <= 0:
             return False
