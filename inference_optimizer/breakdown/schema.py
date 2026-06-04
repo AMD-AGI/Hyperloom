@@ -23,8 +23,9 @@ from typing import Any, TypedDict
 #: breakdown schema version. v2 adds the
 #: ``specialist_runs`` section, ``capability_summary.specialist``
 #: row, ``critic_robustness.kb_writes_summary`` sub-block, the
-#: top-level ``action_timeline`` / ``explore_search`` v1-reader
-#: aliases, and (additively) the ``kernel_optimization_summary`` /
+#: top-level ``action_timeline`` alias, the native ``explore_search``
+#: ledger (with ``param_search`` retained as a v1-reader alias), and
+#: (additively) the ``kernel_optimization_summary`` /
 #: ``conc_sweep_summary`` sections mirrored from
 #: ``reports/kernel_optimization_summary.json`` and
 #: ``reports/conc_sweep_summary.json`` (PR #399 lishuoshuo). Inv-12.1
@@ -994,9 +995,8 @@ class SessionBreakdown(TypedDict, total=False):
     geak_invocations: list[Invocation]
     oob_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
-    # ``param_search`` is the v1-reader compat alias
-    # for the merged ``explore_search`` ledger; both fields carry
-    # identical data so an old reader doesn't see a missing key.
+    # ``explore_search`` is the native merged ledger. ``param_search`` is
+    # retained as a v1-reader compatibility alias with identical data.
     param_search: ParamSearch
     explore_search: ParamSearch
     sweep: Sweep
