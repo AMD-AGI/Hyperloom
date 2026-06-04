@@ -36,7 +36,7 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
-# Phase identifiers + ordering (Inv-2.1: monotonic chain)
+# Phase identifiers + ordering (monotonic chain)
 # ---------------------------------------------------------------------------
 PHASE_PRELUDE      = "PRELUDE"
 PHASE_FRAMEWORK_PR = "FRAMEWORK_PR"
@@ -68,11 +68,10 @@ def phase_index(phase: str) -> int:
 # ---------------------------------------------------------------------------
 # Phase ↔ allowed action set
 # ---------------------------------------------------------------------------
-# v0.8 view:
 #
 # * EXPLORE allowlist contains the merged ``explore`` action and the
 #   ``specialist`` LLM sub-agent.
-# * ``recover`` stays in every phase — phase-orthogonal per §3.2.
+# * ``recover`` stays in every phase — phase-orthogonal.
 # * ``session_breakdown`` is a CLOSE action (it materializes the
 #   report bundle). The per-KEEP stack rebench is inlined into
 #   ``explore``.
@@ -102,7 +101,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         "framework_pr", "integrate_patch", "roofline", "profile", "recover",
     }),
     PHASE_EXPLORE: frozenset({
-        # v0.8 canonical: merged grid runner + LLM specialist dispatch.
+        # merged grid runner + LLM specialist dispatch.
         "explore", "specialist",
         # Specialist-authored source patches are applied only through
         # integrate_patch, which holds the serving lane and benchmarks the
@@ -190,7 +189,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
     "explore_force_exit_low_budget",    # EXPLORE → next phase when total remaining or phase remaining drops below operator-configured thresholds
     "no_more_leverage",                 # EXPLORE/KERNEL → SWEEP (non-terminal): steward stop_session via the skip_to_sweep hint. (The Coordinator's automatic no-more-leverage safety net was removed for long-run continuity.) Reclassified from a terminal stop_reason — it now winds the session down through SWEEP → CLOSE instead of aborting.
-    # FRAMEWORK_PR phase transitions (PR-A1 / FRAMEWORK_PR phase).
+    # FRAMEWORK_PR phase transitions.
     "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
     "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
     "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
@@ -225,7 +224,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
 # stop_reason vocab
 # ---------------------------------------------------------------------------
 STOP_REASON_VOCAB: frozenset[str] = frozenset({
-    # v0.6 sentinels — kept for backward compat (resume from old sessions).
+    # Legacy sentinels — kept for backward compat (resume from old sessions).
     "target_reached",
     "no_more_leverage",
     "time_exhausted",
@@ -238,7 +237,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "unknown",
     "custom",
 
-    # v0.8 additions.
+    # Newer reasons.
     "crash_threshold_exceeded",
     "robustness_escalated",
     "user_stop_requested",
@@ -269,18 +268,13 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Default phase budgets (% of total wall-clock) — KB_design §3.8 §5.3
+# Default phase budgets (% of total wall-clock)
 # ---------------------------------------------------------------------------
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
-    # Rebalanced 2026-06 based on field telemetry from the
-    # Qwen3-30B-A3B / MI355x runs once conc_sweep was on by default:
-    # SWEEP was running ~2.5x over its old 8% allocation (sweep action
-    # ~37min + conc_sweep ~31min, total ~68min on a ~5.7h budget) so we
-    # shift PRELUDE -3pp / EXPLORE -7pp into SWEEP +10pp while keeping
-    # KERNEL at its historical 35% (GEAK quick-mode needs full cycles).
-    # PRELUDE only ever spent ~5min of its old 27min slice; EXPLORE
-    # force-exit at phase_remaining_pct=0.176 confirmed the old 47%
-    # was over-provisioned by ~7pp.
+    # Rebalanced from field telemetry (with conc_sweep on by default
+    # SWEEP ran ~2.5x over its old 8%): shift PRELUDE -3pp / EXPLORE
+    # -7pp into SWEEP +10pp, keeping KERNEL at 35% (GEAK quick-mode
+    # needs full cycles).
     #
     # FRAMEWORK_PR is *not* given a phase budget pct — the time wall is
     # ``force_exit_hours_remaining_ratio * max_hours`` instead (default
@@ -307,7 +301,7 @@ DEFAULT_PLATEAU_KERNEL_REVERT_STREAK:     int   = 3
 DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT:     float = 0.5
 DEFAULT_PLATEAU_KERNEL_LOOKBACK:          int   = 5
 
-# v0.8 — EXPLORE hard force-exit thresholds (HARD time gate; overrides
+# EXPLORE hard force-exit thresholds (HARD time gate; overrides
 # plateau + steward). The Coordinator may exit EXPLORE the moment EITHER
 # of the following holds:
 #
@@ -383,10 +377,8 @@ ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 # the optimization. Unlike ``skip_to_close`` (which is terminal via
 # ``_global_terminal`` → ``robustness_escalated``), ``skip_to_sweep``
 # still runs the SWEEP validation pass and produces a clean report.
-# It is set by the IR-7 steward's ``stop_session`` verdict, which used
-# to set a terminal ``stop_reason='no_more_leverage'``. (The Coordinator
-# also used to drive this via an automatic no-more-leverage safety net;
-# that net was removed for long-run continuity.)
+# It is set by the steward's ``stop_session`` verdict (the automatic
+# no-more-leverage safety net was removed for long-run continuity).
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -398,8 +390,7 @@ ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
 # Cap that ``extend_*_budget`` hints can lift the per-phase budget to
 # (relative ratio, not absolute). 0.80 means: EXPLORE budget can grow to
 # at most 80% of total wall-clock budget, no matter how many
-# ``extend_explore_budget`` hints fire. Mirrors KB_design §3.13 M7 §5.3
-# "上限 80%".
+# ``extend_explore_budget`` hints fire (hard cap at 80%).
 ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05   # +5 percentage points per hint
 ESCALATE_HINT_BUDGET_BUMP_CAP:   float = 0.80   # absolute ceiling
 
@@ -622,7 +613,7 @@ def should_force_exit_explore(
     # Non-positive threshold = disabled. Lets callers opt out of either
     # sub-gate (e.g. tests that want to isolate budget_exhausted, or an
     # operator who wants only the phase-pct backstop). Both thresholds
-    # disabled effectively turns IR-6 off for this call.
+    # disabled effectively turns the HARD force-exit off for this call.
     hours_threshold_enabled = float(hours_remaining_threshold) > 0.0
     pct_threshold_enabled = float(budget_pct_threshold) > 0.0
 
@@ -811,7 +802,7 @@ def compute_plateau_explore(
         if not isinstance(row, dict):
             return False
         # Designed shape: ``proposals_total`` /
-        # ``proposals_kept`` (M5+); fall back to ``proposal_count``
+        # ``proposals_kept``; fall back to ``proposal_count``
         # for forward-compat with older round summaries.
         try:
             proposals = int(
@@ -1070,7 +1061,7 @@ def exit_normal_explore(
        or ``specialist_rounds``).
     3. Phase budget exhausted.
     """
-    # Priority 0 — HARD force-exit (IR-6).
+    # Priority 0 — HARD force-exit.
     forced, force_ev = should_force_exit_explore(
         state,
         hours_remaining_threshold=force_exit_hours_remaining,
@@ -1112,7 +1103,7 @@ def exit_normal_explore(
             empty_streak_threshold=plateau_empty_streak,
         )
         if triggered:
-            # IR-7 — steward gate. The plateau judge fired; consult the
+            # steward gate. The plateau judge fired; consult the
             # session_steward verdict before actually exiting. Three
             # routes:
             #   * steward_disabled override → exit immediately (plateau).
@@ -1143,7 +1134,7 @@ def exit_normal_explore(
             ))
             # When the depth gate is active it owns continuation
             # bounding (rewrites stop/advance to continue as often as
-            # needed, IR-6 being the only backstop), so the legacy
+            # needed, the HARD force-exit being the only backstop), so the legacy
             # single-continuation cap is lifted. With the gate off the
             # original "one continuation per session" semantics apply.
             depth_gate_on = True
@@ -1212,7 +1203,7 @@ def wants_steward_assessment(
     overrides = _resolve_plateau_overrides(state)
     if bool(overrides.get("steward_disabled", False)):
         return False
-    # HARD force-exit takes precedence — if it fires, IR-6 routes us
+    # HARD force-exit takes precedence — if it fires, it routes us
     # straight to KERNEL and the steward never runs.
     forced, _ = should_force_exit_explore(
         state,
