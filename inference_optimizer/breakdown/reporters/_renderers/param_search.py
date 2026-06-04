@@ -1,4 +1,4 @@
-"""Parameter / backend DFS state renderer."""
+"""Explore search ledger renderer."""
 
 from __future__ import annotations
 
@@ -10,24 +10,33 @@ from ..base import RenderedSection, md_table, register_renderer
 @register_renderer("param_search")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     ps = breakdown.get("param_search") or {}
+    explore = ps.get("explore") or {}
     backends = ps.get("backends") or {}
     params = ps.get("params") or {}
     flags = ps.get("discovered_flags") or {}
     winners = ps.get("backend_winners_history") or []
     synergy = ps.get("synergy_attempted") or []
 
+    explore_accepted = len((explore.get("accepted") or []) if isinstance(explore, dict) else [])
+    explore_tested = len((explore.get("tested") or {}) if isinstance(explore, dict) else {})
     backends_accepted = len((backends.get("accepted") or []) if isinstance(backends, dict) else [])
     backends_tested = len((backends.get("tested") or {}) if isinstance(backends, dict) else {})
     params_accepted = len((params.get("accepted") or []) if isinstance(params, dict) else [])
     params_tested = len((params.get("tested") or {}) if isinstance(params, dict) else {})
+    has_legacy = (
+        backends_accepted or backends_tested or params_accepted or params_tested
+    )
 
     facts: list[str] = []
     facts.append(
-        f"backends DFS: tested={backends_tested}, accepted={backends_accepted}"
+        f"explore ledger: tested={explore_tested}, accepted={explore_accepted}"
     )
-    facts.append(
-        f"params DFS: tested={params_tested}, accepted={params_accepted}"
-    )
+    if has_legacy:
+        facts.append(
+            "legacy search aliases: "
+            f"backends tested={backends_tested}, accepted={backends_accepted}; "
+            f"params tested={params_tested}, accepted={params_accepted}"
+        )
     if winners:
         facts.append(f"backend_winners_history: {len(winners)} round(s).")
     if synergy:
@@ -45,21 +54,27 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 )
 
     md_parts: list[str] = []
-    md_parts.append("**Backends DFS:**")
+    md_parts.append("**Explore Search:**")
     md_parts.append(md_table(
         ["accepted", "tested", "cursor", "last_round"],
-        [[backends_accepted, backends_tested,
-          (backends.get("cursor") if isinstance(backends, dict) else None),
-          (backends.get("last_round") if isinstance(backends, dict) else None)]],
+        [[explore_accepted, explore_tested,
+          (explore.get("cursor") if isinstance(explore, dict) else None),
+          (explore.get("last_round") if isinstance(explore, dict) else None)]],
     ))
-    md_parts.append("")
-    md_parts.append("**Params DFS:**")
-    md_parts.append(md_table(
-        ["accepted", "tested", "cursor", "last_round"],
-        [[params_accepted, params_tested,
-          (params.get("cursor") if isinstance(params, dict) else None),
-          (params.get("last_round") if isinstance(params, dict) else None)]],
-    ))
+    if has_legacy:
+        md_parts.append("")
+        md_parts.append("**Legacy Search Aliases (archived sessions):**")
+        md_parts.append(md_table(
+            ["ledger", "accepted", "tested", "cursor", "last_round"],
+            [
+                ["backends", backends_accepted, backends_tested,
+                 (backends.get("cursor") if isinstance(backends, dict) else None),
+                 (backends.get("last_round") if isinstance(backends, dict) else None)],
+                ["params", params_accepted, params_tested,
+                 (params.get("cursor") if isinstance(params, dict) else None),
+                 (params.get("last_round") if isinstance(params, dict) else None)],
+            ],
+        ))
 
     if winners:
         md_parts.append("")
@@ -87,13 +102,14 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     no_search_data = (
         not winners and not synergy and not flags
+        and explore_accepted == 0 and explore_tested == 0
         and backends_accepted == 0 and backends_tested == 0
         and params_accepted == 0 and params_tested == 0
     )
 
     return RenderedSection(
         section_id="param_search",
-        title="Parameter / Backend Search",
+        title="Explore Search",
         key_facts=facts,
         markdown_block="\n".join(md_parts).strip(),
         warnings=[],
