@@ -84,9 +84,16 @@ These remain conceptually LLM-facing, subject to phase, policy, and sequence gat
 - `report`
 - `recover`, but only for allowed robustness ownership paths.
 
+Runtime source:
+
+- `action_surfaces.FULL_ENABLED_ACTIONS`
+- `action_surfaces.NO_KERNEL_ENABLED_ACTIONS`
+
 Cleanup note:
 
-- This list should eventually be derived or checked against policy rules. For now it is descriptive.
+- These sets are still explicit because they encode launch-mode prompt
+  visibility. Drift guards now ensure they only contain live metadata
+  actions and do not expose kernel-owned actions in no-kernel mode.
 
 ## Retired Runtime Action Names
 
