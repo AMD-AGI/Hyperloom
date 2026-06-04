@@ -147,3 +147,46 @@ def test_monitor_times_out_when_launch_info_never_appears(tmp_path):
     # Waited at least most of the window before giving up.
     assert elapsed >= 2, f"should have polled the wait window, took {elapsed:.1f}s"
     assert "session dir is unknown" in proc.stderr
+
+
+def test_monitor_tolerates_non_integer_wait_sec(tmp_path):
+    """A malformed LAUNCH_INFO_WAIT_SEC must degrade to the default wait, not
+    emit a bash arithmetic error and skip the bounded poll. Pre-fix, an invalid
+    token ('60x') makes the ``$(( ... ))`` deadline computation error out under
+    ``set -u``, so the monitor never polls the real window and bails (exit 2)
+    with a confusing 'within 60xs' message before the delayed launch-info
+    appears. Post-fix it warns, falls back to the default window, picks up the
+    launch-info, and exits 0."""
+    sess = tmp_path / "sess"
+    (sess / "reports").mkdir(parents=True)
+    (sess / "reports" / "final.md").write_text("done\n", encoding="utf-8")
+
+    launch = tmp_path / "launch.json"
+    pidfile = tmp_path / "pid"
+    pidfile.write_text("999999\n", encoding="utf-8")
+
+    env = _clean_env()
+    env.update(
+        {
+            "PID_FILE": str(pidfile),
+            "REPO_ROOT": str(tmp_path),
+            "LAUNCH_INFO_FILE": str(launch),
+            "LAUNCH_INFO_WAIT_SEC": "60x",  # invalid arithmetic token
+            "MAX_HOURS": "1",
+        }
+    )
+
+    proc = subprocess.Popen(
+        ["bash", str(MONITOR)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(1.5)
+    launch.write_text(json.dumps({"session_dir": str(sess)}), encoding="utf-8")
+    out, err = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, f"rc={proc.returncode}\nstdout={out}\nstderr={err}"
+    assert "invalid LAUNCH_INFO_WAIT_SEC" in err
