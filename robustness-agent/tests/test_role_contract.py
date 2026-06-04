@@ -29,7 +29,7 @@ def _try_import_inference_optimizer():
             sys.path.insert(0, str(root))
             break
     try:
-        import inference_optimizer.orchestrator.intent_parser as upstream_ip
+        import inference_optimizer.protocol.intent as upstream_ip
         import inference_optimizer.orchestrator.policy as upstream_policy
         import inference_optimizer.orchestrator.agent_role as upstream_role
     except ImportError:

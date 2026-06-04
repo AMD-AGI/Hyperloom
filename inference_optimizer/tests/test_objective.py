@@ -16,7 +16,7 @@ from inference_optimizer.orchestrator.coordinator import (
     Coordinator,
     effective_closing_grace_sec,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.objective import (
     ObjectiveError,
     TargetBaselineObjective,
