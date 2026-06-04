@@ -1086,7 +1086,7 @@ def _build_final_invocation(
 _AUDIT_ACTIONS = (
     "baseline", "profile", "explore",
     "backends", "params", "validate_stack",
-    "sweep",
+    "sweep", "roofline",
 )
 
 
