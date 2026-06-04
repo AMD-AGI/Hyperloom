@@ -313,8 +313,8 @@ def _validate_critic_agent_runtime(root: Path) -> None:
             f"  cwd={root}\n"
             f"  cmd={' '.join(cmd)}\n"
             f"Either fix CRITIC_AGENT_ROOT, install critic-agent at "
-            f"$REPO_ROOT/critic-agent, or pass --critic-mock / "
-            f"--critic-codex-bare to bypass critic-agent.",
+            f"$REPO_ROOT/critic-agent, or pass --critic-mock to bypass "
+            f"critic-agent.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -722,14 +722,12 @@ def _build_backends(
 ) -> dict[str, Any]:
     """Construct all per-role backends.
 
-    ``critic_choice`` ∈ {``"mock"``, ``"agent"``, ``"codex_bare"``}:
+    ``critic_choice`` ∈ {``"mock"``, ``"agent"``}:
 
     * ``mock`` — always-approve adapter (smoke / offline tests).
     * ``agent`` — :class:`CriticAgentBackend` driving the ``critic-agent``
       skill runtime. Adds KB priors / writes, session memory, and
       ``review_constraints``-gated verdicts. Requires ``critic_agent_root``.
-    * ``codex_bare`` — legacy direct :class:`CodexBackend` chat-completion
-      path. Kept available for debugging the LLM layer in isolation.
 
     ``robustness_choice`` ∈ {``"mock"``, ``"agent"``}:
 
@@ -739,16 +737,14 @@ def _build_backends(
       ``python -m robustness_agent.runtime.cli`` in a subprocess. Mirrors
       the critic-agent transport. Requires ``robustness_agent_root``.
     """
-    if critic_choice not in ("mock", "agent", "codex_bare"):
+    if critic_choice not in ("mock", "agent"):
         raise ValueError(
             f"_build_backends: critic_choice={critic_choice!r} not in "
-            "{'mock','agent','codex_bare'}"
+            "{'mock','agent'}"
         )
 
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
-    elif critic_choice == "codex_bare":
-        critic_backend = CodexBackend(model=codex_model)
     else:  # "agent"
         if critic_agent_root is None:
             raise ValueError(
@@ -2333,8 +2329,8 @@ def _check_node_claude_cli() -> None:
     ``@anthropic-ai/claude-code`` CLI; without it on PATH the SDK falls
     back to a direct HTTP path against the upstream gateway, so this
     is informational rather than fatal. Same for ``codex`` (used by
-    ``CodexBackend`` whenever Codex is on the wire — i.e. ``--critic-agent``
-    / ``--critic-codex-bare`` and/or ``--kernel-codex``). ``node`` is a
+    ``CriticAgentBackend`` review reasoning and ``--kernel-codex``).
+    ``node`` is a
     transitive dep — if it's missing, npm-based recovery via
     ``kernel-agent/scripts/install.sh`` won't work either.
 
@@ -2704,9 +2700,8 @@ def _smoke_test_codex_model(
     if catalog_ids is None:
         return
     # Codex is needed by the Kernel agent (when kernel-codex is on) and by
-    # the Critic — both via the ``codex_bare`` direct path and the
-    # ``agent`` path (which also calls Codex for review reasoning).
-    critic_uses_codex = args.critic_backend in ("agent", "codex_bare")
+    # the critic-agent path (which calls Codex for review reasoning).
+    critic_uses_codex = args.critic_backend == "agent"
     needs_codex = critic_uses_codex or (
         args.kernel_codex and not getattr(args, "no_kernel", False)
     )
@@ -3038,13 +3033,13 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Default critic backend. Step D of the critic-agent integration plan flipped
 # this from "mock" to "agent" once CriticAgentBackend is wired and tested.
-# Override via env (operator runbook) or the --critic-mock / --critic-agent
-# / --critic-codex-bare flags. Step C tests pin a specific value via the
-# CLI flag so they're insulated from default drift.
+# Override via env (operator runbook) or the --critic-mock /
+# --critic-agent flags. Step C tests pin a specific value via the CLI flag
+# so they're insulated from default drift.
 DEFAULT_CRITIC_BACKEND = os.environ.get(
     "INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND", "agent",
 )
-_VALID_CRITIC_BACKENDS = ("mock", "agent", "codex_bare")
+_VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
 def _resolve_critic_choice(args: argparse.Namespace) -> str:
@@ -3060,7 +3055,7 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     if chosen not in _VALID_CRITIC_BACKENDS:
         print(
             f"ERROR: critic backend {chosen!r} not in {_VALID_CRITIC_BACKENDS!r} "
-            f"(set by --critic-mock / --critic-agent / --critic-codex-bare or "
+            f"(set by --critic-mock / --critic-agent or "
             f"INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND)",
             file=sys.stderr,
         )
@@ -4676,7 +4671,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # would otherwise blow up on missing runtime). Fail-fast policy: if the
     # operator selected --critic-agent (or it's the default) but the
     # critic-agent runtime is unreachable, we abort with rc=2 instead of
-    # silently falling back to mock/codex_bare.
+    # silently falling back to mock.
     critic_choice = _resolve_critic_choice(args)
     critic_agent_root: Path | None = None
     critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
@@ -4696,7 +4691,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
                 f"runtime/cli.py, or install critic-agent at "
                 f"$REPO_ROOT/critic-agent/.\n"
-                f"  Bypass with --critic-mock or --critic-codex-bare.",
+                f"  Bypass with --critic-mock.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -4928,8 +4923,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     if critic_choice == "mock":
         critic_str = "mock"
-    elif critic_choice == "codex_bare":
-        critic_str = f"codex-bare({args.codex_model})"
     else:  # "agent"
         critic_str = (
             f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, "
@@ -5405,7 +5398,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--kernel-claude", action="store_false", dest="kernel_codex",
                       help="Use Claude backend for Kernel agent")
     # Critic backend selection. ``critic_backend`` is the canonical
-    # attribute; the four flags below are convenience aliases that all
+    # attribute; the flags below are convenience aliases that all
     # set the same dest. Default is filled by the CLI default block in
     # ``_resolve_critic_choice``; a single explicit flag wins, conflicts
     # are caught at runtime (mutual exclusion checked there because
@@ -5427,25 +5420,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Force the critic-agent runtime backend (KB + session memory + "
              "review_constraints). Requires CRITIC_AGENT_ROOT or a sibling "
              "$REPO_ROOT/critic-agent/ directory.",
-    )
-    opt.add_argument(
-        "--critic-codex-bare",
-        dest="critic_backend",
-        action="store_const",
-        const="codex_bare",
-        help="Force the legacy bare-Codex Critic (single chat-completion + "
-             "JSON envelope; no KB, no session memory). For debugging the "
-             "LLM layer in isolation.",
-    )
-    # Back-compat alias for the old --critic-real flag (semantically the
-    # same as --critic-codex-bare). Hidden from --help to avoid promoting
-    # the old name; still accepted so existing launchers don't break.
-    opt.add_argument(
-        "--critic-real",
-        dest="critic_backend",
-        action="store_const",
-        const="codex_bare",
-        help=argparse.SUPPRESS,
     )
     # ----- Robustness backend selection (mirrors critic) ------------------
     opt.add_argument(
