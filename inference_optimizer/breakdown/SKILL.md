@@ -31,15 +31,15 @@ The JSON has 14 top-level sections plus envelope:
 | `baseline`           | Baseline throughput / accuracy / latency, config path, benchmark report path, failure streak.            |
 | `final`              | `current_best` throughput, validated cumulative gain, action path, extra args/envs.                      |
 | `phase_timeline`     | Chronological list of every action attempt + kernel_opt + integrate event.                               |
-| `capability_summary` | One row per family: geak / oob / backends / params / sweep / validate_stack with status + attempts + keeps. |
+| `capability_summary` | One row per live capability: geak / oob / explore / sweep / specialist, plus legacy rows kept for archived sessions. |
 | `geak_invocations`   | Per-attempt detail: prompt path, optimized files, verification, decision, micro_speedup.                 |
 | `oob_invocations`    | Same schema as `geak_invocations`, with `backend ∈ {claude, codex}`.                                     |
 | `kernel_lifecycle`   | 5 stages: `detected` / `recommended` / `optimized` / `adopted` / `rejected`.                             |
-| `param_search`       | Backends + params search ledgers (tested / accepted / rejected / top_by_gain / winner_history).          |
+| `param_search`       | Compatibility alias for the merged explore ledger (tested / accepted / rejected / top_by_gain / winner_history). |
 | `sweep`              | Grid size, best_overall, pareto_front, every variant's benchmark numbers.                                |
 | `critic_robustness`  | Per-iter critic verdicts + robustness signals.                                                           |
 | `telemetry`          | Paths to `benchmark_report.json` / `torch_trace` / `system_profile` / server logs + aggregated GPU monitor. |
-| `attribution`        | Per-stack-entry gain ledger + family breakdown (geak / oob / backends / params / sweep / validated).     |
+| `attribution`        | Per-stack-entry gain ledger + family breakdown (geak / oob / explore / sweep / legacy aliases).          |
 | `warnings`           | Best-effort caveats (missing files, partial sections, reconstructed fields).                             |
 | `source_files`       | Mapping from logical section to relative path under `session_dir`.                                       |
 
@@ -62,9 +62,10 @@ should ALSO refresh it eagerly when downstream dashboards may be
 watching this session live:
 
 1. **Always** at end-of-session (handled by `cli.py finally` — you do not need to dispatch this).
-2. After every successful `validate_stack` (cumulative gain just changed).
-3. After every KEEP'd kernel/backends/params variant when a live
-   dashboard is observing this session.
+2. After every KEEP'd explore, specialist, framework, or kernel result
+   whose benchmark changed the final stack.
+3. After a successful sweep or conc_sweep when a live dashboard is
+   observing this session.
 4. **Never** mid-action — collectors expect a coherent state snapshot.
 
 Dispatch action `session_breakdown` (yaml meta lives at
@@ -134,7 +135,7 @@ another (each becomes a `warnings[]` entry instead).
 | `geak_invocations`   | `kernel-agent/runs/<sid>/{optimization_attempts.jsonl, prompts/, optimized/, results/, verification/}` filtered by `backend == "geak"` (also scans legacy `kernel-agent-workspace/.../kernel-agent/runs/...` for historical sessions). Per-attempt files under `optimized/` are discovered by `glob("<attempt_id>*")`, so both the historical `<attempt_id>_optimized.<suffix>` name and the post-2026-05 `<attempt_id>_stdout.log` name are picked up transparently — see `kernel-agent/SKILL.md` § *Per-attempt stdout file naming*. |
 | `oob_invocations`    | Same as GEAK, filtered by `backend ∈ {claude, codex}`                                                                |
 | `kernel_lifecycle`   | `runs/profile/*/benchmark_*/benchmark_report.json` (detected) + `state.last_trace_analyze` (recommended) + invocations folded (optimized) + `state.{kernel_integrate_attempts, rejected_kernel_*}` (adopted/rejected) |
-| `param_search`       | `state.{explore_search, params_winner_history, synergy_attempted, discovered_flags, backend_winners_history}` |
+| `param_search`       | `state.{explore_search, params_winner_history, synergy_attempted, discovered_flags, backend_winners_history}`; `params` / `backends` ledgers are historical aliases only |
 | `sweep`              | `state.last_sweep` + `runs/sweep/<task>/variant_*/benchmark_*/benchmark_report.json`                                |
 | `critic_robustness`  | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json` + `robustness-workdir/<NNN>/{signal,action}.json`   |
 | `telemetry`          | All `runs/**/benchmark_*/benchmark_report.json` + `torch_trace/` + `system_profile/` + `server*.log`                  |
