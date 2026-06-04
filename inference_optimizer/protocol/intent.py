@@ -38,7 +38,7 @@ class IntentType(str, Enum):
     ANSWER = "answer"
     ALERT = "alert"
     # Bidirectional agent-to-agent RPC. PolicyGate restricts (source,
-    # target_agent) pairs and `kind` per pair. v0.6: only Orchestration→Kernel.
+    # target_agent) pairs and `kind` per pair.
     REQUEST = "request"
     RESPONSE = "response"
     # Critic Review Protocol (DESIGN §18.2). Critic-only.
@@ -115,8 +115,7 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.ALERT:           ("severity", "summary"),
     IntentType.REQUEST:         ("target_agent", "kind"),
     IntentType.RESPONSE:        ("in_reply_to", "kind"),
-    # v0.8 KB_gaps/Gap-11: the
-    # ``verdict`` / ``verdict_map`` choice is mutually exclusive but
+    # The ``verdict`` / ``verdict_map`` choice is mutually exclusive but
     # one of them must be present. We require only the structural
     # ``target_proposal_msg_id`` field here; the
     # ``verdict``/``verdict_map`` mutual exclusion is enforced by
