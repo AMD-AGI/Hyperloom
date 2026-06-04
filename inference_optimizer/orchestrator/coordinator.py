@@ -1071,10 +1071,8 @@ class Coordinator:
                 log.exception("reactor task raised on shutdown")
         # T4 safety net (only fires when the CLOSE phase sequencer
         # did NOT get to run — e.g. Ctrl-C / crash mid-EXPLORE).
-        # Drains the NDJSON queue + runs the recipe / journal
-        # finalize. Failures are recorded on ``SharedState.stop_reason``
-        # so the operator sees ``cortex_drain_failed`` in the final
-        # summary; the SQLite close still runs so we don't leak fds.
+        # Runs the recipe / journal finalize. The SQLite close still
+        # runs afterwards so we don't leak fds.
         await self._cortex_t4_hook()
         self.db.close()
 
