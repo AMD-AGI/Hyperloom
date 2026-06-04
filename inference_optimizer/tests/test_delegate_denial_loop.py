@@ -8,7 +8,7 @@ import pytest
 
 from inference_optimizer.orchestrator.backends import MockBackend, ScriptedPlan
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
 
@@ -206,7 +206,7 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
 import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.phase_state import (

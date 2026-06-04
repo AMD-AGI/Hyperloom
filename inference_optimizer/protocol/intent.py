@@ -1,4 +1,4 @@
-"""Structured-intent transport ().
+"""Structured-intent transport schema (protocol layer).
 
 Two transports share the same envelope schema:
 
@@ -7,6 +7,10 @@ Two transports share the same envelope schema:
 
 Both validate via :func:`validate_envelope`; downstream consumers see a
 uniform list of :class:`Intent` objects.
+
+This module is the bottom-layer protocol definition: it depends on nothing
+inside the package and must never import ``orchestrator`` / ``shared_state``
+(doing so would create an import cycle).
 
 v0.6 changes vs v0.5:
 
@@ -128,7 +132,7 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     # specialist exit envelope. ``proposal_set`` is a list (may
     # be empty when ``empty=true``); per-variant schema is enforced by
     # PolicyGate R3 (``policy._validate_specialist_done``) since the
-    # intent_parser sees only the envelope skeleton.
+    # intent parser sees only the envelope skeleton.
     IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain",
                                   "proposal_set", "empty", "summary"),
 }

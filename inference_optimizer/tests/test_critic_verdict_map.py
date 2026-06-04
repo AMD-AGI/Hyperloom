@@ -41,7 +41,7 @@ from inference_optimizer.orchestrator.coordinator import (
     CoordinatorState,
     PendingProposal,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
     IntentValidationError,
