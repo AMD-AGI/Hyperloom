@@ -34,4 +34,30 @@
 
 ## 进度记录
 
-(完成后填:测试文件数/LOC 前后 / commit)
+测试文件数:273 → 264(-9)。范围内测试总 LOC:103493 → 103255(-238)。
+
+入口校验:5 个子系统全量跑一遍——io 3620 / robustness 703 / critic 249 /
+framework 191 全绿;kernel-agent 有 15 个**既有**失败(子进程工具依赖
+GPU/aiter 源/磁盘 fixture,在本沙箱缺失),非回归、未触碰。故无 STALE 红灯
+可删——Phase A–D 退役死代码时没留下孤儿测试。
+
+执行(每项一个 commit):
+- 分类盘点 `test_classification.txt`(GUARDRAIL/BEHAVIOR/PRIVATE/STALE)。
+- 合并 `sources_local_probe` 家族 7→1(81 测试,全部同打 `local_probe`)。
+- 合并 `local_health` 信号三件套 3→1(52 测试,共享 `_ctx`)。
+- 合并 `SharedState` 单测三件套 3→1(34 测试),顺带退役 failure-log 里的
+  `backends`/`params` 字符串标签。
+
+出口校验:
+- [x] 无 STALE/PRIVATE 红灯(suites 本就全绿,未盲删)。
+- [x] 小文件已合并,测试文件数下降(-9)。
+- [x] 护栏 keep-list 仍全绿且仍存在(main 307 / critic 21 / robustness 54 /
+      kernel 5 / framework 4)。
+- [x] 剩余测试全绿(io/robustness/critic/framework 全量重跑通过)。
+- [x] 测试总 LOC 下降(-238),每个提交净行数为负。
+- [x] 每个 §1 对外契约仍有 ≥1 护栏测试覆盖(未改动 keep-list)。
+
+未合并(已评估,刻意保留):同一特性但 stub/helper 体不同会冲突的
+(`framework_pr_discover_directed`/`_retry` 的 sync/async `_call_discover`)、
+测不同子模块的(critic `web_tools_*` 各自 `_cfg`)、一文件一信号规则的
+(`signals_*`)——强合并是改名搬家而非降复杂度,违背主旨。
