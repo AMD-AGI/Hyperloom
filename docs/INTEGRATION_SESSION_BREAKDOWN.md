@@ -173,10 +173,11 @@ T+90 min" charts.
 
 ## 8. `capability_summary` — `CapabilitySummary`
 
-One card per capability (`geak`, `oob`, `backends`, `params`, `sweep`,
-`validate_stack`) with: `status`, `attempts`, `keeps`, `tested`,
-`best_gain_pct`, `reason`. Drives the per-session UI cards in
-PrimusClaw.
+One card per live capability (`geak`, `oob`, `explore`, `sweep`,
+`specialist`) with: `status`, `attempts`, `keeps`, `tested`,
+`best_gain_pct`, `reason`. Legacy `backends`, `params`, and
+`validate_stack` rows can appear when archived sessions are rebuilt.
+Drives the per-session UI cards in PrimusClaw.
 
 ---
 
@@ -206,12 +207,13 @@ The same `kernel_id` appears in multiple lists as it progresses.
 
 ## 12. `param_search`
 
-Two ledgers (`params`, `backends`) of `ParamSearchEntry` records:
-every tested variant with `status` ∈ `accepted` / `rejected` /
-`tested`, the `extra_server_args` / `extra_envs` it injected, the
-`output_throughput` it measured, and the resulting `gain_pct`. Also
-includes `synergy_attempted`, `discovered_flags`, and
-`backend_winners_history`.
+The canonical ledger is `explore`, with `ParamSearchEntry` records for
+every tested variant: `status` ∈ `accepted` / `rejected` / `tested`,
+the `extra_server_args` / `extra_envs` it injected, the
+`output_throughput` it measured, and the resulting `gain_pct`. The
+`params` and `backends` ledgers are compatibility aliases emitted for
+archived sessions and old readers. The section also includes
+`synergy_attempted`, `discovered_flags`, and `backend_winners_history`.
 
 ---
 
@@ -249,8 +251,9 @@ artefacts (e.g. for a replay) should resolve relative paths against
 
 Gain attribution per stack entry: a list of `StackGainEntry`
 (per-validation incremental contribution) plus a `SourceBreakdown`
-that splits the validated total across geak / oob / backends / params
-/ sweep.
+that splits the validated total across geak / oob / explore / sweep,
+with legacy alias buckets populated only when the source session
+contains archived action names.
 
 `method` is one of `validated`, `single_source`, `reconstructed`,
 `missing` — consumers should display reconstruction caveats from the
@@ -345,9 +348,9 @@ investigation than the breakdown summarises.
     "extra_server_args": "--nsa-decode-backend aiter --enable-mixed-chunk --enable-aiter-allreduce-fusion",
     "extra_envs": {},
     "action_path": [
-      "backends:nsa_decode_aiter",
-      "backends:mixed_chunk",
-      "backends:aiter_allreduce_fusion",
+      "explore:nsa_decode_aiter",
+      "explore:mixed_chunk",
+      "explore:aiter_allreduce_fusion",
       "kernel_opt:moe_router_gemm_n256_k6144"
     ],
     "ttft_mean_ms": 118.7,
@@ -357,8 +360,8 @@ investigation than the breakdown summarises.
       "framework_args": "python -m sglang.launch_server --model ... --nsa-decode-backend aiter --enable-mixed-chunk --enable-aiter-allreduce-fusion",
       "framework_args_source": "log_non_default_args",
       "extra_envs": { "GPU_TYPE": "mi355x", "TP": "4" },
-      "config_path": "runs/validate_stack/final_config.with_envs.yaml",
-      "server_log_path": "runs/validate_stack/server.log"
+      "config_path": "runs/explore/final_config.with_envs.yaml",
+      "server_log_path": "runs/explore/server.log"
     },
     "closing_phase_entered": true,
     "closing_started_unix": 1747487201.0,
