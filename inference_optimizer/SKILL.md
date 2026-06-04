@@ -83,30 +83,31 @@ so ``session_dir == workspace_root`` (no ``<model>/<ts>`` subdirs).
 
 ### Path resolution (do not guess)
 
+`paths.py` is the single authority for Hyperloom paths. The launching
+agent does not need to recreate that logic in shell; it only needs to run
+`install.sh`, source the generated `runtime/kernel-agent.env.sh`, and read
+the session dir printed by the CLI.
+
 | Concept | Env / helper | Meaning |
 |---|---|---|
-| Workspace root | ``$USER_DATA_PATH`` → ``paths.workspace_root()`` | Shared ``runtime/``, parent of all sessions |
-| Session dir | ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` → ``paths.session_dir()`` | Where ``manifest.json`` / ``state.json`` live |
-| Session id | ``manifest.json`` → ``session_id`` | Logical label only — **not** a directory name |
+| Workspace root | ``$USER_DATA_PATH`` → ``paths.workspace_root()`` | Shared ``runtime/`` + ``logs/`` and parent of all sessions |
+| Session dir | ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` → ``paths.session_dir()`` | Per-run directory containing ``manifest.json`` / ``state.json`` / ``storage/coordinator.db`` |
 
-Resolution order for ``paths.session_dir()``:
+**Launcher rule:** do not hand-build, create, delete, or repair paths
+under ``$USER_DATA_PATH/runtime/`` (especially ``source-mirrors/``).
+Those are workspace-shared assets owned by `install.sh`, including
+Magpie, GEAK, OOB, TraceLens mirrors, env files, and config. Manual edits
+there can corrupt another run's checkout. If install state looks wrong,
+rerun `install.sh` or follow the Recovery section; do not clone or clean
+the mirrors by hand.
 
-1. ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (pin from CLI — **authoritative**)
-2. ``$USER_DATA_PATH`` (legacy flat / tests without pin)
-3. ``/workspace/hyperloom``
-
-**Iron rule for agents:** never treat ``$USER_DATA_PATH`` as the session
-dir when ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set. Read
-``manifest.json`` / ``state.json`` from the **session dir** (CLI prints
-``Session dir : …`` at startup). For monitoring after launch, parse that
-line or walk ``$USER_DATA_PATH/<model_basename>/`` for the latest
-``*T*Z/`` timestamp dir.
-
-The optimizer code uses `paths.*` / `session_paths.*` helpers
-internally (don't string-concat); the launcher only needs
-`paths.workspace_root()` = `$USER_DATA_PATH`, `paths.session_dir()` =
-the pinned session dir, and `paths.db_path_for(sd)` =
-`<sd>/storage/coordinator.db`.
+**Session rule:** never treat ``$USER_DATA_PATH`` as the session dir when
+``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set. Read
+``manifest.json`` / ``state.json`` / ``coordinator.db`` from the
+**session dir**. For monitoring after launch, parse the CLI's
+``Session dir : …`` line first; if it is unavailable, walk
+``$USER_DATA_PATH/<model_basename>/`` for the latest ``*T*Z/`` timestamp
+dir.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
@@ -382,8 +383,10 @@ Steps for the launching agent:
    type, attention variant, expert counts, MTP, SWA window) and set
    `"source": "config_classify"`.
 3. **Write the convention file** — write the profile to
-   `$USER_DATA_PATH/model_arch.json` (the workspace root, parent of all
-   model/session dirs). Include `model_name` (required for the stale-file
+   exactly `$USER_DATA_PATH/model_arch.json`: the file named
+   `model_arch.json` at the workspace root. Do not create a subdirectory
+   such as `model_arch_advisory/`; the CLI only reads the root-level
+   convention file. Include `model_name` (required for the stale-file
    guard — its basename must match the launched `--model` basename or
    Hyperloom ignores the file). All other fields are optional; renderers
    drop empty fields.
@@ -494,6 +497,17 @@ which piece is missing, then re-run full install:
 bash "$REPO_ROOT/inference_optimizer/scripts/install.sh" --check-only
 bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 ```
+
+If install repeatedly fails while building GEAK / `mini-swe-agent` with
+missing files such as `src/minisweagent/...`, the workspace-shared GEAK
+mirror may be half-created (`.git` exists but `src/` is incomplete) or
+the filesystem may be showing stale metadata. Do not manually clone GEAK,
+delete only `build/`, or edit `source-mirrors/` in place. Stop any other
+installer using the same `$USER_DATA_PATH`, remove the entire
+`${HYPERLOOM_ROOT:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/source-mirrors}/geak`
+directory, then rerun the full install so `install.sh` owns the fresh
+clone. Multiple concurrent installs sharing one `$USER_DATA_PATH` also
+share `source-mirrors/`; avoid running them at the same time.
 
 In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):
