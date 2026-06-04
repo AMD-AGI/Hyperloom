@@ -73,3 +73,12 @@
 - [x] 碎文件已核查(无安全合并项,记录理由)。
 - [x] 护栏全绿;`import inference_optimizer.cli` 正常;envelope/平价契约不变。
 - [x] 文件数净增 ≤ 个位数。
+
+### 复核 + 收尾(独立重验)
+
+- 用 AST+Tarjan 重跑环检测(345 模块):**循环 SCC = 0、自环 = 0**。
+- 复核底层纯净:`protocol/*` 与 `paths.py` **无任何包内 import**(真底层)。
+- 复核 intent 合并:`intent_parser.py` 已删、`protocol/intent.py` 在位、全仓**无残留 import** 该模块(`protocol.intent` 53 处 import,采用充分)。
+- 复核碎文件:`_renderers/source_files.py`(0 import refs)实为 `compose.py` 多行 side-effect import 注册的活插件(误报),非死文件。
+- 收尾修正(移位遗留的"名实不符"注释,commit `2b57b61c`):`policy.py` / `coordinator.py` 中引用已删模块名 `intent_parser` 的源码注释改为"protocol 层校验器(protocol/intent)";顺带修 `policy.py` 一处 `#         #` 重复井号碎注释 + 清 coordinator docstring 一处 KB_gaps 痕迹。
+- 残留 `intent_parser` 字样仅在 `tests/`(注释/测试函数名,15 处),归 Phase E。
