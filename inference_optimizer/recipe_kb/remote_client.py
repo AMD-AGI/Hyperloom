@@ -292,6 +292,12 @@ class RemoteRecipeClient:
 
     _transport: _HttpTransport | None = field(default=None, init=False, repr=False)
 
+    # Capability flag read by ``RecipeKB._normalize_remote_row``: the
+    # central kb-service returns the nested v2 envelope, so the dispatcher
+    # must run the v2->arbor projection on our rows. Bare (un-annotated)
+    # so the dataclass does not treat it as an init field.
+    returns_arbor_shape = False
+
     def __post_init__(self) -> None:
         if not self.kb_url:
             self.kb_url = (os.environ.get("CORTEX_KB_URL") or "").strip() or None
