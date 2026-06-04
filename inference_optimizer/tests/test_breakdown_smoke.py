@@ -2735,6 +2735,35 @@ def test_action_timeline_mirrors_phase_timeline(tmp_path):
     assert b["action_timeline"] == b["phase_timeline"]
 
 
+def test_roofline_attempts_are_in_phase_timeline(tmp_path):
+    """Roofline failures must be visible in breakdown timelines."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    _write_state(sd, _basic_state(
+        roofline_attempts=[
+            {
+                "ts": "2026-06-04T01:49:00+00:00",
+                "task_id": "t-roofline-fail",
+                "status": "failed",
+                "decision": "no_promote",
+                "key_metric": None,
+                "key_metric_kind": "snapshot_id",
+                "error_class": "trace_analyze_failed",
+                "extras": {"phase": "trace_analyze"},
+            },
+        ],
+    ))
+    timeline = build(sd)["phase_timeline"]
+
+    roofline_rows = [e for e in timeline if e.get("action") == "roofline"]
+    assert len(roofline_rows) == 1
+    row = roofline_rows[0]
+    assert row["task_id"] == "t-roofline-fail"
+    assert row["status"] == "failed"
+    assert row["decision"] == "no_promote"
+    assert row["error_class"] == "trace_analyze_failed"
+
+
 # ===========================================================================
 # 6. CLI flag wiring
 # ===========================================================================
