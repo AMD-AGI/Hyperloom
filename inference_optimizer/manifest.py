@@ -87,11 +87,11 @@ from .session_paths import manifest_path
 
 log = logging.getLogger(__name__)
 
-# Schema bumped to 3 in the legacy release to add ``stack_fingerprint`` (rocm / aiter /
-# sglang / vllm versions, mandatory attrs for Cortex KB ``session begin``
-# per KB_design §3.6.5.1 + §3.13 M1) plus the ``dependencies`` provenance
-# block (Magpie / InferenceX commit + remote — bugs.md §C #1). Older v2
-# readers stay compatible because all new fields are additive.
+# Schema 3 adds ``stack_fingerprint`` (rocm / aiter / sglang / vllm
+# versions, mandatory attrs for Cortex KB ``session begin``) plus the
+# ``dependencies`` provenance block (Magpie / InferenceX commit +
+# remote). Older v2 readers stay compatible because all new fields are
+# additive.
 SCHEMA_VERSION = 3
 
 
@@ -384,7 +384,7 @@ def build_manifest(
         "pr_degraded_reason": (
             getattr(args, "pr_degraded_reason", None) if args is not None else None
         ),
-        # GAP 1 — Warm-recipe replay flags. Persisted into manifest so
+        # Warm-recipe replay flags. Persisted into manifest so
         # robustness_monitor.sh resume / cross-machine resume picks up
         # the same gate thresholds rather than reverting to defaults.
         # The ``warm_replay_enabled`` field is the inverted form of

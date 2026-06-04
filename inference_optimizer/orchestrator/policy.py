@@ -965,7 +965,7 @@ class PolicyGate:
                 )
         # R1 phase_incompatible. Runs **after** the role +
         # kernel-ownership + unknown_action checks so the cheaper /
-        # structural denials win when both apply (Inv-11.3 orthogonality).
+        # structural denials win when both apply (orthogonality).
         self._validate_phase_action(role, action_name, intent_kind="delegate")
         # R4 / R5 — block any ``delegate`` whose action_name
         # tries to invoke an external tool via the intent channel.
