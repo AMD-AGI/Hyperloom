@@ -130,6 +130,9 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/orchestrator/coordinator.py":
         "comments explain the read_extra_server_args call at the LLM "
         "intent / sub-agent envelope read boundaries",
+    "inference_optimizer/orchestrator/coordinator_helpers.py":
+        "holds the extracted _merge_cumulative_extra_sglang_args helper "
+        "that merges the legacy KB best_config arg stacks",
     "inference_optimizer/orchestrator/kernel_request_handlers.py":
         "comments explain the read_extra_server_args call at the "
         "integrate_patch sub-agent envelope read boundary",
