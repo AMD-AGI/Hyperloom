@@ -229,8 +229,8 @@ async def phase_discover(
 # NOTE: ``phase_fetch`` / ``phase_emit_proposal`` shims used to live
 # here but had zero callers in inference_optimizer (the Coordinator
 # pump only calls ``phase_discover``; ``FrameworkPrExecutor`` curls
-# ``candidate.diff_url`` directly via ``git apply``). The PR-327 review
-# flagged them as dead-API-that-misleads-readers, so they were removed.
+# ``candidate.diff_url`` directly via ``git apply``). They were removed
+# as dead API that misleads readers.
 # The standalone ``fa`` CLI still ships both subcommands for ad-hoc /
 # external use — re-add wrappers here only when the Coordinator
 # actually wires a new caller.

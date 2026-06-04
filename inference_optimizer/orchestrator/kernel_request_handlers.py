@@ -54,10 +54,10 @@ log = logging.getLogger(__name__)
 # Where Hyperloom/kernel-agent's shell tools live. Env is set by
 # inference_optimizer/scripts/install.sh -> pod-local kernel-agent env.
 #
-# Why lazy: in May 2026 the R1 N14 GPU run stalled for 1h 12min because
-# this module was imported BEFORE the cli preflight had a chance to
-# source $USER_DATA_PATH/runtime/kernel-agent.env.sh (the launcher only
-# pre-sourced the user-level .env with 3 vars). A frozen module-level
+# Why lazy: this module can be imported BEFORE the cli preflight has a
+# chance to source $USER_DATA_PATH/runtime/kernel-agent.env.sh (the
+# launcher only pre-sources the user-level .env with 3 vars). A frozen
+# module-level
 # snapshot meant HYPERLOOM_KERNEL_AGENT_ROOT was permanently None even
 # after preflight injected it into os.environ. Reading via a function
 # at each call site lets cli.py's late env injection win; the snapshot
@@ -779,7 +779,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
         if not resolved.get("source_file") and last_kernel.get("source_file"):
             resolved["source_file"] = str(last_kernel["source_file"])
 
-    # Multi-KEEP queue fallback (PR-B B-5):
+    # Multi-KEEP queue fallback:
     # ``last_kernel_opt`` only ever holds the strongest pending KEEP.
     # When the queue drains a second/third KEEP whose kernel_id != that
     # of ``last_kernel_opt``, the block above doesn't fire and we'd
@@ -1173,7 +1173,7 @@ async def trace_analyze_handler(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
-    # N25: forward TraceLens splitter steady-state mode (mixed /
+    # forward TraceLens splitter steady-state mode (mixed /
     # decode_only / prefilldecode). Set via payload OR env so the
     # coordinator can re-issue roofline with a different mode after a
     # steady_state_chunk_missing / steady_state_chunk_empty warning
@@ -1188,8 +1188,8 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # PR-E: ``--roofline-json`` CLI param retired with the
-    # ``pmc_roofline`` action (2486a19). No producer for that JSON
+    # ``--roofline-json`` CLI param retired with the ``pmc_roofline``
+    # action. No producer for that JSON
     # remains; the payload key is now silently ignored if a stale
     # caller still passes it.
     if payload.get("dry_run"):
@@ -1212,7 +1212,7 @@ async def trace_analyze_handler(
             _enrich_candidate_trace_report(
                 result.get("hot_kernels"), str(report_path),
             )
-        # PR-A §3 (#206): surface tracelens/summary.json — the per-run
+        # surface tracelens/summary.json — the per-run
         # audit sidecar listing reusable tasks vs skipped kernels with
         # reasons, so operators can see at a glance whether GEAK was
         # offered the kernels they expected.
@@ -1249,7 +1249,7 @@ async def trace_analyze_handler(
             result["hot_kernels"] = []
             result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 
-        # T3 / T4: guarantee ``trace_health_warnings`` is always a list
+        # guarantee ``trace_health_warnings`` is always a list
         # at the handler boundary so downstream code can iterate without
         # a ``None``-guard. Empty list = steady-state ("nothing wrong").
         result.setdefault("trace_health_warnings", [])
@@ -1538,10 +1538,10 @@ def _batch_kernel_candidates(
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
 
-    # PR-C filters: build the "live" exclusion sets up front so both
-    # the task_group fallback and the legacy per-kernel pass can honor
-    # them. Without session_dir (legacy tests / dry-run paths) the
-    # filters degrade to empty sets and behaviour matches PR-A/B.
+    # Filters: build the "live" exclusion sets up front so both the
+    # task_group fallback and the legacy per-kernel pass can honor them.
+    # Without session_dir (legacy tests / dry-run paths) the filters
+    # degrade to empty sets.
     rejected_kernel_ids: set[str] = set()
     attempts_by_kid: dict[str, dict] = {}
     in_flight: set[str] = set()
@@ -1553,7 +1553,7 @@ def _batch_kernel_candidates(
         )))
     except (TypeError, ValueError):
         max_attempts = 1
-    # PR-I: default min_gpu_pct must match SharedState.untried_hot_
+    # default min_gpu_pct must match SharedState.untried_hot_
     # reusable_kernels' default (3.0). Earlier code defaulted to 0.0
     # here, so the LLM saw an empty "untried" queue (gate >=3%) but
     # _batch_kernel_candidates would still dispatch <3% candidates
@@ -1625,7 +1625,7 @@ def _batch_kernel_candidates(
             return False
         return True
 
-    # PR-B §1: collapse kernels that share a source function into a
+    # collapse kernels that share a source function into a
     # single dispatch via ``task_groups[]``. Each group emits exactly
     # one GEAK / Codex / Claude request keyed off ``primary_kernel_id``,
     # and the full row list lives on ``item["task_group"]`` so
@@ -1769,16 +1769,13 @@ async def _run_kernel_backend_sequence(
         })
         verification = result.get("verification") or {}
         proposal = result.get("proposal") or {}
-        # PR-F: prefer a KEEP verdict over a higher-micro non-KEEP. The
-        # ladder runs GEAK first; GEAK frequently returns NEEDS_REVIEW
-        # at e.g. 1.3x because it has no correctness gate, while a
-        # subsequent Claude/Codex attempt may deliver a real KEEP at
-        # 1.17x with full correctness. Before PR-F the higher-micro
-        # NEEDS_REVIEW won the best-selection contest, the ladder
-        # broke on KEEP but returned the wrong result -- the actual
-        # KEEP patch was silently discarded (Qwen3-30B-A3B-Base
-        # 20260523T035235Z k004: codex KEEP @1.17x lost to geak
-        # NEEDS_REVIEW @1.3x, never reached integrate).
+        # Prefer a KEEP verdict over a higher-micro non-KEEP. The ladder
+        # runs GEAK first; GEAK frequently returns NEEDS_REVIEW at e.g.
+        # 1.3x because it has no correctness gate, while a subsequent
+        # Claude/Codex attempt may deliver a real KEEP at 1.17x with full
+        # correctness. Without this, the higher-micro NEEDS_REVIEW would
+        # win the best-selection contest and the actual KEEP patch would
+        # be silently discarded.
         # Mirror the batch handler's max-key in
         # ``_run_optimization_batch`` so ladder + batch agree.
         new_keep = (
