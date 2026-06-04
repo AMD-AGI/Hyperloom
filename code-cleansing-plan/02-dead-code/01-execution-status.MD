@@ -70,16 +70,38 @@ The following remain intentionally untouched because they require compatibility 
 - `extra_sglang_args` read alias,
 - old kernel-agent artifact readers,
 - robustness legacy mode,
-- old Cortex v1 KB surfaces,
-- historical examples under `inference_optimizer/examples`.
+- old Cortex v1 KB surfaces.
+
+## Completed In Follow-Up Batch
+
+### Deleted historical examples
+
+Deleted the old P0/P1/P2 demo package under `inference_optimizer/examples`:
+
+- `__init__.py`
+- `p0_main_loop.py`
+- `p1_5_real_claude_demo.py`
+- `p1_6_e2e_baseline_demo.py`
+- `p1_7_three_agents_e2e_demo.py`
+- `p2_full_optimize_demo.py`
+
+Reason:
+
+- The demos were not CLI entry points or package-data contracts.
+- They encoded retired actions and old smoke-run scripts (`setup`, `classify`, `backends`, `params`).
+- The live Coordinator mock flow remains covered by `test_e2e_mock.py`.
+
+Follow-up cleanup:
+
+- Removed the demo-only test that imported `inference_optimizer.examples.p0_main_loop`.
+- Removed the now-stale coverage omit entry for `*/examples/*`.
 
 ## Status
 
-Step 02 low-risk cleanup is complete for the first batch.
+Step 02 low-risk cleanup is complete for the first and examples batches.
 
 The next safe cleanup batch can continue with:
 
 - stale retired-action prompt references,
 - unimplemented feature wording in deeper docs,
-- examples, after user-facing status is confirmed,
 - compatibility-heavy paths only after the decision list is resolved.
