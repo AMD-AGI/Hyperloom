@@ -340,9 +340,7 @@ def main() -> int:
         help=(
             "Path to a pre-generated trace (``.json`` / ``.json.gz``) or a "
             "torch_trace dir. Use ``inference_optimizer optimize`` to "
-            "produce baseline+profile traces; the legacy auto-baseline "
-            "step that shelled out to marathon/skills/scripts/run_baseline.sh "
-            "was removed."
+            "produce baseline+profile traces."
         ),
     )
     parser.add_argument("--kernel-name", default="",
@@ -389,9 +387,7 @@ def main() -> int:
         if not trace_path or not Path(trace_path).exists():
             raise RuntimeError(
                 f"--trace-path missing or does not exist: {trace_path}. "
-                "Produce a trace with ``inference_optimizer optimize`` first "
-                "(the legacy in-runner auto-baseline step was removed when "
-                "Hyperloom dropped its marathon dependency)."
+                "Produce a trace with ``inference_optimizer optimize`` first."
             )
         summary["baseline"] = baseline
         summary["trace_path"] = trace_path
