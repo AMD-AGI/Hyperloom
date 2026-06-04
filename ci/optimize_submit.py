@@ -2439,8 +2439,9 @@ def wait_and_collect_one(
 
     Two-stage collection:
       1. SaFE API: list_artifacts(task_id) -> download each via /artifacts/download
-      2. NFS fallback: if we still don't have ci_metrics.json + optimization_report.md,
-         walk the canonical NFS result directories for a matching model dir
+      2. NFS fallback: if we still don't have session_breakdown.json (the CI
+         delivery contract), walk the canonical NFS result directories for a
+         matching model dir
     """
     if not rec.task_id:
         return rec  # nothing to wait for (skipped/failed during submit)
@@ -2483,14 +2484,18 @@ def wait_and_collect_one(
         wanted = [it for it in items
                   if _is_wanted_artifact(it.get("path", ""), all_artifacts)]
         wanted_paths = [it.get("path", "").lower() for it in wanted]
-        has_safe_metrics = any(p.endswith("ci_metrics.json") for p in wanted_paths)
-        has_safe_report = any(p.endswith("optimization_report.md") for p in wanted_paths)
-        if has_safe_metrics and has_safe_report:
+        # session_breakdown.json is the CI delivery contract — the optimizer's
+        # cli.finally always writes it (even on abort). ci_metrics.json /
+        # optimization_report.md are no longer hand-written by the prompt, so
+        # we retry only until the breakdown shows up.
+        has_safe_breakdown = any(
+            p.endswith("session_breakdown.json") for p in wanted_paths
+        )
+        if has_safe_breakdown:
             break
         if attempt < 2:
-            log.info("[task %s] safe artifacts missing key files on attempt %d "
-                     "(metrics=%s report=%s); retrying",
-                     rec.task_id, attempt + 1, has_safe_metrics, has_safe_report)
+            log.info("[task %s] safe artifacts missing session_breakdown.json on "
+                     "attempt %d; retrying", rec.task_id, attempt + 1)
             time.sleep(15)
     log.info("[task %s] safe artifacts: %d total, %d to download",
              rec.task_id, len(items), len(wanted))
@@ -2521,12 +2526,18 @@ def wait_and_collect_one(
         except Exception as e:
             log.warning("[task %s] failed to download %s: %s", rec.task_id, path, e)
 
-    # Stage 2: NFS fallback if we didn't get the key result files via Claw.
-    has_metrics = any(p.endswith("ci_metrics.json") for p in rec.artifact_files)
-    has_report = any(p.endswith("optimization_report.md") for p in rec.artifact_files)
-    if not (has_metrics and has_report):
-        log.info("[task %s] missing key files (metrics=%s report=%s) — trying NFS fallback",
-                 rec.task_id, has_metrics, has_report)
+    # Stage 2: NFS fallback if Stage 1 didn't deliver the key result file.
+    # The CI delivery contract is session_breakdown.json (auto-written by the
+    # optimizer's cli.finally to the wekafs session dir, then discovered here
+    # by the recursive NFS scan). ci_metrics.json / optimization_report.md are
+    # no longer required (the prompt no longer hand-writes them), so they no
+    # longer gate the fallback.
+    has_breakdown = any(
+        p.endswith("session_breakdown.json") for p in rec.artifact_files
+    )
+    if not has_breakdown:
+        log.info("[task %s] missing session_breakdown.json — trying NFS fallback",
+                 rec.task_id)
         copy_full_session = all_artifacts or _env_truthy("SAFE_OPTIMIZE_COPY_FULL_SESSION")
         n_added = _nfs_fallback_collect(
             rec,
