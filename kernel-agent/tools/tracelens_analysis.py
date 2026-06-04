@@ -33,6 +33,12 @@ from tracelens_skill_runner import (
     run_tracelens_skill,
 )
 
+# Standalone-tool workspace-root resolver (cannot import
+# inference_optimizer.paths; see _paths.py docstring). Used only for the
+# final fallback in _default_workspace_path() so the "USER_DATA_PATH unset"
+# warning fires instead of a silent /workspace/hyperloom default.
+from _paths import workspace_root
+
 
 HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 80.0
 HIGH_IDLE_PCT_THRESHOLD_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
@@ -2502,10 +2508,12 @@ def _default_workspace_path() -> str:
        ``/workspace``). Kept as a second-tier fallback so existing
        launchers / CI / parallel_e2e_runner that already export it
        continue to work without changes.
-    3. ``/workspace/hyperloom`` — the same hard-coded default as
-       ``inference_optimizer/paths.py::DEFAULT_SESSION_DIR``, so a
+    3. ``_paths.workspace_root()`` — the final fallback. It returns the
+       same ``/workspace/hyperloom`` default as
+       ``inference_optimizer/paths.py::DEFAULT_SESSION_DIR`` (so a
        bare-image run without either env variable lands in the same
-       place the orchestrator does.
+       place the orchestrator does) BUT emits a one-shot loud warning so
+       the missing ``$USER_DATA_PATH`` is never silent.
 
     Note: GEAK / OOB tooling (``kernel_optimization.py``, the auth
     proxy, ray_runtime, install.sh) still defaults to the legacy
@@ -2516,11 +2524,16 @@ def _default_workspace_path() -> str:
     ``test_tracelens_csv.py``) are unaffected — they pass
     ``--workspace-path`` explicitly.
     """
-    return (
-        os.environ.get("USER_DATA_PATH")
-        or os.environ.get("WORKSPACE_PATH")
-        or "/workspace/hyperloom"
-    )
+    user_data = os.environ.get("USER_DATA_PATH")
+    if user_data:
+        return user_data
+    workspace = os.environ.get("WORKSPACE_PATH")
+    if workspace:
+        return workspace
+    # Neither env set: route through the shared helper so the one-shot
+    # "USER_DATA_PATH unset" warning fires and we still return the same
+    # /workspace/hyperloom default the orchestrator uses.
+    return workspace_root()
 
 
 def main() -> int:

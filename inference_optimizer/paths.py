@@ -36,9 +36,12 @@ Two distinct path concepts:
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import re
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
 ENV_USER_DATA_PATH = "USER_DATA_PATH"
@@ -47,6 +50,12 @@ ENV_SESSION_LAYOUT = "INFERENCE_OPTIMIZER_SESSION_LAYOUT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+
+# One-shot guard so the "USER_DATA_PATH unset" fallback warning fires at
+# most once per process. workspace_root() is on a hot path (every
+# runtime_dir/magpie_dir/session_dir call routes through it), so a guard
+# keeps the loud signal from drowning the logs.
+_WARNED_NO_USER_DATA = False
 
 # Directory skeleton mkdir-ed on `make_session_dir()`. Order is irrelevant
 # (each dir is created with `parents=True, exist_ok=True`), but the listing
@@ -146,10 +155,30 @@ def workspace_root() -> Path:
     Per-session artefacts live under :func:`session_dir`, which is
     either this same path (legacy ``flat`` layout) or
     ``<workspace_root>/<model>/<ts>/`` (``per_model_ts`` layout).
+
+    When ``$USER_DATA_PATH`` is set this returns it verbatim and NEVER
+    yields ``DEFAULT_SESSION_DIR`` — that is the whole point of the
+    operator knob. When it is unset/empty we fall back to
+    ``DEFAULT_SESSION_DIR`` but emit a single loud ``logging.warning`` so
+    a misconfigured launcher (one that forgot to export the env) is
+    immediately visible instead of silently writing to the pod-local
+    default.
     """
+    global _WARNED_NO_USER_DATA
     user_data = os.environ.get(ENV_USER_DATA_PATH)
     if user_data:
         return Path(user_data)
+    if not _WARNED_NO_USER_DATA:
+        _WARNED_NO_USER_DATA = True
+        log.warning(
+            "%s is not set; falling back to %s. All session/run artefacts "
+            "will be written there, NOT to an operator-chosen location. "
+            "Export %s to the intended workspace root before launching to "
+            "avoid silently writing to the pod-local default.",
+            ENV_USER_DATA_PATH,
+            DEFAULT_SESSION_DIR,
+            ENV_USER_DATA_PATH,
+        )
     return DEFAULT_SESSION_DIR
 
 

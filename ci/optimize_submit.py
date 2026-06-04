@@ -106,6 +106,7 @@ DEFAULT_PROXY = "harbor.core42.example-internal-host.invalid/proxy"
 # Keeping this aligned avoids the agent landing on a stale /wekafs/InferenceX
 # checkout (left over from earlier non-hyperloom layouts on some sandboxes).
 DEFAULT_GPU_TYPE = "MI300X"
+DEFAULT_GPU_PROFILE = "mi300x"
 DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
 # OOB + TraceLens live next to InferenceX on the same hyperloom-managed mount.
 # Like DEFAULT_INFERENCEX_PATH these are core42 fallbacks; --oob-path /
@@ -116,6 +117,35 @@ DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
 DEFAULT_TARGET_GAIN = 100.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
+DEFAULT_CONTEXT_RESERVE_TOKENS = 16
+
+# Hardware facts are from ROCm GPU hardware specifications and AMD Instinct
+# datasheets/product briefs. tp_thresholds_b is our CI policy: start from the
+# MI300X baseline (32/128/256B) and scale by per-GPU HBM capacity, rounded to
+# the nearest billion parameters.
+GPU_PROFILES = {
+    "mi300x": {
+        "gpu_type": "MI300X",
+        "llvm_target": "gfx942",
+        "hbm_gb": 192,
+        "hbm_bandwidth_tb_s": 5.3,
+        "tp_thresholds_b": (32, 128, 256),
+    },
+    "mi325x": {
+        "gpu_type": "MI325X",
+        "llvm_target": "gfx942",
+        "hbm_gb": 256,
+        "hbm_bandwidth_tb_s": 6.0,
+        "tp_thresholds_b": (43, 171, 341),
+    },
+    "mi355x": {
+        "gpu_type": "MI355X",
+        "llvm_target": "gfx950",
+        "hbm_gb": 288,
+        "hbm_bandwidth_tb_s": 8.0,
+        "tp_thresholds_b": (48, 192, 384),
+    },
+}
 
 _KERNEL_BACKEND_ALIASES = {
     "geak": "GEAK",
@@ -125,6 +155,31 @@ _KERNEL_BACKEND_ALIASES = {
     "codex": "Codex",
     "cursor": "Cursor",
 }
+
+
+def normalize_gpu_profile(gpu_type: str | None, *, warn: bool = True) -> str | None:
+    """Return the GPU profile key when ``gpu_type`` maps to a known CI profile."""
+    raw = (gpu_type or "").strip()
+    compact = re.sub(r"[^a-z0-9]", "", raw.lower())
+    for key, profile in GPU_PROFILES.items():
+        profile_type = str(profile["gpu_type"])
+        aliases = {
+            re.sub(r"[^a-z0-9]", "", key.lower()),
+            re.sub(r"[^a-z0-9]", "", profile_type.lower()),
+        }
+        if compact in aliases or compact.endswith(key):
+            return key
+    if warn and raw:
+        log.warning("unknown gpu_type=%r; using %s for TP policy only",
+                    raw, GPU_PROFILES[DEFAULT_GPU_PROFILE]["gpu_type"])
+    return None
+
+
+def canonical_gpu_type(gpu_type: str | None) -> str:
+    profile_key = normalize_gpu_profile(gpu_type, warn=False)
+    if profile_key:
+        return str(GPU_PROFILES[profile_key]["gpu_type"])
+    return (gpu_type or DEFAULT_GPU_TYPE).strip() or DEFAULT_GPU_TYPE
 
 # Canonical prompt prefix lives in ci/prompt_prefix.txt next to this script.
 # Single source of truth — same file is read by the GitHub workflow Submit
@@ -360,6 +415,7 @@ class DetectedConfig:
     concurrency: int
     image: str
     params_b: float
+    max_context_tokens: int
 
 
 def _quant_type(config: dict) -> str:
@@ -427,40 +483,43 @@ def detect_param_count(hf_info: dict, config: dict) -> float:
     return 0.0
 
 
-def detect_tp(params_b: float, precision: str = "BF16") -> int:
-    """Pick a tensor-parallel size based on quantization-aware weight footprint.
+def detect_max_context_tokens(config: dict) -> int:
+    """Return the model context length from HF config.json when present."""
+    candidates = []
+    for key in ("max_position_embeddings", "max_sequence_length", "n_positions", "seq_length"):
+        value = config.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            candidates.append(int(value))
+    return min(candidates) if candidates else 0
 
-    The old logic only looked at params_b and hit two real bugs in production:
-      - gpt-oss-20b   (21.5B FP4 → ~11 GB weights) was given TP=4 even though
-        it fits comfortably on 1× MI300X (192 GB). TP=4 then failed the
-        baseline benchmark (vllm + EP=1 + non-divisible shape on a 21B MoE).
-      - 30B FP8 models (e.g. Qwen3-Coder-30B-A3B) similarly got TP=4 when
-        TP=1 would have been fine.
 
-    Bytes per param by precision:
-      FP4 / INT4 / NVFP4   = 0.5
-      FP8                  = 1.0
-      BF16 / FP16 (default)= 2.0
+def context_too_short(
+    max_context_tokens: int,
+    isl: int,
+    osl: int,
+    reserve_tokens: int = DEFAULT_CONTEXT_RESERVE_TOKENS,
+) -> bool:
+    if max_context_tokens <= 0:
+        return False
+    return max_context_tokens < (isl + osl + reserve_tokens)
 
-    Snap-to thresholds (after ~30% headroom for KV cache + activations):
-      weight_gb < 50   → TP=1   (single-GPU comfortable)
-      weight_gb < 280  → TP=4   (single GPU technically fits but multi-GPU
-                                 gives better throughput; matches MI300X
-                                 memory budget for 1024/1024 ISL/OSL @ conc=64)
-      weight_gb ≥ 280  → TP=8   (must shard across the full node)
+
+def detect_tp(params_b: float, precision: str = "BF16",
+              gpu_type: str | None = None) -> int:
+    """Pick tensor parallelism from model parameter count and GPU profile.
+
+    Keep the precision argument for API compatibility with older callers, but
+    do not use quantization-adjusted weight size here. The CI policy is meant
+    to be predictable across precision variants of the same model family.
     """
     if params_b <= 0:
         return 1
-    p = (precision or "").upper()
-    if p in ("FP4", "INT4", "NVFP4", "MXFP4"):
-        bytes_per_param = 0.5
-    elif p == "FP8":
-        bytes_per_param = 1.0
-    else:                       # BF16 / FP16 / unknown
-        bytes_per_param = 2.0
-    weight_gb = params_b * bytes_per_param
-    if weight_gb < 50:   return 1
-    if weight_gb < 280:  return 4
+    profile_key = normalize_gpu_profile(gpu_type) or DEFAULT_GPU_PROFILE
+    profile = GPU_PROFILES[profile_key]
+    tp1_max, tp2_max, tp4_max = profile["tp_thresholds_b"]
+    if params_b <= tp1_max:  return 1
+    if params_b <= tp2_max:  return 2
+    if params_b <= tp4_max:  return 4
     return 8
 
 
@@ -474,7 +533,8 @@ def detect_image(framework: str) -> str:
     return _default_vllm_image() if framework == "vllm" else _default_sglang_image()
 
 
-def auto_detect(hf: HuggingFaceClient, repo_id: str) -> DetectedConfig | None:
+def auto_detect(hf: HuggingFaceClient, repo_id: str,
+                gpu_type: str | None = None) -> DetectedConfig | None:
     log.info("[%s] fetching HF metadata", repo_id)
     try:
         info = hf.model_info(repo_id)
@@ -505,16 +565,19 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str) -> DetectedConfig | None:
     framework = detect_framework(config)
     precision = detect_precision(config)
     params_b = detect_param_count(info, config)
-    tp = detect_tp(params_b, precision)
+    max_context_tokens = detect_max_context_tokens(config)
+    tp = detect_tp(params_b, precision, gpu_type)
     conc = detect_concurrency(tp, framework)
     image = detect_image(framework)
 
     cfg = DetectedConfig(
         arch=arch, framework=framework, precision=precision,
         tp=tp, concurrency=conc, image=image, params_b=params_b,
+        max_context_tokens=max_context_tokens,
     )
-    log.info("[%s] arch=%s params=%.1fB framework=%s precision=%s tp=%d conc=%d",
-             repo_id, arch, params_b, framework, precision, tp, conc)
+    log.info("[%s] arch=%s params=%.1fB context=%d framework=%s precision=%s gpu=%s tp=%d conc=%d",
+             repo_id, arch, params_b, max_context_tokens, framework, precision,
+             canonical_gpu_type(gpu_type), tp, conc)
     return cfg
 
 
@@ -1161,8 +1224,10 @@ def process_model(
         overrides={k: v for k, v in overrides.items() if v is not None},
         pool={k: v for k, v in (pool_metadata or {}).items() if v not in (None, "")},
     )
+    gpu_type = canonical_gpu_type(gpu_type)
+    gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
 
-    detected = None if manual_mode else auto_detect(hf, repo_id)
+    detected = None if manual_mode else auto_detect(hf, repo_id, gpu_type=gpu_type)
     if not detected and not manual_mode:
         rec.status = "skipped"
         rec.error = "auto-detect failed"
@@ -1174,6 +1239,17 @@ def process_model(
     if detected:
         rec.detected = asdict(detected)
         rec.category = _category_from_arch(rec.detected.get("arch", ""))
+        max_context = int(rec.detected.get("max_context_tokens") or 0)
+        if context_too_short(max_context, isl, osl):
+            required = isl + osl + DEFAULT_CONTEXT_RESERVE_TOKENS
+            rec.status = "skipped"
+            rec.error = (
+                "context_too_short: "
+                f"max_context_tokens={max_context} < required={required} "
+                f"(isl={isl}, osl={osl}, reserve={DEFAULT_CONTEXT_RESERVE_TOKENS})"
+            )
+            log.warning("[%s] skipping: %s", repo_id, rec.error)
+            return rec
 
     framework = overrides.get("framework") or (detected.framework if detected else "")
     precision = overrides.get("precision") or (detected.precision if detected else "FP8")
@@ -1184,7 +1260,7 @@ def process_model(
     log.info("[%s] => mode=%s framework=%s precision=%s tp=%d conc=%d image=%s",
              repo_id, mode, framework, precision, tp, conc, image)
 
-    display_name = f"{repo_id.split('/')[-1]}-{precision.lower()}-{framework}-mi300x"
+    display_name = f"{repo_id.split('/')[-1]}-{precision.lower()}-{framework}-{gpu_profile}"
     rec.display_name = display_name
     rec.overrides["mode"] = mode
     if kernel_backends:
@@ -2778,6 +2854,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu-type", default="",
                         help=f"GPU type tag for the prompt (defaults to "
                              f"$SAFE_OPTIMIZE_GPU_TYPE then '{DEFAULT_GPU_TYPE}'). "
+                             f"Known profiles: {', '.join(GPU_PROFILES)}. "
                              f"SaFE backend default is MI355X — must override on core42.")
     parser.add_argument("--inferencex-path", default="",
                         help=f"InferenceX checkout path inside the sandbox "
@@ -2913,9 +2990,11 @@ def main() -> int:
     volume = (args.volume
               or os.environ.get("SAFE_OPTIMIZE_VOLUME")
               or DEFAULT_VOLUME)
-    gpu_type = (args.gpu_type
-                or os.environ.get("SAFE_OPTIMIZE_GPU_TYPE")
-                or DEFAULT_GPU_TYPE)
+    gpu_type_input = (args.gpu_type
+                      or os.environ.get("SAFE_OPTIMIZE_GPU_TYPE")
+                      or DEFAULT_GPU_TYPE)
+    gpu_type = canonical_gpu_type(gpu_type_input)
+    gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
     inferencex_path = (args.inferencex_path
                        or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
                        or DEFAULT_INFERENCEX_PATH)
@@ -2937,8 +3016,8 @@ def main() -> int:
 
     log.info("SaFE base_url=%s register_workspace=%s submit_workspace=%s volume=%s",
              base_url, register_workspace, submit_workspace, volume)
-    log.info("Cluster prompt fields: gpu_type=%s inferencex_path=%s oob_path=%s tracelens_root=%s",
-             gpu_type, inferencex_path, oob_path, tracelens_root)
+    log.info("Cluster prompt fields: gpu_type=%s gpu_profile=%s inferencex_path=%s oob_path=%s tracelens_root=%s",
+             gpu_type, gpu_profile, inferencex_path, oob_path, tracelens_root)
     log.info("Kernel backends: %s", ", ".join(kernel_backends))
     if submit_workspaces_pool:
         log.info("submit round-robin pool: %s (overrides --submit-workspace)",
@@ -3083,6 +3162,13 @@ def main() -> int:
                       for r in non_success
                   ))
         return 2
+    context_skipped = [
+        r for r in records
+        if r.status == "skipped" and (r.error or "").startswith("context_too_short:")
+    ]
+    if submitted == 0 and records and len(context_skipped) == len(records):
+        log.info("All models skipped by policy: context_too_short")
+        return 0
     return 0 if submitted > 0 else 1
 
 
