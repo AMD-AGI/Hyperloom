@@ -69,6 +69,13 @@ Removed in the high-risk cleanup pass:
   and were either always empty or derived only from old `propose_point`
   audit rows.
 
+Producer naming cleanup:
+
+- Internal collector/exporter naming now uses `explore_search` for the
+  canonical merged ledger.
+- External `param_search` remains as a v1-reader compatibility alias with
+  identical data.
+
 ## Producer / Report Split
 
 - `session_breakdown.json`: machine-readable, stable fields, minimal narrative; dashboard source of truth.
