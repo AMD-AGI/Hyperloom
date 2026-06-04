@@ -58,7 +58,7 @@ from inference_optimizer.orchestrator.dynamic_action_tools import (
     BENCH_REGISTRY,
     read_session_artifact,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.policy import (
