@@ -850,10 +850,9 @@ class Coordinator:
         # tests).
         self._current_objective: Objective | None = None
 
-        # initialise phase machine. Fresh session enters
-        # PRELUDE; resume from v0.6 (no phase field) infers a phase via
-        # :func:`phase_state.infer_phase_from_state`.  Always idempotent:
-        # second construction on the same session_dir is a no-op.
+        # initialise phase machine. Fresh session enters PRELUDE.
+        # Idempotent: second construction on the same session_dir, and
+        # same-version resume of an already-initialised state, are no-ops.
         self._ensure_phase_initialised()
         # Cortex T0 defensive fallback. The cli
         # is the canonical T0 entry point (fail-fast banner +
@@ -1138,19 +1137,13 @@ class Coordinator:
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("Coordinator: save after phase budget refresh failed")
             return
-        # Fresh OR legacy resume.
-        if self._resumed_from.get("is_resume"):
-            inferred, evidence = _phase_state.infer_phase_from_state(state)
-            reason = "resumed_from_v06_inferred"
-            evidence = {**evidence, "resume_path": True}
-        else:
-            inferred = _phase_state.PHASE_PRELUDE
-            reason = "phase_entered"
-            evidence = {"trigger": "fresh_session"}
+        # Fresh start. A resume whose state.json never initialised the
+        # phase machine (pre-phase-machine session) is treated as fresh:
+        # cross-version resume of such state is not supported.
         state.record_phase_transition(
-            to_phase=inferred,
-            reason=reason,
-            evidence=evidence,
+            to_phase=_phase_state.PHASE_PRELUDE,
+            reason="phase_entered",
+            evidence={"trigger": "fresh_session"},
         )
         try:
             state.save(self.session_dir)
