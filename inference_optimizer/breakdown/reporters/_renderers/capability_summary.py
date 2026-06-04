@@ -18,10 +18,8 @@ from typing import Any
 from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
 
 _CAPABILITY_ORDER = (
-    # ``explore`` is the primary row for sessions
-    #. backends / params / validate_stack
-    # remain as compatibility aliases so legacy resume reports stay
-    # readable.
+    # ``explore`` is the primary row for current sessions. The legacy
+    # rows remain readable for archived sessions rebuilt from old state.
     "explore",
     "backends", "params", "sweep", "geak", "oob", "validate_stack",
 )
