@@ -29,7 +29,7 @@ ROBUST_ANALYZER_CANDIDATES: list[str] = [
     "http://robust-analyzer:8085",
 ]
 
-# robustness-server is the M1 primary data source; we look in cluster
+# robustness-server is the primary data source; we look in cluster
 # DNS first and fall back to a local port-forward used during dev.
 ROBUSTNESS_SERVER_CANDIDATES: list[str] = [
     "http://robustness-server.robustness.svc.cluster.local:8000",
@@ -51,7 +51,7 @@ class Config:
     # Filled by auto-detection; empty means local-only mode.
     robust_analyzer_url: str = ""
 
-    # Primary M1 data source; empty means "skip server, only use local probe".
+    # Primary data source; empty means "skip server, only use local probe".
     robustness_server_url: str = ""
 
     @property
@@ -82,7 +82,7 @@ class Config:
     llm_api_key: str = ""
     rca_max_turns: int = 10
 
-    # -- M1.5 LLM RCA throttle / activation --
+    # -- LLM RCA throttle / activation --
     # ``None`` = auto-enable when llm_base_url + llm_api_key are both set.
     # ``False`` = forcibly disable (env override
     # ROBUSTNESS_LLM_RCA_DISABLED=1 also flips this off).
@@ -93,7 +93,7 @@ class Config:
     llm_rca_timeout_s: float = 8.0
     llm_rca_max_chars: int = 1500
 
-    # -- M1 reactor knobs --
+    # -- reactor knobs --
     cooldown_ticks: int = 5
     metrics_window_s: int = 300
     server_request_timeout_s: float = 5.0
@@ -101,11 +101,11 @@ class Config:
     source_recheck_interval_s: float = 30.0
     standalone_tick_interval_s: float = 10.0
 
-    # -- M1.5 LocalProbe extras --
+    # -- LocalProbe extras --
     health_probe_targets: list[str] = field(default_factory=list)
     health_probe_timeout_s: float = 1.5
 
-    # -- M2 multi-node knobs --
+    # -- multi-node knobs --
     # ``disable_local_probe`` silences the LocalProbe fallback entirely
     # (DegradeRouter falls back to a quiet stub that yields no signals).
     # Required in multi-node runs because per-pod ps / HTTP / rocm-smi
@@ -301,8 +301,8 @@ class Config:
     finalize_max_findings_in_report: int = 20
     finalize_max_tasks_per_action: int = 50
 
-    # -- cross-tick state persistence (2026-05-19) --
-    # M1 transport spawns a fresh subprocess per Coordinator tick, so
+    # -- cross-tick state persistence --
+    # The transport spawns a fresh subprocess per Coordinator tick, so
     # any consecutive-tick rule (``gpu_memory_leaked`` ≥2 ticks,
     # ``ray_pending_starvation`` ≥3 ticks, ``gain_plateau`` 6-tick
     # window, ladder cooldown, RCA per-key cooldown, ...) is broken
