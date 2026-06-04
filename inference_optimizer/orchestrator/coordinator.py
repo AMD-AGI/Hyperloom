@@ -3768,6 +3768,27 @@ class Coordinator:
                  from_phase or "<unknown>")
         await self._record_close_step("sequencer_started", status="running")
 
+        # stop_reason MUST be persisted BEFORE step 2 writes the
+        # session_breakdown. The breakdown executor runs as a subprocess
+        # that reads state.json from disk, and the collector derives both
+        # ``stop_reason`` and ``ended_at_utc`` from it. The old code only
+        # set stop_reason in step 5 (below), AFTER the breakdown was
+        # already serialized — so any CLOSE reached via a non-wall-clock
+        # path (e.g. an LLM ``report`` terminal transition, where the loop
+        # had not yet stamped a reason) shipped an empty stop_reason /
+        # ended_at_utc downstream. Filling it here (only when still blank;
+        # real reasons like baseline_failed / target_reached are already
+        # set before CLOSE) closes that race. Step 5 stays as an
+        # idempotent backstop.
+        if not self.shared_state.stop_reason:
+            self.shared_state.set_stop_reason("time_exhausted")
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "CLOSE: early stop_reason persist failed; step 5 will retry"
+                )
+
         # CLOSE-entry auto-roofline (former N31) was deleted in favour
         # of the EXPLORE-entry / KERNEL-entry hooks; the gain-only
         # freshness gate (:meth:`_needs_fresh_roofline`) keeps the
@@ -3862,7 +3883,10 @@ class Coordinator:
         # The wall-clock deadline path (``_enter_closing_phase``) sets
         # ``time_exhausted`` from the loop body (line ~1971); both
         # paths converge on the same vocab term per
-        # ``STOP_REASON_VOCAB``.
+        # ``STOP_REASON_VOCAB``. NOTE: this is now an idempotent
+        # backstop — the early persist at the top of the sequencer has
+        # normally already filled a blank stop_reason before step 2's
+        # breakdown was serialized.
         if not self.shared_state.stop_reason:
             self.shared_state.set_stop_reason("time_exhausted")
         try:
