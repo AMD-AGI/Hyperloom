@@ -134,9 +134,8 @@ AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
 )
 
 
-# Backward-compat aliases — the canonical names live in `_workload_envs`.
-# Tests, sweep.py / params.py / backends.py used to import these from here;
-# keeping the underscore-prefixed names re-exported avoids a churny rename.
+# Underscore-prefixed aliases re-exported for callers/tests; the canonical
+# names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 

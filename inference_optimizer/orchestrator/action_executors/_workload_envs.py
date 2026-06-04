@@ -27,9 +27,9 @@ Callers:
 * ``baseline.py`` — runs first, materializes the contract once and
   surfaces the rendered YAML path in its result so downstream actions
   can reuse it verbatim (no env re-read race).
-* ``params.py`` / ``backends.py`` — fall back to materializing on
-  their own if Coordinator has not yet plumbed the baseline path
-  through ``task.params["config_path"]``.
+* ``explore`` grid runs — fall back to materializing on their own if
+  Coordinator has not yet plumbed the baseline path through
+  ``task.params["config_path"]``.
 * ``sweep.py`` — same fallback; per-variant CONC/ISL/OSL still win
   because ``_build_variant_yaml`` applies ``variant.extra_envs`` last.
 """
