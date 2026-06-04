@@ -25,6 +25,23 @@ This cleansing effort exists to sharply reduce the engineering and logical compl
 
 `install.sh` now describes the `fa` CLI as serving the Coordinator-owned FRAMEWORK_PR phase (`fa phase-discover`) instead of a "bandit arm". Two comment blocks updated; no behavior change.
 
+### Removed legacy bare Codex Critic mode
+
+Removed the `codex_bare` Critic backend selection path.
+
+Updated:
+
+- CLI backend validation and `_build_backends`.
+- `--critic-codex-bare` and hidden `--critic-real` flags removed.
+- Critic backend documentation now lists only `agent` and `mock`.
+- Preflight / operator messages now point at `--critic-mock` as the
+  offline bypass.
+
+Kept:
+
+- `CodexBackend` class itself, because kernel and backend unit tests still
+  use the generic Codex backend.
+
 ## Verification
 
 - Lint: no errors.
@@ -32,12 +49,11 @@ This cleansing effort exists to sharply reduce the engineering and logical compl
 
 ## Not Done Yet (decision-gated or higher-risk)
 
-- Critic `codex_bare` mode removal: needs a product decision on whether bare Codex critic is still supported.
 - Robustness legacy mode removal: needs the same legacy-mode decision from Step 01.
 - Old Cortex v1 graph KB removal: tracked under Step 06.
 - Consolidating duplicated benchmark parameter docstrings: lower priority, can fold into Step 09 comment compression.
 
 ## Next Safe Follow-Ups
 
-- Resolve the `codex_bare` and robustness legacy mode decisions, then delete the unused paths and their docs.
+- Resolve the robustness legacy mode decision, then delete the unused paths and their docs.
 - Keep one contract test per live bridge; drop tests that assert subprocess temp-file layout unless it is a real contract.
