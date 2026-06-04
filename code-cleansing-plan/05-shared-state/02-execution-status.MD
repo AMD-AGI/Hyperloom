@@ -66,6 +66,20 @@ Test adjustment:
   `backend_winners_history` directly when testing old-session rendering,
   instead of relying on a production writer helper.
 
+### Centralized legacy plateau proxy writes
+
+`params_no_promote_streak` is retained this round because the legacy M2
+plateau proxy still supports old-session resume when `explore_search`
+signals are empty.
+
+Action:
+
+- Added `SharedState.reset_explore_plateau_proxy()`.
+- Extended `SharedState.note_explore_outcome(promoted=...)` so explore
+  KEEP/no-KEEP outcomes update the retained proxy in one place.
+- Removed direct Coordinator increment/reset writes from explore result
+  promotion; steward continuation now resets via the helper.
+
 ## Verification
 
 - Lint: no errors on `shared_state.py`.
@@ -73,6 +87,8 @@ Test adjustment:
 - Follow-up compat cleanup verification: `test_prompt_renders_gain_values.py`,
   `test_shared_state_evolution.py`, `test_no_legacy_writer_sites.py` pass
   (64 passed).
+- Follow-up plateau proxy verification: phase-state, assess-remaining-gaps,
+  gaps, and shared-state evolution tests pass (152 passed).
 
 ## Not Done Yet
 
