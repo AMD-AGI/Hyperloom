@@ -72,11 +72,11 @@ filterwarnings = [
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
-# source so test files / examples / __init__.py do not dilute the
+# source so test files / __init__.py do not dilute the
 # headline number. Run with ``pytest --cov`` to use these defaults.
 #
 # omit patterns exclude:
-#   * tests / examples / __init__.py / __main__.py — non-source
+#   * tests / __init__.py / __main__.py — non-source
 #   * CLI driver scripts whose body is subprocess plumbing (hard to
 #     unit-test without re-implementing the subprocess; covered by
 #     end-to-end flows instead)
@@ -96,7 +96,6 @@ source = [
 ]
 omit = [
     "*/tests/*",
-    "*/examples/*",
     "*/__init__.py",
     "*/__main__.py",
     "setup.py",
