@@ -167,3 +167,68 @@ def test_max_model_len_fallback_when_maxpos_unknown(tmp_path):
         cli._resolve_max_model_len(1024, 1024, str(model))
         == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
     )
+
+
+# ---------------------------------------------------------------------------
+# follow-up #1: the preflight stop_reason must be a canonical
+# STOP_REASON_VOCAB term written through the validated set_stop_reason()
+# writer — not a raw off-vocab attribute assignment. Otherwise the robustness
+# monitor's vocab-based terminal check (and any set_stop_reason round-trip)
+# treats the context-window fail-fast as a non-terminal / 'unknown' stop.
+# ---------------------------------------------------------------------------
+def test_context_window_stop_reason_is_canonical_vocab():
+    from inference_optimizer.orchestrator.phase_state import (
+        STOP_REASON_VOCAB,
+        is_valid_stop_reason,
+    )
+
+    assert "model_context_window_too_small" in STOP_REASON_VOCAB
+    assert is_valid_stop_reason("model_context_window_too_small")
+
+
+def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
+    """Under ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON=1`` the preflight must
+    still persist the canonical stop_reason. This proves the writer goes
+    through the validated ``set_stop_reason()`` path AND that the term is
+    registered in the vocab — an off-vocab term would raise in strict mode and
+    abort the report, leaving no final.json/state.json."""
+    monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_STRICT_STOP_REASON", "1")
+    model = tmp_path / "ctx2048strict"
+    _write_config(model, model_type="llama", max_position_embeddings=2048)
+    sd = tmp_path / "session_strict"
+    _seed_state(sd, monkeypatch)
+
+    assert cli._preflight_context_window(_args(str(model)), sd) is True
+    state = json.loads((sd / "state.json").read_text())
+    assert state["stop_reason"] == "model_context_window_too_small"
+    final = json.loads((sd / "reports" / "final.json").read_text())
+    assert final["stop_reason"] == "model_context_window_too_small"
+
+
+def test_monitor_offline_vocab_includes_context_window():
+    """The robustness monitor's offline STOP_REASON_VOCAB fallback (used when
+    phase_state is not importable) must list the preflight stop_reason so an
+    offline monitor still treats a context-window fail-fast as terminal."""
+    import inference_optimizer
+
+    repo_root = Path(inference_optimizer.__file__).resolve().parents[1]
+    monitor = repo_root / "optimizer_runs" / "robustness_monitor.sh.example"
+    text = monitor.read_text(encoding="utf-8")
+    assert "model_context_window_too_small" in text
+
+
+def test_preflight_reason_suggests_lowering_headroom(tmp_path, monkeypatch):
+    """follow-up #4: the fail-fast advice must tell operators to LOWER the
+    headroom env (which shrinks `required`), not raise it — raising makes
+    admission stricter, the opposite of relaxing a too-conservative gate."""
+    monkeypatch.delenv(cli._CONTEXT_HEADROOM_ENV, raising=False)
+    model = tmp_path / "ctx2048reason"
+    _write_config(model, max_position_embeddings=2048)
+    sd = tmp_path / "session_reason"
+    _seed_state(sd, monkeypatch)
+
+    assert cli._preflight_context_window(_args(str(model)), sd) is True
+    detail = json.loads((sd / "reports" / "final.json").read_text())["stop_detail"]
+    assert f"lower {cli._CONTEXT_HEADROOM_ENV}".lower() in detail.lower()
+    assert f"raise {cli._CONTEXT_HEADROOM_ENV}".lower() not in detail.lower()
