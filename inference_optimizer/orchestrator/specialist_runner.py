@@ -83,7 +83,7 @@ def _extra_focus_tags(
     return tuple(t for t in tags if t and t != primary_anchor)
 
 
-# v0.8 §3.11 R4 / R5 — canonical external tool registry lives in
+# R4 / R5 — canonical external tool registry lives in
 # :mod:`policy`. We re-export the tuples below so legacy importers
 # (and the runner itself) still see the historical names without a
 # code rewrite, but PolicyGate and SpecialistRunner now share a
@@ -124,7 +124,7 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     "Edit", "Write", "MultiEdit",
     # Restricted Bash — runners may further filter via a callback. Keeping
     # ``Bash`` in the whitelist lets the LLM run rocm-smi / pgrep / cat /
-    # git diff > patches/<file>.patch; the runner's per-call hook (TODO M6)
+    # git diff > patches/<file>.patch; the runner's per-call hook (TODO)
     # will block destructive invocations.
     "Bash",
 ) + tuple(sorted(_WEB)) + PR_MONITOR_MCP_TOOLS
@@ -413,7 +413,7 @@ class SpecialistRunner:
                 )
             )
 
-        # M5 scope guard: domains outside the M5 active set still get
+        # scope guard: domains outside the active set still get
         # dispatched (PolicyGate R2 already accepts them), but we log so
         # operators see we're using a generic prompt template.
         notes: list[str] = []
@@ -496,7 +496,7 @@ class SpecialistRunner:
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
-                # GAP 8 — runtime fingerprint surfaced to the prompt so
+                # runtime fingerprint surfaced to the prompt so
                 # ``_format_version_note`` can annotate version-mismatched
                 # lessons / pitfalls. Both empty when the Coordinator
                 # didn't warm them (legacy callers / pre-PR sessions).
@@ -538,7 +538,7 @@ class SpecialistRunner:
         )
 
     # ------------------------------------------------------------------
-    # In-process Backend path (v0.8 M5 / test path)
+    # In-process Backend path (test path)
     # ------------------------------------------------------------------
     async def _run_via_backend(
         self, ctx: RunnerContext, prep: "_PreparedRun",
@@ -659,7 +659,7 @@ class SpecialistRunner:
         )
 
     # ------------------------------------------------------------------
-    # Subprocess path (PR-A2 production)
+    # Subprocess path (production)
     # ------------------------------------------------------------------
     async def _run_via_subprocess(
         self, ctx: RunnerContext, prep: "_PreparedRun",
@@ -835,7 +835,7 @@ class SpecialistRunner:
             done_payload["summary"] = (
                 "specialist emitted done without summary"[:480]
             )
-        # PR-A2 + B4: reconcile the agent's self-reported ``patches_written``
+        # reconcile the agent's self-reported ``patches_written``
         # against the filesystem. The agent may list patches it intends to
         # apply (ordered by numeric prefix), but we must NEVER trust that
         # claim blindly: a worktree that was never materialised, a write

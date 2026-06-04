@@ -516,7 +516,7 @@ def run_t0_anchor(
                 sid, workload,
             )
 
-    # PR-A10: warm_present reflects whether the fallback ladder actually
+    # warm_present reflects whether the fallback ladder actually
     # found a usable record (i.e. tier != "miss" and confidence > 0). The
     # old `bool(warm_text.strip())` check fired on every 200 OK including
     # empty `{"points":[]}` responses, which misled operators into
