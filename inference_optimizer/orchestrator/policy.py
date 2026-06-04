@@ -1,4 +1,4 @@
-"""PolicyGate
+"""PolicyGate.
 
 Single chokepoint: every parsed Intent passes through ``validate_intent``
 before the Coordinator commits side-effects. PolicyGate converges:
@@ -7,8 +7,8 @@ before the Coordinator commits side-effects. PolicyGate converges:
     * Source allowlist  — REVIEW_VERDICT is critic-only;
                           KILL_TASK / FORCE_DISPATCH / PRUNE_BRANCH /
                           ESCALATE_STRATEGY_CHANGE are robustness-only
-    * REQUEST routing   — only orchestration→kernel is allowed in the legacy release
-    * Kernel ownership  — 5 kernel-owned actions can NOT be `delegate`d;
+    * REQUEST routing   — only orchestration→kernel is allowed
+    * Kernel ownership  — kernel-owned actions can NOT be `delegate`d;
                           orchestration must REQUEST(target_agent="kernel")
     * Core state guard  — only the Coordinator can mutate
                           CORE_STATE_FIELDS (current_best, etc.)
@@ -16,14 +16,6 @@ before the Coordinator commits side-effects. PolicyGate converges:
 PolicyGate stays *pure* — it does not touch the bus or the DB. The
 Coordinator catches :class:`PolicyDenied` and emits a ``policy_denied``
 observation event so the LLM can self-correct on its next replay turn.
-
-v0.6 changes vs v0.5:
-
-* Removed mode / FeatureFlags coupling — single full mode (ADR-34)
-* Removed quick-mode bash allow/deny lists
-* Renamed TRIAGE_ONLY → ROBUSTNESS_ONLY (matches new agent name)
-* Added REVIEW_VERDICT validation (Critic-only, §18.2)
-* KERNEL_OWNED_ACTIONS expanded to all 5 (DESIGN §7.2 / §16.1)
 """
 
 from __future__ import annotations
