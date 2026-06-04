@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.intent_parser import IntentType
+from inference_optimizer.protocol.intent import IntentType
 from inference_optimizer.orchestrator.backends.claude import ClaudeBackend
 
 

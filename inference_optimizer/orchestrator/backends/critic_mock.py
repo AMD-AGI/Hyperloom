@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..intent_parser import Intent, IntentType
+from ...protocol.intent import Intent, IntentType
 from .base import BackendTurnResult
 
 

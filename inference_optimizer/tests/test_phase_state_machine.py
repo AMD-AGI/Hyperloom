@@ -23,7 +23,7 @@ from types import SimpleNamespace
 import pytest
 
 from inference_optimizer.orchestrator import phase_state
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     CORE_STATE_FIELDS,
     PolicyDenied,
