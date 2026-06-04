@@ -62,7 +62,7 @@ def _host_reachable(url: str) -> tuple[bool, str]:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task-dir", default=os.environ.get("HYPERLOOM_RESULT_DIR", "/workspace/hyperloom"))
+    parser.add_argument("--task-dir", default=os.environ.get("HYPERLOOM_RESULT_DIR") or os.environ.get("USER_DATA_PATH") or "/workspace/hyperloom")
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--display-name", default="")
