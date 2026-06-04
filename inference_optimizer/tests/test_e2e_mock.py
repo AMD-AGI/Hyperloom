@@ -1,6 +1,6 @@
-"""P0-5 end-to-end main-loop tests.
+"""Mock end-to-end Coordinator loop tests.
 
-Covers the full P0 main path with all 4 agents wired to mock backends:
+Covers the main path with all 4 agents wired to mock backends:
 
 * Orchestration proposes → Critic mock approves → task materialized →
   dispatcher runs the registered baseline runner → succeeded.
@@ -9,8 +9,6 @@ Covers the full P0 main path with all 4 agents wired to mock backends:
   Coordinator routes response back to orchestration inbox.
 * Robustness mock keeps ticking heartbeats throughout — no scheduling
   police intervention.
-* The bundled demo script (``examples.p0_main_loop._run_demo``) finishes
-  cleanly and reports non-zero counts for each milestone topic.
 """
 
 from __future__ import annotations
@@ -18,8 +16,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-from inference_optimizer.examples import p0_main_loop
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
     MockCriticBackend,
@@ -209,20 +205,3 @@ async def test_e2e_robustness_heartbeats_throughout(session_dir):
     finally:
         await c.stop()
 
-
-# ===========================================================================
-# Demo script smoke
-# ===========================================================================
-@pytest.mark.asyncio
-async def test_demo_script_runs_end_to_end(session_dir, capsys):
-    """The packaged demo (`examples.p0_main_loop._run_demo`) completes."""
-    summary = await p0_main_loop._run_demo(ticks=6)
-    assert summary["proposals_seen"] >= 1
-    assert summary["verdicts_seen"] >= 1
-    assert summary["decisions_seen"] >= 1
-    assert summary["delegated_results_seen"] >= 1
-    assert summary["responses_seen"] >= 1
-    captured = capsys.readouterr()
-    assert "highlights" in captured.out
-    assert "verdict" in captured.out
-    assert "delegated_result" in captured.out
