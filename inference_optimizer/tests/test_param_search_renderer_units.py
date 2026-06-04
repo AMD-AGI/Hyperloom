@@ -20,11 +20,17 @@ class TestParamSearchRenderer:
         out = _render({})
         assert isinstance(out, RenderedSection)
         assert out.skipped is True
-        # Two informational lines (backends + params DFS) are always emitted.
-        assert any("backends DFS" in f for f in out.key_facts)
-        assert any("params DFS" in f for f in out.key_facts)
+        assert any("explore ledger" in f for f in out.key_facts)
 
-    def test_populated_backends_unskips_section(self):
+    def test_populated_explore_unskips_section(self):
+        out = _render({
+            "explore": {"accepted": ["a"], "tested": {"a": {}}, "cursor": 1,
+                        "last_round": 2},
+        })
+        assert out.skipped is False
+        assert "Explore Search" in out.markdown_block
+
+    def test_legacy_backends_unskips_section(self):
         out = _render({
             "backends": {"accepted": ["a"], "tested": {"a": {}}, "cursor": 1,
                          "last_round": 2},
@@ -32,7 +38,7 @@ class TestParamSearchRenderer:
                          "last_round": 0},
         })
         assert out.skipped is False
-        assert "Backends DFS" in out.markdown_block
+        assert "Legacy Search Aliases" in out.markdown_block
 
     def test_discovered_flags_rendered_per_framework(self):
         out = _render({

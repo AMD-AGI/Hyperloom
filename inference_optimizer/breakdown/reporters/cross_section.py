@@ -40,7 +40,7 @@ class GlobalFacts:
     elapsed_minutes: float | None
     objective: dict[str, Any]
     workload_summary: str               # "DeepSeek-R1 vllm fp8 tp=8 conc=64 isl=osl=1024"
-    gain_attribution_lines: list[str]   # "100% via 1 backends KEEP (vllm_kv_fp8)"
+    gain_attribution_lines: list[str]   # "100% via 1 explore KEEP (flag_x)"
     capabilities_not_attempted: list[str]
     capabilities_kept: list[str]
     kernel_pipeline_funnel: dict[str, int]   # detected/recommended/optimized/adopted/...
@@ -97,12 +97,17 @@ def _gain_attribution_lines(
     sb = attribution.get("source_breakdown") or {}
     total = _to_float(sb.get("validated_total_pct"))
     sources = {
-        "backends": _to_float(sb.get("backends_pct_of_total")),
-        "params":   _to_float(sb.get("params_pct_of_total")),
+        "explore":  _to_float(sb.get("explore_pct_of_total")),
         "geak":     _to_float(sb.get("geak_pct_of_total")),
         "oob":      _to_float(sb.get("oob_pct_of_total")),
         "sweep":    _to_float(sb.get("sweep_pct_of_total")),
     }
+    # Archived sessions can still carry the old split. Keep it only when
+    # the canonical explore bucket is absent so current reports do not
+    # double-count the same work.
+    if not sources["explore"]:
+        sources["backends"] = _to_float(sb.get("backends_pct_of_total"))
+        sources["params"] = _to_float(sb.get("params_pct_of_total"))
     nonzero = {k: v for k, v in sources.items() if v and v != 0}
     if nonzero and total:
         lines = [
@@ -185,12 +190,11 @@ def _data_quality_flags(
     cap = breakdown.get("capability_summary") or {}
     val = cap.get("validate_stack") or {}
     if val.get("status") == "not_attempted":
-        # validated cumulative gain still gets reported elsewhere, so
-        # be explicit that the validate_stack action never re-ran in
-        # this session.
+        # Validated cumulative gain still gets reported elsewhere, so be
+        # explicit that this archived action did not re-run in-session.
         _push(
-            "[validate_stack] never ran — cumulative_gain_pct_validated comes from "
-            "the historical validate run recorded in state, not a final re-validation."
+            "[legacy validate_stack] never ran — cumulative_gain_pct_validated "
+            "comes from state, not a final archived-action re-run."
         )
     return flags
 
