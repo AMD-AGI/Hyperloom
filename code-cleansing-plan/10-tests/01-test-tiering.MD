@@ -84,6 +84,10 @@ Do NOT execute until the noted gate clears:
   prompt formatter test. It asserted private `SharedState._format_*`
   string details and old `backend_winners_history` rendering after that
   field had been downgraded to old-session read-only compatibility.
+- `test_prompt_assets.py` — removed as a duplicate/exact prompt wrapper
+  test. Prompt structure and action visibility remain covered by
+  `test_prompt_builder.py`, `test_prompt_visibility.py`, and related
+  behavior-domain prompt tests.
 
 Retained coverage:
 
