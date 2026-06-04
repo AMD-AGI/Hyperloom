@@ -216,26 +216,45 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
-    """Warn when a dependency checkout path escapes an explicit USER_DATA_PATH.
+# Pod-local, non-persistent roots. A dependency checkout under one of these
+# (e.g. the ``/workspace/hyperloom_runtime_*`` override seen in the wild) is
+# erased on pod recycle and is the real "artefacts disappeared" failure mode.
+# A persistent shared checkout outside USER_DATA_PATH (e.g. a WekaFS InferenceX
+# or TraceLens mirror under /wekafs or /hyperloom) is legitimate by design and
+# must NOT warn.
+_POD_LOCAL_PREFIXES = ("/workspace", "/tmp", "/root")
 
-    Operators expect Magpie / InferenceX runtime checkouts to live under the
-    same workspace root as session data.  The env vars are still honoured for
-    advanced/debug flows, but an out-of-tree override should be loud in the
-    manifest logs because it is otherwise very hard to explain why artefacts
-    appeared under /workspace instead of the configured data root.
+
+def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
+    """Warn when a dependency checkout escapes USER_DATA_PATH into a
+    pod-local, non-persistent location.
+
+    Operators expect the Magpie / InferenceX runtime checkouts that
+    install.sh creates to live under USER_DATA_PATH. An override that
+    points them at a pod-local path (``/workspace/...``, ``/tmp/...``) is
+    erased on pod recycle — that is the failure mode worth a loud manifest
+    warning. A persistent shared checkout outside USER_DATA_PATH (a WekaFS
+    InferenceX / TraceLens mirror) is legitimate and does NOT warn.
     """
     user_data = (os.environ.get(_paths.ENV_USER_DATA_PATH) or "").strip()
     if not user_data:
         return
     dep_path = Path(raw)
-    root = Path(user_data)
-    if not _path_is_relative_to(dep_path, root):
-        log.warning(
-            "%s=%s is outside %s=%s; this run may read/write runtime "
-            "artefacts outside the configured Hyperloom workspace root.",
-            env_var, raw, _paths.ENV_USER_DATA_PATH, user_data,
-        )
+    if _path_is_relative_to(dep_path, Path(user_data)):
+        return
+    resolved = str(dep_path.resolve(strict=False))
+    is_pod_local = any(
+        resolved == p or resolved.startswith(p + "/")
+        for p in _POD_LOCAL_PREFIXES
+    )
+    if not is_pod_local:
+        return
+    log.warning(
+        "%s=%s is a pod-local path outside %s=%s; runtime artefacts there are "
+        "erased on pod recycle. install.sh writes dependencies under "
+        "%s/runtime by default — point %s back there to persist them.",
+        env_var, raw, _paths.ENV_USER_DATA_PATH, user_data, user_data, env_var,
+    )
 
 
 def _describe_dep(env_var: str) -> dict[str, str]:
