@@ -1401,16 +1401,6 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "recover":           recover_executor,
 }
 
-# Kernel-only real executors. The composite ``roofline`` action is
-# registered separately by ``_register_executors`` below. ``profile``
-# is registered in ``_REAL_EXECUTORS_FULL`` so the Coordinator's
-# auto-managed analysis path can dispatch it through SubAgentRunner
-# when ``--no-enable-roofline`` is set; the same ``profile_executor``
-# is also called directly from RooflineExecutor's ``_wrap_profile_ctx``
-# in the default roofline mode. PolicyGate denies LLM-proposed
-# delegate{action_name='profile'} regardless of mode.
-_REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
-
 # Kernel-owned action kinds dispatched via
 # ``request{target_agent='kernel', kind=...}``. The executor body is a
 # no-op in this process — actual work happens inside the kernel agent's
@@ -1648,13 +1638,13 @@ def _register_executors(
 ) -> None:
     """Wire all currently-available action executors.
 
-    Real executors are pulled from ``_REAL_EXECUTORS_FULL`` (always) and
-    ``_REAL_EXECUTORS_KERNEL_ONLY`` (when kernel-mode is on). Kernel-owned
-    kinds (whose work is done inside the kernel agent via emit_intent)
-    get ``_noop_prep`` so SubAgentRunner doesn't fail with "no_executor".
+    Real executors are pulled from ``_REAL_EXECUTORS_FULL`` (always).
+    Kernel-owned kinds (whose work is done inside the kernel agent via
+    emit_intent) get ``_noop_prep`` so SubAgentRunner doesn't fail with
+    "no_executor".
 
-    When ``no_kernel`` is True, the kernel-owned executor table is
-    skipped and the kernel-only no-op stubs are skipped. The Coordinator-
+    When ``no_kernel`` is True, the kernel-only no-op stubs are
+    skipped. The Coordinator-
     internal ``profile`` and ``roofline`` analysis executors are
     registered unconditionally so PRELUDE's auto-enqueued analysis task
     (kind switched by ``--enable-roofline``) can always dispatch.
@@ -1751,8 +1741,6 @@ def _register_executors(
     if no_kernel:
         return
 
-    for kind, fn in _REAL_EXECUTORS_KERNEL_ONLY.items():
-        coordinator.sub.register_executor(kind, fn)
     for kind in _NOOP_KINDS_KERNEL_ONLY:
         coordinator.sub.register_executor(kind, _noop_prep)
 
