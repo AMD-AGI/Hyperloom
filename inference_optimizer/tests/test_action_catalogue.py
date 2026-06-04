@@ -217,35 +217,12 @@ def test_lease_ttl_sec_consistent_with_cost(registry):
 
 
 # ---------------------------------------------------------------------------
-# Drift guards: keep the four "is this a real action?" sources of truth
-# consistent with each other.
-#
-# Background: ``session_paths._runs_actions()`` (the whitelist for actions
-# that get a per-task ``runs/<kind>/<task_id>/`` workspace) used to be a
-# hand-maintained ``_RUNS_ACTIONS`` frozenset. Adding a new action
-# (``explore``) without updating it caused the orchestrator to loop
-# forever proposing the action — every dispatch raised ``ValueError`` from
-# inside the executor's ``runs_dir()`` fallback, but mission TODOs never
-# cleared. The fix derives the whitelist from ``pipeline_phase`` in the
-# ActionRegistry; these tests lock the alignment in place.
+# Drift guards: keep action metadata, session paths, and CLI executor wiring
+# aligned so every executor-backed action gets a runs/<kind>/<task_id>
+# workspace.
 # ---------------------------------------------------------------------------
-# v0.8 M5 (KB_design §3.5 §10) — ``specialist`` is the LLM sub-agent
-# action. It's parameterised by ``params.domain`` rather than a yaml
-# meta, so the registry-derived runs_actions set won't list it but it
-# still needs a per-task workspace (``runs/specialist/<task_id>/``).
-# We add it explicitly to the registry-derived expected set in the
-# drift tests below.
-_SPECIALIST_RUNS_ACTION_NAME = "specialist"
-
-
 def test_runs_actions_match_pipeline_phases(registry):
-    """``_runs_actions()`` must equal {a.name for a in registry
-    if a.pipeline_phase ∈ _RUNS_WORKSPACE_PHASES} ∪ {'specialist'}.
-
-    This is the primary registry ↔ session_paths drift guard. The
-    ``specialist`` exception covers the yaml-less M5 action surface
-    (KB_design §3.5 §10).
-    """
+    """``_runs_actions()`` must follow registry pipeline phases."""
     from inference_optimizer.session_paths import (
         _RUNS_WORKSPACE_PHASES,
         _runs_actions,
@@ -254,7 +231,7 @@ def test_runs_actions_match_pipeline_phases(registry):
     expected = frozenset(
         a.name for a in registry.all()
         if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    ) | frozenset({_SPECIALIST_RUNS_ACTION_NAME})
+    )
     actual = _runs_actions()
     assert actual == expected, (
         f"runs_actions drift: actual={sorted(actual)!r} expected={sorted(expected)!r}; "
@@ -275,8 +252,7 @@ def test_explore_in_runs_actions():
 def test_runs_actions_fallback_matches_registry(registry):
     """The hardcoded ``_RUNS_ACTIONS_FALLBACK`` (used only when the
     registry can't be loaded) must stay aligned with the registry-derived
-    set ∪ {'specialist'}. The yaml-less ``specialist`` (KB_design §3.5
-    §10) is the one well-known exception.
+    set.
     """
     from inference_optimizer.session_paths import (
         _RUNS_ACTIONS_FALLBACK,
@@ -286,7 +262,7 @@ def test_runs_actions_fallback_matches_registry(registry):
     expected = frozenset(
         a.name for a in registry.all()
         if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    ) | frozenset({_SPECIALIST_RUNS_ACTION_NAME})
+    )
     assert _RUNS_ACTIONS_FALLBACK == expected, (
         f"_RUNS_ACTIONS_FALLBACK drift: fallback={sorted(_RUNS_ACTIONS_FALLBACK)!r} "
         f"registry-derived={sorted(expected)!r}; update _RUNS_ACTIONS_FALLBACK "
