@@ -44,7 +44,7 @@ session dir + GEAK build artefacts.
 
 | Workload                  | Typical session size              | Retention recommendation                |
 |---------------------------|-----------------------------------|-----------------------------------------|
-| 2-hour params-only run    | 5–10 GB                           | 30 days (then archive `session_breakdown.json` only) |
+| 2-hour explore-only run   | 5–10 GB                           | 30 days (then archive `session_breakdown.json` only) |
 | 24-hour full run with kernel-opt | 50–100 GB                  | 14 days (then archive selectively)      |
 | Multi-day marathon        | 200 GB+                           | 7 days (move artefacts to cold storage) |
 
