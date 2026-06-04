@@ -168,8 +168,10 @@ ALLOWED_FILES: dict[str, str] = {
 
 # Files under these top-level prefixes are skipped entirely.
 _SKIP_DIRECTORIES: tuple[str, ...] = (
-    # Plan / migration narrative tree (slated for deletion).
+    # Plan / migration narrative trees (slated for deletion). These describe
+    # the legacy key as a removal target, not a live writer site.
     "atom_plan/",
+    "code_cleansing_plan/",
     ".git/",
     "node_modules/",
     "__pycache__/",
