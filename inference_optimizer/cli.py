@@ -1023,6 +1023,134 @@ def _load_model_config_tags(model_path: str) -> dict:
     return out
 
 
+# config.json keys that carry the model's max sequence length, priority order.
+# Most modern decoders use max_position_embeddings; a few legacy/alt configs
+# use these aliases.
+_MAXPOS_CONFIG_KEYS = (
+    "max_position_embeddings",
+    "n_positions",
+    "max_sequence_length",
+    "seq_length",
+    "max_seq_len",
+)
+
+# Safety headroom (tokens) the model context window must have ABOVE the nominal
+# ISL+OSL workload: covers the BOS token, chat-template tokens, and random-
+# dataset length jitter (a nominal 2048 workload has been observed to emit
+# requests up to ~2568). Operator-tunable via env.
+_CONTEXT_HEADROOM_ENV = "HYPERLOOM_CONTEXT_HEADROOM_TOKENS"
+_CONTEXT_HEADROOM_DEFAULT = 512
+
+
+def _load_model_max_position_embeddings(model_path: str) -> int | None:
+    """Best-effort read of the model's max sequence length from config.json.
+
+    Returns the first positive integer among the known max-length keys (also
+    checking a nested ``text_config`` for multimodal configs), or None when
+    config.json is missing/unreadable/has none of them — callers then skip the
+    context preflight rather than guessing.
+    """
+    if not model_path:
+        return None
+    cfg_path = Path(model_path) / "config.json"
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg in candidates:
+        for key in _MAXPOS_CONFIG_KEYS:
+            val = cfg.get(key)
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, int) and val > 0:
+                return val
+    return None
+
+
+def _context_headroom_tokens() -> int:
+    """Resolve the context headroom (tokens); env override, else default."""
+    raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
+    if not raw:
+        return _CONTEXT_HEADROOM_DEFAULT
+    try:
+        val = int(raw)
+    except ValueError:
+        return _CONTEXT_HEADROOM_DEFAULT
+    return val if val >= 0 else _CONTEXT_HEADROOM_DEFAULT
+
+
+def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
+    """Fail fast when the model context window cannot hold ISL+OSL+headroom.
+
+    We deliberately do NOT pass ``--context-length`` to stretch a small window:
+    that forces RoPE extrapolation (quality loss) and can CUDA-error on models
+    with learned absolute position embeddings. Instead, when
+    ``max_position_embeddings < ISL + OSL + headroom`` we persist a clear stop
+    reason (state.json + reports/final.{json,md}) and signal the caller to exit
+    non-zero — far better than booting a server that 400s every request and
+    dies on the scheduler watchdog (the observed baseline_failed mode for
+    stale 2048-ctx checkpoints).
+
+    Returns True when the workload does NOT fit (caller should exit); False
+    when it fits or the model's max length is unknown (gate skipped).
+    """
+    isl = int(getattr(args, "isl", 0) or 0)
+    osl = int(getattr(args, "osl", 0) or 0)
+    if isl <= 0 or osl <= 0:
+        return False
+    maxpos = _load_model_max_position_embeddings(str(getattr(args, "model", "") or ""))
+    if not maxpos:
+        return False
+    headroom = _context_headroom_tokens()
+    required = isl + osl + headroom
+    if maxpos >= required:
+        return False
+
+    reason = (
+        f"model max_position_embeddings={maxpos} < required {required} "
+        f"(ISL={isl} + OSL={osl} + headroom={headroom}). The workload exceeds "
+        f"the model context window; every request would 400. Refusing to run "
+        f"(no --context-length override by policy). Lower ISL/OSL for this "
+        f"model, or raise {_CONTEXT_HEADROOM_ENV} if the headroom is too "
+        f"conservative."
+    )
+    # Persist the stop reason so CI / the robustness monitor read it from
+    # state.json + reports/final.json instead of grepping the run log.
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        state.stop_reason = "model_context_window_too_small"
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist context-window stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -4603,6 +4731,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
         )
+        # Context-window preflight: refuse to run (with a persisted stop
+        # reason) when ISL+OSL+headroom exceeds the model's
+        # max_position_embeddings, instead of booting a server that 400s every
+        # request and dies on the scheduler watchdog. No --context-length
+        # stretch by policy. Runs after the SharedState seed (so the stop
+        # reason lands in state.json/final.*) but before the heavy Cortex /
+        # backend / Coordinator bring-up.
+        if _preflight_context_window(args, session_dir):
+            sys.exit(2)
         # Cortex KB T0 anchor. Must run after the SharedState
         # seed (so model_name / gpu_type / framework are populated for
         # recipe_canonical_id derivation) but before Coordinator is
