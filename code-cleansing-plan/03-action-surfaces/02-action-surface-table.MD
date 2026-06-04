@@ -49,11 +49,14 @@ Runtime source:
 
 - `action_surfaces.INTERNAL_ONLY_ACTION_NAMES`
 - `action_surfaces.FRAMEWORK_PR_INTERNAL_ACTION_NAMES`
+- `action_surfaces.PHASE_ALLOWLIST_BYPASS_ACTIONS`
 
 Protected behavior:
 
 - PolicyGate denies direct LLM proposals.
 - Coordinator enqueues these actions from phase hooks or warm-start logic.
+- Actions in `PHASE_ALLOWLIST_BYPASS_ACTIONS` are Coordinator-constructed
+  tasks that intentionally do not appear in the LLM-facing phase allowlist.
 
 ## Grid-Injectable Actions
 
