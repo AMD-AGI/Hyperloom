@@ -43,7 +43,7 @@ from typing import Any
 
 from ..session_paths import runs_dir
 from .backends.base import BackendError
-from .intent_parser import Intent, IntentType
+from ..protocol.intent import Intent, IntentType
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     SPECIALIST_DOMAINS_M5,

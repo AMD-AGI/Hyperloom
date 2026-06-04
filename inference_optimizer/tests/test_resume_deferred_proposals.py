@@ -34,7 +34,7 @@ from inference_optimizer.orchestrator.backends import (
     MockRobustnessBackend,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.message_bus import Message
 from inference_optimizer.paths import make_session_dir
 

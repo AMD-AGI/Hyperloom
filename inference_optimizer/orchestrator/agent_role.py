@@ -40,7 +40,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from ..paths import asset_system_prompts_dir
-from .intent_parser import IntentType
+from ..protocol.intent import IntentType
 
 
 class BackendType(str, Enum):
