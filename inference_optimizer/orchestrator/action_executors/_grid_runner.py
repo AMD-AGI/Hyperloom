@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 #     aggressive — two flag strings differing only in token order produce the
 #     same fingerprint. Real "later wins" overrides should be expressed as a
 #     single flag with the final value, not a re-emit in a different order;
-#     this is documented in the Orchestration IR-26 prompt.
+#     this is documented in the Orchestration prompt.
 #   * envs: ``(str(k), str(v))`` pairs sorted by key. ``str()`` matches the
 #     ``_baseline_params_fingerprint`` convention so ``"1"`` and ``1`` collide
 #     (Magpie ultimately sees the value as a shell-exported string anyway).
