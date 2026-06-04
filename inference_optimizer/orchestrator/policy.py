@@ -148,9 +148,9 @@ DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
 # ---------------------------------------------------------------------------
 SPECIALIST_ACTION_NAME: str = "specialist"
 
-# PR-A7 (Arbor-into-Hyperloom): the orchestrator-side patch
-# integration step. Lives in the EXPLORE phase, gated by a Critic
-# verdict before bench (Inv-5.1 / Inv-3 single-tenant GPU preserved).
+# The orchestrator-side patch integration step. Lives in the EXPLORE
+# phase, gated by a Critic verdict before bench (single-tenant GPU
+# preserved).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
 # Merged explore action — kept as a named constant alongside
@@ -277,7 +277,7 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset({
 })
 
 # Source roles allowed to dispatch a specialist via
-# ``delegate{action='specialist'}``. KB_design §3.5 §11 / §3.11 §4.2.
+# ``delegate{action='specialist'}``.
 SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
 
 # Prefix the SubAgentRunner stamps on every emit-intent originating
@@ -327,7 +327,7 @@ DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL: str = "kernel"
 
 
 # ---------------------------------------------------------------------------
-# v0.8 §3.11 R4 / R5 — external tool whitelist registry
+# R4 / R5 — external tool whitelist registry
 #
 # Tool names live here (the *policy* layer) so PolicyGate AND the
 # SpecialistRunner share a single source of truth. The runner builds
@@ -369,8 +369,8 @@ PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp__pr_monitor__pr_search",
 })
 
-#: Web tools. R5 — specialist-only AND EXPLORE-phase-only (KB_design
-#: §3.11 §4.5 table). Other roles / phases get
+#: Web tools. R5 — specialist-only AND EXPLORE-phase-only.
+#: Other roles / phases get
 #: ``tool_whitelist_role`` / ``tool_whitelist_phase``.
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
 
@@ -395,8 +395,7 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
 
 #: Phase whitelist for tools that are time-sensitive. Currently only
 #: the ``WebSearch`` / ``WebFetch`` block carries a phase restriction;
-#: KB readonly + PR Monitor are allowed in any phase (KB_design §3.11
-#: §4.5 table).
+#: KB readonly + PR Monitor are allowed in any phase.
 PHASE_RESTRICTED_TOOLS: dict[str, frozenset[str]] = {
     "WebSearch": frozenset({"EXPLORE"}),
     "WebFetch": frozenset({"EXPLORE"}),
@@ -428,8 +427,8 @@ _SPECIALIST_PSEUDO_ROLE = _SpecialistPseudoRole()
 # ---------------------------------------------------------------------------
 # REQUEST/RESPONSE routing matrix (DESIGN §7.6 / §13.4)
 #
-# Maps source role → set of allowed target_agent names. v0.6: only
-# orchestration→kernel is allowed.
+# Maps source role → set of allowed target_agent names. Currently
+# only orchestration→kernel is allowed.
 # ---------------------------------------------------------------------------
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
     "orchestration": frozenset({"kernel"}),
@@ -571,7 +570,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "start_ts",
     "max_minutes",
     # the fact-layer KEEP ledger. Coordinator is the
-    # sole writer (Inv-1 / Inv-10.2); LLM update_state can never
+    # sole writer; LLM update_state can never
     # rewrite the stack, even though the LLM proposes the entries that
     # land in it via emit_intent → execute → promote flows.
     "optimization_stack",
@@ -580,35 +579,34 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # LLM update_state must not be able to roll the state.json back to
     # a reader by setting ``schema_version=1``.
     "schema_version",
-    # Cortex KB integration fields (KB_design §3.6, §3.10,
-    # §3.13 M1). Coordinator-only writes; LLM agents reading is fine.
+    # Cortex KB integration fields. Coordinator-only writes; LLM
+    # agents reading is fine.
     "cortex_session_id",
     "cortex_session_summary",
     "warm_start_recipe",
     "warm_start_pitfalls",
     "warm_start_lessons",
     "warm_start_ts",
-    # GAP 5 KB tag completeness — populated by Coordinator from
+    # KB tag completeness — populated by Coordinator from
     # manifest + baseline materialized config. LLM agents can read
     # them via prompt sections, but only Coordinator writes.
     "stack_fingerprint_meta",
     "baseline_workload_extra",
-    # GAP 1 warm-recipe replay — one-shot guard + outcome record.
+    # warm-recipe replay — one-shot guard + outcome record.
     # Coordinator-only writes; LLM cannot edit them via update_state
     # (would let a misbehaving LLM bypass the replay budget).
     "warm_replay_attempted",
     "warm_replay_outcome",
     "warm_history_injected",
-    # phase state machine fields (KB_design §3.2, §3.10,
-    # §3.13 M2). All managed by ``Coordinator._advance_phase_if_needed``;
+    # phase state machine fields. All managed by
+    # ``Coordinator._advance_phase_if_needed``;
     # LLM update_state never reaches these.
     "phase",
     "phase_started_ts",
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
-    # specialist sub-agent ledger (KB_design §3.5 §10 / §3.10
-    # §4.1 / §3.11). Coordinator-only writes; LLM cannot inject
+    # specialist sub-agent ledger. Coordinator-only writes; LLM cannot inject
     # arbitrary entries via update_state (specialist_done carries
     # proposals through the dedicated R3 path instead).
     "specialist_rounds",
@@ -619,8 +617,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # from raising capacity mid-flight.
     "research_lane_capacity",
     "gpu_specialist_capacity",
-    # phase-machine escalation plumbing (KB_design §3.8 §7.3 /
-    # §3.13 M7). Coordinator's ``_handle_escalate_strategy_change``
+    # phase-machine escalation plumbing. Coordinator's
+    # ``_handle_escalate_strategy_change``
     # writes ``pending_escalate_hint`` via the validated
     # ``SharedState.set_pending_escalate_hint`` helper; LLM
     # ``update_state`` is blocked here as a defense-in-depth measure
@@ -639,14 +637,13 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # explore search ledger.
     # Coordinator's ``apply_explore_search_update`` / ``record_explore_accepted``
     # are the sole writers; LLM ``update_state`` must not rewrite the ledger
-    # directly (would bypass dedup-by-fingerprint + Inv-1).
+    # directly (would bypass dedup-by-fingerprint + single writer).
     "explore_search",
-    # structured gaps ledger (KB_design §3.3 /
-    # §3.5 / §3.9 §6). Coordinator's ``_refresh_gaps`` is the sole
+    # structured gaps ledger. Coordinator's ``_refresh_gaps`` is the sole
     # writer; LLM agents read via prompt injection. Locking the field
     # closes the proxy gap (last_action_failures + winners_history)
     # against an arbitrary update_state that would inject fake gaps
-    # to bias specialist domain selection (Inv-1 / Inv-10.2).
+    # to bias specialist domain selection (single writer).
     "gaps",
     # Coordinator-only writes on the dynamic_action aggregate view +
     # round counter so the LLM cannot self-narrate its dispatch
@@ -704,8 +701,7 @@ class PolicyGate:
     # phase-incompatible R1 enforcement mode.  When False
     # (default) the rule only emits a warning entry into the audit log;
     # production CLI flips this on via ``INFERENCE_OPTIMIZER_STRICT_PHASE=1``
-    # to fail-closed.  Two-stage rollout matches the legacy →
-    # v0.8 transition strategy in KB_design §3.13 M2.
+    # to fail-closed (two-stage rollout: warn first, then enforce).
     strict_phase: bool = False
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
@@ -892,8 +888,8 @@ class PolicyGate:
         if action_name == DYNAMIC_ACTION_NAME:
             self._validate_dynamic_action_dispatch(role, payload)
             return
-        # PR-A7 (Arbor-into-Hyperloom) — ``integrate_patch`` requires a
-        # non-reject Critic verdict on the specialist's patches before
+        # ``integrate_patch`` requires a non-reject Critic verdict on
+        # the specialist's patches before
         # the orchestrator can apply them to framework_source_roots.
         # See SharedState.specialist_patch_verdicts /
         # record_specialist_patch_verdict; ``bypass_critic=True`` lets
@@ -971,7 +967,7 @@ class PolicyGate:
         # kernel-ownership + unknown_action checks so the cheaper /
         # structural denials win when both apply (Inv-11.3 orthogonality).
         self._validate_phase_action(role, action_name, intent_kind="delegate")
-        # v0.8 §3.11 R4 / R5 — block any ``delegate`` whose action_name
+        # R4 / R5 — block any ``delegate`` whose action_name
         # tries to invoke an external tool via the intent channel.
         self._validate_no_kb_write_collision(
             action_name, intent_kind="delegate",
@@ -1029,7 +1025,7 @@ class PolicyGate:
         self._validate_explore_minimum_before_kernel_opt(action_name)
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
-        # v0.8 §3.11 R4 / R5 — defense in depth on propose_action.
+        # R4 / R5 — defense in depth on propose_action.
         self._validate_no_kb_write_collision(
             action_name, intent_kind="propose_action",
         )
@@ -1139,7 +1135,7 @@ class PolicyGate:
         if target == "kernel" and kind in KERNEL_OWNED_ACTIONS:
             self._validate_phase_action(role, kind, intent_kind="request")
         self._validate_fp8_only_action(kind, intent_kind="request")
-        # v0.8 §3.11 R4 / R5 — defense in depth: a REQUEST.kind cannot
+        # R4 / R5 — defense in depth: a REQUEST.kind cannot
         # smuggle a KB write / external tool invocation either.
         self._validate_no_kb_write_collision(kind, intent_kind="request")
         self._validate_tool_whitelist_collision(
@@ -1386,7 +1382,7 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # v0.8 §3.11 R4 — kb_write_unauthorized
+    # R4 — kb_write_unauthorized
     # ------------------------------------------------------------------
     def _validate_no_kb_write_collision(
         self,
@@ -1423,7 +1419,7 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # v0.8 §3.11 R5 — tool_whitelist_role / tool_whitelist_phase
+    # R5 — tool_whitelist_role / tool_whitelist_phase
     #
     # ------------------------------------------------------------------
     def _validate_tool_whitelist_collision(
@@ -1489,7 +1485,7 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # v0.8 §3.11 R4 / R5 public helper — pure validator usable by the
+    # R4 / R5 public helper — pure validator usable by the
     # SpecialistRunner per-task tool-list builder.
     # ------------------------------------------------------------------
     def validate_tool_invocation(
@@ -1646,7 +1642,7 @@ class PolicyGate:
             )
         # Per-round cap on variants stamped with ``provenance='dynamic'``;
         # locked at the grid surface so loosening upstream caps cannot
-        # silently break the IR-4 invariant.
+        # silently break the dynamic-source cap invariant.
         dynamic_sourced = sum(
             1 for v in grid
             if isinstance(v, dict)
@@ -1858,8 +1854,8 @@ class PolicyGate:
             try:
                 verdict = ss.get_specialist_patch_verdict(sid)
             except AttributeError:
-                # Older SharedState (no PR-A7 field). Treat as no
-                # verdict on record.
+                # Older SharedState (no integrate-verdict field). Treat
+                # as no verdict on record.
                 verdict = ""
         if not verdict:
             raise PolicyDenied(
