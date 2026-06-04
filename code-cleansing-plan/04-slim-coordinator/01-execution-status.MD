@@ -38,10 +38,25 @@ Action:
 - Added `Coordinator._replay_resume_if_needed()` and called it from both `tick()` and `run()`.
 - Behavior is unchanged: the guard condition, call order, and side effects match the previous inline blocks.
 
+### Extracted shared FRAMEWORK_PR pump wrapper
+
+`tick()` and `run()` both wrapped `_pump_framework_pr_phase()` in the same
+best-effort `try/except` block with only the caller name differing.
+
+Action:
+
+- Added `Coordinator._pump_framework_pr_phase_safely(caller=...)`.
+- Replaced both inline wrappers with calls to the shared helper.
+- Behavior is unchanged: the pump still runs in the same point in each
+  loop and still logs and suppresses defensive failures.
+
 ## Verification
 
 - Lint: no errors on `coordinator.py`.
 - Tests: `test_coordinator_runtime.py`, `test_resume.py`, `test_resume_deferred_proposals.py`, `test_dynamic_action_resume.py` all pass (112 passed).
+- Follow-up FRAMEWORK_PR pump verification: `test_coordinator_runtime.py`,
+  `test_framework_pr_pump_integration.py`, `test_framework_pr_executor.py`
+  pass (98 passed).
 
 ## Not Done Yet (Future Step 04 Batches)
 
@@ -49,7 +64,6 @@ The plan lists more de-dup and the larger responsibility split. These are intent
 
 De-dup still pending:
 
-- FRAMEWORK_PR pump try/except wrapping shared by `tick()` and `run()`.
 - roofline pending gate duplicate checks across propose / delegate / materialize.
 - time budget prompt block duplication in `_compose_prompt`.
 - `extra_server_args` compat read entry consolidation.
