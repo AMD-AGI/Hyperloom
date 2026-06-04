@@ -78,8 +78,8 @@ class SubAgentRunner:
 
         Returns the path so the caller can stash it on ``RunnerContext.extra``.
         Returns None when the task kind is not one of the known runs/
-        actions (e.g. setup / classify / kernel-owned actions which use
-        their own kernel-agent-workspace tree).
+        actions (e.g. kernel-owned actions which use their own
+        kernel-agent-workspace tree).
         """
         if self.session_dir is None:
             return None

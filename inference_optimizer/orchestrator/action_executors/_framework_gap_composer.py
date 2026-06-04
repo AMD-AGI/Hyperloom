@@ -157,9 +157,10 @@ def compose_gap(
     Parameters
     ----------
     framework, gpu_type, model_class
-        Lifted from :class:`SharedState` (already populated by classify /
-        baseline). All optional; missing fields are quietly dropped from the
-        composed gap so the executor still has *something* to send to fa.
+        Lifted from :class:`SharedState` (already populated during
+        PRELUDE / baseline). All optional; missing fields are quietly
+        dropped from the composed gap so the executor still has
+        *something* to send to fa.
     precision
         Sourced from ``manifest.json``'s ``workload.precision`` because
         SharedState does not surface it directly. Empty string is fine.
