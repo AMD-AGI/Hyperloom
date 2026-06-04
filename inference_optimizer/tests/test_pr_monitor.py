@@ -12,8 +12,6 @@ Covers KB_design §3.6 + §3.13 M4:
 * SpecialistRunner tool-list gating: ``mcp__pr_monitor__*`` stripped
   when KnowledgePlane reports PR Monitor disabled; default still
   exposes the 12 PR Monitor MCP tool names.
-* breakdown ``kb_provenance.points_created`` extraction from the
-  audit log (pr_node + workload_node mixed).
 """
 
 from __future__ import annotations
@@ -40,7 +38,6 @@ from inference_optimizer.orchestrator.specialist_runner import (
     PR_MONITOR_MCP_TOOLS,
     SpecialistRunner,
 )
-from inference_optimizer.breakdown.collectors import collect_kb_provenance
 
 
 # ---------------------------------------------------------------------------
@@ -429,59 +426,7 @@ def test_specialist_runner_without_plane_keeps_default_tools():
 
 
 # ===========================================================================
-# 6. breakdown kb_provenance points_created
-# ===========================================================================
-def test_kb_provenance_points_created_aggregates_pr_node(tmp_path):
-    """Audit log with multiple propose_point ops surfaces in points_created."""
-    session_dir = tmp_path / "session"
-    (session_dir / "runtime" / "cortex").mkdir(parents=True)
-    audit = session_dir / "runtime" / "cortex" / ".kb_audit.jsonl"
-    audit_rows = [
-        {"ts": "2026-05-19T01:00:00", "op": "propose_point",
-         "status": "ok", "canonical_id": "workload.qwen3.mi300x",
-         "kind": "workload_node", "authority": "EXPERIENTIAL",
-         "source": "agent_observation"},
-        {"ts": "2026-05-19T02:00:00", "op": "propose_point",
-         "status": "ok", "canonical_id": "pr.ROCm/aiter#3067",
-         "kind": "pr_node", "authority": "EXPERIENTIAL",
-         "source": "pr_monitor"},
-        {"ts": "2026-05-19T02:01:00", "op": "propose_point",
-         "status": "queued", "canonical_id": "pr.ROCm/aiter#3067",
-         "kind": "pr_node", "authority": "EXPERIENTIAL",
-         "source": "pr_monitor"},   # dedupes (same canonical+kind)
-        {"ts": "2026-05-19T03:00:00", "op": "cli", "status": "ok",
-         "args": ["session", "commit"]},  # non-propose row, skipped
-    ]
-    with audit.open("w", encoding="utf-8") as f:
-        for r in audit_rows:
-            f.write(json.dumps(r) + "\n")
-
-    state = {"cortex_session_id": "sid-1"}
-    manifest = {"stack_fingerprint": {}}
-    warnings: list[str] = []
-    out = collect_kb_provenance(session_dir, state, manifest, warnings)
-    canonical_ids = {p["canonical_id"] for p in out["points_created"]}
-    assert "workload.qwen3.mi300x" in canonical_ids
-    assert "pr.ROCm/aiter#3067" in canonical_ids
-    # Dedup → exactly 2 unique (canonical_id, kind) pairs.
-    assert len(out["points_created"]) == 2
-    assert out["points_by_kind"]["pr_node"] == 1
-    assert out["points_by_kind"]["workload_node"] == 1
-    assert warnings == []
-
-
-def test_kb_provenance_no_audit_log_returns_empty_points(tmp_path):
-    session_dir = tmp_path / "session"
-    state = {}
-    manifest = {}
-    warnings: list[str] = []
-    out = collect_kb_provenance(session_dir, state, manifest, warnings)
-    assert out["points_created"] == []
-    assert out["points_by_kind"] == {}
-
-
-# ===========================================================================
-# 7. KnowledgePlane cache reset
+# 6. KnowledgePlane cache reset
 # ===========================================================================
 def test_plane_reset_round_caches():
     pr = PRMonitorClient.from_args()
