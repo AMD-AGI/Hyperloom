@@ -1,0 +1,38 @@
+# Golden top-level keys of session_breakdown.json
+# schema_version: hyperloom.session_breakdown.v2
+# filename: session_breakdown.json
+# Source: build() over the test_breakdown_smoke realistic fixture (no GPU).
+# Contract (code_cleansing.MD §1): these keys + shapes must stay equivalent.
+# NOTE the v1<->v2 alias pairs that MUST both keep being emitted:
+#   param_search   == explore_search
+#   phase_timeline == action_timeline
+action_timeline
+attribution
+baseline
+capability_summary
+conc_sweep_summary
+critic_robustness
+explore_search
+exported_at_utc
+exporter_version
+final
+geak_invocations
+kb_provenance
+kernel_lifecycle
+kernel_optimization_summary
+kernel_roofline
+oob_invocations
+optimization_stack
+param_search
+phase_segments
+phase_timeline
+roofline
+roofline_progress
+schema_version
+session
+source_files
+specialist_runs
+sweep
+telemetry
+warnings
+workload
