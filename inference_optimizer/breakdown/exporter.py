@@ -112,7 +112,7 @@ def build(
                                        lambda: collectors.collect_final(sd, state, warnings),
                                        warnings)
     phase_timeline    = _safe_collect("phase_timeline",
-                                       lambda: collectors.collect_phase_timeline(state, warnings),
+                                       lambda: collectors.collect_phase_timeline(sd, state, warnings),
                                        warnings)
     phase_segments    = _safe_collect("phase_segments",
                                        lambda: collectors.collect_phase_segments(

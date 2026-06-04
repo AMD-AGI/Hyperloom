@@ -23,6 +23,7 @@ from typing import Any
 # `parallel_e2e_runner` decision consistent here.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+from _paths import workspace_root  # noqa: E402
 sys.path.pop(0)
 
 
@@ -1547,8 +1548,12 @@ def _kernel_agent_root() -> Path:
     which keeps cross-task GEAK/OOB artefacts keyed by kernel_id).
     Legacy default was ``$WORKSPACE_PATH/kernel-agent``; the env was
     removed during the all-artefacts-under-USER_DATA_PATH migration.
+
+    Routes through :func:`_paths.workspace_root` so an unset
+    ``$USER_DATA_PATH`` is warned about loudly (once) instead of
+    silently falling back to ``/workspace/hyperloom``.
     """
-    return Path(os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")) / "kernel-agent"
+    return Path(workspace_root()) / "kernel-agent"
 
 
 def _geak_output_dir(session_id: str, prompt_file: Path) -> Path:
@@ -2877,7 +2882,7 @@ def main() -> int:
     parser.add_argument("--session-id", default="")
     parser.add_argument(
         "--workspace-path",
-        default=os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"),
+        default=workspace_root(),
         help=(
             "Root the tool writes under (output lands at "
             "<workspace_path>/kernel-agent/runs/<session_id>/...). "
