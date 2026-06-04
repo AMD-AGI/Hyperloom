@@ -1,4 +1,4 @@
-"""LLM backend wrappers ().
+"""LLM backend wrappers.
 
 Each backend exposes a uniform :class:`Backend` protocol so the Coordinator
 can swap implementations (real Claude / Codex SDK, mock for tests, future
