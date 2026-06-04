@@ -3991,12 +3991,9 @@ def collect_kb_provenance(
        Cortex CLI call status. Useful for diagnosing T0 sync failures
        from the breakdown JSON alone.
 
-    Returns a stable shape (always the same keys, even on a `--degraded-kb`
-    session) so downstream readers (claw-stats-service) don't have to
-    branch. ``commit_summary`` / ``pending_edges`` / ``edges_promoted``
-    / ``edges_negated`` keys are kept (always empty) for back-compat
-    with claw-stats-service consumers that pre-date the T2/T3 protocol
-    retirement; remove in a future schema bump.
+    Returns a stable shape for live RecipeKB / PR Monitor observability.
+    The old T2/T3 graph edge placeholders were removed with the
+    KnowledgePlane Cortex graph surface.
     """
     from ..session_paths import (
         cortex_audit_jsonl as _audit_path,
@@ -4071,48 +4068,6 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
-    # ``points_created[]`` aggregation: walk the *full* audit log so
-    # one entry per (canonical_id, kind) is exposed even on long
-    # sessions; ``set`` dedups re-proposed rows.
-    points_created: list[dict[str, Any]] = []
-    points_by_kind: dict[str, int] = {}
-
-    try:
-        if audit_path.exists():
-            seen: set[tuple[str, str]] = set()
-            with audit_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(row, dict):
-                        continue
-                    if str(row.get("op") or "") != "propose_point":
-                        continue
-                    canonical = str(row.get("canonical_id") or "").strip()
-                    kind = str(row.get("kind") or "").strip()
-                    if not canonical or not kind:
-                        continue
-                    key = (canonical, kind)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    points_created.append({
-                        "canonical_id": canonical,
-                        "kind":         kind,
-                        "authority":    str(row.get("authority") or ""),
-                        "source":       str(row.get("source") or ""),
-                        "status":       str(row.get("status") or ""),
-                        "ts":           str(row.get("ts") or ""),
-                    })
-                    points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
-    except OSError as exc:
-        warnings.append(f"kb_provenance: failed to scan {audit_path}: {exc!r}")
-
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
     pitfalls = state.get("warm_start_pitfalls") or []
@@ -4138,13 +4093,6 @@ def collect_kb_provenance(
         "warm_replay_attempted":   bool(state.get("warm_replay_attempted")),
         "warm_history_injected":   bool(state.get("warm_history_injected")),
         "stack_fingerprint":      manifest.get("stack_fingerprint") or {},
-        # Always-empty back-compat lists (T2 hypothesize protocol retired).
-        # Consumers that diff session_breakdown.json for "pending edges"
-        # / "edges_promoted" must stop relying on these in a follow-up
-        # schema bump.
-        "pending_edges":          [],
-        "edges_promoted":         [],
-        "edges_negated":          [],
         "queue": {
             "pending_lines":     _count_lines(pending_path),
             "flushed_bookmarks": _count_lines(flushed_path),
@@ -4152,16 +4100,6 @@ def collect_kb_provenance(
         },
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
-        "points_created":        sorted(
-            points_created, key=lambda r: r.get("canonical_id", ""),
-        ),
-        "points_by_kind":        points_by_kind,
-        # Empty placeholder kept for back-compat with claw-stats-service.
-        "commit_summary": {
-            "status":             "",
-            "promoted_edges":     [],
-            "derived_summary_id": "",
-        },
         "flusher_status": _collect_flusher_status(
             session_dir,
             status_path=_flusher_status_path(session_dir),
