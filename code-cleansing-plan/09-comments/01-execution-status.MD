@@ -67,10 +67,30 @@ Changes:
   tool-whitelist comments while keeping the worktree and KB-write
   invariants.
 
+### Compressed PolicyGate and phase-state headers
+
+Updated:
+
+- `orchestrator/policy.py`
+- `orchestrator/phase_state.py`
+
+Changes:
+
+- Removed old v0.5/v0.6 migration notes from the PolicyGate header.
+- Replaced KB/Cortex provenance wording in the phase-state header with
+  current action-attempt phase provenance.
+- Compressed EXPLORE allowlist comments to the current invariants around
+  `integrate_patch`, `assess_remaining_gaps`, and `dynamic_action`.
+
 ## Verification
 
 - Lint: no errors.
 - Tests: `test_agent_roles_and_policy`, `test_role_realignment` pass.
+- Follow-up prompt/specialist verification: prompt-builder,
+  prompt-visibility, specialist lifecycle, and specialist subprocess tests
+  pass (56 passed).
+- Follow-up policy/phase verification: phase-state, agent-role/policy,
+  and action-catalogue tests pass (103 passed).
 
 ## Stale-Doc Candidates For Future Passes
 
