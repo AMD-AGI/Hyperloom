@@ -69,7 +69,7 @@ are accepted as no-ops for backwards compat):
   (Hyperloom is inference-only since v0.4; the training-mode CLI is no
   longer accepted)
 - GEAK CLI from `GEAK_REF` (default `v3.2.0`) +
-  `${HYPERLOOM_ROOT}/geak-config/local.yaml` (model resolution:
+  `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
   `claude-opus-4-7`). Run-mode default for the generated yaml is
   controlled by `GEAK_RUN_MODE` (`quick` or `full`; defaults to `full`,
@@ -345,7 +345,8 @@ When `$TRACELENS_ROOT` or `$TRACELENS_INTERNAL_ROOT` is on a read-only mount,
 respectively (parallel to `${HYPERLOOM_ROOT}/geak` /
 `${HYPERLOOM_ROOT}/OOB/oob_cli`) via `cp -r`, runs `pip install -e` against
 the writable mirror, and `write_env_file` re-exports the resolved root so
-subsequent CLI subprocesses inherit the mirror.
+subsequent CLI subprocesses inherit the mirror. Treat these mirrors as
+installer-owned state; do not clone, clean, or edit them by hand.
 
 If `install.sh` did not finish or the CLI is unexpectedly missing, run a
 manual editable install + smoke test before analysis:
