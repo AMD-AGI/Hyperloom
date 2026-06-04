@@ -902,6 +902,92 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+# ---------------------------------------------------------------------------
+# sglang scheduler watchdog timeout injection
+#
+# On MI300X with the aiter attention backend, the FIRST inference request
+# JIT-compiles the ``mha_batch_prefill`` kernel; that compile can take longer
+# than sglang's default ``--watchdog-timeout`` of 300s. When it does, the
+# scheduler fires ``SIGQUIT`` and the server dies mid-warmup -> the benchmark
+# reports ``baseline_failed`` with throughput 0 (non-deterministic across
+# models: same-arch models pass once the aiter cache is warm). InferenceX's
+# ``sglang_mi300x.sh`` appends ``$EXTRA_SGLANG_ARGS`` after its own
+# DEFAULT_ARGS and never sets ``--watchdog-timeout`` itself, so routing the
+# flag through ``EXTRA_SGLANG_ARGS`` reliably reaches
+# ``python -m sglang.launch_server``. We inject a longer timeout by default
+# unless the user already pinned one.
+# ---------------------------------------------------------------------------
+DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC = 1800
+SGLANG_WATCHDOG_TIMEOUT_ENV = "SGLANG_WATCHDOG_TIMEOUT"
+_SGLANG_WATCHDOG_FLAG = "--watchdog-timeout"
+# Matches the flag in space- or equals-separated form so a user-pinned
+# ``--watchdog-timeout 600`` / ``--watchdog-timeout=600`` both suppress
+# injection, while a longer flag (no such sglang flag today, but defensive)
+# does not false-match.
+_SGLANG_WATCHDOG_RE = re.compile(r"--watchdog-timeout(?:[=\s]|$)")
+
+
+def resolve_sglang_watchdog_timeout() -> int:
+    """Resolve the sglang scheduler watchdog timeout in seconds.
+
+    Reads ``$SGLANG_WATCHDOG_TIMEOUT`` (integer seconds) and falls back to
+    :data:`DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC` when the env var is unset,
+    empty, non-integer, or non-positive. A malformed value logs a warning
+    and uses the default rather than crashing the YAML materialization.
+    """
+    raw = os.environ.get(SGLANG_WATCHDOG_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
+    try:
+        val = int(raw)
+    except ValueError:
+        log.warning(
+            "%s=%r is not an integer; using default %ds.",
+            SGLANG_WATCHDOG_TIMEOUT_ENV, raw,
+            DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
+        )
+        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
+    if val <= 0:
+        log.warning(
+            "%s=%d is not positive; using default %ds.",
+            SGLANG_WATCHDOG_TIMEOUT_ENV, val,
+            DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
+        )
+        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
+    return val
+
+
+def inject_sglang_watchdog_timeout(
+    server_args: str | None, framework: str | None,
+) -> str:
+    """Append ``--watchdog-timeout <N>`` to ``server_args`` for sglang runs.
+
+    Returns ``server_args`` unchanged (coerced to a stripped string) when
+    either guard trips:
+
+    * ``framework`` does not route to ``EXTRA_SGLANG_ARGS`` — vllm / atom
+      have no such flag, so they are left untouched. Framework detection
+      reuses :func:`server_args_env_name`, so an empty/unknown framework is
+      treated as sglang (the default backend), matching how every other
+      arg-routing site in this module behaves.
+    * ``server_args`` already contains ``--watchdog-timeout`` (in space- or
+      equals-separated form) — a user/variant-supplied value wins and is
+      never doubled.
+
+    Otherwise it appends ``--watchdog-timeout <N>`` where ``N`` comes from
+    :func:`resolve_sglang_watchdog_timeout`. Only this flag is added; the
+    function never touches ``--context-length`` / ``MAX_MODEL_LEN`` or any
+    other existing flag.
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args
+    if _SGLANG_WATCHDOG_RE.search(args):
+        return args
+    timeout = resolve_sglang_watchdog_timeout()
+    return merge_server_args(args, f"{_SGLANG_WATCHDOG_FLAG} {timeout}")
+
+
 def apply_runtime_benchmark_overrides(
     bench: dict[str, Any],
     *,
@@ -1766,13 +1852,18 @@ def _write_variant_abort_marker(
 
 
 __all__ = [
+    "DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC",
     "GridVariant",
     "MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
+    "SGLANG_WATCHDOG_TIMEOUT_ENV",
     "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
     "apply_runtime_benchmark_overrides",
+    "inject_sglang_watchdog_timeout",
+    "merge_server_args",
     "pick_winners",
     "reorder_grid_for_multi_node",
+    "resolve_sglang_watchdog_timeout",
     "run_grid",
     "sanitize_result_dir",
     "sanitize_script_name",
