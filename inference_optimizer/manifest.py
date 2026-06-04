@@ -83,6 +83,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import paths as _paths
 from .session_paths import manifest_path
 
 log = logging.getLogger(__name__)
@@ -206,6 +207,37 @@ def _git_remote_at(path: Path) -> str:
         return ""
 
 
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    """Return True when ``path`` is inside ``root`` after best-effort resolution."""
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
+    """Warn when a dependency checkout path escapes an explicit USER_DATA_PATH.
+
+    Operators expect Magpie / InferenceX runtime checkouts to live under the
+    same workspace root as session data.  The env vars are still honoured for
+    advanced/debug flows, but an out-of-tree override should be loud in the
+    manifest logs because it is otherwise very hard to explain why artefacts
+    appeared under /workspace instead of the configured data root.
+    """
+    user_data = (os.environ.get(_paths.ENV_USER_DATA_PATH) or "").strip()
+    if not user_data:
+        return
+    dep_path = Path(raw)
+    root = Path(user_data)
+    if not _path_is_relative_to(dep_path, root):
+        log.warning(
+            "%s=%s is outside %s=%s; this run may read/write runtime "
+            "artefacts outside the configured Hyperloom workspace root.",
+            env_var, raw, _paths.ENV_USER_DATA_PATH, user_data,
+        )
+
+
 def _describe_dep(env_var: str) -> dict[str, str]:
     """Build a `{path, commit, remote}` provenance dict for one dependency
     pointed at by ``$env_var``. All fields default to empty string when
@@ -215,6 +247,7 @@ def _describe_dep(env_var: str) -> dict[str, str]:
     raw = (os.environ.get(env_var) or "").strip()
     if not raw:
         return {"path": "", "commit": "", "remote": ""}
+    _warn_if_dependency_escapes_user_data(env_var, raw)
     path = Path(raw)
     if not path.is_dir():
         return {"path": raw, "commit": "", "remote": ""}
