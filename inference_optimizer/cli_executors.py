@@ -124,7 +124,7 @@ def _build_specialist_executor(
         .strip().lower()
     )
 
-    # PR-A2: derive framework_source_roots from the canonical resolver so
+    # Derive framework_source_roots from the canonical resolver so
     # the specialist worktree is rooted at the same set the orchestration
     # prompt + PolicyGate path-validator already trust.
     framework_source_roots = tuple(resolve_source_file_allowlist())
@@ -320,7 +320,7 @@ def _register_executors(
             "dynamic_action", _stub_dynamic_action_executor,
         )
 
-    # PR-A4: the real IntegratePatchExecutor reads the specialist's worktree
+    # The real IntegratePatchExecutor reads the specialist's worktree
     # patches, applies them to framework_source_roots via ``git apply``,
     # runs a Magpie bench, and decides KEEP / REVERT. Single integration
     # point — specialists never apply patches themselves.
