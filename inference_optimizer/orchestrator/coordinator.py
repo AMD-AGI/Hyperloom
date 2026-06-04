@@ -678,12 +678,10 @@ class Coordinator:
         self._warm_replay_min_confidence: float = float(warm_replay_min_confidence)
         self._warm_replay_min_reproduce_pct: float = float(warm_replay_min_reproduce_pct)
         # KnowledgePlane facade.
-        # When non-None, ``_handle_delegate`` pre-warms ``pr_feed`` +
-        # ``kb_subgraph`` for ``delegate{action='specialist'}`` tasks
-        # before enqueue, so the SpecialistRunner prompt assembly sees
-        # the latest knowledge.  ``None`` keeps the legacy code path
-        # (no warmup; specialist still runs but sees empty knowledge
-        # surface).
+        # When non-None, ``_handle_delegate`` pre-warms PR feed plus
+        # advisory knowledge context for ``delegate{action='specialist'}``
+        # tasks before enqueue. ``None`` means no warmup; specialists
+        # still run with empty advisory context.
         self.knowledge_plane: Any = knowledge_plane
         # ProposalScorer facade (advisory). When non-None, a non-empty
         # specialist ``proposal_set`` is scored by one or more gateway
@@ -8013,10 +8011,8 @@ class Coordinator:
           hand.
         * GPU hardware hints (``gpu_type`` / ``tp``) from SharedState.
 
-        Gap-09 (gaps[] field) will later expose ``gap_symptom`` /
-        ``gap_layer`` / ``gap_attempts`` / ``kb_subgraph`` from a real
-        gap ledger; until then those stay empty (PromptBuilder
-        gracefully degrades).
+        Missing fields stay empty; SpecialistPromptBuilder degrades to
+        domain defaults, warm-start facts, PR feed, and research hints.
         """
         state = self.shared_state
         plane = self.knowledge_plane
@@ -8060,35 +8056,10 @@ class Coordinator:
                 plane is not None and getattr(plane, "pr_monitor_enabled", True)
             )
 
-        # KB sub-graph warmup. ``pr_feed`` covers PR Monitor; this fills
-        # the specialist prompt's KB section with an expanded anchor.
-        if (
-            plane is not None
-            and getattr(plane, "cortex_enabled", False)
-            and "kb_subgraph" not in params
-        ):
-            try:
-                # Pass the lowercased hw_slug so per-domain KB fallback
-                # filters recipe candidates to the same GPU.
-                _hw_raw = (state.gpu_type or "").strip()
-                hw_slug = (
-                    _hw_raw.rsplit("/", 1)[-1].lower()
-                    .replace(" ", "_").replace("/", "_")
-                ) if _hw_raw else ""
-                kb_tags = list(tags) or ([domain] if domain else [])
-                subgraph = plane.select_kb_for_domains(
-                    kb_tags, hw_slug=hw_slug or None,
-                )
-                params["kb_subgraph"] = subgraph or {}
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "specialist warmup: select_kb_for_domains(tags=%r) "
-                    "failed: %r",
-                    tags, exc,
-                )
-                params.setdefault("kb_subgraph", {})
-        else:
-            params.setdefault("kb_subgraph", {})
+        # Old Cortex v1 graph subgraphs were removed from KnowledgePlane.
+        # Keep the field defaulted so SpecialistPromptInputs remains stable;
+        # RecipeKB priors arrive through warm_start_* and PR feed instead.
+        params.setdefault("kb_subgraph", {})
 
         # Warm-start recipe + pitfalls + lessons from T0 anchor.
         if state.warm_start_recipe and "warm_start_recipe" not in params:

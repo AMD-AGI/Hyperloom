@@ -115,14 +115,12 @@ CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
 # Note these tool names follow the Claude / Cursor convention; the actual MCP
 # server names depend on operator config.
 #
-# Cortex KB has no MCP surface (REST only); its read context is
-# pre-warmed into Section 4 of the specialist prompt by
-# ``Coordinator._warm_specialist_params`` → ``select_kb_for_domain``.
-# The ``mcp__cortex_kb__{traverse,find_recipe,query}`` names therefore
-# stay out of the default whitelist — advertising tool names that no
-# MCP server backs caused specialists to attempt orphan calls and
-# silently fall back to ``WebSearch``. ``CORTEX_KB_READONLY_MCP_TOOLS``
-# remains importable for PolicyGate (denial validation) and tests.
+# Cortex KB has no live MCP surface. RecipeKB / PR feed / research hints
+# are warmed into prompt fields before dispatch. The
+# ``mcp__cortex_kb__{traverse,find_recipe,query}`` names stay out of the
+# default whitelist so specialists do not attempt orphan calls.
+# ``CORTEX_KB_READONLY_MCP_TOOLS`` remains importable for PolicyGate
+# denial validation and tests.
 DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     "emit_intent",
     "Read", "Grep", "Glob",
@@ -313,9 +311,9 @@ class SpecialistRunner:
 
         Gated on:
 
-        * KnowledgePlane PR Monitor / Cortex KB availability — strips
-          ``mcp__pr_monitor__*`` / ``mcp__cortex_kb__*`` whenever the
-          corresponding surface is disabled.
+        * KnowledgePlane PR Monitor availability and the retired Cortex
+          MCP denylist — strips ``mcp__pr_monitor__*`` when PR Monitor is
+          disabled and always strips ``mcp__cortex_kb__*``.
         * Per-task ``Task.allowed_tools`` when the dispatcher supplied a
           narrower surface (research_scout is the canonical read-only case).
         * Always enforces :data:`SPECIALIST_TOOL_DENYLIST` last

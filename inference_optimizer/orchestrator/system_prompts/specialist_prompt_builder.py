@@ -511,8 +511,8 @@ class SpecialistPromptInputs:
     # research scout should skip re-mining. Empty on cold-start.
     already_proven: list[dict[str, str]] = field(default_factory=list)
     # Compact advisory research-hint block (source-backed priors collected
-    # this session). Rendered alongside the KB sub-graph as a co-equal
-    # prior; its presence suppresses the cold-start fallback.
+    # this session). Co-equal with RecipeKB warm-start facts; its presence
+    # suppresses the cold-start fallback.
     research_hints: str = ""
     # Workload context (mirrored from SharedState by
     # Coordinator._warm_specialist_params; renders in section 2 so
@@ -539,7 +539,7 @@ class SpecialistPromptInputs:
     gap_layer: str = ""
     gap_evidence: dict[str, Any] = field(default_factory=dict)
 
-    # Cortex KB sub-graph (§3.5 §6 part 4)
+    # Optional structured KB context. Empty in the current RecipeKB-first path.
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
 
     # Roofline / TraceLens evidence (§3.5 §6 part 4a).
@@ -739,7 +739,7 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Section 4 — Cortex KB sub-graph
+# Section 4 — optional KB context
 # ---------------------------------------------------------------------------
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     """Issue-J (Saturday May 2026): all three prior sources are empty.
@@ -766,19 +766,19 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
 
 
 def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
-    rows = ["## 4. CORTEX KB SUB-GRAPH", ""]
+    rows = ["## 4. KB CONTEXT (optional, advisory)", ""]
     cold = _is_cold_start(inp)
     if not inp.kb_subgraph:
         if inp.research_hints:
-            # Research hints stand in as the advisory prior when the KB
-            # anchor is empty — co-equal with the KB sub-graph, never a
-            # deterministic gate. This keeps the cold-start fallback from
+            # Research hints stand in as an advisory prior when structured
+            # KB context is empty; never a deterministic gate. This keeps
+            # the cold-start fallback from
             # firing whenever the scout produced fresh source-backed priors.
             rows.extend([
-                "KB anchor is empty for this (model, hardware, domain), but "
+                "Structured KB context is empty for this (model, hardware, domain), but "
                 "the research scout collected source-backed priors this "
                 "session. Treat these as your advisory prior (co-equal with "
-                "the KB sub-graph; the Critic still gates the final answer):",
+                "RecipeKB priors; the Critic still gates the final answer):",
                 "",
                 inp.research_hints,
                 "",
@@ -796,12 +796,11 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             rows.extend([
                 "**COLD-START MODE — no priors available.**",
                 "",
-                "All three prior sources for this gap are empty:",
+                "All prior sources for this gap are empty:",
                 "",
-                "- KB sub-graph: ``(none)`` — Cortex anchor has no "
-                "committed points for this (model, hardware, domain) "
-                "tuple yet, OR the warmup hit a 4xx schema reject "
-                "(common on first-time models).",
+                "- KB context: ``(none)`` — no RecipeKB warm-start facts, "
+                "research hints, or PR feed entries were available for this "
+                "(model, hardware, domain) tuple.",
                 "- Warm-start recipe: ``(none)`` (Section 5).",
                 "- PR feed: ``(none)`` (Section 6).",
                 "",
@@ -814,8 +813,8 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                 "gap symptom (Section 3); flag each as "
                 "``confidence: low`` and ``provenance: "
                 "domain_focus_default`` in the proposal. Use the "
-                "``residual_questions`` field to record what KB "
-                "anchor / PR query a future round should pre-warm.",
+                "``residual_questions`` field to record what RecipeKB, "
+                "research, or PR query a future round should pre-warm.",
                 "",
                 "If the *Winning techniques* block is generic enough "
                 "that no proposal is safer than a coin-flip, you may "
@@ -828,13 +827,10 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             rows.extend([
                 _NONE_PLACEHOLDER,
                 "",
-                "(No KB sub-graph supplied. The Coordinator pre-warms this "
-                "section via select_kb_for_domain before dispatch; an empty "
-                "block means the anchor has no committed entries yet (cold "
-                "start) or the warmup hit a soft failure. The specialist "
-                "subprocess has no live KB connection — surface what you "
-                "need in ``residual_questions`` so a future round can "
-                "re-warm with a richer anchor.)",
+                "(No structured KB context supplied. Use Sections 1, 3, 5, "
+                "and 6 plus source inspection; record missing RecipeKB / "
+                "research / PR questions in ``residual_questions`` so a "
+                "future round can warm richer advisory context.)",
             ])
         return rows
     rows.append("```json")
