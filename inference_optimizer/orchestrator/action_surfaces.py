@@ -38,6 +38,14 @@ COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = (
 )
 
 
+# Coordinator-internal actions that intentionally do not appear in
+# phase_state.PHASE_ALLOWED_ACTIONS because they bypass LLM proposal /
+# delegate policy entirely.
+PHASE_ALLOWLIST_BYPASS_ACTIONS: frozenset[str] = frozenset({
+    "replay_warm_recipe",
+})
+
+
 # Actions whose prompt catalogue should advertise LLM-supplied grids.
 GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
     "explore",
@@ -85,4 +93,5 @@ __all__ = [
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_OWNED_ACTIONS",
     "NO_KERNEL_ENABLED_ACTIONS",
+    "PHASE_ALLOWLIST_BYPASS_ACTIONS",
 ]
