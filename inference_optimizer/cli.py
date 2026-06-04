@@ -2319,7 +2319,7 @@ def _check_tracelens_cli() -> None:
     ]
     if not missing:
         return
-    session_dir = os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")
+    session_dir = str(_workspace_root_resolve())
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
@@ -2988,7 +2988,7 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
         args.pr_degraded_reason = "explicit_flag"
         return
 
-    user_data = Path(os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"))
+    user_data = _workspace_root_resolve()
     marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
     script = (
         Path(__file__).resolve().parent / "scripts" / "preflight_kb.sh"
@@ -3284,11 +3284,13 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     1. ``--local-kb-root <path>`` — explicit operator override
        (typically only used by tests).
     2. ``$HYPERLOOM_LOCAL_KB_ROOT`` — env override.
-    3. ``$USER_DATA_PATH/kb`` — the documented default. A single
-       ``USER_DATA_PATH`` override moves the whole KB tail.
-    4. ``/workspace/hyperloom/kb`` — container fallback when
-       ``$USER_DATA_PATH`` isn't set (degraded sandbox / fresh-image
-       boot).
+    3. ``paths.workspace_root() / "kb"`` — the documented default.
+       :func:`~inference_optimizer.paths.workspace_root` returns
+       ``$USER_DATA_PATH`` when set (so a single ``USER_DATA_PATH``
+       override moves the whole KB tail) and otherwise falls back to
+       ``/workspace/hyperloom`` while emitting a one-shot loud warning,
+       so a degraded sandbox / fresh-image boot lands at
+       ``/workspace/hyperloom/kb`` but never silently.
 
     The directory is NOT created here — :class:`LocalRecipeStore`
     handles lazy creation on first write so a degraded run that
@@ -3300,10 +3302,7 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     )
     if explicit:
         return Path(str(explicit).strip())
-    user_data = os.environ.get("USER_DATA_PATH", "").strip()
-    if user_data:
-        return Path(user_data) / "kb"
-    return Path("/workspace/hyperloom") / "kb"
+    return _workspace_root_resolve() / "kb"
 
 
 def _build_recipe_kb_dispatcher(
