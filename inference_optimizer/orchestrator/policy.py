@@ -476,7 +476,7 @@ _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
 
 
 # ---------------------------------------------------------------------------
-# SESSION_DIR path containment ().
+# SESSION_DIR path containment.
 #
 # Any payload field listed in _PATH_LIKE_FIELDS must point either
 # (a) inside the active session_dir, OR
