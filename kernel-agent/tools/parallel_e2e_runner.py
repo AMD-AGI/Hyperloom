@@ -44,6 +44,7 @@ OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 # tools dir.
 sys.path.insert(0, str(ROOT / "tools"))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+from _paths import workspace_root  # noqa: E402
 sys.path.pop(0)
 
 
@@ -278,7 +279,7 @@ def main() -> int:
     parser.add_argument("--model-path", default="/wekafs/models/Qwen3-30B-A3B")
     parser.add_argument(
         "--workspace-path",
-        default=os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"),
+        default=workspace_root(),
         help="Root the tool writes under; defaults to $USER_DATA_PATH.",
     )
     parser.add_argument("--session-id", default=f"qwen3-30b-{int(time.time())}")
