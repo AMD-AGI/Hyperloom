@@ -24,19 +24,12 @@ v0.6 roster — 4 persistent reactors, no mode gating::
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
 
-Removed in the legacy release:
-    * sage role (KB merged into Critic — §7.3 / ADR-35)
-    * robustness role (health monitoring + RCA + recovery — ADR-36)
-    * triage role (renamed to robustness — alignment with arch diagram)
-    * OBJECTION / VOTE intents (parliament removed entirely — ADR-38)
-
-Framework / Comm layer experts (DESIGN §7.7) are **not implemented** in
-v0.6; they're architecturally placeholders.
-
-References:
-    --7.4   Per-role responsibilities
-    -       Role × Intent capability matrix
-    -      PolicyGate consumes the flags below
+The roster is exactly these four roles. Earlier designs are gone:
+the ``sage`` role merged into Critic, the ``triage`` role was renamed
+to ``robustness`` (the active 4th role above), and parliament-era
+``OBJECTION`` / ``VOTE`` intents were removed. There is no separate
+framework role: framework PR work runs as the Coordinator-owned
+FRAMEWORK_PR phase, not an agent role.
 """
 
 from __future__ import annotations
