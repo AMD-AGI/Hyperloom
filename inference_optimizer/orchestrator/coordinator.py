@@ -5303,13 +5303,10 @@ class Coordinator:
             # not blocked; only run_optimization is hard-gated on the
             # same cache by `_sequence_denial_for_request`.
             #
-            # NOTE: read ``last_trace_analyze`` (canonical post-M4 cache
-            # key written by RooflineExecutor and by the inline
-            # ``trace_analyze`` request handler). Reading the removed
-            # ``last_select_kernels`` here was the root cause of the
-            # KERNEL-phase ``select_kernels`` request loop: Roofline
-            # would write only ``last_trace_analyze`` and the guard
-            # would see an empty legacy field and instruct the LLM to
+            # NOTE: read ``last_trace_analyze`` (canonical cache key
+            # written by RooflineExecutor and by the inline
+            # ``trace_analyze`` request handler). Reading a stale empty
+            # field here would make the guard instruct the LLM to
             # emit a redundant ``trace_analyze`` request every tick
             # forever.
             cached = self.shared_state.last_trace_analyze or {}
@@ -5738,11 +5735,8 @@ class Coordinator:
         # ``trace_analyze`` IS the prerequisite request: it produces the
         # ``last_trace_analyze`` cache the rest of the chain consults.
         # It is also used directly by tests / tools passing an explicit
-        # ``trace_input``, so allow it through; later
-        # backends/params/sweep are guarded until the result is cached
-        # in SharedState. (Main M4 renamed ``select_kernels`` →
-        # ``trace_analyze``; this branch dropped the legacy alias, so
-        # only the canonical kind passes the carve-out.)
+        # ``trace_input``, so allow it through; later explore/sweep
+        # actions are guarded until the result is cached in SharedState.
         if req_kind == "trace_analyze":
             return None
         if get_handler(req_kind) is None:
@@ -5769,8 +5763,6 @@ class Coordinator:
                     "`recover` as the escape hatch."
                 ),
             )
-        # Canonical post-M4 cache key; legacy ``last_select_kernels``
-        # was removed in this branch.
         select = self.shared_state.last_trace_analyze or {}
         needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
         if needs_select and req_kind not in {"trace_analyze", "run_gemm_tuning"}:
@@ -5841,15 +5833,6 @@ class Coordinator:
             "skipped",
             "failed",
         }
-
-    # Note: main commit c900791 also ports the N22 keyword-implied
-    # advice (``_record_keyword_implied_advice``,
-    # ``_registered_variants_for``). On this branch the equivalent
-    # functionality lives in
-    # ``orchestrator/_analysis_keyword_map.py`` + PolicyGate's
-    # ``analysis_keyword_advisory`` rule. The Coordinator-side
-    # helpers from main are therefore omitted here (they would also
-    # re-import the dropped backends.py / params.py grids).
 
     # ==================================================================
     # Intent handling
@@ -9555,9 +9538,7 @@ class Coordinator:
                 # Cache trace_analyze output so subsequent identical
                 # requests are short-circuited next tick. Only cache
                 # real successful runs, not failures, to avoid sticky
-                # errors. Pre-M4 ``select_kernels`` alias was removed
-                # in this branch — only the canonical kind triggers a
-                # cache write.
+                # errors.
                 if (
                     kind == "trace_analyze"
                     and cache_hit_source is None
@@ -9620,9 +9601,7 @@ class Coordinator:
     def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Return a cached programmatic_handler result if applicable.
 
-        Canonical post-M4 cache key is ``last_trace_analyze``; the
-        legacy ``last_select_kernels`` mirror was removed in this
-        branch.
+        Canonical cache key is ``last_trace_analyze``.
         """
         if kind != "trace_analyze":
             return None
