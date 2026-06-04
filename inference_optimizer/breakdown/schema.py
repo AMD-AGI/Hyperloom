@@ -191,7 +191,7 @@ class CapabilitySummary(TypedDict, total=False):
     geak: CapabilityEntry
     oob: CapabilityEntry
     # primary explore row; ``backends`` / ``params`` /
-    # ``validate_stack`` are kept as compatibility aliases (§3.12 §4.2).
+    # ``validate_stack`` are kept as compatibility aliases.
     explore: CapabilityEntry
     backends: CapabilityEntry
     params: CapabilityEntry
