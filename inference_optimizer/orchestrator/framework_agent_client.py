@@ -1,14 +1,11 @@
-"""Coordinator-side thin client for the framework-agent FRAMEWORK_PR
-phase subcommands.
+"""Coordinator-side thin client for the framework-agent
+``fa phase-discover`` subcommand.
 
-Only ``fa phase-discover`` is actually wired into the Coordinator
-pump: the pump calls it to obtain a batch of candidate PRs, then the
-Coordinator's own Critic gate + ``FrameworkPrExecutor`` (which curls
-``candidate.diff_url`` directly and runs ``git apply``) handles the
-rest. ``fa phase-fetch`` and ``fa phase-emit-proposal`` remain
-available on the standalone ``fa`` CLI but are NOT wrapped here —
-adding shims for unused subcommands invited the "dead API misleads
-readers" problem flagged in the PR-327 review.
+``fa phase-discover`` is the only framework-agent entry point wired into
+the Coordinator pump: the pump calls it to obtain a batch of candidate
+PRs, then the Coordinator's own Critic gate + ``FrameworkPrExecutor``
+(which curls ``candidate.diff_url`` directly and runs ``git apply``)
+handles the rest.
 
 ``phase_discover`` is invoked via ``asyncio.to_thread`` so the
 Coordinator reactor loop never blocks on the CLI; failures degrade to
@@ -115,9 +112,8 @@ def _run_fa_subcommand_sync(
     """Sync helper: run ``fa <subcommand> --request <path> --out -``.
 
     Only ``phase-discover`` calls into here today; the function stays
-    subcommand-agnostic so adding a second wired subcommand later
-    (should we ever need to bring ``phase-emit-proposal`` back into
-    the Coordinator loop) does not require touching it. Never raises.
+    subcommand-agnostic so adding a second wired subcommand later does
+    not require touching it. Never raises.
     """
     cmd = [fa_bin, subcommand, "--request", str(request_path), "--out", "-"]
     try:
