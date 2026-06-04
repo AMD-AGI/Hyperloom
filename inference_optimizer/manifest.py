@@ -1,4 +1,4 @@
-"""Session manifest writer ().
+"""Session manifest writer.
 
 The manifest is the **first** file written to a session directory after
 ``make_session_dir()`` runs and is the canonical session-resume tag.
