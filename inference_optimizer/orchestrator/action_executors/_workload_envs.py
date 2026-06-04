@@ -46,7 +46,7 @@ from typing import Any
 import yaml
 
 from ...paths import asset_root
-from ._grid_runner import server_args_env_name
+from ._grid_runner import inject_sglang_watchdog_timeout, server_args_env_name
 from ._server_patcher import (
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
@@ -510,6 +510,23 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
+    # MI300X cold-compile guard: ensure sglang's scheduler watchdog is long
+    # enough to survive the first-request aiter ``mha_batch_prefill`` JIT
+    # compile. sglang's 300s default fires SIGQUIT mid-warmup on a cold aiter
+    # cache and the server dies -> baseline_failed / throughput 0. We resolve
+    # the FINAL framework env (after the server_args + extra_envs merges
+    # above) so a user-pinned ``--watchdog-timeout`` (via extra_server_args,
+    # extra_envs, or the YAML) is honored and never doubled. No-op for
+    # vllm/atom, and never touches ``--context-length`` / MAX_MODEL_LEN. This
+    # is the single choke point every benchmark path (baseline / profile /
+    # sweep / explore / framework_pr / conc_sweep) funnels through before the
+    # YAML is handed to Magpie, so the flag reaches every sglang launch.
+    framework_env = server_args_env_name(bench.get("framework"))
+    resolved_server_args = inject_sglang_watchdog_timeout(
+        str(envs.get(framework_env, "")).strip(), bench.get("framework"),
+    )
+    if resolved_server_args:
+        envs[framework_env] = resolved_server_args
     # Accuracy eval (GSM8K) is OFF by default because Magpie main and
     # InferenceX main currently disagree on the lm-eval CLI shape:
     # Magpie's benchmark scripts call `run_eval ... --concurrent-requests N`,
