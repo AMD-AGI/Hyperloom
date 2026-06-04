@@ -104,10 +104,14 @@ the mirrors by hand.
 **Session rule:** never treat ``$USER_DATA_PATH`` as the session dir when
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set. Read
 ``manifest.json`` / ``state.json`` / ``coordinator.db`` from the
-**session dir**. For monitoring after launch, parse the CLI's
-``Session dir : …`` line first; if it is unavailable, walk
-``$USER_DATA_PATH/<model_basename>/`` for the latest ``*T*Z/`` timestamp
-dir.
+**session dir**. For monitoring after launch, learn the session dir from
+the **launch-info JSON** written by ``--launch-info-file`` (``jq -r
+.session_dir <file>``) or, equivalently, from the single
+``HYPERLOOM_LAUNCH key=value …`` sentinel line the CLI prints to stdout
+(``session_dir=…``). Those are the authoritative, machine-readable
+sources. Never guess by walking ``$USER_DATA_PATH/<model_basename>/`` for
+the latest ``*T*Z/`` timestamp dir — overlapping sessions on the same
+host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
@@ -779,8 +783,10 @@ if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
-# RUN_LOG/PID under workspace until session_dir is known; move or re-tail
-# from $session_dir/optimizer_runs/ after parsing "Session dir" from stdout.
+# RUN_LOG/PID/launch-info live under the workspace until the session_dir
+# is known; move or re-tail from $session_dir/optimizer_runs/ after reading
+# session_dir from the launch-info JSON below.
+# /workspace/hyperloom is only the fallback when $USER_DATA_PATH is unset.
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
@@ -793,6 +799,7 @@ setsid nohup inference_optimizer --verbose optimize \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --kernel-claude \
+  --launch-info-file "$RUN_DIR/launch_${RUN_TAG}.json" \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"
 ```
@@ -812,11 +819,16 @@ After launching, do a short health check:
 sleep 30
 pid="$(cat "$PID_FILE")"
 test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
-# Parse session dir from RUN_LOG or resolve latest timestamp subdir:
-session_dir="$(grep -m1 '^Session dir' "$RUN_LOG" 2>/dev/null | sed 's/^Session dir[[:space:]]*:[[:space:]]*//')"
+# Authoritative session dir from the launch-info JSON (--launch-info-file).
+# Never guess by timestamp: overlapping sessions break any "latest dir" pick.
+launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
+session_dir="$(jq -r '.session_dir // empty' "$launch_info" 2>/dev/null)"
 if [ -z "$session_dir" ]; then
-  model_base="$(basename "$MODEL_PATH")"
-  session_dir="$(ls -d "${USER_DATA_PATH:-/workspace/hyperloom}/$model_base/"*T*Z 2>/dev/null | sort | tail -1)"
+  echo "ERROR: no .session_dir in $launch_info (launch-info JSON missing or" \
+       "malformed). The optimizer likely died before emitting launch info;" \
+       "inspect the HYPERLOOM_LAUNCH line and errors in $RUN_LOG." \
+       "Refusing to guess the session dir from timestamps." >&2
+  return 1 2>/dev/null || exit 1
 fi
 test -f "$session_dir/manifest.json" && echo "manifest_present=true session_dir=$session_dir"
 test -f "$session_dir/state.json" && echo "state_exists=true" \
@@ -851,6 +863,10 @@ without those markers (unexpected crash).
 ```bash
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 mkdir -p "$RUN_DIR"
+# Point the monitor at the authoritative session dir: it reads
+# $INFERENCE_OPTIMIZER_SESSION_DIR first, else .session_dir from the
+# launch-info JSON in $LAUNCH_INFO_FILE (written by --launch-info-file).
+export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 cp "$REPO_ROOT/optimizer_runs/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
@@ -859,9 +875,12 @@ setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
   2>&1 < /dev/null &
 ```
 
-Reads `$PID_FILE` and (optional) `$USER_DATA_PATH` / `$MAX_HOURS` /
-`$TARGET_GAIN`. Edit the example before copying if defaults need to
-change. `stop_reason` interpretation matches the `## Monitoring` reader.
+Reads `$PID_FILE` plus (optional) `$INFERENCE_OPTIMIZER_SESSION_DIR` /
+`$LAUNCH_INFO_FILE` / `$MAX_HOURS` / `$TARGET_GAIN`. The session dir comes
+from `$INFERENCE_OPTIMIZER_SESSION_DIR` when set, else from `.session_dir`
+in the launch-info JSON at `$LAUNCH_INFO_FILE` (never from a timestamp
+guess). Edit the example before copying if defaults need to change.
+`stop_reason` interpretation matches the `## Monitoring` reader.
 
 ## Monitoring
 
