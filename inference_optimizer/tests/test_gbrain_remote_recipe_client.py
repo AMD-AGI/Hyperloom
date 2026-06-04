@@ -5,13 +5,19 @@ read surface against a fake MCP (no network).
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import pytest
+
+from inference_optimizer.recipe_kb import gbrain_remote_client as grc
 from inference_optimizer.recipe_kb.gbrain_remote_client import (
+    GbrainRemoteError,
     GbrainRemoteRecipeClient,
     _page_to_recipe,
     build_gbrain_remote_from_env,
 )
+from inference_optimizer.recipe_kb.remote_client import RemoteRecipeClientError
 
 
 class _FakeMcp:
@@ -68,7 +74,10 @@ def test_page_to_recipe_maps_identity_and_config() -> None:
     assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:unknown_version:fp8"
     assert r["model"] == "Qwen/Qwen3-32B"
     assert r["best_config"]["extra_server_args"] == "--cuda-graph-max-bs 256"
-    assert r["best_config"]["FOO"] == "1"
+    # Envs are nested under ``extra_envs`` (canonical warm-replay shape),
+    # not flattened as sibling keys.
+    assert r["best_config"]["extra_envs"] == {"FOO": "1"}
+    assert "FOO" not in r["best_config"]
     assert r["validated_gain_pct"] == 12.5
     assert r["authority"] == "EXPERIENTIAL"
 
@@ -134,3 +143,68 @@ def test_build_from_env(monkeypatch) -> None:
     monkeypatch.setenv("GBRAIN_TOKEN", "tok")
     c = build_gbrain_remote_from_env()
     assert c is not None and c.enabled is True
+
+
+def test_client_advertises_arbor_shape() -> None:
+    c = GbrainRemoteRecipeClient(base_url="http://gbrain.test", token="tok", enabled=True)
+    assert c.returns_arbor_shape is True
+
+
+def test_gbrain_error_is_remote_recipe_client_error() -> None:
+    # The dispatcher's ``except RemoteRecipeClientError`` fall-through only
+    # catches gbrain failures if GbrainRemoteError subclasses it.
+    assert issubclass(GbrainRemoteError, RemoteRecipeClientError)
+    err = GbrainRemoteError("boom")
+    assert isinstance(err, RemoteRecipeClientError)
+    assert err.category == "transport"
+
+
+class _Resp:
+    """Minimal urlopen context-manager stand-in."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode()
+
+    def __enter__(self) -> "_Resp":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+
+def _patch_urlopen(monkeypatch, payload: dict[str, Any]) -> None:
+    monkeypatch.setattr(
+        grc.urllib.request, "urlopen", lambda req, timeout=None: _Resp(payload),
+    )
+
+
+def test_mcp_call_raises_on_jsonrpc_error(monkeypatch) -> None:
+    _patch_urlopen(monkeypatch, {
+        "jsonrpc": "2.0", "id": "1",
+        "error": {"code": -32000, "message": "boom"},
+    })
+    mcp = grc._GbrainMcp("http://gbrain.test", "tok", 2.0)
+    with pytest.raises(GbrainRemoteError):
+        mcp.call("put_page", {"slug": "s", "content": "c"})
+
+
+def test_mcp_call_raises_on_tool_iserror(monkeypatch) -> None:
+    _patch_urlopen(monkeypatch, {
+        "jsonrpc": "2.0", "id": "1",
+        "result": {"isError": True, "content": [{"text": "nope"}]},
+    })
+    mcp = grc._GbrainMcp("http://gbrain.test", "tok", 2.0)
+    with pytest.raises(GbrainRemoteError):
+        mcp.call("list_pages", {"type": "recipe"})
+
+
+def test_health_false_on_rpc_error(monkeypatch) -> None:
+    _patch_urlopen(monkeypatch, {
+        "jsonrpc": "2.0", "id": "1",
+        "error": {"code": -32000, "message": "boom"},
+    })
+    c = GbrainRemoteRecipeClient(base_url="http://gbrain.test", token="tok", enabled=True)
+    assert c.health() is False
