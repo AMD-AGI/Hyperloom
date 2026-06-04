@@ -90,7 +90,9 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
     final = json.loads((sd / "reports" / "final.json").read_text())
     assert final["stop_reason"] == "model_context_window_too_small"
     assert "max_position_embeddings=2048" in final["stop_detail"]
-    assert (sd / "reports" / "final.md").exists()
+    final_md = (sd / "reports" / "final.md").read_text(encoding="utf-8")
+    assert "model_context_window_too_small" in final_md
+    assert "max_position_embeddings=2048" in final_md
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_context_window_too_small"
 
