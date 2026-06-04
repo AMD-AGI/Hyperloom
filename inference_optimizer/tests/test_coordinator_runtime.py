@@ -1036,6 +1036,44 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_failed_initial_roofline_rearms_watermark_from_baseline(
+    session_dir,
+):
+    """A failed initial roofline must not suppress later refresh attempts."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.cumulative_gain_validated = 25.0
+        c.shared_state.last_roofline_tput = 0.0
+        c.shared_state.roofline_failure_streak = 1
+        c.shared_state.auto_roofline_pending_task_id = ""
+
+        assert c._needs_roofline_for_watermark() is True
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_unattempted_initial_roofline_does_not_watermark_rearm(
+    session_dir,
+):
+    """Before any failed/successful roofline, PRELUDE remains the only entry."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.cumulative_gain_validated = 25.0
+        c.shared_state.last_roofline_tput = 0.0
+        c.shared_state.roofline_failure_streak = 0
+        c.shared_state.auto_roofline_pending_task_id = ""
+
+        assert c._needs_roofline_for_watermark() is False
+    finally:
+        await c.stop()
+
+
 # ===========================================================================
 # (formerly test_coordinator_baseline_fingerprint.py)
 # ===========================================================================
