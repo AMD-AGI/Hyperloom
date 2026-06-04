@@ -96,6 +96,21 @@ Follow-up cleanup:
 - Removed the demo-only test that imported `inference_optimizer.examples.p0_main_loop`.
 - Removed the now-stale coverage omit entry for `*/examples/*`.
 
+### Rewrote stale optimization-loop documentation
+
+Replaced `docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md` with a current runtime
+walkthrough.
+
+Reason:
+
+- The old document described removed DFS demo mechanics and the retired
+  `classify`, `backends`, `params`, and `validate_stack` paths as the main
+  optimization loop.
+- Keeping a stale banner on top still left most of the page misleading for
+  LLM prompts and maintainers.
+- The replacement documents the live phase chain, current action surfaces,
+  kernel/framework bridges, and artifact contracts.
+
 ## Status
 
 Step 02 low-risk cleanup is complete for the first and examples batches.
