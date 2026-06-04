@@ -119,14 +119,13 @@ class ConductorReader:
 
 
 class IntentEmitter:
-    """Write robustness intents back to Conductor (legacy MVP path).
+    """Write robustness intents back to Conductor (legacy DB writer).
 
     Deprecated as of M1: the canonical integration runs the reactor
     behind the subprocess CLI in :mod:`robustness_agent.runtime.cli`
     and emits a validated ``intent_envelope`` for the host instead of
-    writing into the SQLite DB. The class is retained so the legacy
-    :class:`RobustnessAgent` loop keeps functioning for environments
-    that haven't migrated yet.
+    writing into the SQLite DB. The class is retained for old DB-oriented
+    tooling that has not migrated to the envelope transport.
     """
 
     def __init__(self, db_path: Path):
