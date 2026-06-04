@@ -110,8 +110,11 @@ def test_monitor_fails_fast_when_no_session_source(tmp_path):
     elapsed = time.time() - t0
 
     assert proc.returncode == 2
-    assert elapsed < 5, f"should fail fast, took {elapsed:.1f}s"
     assert "session dir is unknown" in proc.stderr
+    # Fail-fast: with no LAUNCH_INFO_FILE we must NOT enter the bounded wait
+    # loop (default 60s). A generous bound tolerates CI process-spawn latency
+    # while still proving we never polled a wait window.
+    assert elapsed < 30, f"should fail fast (no wait loop), took {elapsed:.1f}s"
 
 
 def test_monitor_times_out_when_launch_info_never_appears(tmp_path):
@@ -190,3 +193,45 @@ def test_monitor_tolerates_non_integer_wait_sec(tmp_path):
 
     assert proc.returncode == 0, f"rc={proc.returncode}\nstdout={out}\nstderr={err}"
     assert "invalid LAUNCH_INFO_WAIT_SEC" in err
+
+
+def test_monitor_handles_leading_zero_wait_sec(tmp_path):
+    """A leading-zero LAUNCH_INFO_WAIT_SEC ('08') passes a naive ^[0-9]+$ check
+    but bash arithmetic treats it as OCTAL -> '08: value too great for base'
+    under ``set -u`` (the very crash the validation was meant to prevent). The
+    deadline computation must force base-10 so '08' means 8 seconds. We point a
+    delayed launch-info at a terminal session: post-fix the monitor polls, picks
+    it up, and exits 0 with no octal arithmetic error on stderr."""
+    sess = tmp_path / "sess"
+    (sess / "reports").mkdir(parents=True)
+    (sess / "reports" / "final.md").write_text("done\n", encoding="utf-8")
+
+    launch = tmp_path / "launch.json"
+    pidfile = tmp_path / "pid"
+    pidfile.write_text("999999\n", encoding="utf-8")
+
+    env = _clean_env()
+    env.update(
+        {
+            "PID_FILE": str(pidfile),
+            "REPO_ROOT": str(tmp_path),
+            "LAUNCH_INFO_FILE": str(launch),
+            "LAUNCH_INFO_WAIT_SEC": "08",  # valid digits, but octal-invalid in bash
+            "MAX_HOURS": "1",
+        }
+    )
+
+    proc = subprocess.Popen(
+        ["bash", str(MONITOR)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(1.5)
+    launch.write_text(json.dumps({"session_dir": str(sess)}), encoding="utf-8")
+    out, err = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, f"rc={proc.returncode}\nstdout={out}\nstderr={err}"
+    assert "value too great for base" not in err
