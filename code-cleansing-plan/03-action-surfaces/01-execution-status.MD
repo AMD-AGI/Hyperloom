@@ -71,6 +71,31 @@ This keeps the compatibility no-op registration aligned with the kernel-owned re
 - Prompt builder uses the shared grid-injectable set.
 - PolicyGate uses the shared Coordinator-internal set.
 
+### Moved prompt enabled action sets into action surfaces
+
+Moved the full and no-kernel prompt-visible action sets into
+`action_surfaces.py`:
+
+- `FULL_ENABLED_ACTIONS`
+- `NO_KERNEL_ENABLED_ACTIONS`
+
+`prompt_builder.py` now imports and re-exports those shared sets instead
+of owning separate lists.
+
+Why:
+
+- Prompt visibility is part of the action runtime surface.
+- Keeping it next to kernel-owned, internal-only, and grid-injectable
+  classifications prevents the prompt catalogue from becoming a hidden
+  source of truth.
+
+Drift guard added:
+
+- prompt-visible actions must have metadata,
+- prompt-visible sets must not include retired action names,
+- full mode includes kernel-owned actions,
+- no-kernel mode excludes kernel-owned actions.
+
 ### Removed stale action-surface comments
 
 Updated comments that described `specialist` as yaml-less and removed stale references to retired `setup`, `classify`, `backends`, `params`, and `validate_stack` as current action semantics.
@@ -88,18 +113,21 @@ This is acceptable for now:
 
 Future cleanup can add a generated or checked action surface report if needed.
 
-### Prompt enabled action sets remain hand-authored
+### Prompt enabled action sets remain explicit
 
-`FULL_ENABLED_ACTIONS` and `NO_KERNEL_ENABLED_ACTIONS` are still prompt-builder constants.
+`FULL_ENABLED_ACTIONS` and `NO_KERNEL_ENABLED_ACTIONS` now live in
+`action_surfaces.py`, but they are still explicit lists.
 
-Reason not changed in this step:
+Reason:
 
 - They encode launch-mode prompt visibility, not only action existence.
-- Deriving them automatically requires deeper policy decisions about Coordinator-internal actions and no-kernel mode.
+- Deriving them automatically requires deeper policy decisions about
+  Coordinator-internal actions and no-kernel mode.
 
 Future cleanup:
 
-- Use the shared action surfaces and phase metadata to reduce these lists safely.
+- Use the shared action surfaces and phase metadata to derive or further
+  constrain these lists safely.
 
 ### Phase allowlist remains hand-authored
 
