@@ -37,4 +37,28 @@
 
 ## 进度记录
 
-(完成后填:每项 commit hash + 净删行数)
+| 步骤 | commit(s) | 说明 |
+|---|---|---|
+| 01 退役 action | `c8b17d80` `01e154d7` | 删 `params_no_promote_streak` plateau proxy + 退役 action 重命名历史注释。 |
+| 02 Cortex KB 残留 | `1d6c3fe8` `00359eee` | 删退役 Cortex KB flusher 守护机制、`cortex_kb_constants` 死模块、过期 NDJSON 注释。 |
+| 03 resume 迁移读取器 | `1c4e195e` | 删跨版本 resume phase 推断(保留 breakdown 兼容 + scoreboard drop-list 日志)。 |
+| 04 stub/no-op/shim | `a1170bd1` | 删未接线 roofline stub executor + 空的 kernel-only 执行器表(保留活别名 apply_patch / params.domain)。 |
+| 05 env/install/auth proxy | `5de0be25` `e6a3cd94` | 删未接线 framework-agent `phase-fetch`/`phase-emit-proposal`;删 install.sh `--with-*`/`--all-backends`/`--backend` no-op flag 解析 + 未用 WITH_* 变量;删 robustness `IntentEmitter` 退役 DB writer 路径;清 framework-agent 未建成的 `fa agent`/`agent/` 文档,使 SKILL/README 与实现一致。 |
+
+净效果:本相位 commit 全部为净删除。
+
+### 保留项(标注原因)
+
+- `tracelens_analysis.py::_default_workspace_path` 的 `$WORKSPACE_PATH` 二级
+  fallback:现役 backward-compat,4 个专测断言其行为,删除会改外部可观测行为
+  (违背总纲领"外部行为不变")。
+- robustness `auth_proxy_unhealthy` 复活守护测试:信号本体已退役,该测试只是
+  防止其复活,低成本保留。
+- scoreboard drop-list 日志 + `--legacy-action-scores` flag:仍是现役日志路径
+  且有测试覆盖。
+
+## 出口验证
+
+护栏 keep-list 全绿(17 文件):main 313 · critic 21 · robustness 54 ·
+kernel 5 · framework 4(framework 数较 Phase 0 的 8 减少,因 step 05 删除了
+`phase-fetch`/`phase-emit-proposal` 专测,属预期)。
