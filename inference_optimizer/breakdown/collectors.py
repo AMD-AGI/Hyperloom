@@ -2216,7 +2216,7 @@ def collect_kernel_lifecycle(
 
 
 # ---------------------------------------------------------------------------
-# §10 Param / backends search
+# §10 Explore search ledger
 # ---------------------------------------------------------------------------
 def _shape_ledger(
     ledger: dict[str, Any] | None,
@@ -2311,7 +2311,7 @@ def _patch_winners_history(
     return out
 
 
-def collect_param_search(
+def collect_explore_search(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
@@ -2345,6 +2345,11 @@ def collect_param_search(
             state.get("backend_winners_history") or [], baseline_tput,
         ),
     }
+
+
+# Backwards-compatible function name for older in-repo callers/tests. The
+# returned shape is the merged explore ledger plus archived aliases.
+collect_param_search = collect_explore_search
 
 
 # ---------------------------------------------------------------------------
@@ -4370,6 +4375,7 @@ __all__ = [
     "collect_capability_summary",
     "collect_critic_robustness",
     "collect_final",
+    "collect_explore_search",
     "collect_kb_provenance",
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
