@@ -211,17 +211,13 @@ OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
 CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
 CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh}"
 
-# Install everything by default. The previous lazy `--with-geak / --with-oob`
-# scheme caused recurring "missing dependency discovered at request time"
-# issues — when the resident skill triggered a kernel-opt that needed
-# claude/codex but install.sh had only brought up GEAK, the CLI auth files
-# were missing and every request 401'd.
-# Per user direction: "kernel-agent skills do not differentiate, just install everything". The
-# old --with-* / --all-backends / --backend flags are accepted but no-op
-# for backwards compatibility with existing call sites.
-WITH_GEAK=1
-WITH_OOB=1
-WITH_LLM=1
+# install.sh always installs everything. A previous lazy
+# "install only the requested backend" scheme caused recurring
+# "missing dependency discovered at request time" issues — when the
+# resident skill triggered a kernel-opt that needed claude/codex but
+# install.sh had only brought up GEAK, the CLI auth files were missing
+# and every request 401'd. Per user direction: "kernel-agent skills do
+# not differentiate, just install everything".
 CHECK_ONLY=0
 DRY_RUN=0
 
@@ -229,11 +225,11 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [options]
 
-Always installs (no --with-* selectivity any more):
+Always installs:
   ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
   Node.js/npm, GEAK CLI/config, OOB + claude/codex CLI auth,
   and LLM gateway env/auth (claude/codex CLIs talk to the gateway
-  directly; the legacy auth-proxy on :4002 has been retired).
+  directly).
 
 Options:
   --check-only       Verify current environment, do not install
@@ -244,25 +240,11 @@ Environment (optional):
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
-
-Legacy options (accepted but no-op, kept for backwards compat):
-  --with-geak / --with-oob / --with-llm / --all-backends / --backend NAME
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --with-geak|--with-oob|--with-llm|--all-backends)
-      # No-op: install.sh always installs everything now. Accepted for
-      # backwards compat with older call sites / docs.
-      ;;
-    --backend)
-      shift
-      case "${1:-}" in
-        geak|oob|llm) ;;  # no-op, see above
-        *) echo "[kernel-agent] ERROR: unknown backend '${1:-}'" >&2; exit 2 ;;
-      esac
-      ;;
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
