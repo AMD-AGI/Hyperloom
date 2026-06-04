@@ -1,0 +1,71 @@
+================================================================
+ Phase 0 Baseline Snapshot
+ Scope: main package + 4 agents (ci/ excluded)
+ Branch: cleanup/zhenggong/safe-cleanup
+ Captured at HEAD: 14cceab6 ("doc clean up")
+================================================================
+
+--- 1. Total LOC by subsystem (*.py, excl __pycache__) ---
+inference_optimizer   165563
+kernel-agent           20903
+critic-agent            9857
+robustness-agent       28349
+framework-agent         8092
+                       ------
+TOTAL                  232764
+
+--- 2. Python file count (5 subsystems) ---
+570
+(inference_optimizer alone: 344 -- matches the old code_cleansing.MD §6 figure)
+
+--- 3. Largest single files (Top 21) ---
+  12664 inference_optimizer/orchestrator/coordinator.py
+   6512 inference_optimizer/cli.py
+   4730 inference_optimizer/orchestrator/shared_state.py
+   4391 inference_optimizer/breakdown/collectors.py
+   3343 kernel-agent/tools/tracelens_analysis.py
+   3151 kernel-agent/tools/kernel_optimization.py
+   3105 inference_optimizer/tests/test_profile_and_kernel_handlers.py
+   2999 kernel-agent/tools/test_tracelens_csv.py
+   2765 inference_optimizer/tests/test_breakdown_smoke.py
+   2593 inference_optimizer/orchestrator/policy.py
+   2381 inference_optimizer/orchestrator/kernel_request_handlers.py
+   2327 inference_optimizer/multi_node/cli.py
+   1879 inference_optimizer/orchestrator/phase_state.py
+   1805 robustness-agent/src/robustness_agent/sources/local_probe.py
+   1781 inference_optimizer/orchestrator/action_executors/_grid_runner.py
+   1584 kernel-agent/tools/test_kernel_optimization_verification.py
+   1543 inference_optimizer/tests/test_coordinator_runtime.py
+   1486 inference_optimizer/orchestrator/system_prompts/specialist_prompt_builder.py
+   1426 inference_optimizer/tests/test_server_patcher.py
+   1407 kernel-agent/tools/tracelens_skill_runner.py
+   1360 inference_optimizer/orchestrator/action_executors/explore.py
+
+--- 4. Comment ratio (rough: lines starting with # / non-blank lines) ---
+inference_optimizer  comments=15851  nonblank=146139   (10.8%)
+kernel-agent         comments= 1983  nonblank= 18567   (10.7%)
+critic-agent         comments=  375  nonblank=  8265   ( 4.5%)
+robustness-agent     comments= 1915  nonblank= 24558   ( 7.8%)
+framework-agent      comments=  307  nonblank=  6777   ( 4.5%)
+
+--- 5. Retired-action reference counts (RAW grep -rn, NOT yet call-site filtered) ---
+NOTE: backends/params/setup/classify are common English words; these raw
+counts mix real action-name call-sites with unrelated usages. Phase A must
+disambiguate per call-site. Target: action-name call-sites -> 0 (only
+migration/rejection tests may retain them).
+  select_kernels      13
+  validate_stack     107
+  setup               39
+  classify            47
+  'backends'(quoted)  94
+  'params'(quoted)   223
+
+--- 6. Dead-code probe (vulture) ---
+SKIPPED: vulture not installed and `rg` not available on shell PATH in this
+environment. Per step 01 this probe is auxiliary/non-authoritative; deletion
+evidence in Phase A comes from manual call-site confirmation, not vulture.
+
+================================================================
+ Tooling note: ripgrep (rg) is NOT on the shell PATH in this environment;
+ grep was used instead. Counts above are grep-derived.
+================================================================
