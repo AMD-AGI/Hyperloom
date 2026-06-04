@@ -129,29 +129,56 @@ def test_unset_warning_is_emitted_once(
 # ---------------------------------------------------------------------------
 # Manifest dependency provenance: out-of-tree runtime overrides are loud
 # ---------------------------------------------------------------------------
-def test_manifest_warns_when_dependency_escapes_user_data(
+def test_manifest_warns_when_dependency_is_pod_local(
     clean_env: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """A dependency override into a pod-local /workspace path (the real
+    'artefacts vanish on pod recycle' failure mode) must warn loudly."""
     from inference_optimizer import manifest
 
     user_data = tmp_path / "user_data"
-    outside = tmp_path / "outside_runtime" / "Magpie"
-    outside.mkdir(parents=True)
+    # Simulate the observed /workspace/hyperloom_runtime_* override. The dir
+    # need not exist for the escape check (guard runs before the is_dir gate).
+    pod_local = "/workspace/hyperloom_runtime_smoke/Magpie"
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(user_data))
-    monkeypatch.setenv("MAGPIE_DIR", str(outside))
+    monkeypatch.setenv("MAGPIE_DIR", pod_local)
 
     with caplog.at_level(logging.WARNING, logger="inference_optimizer.manifest"):
-        dep = manifest._describe_dep("MAGPIE_DIR")
+        manifest._describe_dep("MAGPIE_DIR")
 
-    assert dep["path"] == str(outside)
     assert any(
-        "MAGPIE_DIR" in r.message
-        and "outside USER_DATA_PATH" in r.message
+        "MAGPIE_DIR" in r.message and "pod-local" in r.message
         for r in caplog.records
-    )
+    ), "expected a loud pod-local escape warning"
+
+
+def test_manifest_does_not_warn_for_persistent_shared_checkout(
+    clean_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A persistent shared checkout OUTSIDE USER_DATA_PATH (e.g. a WekaFS
+    InferenceX/TraceLens mirror) is legitimate by design and must NOT warn."""
+    from inference_optimizer import manifest
+
+    user_data = tmp_path / "user_data"
+    user_data.mkdir(parents=True)
+    # A persistent WekaFS mirror outside USER_DATA_PATH (note: NOT under a
+    # pod-local /workspace|/tmp|/root prefix). The guard runs before the
+    # is_dir gate, so the path need not exist on disk for this assertion.
+    shared = "/wekafs/shared-mirrors/InferenceX"
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(user_data))
+    monkeypatch.setenv("INFERENCEX_PATH", shared)
+
+    with caplog.at_level(logging.WARNING, logger="inference_optimizer.manifest"):
+        dep = manifest._describe_dep("INFERENCEX_PATH")
+
+    assert dep["path"] == shared
+    assert not [r for r in caplog.records if "INFERENCEX_PATH" in r.message]
 
 
 def test_manifest_does_not_warn_when_dependency_under_user_data(
