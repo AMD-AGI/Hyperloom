@@ -1,8 +1,8 @@
-"""Phase state machine — v0.8 M2.
+"""Phase state machine.
 
 The Coordinator owns the run-level phase ("where are we in the optimization
 lifecycle") so that LLM-side decisions stay scoped to one phase at a time
-and Cortex KB entries carry phase provenance.
+and action attempts carry phase provenance.
 
 This module is **pure**: every public function takes a frozen SharedState
 view (a ``Any`` typed shim — we deliberately avoid importing SharedState
@@ -11,11 +11,7 @@ either a string sentinel / dict, never mutating its inputs. The
 Coordinator is the only writer of SharedState; this module just decides
 *what* to write.
 
-Design intent reference: ``KB_design/3.2_pipeline_phases/README.md``,
-``KB_design/3.8_phase_state_machine/README.md``, ``KB_design/3.10_shared_state_evolution/README.md``.
-
-The six phases form a strictly monotonic chain (Inv-2.1 phase
-monotonicity):
+The six phases form a strictly monotonic chain:
 
 ::
 
@@ -29,11 +25,9 @@ monotonicity):
 Vocabularies are closed enums; PolicyGate cross-checks any write of
 ``stop_reason`` or any ``phase_history.reason`` against them.
 
-v0.8 transition (M3 complete)
------------------------------
-The §3.2 design talks about ``explore`` (single merged action) and
-``specialist`` (LLM sub-agent). Both have shipped; the EXPLORE
-allowed-action set is ``explore`` / ``specialist`` / ``recover``.
+EXPLORE uses the merged ``explore`` action plus specialist and dynamic
+sub-agent channels. Retired ``backends`` / ``params`` /
+``validate_stack`` actions are not phase-allowed.
 """
 
 from __future__ import annotations
@@ -110,20 +104,16 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_EXPLORE: frozenset({
         # v0.8 canonical: merged grid runner + LLM specialist dispatch.
         "explore", "specialist",
-        # PR-A1 (Arbor-into-Hyperloom): specialists in EXPLORE may write
-        # source patches into ``runs/specialist/<task_id>/worktree/``;
-        # ``integrate_patch`` is the orchestrator-side serving-lane-locked
-        # apply+restart+gate step that consumes those patches.
+        # Specialist-authored source patches are applied only through
+        # integrate_patch, which holds the serving lane and benchmarks the
+        # result.
         "integrate_patch",
-        # IR-7 (Honest self-stop): thin wrapper that dispatches the
-        # session_steward_specialist domain. Coordinator also enqueues
-        # this internally on plateau (bypasses PolicyGate); LLM-side
-        # proposes are throttled by ``assess_remaining_gaps_throttle``.
+        # Thin wrapper that dispatches the session steward specialist.
+        # Coordinator may enqueue it internally on plateau; LLM-side
+        # proposals are throttled.
         "assess_remaining_gaps",
-        # dynamic_action.MD P1 — supplementary cross-domain ReAct
-        # sub-agent channel; orchestration-only dispatch, capped at
-        # MAX_DYNAMIC_PER_ROUND per EXPLORE round. See PolicyGate
-        # ``_validate_dynamic_action_dispatch``.
+        # Supplementary cross-domain sub-agent channel; orchestration-only
+        # dispatch, capped per EXPLORE round by PolicyGate.
         "dynamic_action",
         # ``roofline`` / ``profile`` are Coordinator-auto-enqueued mid-
         # EXPLORE whenever the watermark check at the
