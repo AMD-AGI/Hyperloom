@@ -645,7 +645,7 @@ def test_prompt_builder_emits_nine_sections():
     # User sections (2-7)
     assert "## 2. HARDWARE CONTEXT" in usr_p
     assert "## 3. GAP STATEMENT" in usr_p
-    assert "## 4. CORTEX KB SUB-GRAPH" in usr_p
+    assert "## 4. KB CONTEXT (optional, advisory)" in usr_p
     assert "## 5. WARM-START RECIPE SUMMARY" in usr_p
     assert "## 6. PR FEED" in usr_p
     assert "## 7. LOCAL SOURCE NAVIGATION HINT" in usr_p
