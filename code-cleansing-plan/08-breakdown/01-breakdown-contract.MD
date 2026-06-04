@@ -50,16 +50,24 @@ These drive dashboards and the success judgment.
 
 Missing-data rule: represent as `null` / `[]` / `{}`, never fabricate.
 
-## Archived Compatibility Sections (decision pending)
+## Archived Compatibility Sections
 
 Per `01-baseline-contracts/03-compatibility-decisions.MD`, old session breakdown readers are kept until downstream needs are confirmed. These only serve archived sessions:
 
 - legacy `backends` / `params` / `validate_stack` provenance aliases (folded into `legacy_*` / `explore` rows)
 - legacy kernel-agent nested artifact layout scan
-- old T2/T3 KB fields (kept as always-empty back-compat placeholders)
 - old provenance strings
 
 Deletion condition: remove the archived readers and aliases once downstream dashboard / offline analysis confirms old sessions are no longer needed.
+
+Removed in the high-risk cleanup pass:
+
+- old T2/T3 graph placeholders:
+  `pending_edges`, `edges_promoted`, `edges_negated`,
+  `points_created`, `points_by_kind`, and `commit_summary`.
+- These fields belonged to the retired hypothesize/verify graph protocol
+  and were either always empty or derived only from old `propose_point`
+  audit rows.
 
 ## Producer / Report Split
 
@@ -71,7 +79,8 @@ Deletion condition: remove the archived readers and aliases once downstream dash
 - Aligned `docs/INTEGRATION_SESSION_BREAKDOWN.md` to the current `v2` schema (versioning section, top-level shape example, worked example), preserving the v1->v2 additive-compatibility note.
 - Aligned `inference_optimizer/breakdown/SKILL.md` schema line to `v2`.
 
-No producer/collector code changed; this is a doc-to-code alignment plus contract documentation.
+Initial pass was doc-to-code alignment. Follow-up cleanup also removed
+retired old-KB placeholder fields from the producer/schema.
 
 ## Not Done Yet (decision-gated or higher-risk)
 
