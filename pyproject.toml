@@ -47,13 +47,8 @@ inference_optimizer = [
     "README.md",
     "actions/*.md",
     "actions/_meta/*.yaml",
-    "agents/*/agent_card.yaml",
-    "agents/*/system_prompt.md",
-    "agents/*/SKILL.md",
-    "agents/*/scripts/*",
     "benches/*.sh",
     "benches/README.md",
-    "kernel_opt/*.md",
     "orchestrator/system_prompts/*.md",
     "scripts/*",
 ]
