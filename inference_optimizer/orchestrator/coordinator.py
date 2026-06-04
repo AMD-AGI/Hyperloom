@@ -710,16 +710,6 @@ class Coordinator:
             )
         except ValueError:
             self._specialist_stale_sec = 600.0
-        # opt-out switch for
-        # the legacy ``params_no_promote_streak`` plateau proxy.
-        # When set, ``compute_next_phase`` skips the m2_proxy branch
-        # entirely; legacy resume sessions without signals fall
-        # through to the wall-clock budget exhaustion exit.
-        self._legacy_plateau_proxy_disabled: bool = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY", "",
-            ).strip().lower() in ("1", "true", "yes")
-        )
         # External launcher configuration. ``target_analysis`` always
         # writes an artifact; ``compare_against_gpu`` decides whether it
         # fetches real InferenceX rows or records a no-target marker.
@@ -1295,7 +1285,6 @@ class Coordinator:
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
-            disable_legacy_proxy=self._legacy_plateau_proxy_disabled,
             # Default is True to match SharedState.framework_phase_enabled
             # and the CLI resume fallback at cli.py:3231 (which reads
             # ``getattr(state, "framework_phase_enabled", True)``). The
