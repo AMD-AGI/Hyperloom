@@ -42,6 +42,23 @@ Kept:
 - `CodexBackend` class itself, because kernel and backend unit tests still
   use the generic Codex backend.
 
+### Removed robustness legacy mode
+
+Removed the old pre-reactor robustness loop:
+
+- deleted `robustness_agent/agent.py`,
+- deleted `robustness_agent/rca.py`,
+- removed `robustness-agent --mode legacy`,
+- kept `robustness-agent` as the standalone reactor CLI,
+- kept the live subprocess bridge `python -m robustness_agent.runtime.cli tick`.
+
+Updated:
+
+- `robustness-agent/SKILL.md`
+- `docs/CONFIGURATION_REFERENCE.md`
+- coverage omit comments
+- conductor DB writer docs
+
 ## Verification
 
 - Lint: no errors.
@@ -49,11 +66,9 @@ Kept:
 
 ## Not Done Yet (decision-gated or higher-risk)
 
-- Robustness legacy mode removal: needs the same legacy-mode decision from Step 01.
 - Old Cortex v1 graph KB removal: tracked under Step 06.
 - Consolidating duplicated benchmark parameter docstrings: lower priority, can fold into Step 09 comment compression.
 
 ## Next Safe Follow-Ups
 
-- Resolve the robustness legacy mode decision, then delete the unused paths and their docs.
 - Keep one contract test per live bridge; drop tests that assert subprocess temp-file layout unless it is a real contract.

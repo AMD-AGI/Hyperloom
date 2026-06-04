@@ -19,13 +19,9 @@ on-disk findings.
 cd robustness-agent
 python3 -m venv .venv && .venv/bin/pip install -e ".[test]"
 
-# M1 reactor mode (default). Auto-discovers session_dir and probes
+# Reactor mode. Auto-discovers session_dir and probes
 # robustness-server before falling back to local probes.
 .venv/bin/robustness-agent
-
-# Legacy SQLite-IntentEmitter loop (kept for environments still on the
-# pre-M1 transport).
-.venv/bin/robustness-agent --mode legacy
 ```
 
 ## M1 module layout
@@ -53,13 +49,13 @@ robustness_agent/
 ├── findings/sink.py        # JSONL append sink for Findings
 ├── factory.py              # Config -> ReactorBundle (build_reactor_components)
 ├── config.py               # discovery + tunables
-├── main.py                 # CLI: --mode reactor (default) | legacy
-└── (legacy) agent.py / conductor.py / monitors / checks / providers
+├── main.py                 # standalone reactor CLI
+└── conductor.py / monitors / checks / providers
 ```
 
-The legacy loop is preserved behind `--mode legacy` and emits a
-`DeprecationWarning` when constructed. Migration target is the
-subprocess transport below.
+The old pre-reactor `--mode legacy` loop has been removed. Use the
+standalone reactor CLI above for dev/smoke runs, or the subprocess
+transport below for Coordinator integration.
 
 ## Coordinator integration (subprocess transport)
 
@@ -119,7 +115,7 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 |----------|----------|---------|-------------|
 | `SESSION_DIR` | no | scan known paths | Path containing `storage/conductor.db`; the FindingSink writes under `{session_dir}/agents/robustness/findings/{session_id}.jsonl`. |
 | `ROBUSTNESS_SERVER_URL` | no | scan known DNS | M1 primary data source; empty disables the primary path and forces local-only mode. |
-| `ROBUST_ANALYZER_URL` | no | scan known DNS | Used by the legacy provider only. |
+| `ROBUST_ANALYZER_URL` | no | scan known DNS | Optional hybrid-provider endpoint used during data-source discovery. |
 | `OPENAI_BASE_URL` | no | — | LLM endpoint for RCA (used as `llm_base_url`). |
 | `SAFE_API_KEY` | no | — | API key for the LLM proxy (used as `llm_api_key`). |
 | `LLM_MODEL` | no | `claude-opus-4-7` | RCA model name. |
