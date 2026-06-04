@@ -73,6 +73,13 @@ ALLOWED_FILES: dict[str, str] = {
         "variant objects",
     "inference_optimizer/orchestrator/optimization_journal.py":
         "journal classification reads existing stack/variant args fields",
+    # Legacy v0.6 breakdown reconstruction reads the pre-rename
+    # candidate_extra_sglang_args from raw (un-migrated) optimization_stack
+    # entries; the emitted key is the canonical extra_server_args.
+    "inference_optimizer/breakdown/legacy_collectors.py":
+        "legacy v0.6 reader: raw optimization_stack carries pre-rename "
+        "candidate_extra_sglang_args (breakdown loads state without the "
+        "SharedState key migration)",
     # The materializer keeps the legacy name in its env-routing docstring
     # because the per-framework env names (EXTRA_SGLANG_ARGS / VLLM_ /
     # ATOM_) are intentionally unchanged.
