@@ -133,6 +133,23 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(v2_payload, dict):
         return {}
+    # Idempotency guard. A remote may hand us a row that is ALREADY in
+    # arbor shape: the gbrain client (``GbrainRemoteRecipeClient``)
+    # pre-translates pages into the ``Recipe.to_dict()`` layout, unlike
+    # the central kb-service which speaks the nested v2 envelope. Running
+    # the v2->arbor projection again on an already-arbor row would read
+    # from absent top-level ``body``/``labels``/``findings`` and silently
+    # null out ``model`` / ``best_config`` / ``best_throughput`` /
+    # ``what_worked`` — wiping the warm-start champion while leaving
+    # canonical_id + pitfalls/lessons intact (so the hit still mis-reports
+    # as exact). A real v2 row always carries ``labels`` + ``body``; the
+    # absence of EVERY v2 envelope marker means the row is already arbor,
+    # so we pass it through untouched.
+    if not any(
+        marker in v2_payload
+        for marker in ("body", "labels", "findings", "failures", "gaps", "metrics")
+    ):
+        return dict(v2_payload)
     body    = v2_payload.get("body")    or {}
     metrics = v2_payload.get("metrics") or {}
     labels  = v2_payload.get("labels")  or {}
@@ -233,6 +250,30 @@ class RecipeKB:
         client. Adding a separate ping doubles RTT for every read.
         """
         return self.remote is not None and bool(self.remote.enabled)
+
+    def _normalize_remote_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Project a remote row into the consistent arbor shape callers see.
+
+        Two remote backends feed this dispatcher with DIFFERENT wire
+        shapes:
+
+        * the central kb-service speaks the nested v2 envelope
+          (``labels`` / ``body`` / ``findings`` / ``metrics``) → it needs
+          the :func:`_v2_to_arbor` projection;
+        * the gbrain client (:class:`GbrainRemoteRecipeClient`) already
+          pre-translates pages into the flat ``Recipe.to_dict()`` arbor
+          shape → re-projecting it would null out ``best_config`` /
+          ``best_throughput`` / ``what_worked``.
+
+        A remote advertises which shape it returns via the
+        ``returns_arbor_shape`` capability flag (default ``False`` =
+        v2). The :func:`_v2_to_arbor` projection keeps an independent
+        idempotency guard as a secondary safety net for a mis-flagged
+        remote.
+        """
+        if getattr(self.remote, "returns_arbor_shape", False):
+            return dict(row)
+        return _v2_to_arbor(row)
 
     def _note_failure(self, method: str, exc: Exception) -> None:
         if callable(self.on_remote_failure):
@@ -374,7 +415,7 @@ class RecipeKB:
                     label_match=labels, limit=1,
                 )
                 if rows:
-                    return _v2_to_arbor(rows[0])
+                    return self._normalize_remote_row(rows[0])
                 # remote miss — fall through to local.
             except RemoteRecipeClientError as exc:
                 self._note_failure("get_recipe", exc)
@@ -448,7 +489,7 @@ class RecipeKB:
                 # network or a freshly-bootstrapped service that
                 # hasn't received our local writes yet.
                 if rows:
-                    return [_v2_to_arbor(r) for r in rows]
+                    return [self._normalize_remote_row(r) for r in rows]
             except RemoteRecipeClientError as exc:
                 self._note_failure("search", exc)
         return self.local.search(

@@ -35,7 +35,14 @@ export PATH="/opt/venv/bin:$PATH"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
+# Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
+# can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
+# or empty, which is exactly the case the :- default below would absorb.
+_user_data_was_set="${USER_DATA_PATH:+1}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+if [ -z "${_user_data_was_set}" ]; then
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
@@ -320,6 +327,38 @@ run() {
   log "$*"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
     "$@"
+  fi
+}
+
+# Serialize concurrent installs that share one $USER_DATA_PATH. Installs
+# pointed at the same data root also share $HYPERLOOM_ROOT (=
+# $HYPERLOOM_RUNTIME_DIR/source-mirrors): the GEAK / OOB / TraceLens
+# checkouts cloned/mirrored below. With no lock, two installs race and
+# corrupt each other's half-cloned trees. We hold an flock on
+# $HYPERLOOM_RUNTIME_DIR/.install.lock via fd 9 from the first
+# mirror-mutating step until this process exits (fd closes on exit), so it
+# guards every clone/mirror below and releases automatically at the end.
+# Skipped under --check-only / --dry-run (introspection only, no mutation).
+# When inference_optimizer's installer already holds the lock it exports
+# HYPERLOOM_INSTALL_LOCK_HELD=1; we honour that and do not re-acquire, which
+# would deadlock on a second open file description for the same path.
+acquire_install_lock() {
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "${HYPERLOOM_INSTALL_LOCK_HELD:-0}" = "1" ]; then
+    log "install lock already held by parent installer; not re-locking"
+    return 0
+  fi
+  mkdir -p "${HYPERLOOM_RUNTIME_DIR}"
+  exec 9>"${HYPERLOOM_RUNTIME_DIR}/.install.lock"
+  if command -v flock >/dev/null 2>&1; then
+    log "waiting for install lock: ${HYPERLOOM_RUNTIME_DIR}/.install.lock"
+    flock 9
+    log "acquired install lock"
+    export HYPERLOOM_INSTALL_LOCK_HELD=1
+  else
+    warn "flock not available; concurrent installs may race on source-mirrors"
   fi
 }
 
@@ -1261,6 +1300,10 @@ main() {
   ensure_moreutils
   ensure_ray
   ensure_ray_started
+  # Hold the install lock for the whole mirror-mutating region (TraceLens /
+  # GEAK / OOB clones + mirrors under $HYPERLOOM_ROOT). System-package steps
+  # above (apt/pip) do not touch source-mirrors, so they stay outside the lock.
+  acquire_install_lock
   ensure_tracelens
 
   # Always install everything; ensure_oob also calls ensure_llm_auth_files.

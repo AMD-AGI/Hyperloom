@@ -161,6 +161,8 @@ class PhaseEvent(TypedDict, total=False):
     key_metric_kind: str | None
     workspace: str | None
     error_class: str | None
+    phase: str                    # declared phase (journal-sourced events); "" otherwise
+    change: str                   # human-readable change summary (journal) or action key
     extras: dict[str, Any]
 
 
@@ -168,9 +170,11 @@ class PhaseEvent(TypedDict, total=False):
 # §6 Capability summary — Capability cards in UI
 # ---------------------------------------------------------------------------
 class CapabilityEntry(TypedDict, total=False):
-    status: str                   # kept / tried / attempted / not_attempted / not_configured / failed / completed
+    status: str                   # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
     attempts: int
-    keeps: int
+    keeps: int                    # geak/oob: kernels adopted at integrate (NOT micro-only KEEP)
+    reverts: int                  # geak/oob: micro-KEPT kernels reverted at integrate (e2e regressed)
+    e2e_gain_pct: float | None    # geak/oob: best end-to-end integrate gain for this lane's kernel
     tested: int                   # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
     reason: str                   # human readable, e.g. "kernel-claude only this run"
@@ -253,6 +257,13 @@ class DetectedKernel(TypedDict, total=False):
     source_file: str | None
     detected_from_task: str       # which profile task_id surfaced it
     benchmark_report_path: str
+    # lifecycle stamps (added by _collect_detected_kernels)
+    selected_for_optimization: bool
+    geak: dict[str, Any] | None   # {attempts, best_speedup, decision, last_status}
+    oob: dict[str, Any] | None
+    adopted_by: str | None        # geak / oob / kernel_agent / None
+    final_decision: str           # kept / reverted / rejected / attempted / not_optimized
+    integrate_gain_pct: float | None  # e2e (integrate) gain; negative => regressed -> reverted
 
 
 class RecommendedKernel(TypedDict, total=False):
@@ -547,9 +558,11 @@ class PhaseSegment(TypedDict, total=False):
     entered_ts: str            # iso UTC of entry
     entered_unix: float | None
     exit_ts: str               # iso UTC of next transition; "" for current segment
+    exit_unix: float | None    # unix epoch of next transition; None for current segment
     exit_reason: str           # transition reason vocab entry; "" for current segment
     evidence: dict[str, Any]   # entry evidence (snapshot at transition time)
-    actions: list[PhaseEvent]  # events from phase_timeline whose ts ∈ [entered, exit)
+    events: list[dict[str, Any]]  # non-transition sub-events folded into this phase
+    actions: list[PhaseEvent]  # phase_timeline events attributed to this phase
     elapsed_seconds: float | None
 
 

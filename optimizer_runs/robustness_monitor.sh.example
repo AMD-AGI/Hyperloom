@@ -18,11 +18,20 @@
 #                                            after MAX_HOURS + 1 buffer)
 #   TARGET_GAIN                        10    --target-gain forwarded to
 #                                            ``inference_optimizer optimize --resume``
-#   INFERENCE_OPTIMIZER_SESSION_DIR    /workspace/hyperloom
-#                                            session-dir holding state.json
+#   INFERENCE_OPTIMIZER_SESSION_DIR    (unset) session-dir holding state.json;
+#                                            when set it wins outright
+#   LAUNCH_INFO_FILE                   (unset) launch-info JSON written by
+#                                            ``optimize --launch-info-file``; its
+#                                            ``.session_dir`` is used when
+#                                            INFERENCE_OPTIMIZER_SESSION_DIR is unset
 #   MAGPIE_PYTHON                      /opt/venv/bin/python
 #                                            interpreter forwarded to the
 #                                            resume launch
+#
+# Session-dir resolution order (state.json holder; never a timestamp guess):
+#   1. $INFERENCE_OPTIMIZER_SESSION_DIR  (explicit; wins)
+#   2. .session_dir from $LAUNCH_INFO_FILE  (authoritative launch-info JSON)
+#   3. fail loudly; never guess or fall back to a timestamp/default path
 #
 # Invocation pattern (see ``inference_optimizer/SKILL.md`` §"Robustness
 # Monitor for Long Runs"):
@@ -53,7 +62,17 @@ set -u
 : "${REPO_ROOT:?error: REPO_ROOT must be the Hyperloom checkout root (resume logs land in \$REPO_ROOT/optimizer_runs/)}"
 
 export MAGPIE_PYTHON="${MAGPIE_PYTHON:-/opt/venv/bin/python}"
-session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
+
+# Resolve the session dir holding state.json (see resolution order above).
+# The launch-info JSON is the authoritative source; never guess by timestamp.
+session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-}"
+if [ -z "$session_dir" ] && [ -n "${LAUNCH_INFO_FILE:-}" ] && [ -f "${LAUNCH_INFO_FILE}" ]; then
+  session_dir="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("session_dir") or "")' "${LAUNCH_INFO_FILE}" 2>/dev/null || true)"
+fi
+if [ -z "$session_dir" ]; then
+  echo "ERROR: session dir is unknown. Set INFERENCE_OPTIMIZER_SESSION_DIR or LAUNCH_INFO_FILE; refusing to fall back to /workspace/hyperloom." >&2
+  exit 2
+fi
 deadline=$(( $(date +%s) + (${MAX_HOURS:-24} + 1) * 3600 ))
 
 read_stop() {
