@@ -53,18 +53,17 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 # below is the canonical layout — keep it in sync with the docstring above
 # and SKILL.md "Session Layout".
 #
-# N17 split (May 2026): the layout used to fold ``runtime/`` (Magpie clone,
-# source mirrors, pod-local env files, GEAK config) + ``optimizer_runs/``
-# + ``kernel-agent/`` into the session_dir, on the rationale that
+# The layout used to fold ``runtime/`` (Magpie clone, source mirrors,
+# pod-local env files, GEAK config) + ``optimizer_runs/`` +
+# ``kernel-agent/`` into the session_dir, on the rationale that
 # ``$USER_DATA_PATH`` was the one knob an operator might move. That worked
 # when each pod ran a single session end-to-end, but a multi-tenant
-# workspace (operator pinning ``$USER_DATA_PATH=/wekafs/xiaofei/sessions``
-# and launching multiple optimisation runs against different models
-# back-to-back) silently collapsed every session into the same flat dir —
-# state.json / agents / runs / manifest all overwritten, no per-session
-# audit possible.
+# workspace (operator pinning ``$USER_DATA_PATH`` and launching multiple
+# optimisation runs against different models back-to-back) silently
+# collapsed every session into the same flat dir — state.json / agents /
+# runs / manifest all overwritten, no per-session audit possible.
 #
-# N17 splits into two roots:
+# The layout now splits into two roots:
 #
 # * **Workspace-shared** (one copy per ``$USER_DATA_PATH``, regardless of
 #   how many sessions launch from there): ``runtime/`` (Magpie clone,
@@ -93,8 +92,8 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "findings",
     "reports",
     "agents/orchestration",
-    # dynamic_action.MD P2 §3 — dispatch-time artefact root for every
-    # dyn_id. Per-<dyn_id> subdirs are mkdir-ed on-demand at dispatch.
+    # dispatch-time artefact root for every dyn_id. Per-<dyn_id> subdirs
+    # are mkdir-ed on-demand at dispatch.
     "agents/orchestration/dynamic_actions",
     "agents/kernel",
     "agents/critic",
@@ -119,11 +118,10 @@ _WORKSPACE_SKELETON: tuple[str, ...] = (
     "runtime/source-mirrors",  # writable mirrors of GEAK / OOB / TraceLens sources
     "runtime/geak-config",     # generated litellm config consumed by GEAK CLI
     # Cortex KB integration. Holds the per-session ``.kb_sid`` /
-    # ``.kb_warm.json`` / ``.kb_pitfalls.json`` / ``.kb_pending.ndjson`` /
-    # ``.kb_flushed.ndjson`` / ``.kb_dead_letter.ndjson`` / ``.kb_audit.jsonl``
-    # / ``.kb_flusher.pid`` files described in KB_design §3.6 + §3.13 M1.
-    # Created up-front so the CortexKBClient never has to ``mkdir -p`` on
-    # the hot path; absent files imply ``--degraded-kb`` or pre-T0 state.
+    # ``.kb_warm.json`` / ``.kb_pitfalls.json`` / ``.kb_audit.jsonl``
+    # files. Created up-front so the KB client never has to ``mkdir -p``
+    # on the hot path; absent files imply ``--degraded-kb`` or pre-T0
+    # state.
     "runtime/cortex",
     "logs",                    # launcher stdout (workspace-shared)
 )
