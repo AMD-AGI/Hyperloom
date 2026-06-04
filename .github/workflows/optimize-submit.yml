@@ -32,12 +32,12 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Production large-B pool: 100 models every 8 hours, firing at UTC
-  # 04:00 / 12:00 / 20:00 (Beijing 12:00 / 20:00 / 04:00). The matrix
-  # generator rotates deterministically by UTC 8-hour slot — these hours
-  # map cleanly to hour//8 -> 0 / 1 / 2 so the rotation stays continuous.
+  # Production large-B pool: 100 models twice a day, firing at UTC
+  # 00:00 / 12:00 (Beijing 08:00 / 20:00). The matrix generator rotates
+  # deterministically by UTC 12-hour slot — these hours map cleanly to
+  # hour//12 -> 0 / 1 so the rotation stays continuous.
   schedule:
-    - cron: '0 4,12,20 * * *'
+    - cron: '0 0,12 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
@@ -328,7 +328,6 @@ jobs:
           # for these two critical values. SaFE consumes them and renders the
           # generated prompt tail consistently with the CI prefix.
           ARGS+=(--max-hours "${INPUT_MAX_HOURS:-12}")
-          ARGS+=(--results-path '$RESULT_DIR')
           # Hard guarantee: SaFE promptPrefix MUST be non-empty. Workflow
           # input is only populated on workflow_dispatch — for schedule
           # trigger we fall back to ci/prompt_prefix.txt (single source of

@@ -1993,6 +1993,12 @@ def _validate_credentials() -> None:
     sys.exit(2)
 
 
+def _is_placeholder_tracelens_path(value: str) -> bool:
+    """Treat .env.template's bare ``\\`` and whitespace-only values as unset."""
+    stripped = value.strip()
+    return stripped in ("", "\\")
+
+
 def _load_dotenv_fallback() -> None:
     """Env always wins over .env. If SAFE_API_KEY or OPENAI_BASE_URL is
     missing from os.environ, source ``$REPO_ROOT/.env`` (defaults to
@@ -2020,6 +2026,8 @@ def _load_dotenv_fallback() -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        if key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT") and _is_placeholder_tracelens_path(value):
+            continue
         if key not in os.environ:
             os.environ[key] = value
             loaded += 1

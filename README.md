@@ -4,7 +4,7 @@ An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperlo
 
 <p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
-Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. The optional [TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/) extension adds roofline numbers, gains estimates, and MI355/MI455 MAF data on top of the open-source report — opt in by exporting `TRACELENS_INSTALL_INTERNAL=1` before running `local_setup.sh`.
+Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. Hyperloom uses the public TraceLens package (`TRACELENS_ROOT`) by default (open-source-only report). An optional internal TraceLens extension — roofline numbers, gains estimates, and MI355/MI455 MAF data — can be enabled by internal users who set `TRACELENS_INTERNAL_ROOT` to point at their own internal checkout (path self-provided); leave it unset to stay on the open-source-only report. There is no separate on/off toggle.
 
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. 
 
@@ -98,6 +98,33 @@ docker run -d \
 
 If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
 
+**Install TraceLens inside the container** (required once per container):
+
+```bash
+# On the host
+ssh <node>
+docker exec -it <container> bash
+
+# Inside the container — public repo (required)
+git clone https://github.com/AMD-AGI/TraceLens.git
+cd TraceLens && pip install -e .
+```
+
+Recommended container path (matches the default below):
+
+```bash
+git clone https://github.com/AMD-AGI/TraceLens.git /workspace/TraceLens
+cd /workspace/TraceLens && pip install -e .
+```
+
+If the checkout already exists on the host, mount it instead of cloning:
+
+```bash
+-v /path/on/host/TraceLens:/workspace/TraceLens:rw
+```
+
+> **Optional internal extension (internal users only).** If you have access to the internal TraceLens extension, install your checkout (`pip install -e .`) and set `TRACELENS_INTERNAL_ROOT` to its path. Hyperloom does not clone it and ships no internal URL/path; leave `TRACELENS_INTERNAL_ROOT` unset for the open-source-only report.
+
 #### 2. Connect Cursor to the Runtime Environment
 
 - **SaFE Authoring Pod**: when the Pod is ready, check the connection instructions in the SaFE Authoring page and follow them to connect with Cursor Remote SSH.
@@ -141,6 +168,10 @@ Edit `.env`:
 ```env
 SAFE_API_KEY=ak-your-safe-apikey
 OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
+TRACELENS_ROOT=/workspace/TraceLens
+# Optional: set only if you installed the internal extension (enables roofline
+# gap / MI355+ MAF). Leave unset for the open-source-only report.
+# TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 # Optional, only set if you want the Cursor kernel-opt backend:
 # CURSOR_API_KEY=crsr_xxxxxxxxxxxx
@@ -151,10 +182,12 @@ OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
 |----------|-------------|---------|
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
 | `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1` |
+| `TRACELENS_ROOT` | TraceLens public repo checkout (`pip install -e .`; skills, patches, CLI, analysis orchestrator) | `/workspace/TraceLens` |
+| `TRACELENS_INTERNAL_ROOT` (optional, internal users) | Path to your own internal TraceLens extension checkout (`pip install -e .`; rehydration module). Hyperloom never clones it. Set only to enable the internal extension; unset => open-source-only. | (self-provided) |
 | `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to skip cursor and only use claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK, OOB, InferenceX, or TraceLens configuration is needed.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK or OOB configuration is needed. The public TraceLens repo must be installed in the container (see step 1); the internal extension is optional and is enabled only when `TRACELENS_INTERNAL_ROOT` is set.
 
 > If HTTPS requests to `core42.primus-safe.amd.com` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
 >
@@ -169,7 +202,7 @@ export USER_DATA_PATH=/path/to/hyperloom-run
 bash inference_optimizer/scripts/local_setup.sh
 ```
 
-`USER_DATA_PATH` is Hyperloom's runtime directory for dependency code, logs, state, and optimization results. It is not the Hyperloom source directory, and you can point it at any location with enough space. `local_setup.sh` clones and wires OOB, InferenceX, and TraceLens into this directory, and writes a local env file. When it finishes, it prints:
+`USER_DATA_PATH` is Hyperloom's runtime directory for dependency code, logs, state, and optimization results. It is not the Hyperloom source directory, and you can point it at any location with enough space. `local_setup.sh` clones and wires OOB and InferenceX into this directory, resolves TraceLens paths from your container install (or clones both repos as a fallback), and writes a local env file. When it finishes, it prints:
 
 - the Hyperloom workspace path to open in Cursor;
 - the prompt template to paste into Cursor Chat;
@@ -208,7 +241,7 @@ Requirements:
 2. Monitor the process every 300s until the optimization is complete or failed.
 ````
 
-Follow the script output. In the default flow, users do not need to manually configure GEAK, OOB, InferenceX, or TraceLens.
+Follow the script output. In the default flow, users do not need to manually configure GEAK or OOB. Both TraceLens repos must be installed in the container before bootstrap (step 1).
 
 ### Launch Inference Optimization
 
