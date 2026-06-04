@@ -117,6 +117,7 @@ DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
 DEFAULT_TARGET_GAIN = 100.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
+DEFAULT_CONTEXT_RESERVE_TOKENS = 16
 
 # Hardware facts are from ROCm GPU hardware specifications and AMD Instinct
 # datasheets/product briefs. tp_thresholds_b is our CI policy: start from the
@@ -411,6 +412,7 @@ class DetectedConfig:
     concurrency: int
     image: str
     params_b: float
+    max_context_tokens: int
 
 
 def _quant_type(config: dict) -> str:
@@ -478,6 +480,27 @@ def detect_param_count(hf_info: dict, config: dict) -> float:
     return 0.0
 
 
+def detect_max_context_tokens(config: dict) -> int:
+    """Return the model context length from HF config.json when present."""
+    candidates = []
+    for key in ("max_position_embeddings", "max_sequence_length", "n_positions", "seq_length"):
+        value = config.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            candidates.append(int(value))
+    return min(candidates) if candidates else 0
+
+
+def context_too_short(
+    max_context_tokens: int,
+    isl: int,
+    osl: int,
+    reserve_tokens: int = DEFAULT_CONTEXT_RESERVE_TOKENS,
+) -> bool:
+    if max_context_tokens <= 0:
+        return False
+    return max_context_tokens <= (isl + osl + reserve_tokens)
+
+
 def detect_tp(params_b: float, precision: str = "BF16",
               gpu_type: str | None = None) -> int:
     """Pick tensor parallelism from model parameter count and GPU profile.
@@ -538,6 +561,7 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str,
     framework = detect_framework(config)
     precision = detect_precision(config)
     params_b = detect_param_count(info, config)
+    max_context_tokens = detect_max_context_tokens(config)
     tp = detect_tp(params_b, precision, gpu_type)
     conc = detect_concurrency(tp, framework)
     image = detect_image(framework)
@@ -545,9 +569,10 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str,
     cfg = DetectedConfig(
         arch=arch, framework=framework, precision=precision,
         tp=tp, concurrency=conc, image=image, params_b=params_b,
+        max_context_tokens=max_context_tokens,
     )
-    log.info("[%s] arch=%s params=%.1fB framework=%s precision=%s gpu=%s tp=%d conc=%d",
-             repo_id, arch, params_b, framework, precision,
+    log.info("[%s] arch=%s params=%.1fB context=%d framework=%s precision=%s gpu=%s tp=%d conc=%d",
+             repo_id, arch, params_b, max_context_tokens, framework, precision,
              canonical_gpu_type(gpu_type), tp, conc)
     return cfg
 
@@ -1210,6 +1235,17 @@ def process_model(
     if detected:
         rec.detected = asdict(detected)
         rec.category = _category_from_arch(rec.detected.get("arch", ""))
+        max_context = int(rec.detected.get("max_context_tokens") or 0)
+        if context_too_short(max_context, isl, osl):
+            required = isl + osl + DEFAULT_CONTEXT_RESERVE_TOKENS
+            rec.status = "skipped"
+            rec.error = (
+                "context_too_short: "
+                f"max_context_tokens={max_context} <= required={required} "
+                f"(isl={isl}, osl={osl}, reserve={DEFAULT_CONTEXT_RESERVE_TOKENS})"
+            )
+            log.warning("[%s] skipping: %s", repo_id, rec.error)
+            return rec
 
     framework = overrides.get("framework") or (detected.framework if detected else "")
     precision = overrides.get("precision") or (detected.precision if detected else "FP8")
