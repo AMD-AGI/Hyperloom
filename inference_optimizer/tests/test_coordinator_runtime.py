@@ -40,7 +40,7 @@ from inference_optimizer.orchestrator.coordinator import (
     _baseline_params_fingerprint,
     Coordinator,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.sub_agent_runner import (
     SubAgentRunner,

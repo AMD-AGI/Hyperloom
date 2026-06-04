@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder import (
     build_critic_prompt,

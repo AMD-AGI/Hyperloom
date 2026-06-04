@@ -1,7 +1,7 @@
 """Validation + parity tests for :mod:`runtime.intent_envelope`.
 
 The parity assertions mirror the Coordinator-side schema in
-``inference_optimizer/orchestrator/intent_parser.py`` (REVIEW_VERDICT
+``inference_optimizer/protocol/intent.py`` (REVIEW_VERDICT
 required keys) and ``policy.REVIEW_VERDICTS`` so a future Coordinator
 upgrade fails loudly here first.
 """
