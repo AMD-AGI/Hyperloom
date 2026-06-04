@@ -24,9 +24,10 @@ This cleansing effort exists to sharply reduce the engineering and logical compl
 
 ## Compatibility Gate
 
-Per `01-baseline-contracts/03-compatibility-decisions.MD`, "drop old Cortex v1 graph KB" is marked Decision Needed: Yes.
-
-Therefore this step does NOT delete the cortex_* methods, `cortex_kb_constants`, or their tests. Deleting now would also need to touch live recipe_kb imports and active tests.
+The first Step 06 pass deferred old Cortex v1 graph deletion because the
+compatibility decision was still open. The high-risk cleanup pass now
+treats that decision as resolved for runtime code: the old KnowledgePlane
+v1 graph surface is removed, while live RecipeKB and PR feed paths remain.
 
 ## Implemented In This Step
 
@@ -43,22 +44,61 @@ Added `code-cleansing-plan/06-knowledge/01-knowledge-responsibility-map.MD`:
 
 `knowledge_plane.py` header now states explicitly that the cortex_* surface is inert in production and records the deletion condition: remove once the "drop old Cortex v1 graph KB" decision lands; canonical knowledge is RecipeKB.
 
+### Removed old Cortex v1 graph surface from KnowledgePlane
+
+Removed from `knowledge_plane.py`:
+
+- `select_kb_for_domain`
+- `select_kb_for_domains`
+- `_DOMAIN_FALLBACK_STRATEGIES`
+- `_domain_fallback_query`
+- `cortex_propose_point`
+- `mint_pr_node`
+- `pr_node_canonical_id`
+
+Updated:
+
+- `Coordinator._warm_specialist_params` no longer attempts to fill
+  `kb_subgraph` from KnowledgePlane.
+- Specialist prompt wording no longer describes Section 4 as a Cortex KB
+  subgraph; it is now optional advisory KB context.
+- `actions/specialist.md` now describes RecipeKB warm-start facts,
+  research hints, PR feed, and source roots rather than a Cortex KB
+  subgraph.
+- `test_kb_pr_assembly.py` was deleted because it only tested the removed
+  fake v1 graph path.
+- `test_pr_monitor.py` no longer tests Cortex mint/propose helpers.
+
+Kept:
+
+- RecipeKB warm start / writeback.
+- PR feed warmup.
+- Research scout hints.
+- Optimization journal.
+- `cortex_kb_constants.py`, because live `recipe_kb/` code still imports
+  shared constants from it.
+
 ## Verification
 
 - Lint: no errors on `knowledge_plane.py`.
-- Tests: `test_knowledge_plane`, `test_kb_pr_assembly`, `test_pr_monitor`, `test_research_scout`, `test_recipe_kb_dispatcher`, `test_local_recipe_store`, `test_cortex_t0_anchor` pass.
+- Original first-pass tests: `test_knowledge_plane`, `test_kb_pr_assembly`,
+  `test_pr_monitor`, `test_research_scout`, `test_recipe_kb_dispatcher`,
+  `test_local_recipe_store`, `test_cortex_t0_anchor` pass.
+- Follow-up old-Cortex deletion verification: `test_knowledge_plane`,
+  `test_pr_monitor`, `test_research_scout`, `test_recipe_kb_dispatcher`,
+  `test_local_recipe_store`, `test_cortex_t0_anchor` pass (136 passed).
+- Full knowledge + specialist prompt verification: knowledge-plane,
+  PR-monitor, research-scout, RecipeKB, cortex T0, specialist lifecycle,
+  specialist prompt, and policy-gate tests pass (277 passed).
 
 ## Not Done Yet
 
-Deferred pending the Cortex v1 decision and to stay low-risk:
+Still deferred:
 
-- removing the cortex_* methods + v1-only constants,
-- removing the fake-v1-client tests,
 - consolidating the specialist knowledge input bundle assembly,
-- trimming the prompt KB block wording.
+- deeper renaming of historical `cortex_kb` variables that now hold
+  `RecipeKB` objects.
 
 ## Next Safe Follow-Ups
 
-- Get the product decision on dropping old Cortex v1 graph KB.
-- If dropped: remove cortex_* methods, v1-only constants, and their tests; keep RecipeBK + PR feed + research scout + journal.
 - Consolidate specialist knowledge assembly into one bundle builder without changing the rendered prompt.
