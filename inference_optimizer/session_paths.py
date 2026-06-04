@@ -1,4 +1,4 @@
-"""Per-session path helpers ().
+"""Per-session path helpers.
 
 Single source of truth for every path *inside* a session directory. The
 skeleton itself is created by :func:`paths.make_session_dir`; this module
