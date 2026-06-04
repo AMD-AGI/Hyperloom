@@ -3245,12 +3245,11 @@ class Coordinator:
         2.5 ``fact_finalize``   — write final ``update_recipe`` to KB +
                                   finalize the local optimization journal
                                   (``total_gain_pct`` / ``final_throughput``)
-        3. ``ndjson_drain``     — flush the async Cortex write queue
+        3. ``ndjson_drain``     — retired no-op (writes are local-only)
         4. mark ``close_sequence_done`` (and ``stop_reason``)
 
-        (The legacy step 4 ``cortex_commit`` step was retired alongside
-        the T2/T3 hypothesize/verify protocol — fact writes are session-
-        less so there is no remote sid to close.)
+        (The legacy ``cortex_commit`` step was retired — fact writes are
+        session-less so there is no remote sid to close.)
 
         Each step records a row under
         ``phase_history[-1].evidence.close_steps`` so the breakdown
@@ -3264,17 +3263,15 @@ class Coordinator:
         Idempotence: report / session_breakdown enqueue uses fixed
         idempotency_keys (``internal-report-close_phase_entry`` /
         ``internal-session_breakdown-close_phase_entry``) so a phase
-        re-entry (Inv-2.1 forbids in production, but resume from a
-        crash mid-sequencer counts) reuses existing tasks. NDJSON
-        drain + Cortex commit are themselves idempotent for a given
-        sid.
+        re-entry (forbidden in production, but resume from a crash
+        mid-sequencer counts) reuses existing tasks.
 
         The sequencer runs INLINE inside the hook — it doesn't wait
         for the reactor / dispatcher tick boundary. Steps 1 and 2
         enqueue tasks then poll ``_wait_for_task_terminal`` until the
         dispatcher (which the same Coordinator.run() loop drives)
-        picks them up and finishes. Step 3 + 4 call the cortex_kb
-        client synchronously. Step 5 is a single SharedState write.
+        picks them up and finishes. Step 3 is a retired no-op; step 4
+        is a single SharedState write.
         """
         log.info("CLOSE entered (from=%s); starting 4-step close sequence",
                  from_phase or "<unknown>")
@@ -3358,7 +3355,7 @@ class Coordinator:
         # don't break on a missing entry.
         await self._record_close_step("ndjson_drain", status="skipped")
 
-        # ---------------- Step 5: mark done ----------------
+        # ---------------- Step 4: mark done ----------------
         self.shared_state.close_sequence_done = True
         # phase-machine CLOSE path must set
         # ``stop_reason`` so the main run loop's outer check
