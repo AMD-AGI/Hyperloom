@@ -45,10 +45,44 @@ GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
 })
 
 
+# Actions rendered in the Orchestration prompt for full kernel-enabled runs.
+# This is prompt visibility, not phase permission: phase_state and PolicyGate
+# still decide when an action is legal on a given tick.
+FULL_ENABLED_ACTIONS: tuple[str, ...] = (
+    "target_analysis", "baseline",
+    "roofline", "deep_kernel_analysis",
+    "explore",
+    "specialist",
+    "dynamic_action",
+    "integrate_patch",
+    "sweep",
+    "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
+    "gemm_tuning",
+    "report",
+    "recover",
+)
+
+
+# Prompt-visible actions for --no-kernel runs. Kernel-owned request actions
+# and analysis actions that only feed kernel optimization stay hidden.
+NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
+    "target_analysis", "baseline",
+    "explore",
+    "specialist",
+    "dynamic_action",
+    "integrate_patch",
+    "sweep",
+    "report",
+    "recover",
+)
+
+
 __all__ = [
     "COORDINATOR_INTERNAL_ACTIONS",
     "FRAMEWORK_PR_INTERNAL_ACTION_NAMES",
+    "FULL_ENABLED_ACTIONS",
     "GRID_INJECTABLE_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_OWNED_ACTIONS",
+    "NO_KERNEL_ENABLED_ACTIONS",
 ]
