@@ -30,7 +30,7 @@ from inference_optimizer.orchestrator.action_registry import (
     VALID_FAMILIES,
 )
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
 
 

@@ -48,12 +48,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# the ``orchestrator.scoring`` module was retired; the
-# v0.6 ``ActionScore`` / ``rank_top_k`` / ``target_gap_multiplier``
-# imports below are gone. The LLM now decides by reading facts
-# (phase / gaps / KB), not by consuming a system-side priority
-# ranking. See ``Coordinator._compose_prompt`` for the replacement
-# fact set.
+# The LLM decides by reading facts (phase / gaps / KB), not by
+# consuming a system-side priority ranking (there is no scoring
+# module). See ``Coordinator._compose_prompt`` for the fact set.
 
 
 def _now_iso() -> str:
@@ -186,9 +183,8 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-#: top-level state.json schema version. v0.6 did
-#: not write a value; ``from_dict`` treats an absent key as
-#: ``schema_version=1`` and runs the §3.10 §5.2 migration step,
+#: top-level state.json schema version. An absent key (older
+#: state.json) is treated as ``schema_version=1`` and migrated,
 #: bumping to ``LATEST_STATE_SCHEMA_VERSION`` on the first save.
 LATEST_STATE_SCHEMA_VERSION: int = 2
 
@@ -473,7 +469,7 @@ class SharedState:
     # (which do not compose linearly), so the validated number is
     # what the final report quotes. the
     # rebench runs inline inside the merged ``explore`` action's
-    # per-KEEP loop; the standalone v0.6 ``validate_stack`` action
+    # per-KEEP loop; the standalone ``validate_stack`` action
     # is denied by PolicyGate. Stays 0.0 until the first KEEP
     # cleared its inline rebench.
     cumulative_gain_validated: float = 0.0
@@ -579,8 +575,7 @@ class SharedState:
     # standard Critic-gated ``integrate_patch``-style benchmark, and
     # KEEPs winners to ``optimization_stack``. Operators opt out via
     # ``--no-framework`` (PRELUDE → EXPLORE directly, ``prelude_done``
-    # reason preserved). Replaces the v0.8 ``framework_agent_enabled``
-    # serving-sub-kind toggle; PolicyGate's
+    # reason preserved). PolicyGate's
     # ``framework_pr_action_not_llm_proposable`` rule keeps the LLM
     # from proposing the action itself.
     framework_phase_enabled: bool = True
@@ -757,13 +752,13 @@ class SharedState:
     # this to nudge Orch off the params plateau. Reset to 0 whenever
     # current_best advances.
     params_no_promote_streak: int = 0
-    # unified explore ledger (KB_design §3.4 Inv-4.1 "single
-    # ledger"). Persistent DFS state for the merged ``explore``
-    # action. ``tested`` is keyed by canonical_fingerprint (content-based,
-    # see ``action_executors._canonical_fingerprint``), same hashing as
+    # Unified explore ledger ("single ledger"). Persistent DFS state for
+    # the merged ``explore`` action. ``tested`` is keyed by
+    # canonical_fingerprint (content-based, see
+    # ``action_executors._canonical_fingerprint``), same hashing as
     # ``variant_fingerprint`` so the ledgers migrate losslessly.
     #
-    # Schema (M3, may grow in M5/M6 with specialist provenance):
+    # Schema (may grow with specialist provenance):
     #
     #   {
     #     "schema_version": 1,
@@ -788,7 +783,7 @@ class SharedState:
     #       {flag, source, first_seen_round}
     #     ],
     #     "synergy_attempted": [["name1", "name2"], ...],
-    #     "domains_round_summary": [...],   # M5/M6 fills, M3 leaves []
+    #     "domains_round_summary": [...],
     #     "name_index": {name: fingerprint},
     #     "cursor": int,
     #     "last_round": {...},
@@ -799,10 +794,9 @@ class SharedState:
     # subsequent stack rebench. Items the rebench evicted live in
     # ``rejected`` with ``reason='stack_unstable'``.
     explore_search: dict[str, Any] = field(default_factory=dict)
-    # specialist sub-agent rolling state (KB_design §3.5 +
-    # §3.10 §4.1). Each entry summarises one EXPLORE round of specialist
-    # dispatch (M5: 1 entry per round; M6 grows to N when 6 domains run
-    # concurrently). Schema (per round):
+    # specialist sub-agent rolling state. Each entry summarises one
+    # EXPLORE round of specialist dispatch (one entry per round; grows
+    # to N when multiple domains run concurrently). Schema (per round):
     #
     #   {
     #     "round_id": str,                 # explore-round-N
@@ -936,10 +930,9 @@ class SharedState:
     # the breakdown to surface "we honored a llm_escalation here".
     last_consumed_escalate_hint: str = ""
     last_consumed_escalate_hint_ts: str = ""
-    # per-phase plateau threshold overrides locked at
-    # session start (CLI flags, KB_design §3.13 M7 §4). Empty dict
-    # means "use library defaults"; phase_state reads these fields
-    # for the dispatcher's phase-decision call.
+    # per-phase plateau threshold overrides locked at session start
+    # (CLI flags). Empty dict means "use library defaults"; phase_state
+    # reads these fields for the dispatcher's phase-decision call.
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id + patch_path + args. This
     # prevents Orchestration from spending hours re-validating the same patch
