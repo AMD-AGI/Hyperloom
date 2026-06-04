@@ -15,9 +15,11 @@ from inference_optimizer.orchestrator.action_registry import (
 )
 from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 from inference_optimizer.orchestrator.action_surfaces import (
+    FULL_ENABLED_ACTIONS as SURFACE_FULL_ENABLED_ACTIONS,
     GRID_INJECTABLE_ACTIONS as SURFACE_GRID_INJECTABLE_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES as SURFACE_INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_OWNED_ACTIONS as SURFACE_KERNEL_OWNED_ACTIONS,
+    NO_KERNEL_ENABLED_ACTIONS as SURFACE_NO_KERNEL_ENABLED_ACTIONS,
 )
 
 
@@ -121,6 +123,23 @@ def test_action_surface_constants_are_shared():
     assert set(_NOOP_KINDS_KERNEL_ONLY) == SURFACE_KERNEL_OWNED_ACTIONS
     assert prompt_builder.GRID_INJECTABLE_ACTIONS is SURFACE_GRID_INJECTABLE_ACTIONS
     assert policy.INTERNAL_ONLY_ACTION_NAMES is SURFACE_INTERNAL_ONLY_ACTION_NAMES
+    assert prompt_builder.FULL_ENABLED_ACTIONS is SURFACE_FULL_ENABLED_ACTIONS
+    assert prompt_builder.NO_KERNEL_ENABLED_ACTIONS is SURFACE_NO_KERNEL_ENABLED_ACTIONS
+
+
+def test_prompt_enabled_actions_are_live_registry_actions(registry):
+    retired = {
+        "setup", "classify", "backends", "params",
+        "validate_stack", "select_kernels",
+    }
+    enabled = set(SURFACE_FULL_ENABLED_ACTIONS) | set(SURFACE_NO_KERNEL_ENABLED_ACTIONS)
+    assert not (enabled & retired)
+    for name in enabled:
+        assert registry.get(name) is not None, (
+            f"prompt-visible action {name!r} must have action metadata"
+        )
+    assert SURFACE_KERNEL_OWNED_ACTIONS <= set(SURFACE_FULL_ENABLED_ACTIONS)
+    assert SURFACE_KERNEL_OWNED_ACTIONS.isdisjoint(set(SURFACE_NO_KERNEL_ENABLED_ACTIONS))
 
 
 def test_kernel_opt_has_three_lanes_and_high_cost(registry):
