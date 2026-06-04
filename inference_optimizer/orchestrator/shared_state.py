@@ -996,8 +996,8 @@ class SharedState:
     # re-parsing ISO strings every tick.
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions; each row is built by
-    # :func:`phase_state.make_history_row` and conforms to KB_design
-    # §3.2 §6 (reason must be in ``PHASE_EXIT_REASONS``).  Capped at
+    # :func:`phase_state.make_history_row` (reason must be in
+    # ``PHASE_EXIT_REASONS``).  Capped at
     # ``_PHASE_HISTORY_CAP`` so a runaway transition never bloats
     # state.json (unlikely — at most ~6 phases in the chain — but defensive).
     phase_history: list[dict[str, Any]] = field(default_factory=list)
@@ -1052,11 +1052,9 @@ class SharedState:
     warm_start_ts: str = ""
 
     # ------------------------------------------------------------------
-    # structured gaps ledger (KB_design §3.3 /
-    # §3.5 / §3.9 §6). Replaces the proxy block (which derived
-    # decision input from ``last_action_failures`` +
-    # ``explore_search.winners_history``) with a structured, dedup'd
-    # list of unresolved bottlenecks. Coordinator is the sole writer
+    # structured gaps ledger: a dedup'd list of unresolved bottlenecks
+    # (replacing the older proxy derived from ``last_action_failures`` +
+    # ``explore_search.winners_history``). Coordinator is the sole writer
     # (:meth:`Coordinator._refresh_gaps`); LLM agents read via
     # prompt injection. Listed in :data:`policy.CORE_STATE_FIELDS` so
     # any LLM ``update_state{changes={gaps: ...}}`` intent is denied.
@@ -1067,7 +1065,7 @@ class SharedState:
     #   3. Cortex traverse(issue_node)   — merge cross-session priors
     #   4. specialist_done bookkeeping   — gap.attempts ← specialist
     #
-    # Schema (per entry, KB_design §3.3 §4.2 / §3.5 §11):
+    # Schema (per entry):
     #
     #   {
     #     "canonical_id": str,        # issue_node canonical from Cortex

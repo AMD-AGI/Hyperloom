@@ -52,7 +52,7 @@ from inference_optimizer.orchestrator.policy import (
 
 
 # ---------------------------------------------------------------------------
-# PR-A6 (Arbor-into-Hyperloom) — per-domain focus templates
+# per-domain focus templates
 #
 # Each entry produces the body that the prompt builder injects into
 # Section 1 under "### Domain focus — <key>". The shape mirrors
@@ -62,10 +62,10 @@ from inference_optimizer.orchestrator.policy import (
 # - "Winning techniques" (concrete patterns the specialist should
 #   sanity-check against the gap before proposing).
 # - "Pitfalls" (anti-patterns that historically reverted on this
-#   domain — sourced from KB_design lessons + Arbor's lessons table).
+#   domain — sourced from KB lessons + Arbor's lessons table).
 #
 # When a domain key is missing from this map, ``_section_identity``
-# falls back to the generic body (the legacy M5 default).
+# falls back to the generic body (the generic default).
 # ---------------------------------------------------------------------------
 
 
@@ -523,7 +523,7 @@ class SpecialistPromptInputs:
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
-    # GAP 5 / GAP 8 — runtime fingerprint surfaced into prompts so the
+    # runtime fingerprint surfaced into prompts so the
     # specialist can judge "is this lesson from an old framework still
     # applicable?". ``framework`` is the active backend (sglang / vllm);
     # ``framework_version`` is the precise install version (e.g. "0.5.11").
@@ -559,7 +559,7 @@ class SpecialistPromptInputs:
     # § 5b for the specialist (separate from § 5 recipe so the LLM can
     # reason about each independently).
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
-    # IR-7 — session_steward_specialist panoramic state digest. Only
+    # session_steward_specialist panoramic state digest. Only
     # populated when the dispatcher is dispatching a session_steward
     # task (other specialists get an empty dict and the section is
     # skipped entirely). See ``Coordinator._build_session_snapshot``
@@ -633,7 +633,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "capability boundary is fixed by Section 9 Iron Rules; everything inside",
         "it is yours.",
     ]
-    # PR-A6 (Arbor-into-Hyperloom): per-domain expertise + focus
+    # per-domain expertise + focus
     # paragraph. Each domain template emphasises the surface area the
     # specialist should reason about + the typical winning techniques
     # (lifted from Arbor's orchestrator.md "agent expertise" table).
@@ -1038,7 +1038,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         meta_bits: list[str] = []
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        # GAP 4 — surface the validated_count first because "5 sessions
+        # surface the validated_count first because "5 sessions
         # confirmed this" is the strongest cross-session signal. Fall
         # back to the singular ``source_session_id`` for legacy rows.
         vc = attrs.get("validated_count")
@@ -1052,7 +1052,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
             if src_sid:
                 meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        # GAP 8 — version mismatch annotation. Surface this AFTER the
+        # version mismatch annotation. Surface this AFTER the
         # statement so the LLM sees ``- **X works on sglang** [from
         # sglang@0.4.5, you're on 0.5.11]`` and can decide if the
         # lesson still applies. Client-side ranking already downweighted
@@ -1189,7 +1189,7 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
             meta_bits.append(f"severity={severity}")
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        # GAP 4 — repeat observations strengthen the "don't try this" signal.
+        # repeat observations strengthen the "don't try this" signal.
         vc = attrs.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"observed={vc}")

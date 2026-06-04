@@ -79,15 +79,14 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "deep",        # kernel_opt / integrate / operator_tuning / vendor_kernel_config
     "validate",    # reserved; stack validation is inlined into explore
     "finalize",    # report
-    "support",     # recover (v0.8 KB_design §3.15 §2.3 retired the rest)
+    "support",     # recover (the rest were retired)
 })
 
-# N38 (May 2026) — per-action verdict policy class. Drives the
-# Critic's primary per-proposal rule via the ``action_verdict_policy``
-# entry in ``judge_bundle.review_constraints`` (built by
-# CriticAgentBackend from this registry). Replaces the hard-coded
-# carve-out lists that N33/N35/N37 had to patch into ``critic.md``
-# every time a new action class got introduced.
+# Per-action verdict policy class. Drives the Critic's primary
+# per-proposal rule via the ``action_verdict_policy`` entry in
+# ``judge_bundle.review_constraints`` (built by CriticAgentBackend from
+# this registry), instead of hard-coded carve-out lists in
+# ``critic.md``.
 #
 # * ``archival`` — transcribes existing state to disk; introduces
 #   NO new measurements. Always approve: refusing forces the run
@@ -189,7 +188,7 @@ class ActionMetadata:
     description: str = ""
     pipeline_phase: str = "explore"
     typical_runtime_min: float = 0.0
-    # N38 (May 2026) — per-action verdict policy class. Drives Critic's
+    # per-action verdict policy class. Drives Critic's
     # ``action_verdict_policy`` lookup (see ``VALID_VERDICT_CLASSES``).
     # Defaults inferred from ``default_verdict_class_for(name)`` when
     # the yaml omits the field.
@@ -257,7 +256,7 @@ class ActionMetadata:
                 f"action {expected_name!r}: typical_runtime_min must be >= 0, "
                 f"got {typical_runtime_min}"
             )
-        # N38 verdict_class — explicit yaml override wins; otherwise
+        # verdict_class — explicit yaml override wins; otherwise
         # the loader fills in the default from the table. Validate
         # whichever resolved value against the allowlist so a typo in
         # the yaml fails loudly at boot rather than silently producing
