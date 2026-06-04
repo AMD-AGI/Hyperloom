@@ -210,6 +210,10 @@
 - 新测试分层说明。
 - 最小必跑测试集。
 
+本阶段的测试分层、最小必跑集与执行记录见
+`code-cleansing-plan/10-tests/01-test-tiering.MD` 和
+`code-cleansing-plan/10-tests/02-execution-status.MD`。
+
 ## 完成标准
 
 完成后应达到:
