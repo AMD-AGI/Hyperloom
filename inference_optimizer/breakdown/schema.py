@@ -554,40 +554,12 @@ class PhaseSegment(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# §15 KB Provenance — Cortex KB integration
+# §15 KB Provenance — RecipeKB / PR Monitor integration
 # ---------------------------------------------------------------------------
-class KBPendingEdge(TypedDict, total=False):
-    proposal_msg_id: str
-    edge_id: str
-    action: str
-    ts: str
-
-
 class KBQueueStats(TypedDict, total=False):
     pending_lines: int             # current depth of .kb_pending.ndjson
     flushed_bookmarks: int         # rows in .kb_flushed.ndjson (drain bookmarks)
     dead_letter_lines: int         # rows in .kb_dead_letter.ndjson
-
-
-class KBCommitSummary(TypedDict, total=False):
-    status: str                    # committed / commit_failed / skip_disabled / ...
-    promoted_edges: list[str]
-    derived_summary_id: str
-
-
-class KBPointCreated(TypedDict, total=False):
-    """One row in ``kb_provenance.points_created``.
-
-    ``kind`` ∈ {workload_node / issue_node / optimization_node /
-    pr_node / attempt_node / ...}. ``pr_node`` rows are the M4
-    contribution; everything else came from M1/M3 path.
-    """
-    canonical_id: str
-    kind: str
-    authority: str
-    source: str
-    status: str
-    ts: str
 
 
 class KBFlusherStatus(TypedDict, total=False):
@@ -638,14 +610,9 @@ class KBProvenance(TypedDict, total=False):
     warm_replay_attempted: bool
     warm_history_injected: bool
     stack_fingerprint: dict[str, str]
-    pending_edges: list[KBPendingEdge]
     queue: KBQueueStats
     audit_tail_count: int
     audit_status_counts: dict[str, int]
-    # points created during this session.
-    points_created: list[KBPointCreated]
-    points_by_kind: dict[str, int]
-    commit_summary: KBCommitSummary
     # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle marker.
     flusher_status: KBFlusherStatus
     # IR-3 soft-degrade audit. Values:
