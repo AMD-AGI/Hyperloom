@@ -1,4 +1,4 @@
-"""Explore search ledger renderer."""
+"""Parameter / backend DFS state renderer."""
 
 from __future__ import annotations
 
@@ -23,19 +23,22 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     backends_tested = len((backends.get("tested") or {}) if isinstance(backends, dict) else {})
     params_accepted = len((params.get("accepted") or []) if isinstance(params, dict) else [])
     params_tested = len((params.get("tested") or {}) if isinstance(params, dict) else {})
-    has_legacy = (
-        backends_accepted or backends_tested or params_accepted or params_tested
+    has_explore = (
+        explore_accepted or explore_tested
+        or (explore.get("cursor") if isinstance(explore, dict) else None) is not None
+        or (explore.get("last_round") if isinstance(explore, dict) else None) is not None
     )
 
     facts: list[str] = []
     facts.append(
-        f"explore ledger: tested={explore_tested}, accepted={explore_accepted}"
+        f"backends DFS: tested={backends_tested}, accepted={backends_accepted}"
     )
-    if has_legacy:
+    facts.append(
+        f"params DFS: tested={params_tested}, accepted={params_accepted}"
+    )
+    if has_explore:
         facts.append(
-            "legacy search aliases: "
-            f"backends tested={backends_tested}, accepted={backends_accepted}; "
-            f"params tested={params_tested}, accepted={params_accepted}"
+            f"explore ledger: tested={explore_tested}, accepted={explore_accepted}"
         )
     if winners:
         facts.append(f"backend_winners_history: {len(winners)} round(s).")
@@ -54,26 +57,29 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 )
 
     md_parts: list[str] = []
-    md_parts.append("**Explore Search:**")
+    md_parts.append("**Backends DFS:**")
     md_parts.append(md_table(
         ["accepted", "tested", "cursor", "last_round"],
-        [[explore_accepted, explore_tested,
-          (explore.get("cursor") if isinstance(explore, dict) else None),
-          (explore.get("last_round") if isinstance(explore, dict) else None)]],
+        [[backends_accepted, backends_tested,
+          (backends.get("cursor") if isinstance(backends, dict) else None),
+          (backends.get("last_round") if isinstance(backends, dict) else None)]],
     ))
-    if has_legacy:
+    md_parts.append("")
+    md_parts.append("**Params DFS:**")
+    md_parts.append(md_table(
+        ["accepted", "tested", "cursor", "last_round"],
+        [[params_accepted, params_tested,
+          (params.get("cursor") if isinstance(params, dict) else None),
+          (params.get("last_round") if isinstance(params, dict) else None)]],
+    ))
+    if has_explore:
         md_parts.append("")
-        md_parts.append("**Legacy Search Aliases (archived sessions):**")
+        md_parts.append("**Explore Search:**")
         md_parts.append(md_table(
-            ["ledger", "accepted", "tested", "cursor", "last_round"],
-            [
-                ["backends", backends_accepted, backends_tested,
-                 (backends.get("cursor") if isinstance(backends, dict) else None),
-                 (backends.get("last_round") if isinstance(backends, dict) else None)],
-                ["params", params_accepted, params_tested,
-                 (params.get("cursor") if isinstance(params, dict) else None),
-                 (params.get("last_round") if isinstance(params, dict) else None)],
-            ],
+            ["accepted", "tested", "cursor", "last_round"],
+            [[explore_accepted, explore_tested,
+              (explore.get("cursor") if isinstance(explore, dict) else None),
+              (explore.get("last_round") if isinstance(explore, dict) else None)]],
         ))
 
     if winners:
@@ -109,7 +115,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     return RenderedSection(
         section_id="param_search",
-        title="Explore Search",
+        title="Parameter / Backend Search",
         key_facts=facts,
         markdown_block="\n".join(md_parts).strip(),
         warnings=[],
