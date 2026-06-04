@@ -4347,6 +4347,13 @@ class Coordinator:
         # clean up their worktree + git branch.
         self._resume_abandon_dynamic_actions()
 
+    async def _pump_framework_pr_phase_safely(self, *, caller: str) -> None:
+        """Best-effort FRAMEWORK_PR pump wrapper shared by tick and run."""
+        try:
+            await self._pump_framework_pr_phase()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("FRAMEWORK_PR pump (%s) failed", caller)
+
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for **every** agent.
 
@@ -4368,10 +4375,7 @@ class Coordinator:
             # FRAMEWORK_PR phase pump: enqueue next candidate / fetch
             # next batch when no framework_pr task is in flight. Best-
             # effort; failures degrade to phase_done so we never wedge.
-            try:
-                await self._pump_framework_pr_phase()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("FRAMEWORK_PR pump (tick) failed")
+            await self._pump_framework_pr_phase_safely(caller="tick")
             # phase machine advance at tick boundary.
             await self._advance_phase_if_needed()
 
@@ -4489,10 +4493,7 @@ class Coordinator:
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_PR phase pump: see ``tick()`` for rationale.
                     if not in_closing:
-                        try:
-                            await self._pump_framework_pr_phase()
-                        except Exception:  # noqa: BLE001 — defensive
-                            log.exception("FRAMEWORK_PR pump (run) failed")
+                        await self._pump_framework_pr_phase_safely(caller="run")
                     # phase machine advance at tick boundary.
                     # Runs even when ``in_closing`` so CLOSE phase still gets
                     # recorded into phase_history when the final breakdown
