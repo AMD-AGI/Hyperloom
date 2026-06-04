@@ -206,7 +206,7 @@ specifics.
 
 **Cause.** `USER_DATA_PATH` points at a different directory than the
 original session, or the session never reached the point of writing
-`manifest.json` (failed in setup).
+`manifest.json` (failed before the session manifest was written).
 
 **Fix.**
 
@@ -221,8 +221,8 @@ original session, or the session never reached the point of writing
    export USER_DATA_PATH=/path/to/your/session
    inference_optimizer optimize --resume
    ```
-3. If `manifest.json` truly never existed (session crashed at setup),
-   resume is not possible — restart with a fresh `--model …` launch.
+3. If `manifest.json` truly never existed, resume is not possible —
+   restart with a fresh `--model …` launch.
 
 ---
 

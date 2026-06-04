@@ -25,7 +25,7 @@ You don't need either KB to start. Run optimization without setting
 * Skip the KB-prior step in scoring (every action starts at its base
   prior, no boosts and no penalties).
 * Skip the post-action `kb_ingest` step (no new lessons are written).
-* Continue normally through baseline, profile, params, backends, kernel
+* Continue normally through baseline, roofline/profile, explore, kernel
   optimization, sweep, and report.
 
 Expect modestly worse performance on the **first** run (the agent may
@@ -50,7 +50,7 @@ lessons accumulated across optimization runs. Each entry looks like:
   "category": "lesson",
   "model_class": "moe_mla_nsa",
   "model": "GLM-5-FP8",
-  "action": "backends",
+  "action": "explore",
   "lesson": "Super-linear synergy: combining --nsa-decode-backend aiter, --enable-mixed-chunk, and --enable-aiter-allreduce-fusion gave +41.2% combined vs +3%/+3%/+0.3% individually.",
   "confidence": 0.92,
   "evidence_paths": ["sessions/glm5-20260415/state.json"],
@@ -59,10 +59,9 @@ lessons accumulated across optimization runs. Each entry looks like:
 }
 ```
 
-The Critic agent owns reads and writes; the Coordinator queries it
-during action-stack scoring (see
-[HOW_THE_OPTIMIZATION_LOOP_WORKS.md](HOW_THE_OPTIMIZATION_LOOP_WORKS.md)
-§"Self-Evolving Knowledge Base").
+The Critic agent owns reads and writes; the Coordinator and specialist
+warmup paths surface relevant priors during the live optimization loop
+(see [HOW_THE_OPTIMIZATION_LOOP_WORKS.md](HOW_THE_OPTIMIZATION_LOOP_WORKS.md)).
 
 ### Layout
 
