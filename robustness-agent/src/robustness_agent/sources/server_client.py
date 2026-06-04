@@ -191,7 +191,7 @@ class RobustnessServerClient:
         )
         return body if isinstance(body, dict) else {}
 
-    # -- M2: cluster-physical proxies -----------------------------------
+    # -- cluster-physical proxies ---------------------------------------
 
     async def get_cluster_pod_metrics(
         self,
