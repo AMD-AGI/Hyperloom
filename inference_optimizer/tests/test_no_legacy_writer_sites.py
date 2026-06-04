@@ -89,10 +89,6 @@ ALLOWED_FILES: dict[str, str] = {
     # Prompt / orientation text that names both keys explicitly so the
     # LLM and any human reader of the prompt knows the alias exists
     # for one release.
-    "inference_optimizer/cli.py":
-        "warm-replay executor registration comment names RecipeKB "
-        "best_config field names",
-
     # Pytest marker registration mentions the legacy name in the
     # marker's description.
     "pyproject.toml":
