@@ -111,12 +111,28 @@ Reason:
 - The replacement documents the live phase chain, current action surfaces,
   kernel/framework bridges, and artifact contracts.
 
+### Corrected remaining stale docs wording
+
+Updated:
+
+- `docs/KB_GUIDE.md`
+- `docs/OPERATOR_SCRIPTS.md`
+- `docs/OPERATIONS.md`
+- `docs/TROUBLESHOOTING.md`
+
+Reason:
+
+- These docs still used `backends` / `params` as current proposal or
+  workflow labels, or described resume failures as happening at a
+  `setup` step.
+- The updated wording uses the live `explore` path and describes old
+  names only as migration, compatibility, or OOB backend terminology.
+
 ## Status
 
 Step 02 low-risk cleanup is complete for the first and examples batches.
 
 The next safe cleanup batch can continue with:
 
-- stale retired-action prompt references,
 - unimplemented feature wording in deeper docs,
 - compatibility-heavy paths only after the decision list is resolved.
