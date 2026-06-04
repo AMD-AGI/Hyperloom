@@ -257,13 +257,11 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
             tags.append((dom.kb_anchor or domain) if dom else domain)
     return list(dict.fromkeys(tags))
 
-# M5 active set — domains whose prompt templates are fully wired
-# in the specialist_prompt_builder. PR-A6 (Arbor-into-Hyperloom)
-# added per-domain focus templates for ``kernel_switch_specialist`` /
-# ``comm_specialist`` / ``compiler_specialist`` / ``system_specialist`` /
-# ``pr_intel_specialist`` (previously M6-only fallbacks), so the M5
-# active set now matches the catalogue and Orchestration can dispatch
-# any of the six without falling through to the generic template.
+# Active set — domains whose prompt templates are fully wired in the
+# specialist_prompt_builder. All six domains have per-domain focus
+# templates, so the active set matches the catalogue and Orchestration
+# can dispatch any of them without falling through to the generic
+# template.
 SPECIALIST_DOMAINS_M5: frozenset[str] = frozenset(
     d.key for d in SPECIALIST_DOMAINS
 )
@@ -277,9 +275,9 @@ def get_domain(key: str) -> SpecialistDomain | None:
     return None
 
 
-# Maximum number of LLM turns a specialist may run. KB_design §3.5 §9
-# bounds the stale-detection threshold at ``max_turns × per_turn_max_min
-# × 1.5`` (default ~10 minutes). 8 is the M5 default per §3.13 M5 §5.
+# Maximum number of LLM turns a specialist may run. The stale-detection
+# threshold is bounded at ``max_turns × per_turn_max_min × 1.5``
+# (default ~10 minutes).
 DEFAULT_SPECIALIST_MAX_TURNS: int = 8
 
 # Hard cap so the LLM can't request ridiculous turn counts. PolicyGate
