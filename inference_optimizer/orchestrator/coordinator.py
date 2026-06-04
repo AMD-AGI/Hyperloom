@@ -621,7 +621,7 @@ class Coordinator:
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
-        # T4 safety net (only fires when the CLOSE phase sequencer
+        # safety net (only fires when the CLOSE phase sequencer
         # did NOT get to run — e.g. Ctrl-C / crash mid-EXPLORE).
         # Runs the recipe / journal finalize. The SQLite close still
         # runs afterwards so we don't leak fds.
@@ -903,8 +903,7 @@ class Coordinator:
             ))
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: phase_transition event bus write failed")
-        # phase-entry side effects (KB_gaps/Gap-02 PR 5.4 +
-        # follow-up Gap-04 / Gap-05 / Gap-06). Side effects are
+        # phase-entry side effects. Side effects are
         # *additive* — failures inside a hook are logged but never
         # roll back the transition. Keeping the dispatch table inside
         # ``_on_phase_entered`` so the per-phase branches stay together
@@ -3229,8 +3228,8 @@ class Coordinator:
     # Class-level timeouts for the CLOSE sequencer's wait-for-task
     # polls. Class attributes (rather than constants in the method)
     # so tests can override per-instance with small values without
-    # patching method internals. Production defaults match KB_design
-    # §3.2 §5.5: report ≤ 10 min (matches ``BaselineExecutor`` cap);
+    # patching method internals. Production defaults: report ≤ 10 min
+    # (matches ``BaselineExecutor`` cap);
     # session_breakdown ≤ 5 min (tiny report, lots of headroom).
     CLOSE_REPORT_TIMEOUT_SEC: float = 600.0
     CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC: float = 300.0
@@ -6235,7 +6234,7 @@ class Coordinator:
         # explore directly) but still need the same operational knobs.
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
-        # IR-7 — ``assess_remaining_gaps`` is a thin wrapper: rewrite
+        # ``assess_remaining_gaps`` is a thin wrapper: rewrite
         # the kind to ``specialist`` and force the
         # ``session_steward_specialist`` domain (LLM cannot pick any
         # other domain via this action). Throttle is checked separately
@@ -7137,7 +7136,7 @@ class Coordinator:
 
         # Mechanical floor passed — materialise the specialist-shaped
         # workspace + push the proposal onto the bus for the Critic
-        # to score. The PR-A7 mirror on _handle_single_verdict will
+        # to score. The mirror on _handle_single_verdict will
         # write the verdict into specialist_patch_verdicts so the
         # PolicyGate gate on the eventual integrate_patch delegate
         # passes.
@@ -8190,7 +8189,7 @@ class Coordinator:
             },
         )
 
-        # IR-7 — route session_steward_specialist verdicts. Done payload
+        # route session_steward_specialist verdicts. Done payload
         # carries extra fields beyond the standard schema; see
         # ``actions/assess_remaining_gaps.md`` and the prompt builder
         # focus template. Coerce out-of-vocab recommendations to
@@ -8416,7 +8415,7 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             return raw_rec, next_gap
 
-        # IR-6 is the only thing the depth gate must never override.
+        # The HARD force-exit is the only thing the depth gate must never override.
         try:
             force_exit, _ = _phase_state.should_force_exit_explore(
                 state, budget_pct=self._phase_budget_pct,
@@ -8707,7 +8706,7 @@ class Coordinator:
         # explored deeply enough, rewrite the verdict to
         # ``continue_explore`` and inject a concrete deepening
         # instruction. This may fire any number of times — the only
-        # backstop is the IR-6 budget gate, which is checked first:
+        # backstop is the HARD budget gate, which is checked first:
         # once the budget is (about to be) exhausted the depth gate is
         # bypassed and the original stop / advance stands.
         if raw_rec in ("stop_session", "advance_to_kernel"):
@@ -8911,7 +8910,7 @@ class Coordinator:
             if handler is not None:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
-                # PR-X (1cd9f7d): force batch dispatch for run_optimization.
+                # force batch dispatch for run_optimization.
                 # ``kernel_request_handlers.run_optimization_handler`` upgrades
                 # the request to ``_run_optimization_batch`` only when the
                 # payload carries ``candidates_path`` (so it can fan out to
@@ -8974,7 +8973,7 @@ class Coordinator:
                         # second/third request with ``integrate_handler requires
                         # base_tput > 0`` (the LLM only consistently remembers the
                         # field for the first integrate). Explicit operator value
-                        # still wins. See PR-B follow-up.
+                        # still wins.
                         if (
                             kind == "integrate"
                             and not merged_payload.get("base_tput")
@@ -9054,11 +9053,9 @@ class Coordinator:
                         isinstance(result, dict) and result.get("batch_mode")
                     ):
                         self.shared_state.record_kernel_opt(result)
-                    # Note: main commit ce36e70 also routes the decision
-                    # into a per-action scoreboard (KEEP / no-promote
-                    # accounting on the action-priority table). The
-                    # scoreboard was retired by KB_design §3.9 on this
-                    # branch (                     # §4), so the post-record bookkeeping is omitted.
+                    # The per-action scoreboard (KEEP / no-promote
+                    # accounting) was retired, so the post-record
+                    # bookkeeping is omitted.
                     self.shared_state.save(self.session_dir)
                 if kind == "run_gemm_tuning":
                     self.shared_state.record_gemm_tuning(result)
@@ -9866,7 +9863,7 @@ class Coordinator:
                             "specialist bookkeeping hook failed for task=%s",
                             task.task_id,
                         )
-                # PR-A8 (Arbor-into-Hyperloom): bump the per-EXPLORE
+                # bump the per-EXPLORE
                 # specialist dispatch counter. Robustness reads this
                 # in its prompt context to detect storms (many
                 # specialists dispatched with no winning proposal).
@@ -9888,7 +9885,7 @@ class Coordinator:
                         "dynamic_action lifecycle hook failed for task=%s",
                         task.task_id,
                     )
-            # PR-A8 — intervention-mix ledger: when an explore or
+            # intervention-mix ledger: when an explore or
             # integrate_patch task succeeds with a kept variant, log
             # the change_type so Robustness can see config-only
             # streaks. ``explore`` carries config-shaped KEEPs;
@@ -11555,13 +11552,9 @@ class Coordinator:
             # PRELUDE initial roofline was deferred while replay ran.
             await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
         elif task_kind == "profile":
-            # IR-8 fallback: profile_executor used to short-circuit on
-            # FRAMEWORK=atom with status="skipped" + error_class=
-            # "atom_no_profiler". That short-circuit was removed once
-            # Magpie's atom_mi*x.sh learned to bridge PROFILE=1 to
-            # atom's --torch-profiler-dir (atom natively supports torch
-            # profiler via /start_profile + /stop_profile). This
-            # ``skipped`` arm is now a *defensive* path: it still runs
+            # atom now profiles natively (Magpie's atom_mi*x.sh bridges
+            # PROFILE=1 to --torch-profiler-dir), so this ``skipped``
+            # arm is now a *defensive* path: it still runs
             # cleanly if an out-of-date Magpie clone is in play (the
             # only realistic skipped producer left), or if a future
             # executor returns skipped for a different reason. Audit
@@ -11688,12 +11681,9 @@ class Coordinator:
             # save() path persists the executor's mutations to disk.
             status = str(result.get("status") or "")
             if status == "skipped":
-                # IR-8 fallback: the roofline composite used to short-
-                # circuit on FRAMEWORK=atom with status="skipped"
-                # because profile was a hard dependency and atom had
-                # no profiler wiring. That short-circuit was removed
-                # once Magpie's atom_mi*x.sh learned to bridge PROFILE=1
-                # to atom's --torch-profiler-dir. This arm is now the
+                # atom now profiles natively (Magpie's atom_mi*x.sh
+                # bridges PROFILE=1 to --torch-profiler-dir), so this
+                # arm is now the
                 # *defensive* path: an out-of-date Magpie clone (or a
                 # future skipped-emitting executor) still gets a clean
                 # no-op rather than a spurious "discarded". Do NOT bump

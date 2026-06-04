@@ -150,7 +150,7 @@ class SubAgentRunner:
         # queued → running first (state machine constraint). Use the
         # resilient variant so a missing row doesn't kill the runner
         # before the executor has even started -- see
-        # _transition_resilient for the rationale (Bug N34 #1/#2).
+        # _transition_resilient for the rationale.
         await self._transition_resilient(
             task.task_id, "running", context="enter_running",
         )
@@ -212,7 +212,7 @@ class SubAgentRunner:
         finally:
             # Always release whoever acquired the lease — pre-bound or
             # owned. The dispatcher passes the lease in but trusts the
-            # runner's finally to release it (Inv-7.3 atomic release).
+            # runner's finally to release it (atomic release).
             if lease is not None:
                 await self.locks.release(lease)
 
