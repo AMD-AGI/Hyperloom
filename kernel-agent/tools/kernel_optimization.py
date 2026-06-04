@@ -614,12 +614,42 @@ def _format_shapes_for_case(shapes: Any) -> str:
     return str(shapes)
 
 
+def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
+    """Fallback shapes block when no TraceLens ``task_group`` is attached.
+
+    Surfaces the candidate's TraceLens-captured argument shapes so GEAK binds
+    its (self-generated) harness to the EXACT shapes the kernel saw during
+    serving -- the optimization signal must match the workload or a kernel-level
+    speedup will not translate to an end-to-end gain. Generic: applies to any
+    candidate carrying captured shapes; returns ``""`` when none exist so the
+    prompt stays byte-identical to legacy in that case.
+    """
+    shapes = candidate.get("shapes") or candidate.get("kernel_shapes")
+    rendered = _format_shapes_for_case(shapes)
+    if not rendered:
+        return ""
+    bound = str(candidate.get("bound_type") or candidate.get("bound") or "").strip()
+    bound_line = f" (bound: {bound})" if bound else ""
+    return (
+        "\n## Benchmark shapes (TraceLens-captured from the serving run)\n\n"
+        "Build your harness shape sweep / `get_inputs()` from EXACTLY these\n"
+        f"captured argument shapes{bound_line} -- do NOT invent shapes. They are what\n"
+        "the kernel saw during sglang/vLLM serving, so optimizing against them is\n"
+        "what produces an end-to-end gain on the workload:\n"
+        f"- args: {rendered}\n"
+        "Correctness golden: the ORIGINAL kernel's output on these shapes "
+        "(baseline / `fn=` injection); do not hand-derive a reference from scratch.\n"
+    )
+
+
 def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
     """Render the multi-row benchmark cases section for a task_group.
 
-    Returns the empty string when ``candidate["task_group"]`` is absent
-    so the prompt body stays byte-identical for legacy per-kernel
-    dispatch. When present, emits one bullet per TraceLens Operation
+    Falls back to :func:`_build_captured_shapes_block` when
+    ``candidate["task_group"]`` is absent (or carries no rows) so the
+    captured serving shapes still reach GEAK -- previously this returned
+    ``""`` and GEAK got no shapes. When a task_group is present, emits one
+    bullet per TraceLens Operation
     row sorted by aggregate time (descending). Each bullet carries
     ``operation``, ``args``, ``aggregate_time_ms``, ``percent_e2e``,
     ``count``, ``per_call_ms``, ``flops_per_byte``, ``efficiency``,
@@ -633,11 +663,12 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
     rather than buried inside the kernel_metadata JSON.
     """
     group = candidate.get("task_group")
-    if not isinstance(group, dict):
-        return ""
-    rows = group.get("rows") or []
-    if not isinstance(rows, list) or not rows:
-        return ""
+    rows = group.get("rows") if isinstance(group, dict) else None
+    if not (isinstance(rows, list) and rows):
+        # No task_group (or no rows): still surface the captured serving
+        # shapes so GEAK's harness is bound to the real workload (generic
+        # fallback). Returns "" when the candidate carries no shapes either.
+        return _build_captured_shapes_block(candidate)
     function_name = str(group.get("function_name") or "")
     source_path = str(group.get("source_path") or "")
     definition_line = group.get("definition_line")
