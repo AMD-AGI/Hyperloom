@@ -220,6 +220,45 @@ def test_attribution_method_marks_single_source_when_path_len_1() -> None:
     assert g.gain_attribution_lines[0].startswith("100% via 1 explore KEEP")
 
 
+def test_legacy_backends_action_path_still_attributed() -> None:
+    bd = _fixture_breakdown()
+    bd["final"]["action_path"] = ["backends:vllm_kv_fp8"]
+
+    r = render_session_report(bd)
+
+    assert r.global_facts.gain_attribution_lines[0].startswith(
+        "100% via 1 backends KEEP"
+    )
+
+
+def test_legacy_source_buckets_survive_alongside_explore() -> None:
+    bd = _fixture_breakdown()
+    bd["attribution"] = {
+        "method": "reconstructed",
+        "source_breakdown": {
+            "validated_total_pct": 14.5,
+            "explore_pct_of_total": 10.0,
+            "backends_pct_of_total": 4.5,
+            "params_pct_of_total": 0.0,
+            "geak_pct_of_total": 0.0,
+            "oob_pct_of_total": 0.0,
+            "sweep_pct_of_total": 0.0,
+        },
+        "notes": [],
+    }
+
+    r = render_session_report(bd)
+
+    assert any(
+        line.startswith("explore: 10.00% of total")
+        for line in r.global_facts.gain_attribution_lines
+    )
+    assert any(
+        line.startswith("backends: 4.50% of total")
+        for line in r.global_facts.gain_attribution_lines
+    )
+
+
 def test_attribution_missing_when_no_gain() -> None:
     bd = _fixture_breakdown()
     bd["final"] = {"throughput_tok_s_per_gpu": None,
