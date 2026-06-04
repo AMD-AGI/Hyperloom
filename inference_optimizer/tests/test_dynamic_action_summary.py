@@ -29,7 +29,7 @@ from inference_optimizer.orchestrator.dynamic_action_proposal import (
     TERMINAL_LIFECYCLE_STATUSES,
     can_transition,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     PolicyDenied,
     PolicyGate,

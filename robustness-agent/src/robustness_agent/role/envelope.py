@@ -1,7 +1,7 @@
 """Intent envelope contract.
 
 This module mirrors the wire shape defined by
-``inference_optimizer/orchestrator/intent_parser.py`` so that the
+``inference_optimizer/protocol/intent.py`` so that the
 robustness reactor can construct intents that the Coordinator's
 ``PolicyGate`` accepts without change.
 

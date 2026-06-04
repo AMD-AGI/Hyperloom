@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from ..intent_parser import Intent
+from ...protocol.intent import Intent
 
 log = logging.getLogger(__name__)
 
