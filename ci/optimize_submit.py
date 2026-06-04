@@ -157,9 +157,9 @@ _KERNEL_BACKEND_ALIASES = {
 }
 
 
-def normalize_gpu_profile(gpu_type: str | None, *, warn: bool = True) -> str:
-    """Return the GPU profile key used for CI policy decisions."""
-    raw = (gpu_type or DEFAULT_GPU_TYPE).strip()
+def normalize_gpu_profile(gpu_type: str | None, *, warn: bool = True) -> str | None:
+    """Return the GPU profile key when ``gpu_type`` maps to a known CI profile."""
+    raw = (gpu_type or "").strip()
     compact = re.sub(r"[^a-z0-9]", "", raw.lower())
     for key, profile in GPU_PROFILES.items():
         profile_type = str(profile["gpu_type"])
@@ -170,13 +170,16 @@ def normalize_gpu_profile(gpu_type: str | None, *, warn: bool = True) -> str:
         if compact in aliases or compact.endswith(key):
             return key
     if warn and raw:
-        log.warning("unknown gpu_type=%r; falling back to %s",
+        log.warning("unknown gpu_type=%r; using %s for TP policy only",
                     raw, GPU_PROFILES[DEFAULT_GPU_PROFILE]["gpu_type"])
-    return DEFAULT_GPU_PROFILE
+    return None
 
 
 def canonical_gpu_type(gpu_type: str | None) -> str:
-    return str(GPU_PROFILES[normalize_gpu_profile(gpu_type)]["gpu_type"])
+    profile_key = normalize_gpu_profile(gpu_type, warn=False)
+    if profile_key:
+        return str(GPU_PROFILES[profile_key]["gpu_type"])
+    return (gpu_type or DEFAULT_GPU_TYPE).strip() or DEFAULT_GPU_TYPE
 
 # Canonical prompt prefix lives in ci/prompt_prefix.txt next to this script.
 # Single source of truth — same file is read by the GitHub workflow Submit
@@ -498,7 +501,7 @@ def context_too_short(
 ) -> bool:
     if max_context_tokens <= 0:
         return False
-    return max_context_tokens <= (isl + osl + reserve_tokens)
+    return max_context_tokens < (isl + osl + reserve_tokens)
 
 
 def detect_tp(params_b: float, precision: str = "BF16",
@@ -511,7 +514,8 @@ def detect_tp(params_b: float, precision: str = "BF16",
     """
     if params_b <= 0:
         return 1
-    profile = GPU_PROFILES[normalize_gpu_profile(gpu_type)]
+    profile_key = normalize_gpu_profile(gpu_type) or DEFAULT_GPU_PROFILE
+    profile = GPU_PROFILES[profile_key]
     tp1_max, tp2_max, tp4_max = profile["tp_thresholds_b"]
     if params_b <= tp1_max:  return 1
     if params_b <= tp2_max:  return 2
@@ -1220,8 +1224,8 @@ def process_model(
         overrides={k: v for k, v in overrides.items() if v is not None},
         pool={k: v for k, v in (pool_metadata or {}).items() if v not in (None, "")},
     )
-    gpu_profile = normalize_gpu_profile(gpu_type)
-    gpu_type = str(GPU_PROFILES[gpu_profile]["gpu_type"])
+    gpu_type = canonical_gpu_type(gpu_type)
+    gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
 
     detected = None if manual_mode else auto_detect(hf, repo_id, gpu_type=gpu_type)
     if not detected and not manual_mode:
@@ -1241,7 +1245,7 @@ def process_model(
             rec.status = "skipped"
             rec.error = (
                 "context_too_short: "
-                f"max_context_tokens={max_context} <= required={required} "
+                f"max_context_tokens={max_context} < required={required} "
                 f"(isl={isl}, osl={osl}, reserve={DEFAULT_CONTEXT_RESERVE_TOKENS})"
             )
             log.warning("[%s] skipping: %s", repo_id, rec.error)
@@ -2989,8 +2993,8 @@ def main() -> int:
     gpu_type_input = (args.gpu_type
                       or os.environ.get("SAFE_OPTIMIZE_GPU_TYPE")
                       or DEFAULT_GPU_TYPE)
-    gpu_profile = normalize_gpu_profile(gpu_type_input)
-    gpu_type = str(GPU_PROFILES[gpu_profile]["gpu_type"])
+    gpu_type = canonical_gpu_type(gpu_type_input)
+    gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
     inferencex_path = (args.inferencex_path
                        or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
                        or DEFAULT_INFERENCEX_PATH)
