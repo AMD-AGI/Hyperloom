@@ -78,7 +78,8 @@ These feed warm start and KB sediment; see Step 06.
 Retained only to migrate / fall back for old sessions:
 
 - `params_winner_history` — folded into `explore_search` at load.
-- `backend_winners_history` — folded into `explore_search` at load.
+- `backend_winners_history` — folded into `explore_search` at load and
+  still rendered read-only for old prompt summaries.
 - `synergy_attempted` — folded into `explore_search` at load.
 - `params_no_promote_streak` — read-only fallback for the legacy M2 plateau proxy when `explore_search` is empty.
 
@@ -119,3 +120,9 @@ A new session should only write canonical fields. Specifically:
 - never write `last_select_kernels`.
 
 Existing writer sites already follow this; the static guard in `tests/test_no_legacy_writer_sites.py` keeps the alias surface narrow.
+
+Follow-up applied:
+
+- `push_backend_winners_round()` was removed because it had no live
+  runtime caller. New sessions should update `explore_search`, not the
+  legacy `backend_winners_history` field.
