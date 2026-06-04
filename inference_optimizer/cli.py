@@ -62,18 +62,18 @@ from .cli_kb import (  # noqa: F401 - re-exported for callers/tests
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
-from .orchestrator.backends import (
-    ClaudeBackend,
-    CodexBackend,
-    CriticAgentBackend,
-    MockCriticBackend,
-    MockRobustnessBackend,
-    RobustnessAgentBackend,
+from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
+    _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
+    _build_backends,
+    _build_proposal_scorer,
+    _build_robustness_options,
+    _robustness_server_configured,
 )
+from .orchestrator.backends import ClaudeBackend
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
-from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
+from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS
 from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
@@ -697,130 +697,6 @@ def _autodetect_gpu_type() -> str | None:
         return _GFX_TO_RUNNER.get(gfx)
     except Exception:  # noqa: BLE001
         return None
-
-
-def _build_backends(
-    *,
-    claude_model: str,
-    codex_model: str,
-    kernel_codex: bool,
-    critic_choice: str,
-    session_dir: Path,
-    critic_agent_root: Path | None = None,
-    critic_kb_mode: str = "inmemory",
-    robustness_choice: str = "mock",
-    robustness_agent_root: Path | None = None,
-    robustness_options: dict[str, Any] | None = None,
-    no_kernel: bool = False,
-) -> dict[str, Any]:
-    """Construct all per-role backends.
-
-    ``critic_choice`` ∈ {``"mock"``, ``"agent"``}:
-
-    * ``mock`` — always-approve adapter (smoke / offline tests).
-    * ``agent`` — :class:`CriticAgentBackend` driving the ``critic-agent``
-      skill runtime. Adds KB priors / writes, session memory, and
-      ``review_constraints``-gated verdicts. Requires ``critic_agent_root``.
-
-    ``robustness_choice`` ∈ {``"mock"``, ``"agent"``}:
-
-    * ``mock`` — heartbeat-only :class:`MockRobustnessBackend` (default;
-      keeps optimizer self-contained).
-    * ``agent`` — :class:`RobustnessAgentBackend` driving
-      ``python -m robustness_agent.runtime.cli`` in a subprocess. Mirrors
-      the critic-agent transport. Requires ``robustness_agent_root``.
-    """
-    if critic_choice not in ("mock", "agent"):
-        raise ValueError(
-            f"_build_backends: critic_choice={critic_choice!r} not in "
-            "{'mock','agent'}"
-        )
-
-    if critic_choice == "mock":
-        critic_backend: Any = MockCriticBackend()
-    else:  # "agent"
-        if critic_agent_root is None:
-            raise ValueError(
-                "_build_backends: critic_choice='agent' requires critic_agent_root"
-            )
-        # Feed the registry-derived per-action verdict policy so the
-        # critic-agent runtime sees
-        # ``review_constraints.action_verdict_policy[<action_name>]`` and
-        # approves exploration / archival actions without demanding the
-        # before/after evidence they themselves produce.
-        try:
-            from inference_optimizer.orchestrator.action_registry import (
-                ActionRegistry,
-            )
-            _reg = ActionRegistry().load()
-            _policy = {a.name: a.verdict_class for a in _reg.all()}
-        except Exception:  # noqa: BLE001 — degrade to empty policy
-            _policy = {}
-        critic_backend = CriticAgentBackend(
-            critic_agent_root=critic_agent_root,
-            session_dir=session_dir,
-            codex_model=codex_model,
-            kb_mode=critic_kb_mode,
-            action_verdict_policy=_policy,
-        )
-
-    if robustness_choice not in ("mock", "agent"):
-        raise ValueError(
-            f"_build_backends: robustness_choice={robustness_choice!r} not in "
-            "{'mock','agent'}"
-        )
-    if robustness_choice == "mock":
-        robustness_backend: Any = MockRobustnessBackend()
-    else:  # "agent"
-        if robustness_agent_root is None:
-            raise ValueError(
-                "_build_backends: robustness_choice='agent' requires "
-                "robustness_agent_root"
-            )
-        robustness_backend = RobustnessAgentBackend(
-            robustness_agent_root=robustness_agent_root,
-            session_dir=session_dir,
-            options=robustness_options,
-        )
-
-    backends: dict[str, Any] = {
-        "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
-        "critic":        critic_backend,
-        "robustness":    robustness_backend,
-    }
-    if not no_kernel:
-        if kernel_codex:
-            backends["kernel"] = CodexBackend(model=codex_model)
-        else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=5)
-    return backends
-
-
-def _build_proposal_scorer(
-    args: argparse.Namespace,
-) -> ProposalScorer | None:
-    """Construct the advisory specialist-proposal scorer, or ``None``.
-
-    Returns ``None`` when ``--no-proposal-scoring`` is set or the
-    resolved model list is empty. Models default to
-    :data:`DEFAULT_SCORER_MODELS` (``claude-opus-4-8,gpt-5.5,
-    dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview``).
-    Adding a
-    model = appending its gateway slug to ``--proposal-scorer-models``.
-    The scorer is purely advisory and never gates anything.
-    """
-    if getattr(args, "no_proposal_scoring", False):
-        return None
-    raw = getattr(args, "proposal_scorer_models", None)
-    if raw is None:
-        models = tuple(DEFAULT_SCORER_MODELS)
-    else:
-        models = tuple(
-            m for m in (s.strip() for s in str(raw).split(",")) if m
-        )
-    if not models:
-        return None
-    return ProposalScorer(models=models)
 
 
 def _resume_safe_flag(
@@ -2662,23 +2538,6 @@ DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
 _VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
 
 
-def _robustness_server_configured(args: argparse.Namespace) -> bool:
-    """Return True when a robustness-server endpoint is configured.
-
-    The server is the only source that gives the agent a cluster-wide
-    view on multi-node — once it is wired the agent runs with
-    ``disable_local_probe`` / ``enable_cluster_pod_metrics`` and the
-    sandbox-local ``LocalProbeSource`` false positives are silenced.
-    We treat the server as configured when the operator passes
-    ``--robustness-server-url`` or sets ``ROBUSTNESS_SERVER_URL`` in the
-    environment.
-    """
-    url = (getattr(args, "robustness_server_url", None) or "").strip()
-    if url:
-        return True
-    return bool((os.environ.get("ROBUSTNESS_SERVER_URL") or "").strip())
-
-
 def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     """Resolve the active robustness backend choice.
 
@@ -2745,106 +2604,6 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-_MULTI_NODE_WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
-    "ROBUSTNESS_WORKLOAD_UID",
-    "CLAW_WORKLOAD_UID",
-    "WORKLOAD_UID",
-    "KUBE_WORKLOAD_UID",
-    "RAY_JOB_ID",
-)
-
-
-def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
-    """Collect non-default ``request.options`` overrides from CLI flags.
-
-    Only emits keys the operator actually passed so the runtime CLI
-    falls back to its own defaults / env-discovery for the rest.
-
-    Multi-node policy: when ``--nodes >= 2`` the agent must source its
-    signals from the cluster (robustness-server) rather than the local
-    sandbox, otherwise the per-pod LocalProbe trips false ``ray_head_dead``
-    / ``local_server_unreachable`` symptoms on every worker that does not
-    host the inference server. We therefore default ``disable_local_probe``
-    and ``enable_cluster_pod_metrics`` to True in that mode (unless the
-    operator explicitly opted out) and forward a workload_uid hint so the
-    server can resolve every pod that belongs to the same RayJob.
-
-    For the same reason the hardcoded ``http://127.0.0.1:8888/health``
-    probe baked into ``Config.auto_probe_inference_server`` can never
-    succeed when the inference server lives in the head pod, so we also
-    disable the auto-probe and lift the ``no_levers_found`` elapsed-time
-    floor to 60 min (sglang cold start + baseline + profile + turnaround
-    alone burns 35-50 min before the first explore family runs).
-    Single-node semantics stay untouched.
-    """
-    options: dict[str, Any] = {}
-    server_url = getattr(args, "robustness_server_url", None)
-    if server_url is not None:
-        options["robustness_server_url"] = server_url
-    llm_rca = getattr(args, "robustness_llm_rca", None)
-    if llm_rca is not None:
-        options["llm_rca_enabled"] = bool(llm_rca)
-
-    nodes = int(getattr(args, "nodes", 1) or 1)
-    multi_node = nodes >= 2
-    if nodes > 1:
-        options["nodes"] = nodes
-
-    workload_uid = (getattr(args, "robustness_workload_uid", None) or "").strip()
-    if not workload_uid:
-        for key in _MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
-            candidate = (os.environ.get(key) or "").strip()
-            if candidate:
-                workload_uid = candidate
-                break
-    if workload_uid:
-        options["workload_uid"] = workload_uid
-
-    disable_local = getattr(args, "robustness_disable_local_probe", None)
-    if disable_local is None and multi_node:
-        disable_local = True
-    if disable_local is not None:
-        options["disable_local_probe"] = bool(disable_local)
-
-    enable_pod_metrics = getattr(args, "robustness_enable_cluster_pod_metrics", None)
-    if enable_pod_metrics is None and multi_node:
-        enable_pod_metrics = True
-    if enable_pod_metrics is not None:
-        options["enable_cluster_pod_metrics"] = bool(enable_pod_metrics)
-
-    categories_raw = getattr(args, "robustness_pod_metrics_categories", None)
-    if categories_raw:
-        if isinstance(categories_raw, (list, tuple)):
-            cat_iter = categories_raw
-        else:
-            cat_iter = str(categories_raw).split(",")
-        cat_list = [c.strip() for c in cat_iter if str(c).strip()]
-        if cat_list:
-            options["pod_metrics_categories"] = cat_list
-
-    if multi_node:
-        # The inference server runs in the head pod, so the hardcoded
-        # 127.0.0.1:8888 health probe can never succeed and would flood
-        # the bus with false-positive ``local_server_unreachable``
-        # symptoms each tick — disable the auto-probe in multi-node.
-        options["auto_probe_inference_server"] = False
-        # B3 no_levers_found floor — multi-node large-model spends
-        # 35-50 min on sglang cold start + baseline + profile +
-        # turnaround alone before the first explore family runs.
-        # Bumping the elapsed-time floor from 45 to 60 minutes layers
-        # a wall-clock buffer on top of the explore_started gate
-        # (commit 97318ee) so the symptom only fires when both
-        # exploration has started AND a full hour has elapsed
-        # without finding a lever. Single-node default (45.0) stays
-        # untouched.
-        options["progress_no_levers_min_minutes"] = 60.0
-
-    return options
-
-
-# ---------------------------------------------------------------------------
-# Recipe-snapshot KB dispatcher bootstrap
-# ---------------------------------------------------------------------------
 def _reset_state_file(session_dir: Path) -> None:
     """v0.8 §3.10 — back up the existing ``state.json`` and start fresh.
 
