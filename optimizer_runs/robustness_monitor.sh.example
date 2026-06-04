@@ -75,7 +75,16 @@ export MAGPIE_PYTHON="${MAGPIE_PYTHON:-/opt/venv/bin/python}"
 # resolves instantly; an unset LAUNCH_INFO_FILE fails fast (no wasted wait).
 session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-}"
 if [ -z "$session_dir" ] && [ -n "${LAUNCH_INFO_FILE:-}" ]; then
-  launch_info_deadline=$(( $(date +%s) + ${LAUNCH_INFO_WAIT_SEC:-60} ))
+  # Validate the wait BEFORE arithmetic: a non-integer value would otherwise
+  # make the $(( ... )) below error out under ``set -u`` (e.g. "60x" ->
+  # "value too great for base"), skipping the bounded wait entirely. Degrade a
+  # malformed value to the default instead of crashing / failing early.
+  launch_info_wait_sec="${LAUNCH_INFO_WAIT_SEC:-60}"
+  if ! [[ "$launch_info_wait_sec" =~ ^[0-9]+$ ]]; then
+    echo "WARN: invalid LAUNCH_INFO_WAIT_SEC='${launch_info_wait_sec}'; using default 60s." >&2
+    launch_info_wait_sec=60
+  fi
+  launch_info_deadline=$(( $(date +%s) + launch_info_wait_sec ))
   while [ -z "$session_dir" ]; do
     if [ -f "${LAUNCH_INFO_FILE}" ]; then
       session_dir="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("session_dir") or "")' "${LAUNCH_INFO_FILE}" 2>/dev/null || true)"
@@ -86,7 +95,7 @@ if [ -z "$session_dir" ] && [ -n "${LAUNCH_INFO_FILE:-}" ]; then
   done
 fi
 if [ -z "$session_dir" ]; then
-  echo "ERROR: session dir is unknown (no INFERENCE_OPTIMIZER_SESSION_DIR; LAUNCH_INFO_FILE absent or not written within ${LAUNCH_INFO_WAIT_SEC:-60}s). Refusing to fall back to /workspace/hyperloom." >&2
+  echo "ERROR: session dir is unknown (no INFERENCE_OPTIMIZER_SESSION_DIR; LAUNCH_INFO_FILE absent or not written within ${launch_info_wait_sec:-60}s). Refusing to fall back to /workspace/hyperloom." >&2
   exit 2
 fi
 deadline=$(( $(date +%s) + (${MAX_HOURS:-24} + 1) * 3600 ))
