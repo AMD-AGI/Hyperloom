@@ -389,7 +389,7 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """IR-8: validate atom-specific CLI knob compatibility.
+    """Validate atom-specific CLI knob compatibility.
 
     The function's only responsibility is the multi-node fail-fast
     guard. The forward-looking alias :data:`_assert_atom_single_node`
@@ -896,7 +896,7 @@ def _seed_shared_state(
     # research_lane capacity is locked here for the lifetime of the
     # session. Clamp to [0, research-lane ceiling], where the ceiling
     # scales with the visible GPU count (``2 × GPU``). The cap protects
-    # LLM quota and PR Monitor load (§3.14 R-07).
+    # LLM quota and PR Monitor load.
     from inference_optimizer.orchestrator.policy import (
         research_lane_ceiling,
     )
@@ -1503,25 +1503,23 @@ def _load_kernel_agent_env_fallback() -> None:
     install.sh`` at ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``
     (overridable via ``$KERNEL_AGENT_ENV``).
 
-    Background: the May 2026 R1 N14 run stalled for 1h 12min because
-    the launcher only sourced the user's basic ``.env`` (3 vars) and
-    missed kernel-agent.env.sh. ``RooflineExecutor``'s trace_analyze
-    sub-step imports ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT``
-    at module load — that read happens before any user code can fix the
-    env, so the only way to recover without a restart is to source the
-    file here, before any orchestrator import. Setting the env in this
+    Background: a run once stalled because the launcher only sourced
+    the user's basic ``.env`` and missed kernel-agent.env.sh.
+    ``RooflineExecutor``'s trace_analyze sub-step imports
+    ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT`` at module
+    load — that read happens before any user code can fix the env, so
+    the only way to recover without a restart is to source the file
+    here, before any orchestrator import. Setting the env in this
     process also propagates to all subprocesses launched by Magpie /
     TraceLens / GEAK runners.
 
-    Hard-fail contract (revised after the May 2026 Qwen1.5-7B 10h
-    silent-stall: env file at the wrong path -> silent WARN-only ->
-    5 rooflines all profile-success / trace_analyze-fail / snapshot
-    stays None / LLM heartbeat-only 7.5h). The function now:
+    Hard-fail contract (a wrong-path env file used to WARN-only and let
+    trace_analyze silently fail for hours). The function now:
 
     * Looks ONLY at ``$KERNEL_AGENT_ENV`` (if set) or
       ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``. USER_DATA_PATH
-      MUST be the workspace root (per N17 split: ``runtime/`` is
-      workspace-shared, not per-session). No parent-dir fallback.
+      MUST be the workspace root (``runtime/`` is workspace-shared,
+      not per-session). No parent-dir fallback.
     * If the file is missing OR parses 0 vars OR
       HYPERLOOM_KERNEL_AGENT_ROOT is still unset after sourcing,
       ``sys.exit(2)`` with a clear actionable message instead of
@@ -1750,7 +1748,7 @@ def _check_tracelens_cli() -> None:
     ``inference_optimizer/scripts/install.sh``) into the *pod-local*
     ``/opt/venv/bin/`` — they do NOT persist across pod restarts even
     when ``$USER_DATA_PATH`` (typically ``/workspace/hyperloom``) is a
-    WekaFS-backed session dir that survives pod recycling. SKILL §IR-2
+    WekaFS-backed session dir that survives pod recycling. SKILL
     therefore requires running ``install.sh`` before every launch; the
     only carve-out is ``--resume`` in the *same shell* that earlier ran
     install.sh.
@@ -1759,14 +1757,14 @@ def _check_tracelens_cli() -> None:
     ``runtime/kernel-agent.env.sh`` and skip install.sh (fresh-start
     ``--model`` path) land here with no TraceLens CLI on PATH. Until this
     gate was added, the missing-CLI failure was surfaced only by the
-    robustness agent's J3 signal at tick ~6 (HIGH severity
-    ``tracelens_cli_missing``) — after baseline had already completed
+    robustness agent's HIGH-severity ``tracelens_cli_missing`` signal
+    at tick ~6 — after baseline had already completed
     (or hung) and a multi-minute setup cost was wasted.
     ``trace_analyze`` / ``kernel_opt`` then fail downstream when they
     shell out to ``tracelens_analysis.py``.
 
-    Moving discovery to launch — mirroring ``_gate_claude_model``
-    (SKILL §Step 2 step 10) — turns a delayed silent strike into a
+    Moving discovery to launch — mirroring ``_gate_claude_model`` —
+    turns a delayed silent strike into a
     fail-fast with an actionable error pointing at the install.sh fix.
     """
     missing = [
@@ -2395,7 +2393,7 @@ def _preflight(
     # --- TraceLens CLI presence (HARD-FAIL; SKILL Step 2 step 8.5) ---
     # Catches brain-generated launchers that source only env.sh and skip
     # install.sh — without this gate the missing-CLI symptom would not
-    # surface until robustness J3 fires at tick ~6, after baseline.
+    # surface until the robustness probe fires at tick ~6, after baseline.
     _check_tracelens_cli()
 
     # --- IR-3: Cortex KB + PR Monitor reachability (soft degrade) ---
@@ -2605,7 +2603,7 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
 
 
 def _reset_state_file(session_dir: Path) -> None:
-    """v0.8 §3.10 — back up the existing ``state.json`` and start fresh.
+    """Back up the existing ``state.json`` and start fresh.
 
     The backup name is ``state.json.preReset.<unix_ts>`` so multiple
     resets in the same session_dir don't clobber each other. Symbolic
@@ -3121,9 +3119,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         args.resume = True
 
     if args.resume:
-        # Resume mode (N17-aware): USER_DATA_PATH stays at workspace
-        # level so runtime/ + logs/ resolution doesn't break (N15
-        # `_load_kernel_agent_env_fallback` looks at $USER_DATA_PATH/
+        # Resume mode: USER_DATA_PATH stays at workspace level so
+        # runtime/ + logs/ resolution doesn't break
+        # (`_load_kernel_agent_env_fallback` looks at $USER_DATA_PATH/
         # runtime/kernel-agent.env.sh, which only exists at workspace
         # level after install.sh ran). We then pick the per-session
         # subdir to resume from via either:
@@ -3531,8 +3529,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
               f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision} "
               f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}")
 
-        # N17: session_dir is now <workspace_root>/<model>/<UTC ts>/
-        # by default (per-model + per-launch). Workspace_root is
+        # session_dir is <workspace_root>/<model>/<UTC ts>/ by default
+        # (per-model + per-launch). Workspace_root is
         # $USER_DATA_PATH (fallback /workspace/hyperloom). To restore
         # the legacy flat layout, set INFERENCE_OPTIMIZER_SESSION_LAYOUT=
         # flat. `make_session_dir(model_name=...)` does the layout
@@ -3569,7 +3567,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # seed (so model_name / gpu_type / framework are populated for
         # recipe_canonical_id derivation) but before Coordinator is
         # constructed (the Coordinator stores the client + threads it
-        # into T2/T3/T4 hooks). Fails fast unless --degraded-kb.
+        # into its KB hooks). Fails fast unless --degraded-kb.
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=False,
         )
@@ -3727,9 +3725,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # as `policy_denied` in its inbox. Tests omit this and keep the
     # legacy lenient mode for fixture paths under /tmp.
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
-    # flip on PolicyGate R1 phase_incompatible enforcement
-    # for production runs (matches the legacy→v0.8 strict_paths
-    # rollout). Tests construct PolicyGate directly with strict_phase
+    # flip on PolicyGate R1 phase_incompatible enforcement for
+    # production runs. Tests construct PolicyGate directly with strict_phase
     # left at the dataclass default (False) so legacy fixtures aren't
     # broken; this env var only affects the cli boot path.
     if getattr(args, "strict_phase", True):
@@ -3776,8 +3773,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
 
     # Build the phase budget pct dict from CLI flags; ``None`` values
-    # fall back to library defaults inside Coordinator. See KB_design
-    # §3.13 M2 §7 + §3.8 §5.3.
+    # fall back to library defaults inside Coordinator.
     phase_budget_pct: dict[str, float] = {}
     for cli_field, phase_name in (
         ("phase_budget_prelude_pct", "PRELUDE"),
@@ -3810,7 +3806,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         ),
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
-        # v0.8 §3.5 + KB_gaps/Gap-01/Gap-02 — KnowledgePlane facade.
+        # KnowledgePlane facade.
         # ``None`` when --degraded-kb; otherwise wraps Cortex KB +
         # PR Monitor for specialist prompt assembly.
         knowledge_plane=knowledge_plane,
@@ -3819,7 +3815,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # each proposal_set and surfaces the results to Orchestration as
         # one reference among many (never gates anything).
         proposal_scorer=_build_proposal_scorer(args),
-        # GAP 1 — Warm-recipe replay controls. Default ON, fires when
+        # Warm-recipe replay controls. Default ON, fires when
         # warm_start_recipe.confidence >= min_confidence and the
         # measured gain reproduces at least min_reproduce_pct of the
         # recipe's historical claim. Manifest is the persistent
@@ -3862,13 +3858,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     except (TypeError, ValueError):
         coordinator.framework_pr_discover_timeout_sec = 0.0
-    # v0.8 §3.5 + build specialist executor when the
-    # research_lane capacity is non-zero. ``args.research_lane_capacity``
-    # is already clamped to [0, 32] by ``_seed_shared_state``; a value
-    # of 0 means "degrade to M3 LLM-direct grid", and we keep
-    # ``specialist_executor=None`` so the dispatcher falls back to the
-    # legacy ``no_executor`` rejection (which PolicyGate R2 also
-    # short-circuits in practice).
+    # Build specialist executor when the research_lane capacity is
+    # non-zero. ``args.research_lane_capacity`` is already clamped to
+    # [0, 32] by ``_seed_shared_state``; a value of 0 means "degrade to
+    # the LLM-direct grid", and we keep ``specialist_executor=None`` so
+    # the dispatcher falls back to the ``no_executor`` rejection (which
+    # PolicyGate R2 also short-circuits in practice).
     specialist_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 0
     )
@@ -3943,8 +3938,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # service / offline analysis). Best-effort — a failure here MUST NOT
         # mask the actual stop_reason, so we swallow exceptions and log.
         #
-        # v0.8 §3.2 §5.5 / KB_gaps/Gap-06: when the CLOSE phase sequencer
-        # ran to completion, step 2 already wrote the same artifact via
+        # When the CLOSE phase sequencer ran to completion, step 2
+        # already wrote the same artifact via
         # the standard session_breakdown executor. Skip the duplicate
         # write here so the cli.finally path doesn't clobber the
         # sequencer's output (which includes the full CLOSE-step
@@ -4487,14 +4482,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # Cortex KB integration flags
     # ------------------------------------------------------------------
-    # The defaults wire Cortex *on* (matches the "Loop 1" expectation in
-    # the cortex hand-off doc). ``--degraded-kb`` is a debug escape hatch
-    # that fully bypasses T0/T2/T3/T4 so a fresh sandbox can reproduce
-    # the behaviour without any KB writes. ``--cortex-kb-url``
+    # The defaults wire Cortex *on*. ``--degraded-kb`` is a debug escape
+    # hatch that fully bypasses the KB hooks so a fresh sandbox can
+    # reproduce the behaviour without any KB writes. ``--cortex-kb-url``
     # overrides the env value (``CORTEX_KB_URL``) without exporting one
     # process-wide. ``--cortex-strict-fingerprint`` enforces the
     # manifest stack_fingerprint matches a recipe before warm_start is
-    # consumed (M5 consumer; M1 records the flag into manifest only).
+    # consumed.
     opt.add_argument(
         "--cortex-kb-url",
         dest="cortex_kb_url",
@@ -4547,7 +4541,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "in manifest.json). Default: lenient (M1 records the flag "
              "in manifest only; consumed by M5 specialist assembly).",
     )
-    # GAP 1 — Warm-recipe replay (PRELUDE auto-applies the KB best_config
+    # Warm-recipe replay (PRELUDE auto-applies the KB best_config
     # before EXPLORE starts). Three flags control the behavior:
     #
     # 1. ``--no-warm-replay``         — disable the auto-enqueue entirely.
@@ -4601,7 +4595,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # k8s namespace must port-forward + pass a localhost URL.
     # ``--degraded-pr`` switches the KnowledgePlane.pr_feed_warm
     # path to a no-op and strips ``mcp__pr_monitor__*`` from the
-    # specialist tool whitelist (Inv-6.3 degrade-to-empty).
+    # specialist tool whitelist (degrade-to-empty).
     opt.add_argument(
         "--pr-monitor-url",
         dest="pr_monitor_url",
@@ -4643,14 +4637,14 @@ def _build_parser() -> argparse.ArgumentParser:
              "Default: 30.",
     )
     # ------------------------------------------------------------------
-    # v0.8 M5/M6 — specialist research_lane capacity
+    # specialist research_lane capacity
     # ------------------------------------------------------------------
     # ``--research-lane-capacity`` locks the number of LLM specialists
     # that may run concurrently on the research_lane:
-    #   * 0   → degrade to M3 (no specialist dispatch; EXPLORE uses the
-    #           default_grid path).
-    #   * 1   → v0.8 M5 default (single specialist at a time).
-    #   * 4   → PR-A3 (Arbor-into-Hyperloom) default — enough headroom
+    #   * 0   → no specialist dispatch; EXPLORE uses the default_grid
+    #           path.
+    #   * 1   → single specialist at a time.
+    #   * 4   → default — enough headroom
     #           for the Orchestration LLM to fan out one specialist per
     #           top-K gap inside one tick (multi-emit shape) and have
     #           the dispatcher actually run them in parallel.
@@ -4716,7 +4710,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable the advisory specialist-proposal scorer entirely.",
     )
     # ------------------------------------------------------------------
-    # v0.8 §3.5 / §3.13 M5 + specialist sub-agent
+    # specialist sub-agent
     # backend selection. Specialists run via Claude (default) and inherit
     # the orchestration model unless overridden. Per-task turn / time
     # caps protect against runaway LLM consumption.
@@ -4792,7 +4786,7 @@ def _build_parser() -> argparse.ArgumentParser:
              ".",
     )
     # ------------------------------------------------------------------
-    # PR-A2 (Arbor-into-Hyperloom): specialist dispatch shape.
+    # specialist dispatch shape
     # ------------------------------------------------------------------
     opt.add_argument(
         "--specialist-dispatch-mode",
@@ -5026,7 +5020,7 @@ def _build_parser() -> argparse.ArgumentParser:
             hint=_retired_hint,
         )
     # ------------------------------------------------------------------
-    # Fix E — per-variant explore overtime kill ratio.
+    # Per-variant explore overtime kill ratio.
     #
     # Mirrored into :attr:`SharedState.explore_overtime_kill_ratio`
     # and read by :class:`ExploreExecutor` via task.params (Coordinator
@@ -5152,7 +5146,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # drop scoreboard
     # ------------------------------------------------------------------
-    # v0.8 retires the legacy ``action_scores`` decision system. The
+    # The legacy ``action_scores`` decision system is retired. The
     # flag below controls how a resumed session's leftover
     # scoreboard data is handled:
     #
@@ -5164,8 +5158,8 @@ def _build_parser() -> argparse.ArgumentParser:
     #   a ``breakdown.warnings`` entry so the operator sees the
     #   migration even on a fresh dashboard.
     #
-    # No third "keep" mode is offered: §3.9 §7 explicitly forbids
-    # carrying the field forward (the prompt builder no longer reads
+    # No third "keep" mode is offered: carrying the field forward is
+    # forbidden (the prompt builder no longer reads
     # it; keeping the bytes only inflates state.json).
     opt.add_argument(
         "--legacy-action-scores",
@@ -5302,13 +5296,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "gain sum is computed over. Default 5.",
     )
     # ------------------------------------------------------------------
-    # v0.8 IR-6 — EXPLORE HARD force-exit thresholds (Saturday May 2026)
+    # IR-6 — EXPLORE HARD force-exit thresholds
     # ------------------------------------------------------------------
     # Either condition fires an ``explore_force_exit_low_budget`` exit
-    # which routes EXPLORE → KERNEL (or SWEEP when --no-kernel). Iron
-    # Rule IR-6: this gate is non-negotiable — the steward / plateau /
-    # LLM cannot extend EXPLORE past either threshold. Locked at session
-    # start into ``SharedState.plateau_overrides``.
+    # which routes EXPLORE → KERNEL (or SWEEP when --no-kernel). This
+    # gate is non-negotiable — the steward / plateau / LLM cannot extend
+    # EXPLORE past either threshold. Locked at session start into
+    # ``SharedState.plateau_overrides``.
     opt.add_argument(
         "--explore-force-exit-hours-remaining",
         dest="explore_force_exit_hours_remaining",
@@ -5328,7 +5322,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "0.20 (IR-6).",
     )
     # ------------------------------------------------------------------
-    # IR-7 — session_steward_specialist controls (Saturday May 2026)
+    # IR-7 — session_steward_specialist controls
     # ------------------------------------------------------------------
     # The steward is the soft gate on plateau (HARD IR-6 still wins on
     # low budget). Operators can disable it for smoke runs or cap its
@@ -5355,8 +5349,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # Each phase claims a fraction of the total wall-clock budget. The
     # numbers below are caps — the Coordinator may exit a phase earlier
-    # if the plateau judge fires. Defaults follow §3.8 §5.3.  Sum need
-    # not equal 1.0 (a deliberate padding is encouraged).
+    # if the plateau judge fires. Sum need not equal 1.0 (a deliberate
+    # padding is encouraged).
     opt.add_argument(
         "--max-minutes-prelude-pct",
         dest="phase_budget_prelude_pct",
