@@ -235,30 +235,6 @@ def effective_closing_grace_sec(
     return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
-def _resolve_silent_ticks_closing_threshold() -> int:
-    """Resolve how many idle ticks elapse before forced closing.
-
-    "Idle" = ``shared_state.consecutive_silent_ticks`` was bumped
-    because the tick had no queued tasks, no running tasks, no pending
-    proposals and no ``current_action``. Default 120 ticks; with the
-    prod ``tick_interval_sec=5.0`` that is ~10 minutes of total LLM
-    silence before we short-circuit. Override via the env knob; ``0``
-    disables the early-close (legacy behaviour: idle until the wall-
-    clock deadline). Negative / non-numeric values fall back to the
-    default.
-    """
-    raw = os.environ.get(
-        "INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "",
-    ).strip()
-    if not raw:
-        return 120
-    try:
-        v = int(raw)
-    except ValueError:
-        return 120
-    return v if v >= 0 else 120
-
-
 def _parse_iso_unix(ts: str) -> float:
     """Parse an ISO 8601 UTC timestamp into unix seconds.
 
@@ -4450,7 +4426,6 @@ class Coordinator:
         * ``self._stop`` set (from SIGINT/SIGTERM or ``stop()``)
             → ``stop_reason="signal"``
         * objective.reached(shared_state)  → ``"target_reached"``
-        * no remaining automated levers     → ``"no_more_leverage"``
         * wall-clock budget exceeded        → enter closing phase, then
             ``"time_exhausted"`` after report flush or grace elapses
         * crash_count >= ``crash_emergency_threshold`` → ``"emergency"``
@@ -4530,31 +4505,6 @@ class Coordinator:
                             exc=exc,
                             tick=tick_n,
                         )
-
-                    # N33: bump ``consecutive_silent_ticks`` when the post-
-                    # tick state shows nothing in flight (no queued / running
-                    # task, no pending proposal, no ``current_action``). Any
-                    # non-empty signal means the run is still making forward
-                    # progress (LLM proposed, executor running, critic
-                    # reviewing, etc.) so we reset the counter to 0. Skipped
-                    # while we're already in closing to avoid double-firing
-                    # the closing-phase trigger below.
-                    if not in_closing:
-                        try:
-                            queued_now = len(await self.tasks.queued())
-                            running_now = len(await self.tasks.running())
-                        except Exception:  # noqa: BLE001
-                            queued_now = running_now = 0
-                        tick_is_idle = (
-                            queued_now == 0
-                            and running_now == 0
-                            and not self.state.pending_proposals
-                            and not (self.shared_state.current_action or "").strip()
-                        )
-                        if tick_is_idle:
-                            self.shared_state.consecutive_silent_ticks += 1
-                        else:
-                            self.shared_state.consecutive_silent_ticks = 0
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -4576,13 +4526,6 @@ class Coordinator:
                 if objective.reached(self.shared_state):
                     stop_reason = "target_reached"
                     break
-                # The no-more-leverage safety net (which used to wind the
-                # session down to SWEEP -> CLOSE via the skip_to_sweep hint
-                # when cheap rounds plateaued and every reusable kernel was
-                # rejected) has been removed to prioritise long-run
-                # continuity: the run keeps exploring until the wall-clock
-                # deadline rather than self-winding down on a plateau
-                # judgment.
                 if (
                     deadline is not None
                     and time.monotonic() >= deadline
@@ -4595,13 +4538,6 @@ class Coordinator:
                         grace_sec=grace_sec,
                     )
                     continue
-                # N33 idle-timeout early-close has been removed to
-                # prioritise long-run continuity. ``consecutive_silent_ticks``
-                # is still tracked (the LLM / breakdown can read it), but
-                # the run no longer short-circuits into the closing phase
-                # when the LLM stops proposing actionable work — it keeps
-                # ticking until the wall-clock deadline (or another
-                # stop_reason) fires.
                 if in_closing:
                     report_terminal = await self._closing_report_terminal()
                     grace_blown = (
