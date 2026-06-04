@@ -58,12 +58,11 @@ from ._renderers import (   # noqa: F401  (side-effect imports)
 # Final report layout: ``(group_title, [section_id, ...])``.
 #
 # Grouping mirrors the orchestration phases a hyperloom run actually
-# goes through — Session/Workload setup, performance Results, the
-# capability search loop (backends/params/sweep), kernel optimization
-# (lifecycle + GEAK/OOB invocations), and bookkeeping (attribution +
-# source files). ``telemetry`` is deliberately dropped from the report
-# (its renderer is no longer imported above) because the on-disk GPU
-# monitor data has been consistently broken on real wekafs sessions.
+# goes through: session/workload setup, performance results, explore and
+# sweep capability search, kernel optimization, and bookkeeping.
+# ``telemetry`` is deliberately dropped from the report because the
+# on-disk GPU monitor data has been consistently broken on real wekafs
+# sessions.
 SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ("Session & Workload",          ["session", "workload"]),
     ("Performance Results",          ["baseline", "final", "roofline", "attribution"]),
