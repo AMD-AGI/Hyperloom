@@ -136,8 +136,8 @@ def build(
                                             sd, state, geak_invocations, oob_invocations, warnings,
                                         ),
                                         warnings)
-    param_search       = _safe_collect("param_search",
-                                        lambda: collectors.collect_param_search(state, warnings),
+    explore_search     = _safe_collect("explore_search",
+                                        lambda: collectors.collect_explore_search(state, warnings),
                                         warnings)
     sweep              = _safe_collect("sweep",
                                         lambda: collectors.collect_sweep(sd, state, warnings),
@@ -260,12 +260,12 @@ def build(
         "geak_invocations":    geak_invocations,
         "oob_invocations":     oob_invocations,
         "kernel_lifecycle":    kernel_lifecycle,
-        "param_search":        param_search,
+        "param_search":        explore_search,
         # ``explore_search`` is the v2-native name for
         # the merged ledger. Mirror of
         # ``param_search`` so v2 readers can switch with a one-line
         # rename + v1 readers don't break.
-        "explore_search":      param_search,
+        "explore_search":      explore_search,
         "sweep":               sweep,
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
