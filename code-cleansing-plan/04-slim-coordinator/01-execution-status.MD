@@ -50,6 +50,24 @@ Action:
 - Behavior is unchanged: the pump still runs in the same point in each
   loop and still logs and suppresses defensive failures.
 
+### Centralized roofline pending gate checks
+
+The pending auto-analysis gate appeared separately in propose,
+materialize, and delegate paths.
+
+Action:
+
+- Added `Coordinator._roofline_denial_for_action(action_name)`.
+- Added `Coordinator._defer_approved_proposal_for_roofline(...)` for the
+  materialize-only deferred queue / resume observation logic.
+- Replaced the three inline roofline-gate checks with the shared helper.
+
+Behavior is unchanged:
+
+- propose/delegate still record `PolicyDenied`,
+- already-approved proposals are still deferred instead of dropped,
+- resume can still rebuild the deferred queue from the same observation.
+
 ## Verification
 
 - Lint: no errors on `coordinator.py`.
@@ -57,6 +75,8 @@ Action:
 - Follow-up FRAMEWORK_PR pump verification: `test_coordinator_runtime.py`,
   `test_framework_pr_pump_integration.py`, `test_framework_pr_executor.py`
   pass (98 passed).
+- Follow-up roofline gate verification: coordinator, deferred-proposal,
+  roofline, and prompt-visibility tests pass (244 passed, 1 skipped).
 
 ## Not Done Yet (Future Step 04 Batches)
 
@@ -64,7 +84,6 @@ The plan lists more de-dup and the larger responsibility split. These are intent
 
 De-dup still pending:
 
-- roofline pending gate duplicate checks across propose / delegate / materialize.
 - time budget prompt block duplication in `_compose_prompt`.
 - `extra_server_args` compat read entry consolidation.
 - shared terminal task-result promotion hook.
