@@ -99,6 +99,9 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"- **Model**: {summary['model_name']}  (`{summary['model_path']}`)")
     lines.append(f"- **Stop reason**: `{summary['stop_reason']}`")
+    stop_detail = str(summary.get("stop_detail") or "").strip()
+    if stop_detail:
+        lines.append(f"- **Stop detail**: {stop_detail}")
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")

@@ -900,8 +900,15 @@ def _write_gemm_tuning_benchmark_script(
     to the benchmark script's own PID/trap handling. It deliberately avoids
     global `pgrep sglang` cleanup so it cannot kill the main optimizer's
     benchmark server when GEMM tuning runs inside a live session.
+
+    ``$INFERENCEX_PATH`` (honoured when set in the orchestrator env) lets an
+    operator point GEMM tuning at a relocated InferenceX checkout; the
+    legacy ``/hyperloom/InferenceX`` literal is used only as the fallback.
+    It is resolved once here so the benchmark runner path and the exported
+    ``INFERENCEX_PATH`` stay consistent.
     """
-    runner = f"/hyperloom/InferenceX/benchmarks/{framework}_{gpu_type}.sh"
+    inferencex_path = os.environ.get("INFERENCEX_PATH") or "/hyperloom/InferenceX"
+    runner = f"{inferencex_path}/benchmarks/{framework}_{gpu_type}.sh"
     path = workspace / "geak_gemm_benchmark.sh"
     path.write_text(
         f"""#!/usr/bin/env bash
@@ -919,7 +926,7 @@ export RESULT_DIR="${{RESULT_DIR:-$PWD/gemm_benchmark_result}}"
 export RESULT_FILENAME="${{RESULT_FILENAME:-bench_serving.json}}"
 export PORT="${{PORT:-18888}}"
 export PATH="/opt/node20/bin:/opt/venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export INFERENCEX_PATH="/hyperloom/InferenceX"
+export INFERENCEX_PATH={shlex.quote(inferencex_path)}
 mkdir -p "$RESULT_DIR"
 cd "$INFERENCEX_PATH"
 exec {shlex.quote(runner)}
