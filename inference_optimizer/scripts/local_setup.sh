@@ -8,7 +8,14 @@ CHECK_ONLY=0
 
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../.." && pwd)}"
+# Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
+# can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
+# or empty, which is exactly the case the :- default below would absorb.
+_user_data_was_set="${USER_DATA_PATH:+1}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+if [ -z "${_user_data_was_set}" ]; then
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 DEPS_ROOT_EXPLICIT=0
 if [ -n "${HYPERLOOM_DEPS_ROOT:-}" ]; then
