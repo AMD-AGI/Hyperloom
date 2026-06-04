@@ -3210,6 +3210,51 @@ class Coordinator:
             ),
         )
 
+    async def _roofline_denial_for_action(
+        self, action_name: str,
+    ) -> "PolicyDenied | None":
+        """Apply the auto-analysis gate only to actions that require it."""
+        if action_name not in _ROOFLINE_GATED_ACTIONS:
+            return None
+        return await self._auto_roofline_pending_denial(action_name=action_name)
+
+    async def _defer_approved_proposal_for_roofline(
+        self,
+        pending: PendingProposal,
+        approved_variant_names: set[str] | None,
+    ) -> None:
+        """Queue an approved proposal until the pending analysis task lands."""
+        self._proposals_awaiting_roofline.append(
+            (pending, approved_variant_names),
+        )
+        # Resume contract: this observation carries everything
+        # ``replay_for_resume`` needs to rebuild the deferred queue after a
+        # restart. A subsequent ``approved_proposal`` decision carrying the
+        # same proposal_msg_id signals that the drain dispatched it.
+        await self._record_observation(
+            "coordinator", "observation",
+            {
+                "kind": "proposal_materialize_blocked",
+                "reason": "wait_for_auto_roofline",
+                "proposal_msg_id": pending.proposal_msg_id,
+                "action_name": pending.action_name,
+                "from_agent": pending.from_agent,
+                "pending_roofline_task_id": (
+                    self.shared_state.auto_roofline_pending_task_id
+                    or ""
+                ),
+                "deferred_queue_depth": len(
+                    self._proposals_awaiting_roofline,
+                ),
+                "approved_variant_names": (
+                    sorted(approved_variant_names)
+                    if approved_variant_names is not None
+                    else None
+                ),
+                "kb_edge_ids": dict(pending.kb_edge_ids or {}),
+            },
+        )
+
     async def _drain_proposals_awaiting_roofline(self) -> None:
         """Re-run materialise for proposals deferred by the analysis gate.
 
@@ -5916,15 +5961,12 @@ class Coordinator:
         # path; ``_materialize_approved_proposal`` carries a symmetric
         # check for the race where the watermark trips while a proposal
         # is already in front of the Critic.
-        if action_name in _ROOFLINE_GATED_ACTIONS:
-            roofline_denied = await self._auto_roofline_pending_denial(
-                action_name=action_name,
+        roofline_denied = await self._roofline_denial_for_action(action_name)
+        if roofline_denied is not None:
+            await self._record_policy_denied(
+                source, intent, roofline_denied, action_name=action_name,
             )
-            if roofline_denied is not None:
-                await self._record_policy_denied(
-                    source, intent, roofline_denied, action_name=action_name,
-                )
-                return
+            return
         denied = self._sequence_denial_for_action(
             action_name,
             proposed_params=intent.payload.get("params"),
@@ -6523,48 +6565,14 @@ class Coordinator:
         # the watermark crossing and the dispatch tick. Defer rather
         # than drop — the Critic already approved, so re-running the
         # round-trip would be wasted budget.
-        if pending.action_name in _ROOFLINE_GATED_ACTIONS:
-            roofline_denied = await self._auto_roofline_pending_denial(
-                action_name=pending.action_name,
+        roofline_denied = await self._roofline_denial_for_action(
+            pending.action_name,
+        )
+        if roofline_denied is not None:
+            await self._defer_approved_proposal_for_roofline(
+                pending, approved_variant_names,
             )
-            if roofline_denied is not None:
-                self._proposals_awaiting_roofline.append(
-                    (pending, approved_variant_names),
-                )
-                # Resume contract: this observation carries everything
-                # ``replay_for_resume`` needs to rebuild the deferred
-                # queue after a restart (proposal_msg_id keys the
-                # PendingProposal in the bus's proposal-topic events;
-                # approved_variant_names + kb_edge_ids preserve the
-                # per-variant filter the Critic produced and the
-                # Cortex T2 edge stamping). A subsequent
-                # ``approved_proposal`` decision carrying the same
-                # proposal_msg_id signals that the drain has dispatched
-                # the proposal so resume should skip it.
-                await self._record_observation(
-                    "coordinator", "observation",
-                    {
-                        "kind": "proposal_materialize_blocked",
-                        "reason": "wait_for_auto_roofline",
-                        "proposal_msg_id": pending.proposal_msg_id,
-                        "action_name": pending.action_name,
-                        "from_agent": pending.from_agent,
-                        "pending_roofline_task_id": (
-                            self.shared_state.auto_roofline_pending_task_id
-                            or ""
-                        ),
-                        "deferred_queue_depth": len(
-                            self._proposals_awaiting_roofline,
-                        ),
-                        "approved_variant_names": (
-                            sorted(approved_variant_names)
-                            if approved_variant_names is not None
-                            else None
-                        ),
-                        "kb_edge_ids": dict(pending.kb_edge_ids or {}),
-                    },
-                )
-                return
+            return
         params = dict(pending.payload.get("params") or {})
         # Filter the grid down to the Critic-approved subset (Gap-11).
         # The per-variant ``kb_edge_id`` stamping the T2 hook used to do
@@ -6807,15 +6815,12 @@ class Coordinator:
         # runs. The gated action set is the module-level
         # ``_ROOFLINE_GATED_ACTIONS`` so propose_action / materialize
         # paths gate against the exact same names.
-        if action_name in _ROOFLINE_GATED_ACTIONS:
-            denied = await self._auto_roofline_pending_denial(
-                action_name=action_name,
+        denied = await self._roofline_denial_for_action(action_name)
+        if denied is not None:
+            await self._record_policy_denied(
+                source, intent, denied, action_name=action_name,
             )
-            if denied is not None:
-                await self._record_policy_denied(
-                    source, intent, denied, action_name=action_name,
-                )
-                return
+            return
 
         # v0.8 §3.5 + specialist pre-dispatch warmup.
         # When the Orchestration role delegates a specialist task, the
