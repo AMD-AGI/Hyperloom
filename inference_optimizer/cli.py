@@ -1041,6 +1041,15 @@ _MAXPOS_CONFIG_KEYS = (
 _CONTEXT_HEADROOM_ENV = "HYPERLOOM_CONTEXT_HEADROOM_TOKENS"
 _CONTEXT_HEADROOM_DEFAULT = 512
 
+# Extra context budget (tokens) layered on top of ISL+OSL when sizing the
+# server-facing ``MAX_MODEL_LEN`` (KV-cache ceiling). Larger than the preflight
+# headroom because it also absorbs decode-side slack, but ALWAYS clamped to the
+# model's native window by :func:`_resolve_max_model_len` so it can never stretch
+# the context. sglang ignores MAX_MODEL_LEN (its ``context_length`` stays None),
+# but the vllm benchmark wires it into ``--max-model-len``, so an unclamped value
+# above the native window would crash that server.
+_MAX_MODEL_LEN_HEADROOM = 4096
+
 
 def _load_model_max_position_embeddings(model_path: str) -> int | None:
     """Best-effort read of the model's max sequence length from config.json.
@@ -1083,6 +1092,29 @@ def _context_headroom_tokens() -> int:
     except ValueError:
         return _CONTEXT_HEADROOM_DEFAULT
     return val if val >= 0 else _CONTEXT_HEADROOM_DEFAULT
+
+
+def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
+    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to the native window.
+
+    Never returns a value above the model's ``max_position_embeddings``: by
+    policy we do not stretch the context (RoPE extrapolation / learned-absolute
+    position breakage), and the vllm benchmark wires this value straight into
+    ``--max-model-len`` — an unclamped ISL+OSL+4096 above a small native window
+    would crash the server. The clamp keeps it aligned with the preflight gate
+    (which already guarantees ``maxpos >= ISL+OSL+headroom``), so the resolved
+    value always lands in ``[ISL+OSL, max_position_embeddings]``. When the native
+    window is unknown the headroom default stands (prior behaviour).
+
+    sglang ignores ``MAX_MODEL_LEN`` (its ``context_length`` stays None), but the
+    value is still mirrored into the benchmark YAML, so it must not advertise a
+    length above the model's real window there either.
+    """
+    desired = int(isl) + int(osl) + _MAX_MODEL_LEN_HEADROOM
+    maxpos = _load_model_max_position_embeddings(model_path)
+    if maxpos:
+        return min(desired, maxpos)
+    return desired
 
 
 def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
@@ -1145,6 +1177,19 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
         print(
             f"WARNING: failed to persist context-window stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    # Delivery-artifact parity: cli's normal exit writes session_breakdown.json
+    # in coordinator.run()'s finally, but this fail-fast sys.exit(2)s before that
+    # try/finally is ever entered. Emit it here too (best-effort) so CI's
+    # delivery contract sees a clean, documented skip — not "Missing artifacts".
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on context "
+            f"fail-fast: {exc!r}",
             file=sys.stderr,
         )
     print(f"ERROR: {reason}", file=sys.stderr)
@@ -4708,8 +4753,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
 
-        # Compute MAX_MODEL_LEN = ISL + OSL + 4096 headroom, export for yaml injection.
-        max_model_len = args.isl + args.osl + 4096
+        # MAX_MODEL_LEN = ISL + OSL + headroom, clamped to the model's native
+        # window (no context stretch); see _resolve_max_model_len. Exported for
+        # YAML injection — vllm wires it into --max-model-len; sglang ignores it
+        # (context_length stays None) but still mirrors it into the config.
+        max_model_len = _resolve_max_model_len(
+            args.isl, args.osl, str(args.model or ""),
+        )
         os.environ["MAX_MODEL_LEN"] = str(max_model_len)
         os.environ["ISL"] = str(args.isl)
         os.environ["OSL"] = str(args.osl)
