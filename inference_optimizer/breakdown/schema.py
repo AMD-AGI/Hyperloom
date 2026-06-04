@@ -174,7 +174,7 @@ class CapabilityEntry(TypedDict, total=False):
     tested: int                   # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
     reason: str                   # human readable, e.g. "kernel-claude only this run"
-    # v0.8 M3 explore-specific:
+    # explore-specific:
     keep_unstable_count: int      # KEEP'd variants evicted by inlined stack rebench
     winners_history: int          # cumulative explore_search.winners_history length
     # specialist-row only — per-domain split. Keys are
@@ -539,7 +539,7 @@ class Attribution(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# §16 Phase segments — v0.8 M2 phase state machine
+# §16 Phase segments — phase state machine
 # ---------------------------------------------------------------------------
 class PhaseSegment(TypedDict, total=False):
     phase: str                 # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
@@ -547,7 +547,7 @@ class PhaseSegment(TypedDict, total=False):
     entered_ts: str            # iso UTC of entry
     entered_unix: float | None
     exit_ts: str               # iso UTC of next transition; "" for current segment
-    exit_reason: str           # KB_design §3.2 §6 vocab entry; "" for current segment
+    exit_reason: str           # transition reason vocab entry; "" for current segment
     evidence: dict[str, Any]   # entry evidence (snapshot at transition time)
     actions: list[PhaseEvent]  # events from phase_timeline whose ts ∈ [entered, exit)
     elapsed_seconds: float | None
@@ -605,7 +605,7 @@ class KBProvenance(TypedDict, total=False):
     warm_start_recipe_tier: str
     warm_start_pitfall_count: int
     warm_start_lesson_count: int
-    # GAP 1 — operator-visible warm-replay summary.
+    # operator-visible warm-replay summary.
     warm_replay: WarmReplayOutcome
     warm_replay_attempted: bool
     warm_history_injected: bool
@@ -613,12 +613,12 @@ class KBProvenance(TypedDict, total=False):
     queue: KBQueueStats
     audit_tail_count: int
     audit_status_counts: dict[str, int]
-    # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle marker.
+    # Cortex KB flusher daemon lifecycle marker.
     flusher_status: KBFlusherStatus
-    # IR-3 soft-degrade audit. Values:
-    # ``None`` (KB / PR Monitor reachable, no degrade), ``"explicit_flag"``
-    # (operator passed ``--degraded-{kb,pr}``), or ``"ir3_auto"`` (IR-3
-    # probe failed and cli auto-enabled the corresponding degrade).
+    # Soft-degrade audit. Values: ``None`` (KB / PR Monitor reachable,
+    # no degrade), ``"explicit_flag"`` (operator passed
+    # ``--degraded-{kb,pr}``), or ``"ir3_auto"`` (preflight probe failed
+    # and cli auto-enabled the corresponding degrade).
     kb_degraded_reason: str
     pr_degraded_reason: str
 
@@ -981,14 +981,13 @@ class SessionBreakdown(TypedDict, total=False):
     workload: Workload
     baseline: Baseline
     final: Final
-    # ``phase_timeline`` retained for v1-reader
-    # compat as the flat per-action timeline (``action_timeline`` is
-    # the canonical v2 name; see below). ``phase_segments`` carries
-    # the phase-boundary view (M2).
+    # ``phase_timeline`` retained for v1-reader compat as the flat
+    # per-action timeline (``action_timeline`` is the canonical v2 name;
+    # see below). ``phase_segments`` carries the phase-boundary view.
     phase_timeline: list[PhaseEvent]
     phase_segments: list[PhaseSegment]
-    # v0.8 §3.12 §4.2 / §5 — top-level action_timeline alias used by
-    # v0.6 readers that still expect a flat per-action list.
+    # top-level action_timeline alias used by older readers that still
+    # expect a flat per-action list.
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
     geak_invocations: list[Invocation]
