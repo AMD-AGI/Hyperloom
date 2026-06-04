@@ -1112,7 +1112,7 @@ class SharedState:
         # function is idempotent: re-loading a current
         # state.json (``schema_version == LATEST_STATE_SCHEMA_VERSION``)
         # short-circuits the migration logging without touching the
-        # fact-layer payload (Inv-10.1).
+        # fact-layer payload.
         incoming_version = int(raw.get("schema_version") or 1)
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
@@ -1203,7 +1203,7 @@ class SharedState:
         # *non-empty* legacy state.json but couldn't be loaded into
         # the dataclass (caller dropped it / type mismatch). ``lenient``
         # downgrades to WARNING and continues. Fresh sessions
-        # (``raw == {}``) skip the check entirely. Inv-10.1.
+        # (``raw == {}``) skip the check entirely.
         if needs_migration and raw:
             mode = os.environ.get(
                 "INFERENCE_OPTIMIZER_MIGRATION_MODE", "strict",
