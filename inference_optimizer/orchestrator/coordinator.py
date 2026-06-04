@@ -2785,8 +2785,20 @@ class Coordinator:
         best_config = recipe_attrs.get("best_config") or {}
         if not isinstance(best_config, dict):
             best_config = {}
-        # Need at least one of args / envs to be worth replaying.
-        bc_args = str(best_config.get("extra_sglang_args") or best_config.get("args") or "").strip()
+        # Need at least one of args / envs to be worth replaying. Read the
+        # canonical ``extra_server_args`` FIRST (emitted by the gbrain remote
+        # round-trip) before the legacy ``extra_sglang_args`` / ``args`` —
+        # reading only the legacy names skipped a high-confidence gbrain warm
+        # recipe as ``best_config_empty``. Explicit fallback (not the
+        # warn-on-legacy compat reader) matches the sibling best_config reads
+        # in ``_build_recipe_payload`` and stays quiet for local/cortex rows
+        # that still carry the legacy key.
+        bc_args = str(
+            best_config.get("extra_server_args")
+            or best_config.get("extra_sglang_args")
+            or best_config.get("args")
+            or ""
+        ).strip()
         bc_envs = best_config.get("extra_envs") or best_config.get("envs") or {}
         if not isinstance(bc_envs, dict):
             bc_envs = {}
@@ -6648,6 +6660,17 @@ class Coordinator:
                 params.setdefault(
                     "roofline_saturation_snapshot", dict(history[-1]),
                 )
+        # Thread the persisted explore_search ledger so the ExploreExecutor's
+        # canonical_fingerprint dedup has cross-turn memory. Without it,
+        # params["explore_search"] is unset every round: the executor restarts
+        # dedup from an empty ledger (re-benching an already-tested (args, envs)
+        # under a renamed variant that escapes dedup), and the single-round
+        # tested/rejected it returns overwrite the persisted ledger via
+        # apply_explore_search_update — starving the specialist prompt's
+        # exhausted-knob context. setdefault keeps an explicit override.
+        es = getattr(self.shared_state, "explore_search", None)
+        if isinstance(es, dict) and es.get("tested"):
+            params.setdefault("explore_search", es)
 
     async def _materialize_approved_proposal(
         self,
