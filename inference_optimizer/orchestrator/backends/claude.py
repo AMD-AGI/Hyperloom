@@ -1,4 +1,4 @@
-"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude ().
+"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude.
 
 P1-5 implementation:
 
@@ -17,8 +17,6 @@ Out of scope for P1-5:
 * JSON-in-text fallback (silently degrades to NoIntentEmitted error)
 * Repair-prompt retry on parse failure (let the Coordinator surface the
   policy_denied / observation event so the agent self-corrects)
-* Codex backend — ships in a follow-up commit; the Critic role still
-  uses MockCriticBackend until then
 """
 
 from __future__ import annotations
@@ -103,7 +101,7 @@ def _import_sdk() -> tuple[Any, Any, Any]:
 
 @dataclass
 class ClaudeBackend:
-    """Production Claude backend (). Implements :class:`Backend`.
+    """Production Claude backend. Implements :class:`Backend`.
 
     Args:
         model: Claude model id (e.g. ``"claude-opus-4-7"``); defaults to

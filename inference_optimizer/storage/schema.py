@@ -1,6 +1,6 @@
-"""SQLite schema for the unified Coordinator state DB ().
+"""SQLite schema for the unified Coordinator state DB.
 
-Five tables consolidated into a single WAL database
+Seven tables consolidated into a single WAL database
 ``$SESSION_DIR/storage/coordinator.db``:
 
 * ``leases``         — resource lock state.  v0.6 had PK ``lane``
