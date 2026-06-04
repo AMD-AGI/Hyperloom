@@ -5,7 +5,7 @@ deterministic Python executors in ``action_executors/``). Each specialist
 is parameterized by a ``domain`` — a prompt-assembly dimension that maps
 to:
 
-* a Cortex KB sub-graph anchor (``kernel.*`` / ``framework.*`` / …),
+* a knowledge-domain tag for advisory RecipeKB / prompt context,
 * a PR Monitor repo subset (M4),
 * a default tool-call hint set,
 * a stable id used by PolicyGate R2 + breakdown ``specialist_runs``.
@@ -25,8 +25,8 @@ Field reference:
 * ``key`` — canonical id used in ``delegate{params.domain}`` and
   ``specialist_done{payload.domain}``.
 * ``layer`` — short human label (analysis layer the specialist cares about).
-* ``kb_anchor`` — Cortex KB top-level domain to traverse on prompt
-  assembly (M4/M5).
+* ``kb_anchor`` — legacy knowledge-domain label retained for prompt
+  grouping and old data compatibility.
 * ``pr_repos`` — repos the PR Monitor (M4) should pull recent PRs from
   for this domain.
 * ``available_in`` — ``"M5"`` for serving_specialist, ``"M6"`` for the
