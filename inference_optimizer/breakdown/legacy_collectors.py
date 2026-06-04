@@ -153,7 +153,15 @@ def collect_phase_segments(
             {
                 "action": a.get("action"),
                 "variant_name": a.get("variant_name"),
-                "extra_sglang_args": a.get("candidate_extra_sglang_args"),
+                # Emit the canonical ``extra_server_args`` field. v0.6 raw
+                # state (loaded without the SharedState key migration) only
+                # carries the pre-rename ``candidate_extra_sglang_args``, so
+                # read that with a canonical fallback for forward-migrated
+                # snapshots.
+                "extra_server_args": (
+                    a.get("candidate_extra_server_args")
+                    or a.get("candidate_extra_sglang_args")
+                ),
                 "tput": _to_float(a.get("tput")),
                 "ts": _iso_z(a.get("ts")),
             }
