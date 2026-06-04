@@ -35,7 +35,8 @@ This is a cleanup guide, not a second source of truth. Runtime source remains th
 - Contract mirror: `robustness-agent/src/robustness_agent/role/envelope.py` mirrors the intent vocabulary without importing the main package; contract tests keep them in sync.
 - Main-package responsibility: send the Coordinator prompt/state, validate the emitted intent envelope, enforce robustness-only intents through PolicyGate.
 - Multi-node: CLI auto-downgrades to `--robustness-mock` when `--nodes >= 2` without a robustness-server.
-- Decision pending: robustness legacy mode (drop if production uses reactor mode only).
+- Removed: legacy `robustness-agent --mode legacy` / `agent.py` loop.
+  Live standalone mode and Coordinator integration both use the reactor.
 
 ## Framework Integration
 
