@@ -7,24 +7,22 @@ integration uses the FRAMEWORK_PR discovery path:
 - **FRAMEWORK_PR discovery** (`fa phase-discover`) — returns upstream PR
   candidates to `inference_optimizer`, which owns Critic review, diff
   apply, benchmark, KEEP, and REVERT.
-- **Legacy PR exploration** (`fa candidates` / `fa explore`) — standalone
-  ad-hoc tooling outside the current `inference_optimizer` runtime path.
-- **Future sibling skill** (`fa agent`, PR-D+) — planned AST scan / patch
-  lifecycle; not wired into the current `inference_optimizer` Coordinator.
+- **Standalone PR exploration** (`fa candidates` / `fa explore`) —
+  ad-hoc tooling outside the `inference_optimizer` runtime path.
 
 See [`SKILL.md`](./SKILL.md) for the full architectural overview.
 
 ## Quick start
 
 ```bash
-# Install (idempotent; PR-D adds scripts/install.sh)
+# Install (idempotent)
 cd Hyperloom/framework-agent
-pip install -e '.[test]'
+bash scripts/install.sh        # or: pip install -e '.[test]'
 
 # Live IO discovery path
 fa phase-discover --request /path/to/request.json --out -
 
-# Standalone legacy PR exploration
+# Standalone PR exploration
 fa schema
 fa candidates --request /path/to/request.json
 fa explore --request /path/to/request.json [--execute]
@@ -32,10 +30,6 @@ fa explore --request /path/to/request.json [--execute]
 # KB management
 fa kb list
 fa kb search --domain framework_optimization --query "fp8 kv cache"
-
-# Future sibling-skill subprocess (not wired into IO today)
-fa agent prepare-task --task task.json --output-bundle bundle.json
-fa agent commit-result --envelope envelope.json --task-id <task_id>
 ```
 
 ## Tests

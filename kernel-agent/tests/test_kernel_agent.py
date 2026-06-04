@@ -189,9 +189,9 @@ class KernelAgentToolTests(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(help_proc.returncode, 0)
-        self.assertIn("--all-backends", help_proc.stdout)
+        self.assertIn("--check-only", help_proc.stdout)
         dry_proc = subprocess.run(
-            ["bash", str(INSTALL_SCRIPT), "--dry-run", "--all-backends"],
+            ["bash", str(INSTALL_SCRIPT), "--dry-run"],
             text=True,
             capture_output=True,
             timeout=30,
@@ -219,7 +219,10 @@ class KernelAgentToolTests(unittest.TestCase):
         # Internal extension is opt-in: no default path (open-source-only unless
         # TRACELENS_INTERNAL_ROOT is explicitly set).
         self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)
-        self.assertIn('GEAK_REF="${GEAK_REF:-v3.2.0}"', install_text)
+        # GEAK_REF is pinned to a tag/branch/SHA but must stay operator-
+        # overridable; assert the override pattern, not the exact pin, so a
+        # future ref bump doesn't break this guard.
+        self.assertIn('GEAK_REF="${GEAK_REF:-', install_text)
         self.assertIn("ensure_rocm_torch_for_geak()", install_text)
         self.assertIn("KERNEL_AGENT_SKIP_TORCH_GATE", install_text)
         self.assertIn("rocm-smi --showid", install_text)
