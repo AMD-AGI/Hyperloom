@@ -2448,12 +2448,11 @@ def _emit_preflight_diagnostics(
         print(f"  pr_degraded_reason  = {pr_reason}")
 
     # Issue-H (Saturday May 2026): surface Cortex KB offline-queue
-    # state. The flusher daemon already drains ``.kb_pending.ndjson``
-    # in the background, but a dead-letter pile-up is the canonical
-    # signal for "the prior session's KB writes were rejected (HTTP
-    # 4xx schema), this session is starting cold." Operators have no
-    # in-band way to see this today — they discover it only when
-    # specialists return empty proposal_set.
+    # state. A dead-letter pile-up is the canonical signal for "the
+    # prior session's KB writes were rejected (HTTP 4xx schema), this
+    # session is starting cold." Operators have no in-band way to see
+    # this today — they discover it only when specialists return empty
+    # proposal_set.
     try:
         _print_cortex_kb_queue_status()
     except Exception as exc:  # noqa: BLE001 — defensive
@@ -2463,13 +2462,10 @@ def _emit_preflight_diagnostics(
 def _print_cortex_kb_queue_status() -> None:
     """Emit a one-line summary of the Cortex KB offline NDJSON queue.
 
-    Pure visibility helper. The flusher daemon does the actual draining;
-    we only count rows so the operator sees ``pending=N dead=M`` next
-    to the rest of the preflight diagnostics. When ``pending > 0`` the
-    operator can verify the flusher is alive via
-    ``runtime/cortex/.kb_flusher.pid``; the dead-letter count is the
-    422-style permanent-reject signal that telegraphs an upcoming
-    cold-start session for new models.
+    Pure visibility helper. We count rows so the operator sees
+    ``pending=N dead=M`` next to the rest of the preflight diagnostics.
+    The dead-letter count is the 422-style permanent-reject signal that
+    telegraphs an upcoming cold-start session for new models.
     """
     from .session_paths import (
         cortex_dead_letter_ndjson,
@@ -3452,87 +3448,6 @@ def _bootstrap_cortex_kb(
 
 
 # ---------------------------------------------------------------------------
-# Retired (v2 RecipeKB cutover): the Cortex KB flusher daemon was a
-# background NDJSON drainer for failed central-server writes. Under
-# the local-write design writes are local-only so there is nothing
-# to drain. The two helpers below are kept as no-op stubs that
-# write a "skipped" status marker for the breakdown collector,
-# preserving the on-disk layout for a few session-cycles while
-# downstream consumers catch up.
-# ---------------------------------------------------------------------------
-def _maybe_spawn_kb_flusher(
-    args: argparse.Namespace,
-    *,
-    session_dir: Path,
-) -> tuple[subprocess.Popen | None, Path]:
-    """No-op shim — flusher daemon is retired.
-
-    Returns ``(None, pid_path)`` and writes a status marker with
-    ``reason="retired_v2_local_write"`` so the breakdown collector
-    surfaces the cutover state. Full retirement (deleting the
-    helper + its callers + the status marker / pid path machinery)
-    happens in a follow-up commit alongside the cortex_kb_client
-    module deletion.
-    """
-    from .session_paths import (
-        cortex_dir,
-        cortex_flusher_pid,
-        cortex_flusher_status_json,
-    )
-
-    pid_path = cortex_flusher_pid(session_dir)
-    status_path = cortex_flusher_status_json(session_dir)
-    cortex_root = cortex_dir(session_dir)
-    cortex_root.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "enabled":       False,
-        "spawned":       False,
-        "pid":           None,
-        "cmd":           [],
-        "cortex_kb_url": (getattr(args, "cortex_kb_url", None) or "").strip() or None,
-        "interval_sec":  0.0,
-        "batch_size":    0,
-        "reason":        "retired_v2_local_write",
-        "ts":            datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "pid_path":      str(pid_path),
-    }
-    try:
-        status_path.parent.mkdir(parents=True, exist_ok=True)
-        status_path.write_text(
-            json.dumps(payload, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log.warning("kb_flusher status marker write failed: %s", exc)
-    return None, pid_path
-
-
-def _stop_kb_flusher(
-    proc: subprocess.Popen | None,
-    pid_path: Path,
-    *,
-    grace_sec: float = 10.0,
-) -> None:
-    """No-op shim — flusher is retired (always spawned proc=None)."""
-    if proc is None:
-        return
-    # Defensive: if a stale prior daemon still exists, terminate it.
-    if proc.poll() is None:
-        try:
-            proc.send_signal(signal.SIGTERM)
-            proc.wait(timeout=grace_sec)
-        except Exception:  # noqa: BLE001
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
-    try:
-        pid_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # PR Monitor + KnowledgePlane wiring
 # ---------------------------------------------------------------------------
 def _bootstrap_knowledge_plane(
@@ -4421,9 +4336,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=True,
         )
-        kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
-            args, session_dir=session_dir,
-        )
         # KnowledgePlane facade. Bootstrapped
         # alongside the cortex client so a resumed session also gets the
         # PR Monitor + KB readonly tools wired into specialist dispatch.
@@ -4604,9 +4516,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # into T2/T3/T4 hooks). Fails fast unless --degraded-kb.
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=False,
-        )
-        kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
-            args, session_dir=session_dir,
         )
         # KnowledgePlane facade for specialist
         # sub-agents. Wraps cortex_client (already T0'd above) + a
@@ -4973,14 +4882,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         await coordinator.stop()
-        # v0.8 KB_gaps/Dead-E — stop the flusher daemon (best-effort;
-        # graceful SIGTERM with 10s budget then SIGKILL fallback). Done
-        # before the breakdown safety-net so the final NDJSON drain
-        # numbers reflect a stable post-shutdown queue.
-        try:
-            _stop_kb_flusher(kb_flusher_proc, kb_flusher_pid_path)
-        except Exception:  # noqa: BLE001
-            log.exception("kb_flusher stop failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json
         # for downstream consumers (claw-stats-service / hyperloom-results-
         # service / offline analysis). Best-effort — a failure here MUST NOT
@@ -5634,39 +5535,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "+20%% or more. Below the threshold we record "
              "``status=drift`` and continue with the regular EXPLORE "
              "flow without inheriting the warm config.",
-    )
-    # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle. The cli
-    # spawns ``scripts.cortex_kb_flusher`` after the T0 anchor (so the
-    # NDJSON pending queue gets drained in the background while the
-    # main loop runs); ``--no-kb-flusher`` short-circuits the spawn for
-    # operators debugging the NDJSON path manually. ``--kb-flusher-*``
-    # overrides forward the same flags to the daemon CLI.
-    opt.add_argument(
-        "--no-kb-flusher",
-        dest="kb_flusher_enabled",
-        action="store_false",
-        default=True,
-        help="Skip spawning the Cortex KB flusher daemon. The NDJSON "
-             "pending queue still accumulates but only drains on the "
-             "next session start (or via manual ``python -m "
-             "inference_optimizer.scripts.cortex_kb_flusher`` run). "
-             "Implied by --degraded-kb.",
-    )
-    opt.add_argument(
-        "--kb-flusher-interval-sec",
-        dest="kb_flusher_interval_sec",
-        type=float,
-        default=5.0,
-        help="Forwarded to the flusher daemon as --interval-sec "
-             "(default 5.0).",
-    )
-    opt.add_argument(
-        "--kb-flusher-batch-size",
-        dest="kb_flusher_batch_size",
-        type=int,
-        default=50,
-        help="Forwarded to the flusher daemon as --batch-size "
-             "(default 50).",
     )
     # ------------------------------------------------------------------
     # PR Monitor REST + MCP
