@@ -319,18 +319,12 @@ def test_cli_real_executors_consistent_with_runs_actions():
     a real executor without giving its yaml a ``pipeline_phase`` that
     falls in ``_RUNS_WORKSPACE_PHASES``, this test fires.
     """
-    from inference_optimizer.cli import (
-        _REAL_EXECUTORS_FULL,
-        _REAL_EXECUTORS_KERNEL_ONLY,
-    )
+    from inference_optimizer.cli import _REAL_EXECUTORS_FULL
     from inference_optimizer.session_paths import _runs_actions
 
     SESSION_ROOT_WRITERS = {"report", "session_breakdown"}
     runs = _runs_actions()
-    real_kinds = (
-        set(_REAL_EXECUTORS_FULL.keys())
-        | set(_REAL_EXECUTORS_KERNEL_ONLY.keys())
-    )
+    real_kinds = set(_REAL_EXECUTORS_FULL.keys())
 
     missing_from_runs = (real_kinds - SESSION_ROOT_WRITERS) - runs
     assert not missing_from_runs, (
