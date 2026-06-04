@@ -478,7 +478,7 @@ def test_policy_blocks_llm_close_sequence_done_write():
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (

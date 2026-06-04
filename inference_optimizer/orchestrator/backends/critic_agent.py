@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from ..intent_parser import (
+from ...protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,

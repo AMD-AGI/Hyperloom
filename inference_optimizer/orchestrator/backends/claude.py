@@ -30,7 +30,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ..intent_parser import (
+from ...protocol.intent import (
     Intent,
     IntentValidationError,
     NoIntentEmitted,

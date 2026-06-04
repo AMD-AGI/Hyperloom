@@ -47,7 +47,7 @@ from .action_registry import ActionRegistry
 from .agent_role import AgentRole, default_role_registry
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
-from .intent_parser import Intent, IntentType, NoIntentEmitted
+from ..protocol.intent import Intent, IntentType, NoIntentEmitted
 from .kernel_request_handlers import get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
