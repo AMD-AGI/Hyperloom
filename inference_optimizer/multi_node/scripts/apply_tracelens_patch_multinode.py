@@ -35,7 +35,9 @@ Algorithm
   2. Enumerate all alive nodes (one actor per pod).
   3. For each pod, in a NodeAffinity-pinned actor:
      a. ``import sglang`` → resolve installed version and apply root.
-     b. Resolve ``$TRACELENS_ROOT/<patch_tree>/sglang_<X_Y_Z>/*.patch``.
+     b. Resolve ``$TRACELENS_ROOT/<patch_tree>/sglang_<X_Y_Z>/*.patch``
+        (public TraceLens checkout; ``$TRACELENS_INTERNAL_ROOT`` is plumbed
+        but not consumed by current patch logic).
         Per-version subdirs are the v0.3.1+ layout; flat fallback is NOT
         supported here (matches Hyperloom main's
         ``_resolve_sglang_patches_dir`` post-c839a20 simplification).
@@ -198,9 +200,14 @@ def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
 def _apply_on_pod(
     *,
     tracelens_root: str,
+    tracelens_internal_root: str,
     sglang_version_pin: str | None,
 ) -> dict[str, Any]:
     """Apply (or verify) the TraceLens SGLang patch set on THIS pod.
+
+    *tracelens_root* is the public TraceLens checkout (patch source).
+    *tracelens_internal_root* is plumbed for future use
+    but not consumed by current logic.
 
     Returns a dict summary (host, status, version, patches, skipped reason
     if any). Never raises — wraps failures into ``status=failed`` so the
@@ -392,12 +399,14 @@ def _apply_on_pod(
 def _actor_apply(
     *,
     tracelens_root: str,
+    tracelens_internal_root: str,
     sglang_version_pin: str | None,
 ) -> dict[str, Any]:
     """Ray actor entrypoint. Pinned to one node via NodeAffinityScheduling
     so every pod (head + workers) runs the patcher exactly once."""
     return _apply_on_pod(
         tracelens_root=tracelens_root,
+        tracelens_internal_root=tracelens_internal_root,
         sglang_version_pin=sglang_version_pin,
     )
 
@@ -405,6 +414,7 @@ def _actor_apply(
 def _fanout_to_all_nodes(
     *,
     tracelens_root: str,
+    tracelens_internal_root: str,
     sglang_version_pin: str | None,
 ) -> list[dict[str, Any]]:
     """Spawn one actor per alive node; collect all summaries."""
@@ -424,6 +434,7 @@ def _fanout_to_all_nodes(
         )
         actors.append(opts.remote(
             tracelens_root=tracelens_root,
+            tracelens_internal_root=tracelens_internal_root,
             sglang_version_pin=sglang_version_pin,
         ))
     results = ray.get(actors)
@@ -435,7 +446,13 @@ def main() -> int:
     parser.add_argument(
         "--tracelens-root",
         default=os.environ.get("TRACELENS_ROOT", ""),
-        help="path to TraceLens-internal checkout (default: $TRACELENS_ROOT)",
+        help="path to public TraceLens checkout (default: $TRACELENS_ROOT)",
+    )
+    parser.add_argument(
+        "--tracelens-internal-root",
+        default=os.environ.get("TRACELENS_INTERNAL_ROOT", ""),
+        help="path to TraceLens-internal checkout (default: $TRACELENS_INTERNAL_ROOT). "
+             "Reserved for future use; not consumed by current patch logic.",
     )
     parser.add_argument(
         "--sglang-version-pin",
@@ -465,6 +482,7 @@ def main() -> int:
     try:
         per_pod = _fanout_to_all_nodes(
             tracelens_root=args.tracelens_root,
+            tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
         )
     except Exception as e:  # noqa: BLE001
