@@ -1,7 +1,9 @@
-"""Unit tests for the local-health signal rule."""
+"""Unit tests for the local-health signal rule (server/log/gpu/disk/shm/fd/ray
++ D1 log-pattern extensions)."""
 
 from __future__ import annotations
 
+import pytest
 
 from robustness_agent.role.prompt_inputs import (
     ReactorContext,
@@ -13,6 +15,10 @@ from robustness_agent.signals import (
 )
 from robustness_agent.signals.local_health import LocalHealthConfig
 from robustness_agent.sources.base import SourceData
+from robustness_agent.sources.local_probe import (
+    _DEFAULT_LOG_ERROR_PATTERNS,
+    _extract_log_errors,
+)
 
 
 def _ctx() -> ReactorContext:
@@ -149,3 +155,232 @@ def test_classifier_includes_local_health_rule():
     out = classifier.classify(data, _ctx())
     names = {s.name for s in out}
     assert {"log_error_pattern", "local_server_unreachable", "gpu_thermal_high"} <= names
+
+
+# ===========================================================================
+# D1 — log-pattern extension coverage
+# ===========================================================================
+# Patterns live in local_probe._DEFAULT_LOG_ERROR_PATTERNS and
+# local_health._HIGH_SEVERITY_PATTERNS; verify each is detected + routed.
+
+@pytest.mark.parametrize(
+    "line,expected_pattern",
+    [
+        ("Engine core EngineCore-1 died unexpectedly",
+         r"Engine core .* died"),
+        ("RuntimeError: Engine core initialization failed",
+         r"RuntimeError: Engine core initialization failed"),
+        ("OSError: [Errno 98] Address already in use",
+         r"Address already in use"),
+        ("sglang tokenizer worker tw-3 died (signal 9)",
+         r"tokenizer worker .* died"),
+        ("MLA-style attention not supported in this checkpoint",
+         r"MLA.*not supported"),
+        ("MTP draft model unavailable for spec decoding",
+         r"MTP draft .* unavailable"),
+        ("aiter rms_norm compilation failed: nvcc returned exit 1",
+         r"aiter .* compilation failed"),
+        ("hipcc died with signal 9 (SIGKILL)",
+         r"hipcc .* signal"),
+        ("accuracy MMLU gate failed; reverting integrate",
+         r"accuracy .* gate failed"),
+        ("Eval result: MMLU 67.3% below threshold (74%)",
+         r"MMLU .* below threshold"),
+        ("ROCblas internal error: rocblasStatus 2",
+         r"ROCblas.*Status\s*\d+"),
+        ("hipBLAS Error: handle is in invalid state",
+         r"hipBLAS.*Error"),
+        ("NCCL WARN [Worker 3] timeout after 600 seconds",
+         r"NCCL WARN .* timeout"),
+        ("Failed to load checkpoint /weights/dsr1/safetensors",
+         r"Failed to load checkpoint"),
+        ("runtime.cli prepare-review timed out after 30s",
+         r"runtime\.cli .* timed out after \d+s"),
+        ("cudaErrorOutOfDevice while allocating KV cache",
+         r"cudaErrorOutOfDevice"),
+        ("HSA_STATUS_ERROR_OUT_OF_RESOURCES at hipDeviceAlloc",
+         r"HSA_STATUS_ERROR_OUT_OF_RESOURCES"),
+    ],
+)
+def test_d1_new_pattern_matches(line, expected_pattern):
+    hits = _extract_log_errors([line], _DEFAULT_LOG_ERROR_PATTERNS, window=10)
+    matched_patterns = {h["pattern"] for h in hits}
+    assert expected_pattern in matched_patterns
+
+
+@pytest.mark.parametrize(
+    "line,expected_pattern",
+    [
+        ("CUDA out of memory at allocator.cc:42", "CUDA out of memory"),
+        ("Engine core EngineCore-1 died unexpectedly",
+         r"Engine core .* died"),
+        ("RuntimeError: Engine core initialization failed",
+         r"RuntimeError: Engine core initialization failed"),
+        ("aiter fused_moe compilation failed: hipcc exit 1",
+         r"aiter .* compilation failed"),
+        ("Failed to load checkpoint /weights/dsr1",
+         r"Failed to load checkpoint"),
+        ("runtime.cli commit-review timed out after 30s",
+         r"runtime\.cli .* timed out after \d+s"),
+    ],
+)
+def test_d1_high_severity_pattern_emits_high(line, expected_pattern):
+    data = SourceData(
+        local_log_errors=[{"pattern": expected_pattern, "line": line}],
+    )
+    out = evaluate_local_health_signals(_ctx(), data)
+    sym = next(s for s in out if s.name == "log_error_pattern")
+    assert sym.severity is SymptomSeverity.HIGH
+
+
+@pytest.mark.parametrize(
+    "line,expected_pattern",
+    [
+        ("OSError: Address already in use", r"Address already in use"),
+        ("tokenizer worker tw-2 died (signal 11)",
+         r"tokenizer worker .* died"),
+        ("NCCL WARN [Worker 0] timeout after 600s",
+         r"NCCL WARN .* timeout"),
+    ],
+)
+def test_d1_medium_severity_pattern_emits_medium(line, expected_pattern):
+    data = SourceData(
+        local_log_errors=[{"pattern": expected_pattern, "line": line}],
+    )
+    out = evaluate_local_health_signals(_ctx(), data)
+    sym = next(s for s in out if s.name == "log_error_pattern")
+    assert sym.severity is SymptomSeverity.MEDIUM
+
+
+# ===========================================================================
+# disk / shm / fd / ray_head signals (A3 / A4 / A5 / A6)
+# ===========================================================================
+
+def test_disk_pressure_silent_below_warn():
+    data = SourceData(local_disk={
+        "/": {"used_pct": 50.0, "used_gb": 100, "free_gb": 100, "total_gb": 200},
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    assert all(s.name != "disk_pressure" for s in out)
+
+
+def test_disk_pressure_medium_in_warn_zone():
+    data = SourceData(local_disk={
+        "/": {"used_pct": 88.0, "used_gb": 176, "free_gb": 24, "total_gb": 200},
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    sym = next(s for s in out if s.name == "disk_pressure")
+    assert sym.severity is SymptomSeverity.MEDIUM
+    assert sym.subject["mountpoint"] == "/"
+
+
+def test_disk_pressure_high_in_crit_zone():
+    data = SourceData(local_disk={
+        "/": {"used_pct": 97.0, "used_gb": 194, "free_gb": 6, "total_gb": 200},
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    sym = next(s for s in out if s.name == "disk_pressure")
+    assert sym.severity is SymptomSeverity.HIGH
+
+
+def test_disk_pressure_skips_shm_mountpoints():
+    data = SourceData(local_disk={
+        "/dev/shm": {"used_pct": 97.0, "used_gb": 31, "free_gb": 1, "total_gb": 32},
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    assert all(s.name != "disk_pressure" for s in out)
+    assert any(s.name == "shm_pressure" for s in out)
+
+
+def test_shm_pressure_silent_when_healthy():
+    data = SourceData(local_disk={
+        "/dev/shm": {"used_pct": 40.0, "used_gb": 12, "free_gb": 20, "total_gb": 32},
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    assert all(s.name != "shm_pressure" for s in out)
+
+
+def test_shm_pressure_medium_at_warn():
+    data = SourceData(local_disk={
+        "/dev/shm": {"used_pct": 80.0, "used_gb": 25, "free_gb": 7, "total_gb": 32},
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    sym = next(s for s in out if s.name == "shm_pressure")
+    assert sym.severity is SymptomSeverity.MEDIUM
+
+
+def test_shm_pressure_high_at_crit():
+    data = SourceData(local_disk={
+        "/dev/shm": {"used_pct": 96.0, "used_gb": 31, "free_gb": 1, "total_gb": 32},
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    sym = next(s for s in out if s.name == "shm_pressure")
+    assert sym.severity is SymptomSeverity.HIGH
+    assert "SHM exhaustion" in sym.summary
+
+
+def test_ray_head_dead_silent_when_no_data():
+    data = SourceData()
+    out = evaluate_local_health_signals(_ctx(), data)
+    assert all(s.name != "ray_head_dead" for s in out)
+
+
+def test_ray_head_dead_silent_when_healthy():
+    data = SourceData(local_ray={"healthy": True, "stdout_head": "OK"})
+    out = evaluate_local_health_signals(_ctx(), data)
+    assert all(s.name != "ray_head_dead" for s in out)
+
+
+def test_ray_head_dead_fires_high_when_unhealthy():
+    data = SourceData(local_ray={
+        "healthy": False,
+        "reason": "ray status exit=1",
+        "stderr": "Could not connect to GCS",
+        "returncode": 1,
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    sym = next(s for s in out if s.name == "ray_head_dead")
+    assert sym.severity is SymptomSeverity.HIGH
+    assert sym.evidence["reason"] == "ray status exit=1"
+
+
+def test_fd_pressure_silent_when_no_data():
+    data = SourceData()
+    out = evaluate_local_health_signals(_ctx(), data)
+    assert all(s.name != "fd_pressure" for s in out)
+
+
+def test_fd_pressure_silent_below_warn():
+    data = SourceData(local_fd={
+        "pid": 1234, "used": 200, "limit": 1024, "used_pct": 19.5,
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    assert all(s.name != "fd_pressure" for s in out)
+
+
+def test_fd_pressure_medium_at_warn():
+    data = SourceData(local_fd={
+        "pid": 1234, "used": 850, "limit": 1024, "used_pct": 83.0,
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    sym = next(s for s in out if s.name == "fd_pressure")
+    assert sym.severity is SymptomSeverity.MEDIUM
+
+
+def test_fd_pressure_high_at_crit():
+    data = SourceData(local_fd={
+        "pid": 1234, "used": 1000, "limit": 1024, "used_pct": 97.7,
+    })
+    out = evaluate_local_health_signals(_ctx(), data)
+    sym = next(s for s in out if s.name == "fd_pressure")
+    assert sym.severity is SymptomSeverity.HIGH
+
+
+def test_custom_disk_thresholds():
+    cfg = LocalHealthConfig(disk_used_warn_pct=50.0, disk_used_crit_pct=70.0)
+    data = SourceData(local_disk={
+        "/": {"used_pct": 75.0, "used_gb": 150, "free_gb": 50, "total_gb": 200},
+    })
+    out = evaluate_local_health_signals(_ctx(), data, config=cfg)
+    sym = next(s for s in out if s.name == "disk_pressure")
+    assert sym.severity is SymptomSeverity.HIGH
