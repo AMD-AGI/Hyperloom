@@ -135,11 +135,11 @@ on:
         required: false
         default: ''
       target_gpu:
-        description: 'Reference GPU for InferenceX comparison. auto follows gpu_type.'
+        description: 'Reference GPU for InferenceX comparison in the summary table'
         required: false
-        default: 'auto'
+        default: 'mi300x'
         type: choice
-        options: [auto, mi300x, mi325x, mi355x, b200, h100]
+        options: [mi300x, b200, h100, mi355x, mi325x]
       wait_for_completion:
         description: 'Wait for tasks to finish (default true). Uncheck for fire-and-forget.'
         type: boolean
@@ -944,24 +944,13 @@ jobs:
         working-directory: ci
         env:
           INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
-          INPUT_GPU_TYPE:   ${{ github.event.inputs.gpu_type }}
           INPUT_ISL:        ${{ github.event.inputs.isl }}
           INPUT_OSL:        ${{ github.event.inputs.osl }}
         run: |
-          TARGET_GPU="${INPUT_TARGET_GPU:-auto}"
-          if [ "$TARGET_GPU" = "auto" ]; then
-            GPU_TYPE="${INPUT_GPU_TYPE:-MI300X}"
-            GPU_KEY="$(printf '%s' "$GPU_TYPE" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
-            case "$GPU_KEY" in
-              *mi355x) TARGET_GPU="mi355x" ;;
-              *mi325x) TARGET_GPU="mi325x" ;;
-              *)       TARGET_GPU="mi300x" ;;
-            esac
-          fi
           python3 build_summary.py \
             --artifacts-dir "${{ github.workspace }}/task-artifacts-merged" \
             --manifests-dir "${{ github.workspace }}/manifests" \
-            --target-gpu    "$TARGET_GPU" \
+            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
             --isl           "${INPUT_ISL:-1024}" \
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"
