@@ -128,6 +128,19 @@ Reason:
 - The updated wording uses the live `explore` path and describes old
   names only as migration, compatibility, or OOB backend terminology.
 
+### Removed stale package-data patterns
+
+Removed `pyproject.toml` package-data entries for directories that no
+longer exist:
+
+- `inference_optimizer/agents/*`
+- `inference_optimizer/kernel_opt/*.md`
+
+Verification:
+
+- All remaining `tool.setuptools.package-data.inference_optimizer`
+  patterns match at least one file.
+
 ## Status
 
 Step 02 low-risk cleanup is complete for the first and examples batches.
