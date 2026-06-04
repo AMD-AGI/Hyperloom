@@ -53,9 +53,8 @@ robustness_agent/
 └── conductor.py / monitors / checks / providers
 ```
 
-The old pre-reactor `--mode legacy` loop has been removed. Use the
-standalone reactor CLI above for dev/smoke runs, or the subprocess
-transport below for Coordinator integration.
+Use the standalone reactor CLI above for dev/smoke runs, or the
+subprocess transport below for Coordinator integration.
 
 ## Coordinator integration (subprocess transport)
 
