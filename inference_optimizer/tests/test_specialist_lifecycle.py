@@ -486,7 +486,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
     ])])
 
-    import inference_optimizer.cli as cli_mod
+    import inference_optimizer.cli_executors as cli_mod
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-mock")
     try:
