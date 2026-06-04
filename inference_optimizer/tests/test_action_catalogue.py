@@ -15,11 +15,13 @@ from inference_optimizer.orchestrator.action_registry import (
 )
 from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 from inference_optimizer.orchestrator.action_surfaces import (
+    FRAMEWORK_PR_INTERNAL_ACTION_NAMES as SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES,
     FULL_ENABLED_ACTIONS as SURFACE_FULL_ENABLED_ACTIONS,
     GRID_INJECTABLE_ACTIONS as SURFACE_GRID_INJECTABLE_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES as SURFACE_INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_OWNED_ACTIONS as SURFACE_KERNEL_OWNED_ACTIONS,
     NO_KERNEL_ENABLED_ACTIONS as SURFACE_NO_KERNEL_ENABLED_ACTIONS,
+    PHASE_ALLOWLIST_BYPASS_ACTIONS as SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS,
 )
 
 
@@ -140,6 +142,42 @@ def test_prompt_enabled_actions_are_live_registry_actions(registry):
         )
     assert SURFACE_KERNEL_OWNED_ACTIONS <= set(SURFACE_FULL_ENABLED_ACTIONS)
     assert SURFACE_KERNEL_OWNED_ACTIONS.isdisjoint(set(SURFACE_NO_KERNEL_ENABLED_ACTIONS))
+
+
+def test_phase_allowlist_actions_are_live_registry_actions(registry):
+    from inference_optimizer.orchestrator.phase_state import PHASE_ALLOWED_ACTIONS
+
+    retired = {
+        "setup", "classify", "backends", "params",
+        "validate_stack", "select_kernels",
+    }
+    phase_actions = set().union(*PHASE_ALLOWED_ACTIONS.values())
+    assert not (phase_actions & retired)
+    for name in phase_actions:
+        assert registry.get(name) is not None, (
+            f"phase allowlist action {name!r} must have action metadata"
+        )
+
+
+def test_action_surface_sets_are_phase_aligned():
+    from inference_optimizer.orchestrator.phase_state import (
+        PHASE_ALLOWED_ACTIONS,
+        PHASE_FRAMEWORK_PR,
+        PHASE_KERNEL,
+    )
+
+    all_phase_actions = set().union(*PHASE_ALLOWED_ACTIONS.values())
+    assert SURFACE_KERNEL_OWNED_ACTIONS <= PHASE_ALLOWED_ACTIONS[PHASE_KERNEL]
+    assert (
+        SURFACE_INTERNAL_ONLY_ACTION_NAMES - SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS
+    ) <= all_phase_actions
+    assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS <= SURFACE_INTERNAL_ONLY_ACTION_NAMES
+    assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS.isdisjoint(all_phase_actions)
+    assert (
+        SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES
+        <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_PR]
+    )
+    assert SURFACE_GRID_INJECTABLE_ACTIONS <= all_phase_actions
 
 
 def test_kernel_opt_has_three_lanes_and_high_cost(registry):
