@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from .orchestrator.cortex_t0 import run_t0_anchor
 from .orchestrator.shared_state import SharedState
+from .paths import workspace_root as _workspace_root_resolve
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
     from .orchestrator.knowledge_plane import KnowledgePlane
@@ -30,9 +31,12 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     """Resolve the local recipe-snapshot KB root.
 
     Resolution ladder (highest priority first): ``--local-kb-root`` →
-    ``$HYPERLOOM_LOCAL_KB_ROOT`` → ``$USER_DATA_PATH/kb`` →
-    ``/workspace/hyperloom/kb``. The directory is NOT created here
-    (:class:`LocalRecipeStore` lazily creates it on first write).
+    ``$HYPERLOOM_LOCAL_KB_ROOT`` → ``paths.workspace_root() / "kb"``.
+    ``workspace_root()`` returns ``$USER_DATA_PATH`` when set (so a single
+    override moves the whole KB tail) and otherwise falls back to
+    ``/workspace/hyperloom`` with a one-shot loud warning. The directory
+    is NOT created here (:class:`LocalRecipeStore` lazily creates it on
+    first write).
     """
     explicit = (
         getattr(args, "local_kb_root", None)
@@ -40,10 +44,7 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     )
     if explicit:
         return Path(str(explicit).strip())
-    user_data = os.environ.get("USER_DATA_PATH", "").strip()
-    if user_data:
-        return Path(user_data) / "kb"
-    return Path("/workspace/hyperloom") / "kb"
+    return _workspace_root_resolve() / "kb"
 
 
 def _build_recipe_kb_dispatcher(
@@ -65,6 +66,50 @@ def _build_recipe_kb_dispatcher(
     if bool(getattr(args, "degraded_kb", False)):
         # Operator explicitly opted out — no network calls regardless
         # of CORTEX_KB_URL value.
+        return RecipeKB(local=local_store, remote=None)
+
+    # gbrain read-side remote (opt-in). Selected with
+    # ``RECIPE_KB_REMOTE=gbrain`` + ``GBRAIN_BASE_URL`` / ``GBRAIN_TOKEN``.
+    # Writes still go local-only; gbrain only serves the read side, so
+    # this slots into the same dispatcher contract as the cortex remote.
+    if os.environ.get("RECIPE_KB_REMOTE", "").strip().lower() == "gbrain":
+        from .recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
+
+        gbrain_remote = build_gbrain_remote_from_env()
+        if gbrain_remote is not None and gbrain_remote.enabled:
+            kb = RecipeKB(local=local_store, remote=gbrain_remote)
+            # Mirror policy (``RECIPE_KB_MIRROR_MODE``, default ``external``):
+            #   * ``external`` (default) — the optimizer does NOT mirror; an
+            #     out-of-band service (hyperloom-recipe-mirror CronJob) ingests
+            #     the local store into gbrain, keeping gbrain off the write
+            #     path. REQUIRES that CronJob to be deployed: until it runs,
+            #     new champions persist locally only (durable iff
+            #     USER_DATA_PATH is the injected persistent path) and won't
+            #     appear in gbrain.
+            #   * ``inline`` — close the loop in-process: each local recipe
+            #     write is best-effort mirrored into gbrain (the read cache)
+            #     so a future session's remote read returns the champion
+            #     config. Local write stays authoritative.
+            mirror_mode = (
+                os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
+            )
+            if mirror_mode == "inline":
+                # Opt-in best-effort in-process mirror. Falls back to the bare
+                # dispatcher if the write-side MCP can't be built.
+                from .recipe_kb.gbrain_ingest import (
+                    GbrainMirroringRecipeKB,
+                    build_mirror_mcp_from_env,
+                )
+                mirror_mcp = build_mirror_mcp_from_env()
+                return (
+                    GbrainMirroringRecipeKB(kb, mirror_mcp)
+                    if mirror_mcp is not None
+                    else kb
+                )
+            # ``external`` (default): no in-process mirror.
+            return kb
+        # Selected but not configured: stay local-only rather than
+        # silently falling back to the cortex kb-service.
         return RecipeKB(local=local_store, remote=None)
 
     cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
