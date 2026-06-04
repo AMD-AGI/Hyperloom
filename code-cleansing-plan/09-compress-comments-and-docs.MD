@@ -209,6 +209,9 @@ PR-X / Gap-Y / N33 introduced this after a long sequence of failures...
 - 删除 stale docs 的清单。
 - 注释风格规则。
 
+本阶段的执行记录、注释风格规则与 stale-doc 清单见
+`code-cleansing-plan/09-comments/01-execution-status.MD`。
+
 ## 完成标准
 
 完成后应达到:
