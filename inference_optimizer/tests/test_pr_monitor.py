@@ -8,9 +8,7 @@ Covers KB_design §3.6 + §3.13 M4:
 * domain → repos yaml loader (``actions/_meta/_domain_repos.yaml``)
   with wildcard handling.
 * KnowledgePlane facade: pr_feed_warm dispatch (disabled / unknown
-  domain / wildcard / per-repo failure folded into warnings), Cortex
-  write helpers no-op when disabled, mint_pr_node canonical_id
-  derivation.
+  domain / wildcard / per-repo failure folded into warnings).
 * SpecialistRunner tool-list gating: ``mcp__pr_monitor__*`` stripped
   when KnowledgePlane reports PR Monitor disabled; default still
   exposes the 12 PR Monitor MCP tool names.
@@ -28,7 +26,6 @@ import pytest
 from inference_optimizer.orchestrator.knowledge_plane import (
     KnowledgePlane,
     load_domain_repos,
-    pr_node_canonical_id,
 )
 from inference_optimizer.orchestrator.pr_monitor import (
     DEFAULT_PR_MONITOR_URL,
@@ -368,65 +365,6 @@ def test_plane_pr_feed_warm_wildcard_expands_via_list_repos(monkeypatch):
     prs, warns = plane.pr_feed_warm("pr_intel_specialist")
     assert len(prs) >= 1
     # pr_intel_specialist has empty keywords → everything passes.
-
-
-def test_plane_cortex_write_helpers_skip_when_disabled():
-    plane = KnowledgePlane.from_clients(cortex_kb=None, pr_monitor=None)
-    out = plane.cortex_propose_point(canonical_id="x", kind="pr_node")
-    assert out["status"] == "skip_disabled"
-    # ``cortex_hypothesize`` was retired with the T2/T3 protocol; no
-    # facade method exists to test the disabled path against anymore.
-
-
-# ===========================================================================
-# 4. pr_node_canonical_id + mint_pr_node
-# ===========================================================================
-def test_pr_node_canonical_id_with_number():
-    assert pr_node_canonical_id("ROCm/aiter", number=3067) == "pr.ROCm/aiter#3067"
-
-
-def test_pr_node_canonical_id_with_sha():
-    assert pr_node_canonical_id("x/y", sha="abc123") == "pr.x/y@abc123"
-
-
-def test_pr_node_canonical_id_defaults():
-    assert pr_node_canonical_id("") == "pr.unknown_repo.unknown"
-
-
-def test_mint_pr_node_disabled_returns_skip():
-    plane = KnowledgePlane.from_clients(cortex_kb=None, pr_monitor=None)
-    out = plane.mint_pr_node(repo="ROCm/aiter", number=3067)
-    assert out["status"] == "skip_disabled"
-
-
-def test_mint_pr_node_calls_cortex_with_correct_canonical():
-    # Stub a CortexKBClient that captures calls.
-    captured: dict[str, Any] = {}
-
-    class _StubCortex:
-        enabled = True
-        def propose_point(self_inner, **kwargs):
-            captured.update(kwargs)
-            return {"status": "ok", "point_id": "pt-1"}
-
-    plane = KnowledgePlane.from_clients(
-        cortex_kb=_StubCortex(),  # type: ignore[arg-type]
-        pr_monitor=None,
-    )
-    out = plane.mint_pr_node(
-        repo="ROCm/aiter", number=3067,
-        attrs={"specialist": "kernel_switch_specialist"},
-    )
-    assert out["status"] == "ok"
-    assert captured["canonical_id"] == "pr.ROCm/aiter#3067"
-    assert captured["kind"] == "pr_node"
-    assert captured["authority"] == "EXPERIENTIAL"
-    # The repo/number/url get folded into attrs.
-    assert captured["attrs"]["repo"] == "ROCm/aiter"
-    assert captured["attrs"]["number"] == 3067
-    assert "ROCm/aiter/pull/3067" in captured["attrs"]["url"]
-    # The synthesised url evidence is appended.
-    assert any(e.startswith("url:") for e in captured["evidence"])
 
 
 # ===========================================================================
