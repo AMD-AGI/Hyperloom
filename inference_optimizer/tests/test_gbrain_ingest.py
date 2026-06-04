@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from inference_optimizer.recipe_kb.gbrain_ingest import (
+    _best_config_split,
     _scalar,
     ingest_local_to_gbrain,
     recipe_to_page,
@@ -60,8 +61,63 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
     }
     r = _page_to_recipe(fm)
     assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:0_5_11:fp8"
-    assert r["best_config"] == {"extra_server_args": "--cuda-graph-max-bs 256", "FOO": "1"}
+    assert r["best_config"] == {
+        "extra_server_args": "--cuda-graph-max-bs 256",
+        "extra_envs": {"FOO": "1"},
+    }
     assert r["best_throughput"] == 5800.5
+
+
+def test_best_config_split_unwraps_nested_extra_envs() -> None:
+    # Authoritative local shape (coordinator._build_recipe_payload): args
+    # key + NESTED extra_envs dict. The nested dict must be unwrapped, NOT
+    # str()'d into a single bogus "extra_envs" env key.
+    args, envs = _best_config_split({
+        "extra_server_args": "--cuda-graph-max-bs 256",
+        "extra_envs": {"SGLANG_X": "1", "FOO": "bar"},
+    })
+    assert args == "--cuda-graph-max-bs 256"
+    assert envs == {"SGLANG_X": "1", "FOO": "bar"}
+    assert "extra_envs" not in envs
+
+
+def test_best_config_split_handles_flat_envs() -> None:
+    # Flat shape: each env is a sibling scalar key.
+    args, envs = _best_config_split({
+        "extra_server_args": "--x 1", "FOO": "1", "BAR": "2",
+    })
+    assert args == "--x 1"
+    assert envs == {"FOO": "1", "BAR": "2"}
+
+
+def test_best_config_split_skips_passthrough_metadata() -> None:
+    # current_best copies name/tput/accuracy into best_config; these are
+    # NOT envs and must not be serialized as such.
+    args, envs = _best_config_split({
+        "extra_server_args": "--x 1",
+        "name": "v1", "tput": 5400.0, "accuracy": 0.9,
+        "extra_envs": {"E": "1"},
+    })
+    assert args == "--x 1"
+    assert envs == {"E": "1"}
+
+
+def test_nested_extra_envs_roundtrips_via_reader() -> None:
+    # End-to-end: nested-env local recipe -> page -> read must surface the
+    # canonical nested ``extra_envs`` (consumable by warm-replay).
+    import yaml
+
+    rec = _recipe(best_config={
+        "extra_server_args": "--cuda-graph-max-bs 256",
+        "extra_envs": {"SGLANG_X": "1"},
+    })
+    _slug, content = recipe_to_page(rec)
+    fm = yaml.safe_load(content.split("---", 2)[1])
+    r = _page_to_recipe(fm)
+    assert r["best_config"] == {
+        "extra_server_args": "--cuda-graph-max-bs 256",
+        "extra_envs": {"SGLANG_X": "1"},
+    }
 
 
 def test_negative_knowledge_roundtrips() -> None:

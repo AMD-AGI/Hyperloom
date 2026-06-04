@@ -100,20 +100,48 @@ def _emit_yaml(obj: Mapping[str, Any], indent: int = 0) -> str:
     return "\n".join(lines)
 
 
-def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
-    """Split a v2 ``best_config`` dict into (sglang_args, envs).
+# best_config keys that are NOT environment variables (launch args under
+# the canonical/legacy name + the nested env containers + current_best
+# passthrough metadata copied by ``coordinator._build_recipe_payload``).
+_NON_ENV_BEST_CONFIG_KEYS = frozenset({
+    CANONICAL_KEY, LEGACY_KEY, "extra_envs", "envs", "args",
+    "name", "tput", "accuracy",
+})
 
-    Inverse of ``GbrainRemoteRecipeClient._best_config_from_attrs`` so a
-    round-trip ingest->read preserves the champion config. Reads the
-    canonical ``extra_server_args`` (with a read-only legacy fallback via
-    the compat helper) and routes every other key into ``envs``.
+
+def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
+    """Split a ``best_config`` dict into (launch_args, envs).
+
+    Handles BOTH canonical best_config shapes so an ingest->read
+    round-trip preserves the champion config:
+
+    * NESTED (authoritative local shape from
+      ``coordinator._build_recipe_payload``): launch args under the
+      canonical (or read-only legacy-alias) key and the env map nested
+      under ``extra_envs`` / ``envs``. The nested dict MUST be unwrapped —
+      treating ``extra_envs`` as a scalar env and ``str()``-ing it would
+      serialize a Python ``dict`` repr into a single bogus env value and
+      drop the real envs.
+    * FLAT (legacy / direct-dict shape): launch args under the
+      canonical/legacy key and each env as a sibling scalar key.
+
+    Reads the args via the compat helper (canonical with read-only legacy
+    fallback). For envs, a nested map wins; otherwise the remaining scalar
+    sibling keys (minus non-env metadata) are taken as flat envs.
     """
     args = read_extra_server_args(dict(best_config)).strip()
-    envs = {
-        str(k): str(v)
-        for k, v in best_config.items()
-        if k not in (CANONICAL_KEY, LEGACY_KEY)
-    }
+    nested = best_config.get("extra_envs")
+    if not isinstance(nested, Mapping):
+        nested = best_config.get("envs")
+    if isinstance(nested, Mapping):
+        envs = {str(k): str(v) for k, v in nested.items()}
+    else:
+        envs = {
+            str(k): str(v)
+            for k, v in best_config.items()
+            if k not in _NON_ENV_BEST_CONFIG_KEYS
+            and not isinstance(v, (Mapping, list, tuple))
+        }
     return args, envs
 
 
