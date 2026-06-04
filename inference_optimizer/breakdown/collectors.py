@@ -1320,7 +1320,7 @@ def collect_capability_summary(
 
     # specialist sub-agent capability row. Counts
     # are derived from ``specialist_rounds`` so they always agree with
-    # ``specialist_runs`` (Inv-12.2 single source).
+    # ``specialist_runs`` (single source).
     specialist_row = _specialist_capability_row(state)
     return {
         "geak":           geak_cap,
@@ -2868,7 +2868,7 @@ def _promote_legacy_gain_entries(
 
 
 # ---------------------------------------------------------------------------
-# §13b Roofline (PR #321 single-path + watermark refresh model)
+# §13b Roofline (single-path + watermark refresh model)
 # ---------------------------------------------------------------------------
 def collect_roofline(
     state: dict[str, Any],
