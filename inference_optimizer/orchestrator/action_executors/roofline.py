@@ -28,11 +28,6 @@ fresh TraceLens snapshot (`last_profile_trace` +
   would normally do for a top-level profile task are reproduced
   inline (limited to the trace_path / status / args fields that
   downstream trace_analyze depends on).
-
-N2a stub kept (`RooflineStubExecutor` + `make_roofline_stub_executor`)
-as the §11 risk-mitigation fallback wiring: operators who want to
-temporarily disable the real executor without removing the action
-entry can wire the stub instead.
 """
 
 from __future__ import annotations
@@ -126,50 +121,6 @@ def _extract_steady_state_retry_mode(
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip(), w
     return None
-
-
-# ---------------------------------------------------------------------------
-# Stub (N2a) — kept for the §11 fallback wiring path
-# ---------------------------------------------------------------------------
-class RooflineStubExecutor:
-    """Stub executor used as a fallback when the real `RooflineExecutor`
-    must be disabled (operator override / debug scenarios). Returns
-    `succeeded` + `degraded=True` with diagnostic `error` field."""
-
-    def __init__(self, *, shared_state: Any = None):
-        self.shared_state = shared_state
-
-    async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
-        snapshot_id = 0
-        analysis_md_path = ""
-        last_profile_trace = ""
-        if self.shared_state is not None:
-            cached = (
-                getattr(self.shared_state, "last_trace_analyze", {}) or {}
-            )
-            snap_raw = cached.get("roofline_snapshot_id")
-            if isinstance(snap_raw, int):
-                snapshot_id = snap_raw
-            analysis_md_path = str(cached.get("analysis_md_path") or "")
-            last_profile_trace = str(
-                getattr(self.shared_state, "last_profile_trace", "") or ""
-            )
-        return {
-            "status": "succeeded",
-            "degraded": True,
-            "error": "roofline_stub_executor_active",
-            "executed_at_iso": _now_iso(),
-            "snapshot_id": snapshot_id,
-            "last_profile_trace": last_profile_trace,
-            "analysis_md_path": analysis_md_path,
-        }
-
-
-def make_roofline_stub_executor(
-    *, shared_state: Any = None,
-) -> RooflineStubExecutor:
-    """Stub factory — kept as the explicit safe-fallback wiring path."""
-    return RooflineStubExecutor(shared_state=shared_state)
 
 
 # ---------------------------------------------------------------------------
@@ -491,16 +442,11 @@ class RooflineExecutor:
 
 
 def make_roofline_executor(*, shared_state: Any) -> RooflineExecutor:
-    """Production factory used by `cli._register_executors`.
-
-    Same call-site signature `make_roofline_stub_executor` exposes so
-    swapping stub → real is a one-line change in cli.py."""
+    """Production factory used by `cli._register_executors`."""
     return RooflineExecutor(shared_state=shared_state)
 
 
 __all__ = [
     "RooflineExecutor",
-    "RooflineStubExecutor",
     "make_roofline_executor",
-    "make_roofline_stub_executor",
 ]
