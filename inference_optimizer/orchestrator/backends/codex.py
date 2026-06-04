@@ -113,7 +113,7 @@ def _extract_envelope(text: str) -> dict | None:
 
 @dataclass
 class CodexBackend:
-    """Production Codex backend (). Implements :class:`Backend`."""
+    """Production Codex backend. Implements :class:`Backend`."""
 
     model: str = "gpt-5.4"
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
