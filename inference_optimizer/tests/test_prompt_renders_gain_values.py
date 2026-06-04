@@ -21,6 +21,40 @@ from __future__ import annotations
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
+def _legacy_winners_round(i: int = 1) -> dict:
+    return {
+        "action": "backends",
+        "round_id": f"backends-{i:03d}",
+        "base_tput": 1641.16,
+        "base_extra_args": "",
+        "winners": [
+            {
+                "name": "qr_int4",
+                "tput": 1768.67,
+                "gain_pct": 3.33,
+                "extra_server_args": "",
+                "extra_envs": {
+                    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
+                },
+                "note": "tier5_comm",
+                "fingerprint": "fp_c",
+            },
+        ],
+        "best": {
+            "name": "qr_int4",
+            "tput": 1768.67,
+            "gain_pct": 3.33,
+            "extra_server_args": "",
+            "extra_envs": {
+                "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
+            },
+            "note": "tier5_comm",
+            "fingerprint": "fp_c",
+        },
+        "ts": f"2026-01-01T00:00:{i:02d}+00:00",
+    }
+
+
 def _make_state() -> SharedState:
     """Construct a SharedState with one accepted/one rejected entry per
     ``*_search`` ledger plus one populated ``backend_winners_history``
@@ -91,33 +125,7 @@ def _make_state() -> SharedState:
         "cursor": 4,
         "last_round": {},
     }
-    s.push_backend_winners_round(
-        action="backends",
-        base_tput=1641.16,
-        base_extra_args="",
-        winners=[
-            {
-                "name": "qr_int4",
-                "output_throughput": 1768.67,
-                "gain_pct": 3.33,
-                "extra_server_args": "",
-                "extra_envs": {
-                    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
-                },
-                "note": "tier5_comm",
-            },
-        ],
-        best={
-            "name": "qr_int4",
-            "output_throughput": 1768.67,
-            "gain_pct": 3.33,
-            "extra_server_args": "",
-            "extra_envs": {
-                "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
-            },
-            "note": "tier5_comm",
-        },
-    )
+    s.backend_winners_history = [_legacy_winners_round()]
     return s
 
 
@@ -202,14 +210,10 @@ def test_backend_winners_history_caps_at_five_rounds():
     """Older rounds collapse to ``[+N earlier rounds elided]`` so the
     prompt doesn't grow unbounded across long sessions."""
     s = SharedState(session_id="long")
-    for i in range(7):
-        s.push_backend_winners_round(
-            action="backends",
-            base_tput=1000.0 + i,
-            base_extra_args="",
-            winners=[],
-            best=None,
-        )
+    s.backend_winners_history = [
+        {**_legacy_winners_round(i), "winners": [], "best": None}
+        for i in range(1, 8)
+    ]
     out = s._format_backend_winners_history()
     assert "[+2 earlier rounds elided]" in out
     # Most recent round is still present.
