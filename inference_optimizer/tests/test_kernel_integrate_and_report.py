@@ -46,10 +46,17 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     # inline reimport. Same convention as test_p2_2_profile_and_handlers.py.
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
-    # Skip the ``python3 -c "import Magpie"`` probe inside
-    # _resolve_magpie_python so subprocess.run mocks only see the actual
-    # Magpie launch command (origin/main behaviour).
+    # Keep the unit test hermetic: stub the interpreter resolver so it never
+    # spawns a real ``python3 -c "import Magpie"`` probe. (Setting
+    # MAGPIE_PYTHON alone no longer short-circuits the probe — the resolver
+    # validates the env value via run_with_session_kill since the
+    # stale-interpreter self-heal landed.) The mocked Magpie launch only ever
+    # sees this fixed interpreter as ``cmd[0]``.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
+    from inference_optimizer.orchestrator.action_executors import _grid_runner
+    monkeypatch.setattr(
+        _grid_runner, "_resolve_magpie_python", lambda: "/usr/bin/python3",
+    )
     return make_session_dir()
 
 
@@ -424,7 +431,15 @@ async def test_integrate_handler_injects_extra_server_args(
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "KEEP"
-    assert seen["envs"]["EXTRA_SGLANG_ARGS"] == "--cuda-graph-max-bs 8"
+    # The operator-supplied extra_server_args must be preserved verbatim, and
+    # the shared materialization choke point auto-appends the sglang
+    # scheduler ``--watchdog-timeout`` (MI300X cold-compile guard) on top of
+    # it. Assert both rather than exact equality so the watchdog default
+    # (1800s, or $SGLANG_WATCHDOG_TIMEOUT) can evolve without breaking this
+    # test. See ``inject_sglang_watchdog_timeout`` / test_watchdog_injection.
+    sglang_args = seen["envs"]["EXTRA_SGLANG_ARGS"]
+    assert "--cuda-graph-max-bs 8" in sglang_args
+    assert "--watchdog-timeout" in sglang_args
 
 
 @pytest.mark.asyncio
