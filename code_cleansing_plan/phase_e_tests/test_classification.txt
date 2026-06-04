@@ -1,0 +1,90 @@
+# Phase E — test classification + consolidation inventory
+#
+# Labels (per 01_test_inventory.md):
+#   GUARDRAIL  Phase 0 keep-list; functional-equivalence judge. Slim-only, never delete.
+#   BEHAVIOR   Covers outward behavior/contract but not on keep-list. Keep; may merge.
+#   PRIVATE    Asserts private helper / internal mid-state. Deletable per master旨.
+#   STALE      Tests removed/Phase-B-rewritten functionality. Deletable.
+#
+# Method: the full per-subsystem suites were run first. Every non-kernel
+# subsystem was fully green (io 3620, robustness 703, critic 249, framework
+# 191), so there were NO red/STALE tests to delete — Phases A–D retired dead
+# code without leaving orphaned tests. kernel-agent has 15 pre-existing
+# failures that are environment-dependent (subprocess tools needing GPU /
+# aiter source / on-disk fixtures absent in this sandbox), NOT regressions
+# and NOT touched here.
+#
+# Phase E therefore focused on CONSOLIDATION of genuinely fragmented
+# small-file families that all exercise the SAME module (the 02 step's
+# primary target), preserving every test. No outward-behavior coverage was
+# dropped; every §1 contract still has its guardrail test.
+
+# ---------------------------------------------------------------------------
+# GUARDRAIL (Phase 0 keep-list — untouched except allowed slimming)
+# ---------------------------------------------------------------------------
+inference_optimizer/tests/test_coordinator_runtime.py            GUARDRAIL  full-flow phase machine / stop_reason
+inference_optimizer/tests/test_e2e_mock.py                       GUARDRAIL  mock end-to-end optimize to CLOSE
+inference_optimizer/tests/test_breakdown_smoke.py                GUARDRAIL  session_breakdown.json shape
+inference_optimizer/tests/test_back_compat_legacy_field_name.py  GUARDRAIL  v1 alias keys (the one preserved back-compat point)
+inference_optimizer/tests/test_cli_breakdown_claw_mirror.py      GUARDRAIL  claw-stats-service mirror consumer
+inference_optimizer/tests/test_no_legacy_writer_sites.py         GUARDRAIL  static legacy-writer allowlist guard
+inference_optimizer/tests/test_payload_aliases.py                GUARDRAIL  extra_sglang_args -> extra_server_args alias
+inference_optimizer/tests/test_roofline_ceiling.py               GUARDRAIL  outward roofline ceiling numbers
+critic-agent/runtime/tests/test_intent_envelope.py               GUARDRAIL  critic envelope shape parity
+critic-agent/runtime/tests/test_cli.py                           GUARDRAIL  critic runtime CLI envelope contract
+robustness-agent/tests/test_role_contract.py                     GUARDRAIL  robustness tick envelope semantics
+robustness-agent/tests/test_role_envelope.py                     GUARDRAIL  robustness envelope shape parity
+robustness-agent/tests/test_runtime_cli.py                       GUARDRAIL  robustness runtime CLI envelope contract
+robustness-agent/tests/test_payload_aliases_shim.py              GUARDRAIL  robustness payload alias shim
+kernel-agent/tools/test_payload_aliases_shim.py                  GUARDRAIL  kernel payload alias shim
+framework-agent/tests/test_phase_flow_cli.py                     GUARDRAIL  fa phase-discover request/output schema
+framework-agent/tests/integration/test_e2e_execute_mock.py       GUARDRAIL  framework-agent mock execute e2e
+
+# ---------------------------------------------------------------------------
+# CONSOLIDATED (BEHAVIOR; merged into a single module, all tests preserved)
+# ---------------------------------------------------------------------------
+# robustness sources_local_probe family (7 files -> 1): all hit
+#   robustness_agent.sources.local_probe; split only duplicated import/helper
+#   headers. d2/preflight/ray/decision_audit/ij merged into:
+robustness-agent/tests/test_sources_local_probe.py               BEHAVIOR   merged: +d2/preflight/ray/decision_audit/ij (81 tests)
+#   DELETED (folded above):
+#     test_sources_local_probe_d2.py
+#     test_sources_local_probe_preflight.py
+#     test_sources_local_probe_ray.py
+#     test_sources_local_probe_decision_audit.py
+#     test_sources_local_probe_ij.py
+#
+# robustness local_health signal trio (3 files -> 1): all exercise
+#   evaluate_local_health_signals; shared a duplicated _ctx helper.
+robustness-agent/tests/test_signals_local_health.py              BEHAVIOR   merged: +d1 log-patterns +disk/shm/fd/ray (52 tests)
+#   DELETED (folded above):
+#     test_signals_local_health_d1.py
+#     test_signals_local_health_disk.py
+#
+# inference_optimizer SharedState unit trio (3 files -> 1): pure SharedState
+#   helpers + audit-trail / failure-log; also retired "backends"/"params"
+#   string labels from failure-log fixtures.
+inference_optimizer/tests/test_shared_state_units.py             BEHAVIOR   merged: +action_attempts +last_action_failures (34 tests)
+#   DELETED (folded above):
+#     test_shared_state_action_attempts.py
+#     test_shared_state_last_action_failures.py
+
+# ---------------------------------------------------------------------------
+# NOT merged (evaluated, left intact) — same feature but distinct stubs /
+# helpers that would collide on merge (merge would be a rename-churn, not a
+# simplification), or distinct submodules under test:
+# ---------------------------------------------------------------------------
+# test_framework_pr_discover_directed.py + _retry.py : both define
+#   _StateStub/_CoordinatorStub/_call_discover with DIFFERENT (sync vs async)
+#   bodies -> collide; kept separate.
+# critic web_tools_{config,schemas,providers,fetch_client,search_client} :
+#   each tests a different web_tools submodule; colliding _cfg helpers ->
+#   kept separate.
+# robustness signals_{budget,preflight,progress,state_integrity,...} : one
+#   file per distinct signal rule -> kept separate (merging mixes concerns).
+
+# ---------------------------------------------------------------------------
+# Everything else: BEHAVIOR by default (covers outward behavior of its module;
+# no PRIVATE/STALE bulk-deletion performed because the suites were already
+# green and the master旨 red line forbids dropping contract coverage).
+# ---------------------------------------------------------------------------
