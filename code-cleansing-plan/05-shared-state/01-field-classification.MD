@@ -126,3 +126,6 @@ Follow-up applied:
 - `push_backend_winners_round()` was removed because it had no live
   runtime caller. New sessions should update `explore_search`, not the
   legacy `backend_winners_history` field.
+- New writes to `params_no_promote_streak` are centralized in
+  `SharedState.note_explore_outcome()` / `reset_explore_plateau_proxy()`
+  while the legacy plateau proxy remains supported.
