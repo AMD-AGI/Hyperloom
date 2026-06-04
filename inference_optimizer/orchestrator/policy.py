@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from .framework_paths import resolve_source_file_allowlist
 from .intent_parser import Intent, IntentType
-from .action_surfaces import (
+from ..protocol.action_surfaces import (
     FRAMEWORK_PR_INTERNAL_ACTION_NAMES,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_OWNED_ACTIONS,

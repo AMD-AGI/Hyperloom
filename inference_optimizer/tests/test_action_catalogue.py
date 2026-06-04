@@ -14,7 +14,7 @@ from inference_optimizer.orchestrator.action_registry import (
     VALID_PIPELINE_PHASES,
 )
 from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
-from inference_optimizer.orchestrator.action_surfaces import (
+from inference_optimizer.protocol.action_surfaces import (
     FRAMEWORK_PR_INTERNAL_ACTION_NAMES as SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES,
     FULL_ENABLED_ACTIONS as SURFACE_FULL_ENABLED_ACTIONS,
     GRID_INJECTABLE_ACTIONS as SURFACE_GRID_INJECTABLE_ACTIONS,
