@@ -543,7 +543,7 @@ class SharedState:
     last_profile_args: str = ""
 
     # ------------------------------------------------------------------
-    # Roofline-v2 trace-analyze cache (canonical, post-M4 rename).
+    # Roofline-v2 trace-analyze cache.
     #
     # ``last_trace_analyze`` is the canonical 11-field dict written by
     # :meth:`record_trace_analyze` after a successful ``trace_analyze``
@@ -555,12 +555,6 @@ class SharedState:
     # ``roofline_snapshot_id`` mirrors ``last_trace_analyze['roofline_snapshot_id']``
     # at the top level for fast PolicyGate / Coordinator access (avoids the
     # nested-dict lookup on hot paths).
-    #
-    # Pre-M4 ``last_select_kernels`` field was removed in this branch
-    # (commit "drop select_kernels alias…") — all readers must use
-    # ``last_trace_analyze``. Resume of a stale state.json that still
-    # carries ``last_select_kernels`` will silently drop the extra key
-    # via :meth:`_apply_loaded_state`.
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
@@ -1171,15 +1165,9 @@ class SharedState:
         # crash. Unknown keys are dropped; missing keys fall back to defaults.
         known = {f for f in cls.__dataclass_fields__}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # drop the legacy scoreboard fields from the loaded
-        # dict. The dataclass no longer carries
-        # ``action_scores`` so it would be filtered out anyway; we
-        # also strip ``params_no_promote_streak`` /
-        # ``score_violation`` / ``cooldown_until_tick`` / ``streak_*``
-        # / ``locked_reason`` family explicitly so the ``warn`` mode
-        # gets a usable count. ``params_no_promote_streak`` is kept
-        # as a read-only fallback for legacy M2 plateau proxy when
-        # ``explore_search`` is empty; everything else is dropped.
+        # The dataclass no longer carries the legacy scoreboard fields,
+        # so the ``known`` filter above already drops them; this explicit
+        # list only exists to count/log them in ``warn`` mode.
         #
         # Compat (read-only): remove this drop list once old-session
         # resume of pre-v0.8 scoreboard / select_kernels state.json is no
@@ -1194,10 +1182,6 @@ class SharedState:
             "score_mult",
             "effective_score",
             "last_action_score_snapshot",
-            # Removed in this branch: M4 renamed select_kernels →
-            # trace_analyze; the legacy mirror field was dropped so all
-            # readers use ``last_trace_analyze``. Resume of an older
-            # state.json silently discards this slot.
             "last_select_kernels",
         )
         legacy_seen: list[tuple[str, int]] = []
@@ -2513,8 +2497,7 @@ class SharedState:
         ``trace_analyze`` sub-step, and by the inline programmatic
         handler path in :meth:`Coordinator._handle_request` when an LLM
         emits a ``trace_analyze`` request directly. Single canonical
-        writer for this cache — the M4 legacy ``record_select_kernels``
-        twin was removed in this branch.
+        writer for this cache.
 
         On every successful call, ``roofline_snapshot_id`` is read from the
         previous ``last_trace_analyze`` and incremented by one — giving a
@@ -4269,8 +4252,6 @@ class SharedState:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
-            # Canonical post-M4 cache key; legacy ``last_select_kernels``
-            # was removed in this branch (callers must use this field).
             f"last_trace_analyze={self._format_last_trace_analyze()}",
             # Full TraceLens ``analysis.md`` (snapshot id + gain in the
             # bookend header) so the orchestration LLM grounds
@@ -4646,9 +4627,6 @@ class SharedState:
         )
 
     def _format_last_trace_analyze(self) -> str:
-        # Canonical post-M4 cache key. Legacy ``last_select_kernels``
-        # field was removed in this branch — see SharedState dataclass
-        # docstring.
         return self._format_trace_analyze_blob(self.last_trace_analyze)
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
