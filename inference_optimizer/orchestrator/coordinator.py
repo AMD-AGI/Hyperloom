@@ -9344,7 +9344,7 @@ class Coordinator:
                     "steward: append_gap_attempt failed for gap=%s",
                     next_gap,
                 )
-            self.shared_state.params_no_promote_streak = 0
+            self.shared_state.reset_explore_plateau_proxy()
             # Per-domain empty streak reset is a courtesy — Orchestration
             # gets a clean slate to re-dispatch domains.
             self.shared_state.specialist_domain_empty_streak = {}
@@ -12455,11 +12455,6 @@ class Coordinator:
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("depth: note_explore_outcome failed")
             if promoted:
-                # Reset the plateau proxy on a successful KEEP so
-                # the M2 transitional fallback in phase_state stays
-                # aligned with the unified ledger. The proxy is dual-
-                # tracked for resume parity.
-                self.shared_state.params_no_promote_streak = 0
                 # v0.8 M3 §4.4 + explore inlines the
                 # per-KEEP stack rebench, so the post-rebench
                 # ``running_base_tput`` measures the *current*
@@ -12494,9 +12489,6 @@ class Coordinator:
                         reason="explore_keep_watermark",
                     )
             else:
-                # No KEEP cleared the rebench. Bump the proxy so the
-                # plateau judges see the no-progress run.
-                self.shared_state.params_no_promote_streak += 1
                 changed = True
             audit_decision = "promoted" if promoted else "discarded"
             audit_extras = {

@@ -3200,19 +3200,26 @@ class SharedState:
                 dt.get("config_changes_attempted") or 0
             ) + 1
 
-    def note_explore_outcome(self, *, promoted: bool) -> int:
-        """Update ``consecutive_reverts`` from an explore-round outcome.
+    def reset_explore_plateau_proxy(self) -> None:
+        """Reset the retained legacy explore plateau proxy."""
+        self.params_no_promote_streak = 0
 
-        A promoted KEEP resets the run to 0; a no-promote round increments
-        it. Returns the post-update value.
+    def note_explore_outcome(self, *, promoted: bool) -> int:
+        """Update explore outcome counters after one explore task.
+
+        A promoted KEEP resets both the depth gate's revert streak and the
+        retained legacy plateau proxy. A no-promote round increments both.
+        Returns the post-update depth-gate revert streak.
         """
         dt = self._depth()
         if promoted:
             dt["consecutive_reverts"] = 0
+            self.reset_explore_plateau_proxy()
         else:
             dt["consecutive_reverts"] = int(
                 dt.get("consecutive_reverts") or 0
             ) + 1
+            self.params_no_promote_streak += 1
         return int(dt["consecutive_reverts"])
 
     def depth_snapshot(self) -> dict[str, Any]:
