@@ -3723,6 +3723,35 @@ class Coordinator:
     CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC: float = 300.0
     CLOSE_NDJSON_DRAIN_TIMEOUT_SEC: float = 60.0
 
+    def _derive_close_stop_reason(self) -> str:
+        """Best-effort ``stop_reason`` for a CLOSE reached with a blank one.
+
+        Most CLOSE entries are *not* wall-clock timeouts. The phase
+        machine records the transition reason on the latest
+        ``phase_history`` row (e.g. ``sweep_done`` / ``conc_sweep_done``
+        for a normal SWEEP completion), but those are non-terminal
+        transitions so ``_advance_phase_if_needed`` never mirrored them
+        onto ``state.stop_reason``. Recover the reason from the most
+        recent row that lands in CLOSE when it is a valid vocab term;
+        otherwise fall back to ``time_exhausted`` (the wall-clock
+        deadline is the only common path that reaches CLOSE without a
+        recorded phase-exit reason).
+        """
+        history = self.shared_state.phase_history or []
+        for row in reversed(history):
+            if not isinstance(row, dict):
+                continue
+            if (row.get("to_phase") or "").strip().upper() != \
+                    _phase_state.PHASE_CLOSE:
+                continue
+            reason = (row.get("reason") or "").strip()
+            if reason and _phase_state.is_valid_stop_reason(reason):
+                return reason
+            # Newest CLOSE-bound row had no usable reason — stop scanning
+            # rather than picking up a stale older transition.
+            break
+        return "time_exhausted"
+
     async def _on_enter_close(self, *, from_phase: str) -> None:
         """CLOSE phase sequencer.
 
@@ -3780,8 +3809,20 @@ class Coordinator:
         # real reasons like baseline_failed / target_reached are already
         # set before CLOSE) closes that race. Step 5 stays as an
         # idempotent backstop.
+        #
+        # DO NOT unconditionally stamp ``time_exhausted``: most CLOSE
+        # entries are NOT wall-clock timeouts. A normal SWEEP / conc-sweep
+        # completion transitions to CLOSE with a perfectly good
+        # phase-exit reason (``sweep_done`` / ``conc_sweep_done`` — both
+        # valid STOP_REASON_VOCAB terms) recorded on the latest
+        # ``phase_history`` row by ``_advance_phase_if_needed``, but it is
+        # NOT a terminal evidence transition, so the early mirror at line
+        # ~1407 left ``stop_reason`` blank. Derive the reason from that
+        # row first; only fall back to ``time_exhausted`` when the run
+        # genuinely has no usable phase-exit reason.
         if not self.shared_state.stop_reason:
-            self.shared_state.set_stop_reason("time_exhausted")
+            derived = self._derive_close_stop_reason()
+            self.shared_state.set_stop_reason(derived)
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — defensive
@@ -3886,9 +3927,11 @@ class Coordinator:
         # ``STOP_REASON_VOCAB``. NOTE: this is now an idempotent
         # backstop — the early persist at the top of the sequencer has
         # normally already filled a blank stop_reason before step 2's
-        # breakdown was serialized.
+        # breakdown was serialized. We re-derive (rather than hard-code
+        # ``time_exhausted``) so this backstop matches the early path and
+        # never mislabels a normal SWEEP/conc-sweep completion.
         if not self.shared_state.stop_reason:
-            self.shared_state.set_stop_reason("time_exhausted")
+            self.shared_state.set_stop_reason(self._derive_close_stop_reason())
         try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
