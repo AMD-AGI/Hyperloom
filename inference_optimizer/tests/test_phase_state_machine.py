@@ -169,23 +169,6 @@ def test_exit_normal_explore_uses_budget_exhaustion():
     assert out is not None and out[0] == "explore_phase_budget_exhausted"
 
 
-def test_exit_normal_explore_plateau_heuristic():
-    state = SimpleNamespace(
-        phase="EXPLORE",
-        phase_started_unix=0.0,
-        max_minutes=0,  # unlimited
-        phase_budget_pct={},
-        params_no_promote_streak=5,
-        explore_search={},
-        optimization_stack=[{"action": "explore"}],
-    )
-    out = phase_state.exit_normal_explore(state)
-    assert out is not None and out[0] == "plateau_explore"
-    # Without optimization_stack it does NOT fire (would be PRELUDE-ish).
-    state.optimization_stack = []
-    assert phase_state.exit_normal_explore(state) is None
-
-
 def test_compute_next_phase_no_kernel_skips_kernel_phase():
     state = SimpleNamespace(
         phase="EXPLORE",
@@ -193,7 +176,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         max_minutes=0,
         phase_budget_pct={},
         stop_reason="",
-        params_no_promote_streak=5,
+        pending_escalate_hint="skip_to_kernel",
         explore_search={},
         optimization_stack=[{"action": "explore"}],
     )
@@ -527,68 +510,3 @@ def test_collect_phase_segments_empty_when_history_missing():
     from inference_optimizer.breakdown.collectors import collect_phase_segments
     assert collect_phase_segments({}, [], warnings=[]) == []
     assert collect_phase_segments({"phase_history": []}, [], warnings=[]) == []
-
-
-def test_collect_phase_segments_emits_proxy_provisional_warning():
-    """KB_gaps/Gap-15 / R-09 — when a phase_history row carries the
-    legacy ``m2_proxy`` evidence (or the canonical ``r09_provisional``
-    flag), the collector pushes a single ``plateau_proxy_provisional``
-    marker into the session-level warnings list."""
-    from inference_optimizer.breakdown.collectors import collect_phase_segments
-    state = {
-        "phase_history": [
-            {
-                "from_phase": "",
-                "to_phase":   "EXPLORE",
-                "reason":     "prelude_done",
-                "evidence":   {"baseline_tput": 100.0},
-                "ts":         "2026-05-19T00:00:00+00:00",
-                "ts_unix":    1.0,
-            },
-            {
-                "from_phase": "EXPLORE",
-                "to_phase":   "KERNEL",
-                "reason":     "plateau_explore",
-                "evidence":   {
-                    "evidence":         "m2_proxy",
-                    "r09_provisional":  True,
-                    "params_no_promote_streak": 5,
-                },
-                "ts":         "2026-05-19T00:30:00+00:00",
-                "ts_unix":    1801.0,
-            },
-        ],
-    }
-    warnings: list[str] = []
-    segments = collect_phase_segments(state, [], warnings=warnings)
-    assert len(segments) == 2
-    assert any("plateau_proxy_provisional" in w for w in warnings)
-    # Only one marker even if multiple proxy segments existed.
-    assert sum("plateau_proxy_provisional" in w for w in warnings) == 1
-
-
-def test_collect_phase_segments_no_proxy_warning_for_clean_session():
-    from inference_optimizer.breakdown.collectors import collect_phase_segments
-    state = {
-        "phase_history": [
-            {
-                "from_phase": "",
-                "to_phase":   "EXPLORE",
-                "reason":     "prelude_done",
-                "evidence":   {"baseline_tput": 100.0},
-                "ts":         "2026-05-19T00:00:00+00:00",
-                "ts_unix":    1.0,
-            },
-            {
-                "from_phase": "EXPLORE",
-                "to_phase":   "KERNEL",
-                "reason":     "plateau_explore",
-                "evidence":   {"evidence": "plateau_judgment"},
-                "ts":         "2026-05-19T00:30:00+00:00",
-                "ts_unix":    1801.0,
-            },
-        ],
-    }
-    warnings: list[str] = []
-    collect_phase_segments(state, [], warnings=warnings)
-    assert not any("plateau_proxy_provisional" in w for w in warnings)

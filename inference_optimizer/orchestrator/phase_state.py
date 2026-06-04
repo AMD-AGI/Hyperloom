@@ -1053,7 +1053,6 @@ def exit_normal_explore(
     plateau_keep_gain_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     plateau_empty_streak: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
-    disable_legacy_proxy: bool = False,
     force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
@@ -1072,15 +1071,7 @@ def exit_normal_explore(
     2. Real ``plateau_explore`` (:func:`compute_plateau_explore`)
        when signals are present (``explore_search.winners_history``
        or ``specialist_rounds``).
-    3. KB_gaps/Gap-15 R-09 transitional proxy
-       (``params_no_promote_streak``) when signals are absent
-       AND ``disable_legacy_proxy=False``. Evidence carries
-       ``r09_provisional=True`` so the breakdown collector surfaces
-       a ``plateau_proxy_provisional`` warning. Operators can set
-       ``INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1`` (Coordinator
-       reads + passes through) once their fleet is fully v0.8 to
-       fail closed.
-    5. Phase budget exhausted.
+    3. Phase budget exhausted.
     """
     # Priority 0 — HARD force-exit (IR-6).
     forced, force_ev = should_force_exit_explore(
@@ -1182,29 +1173,6 @@ def exit_normal_explore(
                 "steward_recommendation": rec,
                 **evidence,
             }
-    elif not disable_legacy_proxy:
-        params_streak = int(getattr(state, "params_no_promote_streak", 0) or 0)
-        explore_search = getattr(state, "explore_search", None) or {}
-        explore_accepted = 0
-        if isinstance(explore_search, dict):
-            accepted = explore_search.get("accepted") or []
-            explore_accepted = len(accepted) if isinstance(accepted, list) else 0
-        optimization_stack = getattr(state, "optimization_stack", None) or []
-        has_results = bool(
-            isinstance(optimization_stack, list) and optimization_stack
-        )
-        if params_streak >= 5 and explore_accepted == 0 and has_results:
-            return "plateau_explore", {
-                "evidence": "m2_proxy",
-                "r09_provisional": True,
-                "params_no_promote_streak": params_streak,
-                "explore_accepted": explore_accepted,
-                "note": (
-                    "KB_design §3.14 R-09 — legacy params_no_promote_streak "
-                    "proxy fired (signals empty); set "
-                    "INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 to forbid"
-                ),
-            }
     remaining = phase_budget_remaining_seconds(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )
@@ -1229,8 +1197,7 @@ def wants_steward_assessment(
     Pre-conditions (all must hold):
 
     * current phase is EXPLORE,
-    * plateau has triggered (real plateau judgment, not the legacy
-      m2_proxy — the proxy is too noisy to drive a steward dispatch),
+    * plateau has triggered (real plateau judgment),
     * no fresh ``last_remaining_gaps_assessment`` exists (otherwise we
       already routed on the existing verdict),
     * steward is not disabled by operator,
@@ -1595,7 +1562,6 @@ def compute_next_phase(
     kernel_enabled: bool = True,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
-    disable_legacy_proxy: bool = False,
     framework_phase_enabled: bool = False,
     explore_enabled: bool = True,
     max_hours: float | None = None,
@@ -1691,7 +1657,6 @@ def compute_next_phase(
                 "explore_lookback",
                 DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
             )),
-            disable_legacy_proxy=disable_legacy_proxy,
             force_exit_hours_remaining=float(overrides.get(
                 "force_exit_hours_remaining",
                 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
