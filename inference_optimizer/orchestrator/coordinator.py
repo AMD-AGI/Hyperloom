@@ -1,23 +1,10 @@
-"""Coordinator main loop.
+"""Coordinator main loop and runtime protocol manager.
 
-The Coordinator is the **protocol manager** (not a decision-maker). It owns:
-
-* MessageBus + ResourceLockManager + TaskRegistry + CursorStore
-* PolicyGate (intent validation choke-point)
-* REQUEST/RESPONSE routing (Plan A: orchestration → kernel only)
-* Critic Review gate (§18) — pending proposals wait for verdict
-* Robustness scheduling-police execution (§19.3): kill_task / prune /
-  force_dispatch / escalate_strategy_change
-* Per-agent reactor loops + dispatcher
-
-**P0-3 scope**: a minimal, bounded-tick reactor that:
-* spins up one reactor task per agent (calls backend.run() each tick)
-* validates emitted intents through PolicyGate
-* persists / routes intents (REQUEST/RESPONSE/REVIEW_VERDICT/etc.)
-* for delegated tasks: enqueues into TaskRegistry and pumps SubAgentRunner
-
-Everything else (real backends, accuracy gate, phase machine, checkpoint
-cadence) lands in P0-5 and beyond.
+The Coordinator owns the durable optimizer loop: phase transitions,
+intent validation, task materialization, backend reactors, Critic and
+Robustness bridges, kernel/framework handoffs, resume state, and final
+artifact production. It should preserve external runtime contracts while
+keeping private scheduling and helper details free to change.
 """
 
 from __future__ import annotations
@@ -40,10 +27,8 @@ from ..compat.payload_aliases import read_extra_server_args
 from ..recipe_kb import RecipeKB, recipe_canonical_id
 from ..recipe_snapshot_constants import detect_framework_version
 
-# Severity tags previously imported from cortex_kb_constants. Kept as
-# inline string literals here since the recipe-snapshot v2 schema has
-# no fixed enum for severity; arbor's recipe.json doesn't either.
-# Coordinator only uses these two values.
+# Recipe snapshot severity tags. The schema has no fixed enum and
+# Coordinator only needs these two values.
 _SEVERITY_CRASH:   str = "crash"
 _SEVERITY_REGRESS: str = "regress"
 from . import phase_state as _phase_state
@@ -164,9 +149,8 @@ def _infer_model_class_from_config(model_path: str) -> str:
 # (record_kernel_opt / record_kernel_integrate_result).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "sweep", "explore",
-    # F1-3 + N10: see shared_state._AUDIT_ACTIONS for the rationale.
-    # The composite roofline action runs profile + trace_analyze
-    # atomically; each invocation is visible in `roofline_attempts`.
+    # Composite roofline runs profile + trace_analyze atomically; each
+    # invocation is visible in ``roofline_attempts``.
     "roofline",
 })
 
@@ -202,8 +186,8 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
 )
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
 
-# IR-7 — closed enum of session_steward_specialist recommendations.
-# Any value outside this set is coerced to ``stop_session`` in
+# Closed enum of session_steward_specialist recommendations. Any value
+# outside this set is coerced to ``stop_session`` in
 # :meth:`Coordinator._route_steward_verdict` (defense in depth — the
 # LLM can write any string but only the enum drives a phase-routing
 # change).
@@ -252,8 +236,7 @@ def effective_closing_grace_sec(
 
 
 def _resolve_silent_ticks_closing_threshold() -> int:
-    """N33: how many consecutive idle ticks must elapse before the
-    Coordinator force-enters closing phase.
+    """Resolve how many idle ticks elapse before forced closing.
 
     "Idle" = ``shared_state.consecutive_silent_ticks`` was bumped
     because the tick had no queued tasks, no running tasks, no pending
@@ -718,10 +701,8 @@ class Coordinator:
         self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(
             phase_budget_pct
         )
-        # specialist stale scan threshold (seconds).
-        # M5 wires real specialist sub-agents; M2 only ships the
-        # scanner so the Robustness prompt block lights up the moment
-        # M5 lands. Env override mirrors the rest of the knobs.
+        # Specialist stale scan threshold (seconds). Robustness uses this
+        # to surface domains that stopped producing usable proposals.
         try:
             self._specialist_stale_sec: float = max(
                 0.0,
@@ -741,17 +722,9 @@ class Coordinator:
                 "INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY", "",
             ).strip().lower() in ("1", "true", "yes")
         )
-        # External-SKILL-driven configuration. Both replace the deleted
-        # `setup` / `classify` orchestration actions: the SKILL caller is
-        # expected to supply --model-class (or MODEL_CLASS env) and
-        # --compare-against-gpu so the coordinator can seed marathon
-        # priors against the right model_class. ``target_analysis`` is
-        # *always* hard-gated as TODO 0 (independent of this field) so a
-        # marker JSON is written even when no external reference GPU was
-        # requested; the field is still threaded through to the executor
-        # so it knows whether to fetch real InferenceX rows or write a
-        # ``reason='no_target_gpu_configured'`` marker. Both default to
-        # "" so legacy callers keep working.
+        # External launcher configuration. ``target_analysis`` always
+        # writes an artifact; ``compare_against_gpu`` decides whether it
+        # fetches real InferenceX rows or records a no-target marker.
         self._compare_against_gpu: str = (compare_against_gpu or "").strip()
         self._model_class_override: str = (model_class or "").strip()
 
@@ -811,12 +784,10 @@ class Coordinator:
         # otherwise a fresh session that only inferred model_class would look
         # like a resume (state_path.exists() → is_resume=True).
         self._resumed_from = self._detect_resume_state()
-        # External SKILL may fill `model_class` via --model-class /
-        # MODEL_CLASS. If it does not, restore the deleted `classify` action's
-        # lightweight persistence duty by deriving the class once at boot.
-        # Only overwrite a blank value so resumed sessions keep their persisted
-        # class. Persist via ``_ensure_phase_initialised`` (not here) so fresh
-        # sessions are not misclassified as resume.
+        # External launchers may provide model_class via flag/env. If not,
+        # derive it once at boot; never overwrite a resumed session's value.
+        # Persist later via ``_ensure_phase_initialised`` so fresh sessions
+        # are not misclassified as resume.
         if not (self.shared_state.model_class or "").strip():
             self.shared_state.model_class = (
                 self._model_class_override
@@ -1343,10 +1314,9 @@ class Coordinator:
         if str(state.phase or "").upper() == "EXPLORE":
             await self._maybe_enqueue_explore_research_scout()
         if next_phase is None:
-            # IR-7 — on plateau but no steward verdict yet,
-            # compute_next_phase returns None and we enqueue the
-            # steward here. The dispatcher's normal loop picks it up;
-            # the next tick will see the verdict and route accordingly.
+            # On EXPLORE plateau without a steward verdict,
+            # compute_next_phase returns None and this schedules the
+            # steward; the next tick routes using its verdict.
             await self._maybe_enqueue_steward()
             return
         target, reason, evidence = next_phase
@@ -1569,12 +1539,8 @@ class Coordinator:
                     # Either we've exhausted retries (failures >= limit),
                     # or the call returned a clean empty payload
                     # (counter was reset to 0). Both are real exits.
-                    # Stamp a summary row so the give-up decision shows
-                    # up in phase_history alongside the per-attempt
-                    # ``framework_pr_discover_failed`` rows — without
-                    # it the final flip to ``phase_done=True`` is
-                    # silent and operators have to infer the reason
-                    # from the retry trail. PR-327 P2.b follow-up.
+                    # Stamp a summary row so the final phase_done flip is
+                    # visible alongside per-attempt discover failures.
                     self._record_framework_pr_phase_done(
                         reason=(
                             "discover_retries_exhausted"
@@ -1597,8 +1563,8 @@ class Coordinator:
                 state.framework_pr_phase_done = True
                 state.save(self.session_dir)
                 return
-        # P1.b: Critic gate before apply. The Critic sees the PR
-        # metadata (diff URL + title + gap target) and returns an
+        # Critic gate before apply. The Critic sees PR metadata
+        # (diff URL + title + gap target) and returns an
         # ``approve`` / ``reject`` verdict. ``reject`` short-circuits
         # the candidate with a ``critic_denied`` progress row so the
         # apply / bench round is never spent on a candidate the Critic
@@ -1762,8 +1728,8 @@ class Coordinator:
         ``phase_history`` describing why the pump gave up.
 
         Per-attempt ``framework_pr_discover_failed`` rows already cover
-        each individual error; this is the summary row so the give-up
-        decision is not silent (PR-327 P2.b follow-up).
+        each individual error; this summary row makes the final give-up
+        decision explicit.
         """
         state = self.shared_state
         try:
@@ -2797,8 +2763,8 @@ class Coordinator:
                 session_gains.append(g)
             if session_gains:
                 expected_gain = max(session_gains)
-        # Last-chance fallback for offline-ingested seed rows that
-        # carry a flat ``gain_pct`` attr (Arbor compat shape).
+        # Last-chance fallback for offline-ingested seed rows carrying a
+        # flat ``gain_pct`` attr.
         if expected_gain <= 0:
             try:
                 fallback = float(recipe_attrs.get("gain_pct") or 0.0)
@@ -3927,7 +3893,7 @@ class Coordinator:
     async def _enqueue_internal_steward_task(
         self, *, reason: str, retry_attempt: int = 0,
     ) -> "Task | None":
-        """IR-7 — enqueue a Coordinator-owned session_steward_specialist task.
+        """Enqueue a Coordinator-owned session_steward_specialist task.
 
         Mirrors :meth:`_enqueue_internal_report_task` shape, with two
         differences:
@@ -5102,11 +5068,8 @@ class Coordinator:
                 sections.append("=== Priors-match (advisory ordering) ===")
                 sections.append(priors_block)
 
-            # PR-A8 / D3 (Arbor-into-Hyperloom): surface the intervention-mix
-            # ledger so Orchestration escalates to a code-patch specialist
-            # when it has been config-only for too long (Arbor's "do not
-            # settle for config-only" rule). ``record_intervention`` maintains
-            # the ledger + counter; this block is its consumer.
+            # Surface the intervention-mix ledger so Orchestration can
+            # escalate from repeated config-only work to code-patch specialists.
             try:
                 mix_block = self.shared_state.to_intervention_mix_summary()
             except Exception:  # noqa: BLE001 — defensive
@@ -5354,20 +5317,9 @@ class Coordinator:
                     "propose/delegate `integrate` / `recover` / `report`) "
                     "before any further explore."
                 )
-            # PR-C TODO 4a/5: hot-kernel must-try gate. Surfaces the
-            # untried hot reusable kernel queue so Orchestration knows
-            # it has to ``run_optimization`` (not ``report``) until the
-            # gpu_pct >= 3% set is drained. Same source of truth as the
-            # ``_sequence_denial_for_action('report')`` denial.
-            #
-            # Only fires when N19c (cheap-exhausted) gate has opened --
-            # otherwise the LLM would propose ``run_optimization``,
-            # bounce off ``execution_order`` repeatedly, and hit the
-            # policy_loop auto-stop (Qwen3-30B-A3B-Base 20260523T014653Z
-            # died at tick=14 this way). When cheap is still earning
-            # marginal gain (last_cheap_delta_gain >= EPSILON), let the
-            # LLM keep exploring; PR-C re-activates the instant N19c
-            # unlocks.
+            # Hot-kernel must-try gate. Surface untried reusable kernels
+            # only once kernel optimization is dispatchable; otherwise the
+            # LLM would bounce between report denial and execution ordering.
             if self._kernel_opt_unlocked():
                 untried_hot = self.shared_state.untried_hot_reusable_kernels()
                 if untried_hot:
@@ -5683,12 +5635,9 @@ class Coordinator:
                         f"{pending_kid!r}}}}} before any further explore"
                     ),
                 )
-        # PR-C (0270b67) + c900791 yield-to-N19c: hot-kernel report-gate.
-        # Block ``report`` when any reusable hot kernel with gpu_pct >=
-        # 3% has not yet been tried (and is not rejected / integrated).
-        # Prevents the log1 (164910Z) failure mode where tick=8 ->
-        # report_emitted with k001=24% / k002=37% / k004=9.7% untouched.
-        #
+        # Hot-kernel report gate. Block ``report`` when any reusable hot
+        # kernel with gpu_pct >= 3% has not yet been tried, rejected, or
+        # integrated.
         # Allowed through the gate:
         #   - kernel_opt request itself (handled at request layer)
         #   - integrate (still needs to drain prior KEEPs; the
@@ -5698,11 +5647,8 @@ class Coordinator:
         #   - report -- the LLM cannot declare the session done
         #     while a meaningful kernel lever exists.
         #
-        # The hot_kernel_unfinished rule only fires when
-        # ``run_optimization`` is actually dispatchable; otherwise N19c
-        # would reject the LLM's resulting request and we'd deadlock
-        # the LLM between two opposing gates (death-spiral observed on
-        # 20260523T014653Z — see c900791).
+        # Fire only when ``run_optimization`` is dispatchable to avoid
+        # trapping the LLM between opposing gates.
         if action == "report" and self._kernel_opt_unlocked():
             untried = self.shared_state.untried_hot_reusable_kernels()
             if untried:
@@ -6291,8 +6237,8 @@ class Coordinator:
         report / specialist dispatch / any non-grid action). The
         ``approve`` branch materialises the whole proposal as-is.
 
-        PR-A7 (Arbor-into-Hyperloom) adds the integrate_patch critic
-        gate: when the pending proposal is an ``integrate_patch`` for
+        The integrate_patch Critic gate mirrors verdicts: when the
+        pending proposal is an ``integrate_patch`` for
         a specialist whose patches the Critic just reviewed, the
         verdict is mirrored onto ``SharedState.specialist_patch_verdicts``
         so PolicyGate's ``integrate_patch_requires_critic_verdict``
@@ -6313,9 +6259,8 @@ class Coordinator:
             priority=0 if verdict == "reject" else 1,
             in_reply_to=pending.proposal_msg_id,
         ))
-        # PR-A7: mirror specialist / integrate_patch verdicts onto
-        # SharedState so PolicyGate's integrate_patch gate can
-        # consult them on the next tick.
+        # Mirror specialist / integrate_patch verdicts onto SharedState so
+        # PolicyGate's integrate_patch gate can consult them on the next tick.
         try:
             pa_params = pending.payload.get("params") or {}
         except AttributeError:
@@ -6339,8 +6284,8 @@ class Coordinator:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — best-effort mirror
                 log.exception(
-                    "PR-A7: failed to mirror critic verdict for "
-                    "specialist task=%s", sid_candidate,
+                    "failed to mirror critic verdict for specialist task=%s",
+                    sid_candidate,
                 )
         # When the verdict targets a dyn_id (routed via the synthesised
         # ``dyn-<id>`` specialist_task_id), persist the
@@ -8109,22 +8054,16 @@ class Coordinator:
                 plane is not None and getattr(plane, "pr_monitor_enabled", True)
             )
 
-        # PR-A5 (Arbor-into-Hyperloom): KB sub-graph traverse warmup.
-        # The plain ``pr_feed`` covers PR Monitor; this fills the
-        # specialist prompt's ``## 4. KB SUB-GRAPH`` section so the LLM
-        # starts with the Cortex KB anchor expanded rather than having
-        # to call ``mcp__cortex_kb__traverse`` itself.
+        # KB sub-graph warmup. ``pr_feed`` covers PR Monitor; this fills
+        # the specialist prompt's KB section with an expanded anchor.
         if (
             plane is not None
             and getattr(plane, "cortex_enabled", False)
             and "kb_subgraph" not in params
         ):
             try:
-                # PR-A10: pass the (lowercased) hw_slug so the per-domain
-                # fallback in select_kb_for_domain can filter recipe
-                # candidates to the same GPU. The slug rule mirrors the
-                # one ``recipe_kb`` uses (basename + lowercase + space/
-                # slash → underscore) so the two consumers agree.
+                # Pass the lowercased hw_slug so per-domain KB fallback
+                # filters recipe candidates to the same GPU.
                 _hw_raw = (state.gpu_type or "").strip()
                 hw_slug = (
                     _hw_raw.rsplit("/", 1)[-1].lower()
