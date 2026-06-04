@@ -493,7 +493,7 @@ class SpecialistPromptInputs:
     # padding with marginal candidates.
     max_proposals: int = DEFAULT_SPECIALIST_MAX_PROPOSALS
 
-    # Hardware context (§3.5 §6 part 2). ``tp`` defaults to 0
+    # Hardware context. ``tp`` defaults to 0
     # (sentinel for "unspecified"), NOT 1 — a silent default of 1
     # would make comm_specialist veto its own proposals on
     # tensor-parallel sessions where the Coordinator forgot to
@@ -533,7 +533,7 @@ class SpecialistPromptInputs:
     framework: str = ""
     framework_version: str = ""
 
-    # Gap statement (§3.5 §6 part 3)
+    # Gap statement
     gap_canonical_id: str = ""
     gap_symptom: str = ""
     gap_layer: str = ""
@@ -542,7 +542,7 @@ class SpecialistPromptInputs:
     # Optional structured KB context. Empty in the current RecipeKB-first path.
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
 
-    # Roofline / TraceLens evidence (§3.5 §6 part 4a).
+    # Roofline / TraceLens evidence.
     # Filled by ``Coordinator._warm_specialist_params`` from
     # :attr:`SharedState.last_trace_analyze`. Expected keys:
     # ``analysis_md_path``, ``roofline_snapshot_id``,
@@ -551,7 +551,7 @@ class SpecialistPromptInputs:
     # token cost). Empty dict → section renders empty / placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
 
-    # Recipe summary from T0 ``find-recipe`` (§3.5 §6 part 5)
+    # Recipe summary from T0 ``find-recipe``
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # T0 ``lessons`` query result — positive priors from prior KEEPs
@@ -566,7 +566,7 @@ class SpecialistPromptInputs:
     # for the field shape. Rendered as § 5d.
     session_snapshot: dict[str, Any] = field(default_factory=dict)
 
-    # PR feed (§3.5 §6 part 6)
+    # PR feed
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
@@ -592,7 +592,7 @@ class SpecialistPromptInputs:
     # when ``framework == 'atom'``.
     framework: str = ""
 
-    # Local source navigation hint (§3.5 §6 part 7)
+    # Local source navigation hint
     framework_source_roots: tuple[str, ...] = ()
     source_hint_directories: tuple[str, ...] = ()
 
