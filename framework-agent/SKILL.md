@@ -80,29 +80,18 @@ fa agent prepare-task --help   # rc=0, lists --task / --output-bundle
 fa agent commit-result --help  # rc=0
 ```
 
-## FRAMEWORK_PR phase subcommands
+## FRAMEWORK_PR phase subcommand
 
 The Coordinator-side **FRAMEWORK_PR phase** (between PRELUDE and
-EXPLORE in `inference_optimizer`) drives three phase-flow
-subcommands. Each reads `--request <json>` and writes
-`--out <json|->` (envelope style mirrors `critic-agent/runtime/cli.py`):
+EXPLORE in `inference_optimizer`) drives the `phase-discover`
+subcommand. It reads `--request <json>` and writes `--out <json|->`
+(envelope style mirrors `critic-agent/runtime/cli.py`):
 
 ```bash
-# 1. Discover a batch of PR candidates for the current run's gaps.
+# Discover a batch of PR candidates for the current run's gaps.
 #    request: {model, framework, gpu_type, gaps[], repo_url?, max_search_candidates, batch_id}
 #    output:  {batch_id, framework, repo_url, candidates: [...]}
 fa phase-discover --request req.json --out -
-
-# 2. Fetch a single PR and apply it into an isolated worktree.
-#    request: {pr_url, repo, ref, framework, worktree_dir, repo_url?, title?}
-#    output:  {status, worktree_path, applied_files, message}
-fa phase-fetch --request req.json --out -
-
-# 3. Emit a specialist_done-shaped envelope the Coordinator's
-#    FrameworkPrExecutor passes to its bench + critic pipeline.
-#    request: {task_id, pr_url, worktree_path, gap_canonical_id,
-#              framework, patches_written[], rationale}
-fa phase-emit-proposal --request req.json --out -
 ```
 
 Distinction from `fa explore` / `fa candidates`: those run a
