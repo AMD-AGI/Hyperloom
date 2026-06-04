@@ -62,9 +62,9 @@ Why:
 
 Test adjustment:
 
-- `test_prompt_renders_gain_values.py` now constructs legacy
-  `backend_winners_history` directly when testing old-session rendering,
-  instead of relying on a production writer helper.
+- The old prompt-renderer micro-test was later removed in Step 10 as an
+  implementation-detail test; old-session rendering remains covered by
+  higher-level prompt and breakdown contract tests.
 
 ### Centralized legacy plateau proxy writes
 
@@ -84,9 +84,9 @@ Action:
 
 - Lint: no errors on `shared_state.py`.
 - Tests: `test_shared_state_*`, `test_resume`, `test_payload_aliases`, `test_no_legacy_writer_sites` pass.
-- Follow-up compat cleanup verification: `test_prompt_renders_gain_values.py`,
-  `test_shared_state_evolution.py`, `test_no_legacy_writer_sites.py` pass
-  (64 passed).
+- Original compat cleanup verification passed before the Step 10 test
+  deletion; retained coverage now comes from shared-state evolution,
+  legacy-writer, prompt, and breakdown tests.
 - Follow-up plateau proxy verification: phase-state, assess-remaining-gaps,
   gaps, and shared-state evolution tests pass (152 passed).
 
