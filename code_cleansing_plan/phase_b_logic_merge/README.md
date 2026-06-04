@@ -57,13 +57,28 @@
     顺手压缩冗长 docstring;`coordinator.py` 通过 re-export 保持 call-site 与测试 import 不变。
   - `coordinator.py` 12559 → 12149(-410);新文件 348 行;**总净 -62**。
 
+- **Step 02 — 拆瘦 cli.py**(`2e0e15bc` / `fd9789d2` / `1cee8dba`)
+  - `cli_executors.py`(新,363):real-executor 表 + specialist/dynamic-action 工厂 + `_register_executors`。
+  - `cli_kb.py`(新,249):`_resolve_local_kb_root` / `_build_recipe_kb_dispatcher` / `_bootstrap_cortex_kb` /
+    `_bootstrap_knowledge_plane`(RecipeKB + KnowledgePlane bootstrap)。
+  - `cli_backends.py`(新,240):`_build_backends` / `_build_proposal_scorer` / `_robustness_server_configured` /
+    `_build_robustness_options` + multi-node workload-uid env keys。
+  - 三个新模块都**单向**(只 import orchestrator,绝不回 import cli);`cli.py` re-export 所有被搬名,call-site/测试 import 不变;
+    顺手删掉随之失活的 import(executor 符号 / `run_t0_anchor` / backend 类 / `ProposalScorer`)。
+  - `cli.py` 6368 → 5436(-932)。
+  - 守 §1 契约:CLI flag 面未改(`_RetiredFlag` 退役 flag 显式报错 + 迁移提示是**活输入处理**且 `help=SUPPRESS`,保留);
+    env 计算的 `DEFAULT_*_BACKEND` 常量与 `_resolve_*_choice` reader 留在 cli.py(reload 测试靠重导入重算)。
+
 ### 各 god-module 行数(Phase B 末)
 
 | 文件 | Phase B 始 | Phase B 末 |
 |---|---|---|
-| `coordinator.py` | 12623 | 12149 |
+| `coordinator.py` | 12623 | 12119 |
 | `coordinator_helpers.py`(新) | — | 348 |
-| `cli.py` | 6368 | 6368 |
+| `cli.py` | 6368 | 5436 |
+| `cli_executors.py`(新) | — | 363 |
+| `cli_kb.py`(新) | — | 249 |
+| `cli_backends.py`(新) | — | 240 |
 | `shared_state.py` | 4707 | 4703 |
 | `collectors.py` | 4377 | 4377 |
 
@@ -71,12 +86,12 @@
 
 - **resume/CLOSE 段抽出(01B 余项)**:`_detect_resume_state` / `_on_enter_close` 等大量依赖 `self.*`,强拆需透传
   self/多参数 → 增复杂度且非净减,违背"净行数不增 + 不为拆而拆"。按 conduct 停在文件内。
-- **Step 02 cli.py 拆分**:parser/executor/backend 抽出在铁律下至多净持平(搬运 +1 文件),收益≈复杂度下降但风险非零;
-  `_RetiredFlag`(退役 flag 显式报错 + 迁移提示)是**活的输入处理**(且 `help=SUPPRESS`,不在 CLI 金标准里),按"拿不准就留"保留。
+- **cli.py 余项**:preflight/诊断簇(env/GPU/凭证/catalog 探测,~1k 行)与 backend-choice resolver 簇和顶部常量/helper 网
+  高度交织(且 `DEFAULT_*_BACKEND` 有 import-期 env 耦合 + reload 测试),强拆易漏 import,留待后续单独一轮。
 - **Step 03 shared_state/collectors 去重**:`session_breakdown.json` 顶层键 = §1 对外契约 + 旧 session 兼容唯一保留点;
   state.json 键 = 同版本 resume 契约。内部 `record_*` 合并风险高(超时/默认值差异),金标准 diff 必须为空,暂缓。
 - **Step 04 跨子系统去重**:grid / workload-env 已收敛——`explore` / `sweep` / `baseline` 均走 `_grid_runner.run_grid` +
   `materialize_config_with_envs`,无重复可删;critic/robustness backend 的 subprocess 样板**语义不同**(三段 prepare/reason/commit
   + web tools vs 简单调用),按 conduct "语义不一致别强合"不合并;跨包 envelope/常量为**有意复制**保持包独立。
 
-> 退出校验:主包护栏 keep-list 全绿(329 passed);`golden_breakdown_keys` 顶层键 diff 为空;CLI flag 面未动;每个 commit `git diff --stat` 净行数 ≤ 0。
+> 退出校验:主包护栏 keep-list 全绿;`golden_breakdown_keys` 顶层键 diff 为空;CLI flag 面未动;每个 commit `git diff --stat` 净行数 ≤ 0。
