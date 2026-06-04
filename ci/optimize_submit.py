@@ -3158,6 +3158,13 @@ def main() -> int:
                       for r in non_success
                   ))
         return 2
+    context_skipped = [
+        r for r in records
+        if r.status == "skipped" and (r.error or "").startswith("context_too_short:")
+    ]
+    if submitted == 0 and records and len(context_skipped) == len(records):
+        log.info("All models skipped by policy: context_too_short")
+        return 0
     return 0 if submitted > 0 else 1
 
 
