@@ -73,7 +73,7 @@ from .orchestrator.backends import (
 )
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
-from .orchestrator.action_surfaces import KERNEL_OWNED_ACTIONS
+from .protocol.action_surfaces import KERNEL_OWNED_ACTIONS
 from .orchestrator.coordinator import Coordinator
 from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 from .orchestrator.cortex_t0 import run_t0_anchor

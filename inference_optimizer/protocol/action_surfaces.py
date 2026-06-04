@@ -1,7 +1,8 @@
 """Shared action-surface constants.
 
-Keep ownership and transport classifications here so PolicyGate, prompt
-rendering, and CLI wiring do not grow separate action-name lists.
+Keep ownership, transport, and prompt-visibility classifications here so
+PolicyGate, prompt rendering, and CLI wiring do not grow separate
+action-name lists.
 """
 
 from __future__ import annotations
