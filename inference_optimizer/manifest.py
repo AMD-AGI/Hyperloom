@@ -212,7 +212,11 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.resolve(strict=False).relative_to(root.resolve(strict=False))
         return True
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
+        # RuntimeError: CPython's resolve() raises "Symlink loop from ..." on a
+        # self-referential symlink (ELOOP); OSError covers broken mounts. Treat
+        # either as "not provably inside root" rather than letting it escape and
+        # crash manifest generation.
         return False
 
 
@@ -242,7 +246,14 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
     dep_path = Path(raw)
     if _path_is_relative_to(dep_path, Path(user_data)):
         return
-    resolved = str(dep_path.resolve(strict=False))
+    try:
+        resolved = str(dep_path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        # Provenance capture must never raise out (see _describe_dep): an
+        # unresolvable dep path (broken mount -> OSError, symlink loop ->
+        # RuntimeError) cannot be proven pod-local, so skip the warning
+        # instead of crashing manifest writing.
+        return
     is_pod_local = any(
         resolved == p or resolved.startswith(p + "/")
         for p in _POD_LOCAL_PREFIXES
