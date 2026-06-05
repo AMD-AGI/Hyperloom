@@ -97,8 +97,6 @@ DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # exports INFERENCEX_PATH for the optimizer runtime.
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
-DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
-DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
 DEFAULT_TARGET_GAIN = 100.0
@@ -2895,12 +2893,13 @@ def _build_parser() -> argparse.ArgumentParser:
                              "install.sh clones/detects InferenceX and exports "
                              "INFERENCEX_PATH.")
     parser.add_argument("--oob-path", default="",
-                        help=f"OOB checkout path inside the sandbox (defaults to "
-                             f"$SAFE_OPTIMIZE_OOB_PATH then '{DEFAULT_OOB_PATH}').")
+                        help="Optional OOB checkout override inside the sandbox. "
+                             "Default is unset: sandbox-side install.sh prepares "
+                             "and exports OOB paths.")
     parser.add_argument("--tracelens-root", default="",
-                        help=f"TraceLens checkout path inside the sandbox (defaults "
-                             f"to $SAFE_OPTIMIZE_TRACELENS_ROOT then "
-                             f"'{DEFAULT_TRACELENS_ROOT}').")
+                        help="Optional TraceLens checkout override inside the "
+                             "sandbox. Default is unset: sandbox-side install.sh "
+                             "prepares TraceLens when available.")
     parser.add_argument("--prompt-prefix",
                         default=_load_default_prompt_prefix(),
                         help="Free-form prefix prepended to the SaFE-generated "
@@ -3033,10 +3032,10 @@ def main() -> int:
                        or "")
     oob_path = (args.oob_path
                 or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
-                or DEFAULT_OOB_PATH)
+                or "")
     tracelens_root = (args.tracelens_root
                       or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT")
-                      or DEFAULT_TRACELENS_ROOT)
+                      or "")
     try:
         kernel_backends = parse_kernel_backends(args.kernel_opt_backends)
     except ValueError as e:
