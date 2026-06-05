@@ -1,4 +1,4 @@
-"""Coordinator + protocol layer ().
+"""Coordinator + protocol layer.
 
 The orchestrator package owns:
 

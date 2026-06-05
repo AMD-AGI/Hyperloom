@@ -253,7 +253,7 @@ class ModelGpuFitDetector:
     ) -> None:
         self._config = config or ModelGpuFitConfig()
         self._state_view = state_view
-        # Disk-backed dedup. Without it, M1 subprocess-per-tick fires
+        # Disk-backed dedup. Without it, the subprocess-per-tick transport fires
         # ``model_gpu_infeasible`` on every tick and the operator inbox
         # gets one row per tick. Persisting the fingerprint keeps the
         # "fire at most once per session" semantics intact.

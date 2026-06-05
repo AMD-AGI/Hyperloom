@@ -1,8 +1,7 @@
 """CodexBackend
 
-Codex roles (only ``critic`` in the legacy release) talk to GPT-style models via the
-OpenAI SDK; per DESIGN §5.1.1 they're **no-tools by default**, so the
-intent transport is JSON-in-text:
+Codex roles talk to GPT-style models via the OpenAI SDK; they're
+**no-tools by default**, so the intent transport is JSON-in-text:
 
     {"intents": [{"intent_type": "...", "payload": {...}}]}
 
@@ -37,7 +36,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ..intent_parser import (
+from ...protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
@@ -114,7 +113,7 @@ def _extract_envelope(text: str) -> dict | None:
 
 @dataclass
 class CodexBackend:
-    """Production Codex backend (). Implements :class:`Backend`."""
+    """Production Codex backend. Implements :class:`Backend`."""
 
     model: str = "gpt-5.4"
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too

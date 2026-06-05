@@ -136,8 +136,8 @@ def build(
                                             sd, state, geak_invocations, oob_invocations, warnings,
                                         ),
                                         warnings)
-    param_search       = _safe_collect("param_search",
-                                        lambda: collectors.collect_param_search(state, warnings),
+    explore_search     = _safe_collect("explore_search",
+                                        lambda: collectors.collect_explore_search(state, warnings),
                                         warnings)
     sweep              = _safe_collect("sweep",
                                         lambda: collectors.collect_sweep(sd, state, warnings),
@@ -163,7 +163,7 @@ def build(
     # specialist sub-agent dispatch records. Built
     # from ``state.specialist_rounds`` + the on-disk transcripts so
     # capability_summary.specialist and specialist_runs always agree
-    # (Inv-12.2 single source).
+    # (single source).
     specialist_runs    = _safe_collect("specialist_runs",
                                         lambda: collectors.collect_specialist_runs(
                                             sd, state, warnings,
@@ -260,18 +260,18 @@ def build(
         "geak_invocations":    geak_invocations,
         "oob_invocations":     oob_invocations,
         "kernel_lifecycle":    kernel_lifecycle,
-        "param_search":        param_search,
+        "param_search":        explore_search,
         # ``explore_search`` is the v2-native name for
         # the merged ledger. Mirror of
         # ``param_search`` so v2 readers can switch with a one-line
         # rename + v1 readers don't break.
-        "explore_search":      param_search,
+        "explore_search":      explore_search,
         "sweep":               sweep,
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
         "attribution":         attribution,
-        # Cortex KB integration audit (KB_design §3.13 M1 §4
-        # "kb_provenance"). Added as a new top-level section rather than
+        # Cortex KB integration audit ("kb_provenance"). Added as a new
+        # top-level section rather than
         # bumping ``schema_version`` because every field is optional; the
         # v1 reader simply ignores it.
         "kb_provenance":       kb_provenance,
