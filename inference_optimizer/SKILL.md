@@ -605,9 +605,9 @@ Operators only interact through two `task.params` knobs (full schema in
 each `actions/_meta/<action>.yaml`): `params.benchmark_script` (bare
 sanitized `*.sh` name; overrides the gpu_type auto-pick) and
 `params.result_dir` (forwarded as `$RESULT_DIR`). The Coordinator's
-`baseline_self_loop` PolicyGate rule denies a third baseline attempt
-that repeats a twice-failed param fingerprint, pointing FAILURE RECOVERY
-at the next override surface.
+`baseline_no_param_change` PolicyGate rule denies any baseline proposal
+that changes params after a failure — the agent must retry with
+identical params and the run terminates after 3 consecutive failures.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 
