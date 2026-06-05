@@ -751,8 +751,8 @@ _probe_framework_source_roots
 # framework-agent (sibling skill — drives the standalone FRAMEWORK_PR
 # phase via ``fa phase-discover`` for batch enumeration. The
 # Coordinator's executor handles the apply/bench loop directly, so
-# ``phase-fetch`` / ``phase-emit-proposal`` ship for ad-hoc use but
-# are not on the inference_optimizer hot path). Owns its own python
+# only ``phase-discover`` is wired/kept on the inference_optimizer
+# path). Owns its own python
 # deps and venv layout; we only need to invoke its installer.
 #
 # Install is ON by default to match the runtime default
