@@ -142,12 +142,13 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
     phase **means** so the LLM has a stable mental model independent
     of the runtime state.
     """
-    # Lazy import: phase_state imports only stdlib so this is safe at
-    # module-import time, but keeping it local makes the lazy
-    # dependency explicit (and lets tests stub the action sets
-    # without rewriting this file).
-    from ..phase_state import PHASE_LLM_PROPOSABLE_ACTIONS, PHASE_NAMES
+    from ..phase_state import (
+        PHASE_NAMES,
+        is_phase_interleave_enabled,
+        llm_proposable_actions_for_with_interleave,
+    )
 
+    interleave = is_phase_interleave_enabled()
     lines: list[str] = [
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "",
@@ -158,9 +159,12 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
         "",
     ]
     for phase in PHASE_NAMES:
-        proposable = sorted(PHASE_LLM_PROPOSABLE_ACTIONS.get(phase, frozenset()))
+        proposable = sorted(
+            llm_proposable_actions_for_with_interleave(
+                phase, interleave=interleave,
+            )
+        )
         if not kernel_enabled and phase == "KERNEL":
-            # No-kernel run will not enter KERNEL phase; render but flag.
             lines.append(
                 f"- **{phase}**: {', '.join(proposable)} (skipped in --no-kernel runs)"
             )
@@ -172,13 +176,34 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
         "in the sets above: the Coordinator auto-manages them and PolicyGate",
         "denies any attempt to propose them.",
         "",
-        "Phase transitions are Coordinator-owned and based on machine-",
-        "judgeable signals: `baseline_tput > 0` exits PRELUDE; plateau",
-        "judges or budget caps exit EXPLORE / KERNEL / SWEEP; the wall-",
-        "clock deadline (closing phase) exits to CLOSE. You influence",
-        "transitions indirectly — by driving the current phase's signals",
-        "in the right direction — never by writing `phase` directly.",
+        "Phase transitions are Coordinator-owned. The hard advance gates",
+        "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
+        "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL",
+        "/ SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+        "You may also emit `escalate_strategy_change{next_action_hint=",
+        "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
+        "(no longer robustness-only) when you judge the current phase",
+        "exhausted; the Coordinator validates the hint vocab and routes",
+        "the transition on the next tick.",
     ])
+    if interleave:
+        lines.extend([
+            "",
+            "**Phase interleave mode is ON** (env "
+            "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1`):",
+            "- EXPLORE may also REQUEST kernel-owned kinds "
+            "(kernel_opt / integrate / deep_kernel_analysis / "
+            "operator_tuning / vendor_kernel_config / gemm_tuning) when "
+            "a probe of the kernel surface is needed mid-EXPLORE.",
+            "- KERNEL may also propose / delegate explore / specialist /",
+            "  integrate_patch when a config / patch refinement is needed",
+            "  mid-KERNEL.",
+            "- The phase chain stays monotonic for resume / audit / the",
+            "  CLOSE sequencer; only the per-phase action contract is",
+            "  widened. Data-dependency (trace_analyze→run_optimization),",
+            "  the integrate_patch Critic gate, and sweep singletons are",
+            "  unchanged.",
+        ])
     return lines
 
 
@@ -456,16 +481,18 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "6. **Phase budget awareness**. The `=== Phase ===` block carries",
         "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
         "   prefer lower-cost / known-good actions (explore over kernel_opt).",
-        "   Plateau judgments fire when the system thinks you're stalled;",
-        "   they auto-advance the phase. Don't fight them — drive the",
-        "   current phase's signal in the right direction or emit",
-        "   ``escalate_strategy_change{hint='skip_to_kernel'}`` via",
-        "   robustness if you know it's time to move on.",
-        "7. **Sweep / report tail**: when EXPLORE plateau fires, the",
-        "   Coordinator routes EXPLORE → KERNEL (kernel_enabled) or →",
-        "   SWEEP (--no-kernel). When SWEEP completes, propose `report`",
-        "   for the LLM narrative (Coordinator also auto-enqueues one at",
-        "   the deadline).",
+        "   The Plateau advisory block is informational only; it does not",
+        "   advance the phase. When you judge the current phase exhausted,",
+        "   emit ``escalate_strategy_change{next_action_hint=",
+        "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (no",
+        "   longer robustness-only). Otherwise the Coordinator advances",
+        "   only on IR-6 force-exit, phase-budget exhaustion, or a",
+        "   terminal stop_reason.",
+        "7. **Sweep / report tail**: once EXPLORE / KERNEL exit, the",
+        "   Coordinator routes the run to SWEEP (or directly to it under",
+        "   --no-kernel). When SWEEP completes, propose `report` for the",
+        "   LLM narrative (Coordinator also auto-enqueues one at the",
+        "   deadline).",
         "",
         "If you cannot move forward, emit",
         "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",

@@ -3633,7 +3633,7 @@ class SharedState:
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
             DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
             PHASE_EXPLORE,
-            llm_proposable_actions_for,
+            llm_proposable_actions_for_with_interleave,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
             phase_elapsed_seconds,
@@ -3658,7 +3658,9 @@ class SharedState:
                 f"budget    : pct={budget_pct_for_phase:.2f} "
                 f"elapsed_sec={elapsed} remaining_sec={int(remaining)}"
             )
-        proposable = llm_proposable_actions_for(phase)
+        proposable = tuple(sorted(
+            llm_proposable_actions_for_with_interleave(phase)
+        ))
         allowed_line = (
             f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
         )

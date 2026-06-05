@@ -32,9 +32,13 @@ sub-agent channels. Retired ``backends`` / ``params`` /
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
-from ..protocol.action_surfaces import COORDINATOR_INTERNAL_ACTIONS
+from ..protocol.action_surfaces import (
+    COORDINATOR_INTERNAL_ACTIONS,
+    KERNEL_OWNED_ACTIONS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +211,69 @@ def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
     return tuple(sorted(
         PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper(), frozenset())
     ))
+
+
+# ---------------------------------------------------------------------------
+# Interleave mode (env-flagged): widen EXPLORE / KERNEL proposable sets
+# ---------------------------------------------------------------------------
+#
+# When ``INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is truthy, EXPLORE may
+# emit kernel-owned REQUEST kinds and KERNEL may propose / delegate the
+# explore-shaped actions. The phase chain itself stays monotonic — only
+# the per-phase action contract is widened.
+PHASE_INTERLEAVE_ENV: str = "INFERENCE_OPTIMIZER_PHASE_INTERLEAVE"
+
+# EXPLORE in interleave mode keeps its native action set and adds the
+# KERNEL_OWNED_ACTIONS so REQUEST(target_agent='kernel', kind=...) and
+# the matching action names pass R1.
+_INTERLEAVE_EXPLORE_EXTRAS: frozenset[str] = KERNEL_OWNED_ACTIONS
+
+# KERNEL in interleave mode adds the explore-side proposable triple so
+# the LLM can keep refining configs / specialists / patches mid-kernel
+# work. The grid runner + specialist + integrate_patch carry their own
+# dependency / Critic gates.
+_INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset({
+    "explore", "specialist", "integrate_patch",
+})
+
+
+def is_phase_interleave_enabled() -> bool:
+    """Return True when the env flag enables EXPLORE↔KERNEL interleave."""
+    raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def llm_proposable_actions_for_with_interleave(
+    phase: str, *, interleave: bool | None = None,
+) -> frozenset[str]:
+    """Return the active LLM-proposable set for ``phase``.
+
+    ``interleave`` defaults to :func:`is_phase_interleave_enabled`. When
+    on, EXPLORE adds kernel-owned action names and KERNEL adds the
+    explore-shaped triple. Other phases are unchanged.
+    """
+    key = (phase or "").strip().upper()
+    base = PHASE_LLM_PROPOSABLE_ACTIONS.get(key, frozenset())
+    if interleave is None:
+        interleave = is_phase_interleave_enabled()
+    if not interleave:
+        return base
+    if key == PHASE_EXPLORE:
+        return base | _INTERLEAVE_EXPLORE_EXTRAS
+    if key == PHASE_KERNEL:
+        return base | _INTERLEAVE_KERNEL_EXTRAS
+    return base
+
+
+def is_action_llm_proposable_in_phase_with_interleave(
+    action_name: str, phase: str, *, interleave: bool | None = None,
+) -> bool:
+    """Mirror of :func:`is_action_llm_proposable_in_phase` honoring the
+    interleave flag."""
+    proposable = llm_proposable_actions_for_with_interleave(
+        phase, interleave=interleave,
+    )
+    return (action_name or "").strip() in proposable
 
 
 # ---------------------------------------------------------------------------
@@ -1487,6 +1554,7 @@ __all__ = [
     "ESCALATE_HINT_SKIP_TO_SWEEP",
     "ESCALATE_HINT_VOCAB",
     "PHASE_ALLOWED_ACTIONS",
+    "PHASE_INTERLEAVE_ENV",
     "PHASE_LLM_PROPOSABLE_ACTIONS",
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
@@ -1516,7 +1584,10 @@ __all__ = [
     "exit_terminal_prelude",
     "is_action_allowed_in_phase",
     "is_action_llm_proposable_in_phase",
+    "is_action_llm_proposable_in_phase_with_interleave",
+    "is_phase_interleave_enabled",
     "llm_proposable_actions_for",
+    "llm_proposable_actions_for_with_interleave",
     "is_pause_specialist_hint",
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",

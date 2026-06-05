@@ -36,8 +36,8 @@ from .phase_state import (
     PHASE_EXPLORE,
     PHASE_NAMES,
     PHASE_SWEEP,
-    is_action_llm_proposable_in_phase,
-    llm_proposable_actions_for,
+    is_action_llm_proposable_in_phase_with_interleave,
+    llm_proposable_actions_for_with_interleave,
 )
 from .specialist_domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
@@ -445,19 +445,27 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset({
 })
 ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
-# Roofline-v2 C3: per-intent source allowlist override. PRUNE_BRANCH widens
-# to ``orchestration`` as well, because the ``roofline`` action (C4) produces
-# structured prune suggestions that the main Orchestration LLM consumes via
-# the rendered prompt (C5) and then forwards to the Coordinator. The other
-# two scheduling-police intents (FORCE_DISPATCH, ESCALATE_STRATEGY_CHANGE)
-# stay robustness-only — they are recovery-shaped intents that bypass normal
-# task accounting and shouldn't be reachable from optimisation-flow LLMs.
+# Per-intent source allowlist override. Some scheduling-police intents
+# legitimately need a non-robustness source:
+#   * PRUNE_BRANCH widens to ``orchestration`` so it can forward the
+#     ``roofline`` action's structured ``suggested_prunes`` advice
+#     (Roofline-v2 C3 path).
+#   * ESCALATE_STRATEGY_CHANGE widens to ``orchestration`` so the main
+#     LLM can directly request phase advance / wind-down hints
+#     (``skip_to_kernel`` / ``skip_to_sweep`` / ``skip_to_close``) once
+#     it judges the current phase exhausted, instead of having to bounce
+#     the request through robustness.
+# FORCE_DISPATCH stays robustness-only — it is a recovery-shaped intent
+# that bypasses normal task accounting.
 #
 # Lookups fall through to ROBUSTNESS_ONLY_SOURCE_ALLOWLIST when an intent is
 # not listed here, so adding a new ROBUSTNESS_ONLY_INTENTS entry remains
 # robustness-only by default.
 _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
     IntentType.PRUNE_BRANCH: frozenset({"robustness", "orchestration"}),
+    IntentType.ESCALATE_STRATEGY_CHANGE: frozenset({
+        "robustness", "orchestration",
+    }),
 }
 
 
@@ -1185,9 +1193,13 @@ class PolicyGate:
         phase = (getattr(state, "phase", "") or "").strip().upper()
         if not phase or phase not in PHASE_NAMES:
             return
-        if is_action_llm_proposable_in_phase(action_name, phase):
+        if is_action_llm_proposable_in_phase_with_interleave(
+            action_name, phase,
+        ):
             return
-        allowed = llm_proposable_actions_for(phase)
+        allowed = tuple(sorted(
+            llm_proposable_actions_for_with_interleave(phase)
+        ))
         hint = (
             f"you are in phase={phase}; action {action_name!r} is not in "
             f"the LLM-proposable set {list(allowed)!r}. Either propose an "
@@ -2243,9 +2255,10 @@ class PolicyGate:
     def _validate_robustness_only(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any]
     ) -> None:
-        # Roofline-v2 C3: per-intent source allowlist takes precedence; the
-        # generic ROBUSTNESS_ONLY_SOURCE_ALLOWLIST remains the default so
-        # FORCE_DISPATCH / ESCALATE_STRATEGY_CHANGE stay robustness-only.
+        # Per-intent source allowlist takes precedence; the generic
+        # ROBUSTNESS_ONLY_SOURCE_ALLOWLIST remains the default so any
+        # newly-added ROBUSTNESS_ONLY_INTENTS member starts off
+        # robustness-only by construction.
         allowed_sources = _ROBUSTNESS_ONLY_INTENT_SOURCES.get(
             intent_type, ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
         )

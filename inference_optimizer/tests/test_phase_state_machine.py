@@ -124,6 +124,77 @@ def test_is_action_llm_proposable_in_phase_handles_unknowns():
     assert "roofline" not in explore and "profile" not in explore
 
 
+def test_phase_interleave_off_matches_default_proposable_set():
+    """With the env flag unset, the interleave-aware helpers return the
+    same set as the default ones — phase boundaries stay strict."""
+    for phase in phase_state.PHASE_NAMES:
+        base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
+            phase, frozenset(),
+        )
+        assert (
+            phase_state.llm_proposable_actions_for_with_interleave(
+                phase, interleave=False,
+            )
+            == base
+        )
+    # And kernel-owned actions are denied in EXPLORE under default mode.
+    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "kernel_opt", "EXPLORE", interleave=False,
+    )
+    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "explore", "KERNEL", interleave=False,
+    )
+
+
+def test_phase_interleave_on_widens_explore_and_kernel():
+    """With interleave=True, EXPLORE adds kernel-owned actions and
+    KERNEL adds explore / specialist / integrate_patch. Other phases
+    are unchanged."""
+    explore = phase_state.llm_proposable_actions_for_with_interleave(
+        "EXPLORE", interleave=True,
+    )
+    assert "kernel_opt" in explore
+    assert "integrate" in explore
+    assert "gemm_tuning" in explore
+    assert "explore" in explore  # native EXPLORE actions still present
+    assert "specialist" in explore
+    kernel = phase_state.llm_proposable_actions_for_with_interleave(
+        "KERNEL", interleave=True,
+    )
+    assert "explore" in kernel
+    assert "specialist" in kernel
+    assert "integrate_patch" in kernel
+    assert "kernel_opt" in kernel  # native KERNEL actions still present
+    # SWEEP / CLOSE / PRELUDE / FRAMEWORK_PR are unchanged.
+    for phase in ("PRELUDE", "FRAMEWORK_PR", "SWEEP", "CLOSE"):
+        base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
+            phase, frozenset(),
+        )
+        assert (
+            phase_state.llm_proposable_actions_for_with_interleave(
+                phase, interleave=True,
+            )
+            == base
+        )
+
+
+def test_phase_interleave_env_flag_is_picked_up(monkeypatch):
+    """The bare helpers honour the env flag via
+    :func:`is_phase_interleave_enabled`."""
+    monkeypatch.delenv(phase_state.PHASE_INTERLEAVE_ENV, raising=False)
+    assert phase_state.is_phase_interleave_enabled() is False
+    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "kernel_opt", "EXPLORE",
+    )
+    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
+    assert phase_state.is_phase_interleave_enabled() is True
+    assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "kernel_opt", "EXPLORE",
+    )
+    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "false")
+    assert phase_state.is_phase_interleave_enabled() is False
+
+
 def test_phase_exit_reasons_includes_required_vocab():
     for reason in (
         "prelude_done", "plateau_explore", "plateau_kernel",
@@ -380,6 +451,112 @@ def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "sweep", "predicted_gain_pct": 1.0},
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "phase_incompatible"
+
+
+def test_policy_gate_phase_interleave_off_denies_kernel_request_in_explore(
+    monkeypatch,
+):
+    """With interleave off (default) a kernel-owned REQUEST in EXPLORE
+    is denied by R1; the kernel-owned data dependency / role gate
+    never gets a chance to weigh in."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", raising=False)
+    state = SharedState()
+    state.record_phase_transition(
+        to_phase="EXPLORE", reason="prelude_done", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+    )
+    gate = PolicyGate(
+        role_registry=_make_role_registry(),
+        shared_state=state,
+        strict_phase=True,
+    )
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": "kernel_opt",
+            "params": {},
+        },
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "phase_incompatible"
+
+
+def test_policy_gate_phase_interleave_on_allows_kernel_request_in_explore(
+    monkeypatch,
+):
+    """With INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1 the EXPLORE proposable
+    set is widened to include kernel-owned kinds, so R1 lets the
+    REQUEST through."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+    state = SharedState()
+    state.record_phase_transition(
+        to_phase="EXPLORE", reason="prelude_done", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+    )
+    gate = PolicyGate(
+        role_registry=_make_role_registry(),
+        shared_state=state,
+        strict_phase=True,
+    )
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": "kernel_opt",
+            "params": {},
+        },
+    )
+    gate.validate_intent("orchestration", intent)  # no exception
+
+
+def test_policy_gate_phase_interleave_on_allows_explore_propose_in_kernel(
+    monkeypatch,
+):
+    """With interleave on, KERNEL also accepts ``explore`` /
+    ``specialist`` / ``integrate_patch`` proposals so config-side
+    refinement can run mid-KERNEL."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+    state = SharedState()
+    state.record_phase_transition(
+        to_phase="KERNEL", reason="plateau_explore", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+    )
+    gate = PolicyGate(
+        role_registry=_make_role_registry(),
+        shared_state=state,
+        strict_phase=True,
+    )
+    intent = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
+    )
+    gate.validate_intent("orchestration", intent)  # no exception
+
+
+def test_policy_gate_phase_interleave_does_not_widen_other_phases(monkeypatch):
+    """The interleave widening is scoped to EXPLORE / KERNEL; SWEEP
+    must still reject explore / kernel_opt under R1 even when the flag
+    is on."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+    state = SharedState()
+    state.record_phase_transition(
+        to_phase="SWEEP", reason="plateau_kernel", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+    )
+    gate = PolicyGate(
+        role_registry=_make_role_registry(),
+        shared_state=state,
+        strict_phase=True,
+    )
+    intent = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={"action_name": "kernel_opt", "predicted_gain_pct": 1.0},
     )
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)

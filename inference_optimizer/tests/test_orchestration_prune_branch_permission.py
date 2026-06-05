@@ -1,23 +1,18 @@
-"""Roofline-v2 C3: Orchestration is allowed to emit PRUNE_BRANCH.
+"""Orchestration permission widenings for scheduling-police intents.
 
-These tests pin the permission boundary the ``roofline`` action (C4)
-and the renderer (C5) depend on:
+Two intents are reachable from Orchestration in addition to the
+robustness path:
 
-* Orchestration can emit ``PRUNE_BRANCH`` with a non-empty ``family``
-  (the structured advice in ``last_roofline_analysis.suggested_prunes``
-  is consumed by the main LLM and forwarded as a normal PRUNE_BRANCH
-  intent — Coordinator's ``_handle_prune_branch`` is source-agnostic
-  so this widening alone unlocks the full path).
-* Orchestration is still rejected when ``family`` is missing — the
-  payload-shape check (``_validate_robustness_only``) still runs for
-  the new source, so a malformed analyzer-LLM forwarded intent cannot
-  silently write garbage into ``pruned_families``.
-* Robustness can still emit PRUNE_BRANCH (the original allowlist
-  member); ESCALATE_STRATEGY_CHANGE and FORCE_DISPATCH remain
-  robustness-only — the per-intent override widens **only**
-  PRUNE_BRANCH, not the whole robustness-only set.
-* Kernel / Critic cannot emit PRUNE_BRANCH (both fall under
-  ``role.allowed_intents`` check before reaching the source allowlist).
+* PRUNE_BRANCH (Roofline-v2 C3) — Orchestration forwards the
+  structured ``suggested_prunes`` advice from the ``roofline`` action.
+* ESCALATE_STRATEGY_CHANGE (loosen P3_18 18A) — Orchestration emits
+  phase-advance hints (``skip_to_kernel`` / ``skip_to_sweep`` /
+  ``skip_to_close``) directly instead of bouncing through robustness.
+
+FORCE_DISPATCH stays robustness-only: it is a recovery-shaped intent
+that bypasses normal task accounting. Kernel / Critic cannot emit any
+of these (the role.allowed_intents check runs before the per-intent
+source allowlist).
 """
 
 from __future__ import annotations
@@ -89,13 +84,13 @@ def test_robustness_can_still_emit_prune_branch(gate):
 
 
 # ---------------------------------------------------------------------------
-# Per-intent override is scoped to PRUNE_BRANCH — sibling scheduling-
-# police intents stay robustness-only
+# Per-intent override widens PRUNE_BRANCH and ESCALATE_STRATEGY_CHANGE.
+# FORCE_DISPATCH stays robustness-only.
 # ---------------------------------------------------------------------------
 def test_orchestration_cannot_emit_force_dispatch(gate):
-    """The PRUNE_BRANCH widening must NOT leak to FORCE_DISPATCH —
-    Orchestration's role intent set doesn't even list it, so this is
-    caught at the role gate before reaching the per-intent override."""
+    """FORCE_DISPATCH stays robustness-only — Orchestration's role
+    intent set doesn't list it, so the role gate fires before the
+    per-intent override is consulted."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", Intent(
             type=IntentType.FORCE_DISPATCH,
@@ -104,13 +99,33 @@ def test_orchestration_cannot_emit_force_dispatch(gate):
     assert exc.value.rule == "role"
 
 
-def test_orchestration_cannot_emit_escalate_strategy_change(gate):
-    """Same as FORCE_DISPATCH — Orchestration's role intent set
-    intentionally excludes ESCALATE_STRATEGY_CHANGE."""
+def test_orchestration_can_emit_escalate_strategy_change(gate):
+    """Loosen P3_18 18A — Orchestration may emit phase-advance hints
+    directly (skip_to_kernel / skip_to_sweep / skip_to_close). The
+    Coordinator's ``_handle_escalate_strategy_change`` is source-
+    agnostic; the per-intent allowlist widening here unlocks the path
+    end-to-end. FORCE_DISPATCH remains robustness-only."""
+    gate.validate_intent("orchestration", Intent(
+        type=IntentType.ESCALATE_STRATEGY_CHANGE,
+        payload={"next_action_hint": "skip_to_kernel"},
+    ))
+
+
+def test_robustness_can_still_emit_escalate_strategy_change(gate):
+    """Robustness retains the original authority for the same intent."""
+    gate.validate_intent("robustness", Intent(
+        type=IntentType.ESCALATE_STRATEGY_CHANGE,
+        payload={"next_action_hint": "skip_to_close"},
+    ))
+
+
+def test_kernel_cannot_emit_escalate_strategy_change(gate):
+    """Kernel responder-only — its role intent set excludes the
+    scheduling-police intents entirely."""
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", Intent(
+        gate.validate_intent("kernel", Intent(
             type=IntentType.ESCALATE_STRATEGY_CHANGE,
-            payload={"reason": "x"},
+            payload={"next_action_hint": "skip_to_close"},
         ))
     assert exc.value.rule == "role"
 

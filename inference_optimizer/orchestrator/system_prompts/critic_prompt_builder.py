@@ -92,8 +92,13 @@ def _section_phase_review_contract() -> list[str]:
     rule and only sees what the LLM can actually propose. The dynamic
     *current* phase is in ``judge_bundle.phase`` each tick.
     """
-    from ..phase_state import PHASE_LLM_PROPOSABLE_ACTIONS, PHASE_NAMES
+    from ..phase_state import (
+        PHASE_NAMES,
+        is_phase_interleave_enabled,
+        llm_proposable_actions_for_with_interleave,
+    )
 
+    interleave = is_phase_interleave_enabled()
     lines: list[str] = [
         "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
         "",
@@ -102,7 +107,11 @@ def _section_phase_review_contract() -> list[str]:
         "",
     ]
     for phase in PHASE_NAMES:
-        proposable = sorted(PHASE_LLM_PROPOSABLE_ACTIONS.get(phase, frozenset()))
+        proposable = sorted(
+            llm_proposable_actions_for_with_interleave(
+                phase, interleave=interleave,
+            )
+        )
         lines.append(f"- **{phase}**: {', '.join(proposable)}")
     lines.extend([
         "",
@@ -118,6 +127,14 @@ def _section_phase_review_contract() -> list[str]:
         "routed to you for pre-review. Review the single-action",
         "proposals you do receive with one verdict each.",
     ])
+    if interleave:
+        lines.extend([
+            "",
+            "Phase interleave is ON: EXPLORE additionally accepts kernel-",
+            "owned REQUEST kinds and KERNEL additionally accepts explore /",
+            "specialist / integrate_patch. The kernel-owned data-dependency",
+            "and integrate_patch Critic gates still apply.",
+        ])
     return lines
 
 

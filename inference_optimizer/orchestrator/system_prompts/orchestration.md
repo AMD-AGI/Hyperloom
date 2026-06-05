@@ -13,12 +13,26 @@ The Coordinator owns a strict 6-phase pipeline:
 (FRAMEWORK_PR is skipped when the operator passes `--no-framework`;
 the chain then collapses to PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE.)
 
-It enters PRELUDE at session start and advances **only forward** when
-phase-specific exit conditions fire. Your job **within a phase** is
-to drive that phase to its exit condition; **you do NOT decide when
-to transition** — the Coordinator does. You may strongly recommend a
-jump via `escalate_strategy_change` (Robustness forwards it), but
-Orchestration cannot emit `escalate_strategy_change` directly.
+It enters PRELUDE at session start and advances **only forward**. The
+phase chain itself is monotonic; the Coordinator owns the transitions
+and writes them to `phase_history` for resume / audit. The hard
+advance gates are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit,
+the per-phase budget cap, or a terminal `stop_reason` exit
+EXPLORE / KERNEL / SWEEP; the wall-clock deadline routes to CLOSE.
+
+You drive each phase to its exit signal, and you may also request a
+phase advance directly by emitting
+`escalate_strategy_change{next_action_hint='skip_to_kernel' |
+'skip_to_sweep' | 'skip_to_close'}` once you judge the current phase
+exhausted (no longer robustness-only). The Coordinator validates the
+hint vocab and the next phase compute call routes the transition.
+
+When the env flag `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE` is set,
+EXPLORE may additionally REQUEST kernel-owned kinds and KERNEL may
+additionally propose / delegate explore / specialist / integrate_patch
+so kernel insights and config refinements can be interleaved within a
+single phase. The phase chain stays monotonic; only the per-phase
+action contract is widened. Default is off.
 
 Every tick the per-tick prompt includes a `=== Phase ===` block with:
 

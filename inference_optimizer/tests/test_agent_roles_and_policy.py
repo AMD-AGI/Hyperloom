@@ -72,9 +72,14 @@ def test_orchestration_permissions():
     assert IntentType.DELEGATE in role.allowed_intents
     assert IntentType.REQUEST in role.allowed_intents
     assert IntentType.UPDATE_STATE in role.allowed_intents
-    # Cannot review / kill / scheduling-police / response
+    # Orchestration may forward roofline-driven prune advice and request
+    # phase-advance hints directly (skip_to_kernel / sweep / close).
+    assert IntentType.PRUNE_BRANCH in role.allowed_intents
+    assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
+    # Cannot review / kill / force_dispatch / response
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
     assert IntentType.KILL_TASK not in role.allowed_intents
+    assert IntentType.FORCE_DISPATCH not in role.allowed_intents
     assert IntentType.RESPONSE not in role.allowed_intents
 
 
