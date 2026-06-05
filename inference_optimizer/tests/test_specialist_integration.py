@@ -511,17 +511,24 @@ def test_cli_specialist_flags_present():
     assert args.specialist_model == "claude-3-haiku-20240307"
 
 
-def test_cli_specialist_flags_have_safe_defaults():
+def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     import inference_optimizer.cli as cli_mod
+    from inference_optimizer.orchestrator import policy as policy_mod
 
+    # The research-lane-capacity default is the GPU-derived ceiling;
+    # pin the GPU count so the assertion is deterministic regardless of
+    # the host.
+    monkeypatch.delenv(
+        "INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", raising=False,
+    )
+    monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
     args = parser.parse_args([
         "optimize", "--model", "/tmp/dummy-model",
     ])
-    # PR-A3 (Arbor-into-Hyperloom): default capacity raised from 1 → 4
-    # so the Orchestration LLM's multi-emit fan-out shape (one specialist
-    # per top-K gap in a single tick) actually runs in parallel.
-    assert args.research_lane_capacity == 4
+    # Default capacity is the research-lane ceiling (2 × visible GPU) so
+    # the multi-emit specialist fan-out uses the full lane budget.
+    assert args.research_lane_capacity == policy_mod.research_lane_ceiling()
     assert args.specialist_max_turns == 8
     assert args.specialist_per_turn_max_seconds == 600.0
     # Specialist model defaults to None → cli factory falls back to

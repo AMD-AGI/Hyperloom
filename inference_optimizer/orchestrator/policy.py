@@ -173,8 +173,6 @@ CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 #   * ``DEFAULT_SPECIALIST_MAX_PROPOSALS`` — per-specialist proposal_set
 #     cap; enforced both in the specialist prompt (self-curation) and on
 #     the SpecialistRunner write path (hard truncate before persist).
-#   * ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` — fallback per-round
-#     specialist fan-out used only when SharedState capacity is unset.
 
 # Conservative research-lane ceiling used when the GPU count cannot be
 # probed (keeps the loop alive on CPU-only boxes / sandboxes).
@@ -266,7 +264,6 @@ MAX_RESEARCH_LANE_CAPACITY: int = research_lane_ceiling()
 # :data:`resource_lock.LANE_PRIORITY`.
 RESEARCH_LANE_NAME: str = "research_lane"
 DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 3
-MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS: int = 1
 
 # Verdicts that allow ``integrate_patch`` to proceed without an
 # explicit operator override. ``advise`` is treated as a soft
@@ -299,12 +296,10 @@ DYNAMIC_ACTION_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({
     "orchestration",
 })
 
-# At most one dispatch and one sourced variant per EXPLORE round.
-MAX_DYNAMIC_PER_ROUND: int = 1
-MAX_DYNAMIC_SOURCED_VARIANTS: int = 1
-
-# Floor on the ``scope_domains`` list length.
-DYNAMIC_ACTION_MIN_SCOPE_DOMAINS: int = 2
+# Floor on the ``scope_domains`` list length. Single-domain deep dives
+# are allowed; the red-line checks (kernel-only / side-effects) carry the
+# safety contract.
+DYNAMIC_ACTION_MIN_SCOPE_DOMAINS: int = 1
 
 # Allowed values of the optional ``budget_hint`` field.
 DYNAMIC_ACTION_BUDGET_HINTS: frozenset[str] = frozenset({
@@ -891,11 +886,8 @@ class PolicyGate:
             self._validate_integrate_patch_critic_gate(payload)
             # Continue into the standard registry + phase checks below.
         # EXPLORE grids carry an advisory ``provenance`` field for the
-        # audit trail; all-``llm_direct`` grids are accepted. The only
-        # enforced explore-grid limit is the per-round specialist fan-out
-        # cap below.
-        if action_name == EXPLORE_ACTION_NAME:
-            self._validate_explore_grid_size(payload)
+        # audit trail; grid breadth is bounded by the research_lane /
+        # GPU pool leases at dispatch time, not by a grid-size gate.
         # sweep_phase_singleton: deny LLM-emitted
         # sweep when the Coordinator's SWEEP-entry hook already
         # auto-enqueued one. Two concurrent sweep tasks crash both
@@ -997,15 +989,6 @@ class PolicyGate:
             self._validate_conc_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
-        # Same explore-grid caps as the delegate channel. Without these, an LLM that
-        # cannot delegate{action_name='explore', ...} (e.g. wrong role
-        # or phase guard fires first) can still propose_action an
-        # explore grid full of llm_direct or many specialist:* variants
-        # and have the Coordinator materialise it. Mirror the cap here
-        # so the propose advisory path can never sidestep the per-round
-        # specialist limit.
-        if action_name == EXPLORE_ACTION_NAME:
-            self._validate_explore_grid_size(payload)
         self._validate_fp8_only_action(action_name, intent_kind="propose_action")
         # F3-5: explore-attempt minimum guard — kernel_opt requires at
         # least one successful explore round on record.
@@ -1519,100 +1502,6 @@ class PolicyGate:
         # tools that don't pass through PolicyGate.
 
     # ------------------------------------------------------------------
-    # ``explore_specialist_grid_max_one`` — cap on how many
-    # ``provenance='specialist:*'`` variants Orchestration may stack
-    # into one explore round. ``default_grid`` variants are unaffected
-    # (cold-start path). Backstops the prompt instruction by hard-denying
-    # at PolicyGate so an over-eager LLM cannot ship an oversized grid
-    # even if the orchestration prompt is later softened.
-    #
-    # The cap is dynamic: it tracks the session's
-    # ``research_lane_capacity`` (how many specialists may fan out in
-    # parallel per round), clamped to the GPU-derived research-lane
-    # ceiling (``2 × visible GPU``). The historical hard-1
-    # (``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS``) remains the fallback
-    # when SharedState / the field is unavailable. The rule id is kept
-    # as ``explore_specialist_grid_max_one`` for audit-trail / breakdown
-    # stability even though the numeric cap may now exceed one.
-    # ------------------------------------------------------------------
-    def _effective_specialist_grid_cap(self) -> int:
-        """Per-round cap on ``provenance='specialist:*'`` explore variants.
-
-        Tracks ``SharedState.research_lane_capacity`` (clamped to the
-        GPU-derived research-lane ceiling); falls back to
-        ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` (1) when SharedState
-        is unavailable or the field is unset / non-positive.
-        """
-        ss = getattr(self, "shared_state", None)
-        rlc = 0
-        if ss is not None:
-            try:
-                rlc = int(getattr(ss, "research_lane_capacity", 0) or 0)
-            except (TypeError, ValueError):
-                rlc = 0
-        if rlc > 0:
-            cap = min(research_lane_ceiling(), rlc)
-        else:
-            cap = MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS
-        return max(1, cap)
-
-    def _validate_explore_grid_size(
-        self, payload: dict[str, Any],
-    ) -> None:
-        params = payload.get("params") or {}
-        if not isinstance(params, dict):
-            return
-        grid = params.get("grid")
-        if not isinstance(grid, list) or not grid:
-            return
-        specialist_sourced = sum(
-            1 for v in grid
-            if isinstance(v, dict)
-            and str(v.get("provenance") or "").startswith("specialist:")
-        )
-        specialist_cap = self._effective_specialist_grid_cap()
-        if specialist_sourced > specialist_cap:
-            raise PolicyDenied(
-                f"explore: grid contains {specialist_sourced} "
-                f"specialist-sourced variants; max "
-                f"{specialist_cap} per round "
-                f"(= research_lane_capacity).",
-                rule="explore_specialist_grid_max_one",
-                hint=(
-                    "Across all specialist_done.proposal_set entries in "
-                    f"the inbox, select AT MOST {specialist_cap} variant(s) "
-                    "per explore round to stamp "
-                    "provenance='specialist:<domain>' (the cap tracks "
-                    "research_lane_capacity, hard-capped at "
-                    f"{MAX_RESEARCH_LANE_CAPACITY}). If more specialist "
-                    "proposals look attractive, defer the runners-up "
-                    "beyond the cap to a subsequent explore round. "
-                    "``default_grid`` variants are unaffected (cold-start "
-                    "path)."
-                ),
-            )
-        # Per-round cap on variants stamped with ``provenance='dynamic'``;
-        # locked at the grid surface so loosening upstream caps cannot
-        # silently break the dynamic-source cap invariant.
-        dynamic_sourced = sum(
-            1 for v in grid
-            if isinstance(v, dict)
-            and str(v.get("provenance") or "").strip() == "dynamic"
-        )
-        if dynamic_sourced > MAX_DYNAMIC_SOURCED_VARIANTS:
-            raise PolicyDenied(
-                f"explore: grid contains {dynamic_sourced} "
-                f"dynamic-sourced variants; max "
-                f"{MAX_DYNAMIC_SOURCED_VARIANTS} per round.",
-                rule="dynamic_sourced_variant_cap_exceeded",
-                hint=(
-                    f"At most {MAX_DYNAMIC_SOURCED_VARIANTS} variant "
-                    f"with provenance='dynamic' per explore round; "
-                    f"defer runners-up to a subsequent round."
-                ),
-            )
-
-    # ------------------------------------------------------------------
     # ``sweep_phase_singleton``
     # ------------------------------------------------------------------
     def _validate_sweep_singleton(
@@ -1905,34 +1794,10 @@ class PolicyGate:
                 ),
             )
 
-        # ``domain`` alias retained for the sub_kind lookup below. When a
-        # multi-tag dispatch carries no explicit ``domain`` the sub_kind
-        # path is inert (sub_kind catalogues are per specialist key).
-        domain = str(params.get("domain") or "").strip()
-
-        # Per-domain sub_kind validation. Default sub_kind (None / "")
-        # is always allowed — the specialist runs the canonical per-
-        # domain prompt. Non-empty sub_kind must appear in the
-        # domain's ``sub_kinds`` tuple. (``FRAMEWORK_AGENT_GATED_SUB_KINDS``
-        # / ``framework_pr_scout`` were removed when framework-agent
-        # was promoted to the FRAMEWORK_PR phase.)
-        sub_kind = str(params.get("sub_kind") or "").strip()
-        if sub_kind:
-            from .specialist_domains import get_domain
-            domain_obj = get_domain(domain)
-            allowed = tuple(domain_obj.sub_kinds) if domain_obj else ()
-            if sub_kind not in allowed:
-                raise PolicyDenied(
-                    f"delegate{{action='specialist'}}: domain={domain!r} "
-                    f"does not support sub_kind={sub_kind!r}",
-                    rule="specialist_dispatch_source",
-                    hint=(
-                        f"params.sub_kind must be empty (= default "
-                        f"per-domain prompt) or one of "
-                        f"{sorted(allowed)!r} for domain={domain!r}."
-                    ),
-                )
-
+        # ``sub_kind`` is a free-form prompt selector. The domain tag set
+        # above is the controlled vocabulary; sub_kind is not constrained
+        # to a per-domain catalogue (the specialist runs the default
+        # per-domain prompt when sub_kind is empty).
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         if not gap:
             raise PolicyDenied(
@@ -2124,9 +1989,8 @@ class PolicyGate:
                 f"entries; minimum is {DYNAMIC_ACTION_MIN_SCOPE_DOMAINS}",
                 rule="dynamic_scope_too_narrow",
                 hint=(
-                    "dynamic_action is for cross-domain patches; "
-                    "declare at least 2 distinct specialist domains. "
-                    "For single-domain patches, dispatch a specialist."
+                    "Declare at least one specialist domain in "
+                    "scope_domains so the sub-agent's scope is anchored."
                 ),
             )
         unknown_domains = [
@@ -2203,25 +2067,9 @@ class PolicyGate:
                     "independent server lifecycle."
                 ),
             )
-        # Round-cap accounting; only enforced when shared_state is
-        # wired (legacy unit tests pass without it).
-        if state is not None:
-            cur = int(
-                getattr(state, "dynamic_action_round_count", 0) or 0
-            )
-            if cur >= MAX_DYNAMIC_PER_ROUND:
-                raise PolicyDenied(
-                    f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                    f"round cap exhausted "
-                    f"({cur}/{MAX_DYNAMIC_PER_ROUND} dispatched in the "
-                    f"current EXPLORE round)",
-                    rule="dynamic_round_cap_exhausted",
-                    hint=(
-                        f"At most {MAX_DYNAMIC_PER_ROUND} dynamic_action "
-                        f"per EXPLORE round; wait for the next round."
-                    ),
-                )
-        # Registry-backed phase allowlist as a final defense.
+        # Registry-backed phase allowlist as a final defense. Per-round
+        # dispatch count is bounded by the research_lane / GPU pool
+        # leases at dispatch time, not by a policy cap.
         self._validate_phase_action(
             role, DYNAMIC_ACTION_NAME, intent_kind="delegate",
         )

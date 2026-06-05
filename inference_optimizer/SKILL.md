@@ -210,11 +210,12 @@ brief:
   research-backed variants when available, but `llm_direct`,
   `default_grid`, `specialist:<domain-or-tag>`, and `dynamic` provenance
   values are all accepted audit labels when phase and sequence gates pass.
-  Specialist-sourced variants are capped by `research_lane_capacity`
-  (clamped to the `2 × visible GPU count` ceiling); dynamic variants use
-  their own per-round cap. Specialists author patches into an isolated
-  worktree; `integrate_patch` does the actual `git apply` +
-  throughput/accuracy gate after Critic review.
+  Specialist- and dynamic-sourced variants are not grid-size capped;
+  per-round breadth is bounded by the `research_lane` / GPU pool leases
+  (the `research_lane` scales with the `2 × visible GPU count` ceiling).
+  Specialists author patches into an isolated worktree; `integrate_patch`
+  does the actual `git apply` + throughput/accuracy gate after Critic
+  review.
   Optional GPU specialists are off by default: launch with
   `--gpu-specialist-capacity N` (or
   `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) before Orchestration may

@@ -970,8 +970,8 @@ class Coordinator:
         :meth:`_needs_roofline_for_watermark`. EXPLORE entry no
         longer enqueues roofline.
 
-        Resets the per-round ``dynamic_action`` cap counter so a fresh
-        EXPLORE entry restores the ``MAX_DYNAMIC_PER_ROUND`` budget.
+        Resets the per-round ``dynamic_action`` counter (telemetry +
+        the ``dyn-<round>-<seq>`` id sequence) on EXPLORE entry.
         """
         try:
             self.shared_state.reset_dynamic_action_round_count()
@@ -6257,7 +6257,6 @@ class Coordinator:
                 "dynamic_scope_unknown_domain",
                 "dynamic_side_effects_red_line",
                 "dynamic_kernel_only_disallowed",
-                "dynamic_round_cap_exhausted",
             ],
             "verdict": "approve",
         }

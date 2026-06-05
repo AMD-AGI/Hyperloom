@@ -75,15 +75,13 @@ grid-runner entry):
     `provenance='default_grid'` for framework seed grids,
     `provenance='llm_direct'` for Orchestration-authored hypotheses, and
     `provenance='dynamic'` for dynamic_action output. Provenance does not
-    decide acceptance by itself; the remaining hard limits are:
-    per round, up to `research_lane_capacity` specialist variants
-    (`explore_specialist_grid_max_one` — the numeric cap tracks
-    `research_lane_capacity`, clamped to the `2 × visible GPU count`
-    ceiling), and at most one dynamic variant. Prefer the strongest
-    evidence-backed variants and defer runners-up beyond the cap. Each
-    variant in the grid is benchmarked directly and judged by the KEEP
-    threshold — there is no per-variant Critic pre-review between the
-    delegate and the executor.
+    decide acceptance by itself, and there is no per-round grid-size cap:
+    specialist / dynamic variants fan out up to the available
+    `research_lane` / GPU pool leases (the `research_lane` scales with the
+    `2 × visible GPU count` ceiling). Prefer the strongest evidence-backed
+    variants. Each variant in the grid is benchmarked directly and judged
+    by the KEEP threshold — there is no per-variant Critic pre-review
+    between the delegate and the executor.
 
     **Advisory proposal scores**: after a specialist round, the prompt
     MAY carry a `=== Specialist proposal scores (advisory) ===` block —
@@ -97,8 +95,8 @@ grid-runner entry):
     with no more authority than those. They are priors, not measurements,
     and may be correlated or wrong. Per §3.9 Inv-9.1 there is no
     system-side scoreboard: the scores do NOT rank or pre-select anything
-    — the at-most-one `provenance='specialist:*'` variant you pick
-    remains YOUR judgment. Cross-rater disagreement is itself an
+    — which `provenance='specialist:*'` variants you pick remains YOUR
+    judgment. Cross-rater disagreement is itself an
     uncertainty signal; when scores conflict with the analysis.md markers
     or KB evidence, prefer the measured / evidence-backed signal.
 

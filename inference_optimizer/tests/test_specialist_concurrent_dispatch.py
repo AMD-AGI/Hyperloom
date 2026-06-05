@@ -318,16 +318,32 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
 
 
 # ---------------------------------------------------------------------------
-# CLI surface check — the default capacity changed to 4 in PR-A3.
+# CLI surface check — the default capacity is the research-lane ceiling.
 # ---------------------------------------------------------------------------
-def test_cli_default_research_lane_capacity_is_4():
-    """PR-A3 (Arbor-into-Hyperloom) bumped the default from 1 to 4 so the
-    multi-emit fan-out actually parallelises out of the box."""
+def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
+    """The default ``--research-lane-capacity`` is the GPU-derived
+    research-lane ceiling (``2 × visible GPU``) so the multi-emit fan-out
+    uses the full lane budget out of the box."""
     import inference_optimizer.cli as cli_mod
+    from inference_optimizer.orchestrator import policy as policy_mod
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", raising=False)
+    monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
-    assert args.research_lane_capacity == 4
+    assert args.research_lane_capacity == policy_mod.research_lane_ceiling()
+    assert args.research_lane_capacity == 8
     assert args.gpu_specialist_capacity == 0
+
+
+def test_cli_research_lane_capacity_env_override(monkeypatch):
+    """An explicit env value still wins over the GPU-derived default."""
+    import inference_optimizer.cli as cli_mod
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", "3")
+    parser = cli_mod._build_parser()
+    args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
+    assert args.research_lane_capacity == 3
 
 
 def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):

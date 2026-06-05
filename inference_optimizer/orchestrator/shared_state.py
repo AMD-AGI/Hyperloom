@@ -906,10 +906,9 @@ class SharedState:
     # (status / last_outcome / cumulative_gain / …).
     dynamic_actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Per-EXPLORE-round counter of *successful* dynamic_action
-    # dispatches (PolicyGate denials do not increment). Reset on
-    # every fresh EXPLORE entry; read by
-    # ``PolicyGate._validate_dynamic_action_dispatch`` for the
-    # ``MAX_DYNAMIC_PER_ROUND`` cap; Coordinator is the sole writer.
+    # dispatches (PolicyGate denials do not increment). Reset on every
+    # fresh EXPLORE entry. Telemetry + the ``dyn-<round>-<seq>`` id
+    # sequence; Coordinator is the sole writer.
     dynamic_action_round_count: int = 0
     # Research-lane capacity locked at session start. PolicyGate denies
     # mid-session mutation because this is a core state field.

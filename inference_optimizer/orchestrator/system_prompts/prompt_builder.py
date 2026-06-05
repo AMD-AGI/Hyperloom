@@ -307,20 +307,18 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
         return (
             "delegate{action_name='dynamic_action', params={"
             "motivation_gap_text=<why no single specialist can cover>, "
-            "scope_domains=[<>=2 specialist domain keys>], "
+            "scope_domains=[<>=1 specialist domain keys>], "
             "side_effects_declared=[<framework_source|...>], "
             "budget_hint?=<low|medium|high>}}. "
-            "Constraints: scope_domains length >= 2; "
+            "Constraints: scope_domains length >= 1; "
             "side_effects_declared must not include any kernel-owned "
-            "action / metric / accuracy_gate / server lifecycle; "
-            "at most 1 dispatch per EXPLORE round. "
+            "action / metric / accuracy_gate / server lifecycle. "
             "PolicyGate reason codes on denial: "
             "dynamic_phase_violation / dynamic_source_violation / "
             "dynamic_payload_schema / dynamic_scope_too_narrow / "
             "dynamic_scope_unknown_domain / "
             "dynamic_side_effects_red_line / "
-            "dynamic_kernel_only_disallowed / "
-            "dynamic_round_cap_exhausted."
+            "dynamic_kernel_only_disallowed."
         )
     return (
         f"propose_action{{action_name='{meta.name}', "
@@ -346,12 +344,10 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "provenance='specialist:<domain-or-tag>', and "
             "provenance='dynamic'. Prefer specialist / research-hint "
             "variants when they exist, but use llm_direct for uncovered "
-            "gaps or cold-start hypotheses. **Remaining caps:** up to "
-            "research_lane_capacity variants (clamped to the 2 x visible "
-            "GPU count ceiling) in the grid may carry "
-            "provenance='specialist:*' (rule "
-            "'explore_specialist_grid_max_one'); at most one "
-            "provenance='dynamic' variant may run per explore round. The "
+            "gaps or cold-start hypotheses. **Breadth is bounded by "
+            "resources, not a grid cap:** specialist / dynamic variants "
+            "fan out up to the research_lane / GPU pool leases (the "
+            "research_lane scales with the 2 x visible GPU ceiling). The "
             "executor dedups against SharedState.explore_search by "
             "canonical_fingerprint, so a rename of an already-tested "
             "(args, envs) collapses to the same row."
@@ -672,14 +668,14 @@ def _section_dynamic_action(actions: list[ActionMetadata]) -> list[str] | None:
     return [
         "## 6b. DYNAMIC ACTION (supplementary EXPLORE channel)",
         "",
-        "If you believe a single cross-domain patch combination exists",
+        "If you believe a cross-domain patch combination exists",
         "that no specialist could surface within its own-domain prompt",
-        "boundary, you MAY dispatch one `dynamic_action` in the EXPLORE",
+        "boundary, you MAY dispatch a `dynamic_action` in the EXPLORE",
         "phase via `delegate{action_name='dynamic_action', params={...}}`.",
         "",
         "`dynamic_action` is a **supplementary** channel, not the default.",
-        "Specialists remain the primary EXPLORE entry. At most ONE",
-        "`dynamic_action` dispatch is allowed per EXPLORE round.",
+        "Specialists remain the primary EXPLORE entry. Per-round breadth",
+        "is bounded by the research_lane / GPU pool leases, not a cap.",
         "",
         "After an `explore` KEEP, you MAY pair that winning direction",
         "with an adjacent domain via one `dynamic_action` deep-dive —",

@@ -69,8 +69,6 @@ from inference_optimizer.orchestrator.policy import (
     DYNAMIC_ACTION_NAME,
     DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES,
     KERNEL_OWNED_ACTIONS,
-    MAX_DYNAMIC_PER_ROUND,
-    MAX_DYNAMIC_SOURCED_VARIANTS,
     PolicyDenied,
     PolicyGate,
 )
@@ -688,20 +686,16 @@ class TestInvariant_8_CrossDynIsolation:
 
 
 # ===========================================================================
-# Round-cap invariants — every reject + every restart respects
-# MAX_DYNAMIC_PER_ROUND / MAX_DYNAMIC_SOURCED_VARIANTS.
+# Breadth invariants — grid breadth is resource-bounded, not capped.
 # ===========================================================================
-class TestInvariant_RoundCap:
+class TestInvariant_Breadth:
 
-    def test_inv_max_dynamic_per_round_is_one(self):
-        assert MAX_DYNAMIC_PER_ROUND == 1
-        assert MAX_DYNAMIC_SOURCED_VARIANTS == 1
-
-    def test_inv_dynamic_sourced_cap_enforced_at_explore_dispatch(self):
-        """The sourced-variant cap is enforced on every explore-grid
-        delegate, independent of ``MAX_DYNAMIC_PER_ROUND``."""
+    def test_inv_multiple_dynamic_sourced_variants_allowed(self):
+        """Multiple dynamic-sourced variants in one explore grid are
+        accepted; breadth is bounded by the research_lane / GPU leases,
+        not a grid-size gate."""
         gate = _gate()
-        bad = Intent(
+        grid = Intent(
             type=IntentType.DELEGATE,
             payload={
                 "action_name": "explore",
@@ -714,49 +708,28 @@ class TestInvariant_RoundCap:
                 },
             },
         )
-        with pytest.raises(PolicyDenied) as excinfo:
-            gate.validate_intent("orchestration", bad)
-        assert excinfo.value.rule == "dynamic_sourced_variant_cap_exceeded"
+        gate.validate_intent("orchestration", grid)  # no raise
 
-    def test_inv_scope_domains_dedup_blocks_fake_cross_domain(self):
-        """A repeated domain cannot inflate a single-domain dispatch
-        into a fake cross-domain one."""
+    def test_inv_single_domain_scope_allowed(self):
+        """A single distinct scope domain is allowed (single-domain deep
+        dives are valid); only an empty scope is denied."""
         gate = _gate()
         payload = _delegate_payload(params={
+            "motivation_gap_text": "single-domain attempt",
             "scope_domains": ["serving_specialist", "serving_specialist"],
+            "side_effects_declared": ["framework_source"],
         })
-        with pytest.raises(PolicyDenied) as excinfo:
-            gate.validate_intent("orchestration", Intent(
-                type=IntentType.DELEGATE, payload=payload,
-            ))
-        assert excinfo.value.rule == "dynamic_scope_too_narrow"
+        gate.validate_intent("orchestration", Intent(
+            type=IntentType.DELEGATE, payload=payload,
+        ))  # no raise — dedup collapses to one distinct domain, still >= 1
 
-    def test_inv_single_dynamic_sourced_variant_passes(self):
-        """A single dynamic-sourced variant within the cap should pass
-        the new gate (no regression)."""
-        gate = _gate()
-        ok = Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "explore",
-                "params": {
-                    "grid": [
-                        {"name": "v1", "provenance": "dynamic"},
-                    ],
-                    "config_path": "/tmp/baseline.yaml",
-                },
-            },
-        )
-        gate.validate_intent("orchestration", ok)
-
-    def test_inv_round_cap_exhausted_rejected(self):
-        state = _State(dynamic_action_round_count=MAX_DYNAMIC_PER_ROUND)
+    def test_inv_repeated_dispatch_allowed(self):
+        """A non-zero round counter does not block the next dispatch."""
+        state = _State(dynamic_action_round_count=5)
         gate = _gate(state)
-        with pytest.raises(PolicyDenied) as excinfo:
-            gate.validate_intent("orchestration", Intent(
-                type=IntentType.DELEGATE, payload=_delegate_payload(),
-            ))
-        assert excinfo.value.rule == "dynamic_round_cap_exhausted"
+        gate.validate_intent("orchestration", Intent(
+            type=IntentType.DELEGATE, payload=_delegate_payload(),
+        ))  # no raise
 
     def test_inv_rejected_dispatch_does_not_bump_round_counter(self):
         """A PolicyGate denial must not advance the round counter

@@ -4189,6 +4189,24 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     ) else 1
 
 
+def _default_research_lane_capacity() -> int:
+    """Default ``--research-lane-capacity``: the GPU-derived ceiling.
+
+    Honours ``INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY`` when set;
+    otherwise defaults to the research-lane ceiling (``2 × visible GPU``,
+    with a conservative fallback when no GPU is detected). The value is
+    still clamped to the ceiling at session start.
+    """
+    env = os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    from inference_optimizer.orchestrator.policy import research_lane_ceiling
+    return research_lane_ceiling()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="inference_optimizer",
@@ -4850,16 +4868,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--research-lane-capacity",
         dest="research_lane_capacity",
         type=int,
-        default=int(
-            os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", "4")
-            or "4"
-        ),
+        default=_default_research_lane_capacity(),
         help="Max concurrent LLM specialist sub-agents on the "
              "research_lane. 0 disables specialist "
-             "dispatch entirely (degrades to LLM-direct grid); 4 is "
-             "the default. The upper bound scales with the visible GPU "
-             "count (2 x GPU); values above it are silently clamped "
-             "down. Locked at session start.",
+             "dispatch entirely (degrades to LLM-direct grid). The "
+             "default is the research-lane ceiling (2 x visible GPU "
+             "count, falling back to a conservative value when no GPU "
+             "is detected); values above the ceiling are silently "
+             "clamped down. Locked at session start.",
     )
     opt.add_argument(
         "--gpu-specialist-capacity",

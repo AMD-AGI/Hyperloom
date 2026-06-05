@@ -17,7 +17,6 @@ import pytest
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.policy import (
     DYNAMIC_ACTION_NAME,
-    MAX_DYNAMIC_PER_ROUND,
 )
 from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
@@ -36,7 +35,6 @@ EXPECTED_REASON_CODES: tuple[str, ...] = (
     "dynamic_scope_unknown_domain",
     "dynamic_side_effects_red_line",
     "dynamic_kernel_only_disallowed",
-    "dynamic_round_cap_exhausted",
 )
 
 
@@ -106,7 +104,7 @@ def test_p7_scenario_01_dynamic_action_block_present(prompt: str):
 
 def test_p7_scenario_01b_block_text_matches_31_intent(prompt: str):
     """Wording must reflect §3.1: 'supplementary channel, not default',
-    cross-domain motivation framing, and the round-cap."""
+    cross-domain motivation framing, and the resource-bounded breadth."""
     block = re.search(
         r"## 6b\. DYNAMIC ACTION.*?(?=^## )", prompt, re.S | re.M,
     ).group(0)
@@ -114,8 +112,8 @@ def test_p7_scenario_01b_block_text_matches_31_intent(prompt: str):
     assert "not the default" in block.lower()
     assert "cross-domain" in block.lower()
     assert "specialist" in block.lower()
-    # round cap visible
-    assert "ONE" in block or "1" in block
+    # breadth is resource-bounded, not capped
+    assert "research_lane" in block.lower()
 
 
 # ===========================================================================
@@ -158,16 +156,15 @@ def test_p7_scenario_03_emit_hint_payload_fields(prompt: str):
 
 
 def test_p7_scenario_03b_emit_hint_carries_constraints(prompt: str):
-    """Key constraints — scope_domains length, side-effect red lines,
-    round-cap — must appear in the hint."""
+    """Key constraints — scope_domains length + side-effect red lines —
+    must appear in the hint."""
     # The constraints text follows the EMIT line and may wrap across
     # the catalogue line; we search the whole prompt for the literal
     # tokens that the §5.1 contract requires.
-    assert "scope_domains length >= 2" in prompt
+    assert "scope_domains length >= 1" in prompt
     assert "kernel-owned action" in prompt
     assert "metric" in prompt
     assert "server lifecycle" in prompt
-    assert "1 dispatch per EXPLORE round" in prompt
 
 
 @pytest.mark.parametrize("reason_code", EXPECTED_REASON_CODES)
@@ -343,15 +340,13 @@ def test_dynamic_action_block_omits_internal_mechanics(prompt: str):
 
 
 # ===========================================================================
-# Round-cap visibility — both the catalogue hint AND the dedicated
-# block surface MAX_DYNAMIC_PER_ROUND.
+# Breadth framing — the prompt presents dynamic_action breadth as
+# resource-bounded, with no per-round dispatch cap.
 # ===========================================================================
-def test_round_cap_value_visible_in_prompt(prompt: str):
-    """The §5.1 + §3.1 cap of MAX_DYNAMIC_PER_ROUND should be visible
-    so the LLM can budget its dispatches."""
-    assert MAX_DYNAMIC_PER_ROUND == 1
-    # Catalogue hint mentions "at most 1 dispatch per EXPLORE round".
-    assert "1 dispatch per EXPLORE round" in prompt
+def test_no_round_cap_directive_in_prompt(prompt: str):
+    """No removed per-round dispatch cap leaks into the prompt."""
+    assert "dispatch per EXPLORE round" not in prompt
+    assert "dynamic_round_cap_exhausted" not in prompt
 
 
 # ===========================================================================

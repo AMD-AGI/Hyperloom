@@ -3,14 +3,14 @@
 ## Purpose
 
 Dispatch a multi-turn ReAct sub-agent on the **research_lane** to explore
-one cross-domain patch combination that no single specialist (with its
-own-domain prompt) could surface. dynamic_action is the supplementary
-EXPLORE channel for organic synthesis across `>=2` specialist domains;
-specialists remain the default path.
+a patch combination that a single specialist (with its own-domain prompt)
+might not surface. dynamic_action is the supplementary EXPLORE channel for
+organic synthesis across one or more specialist domains; specialists
+remain the default path.
 
 dynamic_action shares the `research_lane` physical channel with
-specialists (`MAX_RESEARCH_LANE_CAPACITY=6`) but counts against an
-independent round-cap so the two pools cannot starve each other.
+specialists; per-round breadth is bounded by the research_lane / GPU pool
+leases, not by a dispatch cap.
 
 ## Phase / source
 
@@ -26,7 +26,7 @@ checks at dispatch time.
 | Key                     | Type   | Required | Description |
 |-------------------------|--------|----------|-------------|
 | `motivation_gap_text`   | string | yes      | Why specialists cannot cover this combination (audit only). |
-| `scope_domains`         | list   | yes      | `>=2` registered specialist domain keys. |
+| `scope_domains`         | list   | yes      | `>=1` registered specialist domain key(s). |
 | `side_effects_declared` | list   | yes      | Action categories the sub-agent expects to touch. |
 | `budget_hint`           | string | no       | `low` / `medium` / `high`; default `medium`. |
 
@@ -57,14 +57,13 @@ delegate{
 
 | Knob                              | Default |
 |-----------------------------------|---------|
-| `MAX_DYNAMIC_PER_ROUND`           | 1       |
-| `MAX_DYNAMIC_SOURCED_VARIANTS`    | 1       |
-| `scope_domains` min length        | 2       |
-| `MAX_RESEARCH_LANE_CAPACITY`      | 6 (shared with specialists) |
+| `scope_domains` min length        | 1       |
+| `MAX_RESEARCH_LANE_CAPACITY`      | 2 × visible GPU (shared with specialists) |
 
-Failed dispatches do NOT consume `MAX_DYNAMIC_PER_ROUND`: PolicyGate
-rejects come back with a structured reason; only successful dispatches
-bump the round counter.
+There is no per-round dynamic dispatch cap: breadth is bounded by the
+shared `research_lane` / GPU pool leases. `dynamic_action_round_count`
+remains as telemetry and the `dyn-<round>-<seq>` id sequence; only
+successful dispatches bump it.
 
 ## Output
 

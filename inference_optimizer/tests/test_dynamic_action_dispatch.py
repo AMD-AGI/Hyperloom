@@ -18,8 +18,6 @@ from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     DYNAMIC_ACTION_NAME,
-    MAX_DYNAMIC_PER_ROUND,
-    MAX_DYNAMIC_SOURCED_VARIANTS,
     PolicyDenied,
     PolicyGate,
 )
@@ -120,13 +118,25 @@ def test_p1_scenario_03_non_orchestration_source_denied():
 
 
 # ===========================================================================
-# §9 #4 — scope_domains too narrow
+# §9 #4 — single-domain scope is allowed
 # ===========================================================================
-def test_p1_scenario_04_scope_domains_too_narrow_denied():
-    """scope_domains.length == 1 → dynamic_scope_too_narrow."""
+def test_p1_scenario_04_single_scope_domain_allowed():
+    """scope_domains.length == 1 is accepted (single-domain deep dives are
+    a valid dynamic_action shape; breadth is resource-bounded)."""
     payload = _payload(params={
         "motivation_gap_text": "single-domain attempt",
         "scope_domains": ["serving_specialist"],
+        "side_effects_declared": ["framework_source"],
+    })
+    gate = _gate()
+    gate.validate_intent("orchestration", _intent(payload))  # no raise
+
+
+def test_scope_domains_empty_denied():
+    """An empty scope_domains list is still denied (nothing to anchor)."""
+    payload = _payload(params={
+        "motivation_gap_text": "no-domain attempt",
+        "scope_domains": [],
         "side_effects_declared": ["framework_source"],
     })
     gate = _gate()
@@ -173,17 +183,15 @@ def test_p1_scenario_06_red_line_side_effects_denied(forbidden: str):
 
 
 # ===========================================================================
-# §9 #7 — round-cap exhausted
+# §9 #7 — no per-round dispatch cap
 # ===========================================================================
-def test_p1_scenario_07_round_cap_exhausted_denied():
-    """Once MAX_DYNAMIC_PER_ROUND dispatches have landed in
-    SharedState the next dispatch is denied with
-    dynamic_round_cap_exhausted (until the EXPLORE round resets)."""
-    state = _State(dynamic_action_round_count=MAX_DYNAMIC_PER_ROUND)
+def test_p1_scenario_07_repeated_dispatch_allowed():
+    """There is no per-round dynamic dispatch cap: a non-zero round
+    counter does not block the next dispatch (breadth is bounded by the
+    research_lane / GPU pool leases instead)."""
+    state = _State(dynamic_action_round_count=5)
     gate = _gate(state)
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", _intent(_payload()))
-    assert excinfo.value.rule == "dynamic_round_cap_exhausted"
+    gate.validate_intent("orchestration", _intent(_payload()))  # no raise
 
 
 # ===========================================================================
@@ -293,11 +301,11 @@ def test_rejected_dispatch_does_not_bump_round_counter():
 
 
 # ===========================================================================
-# Explore-grid provenance is advisory-only
+# Explore-grid provenance is advisory-only (no grid-size cap)
 # ===========================================================================
-def test_explore_grid_with_dynamic_provenance_passes_grid_gate():
-    """Mixed-provenance explore grid with one ``dynamic`` variant is
-    accepted; the explore-grid gate only caps specialist fan-out."""
+def test_explore_grid_with_mixed_provenance_passes_grid_gate():
+    """Mixed-provenance explore grid is accepted; provenance is an audit
+    label and there is no per-round grid-size cap."""
     state = _State(phase="EXPLORE")
     gate = _gate(state)
     explore_payload = {
@@ -305,25 +313,17 @@ def test_explore_grid_with_dynamic_provenance_passes_grid_gate():
         "params": {
             "grid": [
                 {"name": "v1", "provenance": "dynamic"},
-                {"name": "v2", "provenance": "specialist:serving_specialist"},
+                {"name": "v2", "provenance": "dynamic"},
+                {"name": "v3", "provenance": "specialist:serving_specialist"},
+                {"name": "v4", "provenance": "specialist:serving_specialist"},
             ],
             "config_path": "/tmp/baseline.yaml",
         },
     }
-    # _validate_explore_grid_size also runs; only one specialist-sourced
-    # variant present, so the cap holds.
     gate.validate_intent(
         "orchestration",
         Intent(type=IntentType.DELEGATE, payload=explore_payload),
     )
-
-
-def test_explore_grid_size_caps_independent_of_dynamic():
-    """The dynamic literal does NOT count against
-    MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS; that cap is only for
-    ``specialist:`` prefixes. A round with one ``dynamic`` plus one
-    ``specialist:*`` variant is legal."""
-    assert MAX_DYNAMIC_SOURCED_VARIANTS == 1
 
 
 # ===========================================================================
