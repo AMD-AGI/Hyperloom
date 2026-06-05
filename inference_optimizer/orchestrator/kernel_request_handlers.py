@@ -2244,6 +2244,29 @@ async def integrate_handler(
     )
     ctx = RunnerContext(task=fake_task, lease=None)
 
+    # GH #458: aiter cpp_itfs / runtime-compiled kernels (e.g.
+    # paged_attention -> pa_ragged) are recompiled by the server at runtime,
+    # NOT by setup.py develop, and their runtime-cache dir name hashes
+    # params (not source) so pristine + patched collide. apply_kernel_patch
+    # already moved the stale runtime cache aside for cpp_itfs targets; as
+    # belt-and-suspenders we ALSO set AITER_REBUILD=1 for the re-baseline
+    # server so aiter wipes its runtime BUILD_DIR on import and recompiles
+    # the patched kernel. Scoped to cpp_itfs applies and ALWAYS restored, so
+    # every non-cpp_itfs integrate is byte-for-byte unaffected.
+    cpp_itfs_backup = apply_result.get("cpp_itfs_cache_backup") or {}
+    force_aiter_rebuild = bool(cpp_itfs_backup.get("is_cpp_itfs"))
+    _prev_aiter_rebuild = os.environ.get("AITER_REBUILD")
+    if force_aiter_rebuild:
+        os.environ["AITER_REBUILD"] = "1"
+
+    def _restore_aiter_rebuild_env() -> None:
+        if not force_aiter_rebuild:
+            return
+        if _prev_aiter_rebuild is None:
+            os.environ.pop("AITER_REBUILD", None)
+        else:
+            os.environ["AITER_REBUILD"] = _prev_aiter_rebuild
+
     # Multi-node: apply_kernel_patch has just fanned the new source
     # files to every pod. sglang must be FULLY restarted (not resume-
     # pathed) so it re-imports the patched modules; otherwise the
@@ -2274,6 +2297,7 @@ async def integrate_handler(
             ctx.extra = {**(getattr(ctx, "extra", None) or {}),
                          "mn_round_restarted": True}
         except ServerRestartFailed as exc:
+            _restore_aiter_rebuild_env()
             revert_result = _maybe_revert_kernel_patch(apply_result)
             return {
                 "status": "failed",
@@ -2299,6 +2323,10 @@ async def integrate_handler(
             "apply_result": apply_result,
             "revert_result": revert_result,
         }
+    finally:
+        # Restore AITER_REBUILD on every path once the re-baseline server has
+        # been launched, so the env override never leaks past this integrate.
+        _restore_aiter_rebuild_env()
 
     if not is_valid_measurement(bench_result):
         revert_result = _maybe_revert_kernel_patch(apply_result)
@@ -2312,6 +2340,41 @@ async def integrate_handler(
             "apply_result": apply_result,
             "revert_result": revert_result,
         }
+
+    # GH #458 (point 2): don't score a stale binary. For cpp_itfs targets the
+    # served kernel is runtime-compiled, so a re-baseline that reused a stale
+    # params-hashed lib.so would silently measure the PRE-patch kernel (the
+    # observed -0.17% on a real +2.5% paged_attention win). Before trusting
+    # gain_pct, assert a real rebuild landed: apply moved the cache aside, so
+    # a fresh <build_dir>/<md_name>_*/lib.so newer than the invalidation is
+    # proof the patched kernel was (re)compiled and served. If not, flag for
+    # review instead of emitting a KEEP/REVERT on a possibly-stale measure.
+    #
+    # Single-node only: in multi-node the served cache lives on the serving
+    # pod, not this sandbox, so AITER_REBUILD=1 on the pod restart is the
+    # mechanism and the sandbox-local check is skipped to avoid false aborts.
+    # verify_cpp_itfs_rebuilt() returns verified=True for non-cpp_itfs targets
+    # so this gate is a strict no-op off the cpp_itfs path.
+    rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
+    if force_aiter_rebuild and not is_multi_node():
+        rebuild_check = _load_apply_tool().verify_cpp_itfs_rebuilt(cpp_itfs_backup)
+        if not rebuild_check.get("verified", True):
+            revert_result = _maybe_revert_kernel_patch(apply_result)
+            return {
+                "status": "failed",
+                "error_class": "cpp_itfs_rebuild_not_verified",
+                "error": (
+                    "re-baseline did not produce a freshly-built cpp_itfs "
+                    "lib.so; refusing to score a possibly-stale binary"
+                ),
+                "decision": "NEEDS_REVIEW",
+                "kernel_id": kernel_id,
+                "patch_path": patch_path,
+                "target_file": payload.get("target_file") or payload.get("source_file"),
+                "apply_result": apply_result,
+                "revert_result": revert_result,
+                "rebuild_check": rebuild_check,
+            }
 
     new_tput = float(bench_result.get("output_throughput") or 0.0)
     gain_pct = ((new_tput - base_tput) / base_tput * 100.0) if base_tput > 0 else 0.0
@@ -2339,6 +2402,7 @@ async def integrate_handler(
         "extra_server_args": extra_args,
         "apply_result": apply_result,
         "revert_result": revert_result,
+        "rebuild_check": rebuild_check,
     }
 
 
