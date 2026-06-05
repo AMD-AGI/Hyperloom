@@ -52,7 +52,7 @@ from inference_optimizer.orchestrator.policy import (
 
 
 # ---------------------------------------------------------------------------
-# PR-A6 (Arbor-into-Hyperloom) — per-domain focus templates
+# per-domain focus templates
 #
 # Each entry produces the body that the prompt builder injects into
 # Section 1 under "### Domain focus — <key>". The shape mirrors
@@ -62,10 +62,10 @@ from inference_optimizer.orchestrator.policy import (
 # - "Winning techniques" (concrete patterns the specialist should
 #   sanity-check against the gap before proposing).
 # - "Pitfalls" (anti-patterns that historically reverted on this
-#   domain — sourced from KB_design lessons + Arbor's lessons table).
+#   domain — sourced from KB lessons + Arbor's lessons table).
 #
 # When a domain key is missing from this map, ``_section_identity``
-# falls back to the generic body (the legacy M5 default).
+# falls back to the generic body (the generic default).
 # ---------------------------------------------------------------------------
 
 
@@ -493,7 +493,7 @@ class SpecialistPromptInputs:
     # padding with marginal candidates.
     max_proposals: int = DEFAULT_SPECIALIST_MAX_PROPOSALS
 
-    # Hardware context (§3.5 §6 part 2). ``tp`` defaults to 0
+    # Hardware context. ``tp`` defaults to 0
     # (sentinel for "unspecified"), NOT 1 — a silent default of 1
     # would make comm_specialist veto its own proposals on
     # tensor-parallel sessions where the Coordinator forgot to
@@ -511,8 +511,8 @@ class SpecialistPromptInputs:
     # research scout should skip re-mining. Empty on cold-start.
     already_proven: list[dict[str, str]] = field(default_factory=list)
     # Compact advisory research-hint block (source-backed priors collected
-    # this session). Rendered alongside the KB sub-graph as a co-equal
-    # prior; its presence suppresses the cold-start fallback.
+    # this session). Co-equal with RecipeKB warm-start facts; its presence
+    # suppresses the cold-start fallback.
     research_hints: str = ""
     # Workload context (mirrored from SharedState by
     # Coordinator._warm_specialist_params; renders in section 2 so
@@ -523,7 +523,7 @@ class SpecialistPromptInputs:
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
-    # GAP 5 / GAP 8 — runtime fingerprint surfaced into prompts so the
+    # runtime fingerprint surfaced into prompts so the
     # specialist can judge "is this lesson from an old framework still
     # applicable?". ``framework`` is the active backend (sglang / vllm);
     # ``framework_version`` is the precise install version (e.g. "0.5.11").
@@ -533,16 +533,16 @@ class SpecialistPromptInputs:
     framework: str = ""
     framework_version: str = ""
 
-    # Gap statement (§3.5 §6 part 3)
+    # Gap statement
     gap_canonical_id: str = ""
     gap_symptom: str = ""
     gap_layer: str = ""
     gap_evidence: dict[str, Any] = field(default_factory=dict)
 
-    # Cortex KB sub-graph (§3.5 §6 part 4)
+    # Optional structured KB context. Empty in the current RecipeKB-first path.
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
 
-    # Roofline / TraceLens evidence (§3.5 §6 part 4a).
+    # Roofline / TraceLens evidence.
     # Filled by ``Coordinator._warm_specialist_params`` from
     # :attr:`SharedState.last_trace_analyze`. Expected keys:
     # ``analysis_md_path``, ``roofline_snapshot_id``,
@@ -551,7 +551,7 @@ class SpecialistPromptInputs:
     # token cost). Empty dict → section renders empty / placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
 
-    # Recipe summary from T0 ``find-recipe`` (§3.5 §6 part 5)
+    # Recipe summary from T0 ``find-recipe``
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # T0 ``lessons`` query result — positive priors from prior KEEPs
@@ -559,14 +559,14 @@ class SpecialistPromptInputs:
     # § 5b for the specialist (separate from § 5 recipe so the LLM can
     # reason about each independently).
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
-    # IR-7 — session_steward_specialist panoramic state digest. Only
+    # session_steward_specialist panoramic state digest. Only
     # populated when the dispatcher is dispatching a session_steward
     # task (other specialists get an empty dict and the section is
     # skipped entirely). See ``Coordinator._build_session_snapshot``
     # for the field shape. Rendered as § 5d.
     session_snapshot: dict[str, Any] = field(default_factory=dict)
 
-    # PR feed (§3.5 §6 part 6)
+    # PR feed
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
@@ -592,7 +592,7 @@ class SpecialistPromptInputs:
     # when ``framework == 'atom'``.
     framework: str = ""
 
-    # Local source navigation hint (§3.5 §6 part 7)
+    # Local source navigation hint
     framework_source_roots: tuple[str, ...] = ()
     source_hint_directories: tuple[str, ...] = ()
 
@@ -633,7 +633,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "capability boundary is fixed by Section 9 Iron Rules; everything inside",
         "it is yours.",
     ]
-    # PR-A6 (Arbor-into-Hyperloom): per-domain expertise + focus
+    # per-domain expertise + focus
     # paragraph. Each domain template emphasises the surface area the
     # specialist should reason about + the typical winning techniques
     # (lifted from Arbor's orchestrator.md "agent expertise" table).
@@ -739,7 +739,7 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Section 4 — Cortex KB sub-graph
+# Section 4 — optional KB context
 # ---------------------------------------------------------------------------
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     """Issue-J (Saturday May 2026): all three prior sources are empty.
@@ -766,19 +766,19 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
 
 
 def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
-    rows = ["## 4. CORTEX KB SUB-GRAPH", ""]
+    rows = ["## 4. KB CONTEXT (optional, advisory)", ""]
     cold = _is_cold_start(inp)
     if not inp.kb_subgraph:
         if inp.research_hints:
-            # Research hints stand in as the advisory prior when the KB
-            # anchor is empty — co-equal with the KB sub-graph, never a
-            # deterministic gate. This keeps the cold-start fallback from
+            # Research hints stand in as an advisory prior when structured
+            # KB context is empty; never a deterministic gate. This keeps
+            # the cold-start fallback from
             # firing whenever the scout produced fresh source-backed priors.
             rows.extend([
-                "KB anchor is empty for this (model, hardware, domain), but "
+                "Structured KB context is empty for this (model, hardware, domain), but "
                 "the research scout collected source-backed priors this "
                 "session. Treat these as your advisory prior (co-equal with "
-                "the KB sub-graph; the Critic still gates the final answer):",
+                "RecipeKB priors; the Critic still gates the final answer):",
                 "",
                 inp.research_hints,
                 "",
@@ -796,12 +796,11 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             rows.extend([
                 "**COLD-START MODE — no priors available.**",
                 "",
-                "All three prior sources for this gap are empty:",
+                "All prior sources for this gap are empty:",
                 "",
-                "- KB sub-graph: ``(none)`` — Cortex anchor has no "
-                "committed points for this (model, hardware, domain) "
-                "tuple yet, OR the warmup hit a 4xx schema reject "
-                "(common on first-time models).",
+                "- KB context: ``(none)`` — no RecipeKB warm-start facts, "
+                "research hints, or PR feed entries were available for this "
+                "(model, hardware, domain) tuple.",
                 "- Warm-start recipe: ``(none)`` (Section 5).",
                 "- PR feed: ``(none)`` (Section 6).",
                 "",
@@ -814,8 +813,8 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                 "gap symptom (Section 3); flag each as "
                 "``confidence: low`` and ``provenance: "
                 "domain_focus_default`` in the proposal. Use the "
-                "``residual_questions`` field to record what KB "
-                "anchor / PR query a future round should pre-warm.",
+                "``residual_questions`` field to record what RecipeKB, "
+                "research, or PR query a future round should pre-warm.",
                 "",
                 "If the *Winning techniques* block is generic enough "
                 "that no proposal is safer than a coin-flip, you may "
@@ -828,13 +827,10 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             rows.extend([
                 _NONE_PLACEHOLDER,
                 "",
-                "(No KB sub-graph supplied. The Coordinator pre-warms this "
-                "section via select_kb_for_domain before dispatch; an empty "
-                "block means the anchor has no committed entries yet (cold "
-                "start) or the warmup hit a soft failure. The specialist "
-                "subprocess has no live KB connection — surface what you "
-                "need in ``residual_questions`` so a future round can "
-                "re-warm with a richer anchor.)",
+                "(No structured KB context supplied. Use Sections 1, 3, 5, "
+                "and 6 plus source inspection; record missing RecipeKB / "
+                "research / PR questions in ``residual_questions`` so a "
+                "future round can warm richer advisory context.)",
             ])
         return rows
     rows.append("```json")
@@ -1042,7 +1038,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         meta_bits: list[str] = []
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        # GAP 4 — surface the validated_count first because "5 sessions
+        # surface the validated_count first because "5 sessions
         # confirmed this" is the strongest cross-session signal. Fall
         # back to the singular ``source_session_id`` for legacy rows.
         vc = attrs.get("validated_count")
@@ -1056,7 +1052,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
             if src_sid:
                 meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        # GAP 8 — version mismatch annotation. Surface this AFTER the
+        # version mismatch annotation. Surface this AFTER the
         # statement so the LLM sees ``- **X works on sglang** [from
         # sglang@0.4.5, you're on 0.5.11]`` and can decide if the
         # lesson still applies. Client-side ranking already downweighted
@@ -1193,7 +1189,7 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
             meta_bits.append(f"severity={severity}")
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        # GAP 4 — repeat observations strengthen the "don't try this" signal.
+        # repeat observations strengthen the "don't try this" signal.
         vc = attrs.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"observed={vc}")

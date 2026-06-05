@@ -35,7 +35,7 @@ import pytest
 
 from inference_optimizer.orchestrator import framework_agent_client as _fa_client
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 
 
 # Cross-cutting framework parametrisation. Add new frameworks here

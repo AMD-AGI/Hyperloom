@@ -1,6 +1,6 @@
-"""SQLite schema for the unified Coordinator state DB ().
+"""SQLite schema for the unified Coordinator state DB.
 
-Five tables consolidated into a single WAL database
+Seven tables consolidated into a single WAL database
 ``$SESSION_DIR/storage/coordinator.db``:
 
 * ``leases``         — resource lock state.  v0.6 had PK ``lane``
@@ -39,9 +39,9 @@ SCHEMA_VERSION = 3
 
 
 # default lane capacities. ``research_lane`` defaults to 1
-# (M5 single-specialist) so a fresh DB without operator config still
-# runs the M5 behaviour; the CLI flag ``--research-lane-capacity``
-# upgrades this row at session boot. Serving lanes stay at 1 (Inv-7.1).
+# (single-specialist) so a fresh DB without operator config still runs;
+# the CLI flag ``--research-lane-capacity`` upgrades this row at session
+# boot. Serving lanes stay at 1.
 DEFAULT_LANE_CAPACITIES: dict[str, int] = {
     "server_lifecycle":   1,
     "workspace_mutation": 1,
@@ -53,7 +53,7 @@ DEFAULT_LANE_CAPACITIES: dict[str, int] = {
 
 _DDL = [
     # ------------------------------------------------------------------
-    # leases — Resource Lock Manager (DESIGN §3.5 + KB_design §3.7 §4.1)
+    # leases — Resource Lock Manager (DESIGN §3.5)
     # ------------------------------------------------------------------
     # PK is the composite ``(lane, holder_id)``. The capacity
     # cap per lane lives in ``lane_capacity``; ``acquire_many`` selects
@@ -74,7 +74,7 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_leases_lane ON leases(lane)",
     # ------------------------------------------------------------------
-    # lane_capacity — v0.8 M6
+    # lane_capacity — per-lane concurrency cap
     # ------------------------------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS lane_capacity (

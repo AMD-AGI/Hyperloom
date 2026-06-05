@@ -141,10 +141,6 @@ class _StubCortex:
         *,
         drain_remaining: int = 0,
         drain_raises: BaseException | None = None,
-        # Back-compat constructor kwargs for tests that still pass
-        # ``commit_summary`` / ``commit_raises``; the values are ignored.
-        commit_raises: BaseException | None = None,
-        commit_summary: dict | None = None,
     ):
         self.drain_calls: int = 0
         self._drain_remaining = drain_remaining
@@ -357,7 +353,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord,
 ):
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.cortex_kb = _StubCortex(commit_summary={"status": "committed"})
+    coord.cortex_kb = _StubCortex()
     coord.shared_state.cortex_session_id = "sid-test"
 
     await coord._on_enter_close(from_phase="SWEEP")
@@ -504,7 +500,7 @@ def test_policy_blocks_llm_close_sequence_done_write():
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (

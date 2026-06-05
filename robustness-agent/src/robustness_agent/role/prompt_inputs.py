@@ -53,7 +53,7 @@ _INBOX_HEADER_PREFIX = "=== Inbox for "
 _KB_HEADER_PREFIX = "=== Knowledge base hints"
 _TIME_BUDGET_HEADER = "=== Time budget ==="
 
-# SharedState lines we care about for M1.
+# SharedState lines we care about.
 _SCALAR_KEYS = {
     "session_id",
     "baseline_tput",
