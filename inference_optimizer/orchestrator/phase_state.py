@@ -380,19 +380,23 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of total wall-clock)
 # ---------------------------------------------------------------------------
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
-    # Rebalanced from field telemetry (with conc_sweep on by default
-    # SWEEP ran ~2.5x over its old 8%): shift PRELUDE -3pp / EXPLORE
-    # -7pp into SWEEP +10pp, keeping KERNEL at 35% (GEAK quick-mode
-    # needs full cycles).
+    # Loosen-plan P3_22 rebalance: now that plateau judgments are
+    # advisory and the LLM owns phase-advance hints, the Coordinator no
+    # longer auto-cuts EXPLORE / KERNEL early on soft signals — the LLM
+    # is expected to use more of each phase to explore deeper. Shift
+    # weight off SWEEP (discovery-only; conc_sweep stays inside) and
+    # PRELUDE (cold-start is short) into EXPLORE + KERNEL where the
+    # search and optimisation actually happen. IR-6 force-exit is
+    # still the hard backstop on EXPLORE; CLOSE stays at 2% (archival).
     #
     # FRAMEWORK_PR is *not* given a phase budget pct — the time wall is
     # ``force_exit_hours_remaining_ratio * max_hours`` instead (default
     # 0.6), matching the design's "leave at least 60% for the rest of
     # the session" intent.
-    PHASE_PRELUDE: 0.05,
-    PHASE_EXPLORE: 0.40,
-    PHASE_KERNEL:  0.35,
-    PHASE_SWEEP:   0.18,
+    PHASE_PRELUDE: 0.03,
+    PHASE_EXPLORE: 0.45,
+    PHASE_KERNEL:  0.38,
+    PHASE_SWEEP:   0.12,
     PHASE_CLOSE:   0.02,
 }
 

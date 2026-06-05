@@ -2350,17 +2350,13 @@ def test_default_kernel_batch_parallel_matches_full_node():
 
 @pytest.mark.asyncio
 async def test_coordinator_injects_candidates_path_for_run_optimization(
-    session_dir, monkeypatch,
+    session_dir,
 ):
     """When the LLM emits ``run_optimization`` without ``candidates_path``,
     the Coordinator must pull it from ``state.last_trace_analyze`` and
     inject it into the handler payload so ``_run_optimization_batch``
     fires instead of silently collapsing to ``_run_optimization_single``
     (which would waste 7 idle GPUs on an 8-GPU node)."""
-    # Bypass the N13/N19c sequence gate that normally denies
-    # ``run_optimization`` until a roofline snapshot + cheap exploration
-    # exist; this test focuses purely on the injection path.
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
     c = Coordinator(session_dir, backends=_backends_silent())
     # ``_sequence_denial_for_request`` requires both baseline_tput > 0
     # and last_profile_trace to be set (kernel requests are denied with
@@ -2726,7 +2722,7 @@ async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
 
 @pytest.mark.asyncio
 async def test_coordinator_streams_batch_results_and_dedups_final_record(
-    session_dir, monkeypatch,
+    session_dir,
 ):
     """End-to-end through Coordinator._handle_request:
 
@@ -2738,7 +2734,6 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
     Verified by counting how many times SharedState.record_kernel_opt is
     invoked relative to the number of batch sub-results.
     """
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
     c = Coordinator(session_dir, backends=_backends_silent())
     c.shared_state.baseline_tput = 1234.5
     c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"

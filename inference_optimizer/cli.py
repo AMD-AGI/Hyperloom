@@ -5454,28 +5454,28 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Wall-clock budget cap for PRELUDE as a fraction of "
-             "--max-hours. Default: 0.05.",
+             "--max-hours. Default: 0.03.",
     )
     opt.add_argument(
         "--max-minutes-explore-pct",
         dest="phase_budget_explore_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.40.",
+        help="Wall-clock budget cap for EXPLORE. Default: 0.45.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL. Default: 0.35.",
+        help="Wall-clock budget cap for KERNEL. Default: 0.38.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.18.",
+        help="Wall-clock budget cap for SWEEP. Default: 0.12.",
     )
     opt.add_argument(
         "--max-minutes-close-pct",

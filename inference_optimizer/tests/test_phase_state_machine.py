@@ -593,16 +593,14 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     row = c.shared_state.phase_history[0]
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
-    # Budget dict populated. 2026-06 rebalance reshaped the slice:
-    # PRELUDE 0.08 → 0.05 (only ever used ~5min of 27min in practice),
-    # EXPLORE 0.47 → 0.40 (force-exit at phase_remaining_pct=0.176
-    # confirmed it was over-provisioned by ~7pp), KERNEL held at 0.35
-    # (GEAK quick-mode needs full cycles), and SWEEP 0.08 → 0.18 to
-    # fit the sweep + conc_sweep pair that field telemetry showed
-    # running ~2.5x over the old 8% slice. Sum across phases stays
-    # at 1.0.
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.40
-    assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.05
+    # Loosen-plan P3_22 rebalance: now that plateau judgments are
+    # advisory and the LLM owns phase-advance hints, EXPLORE / KERNEL
+    # carry a larger slice (the LLM is expected to stay in each phase
+    # longer rather than be auto-cut on soft signals). PRELUDE drops
+    # to 3% (cold-start is short) and SWEEP drops to 12% (discovery-
+    # only). Sum across phases stays at 1.0.
+    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.45
+    assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.03
 
 
 @pytest.mark.asyncio

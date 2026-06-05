@@ -4524,34 +4524,6 @@ class Coordinator:
         return None
 
     @staticmethod
-    def _allow_early_kernel_opt() -> bool:
-        """Escape hatch — ``INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1``
-        opens the kernel_opt request gate unconditionally (skips the
-        roofline-snapshot check). Used by v0-baseline-comparison flows
-        and unit tests."""
-        return os.environ.get(
-            "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "",
-        ).strip().lower() in {"1", "true", "yes", "on"}
-
-    def _kernel_opt_unlocked(self) -> bool:
-        """Return True when ``run_optimization`` is actually dispatchable
-        right now — i.e. when the hot-kernel report-gate (PR-C) should
-        fire and the LLM should be pushed toward kernel_opt.
-
-        The gate is open when ANY of the following hold:
-          * escape hatch env set;
-          * a roofline snapshot exists (``roofline_snapshot_id`` >= 1).
-        """
-        if self._allow_early_kernel_opt():
-            return True
-        ss = self.shared_state
-        ta = ss.last_trace_analyze or {}
-        snapshot_id = ta.get("roofline_snapshot_id", 0)
-        if not isinstance(snapshot_id, int) or snapshot_id < 1:
-            return False
-        return True
-
-    @staticmethod
     def _skip_gemm_tuning() -> bool:
         return os.environ.get(
             "INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "",
