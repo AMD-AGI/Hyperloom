@@ -204,9 +204,11 @@ on the next tick.
 
 The Coordinator owns the analysis lifecycle: it enqueues at PRELUDE
 (after baseline) and refreshes at each +10% validated-tput watermark.
-While an analysis task is in flight, `specialist` / `explore` /
-kernel-owned dispatches are denied (`wait_for_auto_roofline`) — just
-retry next tick.
+A refresh in flight is advisory only — dispatches are no longer
+denied while it runs, and any concurrent GPU work is serialised by
+the resource lease (lane / GPU pool), so you may keep proposing
+actions against the current `analysis.md` snapshot even if it is
+about to be refreshed.
 
 The SharedState dump carries the full TraceLens `analysis.md` in an
 `analysis_md=...` block between `=== TraceLens Analysis (snapshot #N,

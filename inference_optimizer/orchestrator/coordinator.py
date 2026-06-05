@@ -118,27 +118,6 @@ _STEWARD_RECS: frozenset[str] = frozenset({
 # Empty or malformed *LLM* verdicts still coerce to stop_session.
 _STEWARD_MAX_INFRA_RETRIES: int = 3
 
-# Actions whose output should observe the freshest ``analysis.md`` /
-# ``last_profile_trace`` snapshot. Every dispatch path
-# (``_handle_delegate`` / ``_handle_propose_action`` / the post-Critic
-# ``_materialize_approved_proposal``) consults
-# :meth:`Coordinator._auto_roofline_pending_denial` for these and defers
-# the dispatch while a Coordinator-internal roofline/profile task is
-# still in flight. The field is set by the PRELUDE bootstrap + the
-# +10% watermark crossing and cleared in
-# :meth:`Coordinator._promote_to_shared_state` once the analysis task
-# lands.
-_ROOFLINE_GATED_ACTIONS: frozenset[str] = frozenset({
-    "specialist",
-    "explore",
-    "kernel_opt",
-    "integrate",
-    "deep_kernel_analysis",
-    "operator_tuning",
-    "vendor_kernel_config",
-})
-
-
 # Default per-repo candidate cap for ``fa phase-discover`` during the
 # FRAMEWORK_PR phase. Higher than the historical implicit 5 so each batch
 # probes deeper; overridable per session via
@@ -334,15 +313,6 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
-        # Critic-approved proposals deferred because an auto-roofline /
-        # auto-profile task was still in flight when
-        # :meth:`_materialize_approved_proposal` ran. Drained when the
-        # analysis task lands (both the ``profile`` and ``roofline``
-        # branches in :meth:`_promote_to_shared_state` call
-        # :meth:`_drain_proposals_awaiting_roofline`).
-        self._proposals_awaiting_roofline: list[
-            tuple[PendingProposal, set[str] | None]
-        ] = []
 
         # Per-agent consecutive ``BackendError`` streak. Successful turns
         # reset the counter for that agent; a streak crossing
@@ -444,25 +414,14 @@ class Coordinator:
         ``review_verdict`` event addressed to it AND no ``decision`` event
         materializing it (`kind == "approved_proposal"`).
 
-        We also rebuild :attr:`_proposals_awaiting_roofline` from
-        ``proposal_materialize_blocked`` observations whose proposal_msg_id
-        never paired with a later ``approved_proposal`` decision — these
-        are Critic-approved proposals that were deferred by the
-        analysis gate at process shutdown and would otherwise be lost
-        (the in-memory deque does not survive a restart, and the
-        verdict already marks them as ``decided`` so they get dropped
-        from ``pending_proposals``).
         """
         # 1. Collect all proposal events.
         proposal_msgs = await self.bus.tail(topic="proposal", n=10_000)
-        # 2. Collect verdicts and approved decisions, keyed by proposal_msg_id.
+        # 2. Collect verdicts, keyed by proposal_msg_id.
         verdicts = await self.bus.tail(topic="review_verdict", n=10_000)
-        decisions = await self.bus.tail(topic="decision", n=10_000)
-        observations = await self.bus.tail(topic="observation", n=10_000)
 
         decided_ids: set[str] = set()
         verdict_by_target: dict[str, str] = {}
-        approved_verdict_ids: set[str] = set()
         for v in verdicts:
             target = v.payload.get("target_proposal_msg_id")
             if not target:
@@ -477,50 +436,12 @@ class Coordinator:
                 summary = "needs_review"
             verdict_by_target[target] = summary
             decided_ids.add(target)
-            # Track "approved" verdicts so the deferred-queue rebuild
-            # below can sanity-check it only acts on Critic-approved
-            # proposals (reject verdicts are correctly final).
-            sl = str(summary).strip().lower()
-            if sl in ("approve", "approved") or sl.startswith("approve") or (
-                isinstance(v.payload.get("verdict_map"), dict)
-                and any(
-                    str(vv).strip().lower().startswith("approve")
-                    for vv in (v.payload.get("verdict_map") or {}).values()
-                )
-            ):
-                approved_verdict_ids.add(target)
-
-        drained_proposal_ids: set[str] = set()
-        for d in decisions:
-            if d.payload.get("kind") == "approved_proposal":
-                pid = d.payload.get("proposal_msg_id") or ""
-                if pid:
-                    drained_proposal_ids.add(pid)
-
-        # Latest-wins map of materialize-blocked observations keyed by
-        # proposal_msg_id. ``bus.tail`` returns rows DESC by seq so
-        # the FIRST occurrence of a given proposal_msg_id is the
-        # newest — use ``setdefault`` to keep that one and ignore
-        # older blocked observations (which would otherwise overwrite
-        # the freshest ``approved_variant_names`` + ``kb_edge_ids``).
-        blocked_by_pid: dict[str, dict[str, Any]] = {}
-        for o in observations:
-            pl = o.payload or {}
-            if pl.get("kind") != "proposal_materialize_blocked":
-                continue
-            pid = pl.get("proposal_msg_id") or ""
-            if pid:
-                blocked_by_pid.setdefault(pid, pl)
 
         # 3. Rebuild PendingProposal entries for undecided proposals.
         rebuilt = 0
         self.state.pending_proposals.clear()
-        proposal_by_id: dict[str, Any] = {}
         for p in proposal_msgs:
-            proposal_by_id[p.msg_id] = p
             if p.msg_id in decided_ids:
-                # Optional: also remember the verdict so the Coordinator can
-                # surface it if asked (e.g. /status command).
                 continue
             payload = p.payload or {}
             self.state.pending_proposals[p.msg_id] = PendingProposal(
@@ -532,60 +453,13 @@ class Coordinator:
             )
             rebuilt += 1
 
-        # 4. Rebuild the deferred-materialize queue. A proposal belongs
-        # here when it was Critic-approved, surfaced a
-        # ``proposal_materialize_blocked`` observation, and has no
-        # subsequent ``approved_proposal`` decision proving the drain
-        # already dispatched it. Without this rebuild the in-memory
-        # deque is empty on restart and the original Critic verdict
-        # would be permanently silenced (the proposal_msg_id is in
-        # ``decided_ids`` so step 3 above also drops it from
-        # ``pending_proposals``).
-        self._proposals_awaiting_roofline = []
-        deferred_restored = 0
-        for pid, blocked_payload in blocked_by_pid.items():
-            if pid in drained_proposal_ids:
-                continue
-            if pid not in approved_verdict_ids:
-                # Defensive: a blocked-without-approve combination
-                # should not occur (materialize only runs after the
-                # Critic approves) but if it does, skip rather than
-                # re-dispatch a never-approved proposal.
-                continue
-            src_msg = proposal_by_id.get(pid)
-            if src_msg is None:
-                continue
-            payload = src_msg.payload or {}
-            pending = PendingProposal(
-                proposal_msg_id=src_msg.msg_id,
-                from_agent=src_msg.from_agent,
-                action_name=str(payload.get("action_name", "")),
-                predicted_gain_pct=float(payload.get("predicted_gain_pct", 0.0)),
-                payload=dict(payload),
-            )
-            kb_edges = blocked_payload.get("kb_edge_ids")
-            if isinstance(kb_edges, dict):
-                pending.kb_edge_ids = {
-                    str(k): str(v) for k, v in kb_edges.items() if v
-                }
-            approved_names_list = blocked_payload.get("approved_variant_names")
-            approved_set: set[str] | None
-            if isinstance(approved_names_list, list):
-                approved_set = {str(n) for n in approved_names_list}
-            else:
-                approved_set = None
-            self._proposals_awaiting_roofline.append((pending, approved_set))
-            deferred_restored += 1
-
         self._resumed_from["rebuilt"] = True
         self._resumed_from["pending_restored"] = rebuilt
-        self._resumed_from["deferred_restored"] = deferred_restored
         return {
             "is_resume": self._resumed_from["is_resume"],
             "event_count": self._resumed_from["event_count"],
             "state_json_present": self._resumed_from["state_json_present"],
             "pending_restored": rebuilt,
-            "deferred_restored": deferred_restored,
             "verdicts_seen": len(verdicts),
         }
 
@@ -1983,10 +1857,10 @@ class Coordinator:
 
         Idempotency-keyed via ``reason`` so a re-entrant caller (e.g.
         explore-promote followed immediately by kernel-integrate-promote
-        in the same tick) collapses to a single task. Sets
-        ``auto_roofline_pending_task_id`` so the dispatch gate
-        :meth:`_auto_roofline_pending_denial` blocks subsequent
-        specialist / explore / kernel actions until the roofline lands.
+        in the same tick) collapses to a single task. Stamps
+        ``auto_roofline_pending_task_id`` so the watermark check re-arms
+        only after the result lands; dispatches are no longer gated on
+        this field (analysis-in-flight is advisory).
 
         Returns True when a task was enqueued (or returned existing),
         False when the watermark check did not fire.
@@ -2699,133 +2573,6 @@ class Coordinator:
                 kind, task.task_id, task.state,
             )
         return task
-
-    async def _auto_roofline_pending_denial(
-        self, *, action_name: str = "",
-    ) -> "PolicyDenied | None":
-        """Return a ``PolicyDenied`` when an auto-roofline task is
-        still in-flight; ``None`` otherwise.
-
-        Gates every action that should observe the freshest
-        ``analysis.md`` / ``last_profile_trace`` snapshot before
-        running: specialist dispatches, explore-grid dispatches, and
-        the KERNEL-owned actions (``kernel_opt`` / ``integrate`` /
-        ``deep_kernel_analysis`` / ``operator_tuning`` /
-        ``vendor_kernel_config``). The field is set by
-        :meth:`_maybe_enqueue_watermark_roofline` (mid-run) or the
-        PRELUDE bootstrap (baseline-completion hook) and cleared in
-        :meth:`_promote_to_shared_state` once the task lands.
-        """
-        from .task_registry import TaskNotFound
-        pending_id = (
-            self.shared_state.auto_roofline_pending_task_id or ""
-        ).strip()
-        if not pending_id:
-            return None
-        try:
-            pending = await self.tasks.get(pending_id)
-        except TaskNotFound:
-            # Task got purged (resume edge / corrupt state) — clear
-            # the field and let the dispatch through; we never want a
-            # corrupted pointer to permanently block dispatches.
-            self.shared_state.auto_roofline_pending_task_id = ""
-            return None
-        terminal_states = {"succeeded", "failed", "cancelled", "needs_manual_review"}
-        if pending.state in terminal_states:
-            # Race: the promote path hasn't cleared the field yet.
-            # Clear it here so subsequent dispatches go through.
-            self.shared_state.auto_roofline_pending_task_id = ""
-            return None
-        label = action_name or "dispatch"
-        return PolicyDenied(
-            (
-                f"delegate{{action_name={label!r}}} waits for the "
-                f"auto-enqueued roofline task {pending_id!r} "
-                f"(state={pending.state!r}) — downstream actions "
-                f"need the fresh analysis.md snapshot before they "
-                f"can run."
-            ),
-            rule="wait_for_auto_roofline",
-            hint=(
-                "The Coordinator auto-enqueued a `roofline` task "
-                "(PRELUDE bootstrap or 10% gain watermark crossing); "
-                "re-emit the same delegate next tick (TaskRegistry "
-                "dedupes by content fingerprint) once the roofline "
-                "result lands."
-            ),
-        )
-
-    async def _roofline_denial_for_action(
-        self, action_name: str,
-    ) -> "PolicyDenied | None":
-        """Apply the auto-analysis gate only to actions that require it."""
-        if action_name not in _ROOFLINE_GATED_ACTIONS:
-            return None
-        return await self._auto_roofline_pending_denial(action_name=action_name)
-
-    async def _defer_approved_proposal_for_roofline(
-        self,
-        pending: PendingProposal,
-        approved_variant_names: set[str] | None,
-    ) -> None:
-        """Queue an approved proposal until the pending analysis task lands."""
-        self._proposals_awaiting_roofline.append(
-            (pending, approved_variant_names),
-        )
-        # Resume contract: this observation carries everything
-        # ``replay_for_resume`` needs to rebuild the deferred queue after a
-        # restart. A subsequent ``approved_proposal`` decision carrying the
-        # same proposal_msg_id signals that the drain dispatched it.
-        await self._record_observation(
-            "coordinator", "observation",
-            {
-                "kind": "proposal_materialize_blocked",
-                "reason": "wait_for_auto_roofline",
-                "proposal_msg_id": pending.proposal_msg_id,
-                "action_name": pending.action_name,
-                "from_agent": pending.from_agent,
-                "pending_roofline_task_id": (
-                    self.shared_state.auto_roofline_pending_task_id
-                    or ""
-                ),
-                "deferred_queue_depth": len(
-                    self._proposals_awaiting_roofline,
-                ),
-                "approved_variant_names": (
-                    sorted(approved_variant_names)
-                    if approved_variant_names is not None
-                    else None
-                ),
-                "kb_edge_ids": dict(pending.kb_edge_ids or {}),
-            },
-        )
-
-    async def _drain_proposals_awaiting_roofline(self) -> None:
-        """Re-run materialise for proposals deferred by the analysis gate.
-
-        Called from :meth:`_promote_to_shared_state` once the
-        Coordinator-internal ``profile`` / ``roofline`` task clears
-        ``auto_roofline_pending_task_id``. Drains FIFO so the original
-        Critic-approval order is preserved. Each materialise re-checks
-        the gate, so if another analysis task slipped in between (rare
-        but possible) the proposal is re-queued instead of dispatched
-        before the freshest snapshot lands.
-        """
-        if not self._proposals_awaiting_roofline:
-            return
-        deferred = self._proposals_awaiting_roofline
-        self._proposals_awaiting_roofline = []
-        for pending, approved_variant_names in deferred:
-            try:
-                await self._materialize_approved_proposal(
-                    pending, approved_variant_names=approved_variant_names,
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "drain_proposals_awaiting_roofline: re-materialise "
-                    "failed for proposal=%s action=%s",
-                    pending.proposal_msg_id, pending.action_name,
-                )
 
     def _record_phase_entry_evidence(self, **kvs: Any) -> None:
         """Merge ``kvs`` into the latest ``phase_history`` row's
@@ -3982,19 +3729,13 @@ class Coordinator:
     async def _replay_resume_if_needed(self) -> None:
         """Rebuild in-memory state once for a resumed session.
 
-        Shared by ``tick()`` and ``run()``: replay the event log, drain
-        proposals that were blocked on a now-complete analysis task, and
+        Shared by ``tick()`` and ``run()``: replay the event log and
         abandon non-terminal dynamic_action dispatches. No-op when the
         session is fresh or already rebuilt.
         """
         if not (self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]):
             return
         await self.replay_for_resume()
-        # The analysis task may have completed during shutdown, so the
-        # normal drain hook in ``_promote_to_shared_state`` will not fire
-        # on restart; kick it explicitly to re-check the roofline gate.
-        if self._proposals_awaiting_roofline:
-            await self._drain_proposals_awaiting_roofline()
         # Transition orphaned dynamic_action dispatches to ABANDONED and
         # clean up their worktree + git branch.
         self._resume_abandon_dynamic_actions()
@@ -5176,17 +4917,6 @@ class Coordinator:
                 {"kind": "proposal_pruned", "from": source, "action": action_name},
             )
             return
-        # Gate proposals on a pending auto-roofline / auto-profile task
-        # *before* paying for the Critic round-trip. This is the cheap
-        # path; ``_materialize_approved_proposal`` carries a symmetric
-        # check for the race where the watermark trips while a proposal
-        # is already in front of the Critic.
-        roofline_denied = await self._roofline_denial_for_action(action_name)
-        if roofline_denied is not None:
-            await self._record_policy_denied(
-                source, intent, roofline_denied, action_name=action_name,
-            )
-            return
         denied = self._sequence_denial_for_action(
             action_name,
             proposed_params=intent.payload.get("params"),
@@ -5647,27 +5377,9 @@ class Coordinator:
         best_gain_pct uninformative (DESIGN §16 baseline_tput parameter).
 
         ``approved_variant_names``: when set, filter the ``explore``
-        grid down to the named subset before materialising. Only the
-        roofline defer/resume path carries a non-``None`` value (it
-        preserves a previously-filtered subset across a deferred
-        dispatch); the live single-verdict path passes ``None`` and
-        keeps the full grid.
+        grid down to the named subset before materialising. The
+        single-verdict path passes ``None`` and keeps the full grid.
         """
-        # Safety net for the race where the watermark fires while a
-        # proposal is already in front of the Critic.
-        # ``_handle_propose_action`` carries the same check (the cheaper
-        # path); this one catches proposals the Critic approved between
-        # the watermark crossing and the dispatch tick. Defer rather
-        # than drop — the Critic already approved, so re-running the
-        # round-trip would be wasted budget.
-        roofline_denied = await self._roofline_denial_for_action(
-            pending.action_name,
-        )
-        if roofline_denied is not None:
-            await self._defer_approved_proposal_for_roofline(
-                pending, approved_variant_names,
-            )
-            return
         params = dict(pending.payload.get("params") or {})
         # Filter the grid down to the Critic-approved subset. Variant
         # traceability is carried by the local journal + KB fact-write
@@ -5880,20 +5592,6 @@ class Coordinator:
             # Rewire to the specialist task kind so the standard
             # SpecialistRunner picks it up.
             action_name = "specialist"
-
-        # Auto-roofline gate. When the Coordinator has an in-flight
-        # roofline task (PRELUDE bootstrap or 10% watermark crossing),
-        # Refuse any dispatch whose output should observe the fresh
-        # ``analysis.md`` / ``last_profile_trace`` snapshot before it
-        # runs. The gated action set is the module-level
-        # ``_ROOFLINE_GATED_ACTIONS`` so propose_action / materialize
-        # paths gate against the exact same names.
-        denied = await self._roofline_denial_for_action(action_name)
-        if denied is not None:
-            await self._record_policy_denied(
-                source, intent, denied, action_name=action_name,
-            )
-            return
 
         # Specialist pre-dispatch warmup.
         # When the Orchestration role delegates a specialist task, the
@@ -9254,7 +8952,6 @@ class Coordinator:
                 == task.task_id
             ):
                 self.shared_state.auto_roofline_pending_task_id = ""
-                await self._drain_proposals_awaiting_roofline()
             any_changed = True
             log.warning(
                 "Auto-roofline %s failed (reason=%s phase=%s "
@@ -11181,7 +10878,6 @@ class Coordinator:
                 ):
                     self.shared_state.auto_roofline_pending_task_id = ""
                     changed = True
-                    await self._drain_proposals_awaiting_roofline()
             else:
                 audit_decision = "promoted"
                 audit_extras = {
@@ -11246,21 +10942,20 @@ class Coordinator:
                 changed = True
             # When this profile task came in as the Coordinator-internal
             # analysis action (``--no-enable-roofline`` mode), mirror
-            # the roofline-branch watermark + gate handling so PRELUDE
+            # the roofline-branch watermark handling so PRELUDE
             # bootstrap and watermark-crossing flows behave identically
             # under either kind:
             #   * refresh ``last_roofline_tput`` from the projected
             #     current tput so the next +10% step is anchored on
             #     this measurement (matches the roofline branch math);
-            #   * clear ``auto_roofline_pending_task_id`` so downstream
-            #     dispatches stop being held by
-            #     ``_auto_roofline_pending_denial``.
+            #   * clear ``auto_roofline_pending_task_id`` so the
+            #     watermark check re-arms for the next +10% crossing.
             # The conditions are kind-agnostic — we always refresh the
             # watermark on a successful profile (so any operator-
             # enqueued profile also re-anchors the watermark) and
             # always clear the pending field for THIS task id so an
-            # unrelated profile result cannot clear a gate set by a
-            # different task.
+            # unrelated profile result cannot clear a watermark anchor
+            # set by a different task.
             if profile_status == "succeeded":
                 anchor_tput = self._current_tput_from_validated_gain()
                 if anchor_tput > 0:
@@ -11273,7 +10968,6 @@ class Coordinator:
             ):
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
-                await self._drain_proposals_awaiting_roofline()
         elif task_kind == "roofline":
             # F1-3 (Roofline-v2 / ): the
             # composite ``roofline`` action runs profile +
@@ -11301,9 +10995,9 @@ class Coordinator:
                     "error_class": result.get("error_class"),
                     "error": result.get("error"),
                 }
-                # Still clear any pending gate keyed to this task id so
-                # downstream proposals are not held by
-                # ``_auto_roofline_pending_denial``.
+                # Still clear the pending pointer keyed to this task id
+                # so the watermark check can re-arm for the next
+                # crossing.
                 if (
                     task is not None
                     and self.shared_state.auto_roofline_pending_task_id
@@ -11311,7 +11005,6 @@ class Coordinator:
                 ):
                     self.shared_state.auto_roofline_pending_task_id = ""
                     changed = True
-                    await self._drain_proposals_awaiting_roofline()
             elif status == "succeeded":
                 audit_decision = "promoted"
                 # prefer the executor's already-published
@@ -11383,12 +11076,12 @@ class Coordinator:
                     result.get("phase"),
                     result.get("error_class"),
                 )
-            # Clear the auto-roofline gate: regardless of success/failure,
-            # this task is no longer in-flight, so subsequent dispatches
-            # stop being held by ``_auto_roofline_pending_denial``. We
-            # compare task ids so an unrelated roofline result (e.g.
-            # operator-enqueued via internal tooling) does not
-            # accidentally clear a gate set by a different task.
+            # Clear the pending pointer: regardless of success/failure,
+            # this task is no longer in-flight, so the watermark check
+            # can re-arm for the next +10% crossing. We compare task
+            # ids so an unrelated roofline result (e.g. operator-
+            # enqueued via internal tooling) does not accidentally
+            # clear an anchor set by a different task.
             if (
                 task is not None
                 and self.shared_state.auto_roofline_pending_task_id
@@ -11396,7 +11089,6 @@ class Coordinator:
             ):
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
-                await self._drain_proposals_awaiting_roofline()
         elif task_kind == "explore":
             # ``explore`` is the merged grid runner.
             # The executor already does per-variant KEEP/REVERT gating

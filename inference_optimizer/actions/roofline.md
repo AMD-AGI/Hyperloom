@@ -42,11 +42,11 @@ exactly two places:
    `cur_tput = baseline_tput * (1 + cumulative_gain_validated/100)`.
    Compound: 10% → 21% → 33% triggers.
 
-While the Coordinator-enqueued analysis task is in flight,
-`_auto_roofline_pending_denial` blocks `specialist` / `explore` /
-`kernel_opt` / `integrate` / `deep_kernel_analysis` /
-`operator_tuning` / `vendor_kernel_config` dispatches so downstream
-decisions always read the freshest snapshot.
+While the Coordinator-enqueued analysis task is in flight, downstream
+dispatches are no longer blocked: actions keep running against the
+current `analysis.md` snapshot and resource conflicts (concurrent
+profile / kernel work on the same GPU) are serialised by the lane /
+GPU lease rather than a policy deny.
 
 ## PolicyGate denies LLM proposals
 

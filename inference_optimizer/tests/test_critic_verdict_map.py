@@ -581,8 +581,8 @@ def _delegate_coord(tmp_path: Path):
     needs to reach the direct explore-task creation path.
 
     Stubs out ``is_pruned`` / ``_sequence_denial_for_action`` /
-    ``_roofline_denial_for_action`` / ``_registry_lanes_ttl`` so we
-    never reach the per-test-irrelevant sub-systems.
+    ``_registry_lanes_ttl`` so we never reach the per-test-irrelevant
+    sub-systems.
     """
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -604,7 +604,6 @@ def _delegate_coord(tmp_path: Path):
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
     c._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
     c._sequence_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
-    c._roofline_denial_for_action = AsyncMock(return_value=None)  # type: ignore[method-assign]
     c._registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
     c.policy = None
     return c

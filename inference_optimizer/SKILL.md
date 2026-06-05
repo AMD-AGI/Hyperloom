@@ -907,8 +907,9 @@ The optimizer should:
   (`current_tput / last_roofline_tput >= 1.10`; compound). Default is
   `roofline` (profile + trace_analyze + analysis.md); `--no-enable-roofline`
   switches to plain `profile`. The LLM cannot propose either
-  (`analysis_action_not_llm_proposable`), and while one is in flight all
-  explore / kernel dispatches are deferred (`wait_for_auto_roofline`).
+  (`analysis_action_not_llm_proposable`); concurrent GPU work is
+  serialised by the lane / GPU lease rather than a policy deny, so
+  explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
   (`orchestrator/roofline_ceiling.py`) for the report's
   `## Roofline Comparison` section.

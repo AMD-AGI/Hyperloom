@@ -1,4 +1,4 @@
-"""Watermark-roofline trigger + dispatch-block tests (single path).
+"""Watermark-roofline trigger tests (single path).
 
 After Tasks 1-9 collapsed the legacy composite-on/off bifurcation,
 roofline is auto-managed by the Coordinator in exactly two situations:
@@ -15,13 +15,8 @@ This file pins:
 * :meth:`Coordinator._needs_roofline_for_watermark` — bootstrap guard,
   ratio threshold, and re-arm guard (pending field).
 * :meth:`Coordinator._maybe_enqueue_watermark_roofline` — enqueue +
-  ``auto_roofline_pending_task_id`` stamping.
-* :meth:`Coordinator._auto_roofline_pending_denial` — blocks every
-  member of the gated action set while a roofline is in-flight, and
-  returns ``None`` for actions outside the set.
-* The gated action set itself (specialist / explore / kernel_opt /
-  integrate / deep_kernel_analysis / operator_tuning /
-  vendor_kernel_config).
+  ``auto_roofline_pending_task_id`` stamping (watermark re-arm anchor;
+  no longer a dispatch deny, see loosen plan P2_12).
 """
 
 from __future__ import annotations
@@ -33,7 +28,6 @@ from typing import Any
 import pytest
 
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.policy import PolicyDenied
 
 
 # ---------------------------------------------------------------------------
@@ -286,80 +280,3 @@ async def test_maybe_enqueue_watermark_dedups_per_reason(coord: Coordinator):
     assert task.task_id == pending_id
 
 
-# ===========================================================================
-# 3. _auto_roofline_pending_denial — gates the right action set
-# ===========================================================================
-_GATED_ACTIONS = (
-    "specialist",
-    "explore",
-    "kernel_opt",
-    "integrate",
-    "deep_kernel_analysis",
-    "operator_tuning",
-    "vendor_kernel_config",
-)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action_name", _GATED_ACTIONS)
-async def test_pending_denial_blocks_every_gated_action(
-    coord: Coordinator, action_name: str,
-):
-    from inference_optimizer.orchestrator.task_registry import Task
-
-    pending = Task(
-        task_id="rl-pending",
-        kind="roofline",
-        state="running",
-        params={},
-        idempotency_key="internal-analysis-watermark_crossed",
-    )
-    coord.tasks._tasks[pending.task_id] = pending  # type: ignore[assignment]
-    coord.shared_state.auto_roofline_pending_task_id = pending.task_id
-
-    denied = await coord._auto_roofline_pending_denial(action_name=action_name)
-    assert isinstance(denied, PolicyDenied)
-    assert denied.rule == "wait_for_auto_roofline"
-    # The denial message names the action being blocked so the LLM
-    # gets a useful hint instead of a generic "dispatch" label.
-    assert action_name in str(denied)
-
-
-@pytest.mark.asyncio
-async def test_pending_denial_passes_through_when_no_task(coord: Coordinator):
-    coord.shared_state.auto_roofline_pending_task_id = ""
-    denied = await coord._auto_roofline_pending_denial(action_name="specialist")
-    assert denied is None
-
-
-@pytest.mark.asyncio
-async def test_pending_denial_clears_field_on_terminal_state(coord: Coordinator):
-    """Race: the roofline task already finished but the promote-path
-    has not yet cleared the field. The helper itself clears it and
-    returns ``None`` so the dispatch proceeds."""
-    from inference_optimizer.orchestrator.task_registry import Task
-
-    done = Task(
-        task_id="rl-done",
-        kind="roofline",
-        state="succeeded",
-        params={},
-        idempotency_key="internal-analysis-watermark_crossed",
-    )
-    coord.tasks._tasks[done.task_id] = done  # type: ignore[assignment]
-    coord.shared_state.auto_roofline_pending_task_id = done.task_id
-
-    denied = await coord._auto_roofline_pending_denial(action_name="explore")
-    assert denied is None
-    assert coord.shared_state.auto_roofline_pending_task_id == ""
-
-
-@pytest.mark.asyncio
-async def test_pending_denial_clears_field_when_task_missing(coord: Coordinator):
-    """Corrupt resume edge: the field points at a task the registry no
-    longer knows about. Clear the pointer rather than permanently
-    blocking dispatches."""
-    coord.shared_state.auto_roofline_pending_task_id = "missing-rl-id"
-    denied = await coord._auto_roofline_pending_denial(action_name="kernel_opt")
-    assert denied is None
-    assert coord.shared_state.auto_roofline_pending_task_id == ""
