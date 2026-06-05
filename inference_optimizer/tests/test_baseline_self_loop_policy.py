@@ -288,11 +288,11 @@ async def test_sequence_denial_no_param_change_for_other_actions(session_dir):
 
 
 # ---------------------------------------------------------------------------
-# Event payload carries error detail
+# Audit trail carries error detail
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_failure_event_carries_error_excerpt(session_dir):
-    """The baseline_not_promoted event includes error_excerpt for debugging."""
+async def test_failure_attempt_carries_error_excerpt(session_dir):
+    """Each failed baseline attempt stores error_class and error_excerpt."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
@@ -303,5 +303,7 @@ async def test_failure_event_carries_error_excerpt(session_dir):
         assert len(attempts) >= 1
         last = attempts[-1]
         assert last["error_class"] == "subprocess_nonzero"
+        assert last["error_excerpt"] is not None
+        assert "benchmark_report.json missing" in last["error_excerpt"]
     finally:
         await c.stop()
