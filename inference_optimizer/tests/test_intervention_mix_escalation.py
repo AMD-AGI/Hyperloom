@@ -10,7 +10,6 @@ counter bookkeeping and the telemetry rendering.
 from __future__ import annotations
 
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.phase_state import depth_gate
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.task_registry import Task
 
@@ -58,9 +57,8 @@ def test_code_patch_keep_resets_counter():
     assert "ESCALATION" not in out
 
 
-def test_code_patch_attempt_counts_for_depth_without_keep():
+def test_code_patch_attempt_records_in_ledger_without_keep():
     s = SharedState(session_id="im-attempt")
-    s.depth_tracker["consecutive_reverts"] = 3
     s.record_intervention(
         change_type="code_patch_attempt",
         action="integrate_patch",
@@ -69,19 +67,6 @@ def test_code_patch_attempt_counts_for_depth_without_keep():
     out = s.to_intervention_mix_summary()
     assert "code_patch_keeps=0" in out
     assert "code_patch_attempts=1" in out
-    assert s.depth_tracker["code_patches_attempted"] == 1
-
-    ok, blockers, _ = depth_gate(
-        s.to_dict(),
-        scout_runs_min=0,
-        prs_fetched_min=0,
-        pr_diffs_read_min=0,
-        nvidia_refs_min=0,
-        code_patches_min=1,
-        reverts_to_evaluate=3,
-    )
-    assert ok is True
-    assert not any("code_patches_attempted" in b for b in blockers)
 
 
 def test_reverted_integrate_patch_records_attempt_not_keep():
@@ -103,7 +88,6 @@ def test_reverted_integrate_patch_records_attempt_not_keep():
     mix = coord.shared_state.get_intervention_mix()
     assert mix["total_code_patch"] == 0
     assert mix["total_code_patch_attempt"] == 1
-    assert coord.shared_state.depth_tracker["code_patches_attempted"] == 1
 
 
 def test_config_heavy_zero_patch_renders_counts_without_directive():

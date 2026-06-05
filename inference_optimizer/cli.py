@@ -449,34 +449,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
 _assert_atom_single_node = _apply_atom_auto_tighten
 
 
-_DEPTH_GATE_THRESHOLD_KEYS = frozenset({
-    "scout_runs_min", "prs_fetched_min", "pr_diffs_read_min",
-    "nvidia_refs_min", "code_patches_min", "reverts_to_evaluate",
-})
-
-
-def _parse_depth_gate_thresholds(raw: str) -> dict[str, int]:
-    """Parse ``--depth-gate-thresholds`` (``key=value,...``) into a dict.
-
-    Unknown keys and non-integer values are skipped silently so a typo
-    degrades to the defaults rather than aborting startup.
-    """
-    out: dict[str, int] = {}
-    for token in str(raw or "").split(","):
-        token = token.strip()
-        if not token or "=" not in token:
-            continue
-        key, _, value = token.partition("=")
-        key = key.strip()
-        if key not in _DEPTH_GATE_THRESHOLD_KEYS:
-            continue
-        try:
-            out[key] = int(value.strip())
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
 def _resolve_gpu_type(
     user_specified: str,
     probed: str,
@@ -1315,9 +1287,6 @@ def _seed_shared_state(
         ),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        depth_gate_thresholds=_parse_depth_gate_thresholds(
-            getattr(args, "depth_gate_thresholds", "") or ""
-        ),
         # SWEEP-phase post-sweep concurrency sweep flags (on by default).
         # See ``orchestrator/conc_sweep.py`` + coordinator hook
         # ``_enqueue_internal_conc_sweep_task``.
@@ -1330,7 +1299,6 @@ def _seed_shared_state(
             getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
         ),
     )
-    state.set_depth_gate_enabled(bool(getattr(args, "depth_gate", True)))
     state.save(session_dir)
     return state
 
@@ -3814,12 +3782,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
               "persistent recipe)")
     else:
         print("Recipe sediment : DISABLED (--no-recipe-sediment)")
-    if bool(getattr(args, "depth_gate", True)):
-        print("Depth gate      : ENABLED (stop/advance blocked while "
-              "exploration is too shallow; IR-6 budget overrides)")
-    else:
-        print("Depth gate      : DISABLED (--no-depth-gate); legacy "
-              "single steward continuation")
     if bool(getattr(args, "allow_empty_kernel_shape", False)):
         os.environ["HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE"] = "1"
         print("Kernel shape    : empty-shape dispatch ALLOWED "
@@ -5113,32 +5075,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "directions. Advisory only — never gates Objective or scoring. "
              "Default on; pass ``--no-target-advisory`` to disable. Env: "
              "INFERENCE_OPTIMIZER_TARGET_ADVISORY=0.",
-    )
-    opt.add_argument(
-        "--depth-gate",
-        dest="depth_gate",
-        action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_DEPTH_GATE"),
-        help="Deterministic exploration-depth guard. When the session "
-             "steward recommends stop / advance-to-kernel but the run "
-             "has not explored deeply enough (too few scout runs, no "
-             "code patch, too few PRs/diffs/NVIDIA refs), the verdict is "
-             "rewritten to continue_explore with a deepening hint — as "
-             "many times as needed, bounded only by the IR-6 budget "
-             "gate. Default on; ``--no-depth-gate`` restores the legacy "
-             "single-continuation steward behaviour. Env: "
-             "INFERENCE_OPTIMIZER_DEPTH_GATE=0.",
-    )
-    opt.add_argument(
-        "--depth-gate-thresholds",
-        dest="depth_gate_thresholds",
-        default="",
-        help="Override depth-gate minimums as comma-separated key=value "
-             "pairs. Keys: scout_runs_min, prs_fetched_min, "
-             "pr_diffs_read_min, nvidia_refs_min, code_patches_min, "
-             "reverts_to_evaluate. Defaults: 2,5,3,2,1 evaluated after "
-             "reverts_to_evaluate=3. Example: "
-             "``--depth-gate-thresholds scout_runs_min=1,code_patches_min=2``.",
     )
     # ------------------------------------------------------------------
     # Post-optimization concurrency sweep (on by default).

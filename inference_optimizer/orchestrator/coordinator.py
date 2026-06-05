@@ -108,9 +108,9 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 
 # Closed enum of session_steward_specialist recommendations. Any value
 # outside this set is coerced to ``stop_session`` in
-# :meth:`Coordinator._route_steward_verdict` (defense in depth — the
-# LLM can write any string but only the enum drives a phase-routing
-# change).
+# :meth:`Coordinator._route_steward_verdict` so the audit row carries a
+# known value; the recommendation itself is advisory only and does not
+# drive phase routing.
 _STEWARD_RECS: frozenset[str] = frozenset({
     "continue_explore", "advance_to_kernel", "stop_session",
 })
@@ -3306,8 +3306,8 @@ class Coordinator:
         Bypasses PolicyGate the same way ``closing_report_task`` does
         (Coordinator-internal callers don't go through the
         propose/delegate validation path). LLM-side proposals of
-        ``assess_remaining_gaps`` are throttled separately by
-        :meth:`_assess_remaining_gaps_throttle_denial`.
+        ``assess_remaining_gaps`` are unthrottled (the steward is
+        advisory; loosen plan P2_13).
 
         Returns ``None`` when a task already exists in the registry
         with the same idempotency key (whether queued / running /
@@ -3486,29 +3486,6 @@ class Coordinator:
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: EXPLORE re-dispatch failed")
-
-    def _aggregate_research_evidence(
-        self, done_payload: dict[str, Any],
-    ) -> None:
-        """De-dup a specialist's reported research evidence into the
-        exploration-depth tracker. No-op when no ``research`` block."""
-        block = done_payload.get("research")
-        if not isinstance(block, dict):
-            return
-
-        def _ids(key: str) -> list[Any]:
-            vals = block.get(key)
-            return list(vals) if isinstance(vals, list) else []
-
-        added = self.shared_state.register_research_evidence(
-            prs_fetched=_ids("prs_fetched"),
-            pr_diffs_read=_ids("pr_diffs_read"),
-            nvidia_refs_compared=_ids("nvidia_refs") or _ids(
-                "nvidia_refs_compared"
-            ),
-        )
-        if any(added.values()):
-            log.info("depth: research evidence added %s", added)
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
         """Persist scout output: hints, competitor target, gap seeds, dedup.
@@ -4599,97 +4576,6 @@ class Coordinator:
             hint=hint,
         )
 
-    def _assess_remaining_gaps_throttle_denial(
-        self,
-    ) -> PolicyDenied | None:
-        """IR-7 — throttle LLM-initiated ``assess_remaining_gaps``.
-
-        Coordinator-internal dispatches bypass this rule (they go via
-        :meth:`_enqueue_internal_steward_task` directly into
-        TaskRegistry). The LLM may also propose ``assess_remaining_gaps``
-        when it believes plateau is near, but back-to-back proposals
-        within ``INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC``
-        (default 1800) are denied to keep the dispatch budget bounded.
-
-        Issue-A guard (KB cold-start regression): the action's
-        ``actions/assess_remaining_gaps.md`` md preconditions
-        (``phase == 'EXPLORE'`` AND ``len(optimization_stack) >= 3``)
-        were previously documented but not enforced — letting the LLM
-        propose steward as the very first action after baseline (when
-        KB priors are missing) and route the session into
-        ``no_more_leverage`` before any real exploration. We now deny
-        the proposal until at least three stack entries have landed,
-        so the steward can only fire on a real plateau judgment (which
-        Coordinator-internal dispatch already gates on signals).
-        """
-        phase = (
-            getattr(self.shared_state, "phase", "") or ""
-        ).strip().upper()
-        if phase != "EXPLORE":
-            return PolicyDenied(
-                f"action='assess_remaining_gaps' denied: phase={phase!r} "
-                f"(steward is EXPLORE-only; see actions/"
-                f"assess_remaining_gaps.md preconditions)",
-                rule="assess_remaining_gaps_phase",
-                hint=(
-                    "Steward dispatch is gated to EXPLORE. Continue "
-                    "the current phase or wait for the Coordinator's "
-                    "internal plateau judge to fire on EXPLORE entry."
-                ),
-            )
-        stack_len = len(getattr(self.shared_state, "optimization_stack", []) or [])
-        if stack_len < 3:
-            return PolicyDenied(
-                f"action='assess_remaining_gaps' denied: "
-                f"len(optimization_stack)={stack_len} < 3 "
-                f"(steward needs material to assess; see actions/"
-                f"assess_remaining_gaps.md preconditions)",
-                rule="assess_remaining_gaps_min_stack",
-                hint=(
-                    "Run more EXPLORE rounds (specialist / params / "
-                    "backends) until at least 3 stack entries have "
-                    "promoted; the Coordinator's internal plateau "
-                    "judge will enqueue the steward on its own when "
-                    "v0.8 signals indicate exhaustion."
-                ),
-            )
-        last = self.shared_state.last_remaining_gaps_assessment or {}
-        if not isinstance(last, dict):
-            return None
-        last_ts = str(last.get("ts") or "").strip()
-        if not last_ts:
-            return None
-        try:
-            from datetime import datetime, timezone
-            ts_dt = datetime.fromisoformat(last_ts)
-            if ts_dt.tzinfo is None:
-                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
-            now_dt = datetime.now(timezone.utc)
-            elapsed = (now_dt - ts_dt).total_seconds()
-        except (ValueError, TypeError):
-            return None
-        try:
-            min_interval = float(os.environ.get(
-                "INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC",
-                "1800",
-            ))
-        except (TypeError, ValueError):
-            min_interval = 1800.0
-        if elapsed < min_interval:
-            return PolicyDenied(
-                f"action='assess_remaining_gaps' denied: throttled "
-                f"(last assessment {elapsed:.0f}s ago, min interval "
-                f"{int(min_interval)}s)",
-                rule="assess_remaining_gaps_throttle",
-                hint=(
-                    "Last steward assessment was recent. Wait for the "
-                    "Coordinator to enqueue the next internal steward "
-                    "on plateau, OR continue running variants until "
-                    "the throttle window elapses."
-                ),
-            )
-        return None
-
     def _sequence_denial_for_action(
         self,
         action_name: str,
@@ -5560,15 +5446,10 @@ class Coordinator:
         # ``assess_remaining_gaps`` is a thin wrapper: rewrite
         # the kind to ``specialist`` and force the
         # ``session_steward_specialist`` domain (LLM cannot pick any
-        # other domain via this action). Throttle is checked separately
-        # via _assess_remaining_gaps_throttle_denial above.
+        # other domain via this action). Throttling was removed in
+        # loosen plan P2_13 — the steward is advisory and the LLM may
+        # request it whenever it suspects plateau.
         if action_name == "assess_remaining_gaps":
-            throttle = self._assess_remaining_gaps_throttle_denial()
-            if throttle is not None:
-                await self._record_policy_denied(
-                    source, intent, throttle, action_name=action_name,
-                )
-                return
             # Force the steward domain + a deterministic gap id so
             # PolicyGate R2 passes. Preserve params.reason verbatim
             # so the audit trail captures why the LLM proposed.
@@ -7516,18 +7397,6 @@ class Coordinator:
                     task.task_id,
                 )
 
-        # Aggregate any research evidence (PR / diff / NVIDIA refs)
-        # reported by this specialist into the exploration-depth tracker.
-        # Applies to every domain that self-reports a ``research`` block
-        # (pr_intel + research_scout), de-duped across the session.
-        try:
-            self._aggregate_research_evidence(done_payload)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "depth: research-evidence aggregation failed for task=%s",
-                task.task_id,
-            )
-
         # Harvest research-scout output: persist hints + competitor
         # target, seed advisory gaps, and dedup PR ids against
         # FRAMEWORK_PR. Fail-soft; never blocks the round.
@@ -7706,87 +7575,6 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             return ""
 
-    def _apply_depth_gate_to_verdict(
-        self, *, raw_rec: str, next_gap: str, task: "Task",
-    ) -> tuple[str, str]:
-        """Rewrite a stop / advance verdict to ``continue_explore`` when
-        exploration depth is insufficient.
-
-        Returns the (possibly rewritten) ``(recommendation, next_gap)``.
-        IR-6 budget exhaustion bypasses the gate entirely; a disabled
-        gate or a satisfied depth check leaves the verdict untouched.
-        """
-        state = self.shared_state
-        try:
-            if not state.depth_gate_enabled():
-                return raw_rec, next_gap
-        except Exception:  # noqa: BLE001 — defensive
-            return raw_rec, next_gap
-
-        # The HARD force-exit is the only thing the depth gate must never override.
-        try:
-            force_exit, _ = _phase_state.should_force_exit_explore(
-                state, budget_pct=self._phase_budget_pct,
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            force_exit = False
-        if force_exit:
-            log.info(
-                "depth-gate: IR-6 budget force-exit active; honouring "
-                "steward '%s' (task=%s)", raw_rec, task.task_id,
-            )
-            return raw_rec, next_gap
-
-        try:
-            satisfied, blockers, next_action = _phase_state.depth_gate(
-                state, **self._depth_gate_thresholds(),
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("depth-gate: evaluation failed; honouring steward")
-            return raw_rec, next_gap
-        if satisfied:
-            return raw_rec, next_gap
-
-        # Rewrite to continue and seed a concrete deepening gap.
-        round_id = int((state.explore_search or {}).get("cursor") or 0)
-        gap_cid = f"gap.depth.round{round_id}"
-        symptom = next_action or (
-            "exploration too shallow: " + ", ".join(blockers)
-        )
-        try:
-            state.upsert_gap({
-                "canonical_id": gap_cid,
-                "symptom": symptom,
-                "layer": "exploration_depth",
-                "severity": "high",
-                "source": "depth_gate",
-            })
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("depth-gate: upsert_gap failed")
-        log.info(
-            "depth-gate: rewrote steward '%s' -> 'continue_explore' "
-            "(blockers=%s, next_action=%r, task=%s)",
-            raw_rec, blockers, next_action, task.task_id,
-        )
-        return "continue_explore", gap_cid
-
-    def _depth_gate_thresholds(self) -> dict[str, int]:
-        """Resolve depth-gate thresholds from SharedState overrides,
-        falling back to the phase_state defaults."""
-        overrides = getattr(self.shared_state, "depth_gate_thresholds", None)
-        out: dict[str, int] = {}
-        if isinstance(overrides, dict):
-            for key in (
-                "scout_runs_min", "prs_fetched_min", "pr_diffs_read_min",
-                "nvidia_refs_min", "code_patches_min", "reverts_to_evaluate",
-            ):
-                if overrides.get(key) is not None:
-                    try:
-                        out[key] = int(overrides[key])
-                    except (TypeError, ValueError):
-                        pass
-        return out
-
     async def _maybe_autosubmit_specialist_patches(
         self, *, task: "Task", done_payload: dict[str, Any],
     ) -> None:
@@ -7911,30 +7699,27 @@ class Coordinator:
     async def _route_steward_verdict(
         self, *, task: "Task", done_payload: dict[str, Any],
     ) -> None:
-        """IR-7 — process a session_steward_specialist verdict.
+        """Record a session_steward_specialist verdict as advisory.
 
-        Side effects depending on ``recommendation``:
+        The recommendation is written into
+        ``last_remaining_gaps_assessment`` (and the bounded history
+        ledger) so the orchestration prompt can show it as a second
+        opinion, but the steward no longer drives phase transitions:
 
-        * ``stop_session``    → ``state.set_pending_escalate_hint('skip_to_sweep')``
-          (non-terminal: winds EXPLORE down to SWEEP → CLOSE rather than
-          aborting the session).
-        * ``advance_to_kernel`` → ``state.set_pending_escalate_hint('skip_to_kernel')``.
+        * ``stop_session`` / ``advance_to_kernel`` → recorded, no
+          ``pending_escalate_hint`` is set; phase transitions are
+          driven by IR-6 force-exit, phase-budget exhaustion, or an
+          explicit LLM / robustness ``skip_to_*`` hint.
         * ``continue_explore`` → append ``next_gap_canonical_id`` to
-          ``state.gaps[]``, reset ``params_no_promote_streak`` and
-          per-domain empty streak counters, set
-          ``steward_continuation_used=True`` (audit marker only).
+          the gap ledger and reset plateau counters as a neutral aid
+          to the next round; ``steward_continuation_used`` is still
+          flipped as an audit marker.
 
-        A ``stop_session`` / ``advance_to_kernel`` verdict is run through
-        the exploration-depth gate: if the session has not explored
-        deeply enough it is rewritten to ``continue_explore`` with a
-        concrete deepening instruction. This can repeat; the only
-        backstop is the IR-6 budget gate (checked first), which lets the
-        original stop / advance through once budget is exhausted.
-
-        Infrastructure failures (stale heartbeat, subprocess timeout, empty
-        synthesis) schedule up to :data:`_STEWARD_MAX_INFRA_RETRIES` fresh
-        steward tasks with a new idempotency key. Only genuine LLM
-        out-of-vocab strings coerce to ``stop_session``.
+        Infrastructure failures (stale heartbeat, subprocess timeout,
+        empty synthesis) schedule up to
+        :data:`_STEWARD_MAX_INFRA_RETRIES` fresh steward tasks with a
+        new idempotency key. Out-of-vocab strings coerce to
+        ``stop_session`` so the audit row carries a known value.
         """
         raw_rec = str(done_payload.get("recommendation") or "").strip().lower()
         if raw_rec not in _STEWARD_RECS:
@@ -8009,19 +7794,6 @@ class Coordinator:
             )
             raw_rec = "advance_to_kernel"
 
-        # Exploration-depth gate (deterministic stop guard). When the
-        # steward wants to stop / advance but the session has not
-        # explored deeply enough, rewrite the verdict to
-        # ``continue_explore`` and inject a concrete deepening
-        # instruction. This may fire any number of times — the only
-        # backstop is the HARD budget gate, which is checked first:
-        # once the budget is (about to be) exhausted the depth gate is
-        # bypassed and the original stop / advance stands.
-        if raw_rec in ("stop_session", "advance_to_kernel"):
-            raw_rec, next_gap = self._apply_depth_gate_to_verdict(
-                raw_rec=raw_rec, next_gap=next_gap, task=task,
-            )
-
         # Record the assessment unconditionally so the audit trail
         # captures it even when the recommendation was coerced.
         try:
@@ -8046,27 +7818,17 @@ class Coordinator:
             round_at_assessment=round_at,
             source_payload=done_payload,
         )
-        # Route — the heavy work is mostly already in helper writers
-        # on SharedState.
+        # Recommendation is advisory: log it but do not drive phase.
         if raw_rec == "stop_session":
-            from .phase_state import ESCALATE_HINT_SKIP_TO_SWEEP
-            self.shared_state.set_pending_escalate_hint(
-                ESCALATE_HINT_SKIP_TO_SWEEP,
-            )
             log.info(
-                "steward: recommendation='stop_session' for task=%s "
-                "-> pending_escalate_hint='skip_to_sweep' (non-terminal; "
-                "EXPLORE -> SWEEP -> CLOSE)",
+                "steward (advisory): recommendation='stop_session' for "
+                "task=%s; no phase change applied",
                 task.task_id,
             )
         elif raw_rec == "advance_to_kernel":
-            from .phase_state import ESCALATE_HINT_SKIP_TO_KERNEL
-            self.shared_state.set_pending_escalate_hint(
-                ESCALATE_HINT_SKIP_TO_KERNEL,
-            )
             log.info(
-                "steward: recommendation='advance_to_kernel' for task=%s "
-                "-> pending_escalate_hint='skip_to_kernel'",
+                "steward (advisory): recommendation='advance_to_kernel' "
+                "for task=%s; no phase change applied",
                 task.task_id,
             )
         elif raw_rec == "continue_explore":

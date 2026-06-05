@@ -880,23 +880,6 @@ class SharedState:
     # Round id at which the scout was last dispatched, so the K-round
     # re-dispatch fires at most once per qualifying round.
     research_scout_last_round: int = -1
-    # Exploration-depth counters consumed by the depth gate. Counters are
-    # deterministic (config/code patches, reverts); the id sets are
-    # supplied by specialist research evidence. ``enabled`` mirrors the
-    # ``--depth-gate`` switch. Stored as a dict so old state.json shapes
-    # round-trip with a defaulted sub-structure.
-    depth_tracker: dict[str, Any] = field(default_factory=lambda: {
-        "enabled": True,
-        "prs_fetched": [],
-        "pr_diffs_read": [],
-        "nvidia_refs_compared": [],
-        "code_patches_attempted": 0,
-        "config_changes_attempted": 0,
-        "consecutive_reverts": 0,
-    })
-    # Optional CLI overrides for the depth-gate thresholds; unset keys
-    # fall back to the phase_state defaults.
-    depth_gate_thresholds: dict[str, int] = field(default_factory=dict)
     # Total specialist dispatches in the current EXPLORE entry. Reset on
     # fresh EXPLORE entry; Robustness uses it to detect specialist storms.
     explore_specialist_dispatched_count: int = 0
@@ -2963,8 +2946,8 @@ class SharedState:
         ("kernel", "noop", ...) are still appended (the ledger is
         descriptive); the consecutive-config counter only advances on
         explicit ``"config"`` values and resets on ``"code_patch"``.
-        ``"code_patch_attempt"`` satisfies exploration-depth accounting
-        without counting as a kept code patch.
+        ``"code_patch_attempt"`` is recorded for telemetry but does not
+        reset the config-only counter.
         """
         ct = str(change_type or "").strip().lower()
         entry = {
@@ -2981,7 +2964,6 @@ class SharedState:
             )
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
-        self.bump_depth_patch(ct)
 
     def get_intervention_mix(self, *, recent_window: int = 5) -> dict[str, Any]:
         """Summarise the intervention-mix ledger as derived counts.
@@ -3081,116 +3063,22 @@ class SharedState:
         return bool(pid) and pid in set(self.research_scout_seen_pr_ids or [])
 
     # ------------------------------------------------------------------
-    # Exploration-depth tracker
+    # Explore plateau proxy
     # ------------------------------------------------------------------
-    def _depth(self) -> dict[str, Any]:
-        """Return the depth_tracker sub-dict, repairing a missing / stale
-        shape so old state.json loads degrade to defaults."""
-        dt = self.depth_tracker
-        if not isinstance(dt, dict):
-            dt = {}
-            self.depth_tracker = dt
-        dt.setdefault("enabled", True)
-        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs_compared"):
-            if not isinstance(dt.get(key), list):
-                dt[key] = []
-        for key in ("code_patches_attempted", "config_changes_attempted",
-                    "consecutive_reverts"):
-            try:
-                dt[key] = int(dt.get(key) or 0)
-            except (TypeError, ValueError):
-                dt[key] = 0
-        return dt
-
-    def set_depth_gate_enabled(self, enabled: bool) -> None:
-        self._depth()["enabled"] = bool(enabled)
-
-    def depth_gate_enabled(self) -> bool:
-        return bool(self._depth().get("enabled", True))
-
-    def _depth_register_ids(self, key: str, ids: Any) -> int:
-        dt = self._depth()
-        seen = set(dt.get(key) or [])
-        added = 0
-        for raw in ids or []:
-            val = str(raw or "").strip()
-            if not val or val in seen:
-                continue
-            seen.add(val)
-            dt[key].append(val)
-            added += 1
-        return added
-
-    def register_research_evidence(
-        self,
-        *,
-        prs_fetched: Any = None,
-        pr_diffs_read: Any = None,
-        nvidia_refs_compared: Any = None,
-    ) -> dict[str, int]:
-        """De-dup research evidence into the depth tracker; return per-key
-        added counts. Used when aggregating ``specialist_done.research``."""
-        return {
-            "prs_fetched": self._depth_register_ids("prs_fetched", prs_fetched),
-            "pr_diffs_read": self._depth_register_ids(
-                "pr_diffs_read", pr_diffs_read,
-            ),
-            "nvidia_refs_compared": self._depth_register_ids(
-                "nvidia_refs_compared", nvidia_refs_compared,
-            ),
-        }
-
-    def bump_depth_patch(self, change_type: str) -> None:
-        """Advance the code/config patch-attempt counters from a KEEP."""
-        dt = self._depth()
-        ct = str(change_type or "").strip().lower()
-        if ct in ("code_patch", "code_patch_attempt"):
-            dt["code_patches_attempted"] = int(
-                dt.get("code_patches_attempted") or 0
-            ) + 1
-        elif ct == "config":
-            dt["config_changes_attempted"] = int(
-                dt.get("config_changes_attempted") or 0
-            ) + 1
-
     def reset_explore_plateau_proxy(self) -> None:
-        """Reset the retained legacy explore plateau proxy."""
+        """Reset the legacy explore plateau proxy counter."""
         self.params_no_promote_streak = 0
 
-    def note_explore_outcome(self, *, promoted: bool) -> int:
-        """Update explore outcome counters after one explore task.
+    def note_explore_outcome(self, *, promoted: bool) -> None:
+        """Update the legacy plateau proxy after one explore task.
 
-        A promoted KEEP resets both the depth gate's revert streak and the
-        retained legacy plateau proxy. A no-promote round increments both.
-        Returns the post-update depth-gate revert streak.
+        A promoted KEEP resets the proxy; a no-promote round increments
+        it.
         """
-        dt = self._depth()
         if promoted:
-            dt["consecutive_reverts"] = 0
             self.reset_explore_plateau_proxy()
         else:
-            dt["consecutive_reverts"] = int(
-                dt.get("consecutive_reverts") or 0
-            ) + 1
             self.params_no_promote_streak += 1
-        return int(dt["consecutive_reverts"])
-
-    def depth_snapshot(self) -> dict[str, Any]:
-        """Read-only normalised view of the depth tracker for the gate /
-        prompt (sets rendered as counts + the underlying id lists)."""
-        dt = self._depth()
-        return {
-            "enabled": bool(dt.get("enabled", True)),
-            "research_scout_runs": int(self.research_scout_runs or 0),
-            "prs_fetched": list(dt.get("prs_fetched") or []),
-            "pr_diffs_read": list(dt.get("pr_diffs_read") or []),
-            "nvidia_refs_compared": list(dt.get("nvidia_refs_compared") or []),
-            "code_patches_attempted": int(dt.get("code_patches_attempted") or 0),
-            "config_changes_attempted": int(
-                dt.get("config_changes_attempted") or 0
-            ),
-            "consecutive_reverts": int(dt.get("consecutive_reverts") or 0),
-        }
 
     def to_intervention_mix_summary(self) -> str:
         """Render the intervention ledger as neutral telemetry.

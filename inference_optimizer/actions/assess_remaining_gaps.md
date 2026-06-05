@@ -1,34 +1,19 @@
 # assess_remaining_gaps — session_steward dispatch
 
-IR-7 (honest self-stop). Dispatches the
-``session_steward_specialist`` domain to read the full session state
-and return an exit recommendation. **You normally do NOT need to
-propose this action** — the Coordinator auto-enqueues it the moment
-the EXPLORE plateau judge fires. Propose it manually only when you
-believe EXPLORE is exhausted before the plateau judge says so (e.g.
-five consecutive REVERTs against the same root cause but the
-``params_no_promote_streak`` hasn't yet hit its threshold).
+Dispatches the ``session_steward_specialist`` domain to read the full
+session state and return an exit recommendation. The steward is
+**advisory only** — its verdict is recorded into
+``last_remaining_gaps_assessment`` (and surfaced as a second opinion
+in the orchestration prompt) but never drives phase transitions on
+its own. Phase advance is driven by IR-6 force-exit, phase-budget
+exhaustion, or an explicit ``escalate_strategy_change`` /
+``skip_to_*`` hint from robustness or the LLM.
 
-## When to propose (LLM)
-
-All of the following must hold before you propose:
-
-- ``phase == 'EXPLORE'``
-- ``len(optimization_stack) >= 3`` (we have *something* to assess)
-- Either of:
-  - You see 3+ consecutive REVERTs in
-    ``explore_search.rejected[-3:]`` against the same root cause /
-    domain, **and** the Coordinator's plateau judge has NOT triggered
-    yet (otherwise it would have enqueued the steward internally).
-  - You see 5+ consecutive ``stack_unstable`` rows where the
-    underlying root cause is unclear — at that point the variants
-    you're proposing are genuinely lossy and another round is
-    unlikely to land KEEPs.
-
-Throttle: PolicyGate ``assess_remaining_gaps_throttle`` denies the
-delegate when ``last_remaining_gaps_assessment.ts`` is fresher than
-``INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC`` (default 1800s).
-Coordinator-internal enqueues bypass this rule.
+The Coordinator auto-enqueues a steward run the moment the EXPLORE
+plateau judge fires. Propose it manually when you want a second
+opinion sooner than the plateau judge would fire — there is no
+phase-precondition or back-to-back throttle on the LLM-proposed path
+(those gates were removed in loosen plan P2_13).
 
 ## Output protocol
 
@@ -40,23 +25,22 @@ contains, in addition to the standard fields:
 - ``remaining_potential_pct_estimate`` (float)
 - ``rationale`` (≤ 2000 chars; quoted verbatim in the final report)
 
-The Coordinator routes:
+The Coordinator records the verdict as advisory:
 
-- ``stop_session`` → ``stop_reason='no_more_leverage'`` (immediate
-  CLOSE on the next tick)
-- ``advance_to_kernel`` → ``pending_escalate_hint='skip_to_kernel'``
-  (next ``compute_next_phase`` advances to KERNEL or SWEEP per
-  ``kernel_enabled``)
+- ``stop_session`` / ``advance_to_kernel`` → recorded in
+  ``last_remaining_gaps_assessment``; **no** ``pending_escalate_hint``
+  is set.
 - ``continue_explore`` → appends ``next_gap_canonical_id`` to
-  ``gaps[]``, resets ``params_no_promote_streak``, sets
-  ``steward_continuation_used=True``. Only one continuation per
-  session; a second invocation that returns ``continue_explore`` is
-  coerced to ``advance_to_kernel``.
+  ``gaps[]``, resets ``params_no_promote_streak`` as a neutral aid
+  for the next round, and flips ``steward_continuation_used`` as an
+  audit marker.
+
+Out-of-vocab strings coerce to ``stop_session`` so the audit row
+carries a known value.
 
 ## Iron rules
 
-- IR-7: the steward gates the EXPLORE→KERNEL transition softly; the
-  HARD IR-6 force-exit still wins when wall-clock budget drops below
-  the threshold, regardless of any steward verdict.
+- IR-6 still governs the wall-clock force-exit; the steward never
+  argues with it.
 - The LLM may propose this action only with ``params.reason``
   populated; missing reason → PolicyGate denial.

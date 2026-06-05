@@ -386,25 +386,6 @@ DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
 
 
 # ---------------------------------------------------------------------------
-# Exploration-depth gate thresholds.
-#
-# The depth gate only evaluates once the explore loop has shown
-# instability (``consecutive_reverts`` >= the activation threshold).
-# Each dimension is a minimum the session must reach before a stop /
-# advance verdict is allowed through. Dimensions whose evidence is not
-# being supplied this session (no specialist reports PR / diff / nvidia
-# refs) are dropped from the decision (recorded as N/A) so they never
-# become an unsatisfiable stall.
-# ---------------------------------------------------------------------------
-DEFAULT_DEPTH_GATE_SCOUT_RUNS:          int = 2
-DEFAULT_DEPTH_GATE_PRS_FETCHED:         int = 5
-DEFAULT_DEPTH_GATE_PR_DIFFS_READ:       int = 3
-DEFAULT_DEPTH_GATE_NVIDIA_REFS:         int = 2
-DEFAULT_DEPTH_GATE_CODE_PATCHES:        int = 1
-DEFAULT_DEPTH_GATE_REVERTS_TO_EVALUATE: int = 3
-
-
-# ---------------------------------------------------------------------------
 # escalate_strategy_change hint vocabulary
 # ---------------------------------------------------------------------------
 # Closed enum so the Coordinator + phase_state agree on which hints can
@@ -698,92 +679,6 @@ def should_force_exit_explore(
 
     evidence["fired_reasons"] = fired_reasons
     return fired, evidence
-
-
-def depth_gate(
-    state: Any,
-    *,
-    scout_runs_min: int = DEFAULT_DEPTH_GATE_SCOUT_RUNS,
-    prs_fetched_min: int = DEFAULT_DEPTH_GATE_PRS_FETCHED,
-    pr_diffs_read_min: int = DEFAULT_DEPTH_GATE_PR_DIFFS_READ,
-    nvidia_refs_min: int = DEFAULT_DEPTH_GATE_NVIDIA_REFS,
-    code_patches_min: int = DEFAULT_DEPTH_GATE_CODE_PATCHES,
-    reverts_to_evaluate: int = DEFAULT_DEPTH_GATE_REVERTS_TO_EVALUATE,
-) -> tuple[bool, list[str], str]:
-    """Deterministic exploration-depth check.
-
-    Returns ``(satisfied, blockers, next_action)``:
-
-    * ``satisfied`` — whether every *supplied* depth dimension has met
-      its minimum. The gate only activates once the explore loop has
-      shown instability (``consecutive_reverts >= reverts_to_evaluate``);
-      before that it reports ``satisfied=True`` (nothing to enforce).
-    * ``blockers`` — human-readable list of unmet dimensions, most
-      important first.
-    * ``next_action`` — a concrete deepening instruction for the most
-      important blocker (empty when satisfied).
-
-    Dimensions whose evidence is not being supplied this session (no
-    specialist reports PR / diff / nvidia refs) are dropped — their bar
-    cannot be satisfied, so enforcing them would stall the session. The
-    deterministic dimensions (scout runs, code patches) are always
-    enforced. Pure + fail-soft: a missing / malformed tracker yields
-    ``satisfied=True``.
-    """
-    snap_fn = getattr(state, "depth_snapshot", None)
-    try:
-        snap = snap_fn() if callable(snap_fn) else {}
-    except Exception:  # noqa: BLE001 — fail-soft on any malformed tracker
-        snap = {}
-    if not isinstance(snap, dict) or not snap:
-        return True, [], ""
-    if not bool(snap.get("enabled", True)):
-        return True, [], ""
-
-    reverts = int(snap.get("consecutive_reverts") or 0)
-    if reverts < int(reverts_to_evaluate):
-        return True, [], ""
-
-    scout_runs = int(snap.get("research_scout_runs") or 0)
-    code_patches = int(snap.get("code_patches_attempted") or 0)
-    prs = len(snap.get("prs_fetched") or [])
-    diffs = len(snap.get("pr_diffs_read") or [])
-    nvidia = len(snap.get("nvidia_refs_compared") or [])
-
-    blockers: list[str] = []
-    # (label, current, minimum, supplied, next_action) — order encodes
-    # priority: cheap / always-supplied deepening first.
-    dims = [
-        (
-            "research_scout_runs", scout_runs, int(scout_runs_min), True,
-            "dispatch another research scout to gather proven priors",
-        ),
-        (
-            "code_patches_attempted", code_patches, int(code_patches_min), True,
-            "try at least one source-level code patch, not just config tweaks",
-        ),
-        (
-            "prs_fetched", prs, int(prs_fetched_min), prs > 0,
-            "fetch more candidate PRs across frameworks before stopping",
-        ),
-        (
-            "pr_diffs_read", diffs, int(pr_diffs_read_min), diffs > 0,
-            "read more PR diffs to extract concrete optimizations",
-        ),
-        (
-            "nvidia_refs_compared", nvidia, int(nvidia_refs_min), nvidia > 0,
-            "compare against more NVIDIA / cross-vendor reference numbers",
-        ),
-    ]
-    next_action = ""
-    for label, current, minimum, supplied, action in dims:
-        if minimum <= 0 or not supplied:
-            continue
-        if current < minimum:
-            blockers.append(f"{label}={current}<{minimum}")
-            if not next_action:
-                next_action = action
-    return (len(blockers) == 0), blockers, next_action
 
 
 # ----------------------- plateau pure functions --------
@@ -1098,16 +993,19 @@ def exit_normal_explore(
        every other gate. Fires when total session remaining wall-clock
        drops below ``force_exit_hours_remaining`` hours OR when this
        phase's remaining budget pct drops below ``force_exit_budget_pct``.
-       Iron Rule IR-6: the steward / plateau / LLM proposals do not get
-       to argue with this gate.
-    1. ``escalate_strategy_change`` hint ``skip_to_kernel`` →
-       ``plateau_explore`` (``evidence='llm_escalation'``).
-    2. Real ``plateau_explore`` (:func:`compute_plateau_explore`)
+       Iron Rule IR-6: the plateau judge / LLM proposals do not get to
+       argue with this gate.
+    1. Explicit ``skip_to_kernel`` hint (robustness escalation or LLM
+       phase-advance request) → ``plateau_explore`` with
+       ``evidence='llm_escalation'``.
+    2. Explicit ``skip_to_sweep`` hint → ``no_more_leverage`` (winds
+       EXPLORE → SWEEP → CLOSE non-terminally).
+    3. Real ``plateau_explore`` (:func:`compute_plateau_explore`)
        when signals are present (``explore_search.winners_history``
-       or ``specialist_rounds``).
-    3. Phase budget exhausted.
+       or ``specialist_rounds``). The session_steward verdict is
+       advisory only and no longer gates this exit.
+    4. Phase budget exhausted.
     """
-    # Priority 0 — HARD force-exit.
     forced, force_ev = should_force_exit_explore(
         state,
         hours_remaining_threshold=force_exit_hours_remaining,
@@ -1127,10 +1025,6 @@ def exit_normal_explore(
             "evidence": "llm_escalation",
             "hint": hint,
         }
-    # Non-terminal "no more leverage" signal (steward stop_session). Winds
-    # EXPLORE down to SWEEP (skipping KERNEL) → CLOSE rather than aborting
-    # the session.
-    # compute_next_phase routes the ``no_more_leverage`` reason to SWEEP.
     if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
         return "no_more_leverage", {
             "evidence": "no_more_leverage",
@@ -1149,64 +1043,19 @@ def exit_normal_explore(
             empty_streak_threshold=plateau_empty_streak,
         )
         if triggered:
-            # steward gate. The plateau judge fired; consult the
-            # session_steward verdict before actually exiting. Three
-            # routes:
-            #   * steward_disabled override → exit immediately (plateau).
-            #   * no assessment yet → return None with a sentinel
-            #     evidence the Coordinator picks up (it enqueues the
-            #     steward internally; we stay in EXPLORE one more tick).
-            #   * recommendation == 'continue_explore' AND continuation
-            #     not yet used → stay in EXPLORE; Coordinator already
-            #     reset the plateau counters when it routed the verdict.
-            #   * otherwise → exit plateau normally; evidence carries
-            #     the recommendation so the audit trail reflects it.
-            overrides = _resolve_plateau_overrides(state)
-            steward_disabled = bool(overrides.get("steward_disabled", False))
-            if steward_disabled:
-                return "plateau_explore", {
-                    "evidence":           "plateau_judgment",
-                    "steward_disabled":   True,
-                    **evidence,
-                }
             assessment = getattr(
                 state, "last_remaining_gaps_assessment", None,
             ) or {}
             rec = str(
                 assessment.get("recommendation") or ""
             ).strip().lower() if isinstance(assessment, dict) else ""
-            steward_used = bool(getattr(
-                state, "steward_continuation_used", False,
-            ))
-            # When the depth gate is active it owns continuation
-            # bounding (rewrites stop/advance to continue as often as
-            # needed, the HARD force-exit being the only backstop), so the legacy
-            # single-continuation cap is lifted. With the gate off the
-            # original "one continuation per session" semantics apply.
-            depth_gate_on = True
-            depth_enabled_fn = getattr(state, "depth_gate_enabled", None)
-            if callable(depth_enabled_fn):
-                try:
-                    depth_gate_on = bool(depth_enabled_fn())
-                except Exception:  # noqa: BLE001 — fail-soft
-                    depth_gate_on = True
-            if not rec:
-                # No verdict yet — stay in EXPLORE one more tick and
-                # let the Coordinator enqueue an internal steward run
-                # (it polls ``wants_steward_assessment`` after
-                # ``compute_next_phase`` returns None).
-                return None
-            if rec == "continue_explore" and (depth_gate_on or not steward_used):
-                # Continuation granted; the Coordinator already
-                # processed the verdict (reset plateau counters,
-                # injected next_gap). Stay in EXPLORE.
-                return None
-            # advance_to_kernel / stop_session / continuation exhausted.
-            return "plateau_explore", {
-                "evidence":              "plateau_judgment",
-                "steward_recommendation": rec,
+            out_evidence: dict[str, Any] = {
+                "evidence": "plateau_judgment",
                 **evidence,
             }
+            if rec:
+                out_evidence["steward_recommendation"] = rec
+            return "plateau_explore", out_evidence
     remaining = phase_budget_remaining_seconds(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )

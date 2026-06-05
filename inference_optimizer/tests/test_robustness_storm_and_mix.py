@@ -180,8 +180,8 @@ def test_coordinator_intervention_hook_records_code_patch_for_integrate_kept():
 
 
 def test_coordinator_intervention_hook_records_integrate_attempts():
-    """integrate_patch attempts satisfy depth tracking even when they do
-    not KEEP. Only a kept code patch resets the config-only counter."""
+    """integrate_patch attempts land on the ledger even when they do not
+    KEEP. Only a kept code patch resets the config-only counter."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.task_registry import Task
 
@@ -198,7 +198,6 @@ def test_coordinator_intervention_hook_records_integrate_attempts():
     assert {
         e["change_type"] for e in c.shared_state.intervention_mix
     } == {"code_patch_attempt"}
-    assert c.shared_state.depth_tracker["code_patches_attempted"] == 5
     assert c.shared_state.consecutive_config_only_rounds == 0
 
 

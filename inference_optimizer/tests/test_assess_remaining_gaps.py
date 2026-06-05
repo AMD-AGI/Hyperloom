@@ -1,16 +1,18 @@
-"""IR-7 — session_steward_specialist + assess_remaining_gaps tests.
+"""session_steward_specialist + assess_remaining_gaps tests.
 
-Covers:
+After loosen plan P2_13 the steward is **advisory only**: it no longer
+drives phase transitions and there is no LLM-side throttle. The depth
+gate that used to rewrite stop/advance into continue_explore is gone.
 
-* :func:`phase_state.wants_steward_assessment` predicate.
-* :func:`phase_state.exit_normal_explore` steward gate routing.
+Surviving coverage:
+
+* :func:`phase_state.wants_steward_assessment` predicate (Coordinator
+  still auto-enqueues an advisory verdict on plateau).
 * :meth:`SharedState.record_steward_assessment` audit + history cap.
-* Coordinator's ``_route_steward_verdict`` routing the three
-  recommendations (continue_explore, advance_to_kernel, stop_session)
-  + the antiloop coercion of a second ``continue_explore``.
-* PolicyGate's ``assess_remaining_gaps_throttle`` on LLM-side proposes.
-* ``session_steward_specialist`` is registered in the domain catalogue
-  and gated as M5-active.
+* Coordinator's ``_route_steward_verdict`` records the recommendation
+  verbatim, treats infrastructure failures as retries, coerces OOV
+  strings to ``stop_session``, and **does not** set any
+  ``pending_escalate_hint``.
 """
 
 from __future__ import annotations
@@ -45,8 +47,6 @@ def _make_plateau_state(*, kernel_enabled: bool = True) -> SharedState:
         max_minutes=600,  # 10h budget — well above force-exit thresholds
         kernel_enabled=kernel_enabled,
     )
-    # Plateau signals: 3 consecutive empty specialist rounds and a
-    # winners_history below the keep_gain threshold.
     state.explore_search = {
         "schema_version": 1,
         "tested": {},
@@ -95,7 +95,6 @@ def test_wants_steward_assessment_no_plateau_signals():
         phase=phase_state.PHASE_EXPLORE,
         max_minutes=600,
     )
-    # No v0.8 signals at all — should not request steward.
     assert phase_state.wants_steward_assessment(state) is False
 
 
@@ -128,93 +127,8 @@ def test_wants_steward_assessment_skipped_during_force_exit():
     """When HARD force-exit fires, the steward path is no-op."""
     now = datetime.now(timezone.utc)
     state = _make_plateau_state()
-    # Override start_ts so session_remaining_seconds is well below 3h.
     state.start_ts = (now - timedelta(hours=7.5)).isoformat()
     assert phase_state.wants_steward_assessment(state) is False
-
-
-# ===========================================================================
-# exit_normal_explore steward gate routing
-# ===========================================================================
-def test_exit_normal_explore_holds_when_steward_pending():
-    """Plateau triggered, no assessment yet -> stay in EXPLORE (None)."""
-    state = _make_plateau_state()
-    out = phase_state.exit_normal_explore(state)
-    assert out is None
-
-
-def test_exit_normal_explore_holds_on_continue_explore():
-    state = _make_plateau_state()
-    state.last_remaining_gaps_assessment = {
-        "recommendation": "continue_explore",
-        "next_gap_canonical_id": "gap.X",
-    }
-    state.steward_continuation_used = False
-    out = phase_state.exit_normal_explore(state)
-    assert out is None
-
-
-def test_exit_normal_explore_routes_on_advance_to_kernel():
-    state = _make_plateau_state()
-    state.last_remaining_gaps_assessment = {
-        "recommendation": "advance_to_kernel",
-    }
-    out = phase_state.exit_normal_explore(state)
-    assert out is not None
-    reason, evidence = out
-    assert reason == "plateau_explore"
-    assert evidence["steward_recommendation"] == "advance_to_kernel"
-
-
-def test_exit_normal_explore_routes_on_stop_session():
-    state = _make_plateau_state()
-    state.last_remaining_gaps_assessment = {
-        "recommendation": "stop_session",
-    }
-    out = phase_state.exit_normal_explore(state)
-    assert out is not None
-    reason, evidence = out
-    assert reason == "plateau_explore"
-    assert evidence["steward_recommendation"] == "stop_session"
-
-
-def test_exit_normal_explore_continuation_exhausted():
-    """Legacy: second continue_explore (after first was used) -> exit
-    plateau when the depth gate is disabled."""
-    state = _make_plateau_state()
-    state.set_depth_gate_enabled(False)
-    state.steward_continuation_used = True
-    state.last_remaining_gaps_assessment = {
-        "recommendation": "continue_explore",
-        "next_gap_canonical_id": "gap.Y",
-    }
-    out = phase_state.exit_normal_explore(state)
-    assert out is not None
-    reason, _evidence = out
-    assert reason == "plateau_explore"
-
-
-def test_exit_normal_explore_depth_gate_allows_repeat_continuation():
-    """With the depth gate on, a continuation is honoured even after the
-    legacy single-continuation marker is set (multi-continue)."""
-    state = _make_plateau_state()
-    state.set_depth_gate_enabled(True)
-    state.steward_continuation_used = True
-    state.last_remaining_gaps_assessment = {
-        "recommendation": "continue_explore",
-        "next_gap_canonical_id": "gap.Z",
-    }
-    assert phase_state.exit_normal_explore(state) is None
-
-
-def test_exit_normal_explore_steward_disabled():
-    state = _make_plateau_state()
-    state.plateau_overrides = {"steward_disabled": True}
-    out = phase_state.exit_normal_explore(state)
-    assert out is not None
-    reason, evidence = out
-    assert reason == "plateau_explore"
-    assert evidence.get("steward_disabled") is True
 
 
 # ===========================================================================
@@ -265,10 +179,10 @@ def test_record_steward_assessment_truncates_rationale():
 
 
 # ===========================================================================
-# Coordinator routing
+# Coordinator routing — advisory, never drives phase
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_route_stop_session():
+async def test_route_stop_session_is_advisory_only():
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     state = SharedState(session_id="t-route-stop", phase="EXPLORE")
@@ -277,9 +191,6 @@ async def test_route_stop_session():
         shared_state=state,
         session_dir="/tmp",
         append_gap_attempt=lambda *a, **kw: None,
-        _apply_depth_gate_to_verdict=lambda **kw: (
-            kw["raw_rec"], kw["next_gap"],
-        ),
     )
     task = SimpleNamespace(task_id="task-stop", params={})
     payload = {
@@ -291,15 +202,13 @@ async def test_route_stop_session():
     await Coordinator._route_steward_verdict(
         fake, task=task, done_payload=payload,
     )
-    # stop_session is now non-terminal: it sets the skip_to_sweep hint
-    # (EXPLORE -> SWEEP -> CLOSE) rather than a terminal stop_reason.
     assert not state.stop_reason
-    assert state.pending_escalate_hint == "skip_to_sweep"
+    assert not state.pending_escalate_hint
     assert state.last_remaining_gaps_assessment["recommendation"] == "stop_session"
 
 
 @pytest.mark.asyncio
-async def test_route_advance_to_kernel():
+async def test_route_advance_to_kernel_is_advisory_only():
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     state = SharedState(session_id="t-route-adv", phase="EXPLORE")
@@ -308,9 +217,6 @@ async def test_route_advance_to_kernel():
         shared_state=state,
         session_dir="/tmp",
         append_gap_attempt=lambda *a, **kw: None,
-        _apply_depth_gate_to_verdict=lambda **kw: (
-            kw["raw_rec"], kw["next_gap"],
-        ),
     )
     task = SimpleNamespace(task_id="task-adv", params={})
     payload = {
@@ -322,14 +228,15 @@ async def test_route_advance_to_kernel():
     await Coordinator._route_steward_verdict(
         fake, task=task, done_payload=payload,
     )
-    assert state.pending_escalate_hint == "skip_to_kernel"
+    assert not state.pending_escalate_hint
     assert state.last_remaining_gaps_assessment["recommendation"] == "advance_to_kernel"
 
 
 @pytest.mark.asyncio
-async def test_route_continue_explore_allows_repeat_under_depth_gate():
-    """With the depth gate active (default), the legacy single-continuation
-    cap is lifted — a second continue_explore is still honoured."""
+async def test_route_continue_explore_resets_plateau_counters():
+    """``continue_explore`` still resets the plateau proxy counters as a
+    neutral aid for the next round, even though it no longer feeds back
+    into a steward gate."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     state = SharedState(session_id="t-route-cont", phase="EXPLORE")
@@ -339,9 +246,6 @@ async def test_route_continue_explore_allows_repeat_under_depth_gate():
     fake = SimpleNamespace(
         shared_state=state,
         session_dir="/tmp",
-        _apply_depth_gate_to_verdict=lambda **kw: (
-            kw["raw_rec"], kw["next_gap"],
-        ),
     )
     task = SimpleNamespace(task_id="task-cont-1", params={})
     payload_1 = {
@@ -358,21 +262,7 @@ async def test_route_continue_explore_allows_repeat_under_depth_gate():
     assert state.params_no_promote_streak == 0
     assert state.last_remaining_gaps_assessment["recommendation"] == "continue_explore"
     assert state.stop_reason in ("", None)
-
-    # Second call: continue_explore again -> still granted (no cap).
-    task2 = SimpleNamespace(task_id="task-cont-2", params={})
-    payload_2 = {
-        "domain": "session_steward_specialist",
-        "recommendation": "continue_explore",
-        "next_gap_canonical_id": "gap.another",
-        "remaining_potential_pct_estimate": 3.0,
-        "rationale": "still hopeful",
-    }
-    await Coordinator._route_steward_verdict(
-        fake, task=task2, done_payload=payload_2,
-    )
-    assert state.last_remaining_gaps_assessment["recommendation"] == "continue_explore"
-    assert state.pending_escalate_hint != "skip_to_kernel"
+    assert not state.pending_escalate_hint
 
 
 @pytest.mark.asyncio
@@ -423,29 +313,25 @@ async def test_route_coerces_out_of_vocab():
     fake = SimpleNamespace(
         shared_state=state,
         session_dir="/tmp",
-        _apply_depth_gate_to_verdict=lambda **kw: (
-            kw["raw_rec"], kw["next_gap"],
-        ),
     )
     task = SimpleNamespace(task_id="task-oov", params={})
     payload = {
         "domain": "session_steward_specialist",
-        "recommendation": "make_coffee",  # not a valid recommendation
+        "recommendation": "make_coffee",
         "rationale": "hallucinated verdict",
     }
     await Coordinator._route_steward_verdict(
         fake, task=task, done_payload=payload,
     )
-    # OOV -> coerced to stop_session, which now sets the (non-terminal)
-    # skip_to_sweep hint rather than a terminal stop_reason.
     assert not state.stop_reason
-    assert state.pending_escalate_hint == "skip_to_sweep"
+    assert not state.pending_escalate_hint
     assert state.last_remaining_gaps_assessment["recommendation"] == "stop_session"
 
 
 @pytest.mark.asyncio
 async def test_route_continue_explore_missing_gap_id_coerced():
-    """``continue_explore`` without next_gap_canonical_id -> advance_to_kernel."""
+    """``continue_explore`` without next_gap_canonical_id -> advance_to_kernel
+    (still advisory; no phase hint set)."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     state = SharedState(session_id="t-route-missgap", phase="EXPLORE")
@@ -453,106 +339,18 @@ async def test_route_continue_explore_missing_gap_id_coerced():
     fake = SimpleNamespace(
         shared_state=state,
         session_dir="/tmp",
-        _apply_depth_gate_to_verdict=lambda **kw: (
-            kw["raw_rec"], kw["next_gap"],
-        ),
     )
     task = SimpleNamespace(task_id="task-missgap", params={})
     payload = {
         "domain": "session_steward_specialist",
         "recommendation": "continue_explore",
-        # next_gap_canonical_id missing
         "rationale": "vague continuation request",
     }
     await Coordinator._route_steward_verdict(
         fake, task=task, done_payload=payload,
     )
-    assert state.pending_escalate_hint == "skip_to_kernel"
-
-
-# ===========================================================================
-# PolicyGate throttle (LLM-side propose path)
-# ===========================================================================
-def _ready_to_throttle_state(session_id: str) -> SharedState:
-    """Return a SharedState that satisfies the Issue-A preconditions
-    (phase=EXPLORE + len(optimization_stack)>=3) so the throttle path
-    is the only remaining gate. The throttle tests below all start
-    from this fixture; the new precondition tests use a bare state."""
-    state = SharedState(session_id=session_id)
-    state.phase = "EXPLORE"
-    state.optimization_stack = [
-        {"variant_name": f"stub-{i}", "tput": 100.0 + i}
-        for i in range(3)
-    ]
-    return state
-
-
-def test_assess_remaining_gaps_throttle_blocks_back_to_back(monkeypatch):
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-
-    state = _ready_to_throttle_state("t-throttle")
-    state.last_remaining_gaps_assessment = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "recommendation": "advance_to_kernel",
-    }
-    fake = SimpleNamespace(shared_state=state)
-    denial = Coordinator._assess_remaining_gaps_throttle_denial(fake)
-    assert denial is not None
-    assert denial.rule == "assess_remaining_gaps_throttle"
-
-
-def test_assess_remaining_gaps_throttle_permits_after_window(monkeypatch):
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-
-    state = _ready_to_throttle_state("t-throttle-ok")
-    state.last_remaining_gaps_assessment = {
-        "ts": (
-            datetime.now(timezone.utc) - timedelta(hours=2)
-        ).isoformat(),
-        "recommendation": "advance_to_kernel",
-    }
-    fake = SimpleNamespace(shared_state=state)
-    denial = Coordinator._assess_remaining_gaps_throttle_denial(fake)
-    assert denial is None
-
-
-def test_assess_remaining_gaps_throttle_first_call_passes():
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-
-    state = _ready_to_throttle_state("t-throttle-first")
-    # No prior assessment -> no throttle (and preconditions satisfied).
-    fake = SimpleNamespace(shared_state=state)
-    denial = Coordinator._assess_remaining_gaps_throttle_denial(fake)
-    assert denial is None
-
-
-# ---------------------------------------------------------------------------
-# Issue-A (Saturday May 2026): preconditions enforced before the throttle
-# ---------------------------------------------------------------------------
-def test_assess_remaining_gaps_denied_outside_explore():
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-
-    state = SharedState(session_id="t-precondition-phase")
-    state.phase = "PRELUDE"
-    state.optimization_stack = [
-        {"variant_name": f"stub-{i}"} for i in range(5)
-    ]
-    fake = SimpleNamespace(shared_state=state)
-    denial = Coordinator._assess_remaining_gaps_throttle_denial(fake)
-    assert denial is not None
-    assert denial.rule == "assess_remaining_gaps_phase"
-
-
-def test_assess_remaining_gaps_denied_when_stack_too_short():
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-
-    state = SharedState(session_id="t-precondition-stack")
-    state.phase = "EXPLORE"
-    state.optimization_stack = [{"variant_name": "stub-0"}]
-    fake = SimpleNamespace(shared_state=state)
-    denial = Coordinator._assess_remaining_gaps_throttle_denial(fake)
-    assert denial is not None
-    assert denial.rule == "assess_remaining_gaps_min_stack"
+    assert state.last_remaining_gaps_assessment["recommendation"] == "advance_to_kernel"
+    assert not state.pending_escalate_hint
 
 
 # ===========================================================================
@@ -562,3 +360,19 @@ def test_assess_remaining_gaps_in_explore_allowlist():
     assert "assess_remaining_gaps" in phase_state.PHASE_ALLOWED_ACTIONS[
         phase_state.PHASE_EXPLORE
     ]
+
+
+# ===========================================================================
+# Coordinator no longer exposes the throttle / depth-gate helpers
+# ===========================================================================
+def test_throttle_and_depth_gate_helpers_removed():
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+    for attr in (
+        "_assess_remaining_gaps_throttle_denial",
+        "_apply_depth_gate_to_verdict",
+        "_depth_gate_thresholds",
+    ):
+        assert not hasattr(Coordinator, attr), (
+            f"Coordinator.{attr} unexpectedly resurrected — loosen P2_13 "
+            f"removed the steward throttle / depth gate."
+        )
