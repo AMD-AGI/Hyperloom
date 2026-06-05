@@ -288,7 +288,19 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('chmod 600 "$env_file"', install_text)
         self.assertIn("GEAK_MEMORY_STORE_PATH", ray_runtime_text)
         self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
-        self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"', trace_tool_text)
+        # tracelens_analysis no longer hard-codes a /wekafs fallback for
+        # TRACELENS_ROOT: install.sh exports it via kernel-agent.env.sh and
+        # the tool fails loudly when it is missing rather than silently
+        # poking a path that may not exist on the node.
+        self.assertNotIn("DEFAULT_TRACELENS_ROOT", trace_tool_text)
+        self.assertIn(
+            'parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", "")',
+            trace_tool_text,
+        )
+        self.assertIn(
+            "TraceLens root not provided: set TRACELENS_ROOT in env",
+            trace_tool_text,
+        )
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens}"', install_text)
         self.assertNotIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
