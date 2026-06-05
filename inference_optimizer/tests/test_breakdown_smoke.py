@@ -473,6 +473,44 @@ def test_baseline_resolves_container_workspace_path(tmp_path: Path) -> None:
     ), b["warnings"]
 
 
+def test_baseline_resolves_measure_round_benchmark_workspace(tmp_path: Path) -> None:
+    """Double-run baseline records may point directly at the hot
+    ``measure_round/benchmark_*`` directory. The collector must read that
+    report instead of looking for another nested ``benchmark_*`` below it."""
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "dbl"})
+    bdir = sd / (
+        "runs/baseline/h1/measure_round/benchmark_sglang_20260605_014141"
+    )
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "throughput": {"output_throughput": 3789.33},
+        "latency": {
+            "ttft": {"mean_ms": 616.7},
+            "tpot": {"mean_ms": 16.29},
+            "e2el": {"mean_ms": 17285.09},
+        },
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "dbl",
+        "baseline_tput": 3789.33,
+        "last_baseline": {
+            "workspace": (
+                "/workspace/runs/baseline/h1/measure_round/"
+                "benchmark_sglang_20260605_014141"
+            ),
+        },
+    })
+
+    b = build(sd)
+    baseline = b["baseline"]
+    assert baseline["ttft_mean_ms"] == pytest.approx(616.7)
+    assert baseline["e2el_mean_ms"] == pytest.approx(17285.09)
+    assert baseline["ttft_e2el_source"] == "state_workspace"
+    assert "measure_round" in baseline["benchmark_report_path"]
+
+
 def test_baseline_unresolvable_workspace_emits_warning(tmp_path: Path) -> None:
     """When the recorded workspace can't be re-rooted under ``session_dir``
     (e.g. wrong session_dir), the collector must surface a warning rather
@@ -2003,6 +2041,87 @@ def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:
     ), b["warnings"]
 
 
+def test_final_ttft_reconstructed_from_current_best_benchmark_dir(
+    tmp_path: Path,
+) -> None:
+    """``current_best.workspace`` can point directly at a double-run
+    ``measure_round/benchmark_*`` directory while latency remains only on
+    disk. Final reconstruction must read that report."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "cbdir"})
+    bdir = sd / (
+        "runs/baseline/h1/measure_round/benchmark_sglang_20260605_014141"
+    )
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "throughput": {"output_throughput": 3789.33},
+        "latency": {
+            "ttft": {"mean_ms": 616.7},
+            "tpot": {"mean_ms": 16.29},
+            "e2el": {"mean_ms": 17285.09},
+        },
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "cbdir",
+        "baseline_tput": 3789.33,
+        "current_best": {
+            "action": "baseline",
+            "tput": 3789.33,
+            "workspace": (
+                "/workspace/runs/baseline/h1/measure_round/"
+                "benchmark_sglang_20260605_014141"
+            ),
+        },
+    })
+
+    final = build(sd)["final"]
+    assert final["ttft_mean_ms"] == pytest.approx(616.7)
+    assert final["e2el_mean_ms"] == pytest.approx(17285.09)
+    assert final["ttft_e2el_source"] == "current_best_disk"
+
+
+def test_final_ttft_reconstructed_from_warm_replay_measure_round(
+    tmp_path: Path,
+) -> None:
+    """Warm-replay stack entries may have ``workspace = None``. Match the
+    report under ``runs/replay_warm_recipe`` by action/tput and recover
+    final latency from the hot measure round."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "wr"})
+    bdir = sd / (
+        "runs/replay_warm_recipe/f86b/measure_round/"
+        "benchmark_sglang_20260604_151328"
+    )
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "throughput": {"output_throughput": 4568.10},
+        "latency": {
+            "ttft": {"mean_ms": 2156.71},
+            "tpot": {"mean_ms": 11.91},
+            "e2el": {"mean_ms": 14335.65},
+        },
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "wr",
+        "baseline_tput": 1480.90,
+        "current_best": {"tput": 4568.10},
+        "optimization_stack": [
+            {
+                "action": "replay_warm_recipe",
+                "variant_name": "warm_replay",
+                "tput": 4568.10,
+                "workspace": None,
+            },
+        ],
+        "cumulative_gain_validated": 208.47,
+    })
+
+    final = build(sd)["final"]
+    assert final["ttft_mean_ms"] == pytest.approx(2156.71)
+    assert final["e2el_mean_ms"] == pytest.approx(14335.65)
+    assert final["ttft_e2el_source"] == "stack_top_disk"
+
+
 # ---------------------------------------------------------------------------
 # A3: baseline.attempts_history reconstruction
 # ---------------------------------------------------------------------------
@@ -2201,6 +2320,36 @@ def test_baseline_ttft_disk_walk_fallback(tmp_path: Path) -> None:
         "baseline.ttft_mean_ms reconstructed from runs/baseline/ disk walk" in w
         for w in b["warnings"]
     ), b["warnings"]
+
+
+def test_baseline_ttft_disk_walk_fallback_measure_round(tmp_path: Path) -> None:
+    """Disk-walk fallback must include double-run ``measure_round``
+    reports, not just legacy ``runs/baseline/<hash>/benchmark_*``."""
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "mrdw"})
+    bdir = sd / "runs/baseline/hash1/measure_round/benchmark_sglang_20260605_031230"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "throughput": {"output_throughput": 2110.29},
+        "latency": {
+            "ttft": {"mean_ms": 2075.01},
+            "tpot": {"mean_ms": 28.32},
+            "e2el": {"mean_ms": 31045.42},
+        },
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "mrdw",
+        "baseline_tput": 2110.29,
+        "last_baseline": {"workspace": "/workspace/runs/baseline/missing"},
+    })
+
+    b = build(sd)
+    baseline = b["baseline"]
+    assert baseline["ttft_mean_ms"] == pytest.approx(2075.01)
+    assert baseline["e2el_mean_ms"] == pytest.approx(31045.42)
+    assert baseline["ttft_e2el_source"] == "runs_baseline_disk"
+    assert "measure_round" in baseline["benchmark_report_path"]
 
 
 # ---------------------------------------------------------------------------
