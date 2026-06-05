@@ -354,6 +354,34 @@ def test_session_stop_reason_falls_back_to_close_phase(tmp_path: Path) -> None:
     assert s["ended_at_utc"] == "2026-06-05T03:04:05Z"
 
 
+def test_session_stop_reason_prefers_specific_close_reason(tmp_path: Path) -> None:
+    """A generic top-level timeout should not hide the terminal phase reason."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {
+        "schema_version": 1,
+        "session_id": "closed-with-generic-timeout",
+        "created_at_utc": "2026-06-05T01:00:00+00:00",
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "closed-with-generic-timeout",
+        "stop_reason": "time_exhausted",
+        "close_sequence_done": True,
+        "phase_history": [
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "CLOSE",
+                "reason": "sweep_budget_exhausted",
+                "ts": "2026-06-05T03:04:05+00:00",
+                "ts_unix": 1780628645.0,
+            },
+        ],
+    })
+
+    s = build(sd)["session"]
+    assert s["stop_reason"] == "sweep_budget_exhausted"
+    assert s["ended_at_utc"] == "2026-06-05T03:04:05Z"
+
+
 def test_keep_stamping_only_best_attempt(fixture_session: Path) -> None:
     """KEEP decision must land on the BEST attempt, not every attempt."""
     oob = build(fixture_session)["oob_invocations"]

@@ -685,6 +685,14 @@ def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
+def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> bool:
+    if not close_stop_reason:
+        return False
+    if not stop_reason:
+        return True
+    return stop_reason == "time_exhausted" and close_stop_reason != "time_exhausted"
+
+
 # ---------------------------------------------------------------------------
 # §1 Session metadata
 # ---------------------------------------------------------------------------
@@ -698,7 +706,7 @@ def collect_session(
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
     stop_reason = str(state.get("stop_reason") or "").strip()
     close_stop_reason, close_ts = _close_phase_stop_reason(state)
-    if not stop_reason:
+    if _should_use_close_stop_reason(stop_reason, close_stop_reason):
         stop_reason = close_stop_reason
     ended_at_utc = ""
     if stop_reason:
