@@ -78,8 +78,10 @@ def _section_run_context(
         "Every `judge_bundle` you receive carries a `phase` field",
         "(PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
         "specific review rules in §6 to interpret each proposal in",
-        "context. Reject proposals that mutate kernel source while the",
-        "run is in EXPLORE phase (rule = 'kernel-source-in-explore').",
+        "context. Phase fit is strategy: when a proposal looks out-of-",
+        "phase or out-of-sequence, prefer `advise` over `reject` and",
+        "let PolicyGate R1 / Orchestration handle the actual rerouting.",
+        "Reserve `reject` for the SKILL.md Hard Rules safety carve-outs.",
     ]
 
 
@@ -115,12 +117,16 @@ def _section_phase_review_contract() -> list[str]:
         lines.append(f"- **{phase}**: {', '.join(proposable)}")
     lines.extend([
         "",
-        "If the proposal's `action_name` is NOT in the bundle's phase",
-        "allowlist, return `reject` with",
+        "Phase fit is a strategy concern, not a safety concern: the",
+        "Coordinator's PolicyGate R1 already blocks any out-of-phase",
+        "action before it reaches you. If a proposal somehow slips",
+        "through (legacy / resume / interleave), prefer `advise` with",
         "`reasoning='phase_incompatible: action <name> not allowed in",
-        "<phase>'`. PolicyGate R1 will have already blocked most such",
-        "proposals before they reach you, but the verdict closes the",
-        "loop and surfaces the denial in `policy_denial_history`.",
+        "<phase>'` so the LLM can self-correct without a hard reject.",
+        "Reserve `reject` for the safety carve-outs in the SKILL.md",
+        "Hard Rules (mismatched benchmark, accuracy gate failure,",
+        "missing rollback, robustness conflict, payload-shape /",
+        "provenance violations).",
         "",
         "``explore`` grids run their variants directly (each is",
         "benchmarked and judged by the KEEP threshold), so they are not",

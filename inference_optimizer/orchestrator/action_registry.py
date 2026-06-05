@@ -88,6 +88,13 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
 # this registry), instead of hard-coded carve-out lists in
 # ``critic.md``.
 #
+# This dimension only affects WHICH set of prompt rules the Critic
+# applies; it does not introduce a hidden hard gate of its own.
+# Critic safety carve-outs (mismatched benchmark, accuracy fail,
+# missing rollback, robustness conflict, payload / provenance
+# violations) are the only ``reject`` triggers; everything else
+# surfaces as ``advise`` (loosen P3_20).
+#
 # * ``archival`` — transcribes existing state to disk; introduces
 #   NO new measurements. Always approve: refusing forces the run
 #   to idle until the wall-clock deadline auto-enqueues the same

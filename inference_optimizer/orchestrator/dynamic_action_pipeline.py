@@ -229,16 +229,19 @@ def compose_critic_verdict_envelope(
     Returns ``(envelope_dict, lifecycle_status)``:
 
     * ``envelope_dict`` matches :data:`CRITIC_VERDICT_FIELDS` exactly.
-    * ``lifecycle_status`` is ``CRITIC_REJECTED`` for reject / revise,
-      ``INTEGRATING`` for approve.
+    * ``lifecycle_status`` is ``INTEGRATING`` when the patch is allowed
+      to land (``approve`` or ``advise``) and ``CRITIC_REJECTED`` for
+      ``reject`` / ``revise``.
 
     Composition rule: a safety-invariant violation in the pre-verdict
     (forged provenance, forbidden field, smuggled numeric claim)
     short-circuits to ``reject`` and the LLM verdict is ignored;
-    otherwise the LLM verdict wins. ``revise`` and ``reject`` both
-    land on ``CRITIC_REJECTED`` (no sub-agent re-dispatch loop today);
-    the verdict label is preserved on ``critic_verdict.json`` for
-    audit.
+    otherwise the LLM verdict wins. ``advise`` is the non-blocking
+    strategy verdict — the patch flows through to integrate and the
+    benchmark + KEEP threshold + stack rebench adjudicate the actual
+    contribution. ``revise`` and ``reject`` both land on
+    ``CRITIC_REJECTED`` (no sub-agent re-dispatch loop today); the
+    verdict label is preserved on ``critic_verdict.json`` for audit.
     """
     pre: CrossDomainPreverdict = run_mechanical_cross_domain_checks(
         proposal, spec_scope_domains=list(spec_scope_domains or ()),
@@ -255,7 +258,7 @@ def compose_critic_verdict_envelope(
         return envelope, DynamicActionStatus.CRITIC_REJECTED
 
     verdict = (llm_verdict or "approve").strip().lower()
-    if verdict not in {"approve", "reject", "revise"}:
+    if verdict not in {"approve", "advise", "reject", "revise"}:
         verdict = "reject"
     reason_codes: list[str] = list(pre.reason_codes)
     reviewer_notes: list[str] = list(pre.reviewer_notes)
@@ -271,7 +274,7 @@ def compose_critic_verdict_envelope(
         applied_rules=pre.applied_rules,
         cross_domain_flag=pre.cross_domain_flag,
     )
-    if verdict == "approve":
+    if verdict in {"approve", "advise"}:
         return envelope, DynamicActionStatus.INTEGRATING
     return envelope, DynamicActionStatus.CRITIC_REJECTED
 

@@ -64,15 +64,16 @@ def _proposal(**overrides: Any) -> dict[str, Any]:
 # ===========================================================================
 def test_cross_domain_rule_set_locked():
     """Adding a fourth rule (or renaming one) must be a design
-    change visible in this assertion."""
+    change visible in this assertion. Loosen P3_20 demoted every
+    cross-domain rule from a hard ``reject`` / ``revise`` to an
+    advisory ``advise`` — the strategy quality dimensions surface in
+    the alert detail rather than blocking the patch."""
     assert tuple(r.rule_id for r in CROSS_DOMAIN_RULES) == (
         "rationale_per_domain",
         "coupling_and_side_effects",
         "motivation_gap_valid",
     )
-    assert {r.failure_verdict for r in CROSS_DOMAIN_RULES} == {
-        "revise", "reject",
-    }
+    assert {r.failure_verdict for r in CROSS_DOMAIN_RULES} == {"advise"}
 
 
 def test_critic_verdict_fields_closed():
@@ -82,8 +83,14 @@ def test_critic_verdict_fields_closed():
     })
 
 
-def test_allowed_verdicts_match_p4_5_1():
-    assert ALLOWED_VERDICTS == frozenset({"approve", "reject", "revise"})
+def test_allowed_verdicts_include_advise():
+    """Loosen P3_20 added ``advise`` to the dynamic-action critic
+    verdict envelope so the strategy hints emitted by CROSS_DOMAIN_RULES
+    can land on disk verbatim instead of being coerced to ``reject``.
+    The downstream pipeline treats ``advise`` as non-blocking."""
+    assert ALLOWED_VERDICTS == frozenset({
+        "approve", "advise", "reject", "revise",
+    })
 
 
 # ===========================================================================

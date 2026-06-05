@@ -63,33 +63,34 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
     CrossDomainRule(
         rule_id="rationale_per_domain",
         description=(
-            "Proposal MUST give an independent rationale for each "
+            "Proposal SHOULD give an independent rationale for each "
             "domain listed in scope_domains — why this change is "
             "necessary within that domain's boundary."
         ),
-        failure_verdict="revise",
+        failure_verdict="advise",
         failure_reason_code="cross_domain_rationale_incomplete",
     ),
     CrossDomainRule(
         rule_id="coupling_and_side_effects",
         description=(
-            "Proposal MUST name the cross-domain coupling points "
+            "Proposal SHOULD name the cross-domain coupling points "
             "(why these changes must happen together) AND at least "
             "one potential side effect of the combination."
         ),
-        failure_verdict="revise",
+        failure_verdict="advise",
         failure_reason_code="cross_domain_coupling_unspecified",
     ),
     CrossDomainRule(
         rule_id="motivation_gap_valid",
         description=(
-            "Proposal MUST show that no single specialist could "
+            "Proposal SHOULD show that no single specialist could "
             "surface this combination within its own-domain prompt. "
             "A simple specialist-A + specialist-B concatenation is "
             "a grid combo (explore.params.grid), not a dynamic "
-            "action; reject when the motivation degenerates."
+            "action; advise when the motivation degenerates so the "
+            "stack rebench + KEEP threshold can adjudicate."
         ),
-        failure_verdict="reject",
+        failure_verdict="advise",
         failure_reason_code="cross_domain_motivation_invalid",
     ),
 )
@@ -107,7 +108,9 @@ CRITIC_VERDICT_FIELDS: frozenset[str] = frozenset({
     "cross_domain_flag",
 })
 
-ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "revise"})
+ALLOWED_VERDICTS: frozenset[str] = frozenset({
+    "approve", "advise", "reject", "revise",
+})
 
 
 # ---------------------------------------------------------------------------
