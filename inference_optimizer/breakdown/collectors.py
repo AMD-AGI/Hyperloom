@@ -658,6 +658,33 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     return cur if cur is not None else default
 
 
+def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
+    """Recover terminal reason/time from the CLOSE phase transition.
+
+    Older sessions can complete the phase state machine without mirroring the
+    CLOSE transition's reason back to top-level ``state.stop_reason``. The
+    phase history row is still Coordinator-authored and vocab-validated, so it
+    is the next-best lifecycle source for breakdown metadata.
+    """
+    history = state.get("phase_history") or []
+    if not isinstance(history, list):
+        return "", ""
+    for row in reversed(history):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("to_phase") or "").strip().upper() != "CLOSE":
+            continue
+        reason = str(
+            row.get("reason")
+            or row.get("stop_reason")
+            or row.get("exit_reason")
+            or ""
+        ).strip()
+        ts = str(row.get("ts") or row.get("entered_ts") or "").strip()
+        return reason, ts
+    return "", ""
+
+
 # ---------------------------------------------------------------------------
 # §1 Session metadata
 # ---------------------------------------------------------------------------
@@ -669,7 +696,13 @@ def collect_session(
 ) -> dict[str, Any]:
     """Top-level session identification + lifecycle."""
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
-    stop_reason = str(state.get("stop_reason") or "")
+    stop_reason = str(state.get("stop_reason") or "").strip()
+    close_stop_reason, close_ts = _close_phase_stop_reason(state)
+    if not stop_reason:
+        stop_reason = close_stop_reason
+    ended_at_utc = ""
+    if stop_reason:
+        ended_at_utc = _iso_z(close_ts) if close_ts else _utc_now_iso()
     elapsed_min: float | None = None
     if start_ts:
         try:
@@ -687,7 +720,7 @@ def collect_session(
         "claw_session_id":  manifest.get("claw_session_id") or state.get("claw_session_id"),
         "sandbox_user_id":  manifest.get("sandbox_user_id") or state.get("sandbox_user_id"),
         "created_at_utc":   manifest.get("created_at_utc") or start_ts,
-        "ended_at_utc":     _utc_now_iso() if stop_reason else "",
+        "ended_at_utc":     ended_at_utc,
         "stop_reason":      stop_reason,
         "max_minutes":      int(state.get("max_minutes") or manifest.get("max_minutes") or 0),
         "elapsed_minutes":  round(elapsed_min, 2) if elapsed_min is not None else 0.0,

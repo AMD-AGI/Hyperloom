@@ -313,6 +313,47 @@ def test_session_metadata(fixture_session: Path) -> None:
     assert s["max_minutes"] == 180
 
 
+def test_session_stop_reason_falls_back_to_close_phase(tmp_path: Path) -> None:
+    """Legacy states may close via phase_history without top-level stop_reason.
+
+    Regression: production artifacts had ``close_sequence_done=true`` and a
+    final ``to_phase=CLOSE`` row with ``reason=sweep_budget_exhausted``, while
+    ``state.stop_reason`` stayed blank. The breakdown session metadata should
+    still surface the terminal reason and close timestamp.
+    """
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {
+        "schema_version": 1,
+        "session_id": "closed-via-phase-history",
+        "created_at_utc": "2026-06-05T01:00:00+00:00",
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "closed-via-phase-history",
+        "stop_reason": "",
+        "close_sequence_done": True,
+        "phase_history": [
+            {
+                "from_phase": "KERNEL",
+                "to_phase": "SWEEP",
+                "reason": "kernel_phase_budget_exhausted",
+                "ts": "2026-06-05T02:00:00+00:00",
+                "ts_unix": 1780624800.0,
+            },
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "CLOSE",
+                "reason": "sweep_budget_exhausted",
+                "ts": "2026-06-05T03:04:05+00:00",
+                "ts_unix": 1780628645.0,
+            },
+        ],
+    })
+
+    s = build(sd)["session"]
+    assert s["stop_reason"] == "sweep_budget_exhausted"
+    assert s["ended_at_utc"] == "2026-06-05T03:04:05Z"
+
+
 def test_keep_stamping_only_best_attempt(fixture_session: Path) -> None:
     """KEEP decision must land on the BEST attempt, not every attempt."""
     oob = build(fixture_session)["oob_invocations"]
