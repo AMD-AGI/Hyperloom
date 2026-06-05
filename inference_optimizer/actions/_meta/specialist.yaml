@@ -1,3 +1,6 @@
+# `family` / `cost_minutes_*` / `expected_gain_pct` / `accuracy_risk` /
+# `crash_risk` / `typical_runtime_min` are prompt-advisory metadata
+# (see action_registry.py docstring); the runtime never gates on them.
 name: specialist
 family: creative
 cost_minutes_p50: 6.0

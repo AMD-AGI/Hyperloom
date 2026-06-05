@@ -5,49 +5,65 @@ action). The corresponding markdown body at ``actions/<name>.md`` is
 the agent-facing playbook (loaded lazily by SubAgentRunner / Coordinator
 when composing a sub-agent prompt).
 
-Used by:
+Field consumers split cleanly into two categories:
 
-* :class:`PolicyGate` — looks up ``allowed_tools`` for sub-agent dispatch
-  and validates that proposed action names exist
-* :class:`SubAgentRunner` — reads ``requires_lanes`` / ``lease_ttl_sec``
-  / ``allowed_tools`` to gate sub-agent execution
-* Budget-Aware Scheduler (P1+) — uses ``family`` / ``expected_gain_pct``
-  / ``cost_minutes_p75`` / ``accuracy_risk`` / ``crash_risk`` for scoring
+Operational (these fields gate execution / dispatch — invariants):
 
-v0.6 schema (DESIGN §16.2)::
+* ``allowed_tools`` — read by PolicyGate / SubAgentRunner to bound the
+  tool surface a sub-agent may call.
+* ``requires_lanes`` — read by the resource-lock / lane lease system.
+* ``lease_ttl_sec`` — read by SubAgentRunner / TaskRegistry.
+* ``preferred_backend`` / ``preferred_model`` — backend selection.
+* ``max_turns`` — bound for sub-agent reactor budgets.
+* ``side_effects`` — Coordinator routing of writes.
+
+Prompt-advisory metadata (these fields are RENDERED INTO PROMPTS so
+the LLM has a stable mental model; nothing in the runtime sorts /
+filters / cools-down / picks an action based on them):
+
+* ``family`` — prompt grouping label only (no scheduler).
+* ``pipeline_phase`` — prompt grouping for the catalogue ETA section.
+* ``cost_minutes_p50`` / ``cost_minutes_p75`` / ``typical_runtime_min``
+  — display-only "typical wall-clock" hints.
+* ``expected_gain_pct`` — display-only prior gain range; not a
+  measurement and not a sort key.
+* ``accuracy_risk`` / ``crash_risk`` — Critic-prompt advisory only;
+  the post-P3_20 Critic rejects only on safety carve-outs (mismatched
+  benchmark, accuracy fail, missing rollback, robustness conflict,
+  payload / provenance violations), not on these per-action priors.
+* ``description`` / ``applicable_when`` — prompt blurbs.
+
+There is no scoreboard, no per-action priority, no automatic
+``sort by expected_gain`` or ``cooldown by family`` anywhere in the
+runtime. KB_design §3.9 Inv-9.1 is enforced by construction here.
+
+Schema (DESIGN §16.2)::
 
     name:                str  (required, must equal the filename stem)
     family:              one of {prep, analysis, shallow, deep_kernel,
                                  long, creative, resilience}
-    cost_minutes_p50:    float
-    cost_minutes_p75:    float
-    expected_gain_pct:   [low, high]   # 2-element list of floats
-    accuracy_risk:       float   # 0..1
-    crash_risk:          float   # 0..1
-    prerequisites:       list[str]
-    requires_lanes:      list[str]
-    allowed_tools:       list[str]
-    side_effects:        list[str]
-    preferred_backend:   "claude" | "codex"
-    preferred_model:     str
-    max_turns:           int
-    lease_ttl_sec:       int
-    applicable_when:     list[str]    # free-form predicates
-    # prompt-builder additions:
-    description:         str          # 1-line action brief consumed by
-                                      # prompt_builder; defaults to name
-                                      # when missing.
-    pipeline_phase:      str          # one of VALID_PIPELINE_PHASES; used
-                                      # by prompt_builder to group actions.
-                                      # Defaults to "explore".
-    typical_runtime_min: float        # display-only typical wallclock for
-                                      # the action; defaults to
+    cost_minutes_p50:    float    # prompt-advisory
+    cost_minutes_p75:    float    # prompt-advisory
+    expected_gain_pct:   [low, high]   # prompt-advisory prior, NOT a sort key
+    accuracy_risk:       float    # 0..1, prompt-advisory
+    crash_risk:          float    # 0..1, prompt-advisory
+    prerequisites:       list[str]    # prompt-advisory ordering hint
+    requires_lanes:      list[str]    # operational
+    allowed_tools:       list[str]    # operational
+    side_effects:        list[str]    # operational
+    preferred_backend:   "claude" | "codex"   # operational
+    preferred_model:     str          # operational
+    max_turns:           int          # operational
+    lease_ttl_sec:       int          # operational
+    applicable_when:     list[str]    # prompt-advisory predicate list
+    description:         str          # prompt rendering; defaults to name.
+    pipeline_phase:      str          # one of VALID_PIPELINE_PHASES;
+                                      # prompt grouping only.
+    typical_runtime_min: float        # display-only; defaults to
                                       # cost_minutes_p50.
-
-v0.6 vs v0.5 schema:
-
-* Removed ``allowed_modes`` (single full mode — DESIGN ADR-34)
-* Family vocabulary unchanged (7 families)
+    verdict_class:       "archival" | "exploration" | "promotion"
+                                      # routes Critic prompt rule set;
+                                      # never a hidden gate (P3_20).
 """
 
 from __future__ import annotations
@@ -59,6 +75,10 @@ from typing import Any
 from ..paths import asset_actions_dir
 
 
+# ``family`` is a prompt grouping label only. Nothing in the runtime
+# sorts, filters, cools-down, or prioritises actions by family. The
+# enum stays small so the prompt's "actions by family" section stays
+# legible.
 VALID_FAMILIES: frozenset[str] = frozenset({
     "prep", "analysis", "shallow", "deep_kernel",
     "long", "creative", "resilience",
@@ -68,9 +88,9 @@ VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
 
 # Coarse-grained pipeline phase used by prompt_builder to group actions
 # inside the Orchestration system prompt (e.g. "Run prep actions first,
-# then move to explore..."). Kept intentionally small; map onto the
-# DESIGN §11 timeline rather than the family taxonomy because family is
-# scheduler-oriented (prep/analysis/...) while phases are LLM-oriented.
+# then move to explore..."). Prompt-advisory only; the actual phase
+# state machine lives in :mod:`phase_state` and is not driven by this
+# enum. Kept intentionally small to match the catalogue ETA section.
 VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "prep",        # target_analysis / baseline / warm replay
     "measure",     # baseline (gates explore)
@@ -173,7 +193,16 @@ class ActionRegistryError(RuntimeError):
 
 @dataclass(frozen=True)
 class ActionMetadata:
-    """Mirrors ``actions/_meta/<name>.yaml`` (DESIGN §16.2)."""
+    """Mirrors ``actions/_meta/<name>.yaml`` (DESIGN §16.2).
+
+    Operational fields (``allowed_tools`` / ``requires_lanes`` /
+    ``preferred_backend`` / ``preferred_model`` / ``max_turns`` /
+    ``lease_ttl_sec`` / ``side_effects``) gate execution. Every other
+    field is prompt-advisory only — the runtime never sorts, filters,
+    cools-down, or prioritises actions by ``family`` /
+    ``expected_gain_pct`` / ``cost_minutes_p*`` / ``typical_runtime_min``
+    / ``accuracy_risk`` / ``crash_risk``. See module docstring.
+    """
 
     name: str
     family: str
@@ -191,14 +220,13 @@ class ActionMetadata:
     max_turns: int = 30
     lease_ttl_sec: int = 1800
     applicable_when: tuple[str, ...] = ()
-    # prompt-builder fields — see module docstring.
     description: str = ""
     pipeline_phase: str = "explore"
     typical_runtime_min: float = 0.0
-    # per-action verdict policy class. Drives Critic's
-    # ``action_verdict_policy`` lookup (see ``VALID_VERDICT_CLASSES``).
-    # Defaults inferred from ``default_verdict_class_for(name)`` when
-    # the yaml omits the field.
+    # Drives Critic's ``action_verdict_policy`` rule set (archival /
+    # exploration / promotion). Routes prompt rules only — never a
+    # hidden hard gate (loosen P3_20). Defaults inferred from
+    # :func:`default_verdict_class_for` when the yaml omits the field.
     verdict_class: str = ""
 
     @classmethod
