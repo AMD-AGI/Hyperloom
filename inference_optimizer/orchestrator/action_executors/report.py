@@ -32,6 +32,18 @@ from ...storage.connection import SqliteConnection
 log = logging.getLogger(__name__)
 
 
+def _safe_call(state: Any, method: str, default: Any) -> Any:
+    """Call a zero-arg SharedState helper, returning ``default`` when the
+    attribute is absent (partial-state stub) or the call raises."""
+    fn = getattr(state, method, None)
+    if not callable(fn):
+        return default
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001 — report must never crash on annotations
+        return default
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -65,6 +77,14 @@ def _build_summary_dict(
         "cumulative_gain_validated_ts":       state.cumulative_gain_validated_ts,
         "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
         "optimization_stack_len":             len(state.optimization_stack or []),
+        # Honesty annotations: surface what was left unfinished/unvalidated
+        # at report time rather than blocking the report (the
+        # stack_rebench / hot_kernel deny gates were removed). Read
+        # defensively so partial-state stubs / resume snapshots that lack
+        # the helpers still produce a report.
+        "has_unvalidated_keeps":              _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
+        "untried_hot_reusable_kernels":       list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
+        "pending_keep_kernels":               list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
         "crash_count":      state.crash_count,
         "pruned_families":  state.pruned_families,
         "max_minutes":      state.max_minutes,
@@ -132,13 +152,14 @@ def _format_md(summary: dict[str, Any]) -> str:
     else:
         lines.append(
             f"- cumulative_gain_val : `0.00%` "
-            f"⚠ never validated — no `validate_stack` action ran in this session"
+            f"⚠ never validated — no full-stack rebench ran in this session"
         )
     if cb.get("ttft_mean_ms") is not None:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
         lines.append(f"- e2el_mean      : `{cb.get('e2el_mean_ms'):.1f}` ms")
     lines.append("")
+    lines.extend(_format_completeness_annotations(summary))
     lines.append("## Run summary")
     lines.append("")
     lines.append(f"- crash_count    : {summary['crash_count']}")
@@ -177,6 +198,40 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.extend(_format_external_baseline_section(ext))
 
     return "\n".join(lines)
+
+
+def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
+    """Render the honesty annotations for work left unfinished at report
+    time.
+
+    The session can end with unvalidated KEEPs, untried hot reusable
+    kernels, or KEEP'd kernels awaiting integrate — these are no longer
+    blocked by deny gates, so the report states them as facts.
+    """
+    unvalidated = bool(summary.get("has_unvalidated_keeps"))
+    untried = list(summary.get("untried_hot_reusable_kernels") or [])
+    pending_keeps = list(summary.get("pending_keep_kernels") or [])
+    if not (unvalidated or untried or pending_keeps):
+        return []
+    lines: list[str] = ["## Completeness annotations", ""]
+    if unvalidated:
+        lines.append(
+            "- ⚠ `optimization_stack` has KEEPs landed since the last "
+            "full-stack rebench — `cumulative_gain_validated` does not "
+            "yet reflect them (unvalidated)."
+        )
+    if pending_keeps:
+        lines.append(
+            f"- ⚠ kernel_opt KEEPs awaiting integrate: "
+            f"{', '.join(pending_keeps)}."
+        )
+    if untried:
+        lines.append(
+            f"- ⚠ reusable hot kernels with no kernel_opt attempt: "
+            f"{', '.join(untried)}."
+        )
+    lines.append("")
+    return lines
 
 
 def _format_steward_section(summary: dict[str, Any]) -> list[str]:

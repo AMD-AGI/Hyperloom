@@ -4954,20 +4954,23 @@ class Coordinator:
         action_name: str,
         proposed_params: dict[str, Any] | None = None,
     ) -> PolicyDenied | None:
-        """Reject orchestration action/delegate attempts that skip required steps.
+        """Reject orchestration action/delegate attempts that run before
+        baseline.
 
-        Once optimization_stack has unvalidated KEEPs, the next
-        ``explore`` round must carry the inlined stack rebench
-        (PolicyGate rule ``stack_rebench_required``). This function
-        only enforces the cross-action ordering (target_analysis
-        before baseline, baseline before everything else, baseline
-        self-loop guard, profile/integrate kernel-agent guards).
+        Only two invariants remain here: nothing runs before
+        ``baseline`` produces a positive ``baseline_tput`` (no baseline,
+        no meaning), and the baseline self-loop guard (dedup / anti-loop,
+        delegated to :meth:`_baseline_self_loop_denial`). The former
+        sequencing denials (target_analysis-first, profile-required,
+        KEEP-forces-integrate, hot-kernel report gate, stack-rebench) were
+        strategy gates and are removed — those next-step calls are the
+        LLM's. Report honesty for unvalidated KEEPs / untried hot kernels
+        is now carried by the report's completeness annotations and the
+        per-entry ``validated`` flag in the breakdown, not by a deny.
 
         ``proposed_params`` is the ``intent.payload["params"]`` dict
-        (propose_action / delegate path). Currently only consumed by
-        the baseline self-loop guard above, but the kwarg signature is
-        kept open so other per-action stop-losses can plug in without
-        further call-site churn.
+        (propose_action / delegate path), consumed by the baseline
+        self-loop guard.
         """
         action = str(action_name or "").strip()
         sequence_actions = {
@@ -4979,37 +4982,6 @@ class Coordinator:
             return None
         if self.shared_state.stop_reason:
             return None
-        # target_analysis hard gate: target_baseline.json must be on disk
-        # before any other sequence action runs. The executor never raises
-        # (failures land as `status=fetch_error`, missing GPU lands as
-        # `reason=no_target_gpu_configured`) so this gate always opens
-        # after a single attempt regardless of whether
-        # --compare-against-gpu was supplied.
-        if (
-            not self._target_analysis_baseline_exists()
-            and action != "target_analysis"
-        ):
-            if self._compare_against_gpu:
-                hint = (
-                    "propose/delegate `target_analysis` so InferenceX "
-                    f"reference for --compare-against-gpu="
-                    f"{self._compare_against_gpu!r} is fetched into "
-                    "$SESSION_DIR/target_analysis/target_baseline.json"
-                )
-            else:
-                hint = (
-                    "propose/delegate `target_analysis` so a "
-                    "reason='no_target_gpu_configured' marker JSON is "
-                    "written to $SESSION_DIR/target_analysis/"
-                    "target_baseline.json (no --compare-against-gpu was "
-                    "supplied; the marker is what unblocks the rest of "
-                    "the pipeline)"
-                )
-            return PolicyDenied(
-                f"action={action!r} denied: target_analysis must run first",
-                rule="execution_order",
-                hint=hint,
-            )
         if (
             self.shared_state.baseline_tput <= 0
             and action not in {"baseline", "target_analysis"}
@@ -5023,106 +4995,6 @@ class Coordinator:
             self_loop = self._baseline_self_loop_denial(proposed_params)
             if self_loop is not None:
                 return self_loop
-        # Profile / integrate guards only apply when kernel agent is in
-        # the role registry — no-kernel mode skips them.
-        # ``trace_analyze`` is enforced at the REQUEST layer
-        # (``_sequence_denial_for_request``) for ``run_optimization``
-        # only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
-        # never gated on a fresh ``last_trace_analyze`` cache — those
-        # actions don't need kernel candidates to make progress.
-        if "kernel" in self.role_registry:
-            if (
-                self.shared_state.baseline_tput > 0
-                and not self.shared_state.last_profile_trace
-                and action != "profile"
-            ):
-                return PolicyDenied(
-                    f"action={action!r} denied: profile must run before {action!r}",
-                    rule="execution_order",
-                    hint=(
-                        "wait for the Coordinator-internal analysis task "
-                        "(auto-enqueued at PRELUDE / on every +10% watermark "
-                        "crossing) to populate ``last_profile_trace``; "
-                        "PolicyGate denies LLM-proposed `profile` / "
-                        "`roofline` with "
-                        "``rule='analysis_action_not_llm_proposable'``. If "
-                        "``auto_roofline_pending_task_id`` is stuck on a "
-                        "failed task, emit `recover`."
-                    ),
-                )
-            # integrate gate: kernel_opt KEEP awaiting integrate. Allow
-            # integrate / report through; recover is not in
-            # ``sequence_actions`` and therefore already bypasses this
-            # function (no-op early return).
-            pending_kid = self._kernel_opt_keep_pending()
-            if pending_kid and action not in {"integrate", "report"}:
-                return PolicyDenied(
-                    f"action={action!r} denied: integrate must run first",
-                    rule="execution_order",
-                    hint=(
-                        f"kernel_opt returned KEEP for kernel_id="
-                        f"{pending_kid!r}; emit request{{target_agent="
-                        "'kernel', kind='integrate', params={kernel_id: "
-                        f"{pending_kid!r}}}}} before any further explore"
-                    ),
-                )
-        # Hot-kernel report gate. Block ``report`` when any reusable hot
-        # kernel with gpu_pct >= 3% has not yet been tried, rejected, or
-        # integrated.
-        # Allowed through the gate:
-        #   - kernel_opt request itself (handled at request layer)
-        #   - integrate (still needs to drain prior KEEPs; the
-        #     integrate-pending gate above already handles ordering)
-        #   - recover (not in sequence_actions, bypasses entirely)
-        # Blocked:
-        #   - report -- the LLM cannot declare the session done
-        #     while a meaningful kernel lever exists.
-        #
-        # Fire only when ``run_optimization`` is dispatchable to avoid
-        # trapping the LLM between opposing gates.
-        if action == "report" and self._kernel_opt_unlocked():
-            untried = self.shared_state.untried_hot_reusable_kernels()
-            if untried:
-                untried_str = ", ".join(untried)
-                return PolicyDenied(
-                    f"action='report' denied: untried hot reusable "
-                    f"kernels still present ({untried_str})",
-                    rule="hot_kernel_unfinished",
-                    hint=(
-                        "Every reusable hot kernel with gpu_pct >= 3% "
-                        "must get at least one kernel_opt attempt (or "
-                        "be retired via REVERT / max_failures) before "
-                        f"the session may end. Pending: {untried_str}. "
-                        "Emit request{target_agent='kernel', "
-                        "kind='run_optimization', "
-                        "params={candidates_path=<from "
-                        "last_trace_analyze>}} so the batch fans out "
-                        "across the queue. Threshold overrides: "
-                        "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT / "
-                        "HYPERLOOM_KERNEL_OPT_GATE_TOP_N."
-                    ),
-                )
-        # stack-rebench precedence. Once a
-        # KEEP lands on optimization_stack we want the next action
-        # that touches the stack to also revalidate it. The merged
-        # ``explore`` action carries an *inlined* per-KEEP stack
-        # rebench, so we allow it through
-        # alongside ``baseline`` (ad-hoc re-baseline) and ``report``
-        # (the wind-down).
-        if (
-            self.shared_state.optimization_stack_has_unvalidated_keeps()
-            and action not in {"explore", "baseline", "report"}
-        ):
-            return PolicyDenied(
-                f"action={action!r} denied: stack rebench required first",
-                rule="stack_rebench_required",
-                hint=(
-                    "optimization_stack has KEEPs that have not been "
-                    "re-validated end-to-end; propose/delegate "
-                    "`explore` (its per-KEEP stack rebench is "
-                    "inlined) or `report` before any further action"
-                ),
-            )
         return None
 
     def _sequence_denial_for_request(

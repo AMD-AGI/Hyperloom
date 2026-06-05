@@ -85,27 +85,15 @@ def _assert_no_forbidden(blob: str, where: str) -> None:
     "action",
     ["explore", "sweep", "report", "integrate"],
 )
-def test_sequence_denial_action_hint_does_not_tell_llm_to_propose_profile(
+def test_sequence_denial_action_no_longer_blocks_on_profile(
     coord: Coordinator, action: str,
 ):
-    """``_sequence_denial_for_action`` returns the PolicyDenied that the
-    LLM reads in its inbox. When the gate fires on empty
-    ``last_profile_trace``, the hint must NOT tell the LLM to propose
-    profile (PolicyGate denies that too)."""
+    """The action-layer profile-prereq deny was removed (P2_10): with an
+    empty ``last_profile_trace`` (and baseline done), explore-family
+    actions are no longer sequence-denied for a missing profile."""
     coord.shared_state.last_profile_trace = ""
     coord.shared_state.baseline_tput = 100.0
-    denied = coord._sequence_denial_for_action(action)
-    assert isinstance(denied, PolicyDenied), (
-        f"expected the profile-prereq denial to fire for action={action!r}"
-    )
-    assert denied.rule == "execution_order"
-    _assert_no_forbidden(denied.hint, f"_sequence_denial_for_action({action!r})")
-    assert "analysis_action_not_llm_proposable" in denied.hint or (
-        "auto-enqueue" in denied.hint.lower() or "coordinator" in denied.hint.lower()
-    ), (
-        f"_sequence_denial_for_action({action!r}): hint must name the "
-        f"Coordinator-internal analysis path; got: {denied.hint!r}"
-    )
+    assert coord._sequence_denial_for_action(action) is None
 
 
 @pytest.mark.parametrize(

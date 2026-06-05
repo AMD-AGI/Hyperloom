@@ -99,49 +99,31 @@ def _seed_post_baseline(coord: Coordinator) -> None:
 
 
 # ===========================================================================
-# target_analysis gate
+# target_analysis is no longer sequence-gated (only baseline-first remains)
 # ===========================================================================
-def test_target_analysis_denial_blocks_baseline_when_gate_open(session_dir):
+def test_baseline_allowed_without_target_analysis(session_dir):
+    """The target_analysis-first deny was removed: ``baseline`` is no
+    longer blocked on a missing target_baseline.json."""
     coord = Coordinator(
         session_dir, backends=_backends_full(),
         compare_against_gpu="b300",
     )
-    denied = coord._sequence_denial_for_action("baseline")
-    assert isinstance(denied, PolicyDenied)
-    assert denied.rule == "execution_order"
-    assert "target_analysis must run first" in str(denied)
-    # target_analysis itself is allowed through.
+    assert coord._sequence_denial_for_action("baseline") is None
     assert coord._sequence_denial_for_action("target_analysis") is None
 
 
-def test_target_analysis_denial_blocks_baseline_when_compare_unset(session_dir):
-    """Without --compare-against-gpu the denial still fires; the hint
-    just changes to mention the marker JSON."""
+def test_baseline_first_still_blocks_other_actions(session_dir):
+    """The baseline-first invariant remains: with baseline_tput == 0 and
+    no target_analysis on disk, ``explore`` is denied for baseline (not
+    target_analysis)."""
     coord = Coordinator(session_dir, backends=_backends_full())
-    denied = coord._sequence_denial_for_action("baseline")
-    assert isinstance(denied, PolicyDenied)
-    assert denied.rule == "execution_order"
-    assert "target_analysis must run first" in str(denied)
-    assert "no_target_gpu_configured" in (denied.hint or "")
-    # target_analysis itself is allowed through.
-    assert coord._sequence_denial_for_action("target_analysis") is None
-
-
-def test_target_analysis_denial_clears_after_baseline_json_written(session_dir):
-    coord = Coordinator(
-        session_dir, backends=_backends_full(),
-        compare_against_gpu="b300",
-    )
-    _write_baseline_json(session_dir)
-    # baseline gate now applies (baseline_tput is 0). target_analysis no
-    # longer blocks; the next gate down (baseline) is what speaks up.
-    # Exercise the gate via the canonical ``explore`` action.
     denied = coord._sequence_denial_for_action("explore")
     assert isinstance(denied, PolicyDenied)
+    assert denied.rule == "execution_order"
     assert "baseline must run first" in str(denied)
-    # target_analysis -> the gate has just been satisfied so it should
-    # also pass through cleanly.
+    # baseline + target_analysis themselves pass.
     assert coord._sequence_denial_for_action("baseline") is None
+    assert coord._sequence_denial_for_action("target_analysis") is None
 
 
 # ===========================================================================
@@ -218,27 +200,22 @@ def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
     assert coord._kernel_opt_keep_pending() == ""
 
 
-def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
+def test_pending_keep_no_longer_blocks_other_actions(session_dir):
+    """The KEEP-forces-integrate deny was removed: a pending kernel_opt
+    KEEP no longer blocks explore / sweep. ``_kernel_opt_keep_pending``
+    still reports the fact (surfaced in the report's completeness
+    annotations), but integrate is now the LLM's call."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(
         coord, kernel_id="k-rmsnorm", decision="KEEP",
         source_file="/p/rmsnorm.py",
     )
-    # The canonical EXPLORE-phase actions (``explore`` + ``sweep``)
-    # must be denied while ``integrate`` is required.
-    for action in ("explore", "sweep"):
-        denied = coord._sequence_denial_for_action(action)
-        assert isinstance(denied, PolicyDenied), (
-            f"{action!r} should be denied while integrate is required"
+    assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
+    for action in ("explore", "sweep", "integrate", "report"):
+        assert coord._sequence_denial_for_action(action) is None, (
+            f"{action!r} must not be sequence-denied by a pending KEEP"
         )
-        assert denied.rule == "execution_order"
-        assert "integrate must run first" in str(denied)
-        assert "k-rmsnorm" in (denied.hint or "")
-    # integrate / report bypass the integrate gate. ``report``'s own
-    # PR-C hot-kernel gate is separately covered below.
-    assert coord._sequence_denial_for_action("integrate") is None
-    assert coord._sequence_denial_for_action("report") is None
 
 
 # ---------------------------------------------------------------------------
@@ -252,16 +229,10 @@ def _seed_trace_analyze(coord, *, hot_kernels, task_groups=None):
     }
 
 
-def test_report_denied_when_hot_reusable_kernels_untried(session_dir):
-    """Repro of session 20260522T164910Z (log1): the LLM jumped
-    straight to ``report`` despite k001=23.7% / k002=37.3% / k004=9.7%
-    being reusable hot kernels with zero attempts. The new gate must
-    deny report and surface the untried set in the hint.
-
-    Requires the kernel_opt request gate to be open so the
-    hot_kernel_unfinished rule activates -- a roofline snapshot on
-    record opens it.
-    """
+def test_report_allowed_when_hot_reusable_kernels_untried(session_dir):
+    """The hot_kernel_unfinished report gate was removed: ``report`` is
+    allowed even with untried reusable hot kernels. The report's
+    completeness annotations surface the untried set instead of a deny."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_trace_analyze(coord, hot_kernels=[
@@ -269,57 +240,12 @@ def test_report_denied_when_hot_reusable_kernels_untried(session_dir):
          "source_file": "/sgl/aiter/ops/moe_op.py"},
         {"kernel_id": "k002", "gpu_pct": 37.3, "reusable_native_kernel": True,
          "source_file": "/sgl/aiter/ops/moe_op.py"},
-        {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True,
-         "source_file": "/sgl/aiter/ops/rmsnorm.py"},
     ])
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
     coord.shared_state.explore_attempts = [{"variant_name": "x"}]
-
-    denied = coord._sequence_denial_for_action("report")
-    assert isinstance(denied, PolicyDenied)
-    assert denied.rule == "hot_kernel_unfinished"
-    # Hint must name the untried kernels so the LLM can act.
-    assert "k001" in (denied.hint or "")
-    assert "k002" in (denied.hint or "")
-    assert "k004" in (denied.hint or "")
-
-
-def test_report_allowed_after_every_hot_kernel_tried(session_dir):
-    """Once every reusable hot kernel has either KEEP/REVERT/PARTIAL
-    or has been retired via max_failures, the gate opens. Mix of
-    integrate-stack + rejected_kernel_ids should both count as 'tried'.
-    """
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
-         "source_file": "/p/rmsnorm.py"},
-    ])
-    # k001 retired via max_failures.
-    coord.shared_state.rejected_kernel_ids = ["k001"]
-    coord.shared_state.kernel_opt_attempts = {
-        "k001": {
-            "attempts": 1, "failure_count": 1,
-            "last_decision": "", "last_status": "failed",
-        },
-    }
-    # k002 was integrated and validated (so the unvalidated-KEEPs
-    # gate doesn't independently block report).
-    coord.shared_state.optimization_stack.append({
-        "action": "integrate", "kernel_id": "k002",
-        "target_file": "/p/rmsnorm.py", "tput": 4500.0,
-    })
-    coord.shared_state.cumulative_gain_validated_stack_len = len(
-        coord.shared_state.optimization_stack
-    )
-
-    # Hot-kernel gate must NOT fire (everything tried). Other gates
-    # may still apply -- assert specifically on the rule we care about.
-    denied = coord._sequence_denial_for_action("report")
-    if denied is not None:
-        assert denied.rule != "hot_kernel_unfinished", denied
+    assert coord._sequence_denial_for_action("report") is None
+    # The fact is still observable for the report annotation.
+    assert coord.shared_state.untried_hot_reusable_kernels()
 
 
 def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
@@ -342,85 +268,17 @@ def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
     assert summary.find("k002") < summary.find("k001"), summary
 
 
-def test_report_gate_inactive_when_no_reusable_hot_kernel_above_threshold(
-    session_dir,
-):
-    """If the trace only has aten::mm or sub-3% rmsnorms, the gate
-    correctly allows report -- nothing more for kernel_opt to do."""
+def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
+    """``report`` is never sequence-denied for hot-kernel reasons now —
+    whether the kernels are reusable, sub-threshold, or untried."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 15.0, "reusable_native_kernel": False,
-         "source_file": "/aten/mm.py"},  # aten not reusable
-        {"kernel_id": "k002", "gpu_pct": 2.5, "reusable_native_kernel": True,
-         "source_file": "/p/rmsnorm.py"},  # below 3% threshold
+        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
     ])
+    coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
     assert coord._sequence_denial_for_action("report") is None
-
-
-# ---------------------------------------------------------------------------
-# PR-C hot-kernel report gate: ``_kernel_opt_unlocked`` opens once a
-# roofline snapshot exists (or the escape hatch is set).
-# ---------------------------------------------------------------------------
-def _seed_roofline_snapshot(coord, *, snapshot_id=1):
-    """Mark a roofline snapshot as recorded so ``_kernel_opt_unlocked``
-    reports the kernel_opt request gate as open."""
-    coord.shared_state.last_trace_analyze = dict(
-        coord.shared_state.last_trace_analyze or {}
-    )
-    coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = snapshot_id
-
-
-def test_report_gate_fires_once_snapshot_exists(session_dir):
-    """With a roofline snapshot on record, ``_kernel_opt_unlocked`` is
-    open and PR-C's hot_kernel_unfinished rule denies ``report`` while
-    reusable hot kernels remain untried."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
-    _seed_roofline_snapshot(coord, snapshot_id=1)
-
-    assert coord._kernel_opt_unlocked() is True
-    denied = coord._sequence_denial_for_action("report")
-    assert isinstance(denied, PolicyDenied)
-    assert denied.rule == "hot_kernel_unfinished"
-
-
-def test_report_gate_closed_without_snapshot(session_dir):
-    """Without a roofline snapshot (and no escape hatch),
-    ``_kernel_opt_unlocked`` is closed so hot_kernel_unfinished does
-    not push the LLM toward kernel_opt."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
-
-    assert coord._kernel_opt_unlocked() is False
-    denied = coord._sequence_denial_for_action("report")
-    if denied is not None:
-        assert denied.rule != "hot_kernel_unfinished", denied
-
-
-def test_report_gate_active_with_escape_hatch(session_dir, monkeypatch):
-    """ALLOW_EARLY_KERNEL_OPT unlocks kernel_opt unconditionally ->
-    hot_kernel_unfinished fires even without a roofline snapshot."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
-    # No snapshot at all; escape hatch unlocks kernel_opt.
-    assert coord._kernel_opt_unlocked() is True
-    denied = coord._sequence_denial_for_action("report")
-    assert isinstance(denied, PolicyDenied)
-    assert denied.rule == "hot_kernel_unfinished"
 
 
 # ===========================================================================

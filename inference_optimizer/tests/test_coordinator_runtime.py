@@ -547,15 +547,11 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_execution_order_denies_backends_before_profile(session_dir):
-    """After baseline, profile is mandatory before explore/sweep.
-
-    v0.8 M3 + KB_gaps/Gap-10: ``backends`` was retired; PolicyGate
-    now denies it with ``rule='action_deprecated'`` before the
-    execution-order gate fires. We exercise the same sequence_denial
-    path using the canonical replacement ``explore`` which carries
-    the merged backends/params behaviour.
-    """
+async def test_explore_not_denied_before_profile(session_dir):
+    """The profile-required sequence deny was removed (P2_10): after
+    baseline, ``explore`` is no longer blocked on an empty
+    ``last_profile_trace``. Analysis is auto-managed; the LLM decides
+    when to proceed."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "explore", "predicted_gain_pct": 5.0,
     })
@@ -568,14 +564,14 @@ async def test_execution_order_denies_backends_before_profile(session_dir):
 
         await c.tick(1)
 
-        assert not c.state.pending_proposals
+        # No execution-order/profile denial should fire.
         obs = await c.bus.tail(to_agent="orchestration", topic="observation")
-        assert any(
-            m.payload.get("kind") == "policy_denied"
-            and m.payload.get("rule") == "execution_order"
-            and "profile" in str(m.payload.get("hint"))
-            for m in obs
-        )
+        for m in obs:
+            if m.payload.get("kind") != "policy_denied":
+                continue
+            assert "profile must run" not in str(m.payload.get("hint") or ""), (
+                f"profile-required gate fired despite removal: {m.payload!r}"
+            )
     finally:
         await c.stop()
 

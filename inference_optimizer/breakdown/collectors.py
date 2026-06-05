@@ -4086,21 +4086,35 @@ def collect_optimization_stack(
 ) -> list[dict[str, Any]]:
     """Mirror ``state.optimization_stack[]`` to the breakdown.
 
+    Each entry is stamped ``validated`` (true when its stack position is
+    within ``cumulative_gain_validated_stack_len`` — i.e. covered by the
+    last full-stack rebench; false otherwise) so downstream consumers can
+    tell which KEEPs contributed to the honest validated cumulative gain
+    without inferring it from lengths.
+
     Returns ``[]`` when the field is absent or empty (pre-baseline /
     fresh session). Never raises.
     """
     stack = state.get("optimization_stack") or []
     if not isinstance(stack, list):
         return []
+    try:
+        validated_len = int(state.get("cumulative_gain_validated_stack_len") or 0)
+    except (TypeError, ValueError):
+        validated_len = 0
     out: list[dict[str, Any]] = []
-    for entry in stack:
+    for idx, entry in enumerate(stack):
         if not isinstance(entry, dict):
             continue
-        out.append(_normalize_optimization_stack_entry(entry))
+        out.append(
+            _normalize_optimization_stack_entry(entry, validated=idx < validated_len)
+        )
     return out
 
 
-def _normalize_optimization_stack_entry(raw: dict[str, Any]) -> dict[str, Any]:
+def _normalize_optimization_stack_entry(
+    raw: dict[str, Any], *, validated: bool,
+) -> dict[str, Any]:
     """Coerce one stack entry to the schema shape with stable types.
 
     Unknown / future fields pass through verbatim under their raw
@@ -4116,6 +4130,7 @@ def _normalize_optimization_stack_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "tput":                         _to_float(raw.get("tput")),
         "ts":                           str(raw.get("ts") or ""),
         "workspace":                    raw.get("workspace"),
+        "validated":                    bool(validated),
     }
     # gemm_tuning-specific evidence (optional, only populated by the
     # Coordinator's ``_promote_gemm_tuning_keep`` path).

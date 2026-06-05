@@ -861,6 +861,11 @@ class OptimizationStackEntry(TypedDict, total=False):
     * ``provenance`` — ``specialist:<domain>`` / ``default_grid`` /
       ``llm_direct`` / ``legacy:<action>`` for explore winners.
     * ``task_id`` — orchestrator task id (link to specialist_runs etc).
+    * ``validated`` — true when this entry's stack position is within
+      ``cumulative_gain_validated_stack_len`` (covered by the last
+      full-stack rebench); false for KEEPs landed since that rebench.
+      Lets consumers tell apart honest validated KEEPs from
+      not-yet-revalidated ones without re-deriving lengths.
     """
     action: str
     variant_name: str
@@ -869,6 +874,7 @@ class OptimizationStackEntry(TypedDict, total=False):
     tput: float | None
     ts: str
     workspace: str | None
+    validated: bool
     # gemm_tuning evidence
     tuned_file: str
     final_report_path: str
