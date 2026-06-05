@@ -191,7 +191,13 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
 
 
 @pytest.mark.asyncio
-async def test_run_optimization_denied_until_fp8_gemm_tuning_terminal(session_dir):
+async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
+    """The gemm-before-run_optimization sequence deny was removed.
+
+    The auto-run inside ``_on_enter_kernel`` still drives FP8 SGLang
+    sessions through GEMM tuning first (covered by the entry test
+    below); the request-layer pre-deny no longer fires, so an LLM that
+    chooses to skip ``run_gemm_tuning`` is not bounced by policy."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.precision = "fp8"
@@ -203,12 +209,6 @@ async def test_run_optimization_denied_until_fp8_gemm_tuning_terminal(session_di
             "candidates_path": "/tmp/candidates.json",
         }
 
-        denied = c._sequence_denial_for_request("kernel", "run_optimization")
-        assert denied is not None
-        assert denied.rule == "execution_order"
-        assert "run_gemm_tuning" in (denied.hint or "")
-
-        c.shared_state.last_gemm_tuning = {"status": "failed"}
         assert c._sequence_denial_for_request("kernel", "run_optimization") is None
     finally:
         await c.stop()

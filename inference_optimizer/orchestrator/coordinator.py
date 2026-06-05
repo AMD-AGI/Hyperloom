@@ -5000,16 +5000,23 @@ class Coordinator:
     def _sequence_denial_for_request(
         self, target_agent: str, kind: str,
     ) -> PolicyDenied | None:
-        """Reject kernel requests that skip baseline/profile prerequisites."""
+        """Reject kernel requests that skip the baseline prerequisite.
+
+        Only one invariant remains here: nothing kernel-side runs before
+        ``baseline`` produces a positive ``baseline_tput`` (without a
+        baseline, KEEP / REVERT decisions have no anchor). The former
+        sequencing denials (last_profile_trace-before-kernel, trace_analyze-
+        before-other-kernel-kinds, gemm-before-run_optimization) were
+        strategy gates and are removed. The trace_analyze -> run_optimization
+        data dependency is now enforced at the handler boundary (see
+        ``run_optimization_handler``), so a missing / stale candidates
+        artifact surfaces as a structured handler error visible to the LLM
+        rather than a policy-layer prefetch deny.
+        """
         target = str(target_agent or "").strip()
         req_kind = str(kind or "").strip()
         if target != "kernel" or self.shared_state.stop_reason:
             return None
-        # ``trace_analyze`` IS the prerequisite request: it produces the
-        # ``last_trace_analyze`` cache the rest of the chain consults.
-        # It is also used directly by tests / tools passing an explicit
-        # ``trace_input``, so allow it through; later explore/sweep
-        # actions are guarded until the result is cached in SharedState.
         if req_kind == "trace_analyze":
             return None
         if get_handler(req_kind) is None:
@@ -5019,36 +5026,6 @@ class Coordinator:
                 f"request kind={req_kind!r} denied: baseline must run first",
                 rule="execution_order",
                 hint="propose/delegate `baseline` before kernel requests",
-            )
-        if not self.shared_state.last_profile_trace:
-            return PolicyDenied(
-                f"request kind={req_kind!r} denied: profile must run first",
-                rule="execution_order",
-                hint=(
-                    "wait for the Coordinator-internal analysis task to "
-                    "populate ``last_profile_trace`` before requesting "
-                    "trace_analyze / run_optimization; analysis is "
-                    "auto-enqueued at PRELUDE and on every +10% watermark "
-                    "crossing. The analysis lane is Coordinator-owned and not "
-                    "LLM-proposable (PolicyGate denies with "
-                    "``rule='analysis_action_not_llm_proposable'``). If "
-                    "``auto_roofline_pending_task_id`` is stuck, emit "
-                    "`recover` as the escape hatch."
-                ),
-            )
-        select = self.shared_state.last_trace_analyze or {}
-        needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
-        if needs_select and req_kind not in {"trace_analyze", "run_gemm_tuning"}:
-            return PolicyDenied(
-                f"request kind={req_kind!r} denied: trace_analyze must run first",
-                rule="execution_order",
-                hint="emit request kind='trace_analyze' for last_profile_trace",
-            )
-        if req_kind == "run_optimization" and self._gemm_tuning_required_before_kernel_opt():
-            return PolicyDenied(
-                "request kind='run_optimization' denied: FP8 GEMM tuning must run first",
-                rule="execution_order",
-                hint="emit request kind='run_gemm_tuning' before run_optimization",
             )
         return None
 

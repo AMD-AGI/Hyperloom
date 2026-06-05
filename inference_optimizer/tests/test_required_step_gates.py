@@ -14,10 +14,12 @@ and ``remove-select-kernels-action-gate``):
   the kernel_id has not yet been integrated into ``optimization_stack``
   (and is not on ``rejected_kernel_ids``).
 
-``trace_analyze`` is now enforced ONLY at the REQUEST layer for
-``run_optimization`` (see ``_sequence_denial_for_request``). Action-
-layer explore actions (``explore`` / ``sweep`` / ``report``) are never
-gated on a fresh ``last_trace_analyze`` cache.
+``trace_analyze`` no longer has a sequencing-policy gate at either
+layer. The action-layer gate was removed first; the request-layer
+gate on ``run_optimization`` has now been demoted to a data-contract
+check inside ``run_optimization_handler`` (a missing / stale
+candidates artifact surfaces as a structured handler error visible to
+the LLM, not a policy pre-deny).
 
 These tests exercise each remaining gate's open / closed transitions
 plus the matching ``_sequence_denial_for_action`` deny / allow pairs.
@@ -308,27 +310,27 @@ def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
         )
 
 
-def test_trace_analyze_gate_still_blocks_run_optimization_request(session_dir):
-    """The request-layer gate on ``run_optimization`` MUST still fire
-    when ``last_trace_analyze`` is stale. This is the sole remaining
-    enforcement point that keeps ``kernel_opt`` from running without
-    candidates."""
+def test_run_optimization_request_no_longer_blocked_by_stale_trace_analyze(
+    session_dir,
+):
+    """The request-layer trace_analyze prerequisite was demoted: a stale
+    ``last_trace_analyze`` cache no longer pre-denies ``run_optimization``
+    at the policy boundary. The data dependency is now enforced inside
+    ``run_optimization_handler`` so a missing candidates artifact returns
+    a structured handler error rather than a sequence-denial loop."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    denied = coord._sequence_denial_for_request("kernel", "run_optimization")
-    assert isinstance(denied, PolicyDenied)
-    assert denied.rule == "execution_order"
-    assert "trace_analyze must run first" in str(denied)
+    assert coord._sequence_denial_for_request("kernel", "run_optimization") is None
 
 
 def test_trace_analyze_request_itself_passes(session_dir):
     """``trace_analyze`` REQUEST itself bypasses
     ``_sequence_denial_for_request``'s prerequisite check (it IS the
-    prerequisite). Baseline + profile prerequisites still apply."""
+    prerequisite). Only the baseline prerequisite still applies."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
@@ -336,6 +338,32 @@ def test_trace_analyze_request_itself_passes(session_dir):
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
     assert coord._sequence_denial_for_request("kernel", "trace_analyze") is None
+
+
+def test_run_optimization_handler_reports_missing_trace_analyze(session_dir):
+    """With no ``candidates_path`` in the payload and an empty
+    ``last_trace_analyze`` cache, the handler returns a structured
+    ``missing_trace_analyze`` error so the LLM can see why the request
+    failed and re-run ``trace_analyze``."""
+    import asyncio
+
+    from inference_optimizer.orchestrator.kernel_request_handlers import (
+        run_optimization_handler,
+    )
+
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_trace_analyze = {}
+    s.save(session_dir)
+
+    result = asyncio.run(
+        run_optimization_handler({"kernel_id": "k001"}, session_dir=session_dir),
+    )
+    assert result["status"] == "failed"
+    assert result["error_class"] == "missing_trace_analyze"
 
 
 def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):

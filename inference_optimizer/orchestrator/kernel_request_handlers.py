@@ -1276,6 +1276,71 @@ async def trace_analyze_handler(
 
 
 # ---------------------------------------------------------------------------
+def _validate_trace_analyze_inputs(
+    payload: dict, *, session_dir: Path,
+) -> HandlerResult | None:
+    """Confirm the run_optimization payload references a valid trace_analyze.
+
+    The orchestrator-side ``_sequence_denial_for_request`` no longer
+    pre-blocks ``run_optimization`` on a stale / missing
+    ``last_trace_analyze`` cache. The data dependency is enforced here:
+
+    * an explicit ``candidates_path`` that does not exist on disk is
+      reported as ``missing_candidates_artifact`` so the LLM can re-run
+      ``trace_analyze`` (e.g. after a session restart wiped the file);
+    * a bare payload (no ``candidates_path``, no ``source_file``, no
+      ``candidate`` metadata) is only flagged when SharedState also has
+      no cached ``last_trace_analyze.candidates_path`` — i.e. there is
+      genuinely no prior trace_analyze to dispatch against.
+
+    Single-kernel ``dry_run`` flows and direct ``source_file`` /
+    ``candidate`` dispatches (used by unit tests and by the
+    Orchestration LLM when bypassing the candidates artifact) are
+    allowed through; the downstream ``_validate_reusable_native_kernel``
+    / ``_validate_kernel_shape_and_paths`` checks give those paths
+    their own structured errors.
+    """
+    candidates_path = str(payload.get("candidates_path") or "").strip()
+    if candidates_path and not Path(candidates_path).exists():
+        return {
+            "status": "failed",
+            "error_class": "missing_candidates_artifact",
+            "error": (
+                "run_optimization requires a candidates_path that exists "
+                "on disk; re-run trace_analyze to regenerate it"
+            ),
+            "candidates_path": candidates_path,
+        }
+    if candidates_path:
+        return None
+    if (
+        payload.get("dry_run")
+        or payload.get("source_file")
+        or isinstance(payload.get("candidate"), dict)
+    ):
+        return None
+    try:
+        from .shared_state import SharedState
+        state = SharedState.load_or_init(session_dir)
+    except Exception:  # noqa: BLE001 — best-effort read
+        return None
+    last = state.last_trace_analyze or {}
+    cached = str(last.get("candidates_path") or "").strip()
+    if not cached:
+        return {
+            "status": "failed",
+            "error_class": "missing_trace_analyze",
+            "error": (
+                "run_optimization requires a prior trace_analyze: the "
+                "payload supplied no candidates_path / source_file / "
+                "candidate, and SharedState has no cached "
+                "last_trace_analyze.candidates_path. Issue request "
+                "kind='trace_analyze' first."
+            ),
+        }
+    return None
+
+
 async def run_optimization_handler(
     payload: dict,
     *,
@@ -1297,6 +1362,9 @@ async def run_optimization_handler(
     siblings are still running. Single-kernel runs ignore it (the same
     end-of-handler ``record_kernel_opt`` path covers them).
     """
+    data_guard = _validate_trace_analyze_inputs(payload, session_dir=session_dir)
+    if data_guard is not None:
+        return data_guard
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
     candidates = _batch_kernel_candidates(payload, session_dir=session_dir)

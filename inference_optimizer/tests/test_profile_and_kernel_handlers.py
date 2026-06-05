@@ -2008,7 +2008,12 @@ def test_optimization_wrapper_timeout_sec_geak_env_override(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_optimization_handler_missing_kernel_id(session_dir):
-    res = await krh.run_optimization_handler({}, session_dir=session_dir)
+    # ``source_file`` short-circuits the new data-contract guard
+    # (``missing_trace_analyze``) so the legacy missing-kernel_id
+    # failure path is the one actually exercised.
+    res = await krh.run_optimization_handler(
+        {"source_file": "/tmp/dummy.py"}, session_dir=session_dir,
+    )
     assert res["status"] == "failed"
     assert "kernel_id" in res["error"]
 

@@ -12,13 +12,16 @@ LLM other than ``recover``.
 
 This test pins the sequence-denial sites:
 
-  * ``_sequence_denial_for_action()`` — execution_order denial for
-    sequence-gated actions when last_profile_trace is empty.
-  * ``_sequence_denial_for_request()`` — execution_order denial for
-    trace_analyze / run_optimization requests.
+  * ``_sequence_denial_for_action()`` — the action-layer profile-prereq
+    deny was removed (P2_10), so explore-family actions are no longer
+    blocked on an empty ``last_profile_trace``.
+  * ``_sequence_denial_for_request()`` — the request-layer profile-prereq
+    deny was demoted (P2_11) to a data-contract check inside
+    ``run_optimization_handler``, so kernel requests are no longer
+    pre-denied on an empty ``last_profile_trace``.
 
-The accepted phrasing must reference (a) waiting for the Coordinator-
-internal analysis task and (b) ``recover`` as the escape hatch.
+Both checks guarantee the LLM is never steered into the forbidden
+``propose/delegate profile`` phrasing via these sequencing hints.
 """
 
 from __future__ import annotations
@@ -30,18 +33,6 @@ from typing import Any
 import pytest
 
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.policy import PolicyDenied
-
-
-_FORBIDDEN_SUBSTRINGS = (
-    "propose/delegate `profile`",
-    "propose/delegate only `profile`",
-    "propose/delegate `roofline`",
-    "propose `profile`",
-    "delegate `profile`",
-    "propose `roofline`",
-    "delegate `roofline`",
-)
 
 
 @dataclass
@@ -72,15 +63,6 @@ def coord(tmp_path: Path) -> Coordinator:
     return c
 
 
-def _assert_no_forbidden(blob: str, where: str) -> None:
-    for s in _FORBIDDEN_SUBSTRINGS:
-        assert s not in blob, (
-            f"{where}: hint still tells the LLM to {s!r}; "
-            f"PolicyGate will deny with analysis_action_not_llm_proposable. "
-            f"Full text: {blob!r}"
-        )
-
-
 @pytest.mark.parametrize(
     "action",
     ["explore", "sweep", "report", "integrate"],
@@ -99,21 +81,16 @@ def test_sequence_denial_action_no_longer_blocks_on_profile(
 @pytest.mark.parametrize(
     "req_kind", ["run_optimization"],
 )
-def test_sequence_denial_request_hint_does_not_tell_llm_to_propose_profile(
+def test_sequence_denial_request_no_longer_blocks_on_profile(
     coord: Coordinator, req_kind: str,
 ):
-    """Same contract for the REQUEST-layer denial that fires on
-    run_optimization when ``last_profile_trace`` is empty. (Note:
-    ``trace_analyze`` is the prereq itself and early-returns ``None``
-    from ``_sequence_denial_for_request``; only ``run_optimization``
-    reaches the profile-prereq branch.)"""
+    """The REQUEST-layer profile-prereq deny was demoted alongside the
+    action-layer one: with baseline done and an empty
+    ``last_profile_trace``, the request layer no longer pre-denies kernel
+    requests on a missing profile. The data dependency on a fresh
+    trace_analyze (and the candidates artifact it produces) is enforced
+    inside ``run_optimization_handler`` instead, so the LLM hint surface
+    cannot leak forbidden ``propose/delegate profile`` phrasing."""
     coord.shared_state.last_profile_trace = ""
     coord.shared_state.baseline_tput = 100.0
-    denied = coord._sequence_denial_for_request("kernel", req_kind)
-    assert isinstance(denied, PolicyDenied), (
-        f"expected the profile-prereq denial to fire for request={req_kind!r}"
-    )
-    assert denied.rule == "execution_order"
-    _assert_no_forbidden(
-        denied.hint, f"_sequence_denial_for_request({req_kind!r})",
-    )
+    assert coord._sequence_denial_for_request("kernel", req_kind) is None
