@@ -82,9 +82,9 @@ PRECISION_BYTES_PER_PARAM: dict[str, float] = {
 }
 
 # Per-token KV cache bytes per model class. The numbers are a single
-# rough average across the architectures Hyperloom ships marathon
-# priors for. Override per-model via the optional ``$HYPERLOOM_KV_BYTES``
-# env if you have a more accurate figure.
+# rough average across the architectures Hyperloom ships priors for.
+# Override per-model via the optional ``$HYPERLOOM_KV_BYTES`` env if
+# you have a more accurate figure.
 KV_BYTES_PER_TOKEN: dict[str, float] = {
     "dense":        16.0,
     "moe_swa":      4.0,
