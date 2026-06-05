@@ -364,9 +364,8 @@ PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp__pr_monitor__pr_search",
 })
 
-#: Web tools. R5 — specialist-only AND EXPLORE-phase-only.
-#: Other roles / phases get
-#: ``tool_whitelist_role`` / ``tool_whitelist_phase``.
+#: Web tools. R5 — specialist-only. Other roles get
+#: ``tool_whitelist_role``; usable in any phase.
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
 
 #: Role-→-allowed-toolset map (R5). The default agents (orchestration /
@@ -386,14 +385,6 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
     "kernel": frozenset(),
     "critic": frozenset(),
     "robustness": frozenset(),
-}
-
-#: Phase whitelist for tools that are time-sensitive. Currently only
-#: the ``WebSearch`` / ``WebFetch`` block carries a phase restriction;
-#: KB readonly + PR Monitor are allowed in any phase.
-PHASE_RESTRICTED_TOOLS: dict[str, frozenset[str]] = {
-    "WebSearch": frozenset({"EXPLORE"}),
-    "WebFetch": frozenset({"EXPLORE"}),
 }
 
 #: Convenience superset — every tool name PolicyGate knows about
@@ -899,10 +890,7 @@ class PolicyGate:
         # already dispatched one; see _validate_conc_sweep_singleton.
         if action_name == CONC_SWEEP_ACTION_NAME:
             self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
-        # Same explore-minimum gate applies at the delegate channel so
-        # kernel_opt cannot bypass it by skipping propose_action.
         self._validate_fp8_only_action(action_name, intent_kind="delegate")
-        self._validate_explore_minimum_before_kernel_opt(action_name)
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
         # No registry → fall through (P0 / dev-mode where registry isn't loaded).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -990,9 +978,6 @@ class PolicyGate:
                 payload, intent_kind="propose_action",
             )
         self._validate_fp8_only_action(action_name, intent_kind="propose_action")
-        # F3-5: explore-attempt minimum guard — kernel_opt requires at
-        # least one successful explore round on record.
-        self._validate_explore_minimum_before_kernel_opt(action_name)
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
         # R4 / R5 — defense in depth on propose_action.
@@ -1001,54 +986,6 @@ class PolicyGate:
         )
         self._validate_tool_whitelist_collision(
             role.name, action_name, intent_kind="propose_action",
-        )
-
-    # ------------------------------------------------------------------
-    # Propose_action sub-gates (F3 series)
-    #
-    # Reading order in the dispatch path:
-    #   1. _validate_explore_minimum_before_kernel_opt      (F3-5)
-    # ------------------------------------------------------------------
-
-    def _validate_explore_minimum_before_kernel_opt(
-        self, action_name: str,
-    ) -> None:
-        """F3-5: ``kernel_opt`` requires at least one successful explore
-        round on record.
-
-        Successful = at least one entry in ``gain_per_stack_entry``,
-        which is appended only when ``optimization_stack`` accepts a
-        variant. This is also the same signal Coordinator uses to
-        compute ``cumulative_gain_validated``.
-
-        Always-on (no toggle) — this is a baseline correctness rule;
-        without it the LLM could enter KERNEL phase and burn a
-        kernel-opt lane before it knows whether cheap rounds would
-        have closed the gap.
-        """
-        if action_name != "kernel_opt":
-            return
-        ss = getattr(self, "shared_state", None)
-        if ss is None:
-            return
-        # Phase allowlist owns the "kernel_opt outside KERNEL" denial;
-        # F3-5 is a within-KERNEL correctness rule. Skipping here keeps
-        # the legacy ``phase_incompatible`` message fired by
-        # _validate_phase_action when an LLM proposes kernel_opt in
-        # PRELUDE / FRAMEWORK_PR / EXPLORE.
-        if str(getattr(ss, "phase", "") or "") != "KERNEL":
-            return
-        history = list(getattr(ss, "gain_per_stack_entry", []) or [])
-        accepted = sum(1 for e in history if isinstance(e, dict))
-        if accepted >= 1:
-            return
-        raise PolicyDenied(
-            f"propose_action: kernel_opt requires at least one "
-            f"successful explore round first (gain_per_stack_entry "
-            f"length = {accepted}). Run explore + integrate_patch "
-            f"before invoking kernel_opt.",
-            rule="explore_attempts_minimum_before_kernel_opt",
-            hint="propose_action{action_name='explore'} first.",
         )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
@@ -1353,7 +1290,7 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # R5 — tool_whitelist_role / tool_whitelist_phase
+    # R5 — tool_whitelist_role
     #
     # ------------------------------------------------------------------
     def _validate_tool_whitelist_collision(
@@ -1384,27 +1321,6 @@ class PolicyGate:
             return
         allowed_for_role = TOOL_WHITELIST_BY_ROLE.get(role_name, frozenset())
         if action_name in allowed_for_role:
-            # Role allows it — check the phase restriction if any.
-            phase = ""
-            if self.shared_state is not None:
-                phase = (
-                    getattr(self.shared_state, "phase", "") or ""
-                ).strip().upper()
-            phase_allowed = PHASE_RESTRICTED_TOOLS.get(action_name)
-            if phase and phase_allowed and phase not in phase_allowed:
-                raise PolicyDenied(
-                    f"tool {action_name!r} is restricted to "
-                    f"phase={sorted(phase_allowed)!r}; current "
-                    f"phase={phase!r}",
-                    rule="tool_whitelist_phase",
-                    hint=(
-                        f"{action_name} is restricted to "
-                        f"{sorted(phase_allowed)} phase(s). Wait for "
-                        f"the phase transition or use a phase-allowed "
-                        f"alternative (e.g. KB readonly / PR Monitor "
-                        f"are any-phase). KB_design §3.11 §4.5."
-                    ),
-                )
             return
         raise PolicyDenied(
             f"role={role_name!r} cannot invoke tool {action_name!r}",
@@ -1430,15 +1346,15 @@ class PolicyGate:
         phase: str | None = None,
     ) -> None:
         """Raise :class:`PolicyDenied` if ``tool_name`` is not
-        allowed for ``source_role`` (and optional ``phase``).
+        allowed for ``source_role``.
 
         Pure function — Inv-11.1. Returns ``None`` when the tool is
         allowed. Intended for tool-list builders that need a single
         source of truth: the SpecialistRunner can call this on each
         candidate tool before passing the list to the LLM backend.
 
-        ``phase`` overrides the live ``shared_state.phase`` — handy in
-        unit tests that don't wire a SharedState.
+        ``phase`` is accepted for call-site compatibility but no longer
+        gates any tool — research/Web tools are usable in any phase.
         """
         tool_name = (tool_name or "").strip()
         if not tool_name:
@@ -1458,7 +1374,7 @@ class PolicyGate:
                     "R4). The Coordinator owns all KB writes."
                 ),
             )
-        # R5 — role + phase whitelist for the known external tools.
+        # R5 — role whitelist for the known external tools.
         if tool_name in ALL_KNOWN_EXTERNAL_TOOL_NAMES:
             allowed_for_role = TOOL_WHITELIST_BY_ROLE.get(
                 source_role, frozenset(),
@@ -1471,28 +1387,6 @@ class PolicyGate:
                     hint=(
                         f"{tool_name} is restricted to specialist "
                         f"sub-agents. KB_design §3.11 §4.5."
-                    ),
-                )
-            phase_value = (
-                (phase or "").strip().upper()
-                if phase is not None
-                else (
-                    (getattr(self.shared_state, "phase", "") or "")
-                    .strip().upper()
-                    if self.shared_state is not None else ""
-                )
-            )
-            phase_allowed = PHASE_RESTRICTED_TOOLS.get(tool_name)
-            if phase_value and phase_allowed and phase_value not in phase_allowed:
-                raise PolicyDenied(
-                    f"tool {tool_name!r} is restricted to "
-                    f"phase={sorted(phase_allowed)!r}; current "
-                    f"phase={phase_value!r}",
-                    rule="tool_whitelist_phase",
-                    hint=(
-                        f"{tool_name} is restricted to "
-                        f"{sorted(phase_allowed)} phase(s). KB_design "
-                        f"§3.11 §4.5."
                     ),
                 )
         # Anything else is implicitly allowed — PolicyGate doesn't

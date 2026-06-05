@@ -5,9 +5,9 @@ Covers KB_design/3.11_policy_gate_evolution/README.md:
 * R4 ``kb_write_unauthorized`` — direct KB write surfaces are blocked
   for every LLM role via the intent channel and the
   ``validate_tool_invocation`` helper.
-* R5 ``tool_whitelist_role`` / ``tool_whitelist_phase`` — WebSearch /
-  WebFetch / mcp__pr_monitor__* / mcp__cortex_kb__* readonly tools are
-  specialist-only; web tools additionally restricted to EXPLORE phase.
+* R5 ``tool_whitelist_role`` — WebSearch / WebFetch /
+  mcp__pr_monitor__* / mcp__cortex_kb__* readonly tools are
+  specialist-only; they are usable in any phase.
 * Inv-11.3 orthogonality — only one rule fires per intent.
 * Single source of truth — :mod:`specialist_runner` constants
   derive from :mod:`policy` so no drift can happen.
@@ -25,7 +25,6 @@ from inference_optimizer.orchestrator.policy import (
     ALL_KNOWN_EXTERNAL_TOOL_NAMES,
     CORTEX_KB_READ_TOOL_NAMES,
     KB_WRITE_TOOL_NAMES,
-    PHASE_RESTRICTED_TOOLS,
     PR_MONITOR_TOOL_NAMES,
     PolicyDenied,
     PolicyGate,
@@ -102,12 +101,11 @@ def test_primary_roles_have_empty_external_tool_set():
         assert TOOL_WHITELIST_BY_ROLE[role_name] == frozenset()
 
 
-def test_phase_restricted_tools_only_target_web_tools():
-    """Only WebSearch / WebFetch carry a phase restriction today;
-    everything else is any-phase (KB_design §3.11 §4.5 table)."""
-    assert set(PHASE_RESTRICTED_TOOLS.keys()) == WEB_TOOL_NAMES
-    for phases in PHASE_RESTRICTED_TOOLS.values():
-        assert phases == frozenset({"EXPLORE"})
+def test_no_tools_are_phase_restricted():
+    """No tool carries a phase restriction — research / Web tools are
+    usable in any phase; role isolation is the only R5 gate."""
+    from inference_optimizer.orchestrator import policy as policy_mod
+    assert not hasattr(policy_mod, "PHASE_RESTRICTED_TOOLS")
 
 
 # ===========================================================================
@@ -162,41 +160,40 @@ def test_specialist_can_invoke_readonly_external_tools_in_explore():
 
 
 # ===========================================================================
-# 4. R5 — tool_whitelist_phase (Web tools restricted to EXPLORE)
+# 4. R5 — Web tools are usable in any phase (no phase restriction)
 # ===========================================================================
 @pytest.mark.parametrize("web_tool", sorted(WEB_TOOL_NAMES))
-@pytest.mark.parametrize("bad_phase", ["PRELUDE", "KERNEL", "SWEEP", "CLOSE"])
-def test_specialist_web_tools_denied_outside_explore_phase(
-    web_tool: str, bad_phase: str,
+@pytest.mark.parametrize("phase", ["PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"])
+def test_specialist_web_tools_allowed_in_any_phase(
+    web_tool: str, phase: str,
 ):
-    gate = _gate(_State(phase=bad_phase))
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_tool_invocation(web_tool, source_role="specialist")
-    assert excinfo.value.rule == "tool_whitelist_phase"
+    gate = _gate(_State(phase=phase))
+    gate.validate_tool_invocation(web_tool, source_role="specialist")
 
 
 def test_specialist_pr_monitor_allowed_in_any_phase():
-    """PR Monitor read tools are explicitly NOT phase-restricted
-    (KB_design §3.11 §4.5)."""
+    """PR Monitor read tools are usable in any phase (KB_design §3.11
+    §4.5)."""
     for phase in ("PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
         gate = _gate(_State(phase=phase))
         for tool in PR_MONITOR_TOOL_NAMES:
             gate.validate_tool_invocation(tool, source_role="specialist")
 
 
-def test_validate_tool_invocation_phase_override_argument():
-    """``phase`` kwarg overrides ``shared_state.phase`` — used by
-    unit tests that don't wire a SharedState."""
+def test_validate_tool_invocation_phase_argument_is_noop():
+    """The ``phase`` kwarg no longer gates any tool — a specialist may
+    invoke Web tools in any phase, with or without the override."""
     gate = _gate()
-    # No SharedState, no phase override → web tools pass (phase
-    # check skipped when phase is unknown).
     gate.validate_tool_invocation("WebSearch", source_role="specialist")
-    # Phase override KERNEL → denied.
+    gate.validate_tool_invocation(
+        "WebSearch", source_role="specialist", phase="KERNEL",
+    )
+    # Role isolation still applies regardless of phase.
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_tool_invocation(
-            "WebSearch", source_role="specialist", phase="KERNEL",
+            "WebSearch", source_role="orchestration", phase="EXPLORE",
         )
-    assert excinfo.value.rule == "tool_whitelist_phase"
+    assert excinfo.value.rule == "tool_whitelist_role"
 
 
 # ===========================================================================
