@@ -4782,7 +4782,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # PR Monitor REST + MCP
     # ------------------------------------------------------------------
     # ``--pr-monitor-url`` overrides the in-cluster default; the
-    # marathon pod is typically in a different cluster from
+    # optimizer pod is typically in a different cluster from
     # primus-cortex, so an operator running outside the primus-cortex
     # k8s namespace must port-forward + pass a localhost URL.
     # ``--degraded-pr`` switches the KnowledgePlane.pr_feed_warm
