@@ -1,20 +1,26 @@
-"""Critic-side cross-domain review primitives for ``dynamic_action``.
+"""Critic-side review primitives for ``dynamic_action``.
 
 The runner already validates the proposal payload before the patch
-reaches the Critic. This module is the second defence layer so a
-regression upstream cannot silently bypass the cross-domain red lines.
+reaches the Critic. This module is the safety-invariant second defence
+layer (provenance literal, forbidden quantitative fields, numeric-claim
+regex inside the qualitative argument) so a regression upstream cannot
+smuggle a forged proposal past the Critic boundary. Strategy-level
+cross-domain quality (rationale completeness, coupling/side-effect
+articulation, motivation gap) is the LLM Critic's call and is offered
+to it as advisory descriptors via ``CROSS_DOMAIN_RULES``; the
+mechanical layer no longer enforces those rules.
 
 Public surface:
 
-* :data:`CROSS_DOMAIN_RULES` — the three rule descriptors the Critic
-  prompt cites verbatim;
+* :data:`CROSS_DOMAIN_RULES` — advisory rule descriptors injected into
+  the Critic prompt (LLM judgement guide, not mechanically enforced);
 * :data:`CRITIC_VERDICT_FIELDS` — closed envelope for
   ``critic_verdict.json``;
-* :class:`CrossDomainPreverdict` — mechanical-check result;
+* :class:`CrossDomainPreverdict` — safety-invariant check result;
 * :func:`classify_proposal_for_critic` — maps a proposal to
   ``(bundle_action_class, review_constraints)``;
-* :func:`run_mechanical_cross_domain_checks` — applies the three rules
-  plus the fail-fast provenance + forbidden-field guards;
+* :func:`run_mechanical_cross_domain_checks` — fail-fast provenance +
+  forbidden-field + numeric-claim guards (safety invariants only);
 * :func:`build_critic_verdict_envelope` — assembles the on-disk shape;
 * :func:`write_critic_verdict` — persists the envelope under the
   dispatch artefact dir.
@@ -27,7 +33,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..session_paths import dynamic_action_critic_verdict_path
 from .dynamic_action_proposal import (
@@ -105,41 +111,8 @@ ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "revise"})
 
 
 # ---------------------------------------------------------------------------
-# Mechanical-check primitives
+# Mechanical-check primitives (safety invariants only)
 # ---------------------------------------------------------------------------
-# Coupling keywords — "why must these changes happen together?".
-_COUPLING_KEYWORDS: tuple[str, ...] = (
-    "coupl", "联动", "interaction", "depend", "依赖", "interface",
-    "interplay", "joint", "together", "synerg", "interact",
-    "trigger", "follow",
-)
-
-# Side-effect keywords — "what could go wrong?".
-_SIDE_EFFECT_KEYWORDS: tuple[str, ...] = (
-    "side effect", "side-effect", "regression", "副作用", "trade-off",
-    "tradeoff", "risk", "downside", "may decrease", "may degrade",
-    "could degrade", "could regress", "可能下降", "可能退化",
-    "may break", "could break",
-)
-
-# Phrases that justify a cross-domain dispatch (no single specialist
-# could surface it) — informational; the negative set drives the hard
-# reject.
-_MOTIVATION_VALID_KEYWORDS: tuple[str, ...] = (
-    "no single specialist", "no single domain",
-    "single specialist cannot", "single domain cannot",
-    "specialist boundary", "single-domain boundary",
-    "cross-domain only", "outside specialist scope",
-    "无法由单个 specialist", "无法由单 domain",
-    "specialist 边界", "跨域专属",
-)
-# Phrases that signal a grid-combo masquerading as dynamic_action.
-_MOTIVATION_INVALID_KEYWORDS: tuple[str, ...] = (
-    "just stack", "simple combination of",
-    "concatenate two specialist", "concatenat", "merge of specialist",
-    "拼接", "拼合", "组合 specialist a 和 specialist b",
-)
-
 # Mirrors the runner's numeric-claim regex so the Critic boundary
 # still rejects smuggled numbers if the runner is bypassed.
 _NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -148,16 +121,6 @@ _NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b\d+(?:\.\d+)?\s*(?:ms|us|tok/s|qps|tps)\b", re.I),
     re.compile(r"\bspeedup\s*(?:of|=)?\s*\d", re.I),
 )
-
-
-def _has_any_keyword(text: str, keywords: Iterable[str]) -> bool:
-    lower = (text or "").lower()
-    return any(k in lower for k in keywords)
-
-
-def _missing_domain_mentions(text: str, scope_domains: list[str]) -> list[str]:
-    lower = (text or "").lower()
-    return [d for d in scope_domains if d.lower() not in lower]
 
 
 def _numeric_hits(text: str) -> list[str]:
@@ -173,11 +136,17 @@ def _numeric_hits(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 @dataclass
 class CrossDomainPreverdict:
-    """Pre-LLM verdict produced by the mechanical checks.
+    """Pre-LLM verdict produced by the safety-invariant checks.
 
-    When ``verdict == "approve"`` the LLM-critic still runs and may
-    down-rank to ``revise`` / ``reject``. The mechanical layer is a
-    *floor* — it can only tighten the LLM's verdict, never loosen it.
+    When ``verdict == "approve"`` the LLM-critic runs and is the sole
+    authority on the strategy verdict (approve / revise / reject). The
+    mechanical layer only short-circuits on a clear safety-invariant
+    violation (forged provenance, forbidden field, smuggled numeric
+    claim) — in that case it sets ``verdict == "reject"`` and the
+    Critic call is skipped. ``revise`` is no longer emitted from this
+    layer; it was previously raised by strategy keyword checks that
+    have been delegated to the LLM Critic, but ``is_blocking`` still
+    treats it as blocking for any caller that hand-builds a preverdict.
     """
 
     verdict: str
@@ -244,16 +213,26 @@ def run_mechanical_cross_domain_checks(
     *,
     spec_scope_domains: list[str],
 ) -> CrossDomainPreverdict:
-    """Apply the three review rules + the fail-fast guards.
+    """Apply the fail-fast safety guards (provenance + schema).
 
-    The mechanical layer is conservative — it blocks on clear-cut
-    violations and otherwise falls through to ``approve`` so the
-    LLM-critic still gets the final say. ``applied_rules`` records
-    the full id list (passed + failed) for audit.
+    Only safety invariants block here: the proposal MUST declare
+    ``provenance == 'dynamic'``, MUST NOT carry any field in
+    :data:`FORBIDDEN_PROPOSAL_FIELDS`, and the qualitative argument
+    MUST NOT smuggle quantitative claims (numeric-claim regex). Every
+    other ("strategy") quality dimension — per-domain rationale
+    coverage, coupling articulation, side-effect mention, grid-combo
+    motivation — is the LLM Critic's call now; the mechanical layer no
+    longer rewrites or downgrades those.
+
+    ``applied_rules`` records the safety-guard id list for audit so
+    downstream readers can still tell which checks ran.
+    ``spec_scope_domains`` is accepted for backward compatibility with
+    callers that pass it through; the safety-invariant checks do not
+    consult it.
     """
+    del spec_scope_domains  # safety guards do not consult scope
     pre = CrossDomainPreverdict(verdict="approve", cross_domain_flag=True)
 
-    # Provenance literal — the last of the three defence layers.
     provenance = str(
         (proposal_payload or {}).get("provenance") or "",
     ).strip()
@@ -267,7 +246,6 @@ def run_mechanical_cross_domain_checks(
         return pre
     pre.applied_rules.append("provenance_literal")
 
-    # Forbidden quantitative fields mirror the runner-side validator.
     forbidden_present = sorted(
         set((proposal_payload or {}).keys()) & FORBIDDEN_PROPOSAL_FIELDS,
     )
@@ -281,19 +259,9 @@ def run_mechanical_cross_domain_checks(
         return pre
     pre.applied_rules.append("forbidden_fields")
 
-    scope_domains = [
-        str(d or "").strip()
-        for d in proposal_payload.get("scope_domains") or ()
-        if str(d or "").strip()
-    ]
-    # Spec is the truth set; proposal's own scope is used only to keep
-    # a tighter declared scope fairly evaluated.
-    truth_set = list(spec_scope_domains or scope_domains)
-    rationale = str(proposal_payload.get("cross_domain_rationale") or "")
     qualitative = str(
         proposal_payload.get("expected_qualitative_argument") or "",
     )
-
     nh = _numeric_hits(qualitative)
     if nh:
         pre.verdict = "reject"
@@ -304,49 +272,6 @@ def run_mechanical_cross_domain_checks(
         )
         return pre
     pre.applied_rules.append("qualitative_no_numeric_claims")
-
-    # rationale_per_domain — every truth-set domain must appear in
-    # the rationale text.
-    missing = _missing_domain_mentions(rationale, truth_set)
-    pre.applied_rules.append("rationale_per_domain")
-    if missing:
-        pre.verdict = "revise"
-        pre.reason_codes.append("cross_domain_rationale_incomplete")
-        pre.reviewer_notes.append(
-            f"rationale missing per-domain coverage for: {missing!r}",
-        )
-        return pre
-
-    # coupling_and_side_effects — rationale must mention both why
-    # changes happen together and one potential side effect.
-    pre.applied_rules.append("coupling_and_side_effects")
-    has_coupling = _has_any_keyword(rationale, _COUPLING_KEYWORDS)
-    has_side_effect = _has_any_keyword(rationale, _SIDE_EFFECT_KEYWORDS)
-    if not (has_coupling and has_side_effect):
-        pre.verdict = "revise"
-        pre.reason_codes.append("cross_domain_coupling_unspecified")
-        missing_parts: list[str] = []
-        if not has_coupling:
-            missing_parts.append("coupling")
-        if not has_side_effect:
-            missing_parts.append("side_effect")
-        pre.reviewer_notes.append(
-            f"rationale missing: {missing_parts!r}",
-        )
-        return pre
-
-    # motivation_gap_valid — hard reject when the rationale describes
-    # a grid-combo masquerading as a dynamic_action.
-    pre.applied_rules.append("motivation_gap_valid")
-    if _has_any_keyword(rationale, _MOTIVATION_INVALID_KEYWORDS):
-        pre.verdict = "reject"
-        pre.reason_codes.append("cross_domain_motivation_invalid")
-        pre.reviewer_notes.append(
-            "rationale describes a grid-combo (specialist A + B "
-            "stacking), which belongs in explore.params.grid, not "
-            "in a dynamic_action dispatch.",
-        )
-        return pre
 
     return pre
 

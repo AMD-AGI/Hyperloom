@@ -94,16 +94,16 @@ Severity contract:
   otherwise-`approve` verdict; an approve still requires both these
   rules AND the four checklist.
 
-Three additional rules (cite by name in `notes` when relevant):
+Three additional rules — you (the LLM Critic) own each one; the
+runtime no longer keyword-checks any of them, so a violation will
+only land in the audit trail if you call it out (cite by name in
+`notes` when relevant):
 
 1. **rationale_per_domain** — the proposal MUST give an independent
-   rationale for every entry of `scope_domains`. The runtime's
-   mechanical check already substring-matches each domain name in
-   `cross_domain_rationale`; if a check fires it surfaces as
-   `revise` with `reason="cross_domain_rationale_incomplete"`. When
-   the substring check passes but the per-domain reasoning is
-   shallow / cargo-culted, downgrade to `revise` with the same
-   reason and explain in `notes`.
+   rationale for every entry of `scope_domains`. When the per-domain
+   reasoning is missing or shallow / cargo-culted, emit `revise`
+   with `reason="cross_domain_rationale_incomplete"` and explain in
+   `notes`.
 
 2. **coupling_and_side_effects** — the proposal MUST name the
    cross-domain coupling points (why these changes must happen
@@ -117,12 +117,11 @@ Three additional rules (cite by name in `notes` when relevant):
    specialist B's" is a `explore.params.grid` combo, not a dynamic
    action; **`reject`** with
    `reason="cross_domain_motivation_invalid"` when the rationale
-   degenerates this way (the runtime emits the same reason if the
-   `_MOTIVATION_INVALID_KEYWORDS` substring set fires).
+   degenerates this way.
 
-Hard guards (already enforced upstream; replay here as the last
-line of defence — if any of these reach you, the upstream layer has
-regressed and the dispatch must die):
+Hard guards (still enforced upstream by the runtime safety layer;
+replay here as the last line of defence — if any of these reach you,
+the upstream layer has regressed and the dispatch must die):
 
 * `provenance == "dynamic"` is a literal; any composite form
   (`dynamic:foo`, `specialist:dynamic`) → `reject` with

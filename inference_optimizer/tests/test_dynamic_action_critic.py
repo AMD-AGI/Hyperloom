@@ -118,87 +118,47 @@ def test_is_cross_domain_proposal_predicate():
 
 
 # ===========================================================================
-# §9 #1 — happy path
+# §9 #1 — happy path (safety guards pass; strategy verdict is the LLM's)
 # ===========================================================================
 def test_p4_scenario_01_happy_path_mechanical_layer_passes():
-    """Complete proposal + per-domain rationale + coupling +
-    side-effect text → mechanical layer falls through to APPROVE so
-    the LLM-critic gets the final say."""
+    """Well-formed proposal clears every safety guard and falls
+    through to APPROVE so the LLM-critic gets the final say on the
+    cross-domain quality dimensions (no keyword check left)."""
     pre = run_mechanical_cross_domain_checks(
         _proposal(), spec_scope_domains=SCOPE,
     )
     assert pre.verdict == "approve"
     assert pre.reason_codes == []
-    # full rule audit recorded even on the happy path
-    assert "rationale_per_domain" in pre.applied_rules
-    assert "coupling_and_side_effects" in pre.applied_rules
-    assert "motivation_gap_valid" in pre.applied_rules
+    # Only safety-guard ids are recorded; strategy rules are now LLM-only.
+    assert pre.applied_rules == [
+        "provenance_literal",
+        "forbidden_fields",
+        "qualitative_no_numeric_claims",
+    ]
 
 
 # ===========================================================================
-# §9 #2 — rationale missing a domain
+# Strategy-keyword checks (rationale completeness, coupling, motivation)
+# are no longer enforced mechanically; the LLM Critic owns those verdicts.
+# Even an "obviously thin" rationale now clears the mechanical layer.
 # ===========================================================================
-def test_p4_scenario_02_missing_domain_rationale_revises():
+@pytest.mark.parametrize("rationale", [
+    "serving_specialist needs reordering, with coupling and possible regression risk.",
+    "serving_specialist independently optimal; kernel_switch_specialist independently safer.",
+    "serving_specialist couples with kernel_switch_specialist in this combo; both depend on each other.",
+    (
+        "Just stack the serving_specialist proposal and the "
+        "kernel_switch_specialist proposal together; they couple "
+        "naturally with the risk of cache regress."
+    ),
+])
+def test_strategy_keyword_checks_no_longer_block(rationale: str):
     pre = run_mechanical_cross_domain_checks(
-        _proposal(
-            cross_domain_rationale=(
-                "serving_specialist needs reordering, with coupling "
-                "and possible regression risk."
-            ),
-        ),
+        _proposal(cross_domain_rationale=rationale),
         spec_scope_domains=SCOPE,
     )
-    assert pre.verdict == "revise"
-    assert pre.reason_codes == ["cross_domain_rationale_incomplete"]
-
-
-# ===========================================================================
-# §9 #3 — coupling or side effect not mentioned
-# ===========================================================================
-def test_p4_scenario_03_coupling_missing_revises():
-    pre = run_mechanical_cross_domain_checks(
-        _proposal(
-            cross_domain_rationale=(
-                "serving_specialist independently optimal; "
-                "kernel_switch_specialist independently safer."
-            ),
-        ),
-        spec_scope_domains=SCOPE,
-    )
-    assert pre.verdict == "revise"
-    assert pre.reason_codes == ["cross_domain_coupling_unspecified"]
-
-
-def test_p4_scenario_03b_side_effect_missing_revises():
-    pre = run_mechanical_cross_domain_checks(
-        _proposal(
-            cross_domain_rationale=(
-                "serving_specialist couples with kernel_switch_specialist "
-                "in this combo; both depend on each other."
-            ),
-        ),
-        spec_scope_domains=SCOPE,
-    )
-    assert pre.verdict == "revise"
-    assert pre.reason_codes == ["cross_domain_coupling_unspecified"]
-
-
-# ===========================================================================
-# §9 #4 — motivation degenerates to grid combo
-# ===========================================================================
-def test_p4_scenario_04_grid_combo_motivation_rejects():
-    pre = run_mechanical_cross_domain_checks(
-        _proposal(
-            cross_domain_rationale=(
-                "Just stack the serving_specialist proposal and the "
-                "kernel_switch_specialist proposal together; they "
-                "couple naturally with the risk of cache regress."
-            ),
-        ),
-        spec_scope_domains=SCOPE,
-    )
-    assert pre.verdict == "reject"
-    assert pre.reason_codes == ["cross_domain_motivation_invalid"]
+    assert pre.verdict == "approve"
+    assert pre.reason_codes == []
 
 
 # ===========================================================================

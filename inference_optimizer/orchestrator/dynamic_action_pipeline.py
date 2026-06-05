@@ -20,9 +20,12 @@ Public surface:
   Coordinator pushes to the bus for the Critic. Carries
   ``provenance="dynamic"`` so the backend enrichment helper flips
   ``review_constraints.cross_domain``.
-* :func:`compose_critic_verdict_envelope` — combine the mechanical
-  pre-verdict with the LLM-critic verdict using the "strictest wins"
-  rule.
+* :func:`compose_critic_verdict_envelope` — combine the safety-
+  invariant pre-verdict with the LLM-critic verdict. Strategy
+  judgement (rationale completeness, coupling articulation, motivation
+  gap) is the LLM Critic's call; the mechanical layer only short-
+  circuits on a safety-invariant violation (forged provenance,
+  forbidden field, smuggled numeric claim).
 """
 
 from __future__ import annotations
@@ -221,7 +224,7 @@ def compose_critic_verdict_envelope(
     llm_verdict: str | None = None,
     llm_reason: str | None = None,
 ) -> tuple[dict[str, Any], DynamicActionStatus]:
-    """Combine the mechanical pre-verdict with the LLM-critic verdict.
+    """Combine the safety-invariant pre-verdict with the LLM verdict.
 
     Returns ``(envelope_dict, lifecycle_status)``:
 
@@ -229,10 +232,13 @@ def compose_critic_verdict_envelope(
     * ``lifecycle_status`` is ``CRITIC_REJECTED`` for reject / revise,
       ``INTEGRATING`` for approve.
 
-    Strictest-wins composition: a blocking mechanical pre-verdict
-    overrides any LLM verdict. ``revise`` and ``reject`` both land on
-    ``CRITIC_REJECTED`` (no sub-agent re-dispatch loop today); the
-    verdict label is preserved on ``critic_verdict.json`` for audit.
+    Composition rule: a safety-invariant violation in the pre-verdict
+    (forged provenance, forbidden field, smuggled numeric claim)
+    short-circuits to ``reject`` and the LLM verdict is ignored;
+    otherwise the LLM verdict wins. ``revise`` and ``reject`` both
+    land on ``CRITIC_REJECTED`` (no sub-agent re-dispatch loop today);
+    the verdict label is preserved on ``critic_verdict.json`` for
+    audit.
     """
     pre: CrossDomainPreverdict = run_mechanical_cross_domain_checks(
         proposal, spec_scope_domains=list(spec_scope_domains or ()),
