@@ -19,7 +19,7 @@ Design priorities:
    reflects that — no POST / PUT / DELETE methods are exposed.
 4. **Cross-cluster aware**: production deploys put the
    ``primus-cortex-pr-api`` service in a different cluster from the
-   marathon pod. The default URL hits the in-cluster DNS name; the
+   optimizer pod. The default URL hits the in-cluster DNS name; the
    ``--pr-monitor-url`` CLI flag overrides for ad-hoc port-forwarded
    debug. KB_design §3.14 R-02 acknowledges the unreachable case is
    the dominant failure mode.
@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 
 # Default service URL — primus-cortex-pr-api in the primus-cortex
 # namespace (see primus-cortex-pr-monitor-access.md §"服务地址"). When
-# the marathon pod runs outside the primus-cortex cluster, the operator
+# the optimizer pod runs outside the primus-cortex cluster, the operator
 # must override via ``--pr-monitor-url`` / env var with a port-forward.
 DEFAULT_PR_MONITOR_URL: str = (
     "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/v1"
@@ -192,7 +192,7 @@ class PRMonitorClient:
         parsed JSON or raises :class:`PRMonitorError`.
 
         Defense-in-depth: limits response size to 4 MiB so a misbehaving
-        endpoint can't hang a marathon pod by streaming gigabytes.
+        endpoint can't hang the optimizer pod by streaming gigabytes.
         """
         if not self.enabled:
             raise PRMonitorError("PR Monitor client disabled (--degraded-pr)")

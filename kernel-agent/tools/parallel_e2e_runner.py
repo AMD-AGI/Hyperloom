@@ -14,8 +14,7 @@ The runner does not fabricate patch effectiveness. If no patchable source or
 valid benchmark harness exists, it records that as the experiment outcome.
 
 The legacy ``run_baseline_profile`` step (which shelled out to an external
-``marathon/skills/scripts/run_baseline.sh``) was removed when Hyperloom
-dropped its marathon dependency. Use ``inference_optimizer optimize`` to
+baseline script) was removed. Use ``inference_optimizer optimize`` to
 produce a baseline + profile trace, then pass that trace into this runner
 via ``--trace-path``.
 """
