@@ -61,8 +61,7 @@ DEFAULT_PR_MONITOR_MCP_URL: str = (
     "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/mcp/"
 )
 
-# Default look-back window for ``pr_feed_warm`` (KB_design §3.6 §5.2
-# "近期 默认 30 天").
+# Default look-back window for ``pr_feed_warm`` (recent PRs, 30 days).
 DEFAULT_PR_FEED_WINDOW_DAYS: int = 30
 
 # Per-repo request limit (REST max is 200 per spec; we ask for less so

@@ -1,26 +1,28 @@
 # framework-agent
 
 vllm/sglang source-layer optimisation companion for
-[`inference_optimizer`](../inference_optimizer/). Two protocols share
-this package:
+[`inference_optimizer`](../inference_optimizer/). The live Hyperloom
+integration uses the FRAMEWORK_PR discovery path:
 
-1. **PR exploration** (`fa candidates` / `fa explore`) — discovers and
-   imports upstream PRs for ad-hoc A/B benchmark. Used by IO's
-   `framework_pr` bandit arm.
-2. **5th-role sibling skill** (`fa agent`, PR-D+) — AST scan + patch
-   propose + apply lifecycle invoked by IO's Framework agent role via
-   subprocess bridge.
+- **FRAMEWORK_PR discovery** (`fa phase-discover`) — returns upstream PR
+  candidates to `inference_optimizer`, which owns Critic review, diff
+  apply, benchmark, KEEP, and REVERT.
+- **Standalone PR exploration** (`fa candidates` / `fa explore`) —
+  ad-hoc tooling outside the `inference_optimizer` runtime path.
 
 See [`SKILL.md`](./SKILL.md) for the full architectural overview.
 
 ## Quick start
 
 ```bash
-# Install (idempotent; PR-D adds scripts/install.sh)
+# Install (idempotent)
 cd Hyperloom/framework-agent
-pip install -e '.[test]'
+bash scripts/install.sh        # or: pip install -e '.[test]'
 
-# Legacy PR exploration
+# Live IO discovery path
+fa phase-discover --request /path/to/request.json --out -
+
+# Standalone PR exploration
 fa schema
 fa candidates --request /path/to/request.json
 fa explore --request /path/to/request.json [--execute]
@@ -28,10 +30,6 @@ fa explore --request /path/to/request.json [--execute]
 # KB management
 fa kb list
 fa kb search --domain framework_optimization --query "fp8 kv cache"
-
-# Sibling-skill subprocess (PR-D+)
-fa agent prepare-task --task task.json --output-bundle bundle.json
-fa agent commit-result --envelope envelope.json --task-id <task_id>
 ```
 
 ## Tests
@@ -42,17 +40,16 @@ pytest -q tests/test_logging_setup.py tests/test_isolation.py \
           tests/test_decision.py tests/test_explore_modes.py
 ```
 
-## Used by inference_optimizer as a bandit arm
+## Used by inference_optimizer
 
-`inference_optimizer` drives PR discovery via the `framework_pr` bandit
-arm (not startup CLI flags). After `baseline` completes, the
-Orchestration agent proposes `framework_pr`; the executor calls `fa
-candidates`, applies the winning PR to sglang, runs a sub-baseline, and
-KEEP/DISCARDs based on throughput gain.
+`inference_optimizer` drives PR discovery in the Coordinator-owned
+FRAMEWORK_PR phase. After `baseline` completes, the Coordinator calls
+`fa phase-discover`, routes each candidate through Critic review, then
+uses `FrameworkPrExecutor` to apply the diff to the live framework tree,
+benchmark it, and KEEP/REVERT based on throughput and correctness gates.
 
 Gap / keywords are auto-composed from SharedState (`framework`,
-`gpu_type`, `model_class`, `precision`). Override per tick via
-`proposal.params.gap_override` from the Orchestration prompt.
+`gpu_type`, `model_class`, `precision`).
 
 ```bash
 inference_optimizer optimize \

@@ -1,4 +1,4 @@
-"""SQLite connection wrapper ().
+"""SQLite connection wrapper.
 
 Design choices:
 

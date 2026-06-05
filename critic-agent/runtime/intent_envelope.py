@@ -14,7 +14,7 @@ The Critic agent only ever produces three intent types in normal operation:
 * ``update_persona`` — append-only persona update (Critic role permission).
 
 We deliberately mirror the schema and verdict vocabulary from
-``inference_optimizer/orchestrator/intent_parser.py`` and
+``inference_optimizer/protocol/intent.py`` and
 ``inference_optimizer/orchestrator/policy.py`` rather than importing them, so
 the Critic skill stays usable as a standalone package (no Hyperloom-wide
 runtime dependency at install time).
@@ -66,7 +66,7 @@ ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset({
 
 
 # Required payload fields per intent type — same set the Coordinator's
-# PolicyGate enforces. See ``_PAYLOAD_REQUIRED`` in intent_parser.py.
+# PolicyGate enforces. See ``_PAYLOAD_REQUIRED`` in protocol/intent.py.
 _PAYLOAD_REQUIRED: dict[str, tuple[str, ...]] = {
     "send_message": ("topic",),
     "ask_question": ("topic", "question"),

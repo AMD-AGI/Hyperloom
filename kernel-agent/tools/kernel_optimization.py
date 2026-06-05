@@ -1184,10 +1184,10 @@ def build_prompt(
     # header before every tool call where ``$X.XX`` is the cumulative LLM
     # token spend. With GEAK's per-task cost-limit disabled (``--cost-limit
     # 0.0``) this number is pure telemetry — it does NOT terminate the
-    # agent. In the May 2026 M2.5 N36 run multiple GEAK rounds nonetheless
-    # exited at step 3 / ~$2 with a ``budget exhausted`` panic-submit and
-    # zero code edits, throwing away ~90% of the 60-minute wall-clock
-    # budget that actually governs the task. Re-iterate the contract in
+    # agent. GEAK rounds have nonetheless exited at step 3 / ~$2 with a
+    # ``budget exhausted`` panic-submit and zero code edits, throwing
+    # away ~90% of the 60-minute wall-clock budget that actually governs
+    # the task. Re-iterate the contract in
     # the prompt so the LLM treats the header as a cost meter, not a
     # stop sign. Wall-clock budget is sourced from the runner's
     # ``geak_budget_minutes`` (default 60); the prompt repeats it verbatim

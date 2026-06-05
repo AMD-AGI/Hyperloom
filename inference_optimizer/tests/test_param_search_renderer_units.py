@@ -24,6 +24,14 @@ class TestParamSearchRenderer:
         assert any("backends DFS" in f for f in out.key_facts)
         assert any("params DFS" in f for f in out.key_facts)
 
+    def test_populated_explore_unskips_section(self):
+        out = _render({
+            "explore": {"accepted": ["a"], "tested": {"a": {}}, "cursor": 1,
+                        "last_round": 2},
+        })
+        assert out.skipped is False
+        assert "Explore Search" in out.markdown_block
+
     def test_populated_backends_unskips_section(self):
         out = _render({
             "backends": {"accepted": ["a"], "tested": {"a": {}}, "cursor": 1,

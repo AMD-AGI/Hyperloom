@@ -96,10 +96,6 @@ ALLOWED_FILES: dict[str, str] = {
     # Prompt / orientation text that names both keys explicitly so the
     # LLM and any human reader of the prompt knows the alias exists
     # for one release.
-    "inference_optimizer/cli.py":
-        "warm-replay executor registration comment names RecipeKB "
-        "best_config field names",
-
     # Pytest marker registration mentions the legacy name in the
     # marker's description.
     "pyproject.toml":
@@ -137,6 +133,9 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/orchestrator/coordinator.py":
         "comments explain the read_extra_server_args call at the LLM "
         "intent / sub-agent envelope read boundaries",
+    "inference_optimizer/orchestrator/coordinator_helpers.py":
+        "holds the extracted _merge_cumulative_extra_sglang_args helper "
+        "that merges the legacy KB best_config arg stacks",
     "inference_optimizer/orchestrator/kernel_request_handlers.py":
         "comments explain the read_extra_server_args call at the "
         "integrate_patch sub-agent envelope read boundary",
@@ -175,8 +174,10 @@ ALLOWED_FILES: dict[str, str] = {
 
 # Files under these top-level prefixes are skipped entirely.
 _SKIP_DIRECTORIES: tuple[str, ...] = (
-    # Plan / migration narrative tree (slated for deletion).
+    # Plan / migration narrative trees (slated for deletion). These describe
+    # the legacy key as a removal target, not a live writer site.
     "atom_plan/",
+    "code_cleansing_plan/",
     ".git/",
     "node_modules/",
     "__pycache__/",
