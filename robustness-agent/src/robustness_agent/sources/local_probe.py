@@ -1756,8 +1756,15 @@ async def _probe_gateway_health(
 
 # Default mount paths probed by J2. Each is read from the env at probe
 # time so an operator can move them without rebuilding the agent.
+# All entries default to "" (no in-process fallback): we only probe what
+# the operator/env actually points at. TRACELENS_ROOT is no longer
+# expected to be an external /wekafs mount — install.sh now clones the
+# public repo into $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens (a
+# session-local path), so the J2 probe should only flag it as a degraded
+# external mount when the operator has explicitly overridden TRACELENS_ROOT
+# to point at one (e.g. a shared cluster checkout).
 _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
-    ("TRACELENS_ROOT", "/wekafs/hyperloom/TraceLens-internal"),
+    ("TRACELENS_ROOT", ""),
     # Internal extension is optional: no default path, so an open-source-only
     # setup (TRACELENS_INTERNAL_ROOT unset) is not flagged as a degraded mount.
     ("TRACELENS_INTERNAL_ROOT", ""),

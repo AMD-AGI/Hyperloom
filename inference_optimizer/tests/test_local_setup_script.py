@@ -250,7 +250,7 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     assert str(expected_deps / "TraceLens") in result.stdout
     # Open-source-only by default: internal extension is not requested/cloned.
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
-    assert "release/hyperloom_integration_v0.5.0" in result.stdout
+    assert "c35c787ef31f0425fa0028a605ffc8c60a737c2c" in result.stdout
 
 
 # ---------------------------------------------------------------------------
