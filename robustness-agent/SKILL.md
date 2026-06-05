@@ -97,7 +97,7 @@ python -m robustness_agent.runtime.cli tick \
 
 `intent_envelope` follows the same schema as `critic-agent`'s
 `commit-review` output, validated host-side by
-`inference_optimizer.orchestrator.intent_parser.validate_envelope`.
+`inference_optimizer.protocol.intent.validate_envelope`.
 Exit code `0` = logical success (zero or more intents); `2` = adapter /
 configuration bug.
 
