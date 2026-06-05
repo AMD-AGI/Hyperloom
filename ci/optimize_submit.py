@@ -814,11 +814,15 @@ class SafeOptimizeClient:
         if image:
             body["image"] = image
         # Override SaFE backend's wrong-for-core42 defaults (MI355X /
-        # /hyperloom/InferenceX). See DEFAULT_GPU_TYPE/_INFERENCEX_PATH above.
+        # /hyperloom/InferenceX). See DEFAULT_GPU_TYPE comment above.
         if gpu_type:
             body["gpuType"] = gpu_type
-        if inferencex_path:
-            body["inferencexPath"] = inferencex_path
+        # Always send inferencexPath — even when empty — so the SaFE
+        # backend's Zod default ("/hyperloom/InferenceX") does not kick
+        # in. An empty string tells the Claw prompt-builder to leave
+        # the path blank; install.sh then clones a writable per-session
+        # copy instead of reusing the shared read-only mount.
+        body["inferencexPath"] = inferencex_path or ""
         if oob_path:
             body["oobPath"] = oob_path
         if tracelens_root:
