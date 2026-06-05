@@ -10,7 +10,7 @@ Hosts construct ``request.json``, invoke
 --out emit.json``, and read the resulting ``emit.json`` whose
 ``intent_envelope`` field follows the same schema as critic-agent's
 ``commit-review`` output (and is validated by upstream
-``inference_optimizer.orchestrator.intent_parser.validate_envelope``).
+``inference_optimizer.protocol.intent.validate_envelope``).
 
 Keeping the agent on the far side of a subprocess boundary is a
 deliberate architectural choice — see and the project

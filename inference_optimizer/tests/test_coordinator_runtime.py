@@ -38,10 +38,9 @@ from inference_optimizer.orchestrator.backends import (
 from inference_optimizer.orchestrator.coordinator import (
     _BASELINE_FINGERPRINT_KEYS,
     _baseline_params_fingerprint,
-    _resolve_silent_ticks_closing_threshold,
     Coordinator,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.sub_agent_runner import (
     SubAgentRunner,
@@ -1341,52 +1340,14 @@ def _write_marker_target_baseline(session_dir: Path) -> None:
     )
 
 
-def test_resolve_silent_ticks_closing_threshold_default(monkeypatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", raising=False)
-    assert _resolve_silent_ticks_closing_threshold() == 120
-
-
-def test_resolve_silent_ticks_closing_threshold_override(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "5")
-    assert _resolve_silent_ticks_closing_threshold() == 5
-
-
-def test_resolve_silent_ticks_closing_threshold_disabled(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
-    assert _resolve_silent_ticks_closing_threshold() == 0
-
-
-def test_resolve_silent_ticks_closing_threshold_garbage(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "not-a-number")
-    assert _resolve_silent_ticks_closing_threshold() == 120
-
-
-def test_shared_state_default_consecutive_silent_ticks_is_zero():
-    s = SharedState()
-    assert s.consecutive_silent_ticks == 0
-
-
 @pytest.mark.asyncio
-async def test_silent_ticks_increment_when_run_is_idle(session_dir, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        await c.run(max_ticks=3, tick_interval_sec=0.0)
-        assert c.shared_state.consecutive_silent_ticks >= 3
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_silent_ticks_disabled_by_zero_threshold(
-    session_dir, monkeypatch,
-):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
+async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
+    """An idle run keeps ticking until the wall-clock deadline / max_ticks
+    rather than self-closing on silence (no idle early-close)."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
         assert reason == "max_ticks"
-        assert c.shared_state.consecutive_silent_ticks >= 5
         assert c.shared_state.closing_phase is False
     finally:
         await c.stop()

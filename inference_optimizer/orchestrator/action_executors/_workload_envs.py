@@ -27,9 +27,9 @@ Callers:
 * ``baseline.py`` — runs first, materializes the contract once and
   surfaces the rendered YAML path in its result so downstream actions
   can reuse it verbatim (no env re-read race).
-* ``params.py`` / ``backends.py`` — fall back to materializing on
-  their own if Coordinator has not yet plumbed the baseline path
-  through ``task.params["config_path"]``.
+* ``explore`` grid runs — fall back to materializing on their own if
+  Coordinator has not yet plumbed the baseline path through
+  ``task.params["config_path"]``.
 * ``sweep.py`` — same fallback; per-variant CONC/ISL/OSL still win
   because ``_build_variant_yaml`` applies ``variant.extra_envs`` last.
 """
@@ -294,7 +294,7 @@ def materialize_config_with_envs(
     osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
     conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
 
-    # TraceLens #194: compute steady-state window for profiling configs.
+    # compute steady-state window for profiling configs.
     # Only inject when this is a profile yaml — detected by PROFILE env or
     # `profiler.torch_profiler.enabled: true` in the YAML. The formulas
     # match the TraceLens magpie-benchmark-profiling skill (Option A:
@@ -492,7 +492,7 @@ def materialize_config_with_envs(
     if "NUM_WARMUPS" not in envs:
         envs["NUM_WARMUPS"] = min(conc_val, 8)
     if server_args:
-        # PR-B: merge into the yaml-default EXTRA_SGLANG_ARGS / EXTRA_VLLM_ARGS
+        # merge into the yaml-default EXTRA_SGLANG_ARGS / EXTRA_VLLM_ARGS
         # rather than overwriting. The profile path's
         # ``--enable-profile-cuda-graph`` / ``--enable-shape-discovery-for-
         # cuda-graph-profile`` flags are injected upstream (lines ~295 /

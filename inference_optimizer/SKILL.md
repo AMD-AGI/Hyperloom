@@ -60,7 +60,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
         ├── state.json
         ├── storage/coordinator.db
         ├── agents/{orchestration,kernel,critic,robustness}/
-        ├── runs/{baseline,profile,roofline,backends,params,...}/<task_id>/
+        ├── runs/{baseline,profile,roofline,explore,sweep,...}/<task_id>/
         ├── kernel-agent/runs/<session_id>/
         ├── kernel-agent-workspace/<kernel_id>/
         ├── optimizer_runs/               # per-session launcher logs / PID / monitor
@@ -256,18 +256,11 @@ under **Framework Selection** below.
 
 ## Retired modules and rules (do not re-introduce)
 
-These orchestrator modules were intentionally removed; the
-`actions/_meta/*.yaml` registry + `_grid_runner.py` + the unified,
-specialist-informed EXPLORE flow replaced them. Re-adding them
-re-creates conflicting decision paths:
+The live runtime uses `actions/_meta/*.yaml`, `_grid_runner.py`, and the
+unified specialist-informed `explore` flow. Do not recreate the retired
+`backends` / `params` / `validate_stack` / scoring modules.
 
-- `orchestrator/backends.py` (the action-routing one — distinct from
-  the LLM-adapter directory `orchestrator/backends/`)
-- `orchestrator/params.py`
-- `orchestrator/validate_stack.py`
-- `orchestrator/scoring.py`
-
-Related rules that look reasonable but break things:
+Rules that look reasonable but break the current flow:
 
 - **No `framework_pr first-explore priority` rule** in
   `system_prompts/orchestration.md` — conflicts with the EXPLORE
@@ -629,18 +622,16 @@ tput). Per-variant `extra_envs` still win (applied last).
 
 ## Critic Backend Selection
 
-The Critic role has three backend modes, picked by mutually-exclusive
-CLI flags. Default is `--critic-agent` (no flag needed).
+The Critic role has two backend modes. Default is `--critic-agent` (no
+flag needed).
 
 | Flag | Backend class | Behaviour |
 |---|---|---|
 | (none) / `--critic-agent` | `CriticAgentBackend` | Drives the standalone `critic-agent/` skill runtime via `python -m runtime.cli prepare-review` → Codex chat completion → `python -m runtime.cli commit-review`. Adds KB priors lookup (with circuit-breaker for unreachable services), per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
 | `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
-| `--critic-codex-bare` | `CodexBackend` | Legacy direct chat-completion path with no KB / session memory / `review_constraints`. Available for debugging the LLM layer in isolation. (`--critic-real` is a hidden back-compat alias.) |
 
 Default is overridable per pod via
-`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent` /
-`codex_bare`).
+`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent`).
 
 ### Required env when `--critic-agent` is active
 
@@ -655,9 +646,9 @@ Default is overridable per pod via
 
 `_preflight()` checks `CRITIC_AGENT_ROOT` resolves to a real directory
 with `runtime/cli.py`, then runs `python -m runtime.cli --help` (5s
-timeout) before the Coordinator boots. Missing or broken runtime
-aborts the run with a clear error pointing at `--critic-mock` /
-`--critic-codex-bare` as bypasses.
+timeout) before the Coordinator boots. Missing or broken runtime aborts
+the run with a clear error pointing at `--critic-mock` as the offline
+bypass.
 
 ### Per-turn artefacts (audit trail)
 
@@ -808,8 +799,8 @@ echo $! > "$PID_FILE"
 shell can die on SSH disconnect.
 
 Critic defaults to `--critic-agent`; Robustness defaults to `--robustness-agent`.
-See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock` /
-`--critic-codex-bare` overrides; pod-level overrides via
+See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock`;
+pod-level overrides via
 `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` /
 `INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND`.
 
@@ -1053,8 +1044,8 @@ gate is intentional — opus-4-5 / haiku silently degraded prior runs.
 ### Critic-agent runtime errors
 
 Inspect `$SESSION_DIR/critic-workdir/<latest>/{request,judge_bundle,review,emit}.json`.
-Bypass with `--critic-mock` (offline / smoke) or `--critic-codex-bare` (legacy
-direct Codex). See `## Critic Backend Selection`.
+Bypass with `--critic-mock` for offline / smoke runs. See
+`## Critic Backend Selection`.
 
 | Symptom | Fix |
 |---|---|
@@ -1078,6 +1069,6 @@ Report concise status:
 
 - session id (from `manifest.json`) and log path
 - `cumulative_gain` and `current_best`
-- params accepted/rejected summary
+- explore accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
 - whether the process is still running or stopped and why

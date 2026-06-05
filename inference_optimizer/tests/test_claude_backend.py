@@ -36,7 +36,7 @@ from inference_optimizer.orchestrator.backends import (
     validate_emit_intent_input,
 )
 from inference_optimizer.orchestrator.backends.base import BackendError
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
     NoIntentEmitted,
