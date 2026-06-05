@@ -3,18 +3,12 @@
 The block must:
 
 * Appear under the DECISION FRAMEWORK section.
-* Name the three SharedState surfaces the LLM is expected to consult
-  (``last_<action>`` / ``<action>_attempts`` / ``last_action_failures``).
-* Spell out the three decision rules (F1 same-fingerprint denial /
-  F2 ``error_class='no_report'`` salvage miss / F3 ``subprocess_nonzero``
-  heartbeat-out).
-* Mention the two recovery knobs Orchestration may set in
-  ``propose_action{params=...}``: ``benchmark_script`` and ``result_dir``.
-
-Failing these assertions is a strong signal the prompt drifted away
-from what PolicyGate actually enforces — the prompt must keep referring
-to the rule names the Coordinator emits (``baseline_self_loop``,
-``rescued_from_leaked_path:*``, etc.) so the LLM can correlate the two.
+* Name the SharedState surfaces the LLM is expected to consult.
+* Spell out the baseline failure rules (BF1 no-param-change / BF2 auto-exit
+  / BF3 heartbeat-for-human) and non-baseline rule (F4 policy_loop).
+* Mention the PolicyGate rule name ``baseline_no_param_change`` so the LLM
+  can correlate ``policy_denied{rule: 'baseline_no_param_change'}`` with
+  the recovery instructions.
 """
 
 from __future__ import annotations
@@ -71,50 +65,40 @@ def test_prompt_failure_recovery_names_state_surfaces(registry, rules_path):
         assert needle in text, f"FAILURE RECOVERY missing surface: {needle!r}"
 
 
-def test_prompt_failure_recovery_lists_fingerprint_keys(registry, rules_path):
-    """The eight ``_BASELINE_FINGERPRINT_KEYS`` must show up so the LLM
-    knows which fields actually change what PolicyGate sees."""
+def test_prompt_failure_recovery_names_baseline_rules(registry, rules_path):
     text = _prompt(registry, rules_path)
-    expected_keys = (
-        "benchmark_script", "result_dir", "extra_server_args",
-        "extra_envs", "model_path", "gpu_type", "config_path",
-        "disable_run_eval",
-    )
-    for key in expected_keys:
-        assert key in text, f"fingerprint key {key!r} missing from prompt"
+    assert "RULE BF1" in text
+    assert "RULE BF2" in text
+    assert "RULE BF3" in text
+    assert "baseline_no_param_change" in text
 
 
-def test_prompt_failure_recovery_names_four_rules(registry, rules_path):
+def test_prompt_failure_recovery_names_nonbaseline_rule(registry, rules_path):
     text = _prompt(registry, rules_path)
-    assert "RULE F1" in text
-    assert "RULE F2" in text
-    assert "RULE F3" in text
     assert "RULE F4" in text
     assert "policy_loop" in text
 
 
 def test_prompt_failure_recovery_mentions_policy_rule_tag(registry, rules_path):
     """The exact PolicyGate rule string must appear so the LLM can
-    correlate ``policy_denied{rule: 'baseline_self_loop'}`` with the
-    recovery instructions."""
+    correlate denial events with the recovery instructions."""
     text = _prompt(registry, rules_path)
-    assert "baseline_self_loop" in text
+    assert "baseline_no_param_change" in text
 
 
-def test_prompt_failure_recovery_has_recovery_example(registry, rules_path):
+def test_prompt_failure_recovery_forbids_param_changes(registry, rules_path):
+    """The prompt must explicitly tell the LLM not to change params."""
     text = _prompt(registry, rules_path)
-    # A concrete propose_action example using the new params surface.
-    assert "propose_action{action_name='baseline'" in text
-    assert "sglang_mi300x.sh" in text
+    assert "do NOT change baseline params" in text or \
+           "Do not tweak" in text
 
 
 def test_failure_recovery_block_present_in_no_kernel_prompt(registry, rules_path):
     """Recovery semantics are not kernel-specific — the block must also
-    appear in the no-kernel prompt (baseline / backends / params /
-    sweep / validate_stack are all included there)."""
+    appear in the no-kernel prompt."""
     text = _prompt(registry, rules_path, enabled=NO_KERNEL_ENABLED_ACTIONS)
     assert "### FAILURE RECOVERY" in text
-    assert "RULE F1" in text
+    assert "RULE BF1" in text
 
 
 def test_failure_recovery_appears_after_decision_framework_header(

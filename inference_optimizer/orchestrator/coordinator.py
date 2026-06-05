@@ -4975,73 +4975,62 @@ class Coordinator:
     def _baseline_self_loop_denial(
         self, proposed_params: dict[str, Any] | None,
     ) -> PolicyDenied | None:
-        """Reject a fresh baseline proposal that just replays the last failure.
+        """Reject baseline proposals that change params after a failure.
 
-        The Orchestration prompt's FAILURE RECOVERY section instructs the
-        LLM to introduce a new ``benchmark_script`` / ``result_dir`` /
-        ``extra_server_args`` override after a baseline failure. This
-        method is the PolicyGate stop-loss that fires when the LLM
-        ignores that instruction.
+        After a baseline failure the agent must retry with **identical**
+        params.  Tweaking ``extra_server_args``, ``extra_envs`` or other
+        knobs to "self-heal" is not allowed — the ``baseline_failure_streak``
+        counter will terminate the run after 3 consecutive failures with
+        ``stop_reason='baseline_failed'`` and the failure details in the
+        event log.
 
-        Fires only when ALL of these hold:
+        Fires when:
 
-        * Two or more consecutive baseline failures have landed on
-          ``shared_state.baseline_attempts`` (any decision tail that
-          isn't ``status=succeeded`` counts).
-        * Those last two failures both carry a
-          ``fingerprint`` in their ``extras`` and the fingerprints
-          match each other.
-        * The current proposal's fingerprint matches the failed-streak
-          fingerprint.
+        * At least one consecutive baseline failure exists in the tail
+          of ``baseline_attempts`` (since the last success).
+        * The most recent failure carries a ``fingerprint`` in ``extras``.
+        * The proposed params fingerprint **differs** from the failed
+          fingerprint — i.e. the agent tried to change something.
 
-        When all three match, return :class:`PolicyDenied` with a
-        ``baseline_self_loop`` rule and a hint pointing at the next
-        override surface so the prompt sees a deterministic recovery
-        path. Returns ``None`` otherwise — the regular execution-order
-        rules still apply.
+        Same-fingerprint retries are allowed; they accumulate the streak
+        counter and exit cleanly at 3.
         """
         attempts = list(self.shared_state.baseline_attempts or [])
-        # Walk the tail backwards collecting *consecutive* failures.
-        tail_failures: list[dict[str, Any]] = []
+        # Find the most recent consecutive failure with a fingerprint.
+        last_failure_fp: dict[str, Any] | None = None
+        last_error_class: str = "unknown"
         for entry in reversed(attempts):
             if not isinstance(entry, dict):
                 break
             if entry.get("status") == "succeeded":
                 break
-            tail_failures.append(entry)
-        if len(tail_failures) < _BASELINE_SELF_LOOP_THRESHOLD:
-            return None
-        recent = tail_failures[: _BASELINE_SELF_LOOP_THRESHOLD]
-        prints: list[Any] = []
-        for entry in recent:
             extras = entry.get("extras") or {}
-            if not isinstance(extras, dict):
-                return None
-            fp = extras.get("fingerprint")
-            if fp is None:
-                return None
-            prints.append(fp)
-        first = prints[0]
-        if any(p != first for p in prints[1:]):
+            if isinstance(extras, dict):
+                fp = extras.get("fingerprint")
+                if fp is not None:
+                    last_failure_fp = fp
+                    last_error_class = entry.get("error_class") or "unknown"
+                    break
+        if last_failure_fp is None:
             return None
         proposed_fp = _baseline_params_fingerprint(proposed_params)
-        if proposed_fp != first:
-            return None
-        error_class = recent[0].get("error_class") or "unknown"
+        if proposed_fp == last_failure_fp:
+            return None  # same params → allow retry (streak handles exit)
         hint = (
-            "the last "
-            f"{_BASELINE_SELF_LOOP_THRESHOLD} `baseline` attempts failed "
-            f"with the SAME params fingerprint (error_class={error_class!r}). "
-            "Re-proposing the same params will fail the same way. Change at "
-            "least one of: params.benchmark_script (sanitized *.sh name, "
-            "e.g. \"sglang_mi300x.sh\" to bypass dsr1_fp8_mi300x.sh's "
-            "hardcoded --result-dir), params.result_dir (sanitized path; "
-            "Coordinator already defaults RESULT_DIR=<workspace>), or "
-            "extra_server_args / extra_envs."
+            f"baseline failed with error_class={last_error_class!r}. "
+            "Changing params (extra_server_args, extra_envs, benchmark_script, "
+            "etc.) to self-heal is disabled. Re-propose baseline with the "
+            "SAME params to retry; the run terminates after 3 consecutive "
+            "failures with stop_reason='baseline_failed' and the failure "
+            "details recorded in the event log. If the root cause requires "
+            "manual intervention, emit a heartbeat with "
+            "body_md='blocked: baseline repeatedly failing' and let "
+            "Robustness escalate."
         )
         return PolicyDenied(
-            "action='baseline' denied: same-fingerprint failure streak",
-            rule="baseline_self_loop",
+            "action='baseline' denied: changing params after failure is "
+            "not allowed",
+            rule="baseline_no_param_change",
             hint=hint,
         )
 
@@ -9723,15 +9712,28 @@ class Coordinator:
         baseline_event_payload: dict[str, Any] | None = None
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             self.shared_state.baseline_failure_streak += 1
-            if self.shared_state.baseline_failure_streak >= 3:
+            streak = self.shared_state.baseline_failure_streak
+            raw_error = result_payload.get("error")
+            error_text = str(raw_error) if raw_error is not None else ""
+            if streak >= 3:
                 self.shared_state.set_stop_reason("baseline_failed")
+                log.warning(
+                    "baseline_failure_streak=%d reached threshold — "
+                    "terminating with stop_reason='baseline_failed' "
+                    "(task_id=%s error_class=%s error=%s)",
+                    streak,
+                    task.task_id,
+                    result_payload.get("error_class"),
+                    error_text[:200],
+                )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
-                "failure_streak": self.shared_state.baseline_failure_streak,
+                "failure_streak": streak,
                 "stop_reason": self.shared_state.stop_reason,
                 "result_status": result_payload.get("status"),
                 "error_class": result_payload.get("error_class"),
+                "error_excerpt": error_text[:500] or None,
             }
             any_changed = True
         # Mirror the roofline failure-handling that lives in the promote
