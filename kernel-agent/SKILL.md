@@ -55,8 +55,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 ```
 
-`install.sh` always installs everything (no `--with-*` flags any more — those
-are accepted as no-ops for backwards compat):
+`install.sh` always installs everything (no per-backend selection flags):
 
 - `ray==2.44.1` + `click<8.3.0`
 - Node.js 20 + npm when they are missing (required for the `claude` /
@@ -107,8 +106,8 @@ are accepted as no-ops for backwards compat):
   Anthropic URL derived from `$OPENAI_BASE_URL` with a trailing `/v1`
   stripped) + `~/.codex/auth.json`. The AMD primus-safe gateway accepts
   both `x-api-key` (what claude/codex CLIs send) and
-  `Authorization: Bearer` natively, so the legacy auth-proxy on
-  `127.0.0.1:4002` is no longer in the loop. The cursor backend talks to
+  `Authorization: Bearer` natively, so no local auth-proxy is in the
+  loop. The cursor backend talks to
   Cursor's own gateway via `@cursor/sdk` and requires `CURSOR_API_KEY`
   (separate Cursor account, prefix `crsr_...`).
 

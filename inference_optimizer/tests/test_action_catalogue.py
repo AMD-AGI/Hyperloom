@@ -14,6 +14,15 @@ from inference_optimizer.orchestrator.action_registry import (
     VALID_PIPELINE_PHASES,
 )
 from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
+from inference_optimizer.protocol.action_surfaces import (
+    FRAMEWORK_PR_INTERNAL_ACTION_NAMES as SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES,
+    FULL_ENABLED_ACTIONS as SURFACE_FULL_ENABLED_ACTIONS,
+    GRID_INJECTABLE_ACTIONS as SURFACE_GRID_INJECTABLE_ACTIONS,
+    INTERNAL_ONLY_ACTION_NAMES as SURFACE_INTERNAL_ONLY_ACTION_NAMES,
+    KERNEL_OWNED_ACTIONS as SURFACE_KERNEL_OWNED_ACTIONS,
+    NO_KERNEL_ENABLED_ACTIONS as SURFACE_NO_KERNEL_ENABLED_ACTIONS,
+    PHASE_ALLOWLIST_BYPASS_ACTIONS as SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS,
+)
 
 
 # DESIGN §16.1 + v0.8 KB_design §3.4 (merged ``explore``).
@@ -105,6 +114,72 @@ def test_kernel_owned_actions_all_in_registry(registry):
         assert meta.family == "deep_kernel"
 
 
+def test_action_surface_constants_are_shared():
+    """Policy, prompt rendering, and CLI must not carry divergent action lists."""
+    from inference_optimizer.cli import _NOOP_KINDS_KERNEL_ONLY
+    from inference_optimizer.orchestrator import policy
+    from inference_optimizer.orchestrator.system_prompts import prompt_builder
+
+    assert policy.KERNEL_OWNED_ACTIONS is SURFACE_KERNEL_OWNED_ACTIONS
+    assert prompt_builder.KERNEL_OWNED_ACTIONS is SURFACE_KERNEL_OWNED_ACTIONS
+    assert set(_NOOP_KINDS_KERNEL_ONLY) == SURFACE_KERNEL_OWNED_ACTIONS
+    assert prompt_builder.GRID_INJECTABLE_ACTIONS is SURFACE_GRID_INJECTABLE_ACTIONS
+    assert policy.INTERNAL_ONLY_ACTION_NAMES is SURFACE_INTERNAL_ONLY_ACTION_NAMES
+    assert prompt_builder.FULL_ENABLED_ACTIONS is SURFACE_FULL_ENABLED_ACTIONS
+    assert prompt_builder.NO_KERNEL_ENABLED_ACTIONS is SURFACE_NO_KERNEL_ENABLED_ACTIONS
+
+
+def test_prompt_enabled_actions_are_live_registry_actions(registry):
+    retired = {
+        "setup", "classify", "backends", "params",
+        "validate_stack", "select_kernels",
+    }
+    enabled = set(SURFACE_FULL_ENABLED_ACTIONS) | set(SURFACE_NO_KERNEL_ENABLED_ACTIONS)
+    assert not (enabled & retired)
+    for name in enabled:
+        assert registry.get(name) is not None, (
+            f"prompt-visible action {name!r} must have action metadata"
+        )
+    assert SURFACE_KERNEL_OWNED_ACTIONS <= set(SURFACE_FULL_ENABLED_ACTIONS)
+    assert SURFACE_KERNEL_OWNED_ACTIONS.isdisjoint(set(SURFACE_NO_KERNEL_ENABLED_ACTIONS))
+
+
+def test_phase_allowlist_actions_are_live_registry_actions(registry):
+    from inference_optimizer.orchestrator.phase_state import PHASE_ALLOWED_ACTIONS
+
+    retired = {
+        "setup", "classify", "backends", "params",
+        "validate_stack", "select_kernels",
+    }
+    phase_actions = set().union(*PHASE_ALLOWED_ACTIONS.values())
+    assert not (phase_actions & retired)
+    for name in phase_actions:
+        assert registry.get(name) is not None, (
+            f"phase allowlist action {name!r} must have action metadata"
+        )
+
+
+def test_action_surface_sets_are_phase_aligned():
+    from inference_optimizer.orchestrator.phase_state import (
+        PHASE_ALLOWED_ACTIONS,
+        PHASE_FRAMEWORK_PR,
+        PHASE_KERNEL,
+    )
+
+    all_phase_actions = set().union(*PHASE_ALLOWED_ACTIONS.values())
+    assert SURFACE_KERNEL_OWNED_ACTIONS <= PHASE_ALLOWED_ACTIONS[PHASE_KERNEL]
+    assert (
+        SURFACE_INTERNAL_ONLY_ACTION_NAMES - SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS
+    ) <= all_phase_actions
+    assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS <= SURFACE_INTERNAL_ONLY_ACTION_NAMES
+    assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS.isdisjoint(all_phase_actions)
+    assert (
+        SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES
+        <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_PR]
+    )
+    assert SURFACE_GRID_INJECTABLE_ACTIONS <= all_phase_actions
+
+
 def test_kernel_opt_has_three_lanes_and_high_cost(registry):
     m = registry.get("kernel_opt")
     assert m is not None
@@ -180,35 +255,12 @@ def test_lease_ttl_sec_consistent_with_cost(registry):
 
 
 # ---------------------------------------------------------------------------
-# Drift guards: keep the four "is this a real action?" sources of truth
-# consistent with each other.
-#
-# Background: ``session_paths._runs_actions()`` (the whitelist for actions
-# that get a per-task ``runs/<kind>/<task_id>/`` workspace) used to be a
-# hand-maintained ``_RUNS_ACTIONS`` frozenset. Adding a new action
-# (``explore``) without updating it caused the orchestrator to loop
-# forever proposing the action — every dispatch raised ``ValueError`` from
-# inside the executor's ``runs_dir()`` fallback, but mission TODOs never
-# cleared. The fix derives the whitelist from ``pipeline_phase`` in the
-# ActionRegistry; these tests lock the alignment in place.
+# Drift guards: keep action metadata, session paths, and CLI executor wiring
+# aligned so every executor-backed action gets a runs/<kind>/<task_id>
+# workspace.
 # ---------------------------------------------------------------------------
-# v0.8 M5 (KB_design §3.5 §10) — ``specialist`` is the LLM sub-agent
-# action. It's parameterised by ``params.domain`` rather than a yaml
-# meta, so the registry-derived runs_actions set won't list it but it
-# still needs a per-task workspace (``runs/specialist/<task_id>/``).
-# We add it explicitly to the registry-derived expected set in the
-# drift tests below.
-_SPECIALIST_RUNS_ACTION_NAME = "specialist"
-
-
 def test_runs_actions_match_pipeline_phases(registry):
-    """``_runs_actions()`` must equal {a.name for a in registry
-    if a.pipeline_phase ∈ _RUNS_WORKSPACE_PHASES} ∪ {'specialist'}.
-
-    This is the primary registry ↔ session_paths drift guard. The
-    ``specialist`` exception covers the yaml-less M5 action surface
-    (KB_design §3.5 §10).
-    """
+    """``_runs_actions()`` must follow registry pipeline phases."""
     from inference_optimizer.session_paths import (
         _RUNS_WORKSPACE_PHASES,
         _runs_actions,
@@ -217,7 +269,7 @@ def test_runs_actions_match_pipeline_phases(registry):
     expected = frozenset(
         a.name for a in registry.all()
         if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    ) | frozenset({_SPECIALIST_RUNS_ACTION_NAME})
+    )
     actual = _runs_actions()
     assert actual == expected, (
         f"runs_actions drift: actual={sorted(actual)!r} expected={sorted(expected)!r}; "
@@ -238,8 +290,7 @@ def test_explore_in_runs_actions():
 def test_runs_actions_fallback_matches_registry(registry):
     """The hardcoded ``_RUNS_ACTIONS_FALLBACK`` (used only when the
     registry can't be loaded) must stay aligned with the registry-derived
-    set ∪ {'specialist'}. The yaml-less ``specialist`` (KB_design §3.5
-    §10) is the one well-known exception.
+    set.
     """
     from inference_optimizer.session_paths import (
         _RUNS_ACTIONS_FALLBACK,
@@ -249,7 +300,7 @@ def test_runs_actions_fallback_matches_registry(registry):
     expected = frozenset(
         a.name for a in registry.all()
         if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    ) | frozenset({_SPECIALIST_RUNS_ACTION_NAME})
+    )
     assert _RUNS_ACTIONS_FALLBACK == expected, (
         f"_RUNS_ACTIONS_FALLBACK drift: fallback={sorted(_RUNS_ACTIONS_FALLBACK)!r} "
         f"registry-derived={sorted(expected)!r}; update _RUNS_ACTIONS_FALLBACK "
@@ -268,18 +319,12 @@ def test_cli_real_executors_consistent_with_runs_actions():
     a real executor without giving its yaml a ``pipeline_phase`` that
     falls in ``_RUNS_WORKSPACE_PHASES``, this test fires.
     """
-    from inference_optimizer.cli import (
-        _REAL_EXECUTORS_FULL,
-        _REAL_EXECUTORS_KERNEL_ONLY,
-    )
+    from inference_optimizer.cli import _REAL_EXECUTORS_FULL
     from inference_optimizer.session_paths import _runs_actions
 
     SESSION_ROOT_WRITERS = {"report", "session_breakdown"}
     runs = _runs_actions()
-    real_kinds = (
-        set(_REAL_EXECUTORS_FULL.keys())
-        | set(_REAL_EXECUTORS_KERNEL_ONLY.keys())
-    )
+    real_kinds = set(_REAL_EXECUTORS_FULL.keys())
 
     missing_from_runs = (real_kinds - SESSION_ROOT_WRITERS) - runs
     assert not missing_from_runs, (

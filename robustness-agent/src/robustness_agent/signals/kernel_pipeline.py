@@ -102,7 +102,7 @@ class RayPendingDetector:
         self._state_view = state_view
         # Disk-backed counter — see GpuLeakDetector for the same
         # reasoning. Without this, F1 (≥3 consecutive ticks) cannot
-        # fire under M1 subprocess-per-tick transport.
+        # fire under the subprocess-per-tick transport.
         loaded = state_view.load() if state_view is not None else {}
         try:
             self._consecutive_hits: int = max(

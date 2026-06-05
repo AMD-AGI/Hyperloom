@@ -368,7 +368,7 @@ def test_policy_blocks_llm_phase_write():
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
@@ -389,7 +389,7 @@ def test_policy_blocks_llm_schema_version_write():
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
@@ -411,7 +411,7 @@ def test_policy_blocks_llm_optimization_stack_write():
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
@@ -447,7 +447,7 @@ def test_policy_blocks_llm_search_ledger_write(field_name):
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
