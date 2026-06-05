@@ -107,7 +107,7 @@ on:
         required: false
         default: ''
       inferencex_path:
-        description: 'InferenceX checkout path inside the sandbox. Leave empty to use script default (/wekafs/hyperloom/InferenceX for core42).'
+        description: 'Explicit InferenceX checkout path (dev override only). Leave empty (default) so install.sh clones a writable per-session copy instead of pinning a shared read-only mount.'
         required: false
         default: ''
       kernel_opt_backends:
