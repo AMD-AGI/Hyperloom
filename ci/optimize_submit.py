@@ -3001,7 +3001,8 @@ def main() -> int:
     gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
     # Unset by default: install.sh clones a writable per-session InferenceX.
     # Only an explicit --inferencex-path / SAFE_OPTIMIZE_INFERENCEX_PATH pins
-    # a path (dev override); empty -> body omits inferencexPath entirely.
+    # a path (dev override); empty -> sends inferencexPath="" to suppress
+    # SaFE's default shared read-only path.
     inferencex_path = (args.inferencex_path
                        or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
                        or "")
