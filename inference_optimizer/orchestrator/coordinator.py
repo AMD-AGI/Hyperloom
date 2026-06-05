@@ -9713,6 +9713,8 @@ class Coordinator:
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             self.shared_state.baseline_failure_streak += 1
             streak = self.shared_state.baseline_failure_streak
+            raw_error = result_payload.get("error")
+            error_text = str(raw_error) if raw_error is not None else ""
             if streak >= 3:
                 self.shared_state.set_stop_reason("baseline_failed")
                 log.warning(
@@ -9722,7 +9724,7 @@ class Coordinator:
                     streak,
                     task.task_id,
                     result_payload.get("error_class"),
-                    str(result_payload.get("error", ""))[:200],
+                    error_text[:200],
                 )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
@@ -9731,9 +9733,7 @@ class Coordinator:
                 "stop_reason": self.shared_state.stop_reason,
                 "result_status": result_payload.get("status"),
                 "error_class": result_payload.get("error_class"),
-                "error_excerpt": str(
-                    result_payload.get("error", "")
-                )[:500] or None,
+                "error_excerpt": error_text[:500] or None,
             }
             any_changed = True
         # Mirror the roofline failure-handling that lives in the promote
