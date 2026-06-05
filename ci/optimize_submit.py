@@ -91,26 +91,12 @@ DEFAULT_REGISTER_WORKSPACE = "core42-hyperloom"
 DEFAULT_SUBMIT_WORKSPACE = "core42-sandbox"
 DEFAULT_VOLUME = "/wekafs"
 DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
-# Cluster-aware defaults: SaFE backend's NormalizePromptConfig uses MI355X /
-# /hyperloom/InferenceX which are wrong for core42 (it's MI300X and the
-# canonical hyperloom-managed InferenceX checkout lives at
-# /wekafs/hyperloom/InferenceX). Without overriding here the generated prompt
-# sends the agent on a 5-10 min wild goose chase looking for
-# /hyperloom/InferenceX, and it picks GPU-architecture-wrong heuristics later.
-#
-# /wekafs/hyperloom/InferenceX is the same priority path that:
-#   - inference_optimizer/cli.py:1586          uses as the V2 skill default
-#   - inference_optimizer/scripts/install.sh   bootstraps into
-#   - .github/workflows/inference-optimization-ci.yml lists FIRST after
-#     ${NFS_ROOT}/InferenceX in the config-file probe loop
-# Keeping this aligned avoids the agent landing on a stale /wekafs/InferenceX
-# checkout (left over from earlier non-hyperloom layouts on some sandboxes).
+# Cluster-aware default: SaFE backend's NormalizePromptConfig uses MI355X,
+# which is wrong for core42. InferenceX is no longer forced through the
+# optimization-task body; sandbox-side install.sh owns detection/clone and
+# exports INFERENCEX_PATH for the optimizer runtime.
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
-DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
-# OOB + TraceLens live next to InferenceX on the same hyperloom-managed mount.
-# Like DEFAULT_INFERENCEX_PATH these are core42 fallbacks; --oob-path /
-# --tracelens-root (or SAFE_OPTIMIZE_* env) override per-cluster.
 DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
 DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
@@ -2904,10 +2890,10 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"Known profiles: {', '.join(GPU_PROFILES)}. "
                              f"SaFE backend default is MI355X — must override on core42.")
     parser.add_argument("--inferencex-path", default="",
-                        help=f"InferenceX checkout path inside the sandbox "
-                             f"(defaults to $SAFE_OPTIMIZE_INFERENCEX_PATH then "
-                             f"'{DEFAULT_INFERENCEX_PATH}'). SaFE backend default is "
-                             f"/hyperloom/InferenceX which doesn't exist on core42.")
+                        help="Optional InferenceX checkout override inside the "
+                             "sandbox. Default is unset: sandbox-side "
+                             "install.sh clones/detects InferenceX and exports "
+                             "INFERENCEX_PATH.")
     parser.add_argument("--oob-path", default="",
                         help=f"OOB checkout path inside the sandbox (defaults to "
                              f"$SAFE_OPTIMIZE_OOB_PATH then '{DEFAULT_OOB_PATH}').")
@@ -3044,7 +3030,7 @@ def main() -> int:
     gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
     inferencex_path = (args.inferencex_path
                        or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
-                       or DEFAULT_INFERENCEX_PATH)
+                       or "")
     oob_path = (args.oob_path
                 or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
                 or DEFAULT_OOB_PATH)

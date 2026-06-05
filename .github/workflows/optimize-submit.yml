@@ -105,10 +105,6 @@ on:
         description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
         required: false
         default: ''
-      inferencex_path:
-        description: 'InferenceX checkout path inside the sandbox. Leave empty to use script default (/wekafs/hyperloom/InferenceX for core42).'
-        required: false
-        default: ''
       kernel_opt_backends:
         description: 'Kernel optimization backends forwarded to SaFE (GEAK first by default).'
         required: false
@@ -281,7 +277,6 @@ jobs:
           INPUT_OSL:              ${{ github.event.inputs.osl }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
-          INPUT_INFERENCEX_PATH:  ${{ github.event.inputs.inferencex_path }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
@@ -316,9 +311,6 @@ jobs:
           ARGS+=(--mode "${INPUT_MODE:-local}")
           if [ -n "${INPUT_GPU_TYPE:-}" ]; then
             ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
-          fi
-          if [ -n "${INPUT_INFERENCEX_PATH:-}" ]; then
-            ARGS+=(--inferencex-path "${INPUT_INFERENCEX_PATH}")
           fi
           if [ -n "${INPUT_KERNEL_OPT_BACKENDS:-}" ]; then
             ARGS+=(--kernel-opt-backends "${INPUT_KERNEL_OPT_BACKENDS}")
