@@ -252,6 +252,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "no_kernel_skipped",
     "sweep_done",
     "conc_sweep_done",
+    "sweep_budget_exhausted",
     "explore_force_exit_low_budget",
     "framework_pr_phase_done",
     "framework_pr_plateau",

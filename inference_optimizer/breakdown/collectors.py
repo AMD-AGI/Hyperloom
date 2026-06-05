@@ -554,21 +554,52 @@ def _benchmark_report_metrics(
     return (out_tput, ttft, tpot, e2el)
 
 
+def _benchmark_report_candidates(root: Path) -> list[Path]:
+    """Return benchmark reports under a task/workspace root.
+
+    Hyperloom has used several shapes over time:
+
+    * ``<task>/benchmark_*/benchmark_report.json``
+    * ``<task>/{warmup_round,measure_round}/benchmark_*/benchmark_report.json``
+    * ``<task>/.../variant_*/benchmark_*/benchmark_report.json`` for explore
+    * ``<benchmark_*>/benchmark_report.json`` when state.workspace points
+      directly at the benchmark directory.
+    """
+    if not root.exists():
+        return []
+
+    candidates: list[Path] = []
+    direct = root / "benchmark_report.json"
+    if direct.exists():
+        candidates.append(direct)
+
+    patterns = (
+        "benchmark_*/benchmark_report.json",
+        "measure_round/benchmark_*/benchmark_report.json",
+        "warmup_round/benchmark_*/benchmark_report.json",
+    )
+    for pattern in patterns:
+        candidates.extend(root.glob(pattern))
+    return candidates
+
+
+def _latest_benchmark_report(candidates: Iterable[Path]) -> Path | None:
+    reports = [p for p in candidates if p.exists()]
+    if not reports:
+        return None
+    reports.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return reports[0]
+
+
 def _find_benchmark_report(workspace: Path | None) -> Path | None:
-    """Locate the ``benchmark_*/benchmark_report.json`` under a task workspace.
+    """Locate a ``benchmark_report.json`` under a task workspace.
 
     Returns the most recent one (by mtime) if multiple are present (e.g.
-    retries within the same task), else ``None``.
+    retries or warmup+measure rounds within the same task), else ``None``.
     """
     if workspace is None or not workspace.exists():
         return None
-    candidates: list[Path] = []
-    for p in workspace.glob("benchmark_*/benchmark_report.json"):
-        candidates.append(p)
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
+    return _latest_benchmark_report(_benchmark_report_candidates(workspace))
 
 
 def _resolve_under_session(
@@ -627,6 +658,41 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     return cur if cur is not None else default
 
 
+def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
+    """Recover terminal reason/time from the CLOSE phase transition.
+
+    Older sessions can complete the phase state machine without mirroring the
+    CLOSE transition's reason back to top-level ``state.stop_reason``. The
+    phase history row is still Coordinator-authored and vocab-validated, so it
+    is the next-best lifecycle source for breakdown metadata.
+    """
+    history = state.get("phase_history") or []
+    if not isinstance(history, list):
+        return "", ""
+    for row in reversed(history):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("to_phase") or "").strip().upper() != "CLOSE":
+            continue
+        reason = str(
+            row.get("reason")
+            or row.get("stop_reason")
+            or row.get("exit_reason")
+            or ""
+        ).strip()
+        ts = str(row.get("ts") or row.get("entered_ts") or "").strip()
+        return reason, ts
+    return "", ""
+
+
+def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> bool:
+    if not close_stop_reason:
+        return False
+    if not stop_reason:
+        return True
+    return stop_reason == "time_exhausted" and close_stop_reason != "time_exhausted"
+
+
 # ---------------------------------------------------------------------------
 # §1 Session metadata
 # ---------------------------------------------------------------------------
@@ -638,7 +704,13 @@ def collect_session(
 ) -> dict[str, Any]:
     """Top-level session identification + lifecycle."""
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
-    stop_reason = str(state.get("stop_reason") or "")
+    stop_reason = str(state.get("stop_reason") or "").strip()
+    close_stop_reason, close_ts = _close_phase_stop_reason(state)
+    if _should_use_close_stop_reason(stop_reason, close_stop_reason):
+        stop_reason = close_stop_reason
+    ended_at_utc = ""
+    if stop_reason:
+        ended_at_utc = _iso_z(close_ts) if close_ts else _utc_now_iso()
     elapsed_min: float | None = None
     if start_ts:
         try:
@@ -656,7 +728,7 @@ def collect_session(
         "claw_session_id":  manifest.get("claw_session_id") or state.get("claw_session_id"),
         "sandbox_user_id":  manifest.get("sandbox_user_id") or state.get("sandbox_user_id"),
         "created_at_utc":   manifest.get("created_at_utc") or start_ts,
-        "ended_at_utc":     _utc_now_iso() if stop_reason else "",
+        "ended_at_utc":     ended_at_utc,
         "stop_reason":      stop_reason,
         "max_minutes":      int(state.get("max_minutes") or manifest.get("max_minutes") or 0),
         "elapsed_minutes":  round(elapsed_min, 2) if elapsed_min is not None else 0.0,
@@ -728,10 +800,14 @@ def collect_baseline(
     # match the wekafs root.
     ttft_source: str | None = "state_workspace" if ttft is not None else None
     if ttft is None:
+        baseline_root = session_dir / "runs" / "baseline"
         candidates = sorted(
-            (session_dir / "runs" / "baseline").glob(
-                "*/benchmark_*/benchmark_report.json"
-            ),
+            (
+                p
+                for task_dir in baseline_root.iterdir()
+                if task_dir.is_dir()
+                for p in _benchmark_report_candidates(task_dir)
+            ) if baseline_root.exists() else [],
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -812,6 +888,7 @@ def collect_baseline(
         for candidate in (
             report_path.parent / "baseline_config.with_envs.yaml",
             report_path.parent.parent / "baseline_config.with_envs.yaml",
+            report_path.parent.parent.parent / "baseline_config.with_envs.yaml",
         ):
             if candidate.exists():
                 config_resolved = candidate
@@ -854,8 +931,8 @@ def _reconstruct_baseline_attempts(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Walk ``<sd>/runs/baseline/<hash>/benchmark_*/benchmark_report.json``
-    and synthesize :class:`BaselineAttemptSummary` rows for each.
+    """Walk ``<sd>/runs/baseline/<hash>/**/benchmark_report.json`` and
+    synthesize :class:`BaselineAttemptSummary` rows for each.
 
     Used when ``state.baseline_attempts`` is empty but the on-disk
     runs/baseline/ tree shows that baseline ran (one or many times).
@@ -866,13 +943,22 @@ def _reconstruct_baseline_attempts(
         return []
     out: list[dict[str, Any]] = []
     reports = sorted(
-        root.glob("*/benchmark_*/benchmark_report.json"),
+        (
+            p
+            for task_dir in root.iterdir()
+            if task_dir.is_dir()
+            for p in _benchmark_report_candidates(task_dir)
+        ),
         key=lambda p: p.stat().st_mtime,
     )
     for report_path in reports:
         bench_dir = report_path.parent
-        # task dir = <sd>/runs/baseline/<HASH> ; bench dir = <task>/benchmark_<ts>
-        task_dir = bench_dir.parent
+        # task dir = <sd>/runs/baseline/<HASH>; benchmark reports may sit
+        # directly below it or under warmup_round/measure_round.
+        try:
+            task_dir = root / report_path.relative_to(root).parts[0]
+        except (ValueError, IndexError):
+            task_dir = bench_dir.parent
         ts_iso = ""
         # Prefer a parseable ``benchmark_<UTC>`` suffix, else mtime.
         m = re.search(r"benchmark_(\d{8})[T_](\d{6})", bench_dir.name)
@@ -944,9 +1030,13 @@ def collect_final(
         if reconstructed_report is not None:
             ttft_e2el_source = "validate_stack_disk"
         else:
-            reconstructed_report = _find_stack_top_report(session_dir, state)
+            reconstructed_report = _find_current_best_report(session_dir, state)
             if reconstructed_report is not None:
-                ttft_e2el_source = "stack_top_disk"
+                ttft_e2el_source = "current_best_disk"
+            else:
+                reconstructed_report = _find_stack_top_report(session_dir, state)
+                if reconstructed_report is not None:
+                    ttft_e2el_source = "stack_top_disk"
     if reconstructed_report is not None:
         report = _load_json_safe(reconstructed_report, warnings)
         if isinstance(report, dict):
@@ -995,12 +1085,33 @@ def _find_latest_validate_stack_report(session_dir: Path) -> Path | None:
     root = session_dir / "runs" / "validate_stack"
     if not root.exists():
         return None
-    candidates = sorted(
-        root.glob("*/benchmark_*/benchmark_report.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+    return _latest_benchmark_report(
+        p
+        for task_dir in root.iterdir()
+        if task_dir.is_dir()
+        for p in _benchmark_report_candidates(task_dir)
     )
-    return candidates[0] if candidates else None
+
+
+def _find_current_best_report(
+    session_dir: Path, state: dict[str, Any],
+) -> Path | None:
+    """Best-effort benchmark report for ``state.current_best``.
+
+    Some production states keep final latency on disk only while
+    ``current_best.workspace`` points directly at the benchmark directory.
+    Others omit workspace but still carry enough action/variant/tput
+    identity to match the report under ``runs/<action>/``.
+    """
+    cb = state.get("current_best") or {}
+    if not isinstance(cb, dict):
+        return None
+    workspace = _resolve_under_session(session_dir, cb.get("workspace"))
+    if workspace is not None:
+        report = _find_benchmark_report(workspace)
+        if report is not None:
+            return report
+    return _find_matching_action_report(session_dir, cb)
 
 
 def _find_stack_top_report(
@@ -1012,7 +1123,10 @@ def _find_stack_top_report(
     entry's KEEP run is the next-best evidence of "the final
     configuration's measured throughput / latency".
     """
+    cb = state.get("current_best") or {}
     stack = state.get("optimization_stack") or []
+    if not stack and isinstance(cb, dict):
+        stack = cb.get("optimization_stack") or []
     if not isinstance(stack, list) or not stack:
         return None
     last = stack[-1] if isinstance(stack[-1], dict) else None
@@ -1020,11 +1134,58 @@ def _find_stack_top_report(
         return None
     workspace_str = last.get("workspace") or ""
     if not workspace_str:
-        return None
+        return _find_matching_action_report(session_dir, last)
     workspace = _resolve_under_session(session_dir, workspace_str)
     if workspace is None:
+        return _find_matching_action_report(session_dir, last)
+    report = _find_benchmark_report(workspace)
+    if report is not None:
+        return report
+    return _find_matching_action_report(session_dir, last)
+
+
+def _find_matching_action_report(
+    session_dir: Path, entry: dict[str, Any],
+) -> Path | None:
+    """Match a report under ``runs/<action>/`` by variant name and tput.
+
+    This is intentionally conservative: it is used only when state lacks a
+    usable workspace. A tput match wins, variant path match is the next best
+    signal, and reports without latency are ignored because they cannot
+    repair ``final.ttft/e2el``.
+    """
+    action = str(entry.get("action") or "").strip()
+    if not action:
         return None
-    return _find_benchmark_report(workspace)
+    root = session_dir / "runs" / action
+    if not root.exists():
+        return None
+
+    variant = str(entry.get("variant_name") or entry.get("name") or "").strip().lower()
+    target_tput = _to_float(entry.get("tput"))
+    scored: list[tuple[int, float, Path]] = []
+    for report_path in root.rglob("benchmark_report.json"):
+        rel = report_path.relative_to(root).as_posix().lower()
+        variant_match = bool(variant and variant in rel)
+        report = _load_json_safe(report_path, [])
+        out_tput, ttft, _tpot, e2el = _benchmark_report_metrics(
+            report if isinstance(report, dict) else None
+        )
+        if ttft is None and e2el is None:
+            continue
+        tput_match = False
+        if target_tput is not None and out_tput is not None:
+            tolerance = max(abs(target_tput) * 0.005, 1e-6)
+            tput_match = abs(out_tput - target_tput) <= tolerance
+        if not (tput_match or variant_match):
+            continue
+        score = (2 if tput_match else 0) + (1 if variant_match else 0)
+        scored.append((score, report_path.stat().st_mtime, report_path))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return scored[0][2]
 
 
 def _build_final_invocation(
@@ -1048,6 +1209,7 @@ def _build_final_invocation(
         for candidate in (
             bench_dir / "baseline_config.with_envs.yaml",
             task_dir / "baseline_config.with_envs.yaml",
+            task_dir.parent / "baseline_config.with_envs.yaml",
         ):
             if candidate.exists():
                 config_path = candidate
