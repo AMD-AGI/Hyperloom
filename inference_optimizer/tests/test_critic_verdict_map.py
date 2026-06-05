@@ -15,15 +15,13 @@ This file exercises the v0.8 upgrade across the four layers it touches:
 * :mod:`policy` — ``_validate_review_verdict`` enforces the same
   mutual-exclusion rule and validates every per-variant verdict string
   against ``REVIEW_VERDICTS``.
-* :class:`Coordinator._handle_review_verdict` /
-  :meth:`_handle_verdict_map` — routes batch verdicts to the new
-  per-variant dispatcher, pins the map on
-  :class:`PendingProposal.verdict_map`, mirrors it back onto the bus,
-  and filters the materialised grid down to the ``approve`` subset.
-  (The legacy ``_cortex_t3_critic_rejected`` KB mirror was removed
-  alongside the T2/T3 hypothesize/verify protocol.)
-* :func:`build_critic_prompt` — the OUTPUT PROTOCOL section advertises
-  the new ``verdict_map`` shape and explains the precedence rules.
+* :class:`Coordinator._handle_review_verdict` — every proposal is now
+  decided by a single verdict; an incoming ``verdict_map`` is collapsed
+  to a summary verdict (explore grids run their variants directly, so
+  there is no per-variant Critic pre-review). The envelope + PolicyGate
+  schema still accept ``verdict_map`` for forward-compat / resume.
+* :func:`build_critic_prompt` — the OUTPUT PROTOCOL section documents
+  the single-verdict shape.
 """
 
 from __future__ import annotations
@@ -210,12 +208,12 @@ def test_policy_gate_review_verdicts_vocab_contains_canonical_set():
 
 
 # ===========================================================================
-# 3. Coordinator helpers — _handle_verdict_map dispatch
+# 3. Coordinator helpers — _handle_review_verdict dispatch
 # ===========================================================================
 @dataclass
 class _BareSharedState:
-    """SharedState double exposing the few fields the verdict_map
-    handler touches (Cortex T3 path + audit hint)."""
+    """SharedState double exposing the few fields the review-verdict
+    handler touches (audit hint + roofline gate)."""
 
     cortex_session_id: str = "sid-test"
     save_count: int = 0
@@ -272,8 +270,8 @@ class _StubCortexKB:
 @pytest.fixture
 def coord(tmp_path: Path):
     """Coordinator-shaped object with just enough plumbing for
-    ``_handle_review_verdict`` / ``_handle_verdict_map`` /
-    ``_materialize_approved_proposal`` to run end-to-end."""
+    ``_handle_review_verdict`` / ``_materialize_approved_proposal`` to
+    run end-to-end."""
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _BareSharedState()
@@ -352,7 +350,11 @@ async def test_legacy_single_verdict_still_materialises_whole_proposal(coord):
 
 
 @pytest.mark.asyncio
-async def test_verdict_map_routes_to_per_variant_handler(coord):
+async def test_verdict_map_collapses_to_summary_single_verdict(coord):
+    """A ``verdict_map`` (accepted by the schema for forward-compat) is
+    collapsed to a summary verdict — ``approve`` when any variant is
+    approved — and materialises the whole proposal with no per-variant
+    filter (explore grids are no longer pre-reviewed)."""
     pending = _seed_explore_proposal(coord)
     intent = Intent(
         type=IntentType.REVIEW_VERDICT,
@@ -360,42 +362,27 @@ async def test_verdict_map_routes_to_per_variant_handler(coord):
             "target_proposal_msg_id": pending.proposal_msg_id,
             "verdict_map": {
                 "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "approve"},
-                "v_c": {"verdict": "reject", "rationale": "kb says no"},
-                "v_d": {"verdict": "reject", "rationale": "duplicate"},
+                "v_b": {"verdict": "reject", "rationale": "kb says no"},
+                "v_c": {"verdict": "reject", "rationale": "duplicate"},
+                "v_d": {"verdict": "reject"},
             },
         },
     )
     await coord._handle_review_verdict("critic", intent)
     assert pending.decided is True
-    assert pending.verdict == "approve"  # summary — any approved → approve
-    assert set(pending.verdict_map) == {"v_a", "v_b", "v_c", "v_d"}
-
-
-# --- materialise filter ----------------------------------------------------
-@pytest.mark.asyncio
-async def test_verdict_map_materialises_only_approved_subset(coord):
-    pending = _seed_explore_proposal(coord)
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject"},
-                "v_c": {"verdict": "approve"},
-                "v_d": {"verdict": "needs_review"},
-            },
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "approve"  # any approve → summary approve
+    # Whole proposal materialised — no per-variant subset filter.
     assert len(coord._materialise_calls) == 1
-    _pending, approved = coord._materialise_calls[0]
-    assert approved == {"v_a", "v_c"}
+    assert coord._materialise_calls[0][1] is None
+    # Bus mirror carries the single summary verdict.
+    bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
+    assert len(bus_msgs) == 1
+    assert bus_msgs[0].payload["verdict"] == "approve"
+    assert "verdict_map" not in bus_msgs[0].payload
 
 
 @pytest.mark.asyncio
-async def test_verdict_map_all_rejected_does_not_materialise(coord):
+async def test_verdict_map_all_rejected_collapses_to_reject(coord):
     pending = _seed_explore_proposal(coord)
     intent = Intent(
         type=IntentType.REVIEW_VERDICT,
@@ -410,113 +397,26 @@ async def test_verdict_map_all_rejected_does_not_materialise(coord):
         },
     )
     await coord._handle_review_verdict("critic", intent)
-    assert coord._materialise_calls == []
     assert pending.verdict == "reject"
-    # Observation surfaced for the operator audit log.
-    coord._record_observation.assert_awaited()
-    kind = coord._record_observation.await_args_list[-1][0][2]["kind"]
-    assert kind == "verdict_map_all_rejected"
+    assert coord._materialise_calls == []
 
 
 @pytest.mark.asyncio
-async def test_verdict_map_unknown_variant_is_dropped_and_logged(coord):
-    pending = _seed_explore_proposal(coord, variants=["v_a", "v_b"])
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a":     {"verdict": "approve"},
-                "v_ghost": {"verdict": "approve"},  # not in original grid
-            },
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
-    # Only v_a passes the filter.
-    _pending, approved = coord._materialise_calls[0]
-    assert approved == {"v_a"}
-    # The bus mirror surfaces the unknown variants list.
-    bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
-    assert bus_msgs[0].payload["unknown_variants"] == ["v_ghost"]
-
-
-# --- KB refute -------------------------------------------------------------
-# The legacy ``_cortex_t3_critic_rejected`` path that fired a KB ``refuted``
-# verify for every critic-rejected variant was removed alongside the
-# T2/T3 hypothesize/verify protocol. Rejection is still captured in the
-# verdict event + breakdown collector; the previously-tested KB-mirror
-# behaviour no longer exists.
-
-
-# --- bus mirror ------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_verdict_map_mirror_carries_summary_and_partitions(coord):
-    pending = _seed_explore_proposal(coord)
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject"},
-                "v_c": {"verdict": "approve"},
-                "v_d": {"verdict": "reject"},
-            },
-            "reasoning": "round summary",
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
-    bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
-    assert len(bus_msgs) == 1
-    payload = bus_msgs[0].payload
-    assert payload["verdict"] == "approve"  # summary
-    assert payload["approved_variants"] == ["v_a", "v_c"]
-    assert payload["rejected_variants"] == ["v_b", "v_d"]
-    assert payload["reasoning"] == "round summary"
-    assert payload["target_proposal_msg_id"] == pending.proposal_msg_id
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_unknown_proposal_logs_observation(coord):
+async def test_verdict_for_unknown_proposal_logs_observation(coord):
     intent = Intent(
         type=IntentType.REVIEW_VERDICT,
         payload={
             "target_proposal_msg_id": "ghost-msg",
-            "verdict_map": {"v_a": {"verdict": "approve"}},
+            "verdict": "approve",
         },
     )
     await coord._handle_review_verdict("critic", intent)
     coord._record_observation.assert_awaited()
     assert coord._materialise_calls == []
-
-
-# --- guard: verdict_map for non-explore proposal ---------------------------
-@pytest.mark.asyncio
-async def test_verdict_map_on_kernel_opt_proposal_logs_and_no_materialise(coord):
-    pending = PendingProposal(
-        proposal_msg_id="msg-knl",
-        from_agent="orchestration",
-        action_name="kernel_opt",
-        predicted_gain_pct=2.0,
-        payload={"action_name": "kernel_opt", "params": {}},
-    )
-    coord.state.pending_proposals["msg-knl"] = pending
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": "msg-knl",
-            "verdict_map": {"v_a": {"verdict": "approve"}},
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
-    assert coord._materialise_calls == []
-    coord._record_observation.assert_awaited()
-    kind = coord._record_observation.await_args_list[-1][0][2]["kind"]
-    assert kind == "verdict_map_for_non_explore"
 
 
 # ===========================================================================
-# 4. Critic prompt — OUTPUT PROTOCOL advertises verdict_map shape
+# 4. Critic prompt — OUTPUT PROTOCOL documents the single-verdict shape
 # ===========================================================================
 def _critic_prompt_text() -> str:
     from inference_optimizer.orchestrator.action_registry import ActionRegistry
@@ -531,26 +431,18 @@ def _critic_prompt_text() -> str:
     )
 
 
-def test_critic_prompt_advertises_verdict_map_section():
+def test_critic_prompt_documents_single_verdict_shape():
     text = _critic_prompt_text()
-    assert "verdict_map" in text
-    assert "Mutually exclusive" in text or "MUTUALLY EXCLUSIVE" in text or \
-        "mutually exclusive" in text
-
-
-def test_critic_prompt_still_documents_legacy_single_verdict():
-    text = _critic_prompt_text()
-    # Single-proposal path remains documented for kernel_opt / integrate.
+    # Single-proposal path is documented for every proposal.
     assert "single-proposal" in text.lower()
     assert "verdict:" in text.lower() or "'verdict'" in text.lower()
 
 
-def test_critic_prompt_phase_review_section_points_at_verdict_map():
+def test_critic_prompt_does_not_advertise_per_variant_verdict_map():
+    """Explore grids bench directly, so the Critic is no longer told to
+    emit a per-variant ``verdict_map``."""
     text = _critic_prompt_text()
-    # The phase-review block must steer specialist multi-variant
-    # packets toward the v0.8 batch shape.
-    assert "verdict_map" in text.lower()
-    assert "needs_review" in text.lower()
+    assert "verdict_map" not in text
 
 
 # ===========================================================================
@@ -677,31 +569,27 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
 
 
 # ===========================================================================
-# 6. _handle_delegate — explore grid re-routes through Critic verdict_map path
+# 6. _handle_delegate — explore grid runs directly (no Critic pre-review)
 # ===========================================================================
 #
-# Until this guard landed, ``delegate{action_name='explore', params={grid}}``
-# created an explore task directly via ``tasks.create_or_return_existing``,
-# bypassing the per-variant Critic + KB priors lookup entirely. The new
-# branch in ``_handle_delegate`` hands the intent off to
-# ``_handle_propose_action`` so the proposal lands in ``pending_proposals``
-# and the Critic emits a ``verdict_map``. Other delegate actions
-# (specialist / integrate_patch / sweep / recover) and empty-grid
-# explore delegates keep the legacy direct path.
+# ``delegate{action_name='explore', params={grid}}`` creates an explore
+# task directly via ``tasks.create_or_return_existing``: the variants are
+# benchmarked and judged by the KEEP threshold. There is no silent
+# re-route to ``_handle_propose_action`` / per-variant Critic verdict_map.
 def _delegate_coord(tmp_path: Path):
     """Coordinator double exposing just the surface ``_handle_delegate``
-    needs to reach (and stop at) the explore re-route branch.
+    needs to reach the direct explore-task creation path.
 
-    Stubs out ``is_pruned`` / ``_sequence_denial_for_action`` so we
-    never reach the per-test-irrelevant pruned + sequence
-    sub-systems. (The legacy ``_cortex_t2_hook`` stub is gone — the
-    method itself was removed alongside the T2/T3 protocol.)
+    Stubs out ``is_pruned`` / ``_sequence_denial_for_action`` /
+    ``_roofline_denial_for_action`` / ``_registry_lanes_ttl`` so we
+    never reach the per-test-irrelevant sub-systems.
     """
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
 
     class _State(_BareSharedState):
         baseline_config_path: str = ""
+        tick: int = 0
 
         def is_pruned(self, _action_name: str) -> bool:
             return False
@@ -716,25 +604,33 @@ def _delegate_coord(tmp_path: Path):
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
     c._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
     c._sequence_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
-    # _handle_delegate's deprecation guard reads from policy directly.
-    # We bypass it by short-circuiting the guard at the source.
+    c._roofline_denial_for_action = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    c._registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
     c.policy = None
     return c
 
 
 @pytest.mark.asyncio
-async def test_delegate_explore_with_grid_routes_to_pending_proposals(tmp_path: Path):
-    """The Critic gate re-route: a delegate explore with a non-empty
-    grid lands in ``pending_proposals`` (so Critic can review per
-    variant) and never reaches ``tasks.create_or_return_existing``."""
+async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
+    """A delegate explore with a non-empty grid creates an explore task
+    directly (no ``pending_proposals``, no Critic pre-review); the grid
+    is forwarded to the executor verbatim."""
     coord = _delegate_coord(tmp_path)
     create_calls: list[dict[str, Any]] = []
 
     class _TaskRegistry:
         async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
             create_calls.append(dict(kwargs))
-            raise AssertionError(
-                "delegate explore with grid must NOT create a task directly"
+            from inference_optimizer.orchestrator.task_registry import Task
+            return (
+                Task(
+                    task_id="t-explore-direct",
+                    kind=kwargs["kind"],
+                    state="queued",
+                    params=kwargs["params"],
+                    idempotency_key=kwargs["idempotency_key"],
+                ),
+                False,
             )
 
     coord.tasks = _TaskRegistry()
@@ -749,69 +645,15 @@ async def test_delegate_explore_with_grid_routes_to_pending_proposals(tmp_path: 
         payload={
             "action_name": "explore",
             "params": {"grid": grid},
+            "idempotency_key": "explore-round-1",
         },
     )
     await coord._handle_delegate("orchestration", intent)
-    assert create_calls == []
-    assert len(coord.state.pending_proposals) == 1
-    pending = next(iter(coord.state.pending_proposals.values()))
-    assert pending.action_name == "explore"
-    assert pending.from_agent == "orchestration"
-    assert pending.payload["params"]["grid"] == grid
-
-
-@pytest.mark.asyncio
-async def test_delegate_explore_with_empty_grid_does_not_route_to_critic(tmp_path: Path):
-    """Empty / missing grid has nothing for the Critic to filter, so the
-    re-route guard must NOT fire — the intent should fall through to
-    the legacy direct-task path. We mock ``_handle_propose_action`` so
-    the test stays scoped to the guard contract; the post-guard
-    legacy path is exercised by separate integration tests."""
-    coord = _delegate_coord(tmp_path)
-    coord._handle_propose_action = AsyncMock()  # type: ignore[method-assign]
-    # Stop execution at the first downstream call we don't want to
-    # plumb. The guard runs BEFORE this point, so reaching a raised
-    # exception proves the re-route did not intercept.
-    coord.tasks = None
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={"action_name": "explore", "params": {"grid": []}},
-    )
-    with pytest.raises(AttributeError):
-        await coord._handle_delegate("orchestration", intent)
-    coord._handle_propose_action.assert_not_awaited()
+    # Direct task creation — never lands in the Critic pending queue.
     assert coord.state.pending_proposals == {}
-
-
-@pytest.mark.asyncio
-async def test_delegate_non_explore_action_does_not_route_to_critic(tmp_path: Path):
-    """``delegate{action_name='specialist', ...}`` (and every other
-    non-explore action) must NOT be intercepted by the explore guard,
-    even if the caller smuggles in a ``grid`` param."""
-    coord = _delegate_coord(tmp_path)
-    coord._handle_propose_action = AsyncMock()  # type: ignore[method-assign]
-    coord.tasks = None
-    # Match the new async signature; the no-op coroutine has to
-    # return ``None`` so ``await self._warm_specialist_params(params)``
-    # in _handle_delegate doesn't blow up.
-    async def _noop_warm(_params: dict) -> None:
-        return None
-    coord._warm_specialist_params = _noop_warm  # type: ignore[method-assign]
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": "specialist",
-            "params": {
-                "domain": "serving_specialist",
-                "gap_canonical_id": "gap-x",
-                "grid": [{"name": "v_a"}],
-            },
-        },
-    )
-    with pytest.raises(AttributeError):
-        await coord._handle_delegate("orchestration", intent)
-    coord._handle_propose_action.assert_not_awaited()
-    assert coord.state.pending_proposals == {}
+    assert len(create_calls) == 1
+    assert create_calls[0]["kind"] == "explore"
+    assert create_calls[0]["params"]["grid"] == grid
 
 
 # ===========================================================================

@@ -453,14 +453,8 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     ``backends`` / ``params`` / ``validate_stack`` actions into it; the
     nested-key plumbing the test guards is identical across kinds.
 
-    NOTE: this test deliberately omits ``params.grid`` because the
-    Critic gate (PR after PR-A11) re-routes
-    ``delegate{action_name='explore', params={grid: [...]}}`` through
-    ``_handle_propose_action`` so the Critic can per-variant veto.
-    The nested-idempotency-key plumbing we guard here lives further
-    down ``_handle_delegate``, on the legacy direct-task path; an
-    empty/missing grid falls through to that path, which is exactly
-    the surface this test exercises.
+    The nested-idempotency-key plumbing we guard here lives on the
+    direct-delegate path that explore grids take (no Critic re-route).
     """
     delegate = Intent(type=IntentType.DELEGATE, payload={
         "action_name": "explore",

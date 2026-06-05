@@ -2,10 +2,9 @@
 auto-roofline gate before paying for the Critic round-trip.
 
 Without this gate, an LLM-emitted ``propose_action{action='explore'}``
-with a grid (the only path that goes through propose, not delegate) would
-fan out to the Critic while the PRELUDE / watermark analysis task is
-still in flight — wasting a round-trip + risking dispatch against a stale
-``analysis.md`` snapshot.
+with a grid would fan out to the Critic while the PRELUDE / watermark
+analysis task is still in flight — wasting a round-trip + risking
+dispatch against a stale ``analysis.md`` snapshot.
 """
 
 from __future__ import annotations
@@ -104,7 +103,7 @@ def coord(tmp_path: Path) -> Coordinator:
 async def test_propose_action_blocks_explore_while_roofline_pending(
     coord: Coordinator,
 ):
-    """Explore-with-grid is the only path that re-routes through
+    """A directly-proposed explore-with-grid lands in
     ``_handle_propose_action``. With a roofline task pending, the gate
     must drop the proposal *before* a ``proposal`` message hits the bus
     (which is what the Critic agent reads)."""

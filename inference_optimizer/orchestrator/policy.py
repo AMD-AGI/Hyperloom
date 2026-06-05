@@ -1183,9 +1183,8 @@ class PolicyGate:
                 )
             return
         # verdict_map path — every entry's verdict string must be in
-        # the same closed vocab. variant_name vs original-grid
-        # membership is checked by Coordinator's
-        # ``_handle_verdict_map`` once the grid is in scope.
+        # the same closed vocab. The envelope still accepts this shape;
+        # the Coordinator collapses it to a single summary verdict.
         for vname, entry in verdict_map.items():
             v = str((entry or {}).get("verdict") or "").strip()
             if v not in REVIEW_VERDICTS:

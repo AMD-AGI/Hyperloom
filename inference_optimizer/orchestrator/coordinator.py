@@ -157,16 +157,11 @@ class PendingProposal:
     payload: dict[str, Any]
     decided: bool = False
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
-    # per-variant verdicts
-    # surfaced by the Critic agent's batch review (``verdict_map``).
-    # Keyed by variant_name, value carries ``{verdict, rationale}``.
-    # Empty for single-verdict (kernel_opt / integrate / report /
-    # ...) proposals; the Coordinator's ``_handle_verdict_map`` writer
-    # filters the grid down to the ``approve`` subset before
-    # materializing the explore task and fires KB ``refuted`` for
-    # every reject (so the Cortex view captures the
-    # critic-rejected edge in addition to the KEEP/REVERT
-    # signal the explore executor produces).
+    # Per-variant verdict map kept for the ``review_verdict`` envelope
+    # schema + resume replay of historical sessions. Proposals are now
+    # decided by a single verdict (``_handle_review_verdict`` collapses
+    # any map to a summary), so no live writer populates this; it stays
+    # empty on the in-memory path.
     verdict_map: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Always-empty dict kept for forward compat: no producer writes it,
     # but callers propagate it across defer/restore (deferred_queue +
@@ -472,14 +467,11 @@ class Coordinator:
             target = v.payload.get("target_proposal_msg_id")
             if not target:
                 continue
-            # ``_handle_verdict_map`` always
-            # mirrors a *summary* ``verdict`` alongside the per-
-            # variant ``verdict_map`` so this rebuild stays
-            # backward-compatible. A verdict_map-only event with no
-            # summary string still marks the proposal as decided
-            # (the Critic spoke on every variant, no further round
-            # needed) — we synthesise a ``needs_review`` placeholder
-            # so the prompt's /status surface still shows something.
+            # Historical sessions may carry per-variant ``verdict_map``
+            # events without a summary ``verdict`` string. Keep this
+            # rebuild backward-compatible by synthesising a
+            # ``needs_review`` placeholder so the proposal still counts
+            # as decided and the prompt's /status surface shows something.
             summary = v.payload.get("verdict") or ""
             if not summary and isinstance(v.payload.get("verdict_map"), dict):
                 summary = "needs_review"
@@ -5783,16 +5775,15 @@ class Coordinator:
             )
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
-        """Route a Critic ``review_verdict`` to the per-variant or
-        legacy single-verdict handler.
+        """Apply a Critic ``review_verdict`` to its target proposal.
 
-        The protocol-layer validator (protocol/intent) already
-        validated that exactly one of ``verdict`` / ``verdict_map`` is
-        present. We branch on
-        ``verdict_map`` first so the batch Explore path takes
-        precedence; everything else (kernel_opt / integrate /
-        report / specialist dispatch) falls through to the legacy
-        single-verdict path.
+        Every proposal (kernel_opt / integrate / report / specialist
+        dispatch / directly-proposed explore) is decided by a single
+        verdict. The envelope schema still accepts the legacy
+        per-variant ``verdict_map`` shape; when one arrives we collapse
+        it to a summary verdict (``approve`` if any variant is approved,
+        else ``reject`` if any is rejected, else ``needs_review``) and
+        take the same single-verdict path.
         """
         target = intent.payload["target_proposal_msg_id"]
         pending = self.state.pending_proposals.get(target)
@@ -5809,18 +5800,21 @@ class Coordinator:
                 },
             )
             return
-        if isinstance(verdict_map, dict) and verdict_map:
-            await self._handle_verdict_map(
-                source=source,
-                pending=pending,
-                verdict_map=verdict_map,
-                rationale=str(intent.payload.get("reasoning") or ""),
+        verdict = str(single_verdict or "")
+        if not verdict and isinstance(verdict_map, dict) and verdict_map:
+            sub_verdicts = [
+                str((entry or {}).get("verdict") or "").strip()
+                for entry in verdict_map.values()
+            ]
+            verdict = (
+                "approve" if "approve" in sub_verdicts
+                else "reject" if "reject" in sub_verdicts
+                else "needs_review"
             )
-            return
         await self._handle_single_verdict(
             source=source,
             pending=pending,
-            verdict=str(single_verdict or ""),
+            verdict=verdict,
             reasoning=str(intent.payload.get("reasoning") or ""),
         )
 
@@ -5904,151 +5898,15 @@ class Coordinator:
         if verdict == "approve":
             await self._materialize_approved_proposal(pending)
 
-    async def _handle_verdict_map(
-        self,
-        *,
-        source: str,
-        pending: "PendingProposal",
-        verdict_map: dict[str, dict[str, Any]],
-        rationale: str,
-    ) -> None:
-        """v0.8 KB_gaps/Gap-11 per-variant Critic verdict handler.
-
-        Splits a batch ``verdict_map`` into approved / rejected
-        partitions and:
-
-        1. Pins the full map on the :class:`PendingProposal` so
-           subsequent reactor passes (resume rebuild,
-           ``decided`` checks) can see the per-variant decisions
-           without re-parsing the bus.
-        2. Mirrors the map back onto the bus as a single
-           ``review_verdict`` event carrying both the per-variant
-           detail *and* a summary single ``verdict`` (``approve``
-           when any variant survived; ``reject`` when all are
-           rejected; ``needs_review`` otherwise) so legacy
-           consumers (resume's verdict_by_target rebuild,
-           breakdown.kb_writes_summary) keep their meaning.
-        3. (KB ``refuted`` mirror for critic-rejected variants —
-           removed alongside the T2/T3 hypothesize/verify protocol.
-           Critic rejections are still recorded in the verdict event
-           and the breakdown collector; we no longer fan them out to
-           KB.)
-        4. Materialises an ``explore`` task whose ``grid`` is the
-           approved subset (passes the names down via
-           :meth:`_materialize_approved_proposal`).
-
-        Non-``explore`` proposals never reach this method
-        (``_handle_review_verdict`` routes them through the legacy
-        single-verdict path); we still defend against operator
-        misuse by short-circuiting with an observation when
-        somehow we land here on a non-grid proposal.
-        """
-        if pending.action_name != "explore":
-            await self._record_observation(
-                "coordinator", "observation",
-                {
-                    "kind":             "verdict_map_for_non_explore",
-                    "target":           pending.proposal_msg_id,
-                    "action_name":      pending.action_name,
-                    "variants_in_map":  sorted(verdict_map.keys()),
-                },
-            )
-            return
-
-        # Index the proposal's original grid by variant_name so we can
-        # (a) drop ``verdict_map`` keys that don't match a real
-        # variant, (b) carry the variant's payload (extra_args,
-        # extra_envs, ...) through to the materialised task, and
-        # (c) report a structured "unknown_variants" observation
-        # for the operator audit log.
-        original_grid: list[dict[str, Any]] = []
-        raw_grid = (pending.payload.get("params") or {}).get("grid")
-        if isinstance(raw_grid, list):
-            for v in raw_grid:
-                if isinstance(v, dict) and v.get("name"):
-                    original_grid.append(v)
-        original_names = {str(v.get("name")): v for v in original_grid}
-        approved_names: list[str] = []
-        rejected: list[tuple[str, str]] = []
-        unknown: list[str] = []
-        for vname, entry in verdict_map.items():
-            name = str(vname)
-            sub_verdict = str((entry or {}).get("verdict") or "").strip()
-            sub_rationale = str((entry or {}).get("rationale") or "")
-            if name not in original_names:
-                unknown.append(name)
-                continue
-            if sub_verdict == "approve":
-                approved_names.append(name)
-            elif sub_verdict == "reject":
-                rejected.append((name, sub_rationale))
-            # ``redirect`` / ``advise`` / ``needs_review`` neither
-            # land in the executor grid nor fire a KB refute — they
-            # surface in the audit log via the bus mirror below.
-
-        summary_verdict = (
-            "approve" if approved_names
-            else "reject" if rejected and not approved_names
-            else "needs_review"
-        )
-
-        # 1. Pin on the pending proposal.
-        pending.decided = True
-        pending.verdict = summary_verdict
-        pending.verdict_map = {
-            str(k): dict(v) if isinstance(v, dict) else {"verdict": str(v)}
-            for k, v in verdict_map.items()
-        }
-
-        # 2. Bus mirror — single event carrying the full map AND a
-        #    summary verdict so legacy consumers keep working.
-        await self.bus.append_and_seq(Message.new(
-            source, pending.from_agent, "review_verdict",
-            {
-                "target_proposal_msg_id": pending.proposal_msg_id,
-                "verdict":                summary_verdict,
-                "verdict_map":            pending.verdict_map,
-                "approved_variants":      sorted(approved_names),
-                "rejected_variants":      sorted(n for n, _ in rejected),
-                "unknown_variants":       sorted(unknown),
-                "reasoning":              rationale,
-            },
-            priority=0 if summary_verdict == "reject" else 1,
-            in_reply_to=pending.proposal_msg_id,
-        ))
-
-        # Critic rejection is recorded in the verdict event and breakdown
-        # collectors; intentionally not fanned out to KB.
-
-        # 4. Materialise only the approved subset.
-        if approved_names:
-            await self._materialize_approved_proposal(
-                pending,
-                approved_variant_names=set(approved_names),
-            )
-        else:
-            # Whole grid rejected — observation only; downstream
-            # plateau judges + breakdown reads the bus mirror to
-            # surface "critic rejected K of K".
-            await self._record_observation(
-                "coordinator", "observation",
-                {
-                    "kind":              "verdict_map_all_rejected",
-                    "target":            pending.proposal_msg_id,
-                    "rejected_variants": sorted(n for n, _ in rejected),
-                    "unknown_variants":  sorted(unknown),
-                },
-            )
-
     def _inject_explore_runtime_params(self, params: dict) -> None:
         """Inject explore-task operational knobs from SharedState into ``params``.
 
-        Called from both ``_materialize_approved_proposal`` (Critic-gated path)
-        and ``_handle_delegate`` (direct-delegate path that bypasses the
-        verdict map: legacy resume, tests that delegate explore directly) so
-        a single source of truth controls what gets forwarded to the
-        ExploreExecutor. ``setdefault`` preserves any LLM-supplied override
-        for one-off rebench / debug variants.
+        Called from both ``_materialize_approved_proposal`` (the
+        propose/Critic single-verdict path) and ``_handle_delegate``
+        (the direct-delegate path explore grids take) so a single source
+        of truth controls what gets forwarded to the ExploreExecutor.
+        ``setdefault`` preserves any LLM-supplied override for one-off
+        rebench / debug variants.
 
         Knobs:
           * ``baseline_runtime_sec`` + ``explore_overtime_kill_ratio`` —
@@ -6118,12 +5976,12 @@ class Coordinator:
         gain%; otherwise the runner's default of 0.0 makes
         best_gain_pct uninformative (DESIGN §16 baseline_tput parameter).
 
-        ``approved_variant_names`` (v0.8 KB_gaps/Gap-11): when set,
-        filter the ``explore`` grid down to the named subset before
-        materialising. Used by the per-variant Critic verdict_map
-        path so a 4-variant proposal with 2 approved + 2 rejected
-        dispatches only the 2 approved variants to the executor.
-        ``None`` (legacy single-verdict path) keeps the full grid.
+        ``approved_variant_names``: when set, filter the ``explore``
+        grid down to the named subset before materialising. Only the
+        roofline defer/resume path carries a non-``None`` value (it
+        preserves a previously-filtered subset across a deferred
+        dispatch); the live single-verdict path passes ``None`` and
+        keeps the full grid.
         """
         # Safety net for the race where the watermark fires while a
         # proposal is already in front of the Critic.
@@ -6289,29 +6147,11 @@ class Coordinator:
                 source, intent, denied, action_name=action_name,
             )
             return
-        # Critic gate for explore grids: every ``delegate{action_name='explore',
-        # params={grid: [...]}}`` is reviewed per-variant by the Critic before
-        # any benchmark runs. We re-route through ``_handle_propose_action``
-        # so the proposal lands in ``pending_proposals``, the Critic emits a
-        # ``verdict_map``, and ``_handle_verdict_map`` materialises only the
-        # approved subset (variants the Critic rejects never reach the
-        # executor).
-        # The proposal path re-runs is_pruned + _sequence_denial_for_action,
-        # and ``_materialize_approved_proposal`` writes the task via
-        # ``tasks.create_or_return_existing`` directly, so this re-route
-        # cannot recurse back into ``_handle_delegate``. Empty/missing grid
-        # falls through to the legacy delegate path (nothing to filter).
-        params_preview = intent.payload.get("params") or {}
-        grid_preview = (
-            params_preview.get("grid") if isinstance(params_preview, dict) else None
-        )
-        if (
-            action_name == "explore"
-            and isinstance(grid_preview, list)
-            and grid_preview
-        ):
-            await self._handle_propose_action(source, intent)
-            return
+        # ``delegate{action_name='explore', params={grid: [...]}}`` runs the
+        # variants directly: each variant is benchmarked and judged by the
+        # explore KEEP threshold + canonical_fingerprint dedup. Config/env
+        # grids are not source patches, so no per-variant Critic pre-review
+        # stands between the delegate and the executor.
         params = dict(intent.payload.get("params") or {})
         # The schema says delegate idempotency_key is top-level, but LLMs
         # sometimes place it inside params (especially when following older

@@ -80,9 +80,10 @@ grid-runner entry):
     (`explore_specialist_grid_max_one` — the numeric cap tracks
     `research_lane_capacity`, clamped to the `2 × visible GPU count`
     ceiling), and at most one dynamic variant. Prefer the strongest
-    evidence-backed variants and defer runners-up beyond the cap. The
-    Critic reviews each variant against KB priors before it benches;
-    rejected variants drop silently (`critic_filtered_count`).
+    evidence-backed variants and defer runners-up beyond the cap. Each
+    variant in the grid is benchmarked directly and judged by the KEEP
+    threshold — there is no per-variant Critic pre-review between the
+    delegate and the executor.
 
     **Advisory proposal scores**: after a specialist round, the prompt
     MAY carry a `=== Specialist proposal scores (advisory) ===` block —
