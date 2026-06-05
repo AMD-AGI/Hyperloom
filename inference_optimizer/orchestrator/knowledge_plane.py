@@ -1,13 +1,11 @@
-"""KnowledgePlane facade — v0.8 M1+M4.
+"""KnowledgePlane facade for advisory knowledge inputs.
 
-Single point of contact between the Coordinator and the three
-external knowledge sources:
+Single point of contact between the Coordinator and the live external
+knowledge sources:
 
-1. **Cortex KB** — cross-session optimization memory + hypothesize /
-   verify / commit protocol. Wraps :class:`CortexKBClient` (M1).
-2. **PR Monitor** — recent PRs across repos the LLM specialists care
+1. **PR Monitor** — recent PRs across repos the LLM specialists care
    about. Wraps :class:`PRMonitorClient` (M4).
-3. **Local framework source** — read-only access to
+2. **Local framework source** — read-only access to
    ``/sgl-workspace/{aiter,sglang,vllm}/`` (and operator-supplied
    roots). Exposed via the existing PolicyGate-gated tool whitelist;
    the facade only surfaces the *roots* so specialist prompt
@@ -18,10 +16,10 @@ domain-repos config) and offers two flavours of methods:
 
 * ``read_*`` — used everywhere (Coordinator prompt assembly, breakdown
   collectors). Reads never write to SharedState directly.
-* ``write_*`` — used only by the Coordinator's T0/T2/T3/T4 hooks.
-  Implements Inv-6.2 ("writes must go through the Coordinator"); the
-  facade itself doesn't enforce ACLs but isolates the write surface so
-  the PolicyGate gate sits one call up.
+The old Cortex v1 graph traversal / hypothesize surface was removed
+from this facade. Canonical cross-session reads and writes now flow
+through RecipeKB and warm-start state, while this class remains the PR
+feed facade for specialist prompt context.
 
 KB_design §3.6 §4.3 says specialists DON'T use this facade — they get
 direct MCP tool access. The facade is purely Coordinator-side glue.
@@ -29,19 +27,11 @@ direct MCP tool access. The facade is purely Coordinator-side glue.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Mapping
+from typing import Any
 
-# cortex_kb_client retired alongside the v1 graph KB. KnowledgePlane
-# now treats ``cortex_kb`` as an opaque optional client whose only
-# requirement is the legacy ``_post`` / ``propose_point`` /
-# ``enabled`` surface — which under the v2 design is never wired
-# (cli passes ``cortex_kb=None``), so the cortex_* methods on this
-# class are dead code retained only for grep-stability with old
-# call-sites.
 from ..paths import asset_actions_dir
 from .pr_monitor import (
     DEFAULT_PR_FEED_PER_REPO_LIMIT,
@@ -168,7 +158,6 @@ class KnowledgePlane:
     by :meth:`reset_round_caches`.
     """
 
-    cortex_kb: Any = None  # legacy /v1/points client (always None under v2)
     pr_monitor: PRMonitorClient | None = None
     domain_repos: dict[str, DomainRepos] = field(default_factory=dict)
     pr_feed_window_days: int = DEFAULT_PR_FEED_WINDOW_DAYS
@@ -192,7 +181,6 @@ class KnowledgePlane:
         pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL,
     ) -> "KnowledgePlane":
         return cls(
-            cortex_kb=cortex_kb,
             pr_monitor=pr_monitor,
             domain_repos=domain_repos if domain_repos is not None else load_domain_repos(),
             pr_feed_window_days=int(pr_feed_window_days),
@@ -215,14 +203,9 @@ class KnowledgePlane:
 
     @property
     def cortex_enabled(self) -> bool:
-        # ``self.cortex_kb`` may be a legacy CortexKBClient (which
-        # has an ``.enabled`` attr) or ``None`` (the v2-default).
-        # Tolerant getattr so a future caller passing the v2
-        # RecipeKB dispatcher here doesn't AttributeError.
-        return (
-            self.cortex_kb is not None
-            and bool(getattr(self.cortex_kb, "enabled", True))
-        )
+        # Backwards-compatible property for callers that still check the
+        # old v1 graph surface. KnowledgePlane no longer wires Cortex.
+        return False
 
     def resolve_domain_repos(self, domain: str) -> DomainRepos | None:
         """Look up domain config; returns None for unknown domains."""
@@ -238,409 +221,6 @@ class KnowledgePlane:
         if not self.pr_monitor_enabled:
             return ""
         return self.pr_monitor_mcp_url
-
-    # ------------------------------------------------------------------
-    # PR-A10 (Arbor-into-Hyperloom): per-domain content fallback when
-    # the legacy anchor-canonical_id lookup misses (which it does on
-    # 100% of fresh KBs because the KB has no anchor "hub" points).
-    # Per-domain strategies pick the most useful entity_type / kind
-    # filter so specialists at least see *some* concrete prior.
-    # ------------------------------------------------------------------
-    # Each entry: (label, query_body, apply_hw_filter).
-    # - query_body MUST be a valid ``QueryPointRequest`` (kind /
-    #   entity_type / attrs_filter / limit / neighbor_preview).
-    # - apply_hw_filter=True overlays ``attrs_filter.hardware = hw_slug``
-    #   only when records carry hardware as a *top-level* attr (e.g.
-    #   ``recipe`` kind). Geak records nest hardware under
-    #   ``attrs.scope.hardware`` which KB's shallow ``attrs_filter``
-    #   cannot drill into, so they set apply_hw_filter=False and rely
-    #   on the prompt builder / specialist to filter by scope itself.
-    _DOMAIN_FALLBACK_STRATEGIES: ClassVar[
-        dict[str, tuple[tuple[str, dict[str, Any], bool], ...]]
-    ] = {
-        "serving_specialist": (
-            ("vllm_serve_recipe",
-             {"entity_type": "vllm_serve_recipe",
-              "limit": 10, "neighbor_preview": False},
-             True),
-            ("any_recipe_same_hw",
-             {"kind": "recipe",
-              "limit": 10, "neighbor_preview": False},
-             True),
-        ),
-        "kernel_switch_specialist": (
-            ("geak_experience",
-             {"entity_type": "geak_experience",
-              "limit": 10, "neighbor_preview": False},
-             False),
-            ("geak_skill",
-             {"entity_type": "geak_skill",
-              "limit": 10, "neighbor_preview": False},
-             False),
-        ),
-        "compiler_specialist": (
-            ("geak_skill_compiler",
-             {"entity_type": "geak_skill",
-              "limit": 10, "neighbor_preview": False},
-             False),
-        ),
-        "system_specialist": (
-            ("any_recipe_same_hw_system",
-             {"kind": "recipe",
-              "limit": 10, "neighbor_preview": False},
-             True),
-        ),
-        "comm_specialist": (
-            ("any_recipe_same_hw_comm",
-             {"kind": "recipe",
-              "limit": 10, "neighbor_preview": False},
-             True),
-        ),
-        "pr_intel_specialist": (
-            ("hypothesis",
-             {"kind": "hypothesis",
-              "limit": 10, "neighbor_preview": False},
-             False),
-        ),
-    }
-
-    def _domain_fallback_query(
-        self,
-        *,
-        domain: str,
-        anchor: str,
-        hw_slug: str | None,
-        warnings: list[str],
-    ) -> dict[str, Any] | None:
-        """Try the per-domain content fallback. Returns a fully-formed
-        select_kb_for_domain result dict on first non-empty hit, else
-        None (so the caller emits the legacy empty-result envelope).
-        """
-        from ..cortex_kb_constants import PATH_QUERY_POINT
-
-        strategies = self._DOMAIN_FALLBACK_STRATEGIES.get(domain) or ()
-        if not strategies:
-            return None
-
-        for label, base_body, apply_hw_filter in strategies:
-            body: dict[str, Any] = dict(base_body)
-            # Only overlay an hw_slug filter when the strategy says the
-            # candidate records expose hardware as a *top-level* attr.
-            if hw_slug and apply_hw_filter:
-                af = dict(body.get("attrs_filter") or {})
-                af.setdefault("hardware", hw_slug)
-                body["attrs_filter"] = af
-            try:
-                resp = self.cortex_kb._post(  # type: ignore[union-attr]
-                    PATH_QUERY_POINT, body,
-                )
-            except Exception as exc:  # noqa: BLE001 — defensive
-                warnings.append(
-                    f"cortex_kb:fallback_{label}_failed:{exc!r}"[:240]
-                )
-                continue
-            points = resp.get("points") or []
-            if not isinstance(points, list) or not points:
-                continue
-
-            # Render the candidates into the legacy schema. We use
-            # canonical_id as the "point" label and the attrs.model
-            # (or attrs.kernel_name) as the neighbor label so the
-            # specialist prompt has both an id and a human-readable
-            # peek into each candidate.
-            point_strs: list[str] = []
-            neighbor_strs: list[str] = []
-            for p in points[:12]:
-                if not isinstance(p, dict):
-                    continue
-                cid = str(p.get("canonical_id") or p.get("id") or "")[:240]
-                if cid:
-                    point_strs.append(cid)
-                attrs = p.get("attrs") or {}
-                label_bits: list[str] = []
-                for k in ("model", "kernel_name", "title", "framework",
-                          "hardware", "scope"):
-                    v = attrs.get(k)
-                    if v:
-                        label_bits.append(f"{k}={v}")
-                if label_bits:
-                    neighbor_strs.append(", ".join(label_bits)[:240])
-            if not point_strs:
-                continue
-            warnings.append(
-                f"cortex_kb:fallback_hit:{label}:{len(point_strs)}"
-            )
-            return {
-                "anchor": anchor,
-                "domain": domain,
-                "points": point_strs,
-                "neighbors": neighbor_strs[:20],
-                "paths": [],
-                "candidates": [],
-                "warnings": warnings,
-            }
-        return None
-
-    def select_kb_for_domain(
-        self,
-        domain: str,
-        *,
-        budget_steps: int = 4,
-        budget_branches: int = 20,
-        hw_slug: str | None = None,
-    ) -> dict[str, Any]:
-        """Traverse the Cortex KB starting from the specialist domain's
-        ``kb_anchor`` and return a compact dict the prompt builder
-        renders verbatim into the specialist's ``## 4. KB SUB-GRAPH``
-        section.
-
-        Schema returned:
-
-            {
-                "anchor": "<kb_anchor>",
-                "domain": "<domain>",
-                "points":    [<canonical_id strings, ≤ 12>],
-                "neighbors": [<edge summaries, ≤ 20>],
-                "paths":     [<path summaries, ≤ 5>],
-                "candidates": [<id strings, ≤ 5>],
-                "warnings": [<short status strings>],
-            }
-
-        Fail-soft: when Cortex is disabled, the anchor can't be
-        resolved, or the HTTP call fails, returns an empty dict
-        ``{"anchor": "...", "warnings": ["..."]}`` so the specialist
-        prompt still renders cleanly.
-
-        Notes
-        -----
-        - PR-A5 is the prompt-layer counterpart of Arbor's
-          ``select_kb(domain)``: Arbor reads a local KB tree;
-          Hyperloom queries the Cortex KB HTTP service.
-        - The implementation mirrors the existing
-          :meth:`pr_feed_warm` defensive shape — every failure mode is
-          a warning string, not an exception.
-        """
-        from .specialist_domains import get_domain
-        from ..cortex_kb_constants import (
-            F_BUDGET_BRANCHES,
-            F_BUDGET_STEPS,
-            F_NEIGHBORS,
-            F_PATHS,
-            F_POINTS,
-            F_CANDIDATES,
-            F_START_POINT,
-            PATH_QUERY_POINT,
-            PATH_TRAVERSE,
-        )
-
-        warnings: list[str] = []
-        spec_dom = get_domain(domain)
-        if spec_dom is None:
-            return {
-                "anchor": "",
-                "domain": domain,
-                "points": [],
-                "neighbors": [],
-                "paths": [],
-                "candidates": [],
-                "warnings": [f"unknown_domain:{domain}"],
-            }
-        anchor = spec_dom.kb_anchor or domain
-        if not self.cortex_enabled:
-            return {
-                "anchor": anchor,
-                "domain": domain,
-                "points": [],
-                "neighbors": [],
-                "paths": [],
-                "candidates": [],
-                "warnings": ["cortex_kb:disabled"],
-            }
-
-        # Step 1: resolve the anchor canonical_id → point_id via
-        # POST /v1/points/query. Cortex traverse needs a numeric
-        # start_point id.
-        try:
-            start_resp = self.cortex_kb._post(  # type: ignore[union-attr]
-                PATH_QUERY_POINT,
-                {
-                    "canonical_id": anchor,
-                    "limit": 1,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"cortex_kb:anchor_lookup_failed:{exc!r}"[:240])
-            return {
-                "anchor": anchor,
-                "domain": domain,
-                "points": [],
-                "neighbors": [],
-                "paths": [],
-                "candidates": [],
-                "warnings": warnings,
-            }
-        start_points = start_resp.get(F_POINTS) or start_resp.get("points") or []
-        if not start_points:
-            warnings.append(f"cortex_kb:anchor_not_found:{anchor}")
-            # PR-A10 (Arbor-into-Hyperloom): the anchor canonical_id
-            # (``framework`` / ``kernel`` / ``systems`` / ...) is
-            # essentially a placeholder — the Cortex KB doesn't carry
-            # explicit anchor "hub" points, so the legacy lookup misses
-            # 100% of the time on a fresh KB. Fall back to per-domain
-            # content searches (recipe / experience / lesson points)
-            # so specialists still get something concrete to anchor on.
-            fallback = self._domain_fallback_query(
-                domain=domain, anchor=anchor, hw_slug=hw_slug,
-                warnings=warnings,
-            )
-            if fallback is not None:
-                return fallback
-            return {
-                "anchor": anchor,
-                "domain": domain,
-                "points": [],
-                "neighbors": [],
-                "paths": [],
-                "candidates": [],
-                "warnings": warnings,
-            }
-        first = start_points[0] if isinstance(start_points, list) else {}
-        # Find the numeric point id. KB returns ``point_id`` (int).
-        start_id = first.get("point_id") or first.get("id")
-        if start_id is None:
-            warnings.append("cortex_kb:anchor_point_id_missing")
-            return {
-                "anchor": anchor,
-                "domain": domain,
-                "points": [str(first.get("canonical_id") or anchor)],
-                "neighbors": [],
-                "paths": [],
-                "candidates": [],
-                "warnings": warnings,
-            }
-
-        # Step 2: traverse.
-        try:
-            traverse_resp = self.cortex_kb._post(  # type: ignore[union-attr]
-                PATH_TRAVERSE,
-                {
-                    F_START_POINT: int(start_id),
-                    F_BUDGET_STEPS: int(budget_steps),
-                    F_BUDGET_BRANCHES: int(budget_branches),
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"cortex_kb:traverse_failed:{exc!r}"[:240])
-            return {
-                "anchor": anchor,
-                "domain": domain,
-                "points": [str(first.get("canonical_id") or anchor)],
-                "neighbors": [],
-                "paths": [],
-                "candidates": [],
-                "warnings": warnings,
-            }
-
-        def _str_list(raw: Any, cap: int) -> list[str]:
-            if not isinstance(raw, list):
-                return []
-            out: list[str] = []
-            for entry in raw[:cap]:
-                if isinstance(entry, str):
-                    out.append(entry[:240])
-                elif isinstance(entry, dict):
-                    # Prefer canonical_id; fall back to a short repr.
-                    cid = entry.get("canonical_id") or entry.get("id")
-                    if cid:
-                        out.append(str(cid)[:240])
-                    else:
-                        out.append(json.dumps(entry, sort_keys=True)[:240])
-                else:
-                    out.append(str(entry)[:240])
-            return out
-
-        return {
-            "anchor": anchor,
-            "domain": domain,
-            "points": _str_list(traverse_resp.get(F_POINTS), 12),
-            "neighbors": _str_list(traverse_resp.get(F_NEIGHBORS), 20),
-            "paths": _str_list(traverse_resp.get(F_PATHS), 5),
-            "candidates": _str_list(traverse_resp.get(F_CANDIDATES), 5),
-            "warnings": warnings,
-        }
-
-    def select_kb_for_domains(
-        self,
-        tags: list[str],
-        *,
-        budget_steps: int = 4,
-        budget_branches: int = 20,
-        hw_slug: str | None = None,
-    ) -> dict[str, Any]:
-        """Traverse the Cortex KB for each knowledge-domain tag and merge.
-
-        Each tag selects a KB anchor (knowledge-domain tags are anchors;
-        specialist keys are resolved to their anchor). The per-tag
-        traversals are merged with order-preserving dedup so the prompt
-        builder renders a single combined ``## 4. KB SUB-GRAPH`` block.
-
-        Fail-soft: a tag whose traversal fails contributes its warnings
-        only; an empty tag list yields an empty merged subgraph.
-        """
-        from .specialist_domains import domain_for_tag
-
-        anchors: list[str] = []
-        merged: dict[str, Any] = {
-            "anchor": "",
-            "anchors": [],
-            "tags": [],
-            "domain": "",
-            "points": [],
-            "neighbors": [],
-            "paths": [],
-            "candidates": [],
-            "warnings": [],
-        }
-        seen: dict[str, set[str]] = {
-            "points": set(), "neighbors": set(),
-            "paths": set(), "candidates": set(),
-        }
-
-        def _extend(key: str, values: list[str]) -> None:
-            bucket = merged[key]
-            for v in values:
-                if v not in seen[key]:
-                    seen[key].add(v)
-                    bucket.append(v)
-
-        for tag in tags:
-            dom = domain_for_tag(tag)
-            # ``select_kb_for_domain`` resolves a catalogue key to its
-            # anchor; pass the catalogue key when known, else the tag
-            # itself (treated as the anchor by the fallback path).
-            lookup = dom.key if dom is not None else str(tag)
-            sub = self.select_kb_for_domain(
-                lookup,
-                budget_steps=budget_steps,
-                budget_branches=budget_branches,
-                hw_slug=hw_slug,
-            )
-            anchor = str(sub.get("anchor") or "").strip()
-            if anchor and anchor not in anchors:
-                anchors.append(anchor)
-            merged["tags"].append(str(tag))
-            _extend("points", list(sub.get("points") or []))
-            _extend("neighbors", list(sub.get("neighbors") or []))
-            _extend("paths", list(sub.get("paths") or []))
-            _extend("candidates", list(sub.get("candidates") or []))
-            for w in sub.get("warnings") or []:
-                if w not in merged["warnings"]:
-                    merged["warnings"].append(w)
-
-        merged["anchors"] = anchors
-        merged["anchor"] = anchors[0] if anchors else ""
-        merged["domain"] = ",".join(merged["tags"])
-        return merged
 
     def pr_feed_warm_all_domains(
         self,
@@ -754,113 +334,9 @@ class KnowledgePlane:
         self.last_warnings = warnings
         return prs, warnings
 
-    # ------------------------------------------------------------------
-    # Write surface — all writes are
-    # Coordinator-only; PolicyGate sits one call up.
-    # ------------------------------------------------------------------
-    def cortex_propose_point(
-        self,
-        *,
-        canonical_id: str,
-        kind: str,
-        attrs: Mapping[str, Any] | None = None,
-        authority: str = "HYPOTHESIZED",
-        evidence: list[str] | None = None,
-        source: str = "agent_observation",
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Forward to CortexKBClient.propose_point.
-
-        Returns ``{"status": "skip_disabled"}`` when Cortex is
-        disabled so callers can branchlessly handle the
-        ``--degraded-kb`` case.
-        """
-        if not self.cortex_enabled:
-            return {"status": "skip_disabled"}
-        return self.cortex_kb.propose_point(  # type: ignore[union-attr]
-            canonical_id=canonical_id,
-            kind=kind,
-            attrs=attrs,
-            authority=authority,
-            evidence=evidence,
-            source=source,
-            idempotency_key=idempotency_key,
-        )
-
-    def mint_pr_node(
-        self,
-        *,
-        repo: str,
-        number: int,
-        url: str = "",
-        sha: str = "",
-        attrs: Mapping[str, Any] | None = None,
-        evidence: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Mint a Cortex ``pr_node`` for a PR referenced by a specialist.
-
-        when a specialist puts a PR reference in
-        ``specialist_done.proposal_set[i].pr_evidence``, the Coordinator
-        mint it as a Cortex point so future sessions can cite the
-        same canonical_id (``pr.<repo>#<number>`` or
-        ``pr.<repo>@<sha>``).
-
-        ``url`` defaults to the GitHub PR URL derived from
-        ``(repo, number)`` so a minimal call site only needs
-        ``(repo, number)``.
-
-        Returns the CortexKBClient.propose_point response, or
-        ``{"status": "skip_disabled"}`` when Cortex isn't wired.
-        """
-        canonical = pr_node_canonical_id(repo, number=number, sha=sha)
-        derived_url = url or (
-            f"https://github.com/{repo}/pull/{int(number)}"
-            if number and number > 0 else ""
-        )
-        merged_attrs: dict[str, Any] = {
-            "repo":   repo,
-            "number": int(number) if number else 0,
-            "sha":    sha or "",
-            "url":    derived_url,
-        }
-        if attrs:
-            merged_attrs.update(attrs)
-        merged_evidence: list[str] = list(evidence or [])
-        if derived_url and not any("url:" in e for e in merged_evidence):
-            merged_evidence.append(f"url:{derived_url}")
-        return self.cortex_propose_point(
-            canonical_id=canonical,
-            kind="pr_node",
-            attrs=merged_attrs,
-            authority="EXPERIENTIAL",
-            evidence=merged_evidence,
-            source="pr_monitor",
-            idempotency_key=f"mint_pr_node:{canonical}",
-        )
-
-
-def pr_node_canonical_id(repo: str, *, number: int = 0, sha: str = "") -> str:
-    """Derive the Cortex canonical_id for one PR.
-
-    Priority: ``pr.<repo>#<number>`` when ``number`` is positive;
-    otherwise ``pr.<repo>@<sha>``. Falls back to
-    ``pr.<repo>.unknown`` (defensive — should never happen since the
-    caller always knows at least one of the two).
-    """
-    repo_clean = str(repo or "").strip()
-    if not repo_clean:
-        repo_clean = "unknown_repo"
-    if number and int(number) > 0:
-        return f"pr.{repo_clean}#{int(number)}"
-    if sha and str(sha).strip():
-        return f"pr.{repo_clean}@{str(sha).strip()}"
-    return f"pr.{repo_clean}.unknown"
-
-
 __all__ = [
     "DOMAIN_REPOS_WILDCARD",
     "DomainRepos",
     "KnowledgePlane",
     "load_domain_repos",
-    "pr_node_canonical_id",
 ]

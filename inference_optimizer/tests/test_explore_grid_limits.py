@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS,
     PolicyDenied,
