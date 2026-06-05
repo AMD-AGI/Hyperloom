@@ -358,13 +358,67 @@ class TestLoadModelMeta:
         assert meta is not None
         assert meta.head_dim == 200
 
-    def test_missing_safetensors_index_returns_none(self, tmp_path):
+    def test_missing_safetensors_index_uses_safetensor_file_sizes(self, tmp_path):
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "config.json").write_text(
+            json.dumps({
+                "num_hidden_layers": 12,
+                "num_key_value_heads": 4,
+                "num_attention_heads": 8,
+                "hidden_size": 1024,
+                "torch_dtype": "bfloat16",
+            })
+        )
+        (d / "model-00001-of-00002.safetensors").write_bytes(b"x" * 13)
+        (d / "model-00002-of-00002.safetensors").write_bytes(b"y" * 17)
+
+        meta = load_model_meta(d)
+        assert meta is not None
+        assert meta.weight_bytes == 30
+        assert meta.num_layers == 12
+        assert meta.num_kv_heads == 4
+        assert meta.head_dim == 128
+
+    def test_missing_safetensors_index_and_files_returns_none(self, tmp_path):
         d = tmp_path / "m"
         d.mkdir()
         (d / "config.json").write_text(
             json.dumps({"num_hidden_layers": 12, "torch_dtype": "bfloat16"})
         )
         assert load_model_meta(d) is None
+
+    def test_safetensors_index_without_total_size_uses_file_sizes(self, tmp_path):
+        d = tmp_path / "m"
+        _write_synthetic_model(d, total_size=1_000_000_000)
+        (d / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {}, "weight_map": {}})
+        )
+        (d / "model-00001-of-00001.safetensors").write_bytes(b"z" * 23)
+
+        meta = load_model_meta(d)
+        assert meta is not None
+        assert meta.weight_bytes == 23
+
+    def test_missing_safetensors_uses_pytorch_bin_file_sizes(self, tmp_path):
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "config.json").write_text(
+            json.dumps({
+                "num_hidden_layers": 12,
+                "num_key_value_heads": 4,
+                "num_attention_heads": 8,
+                "hidden_size": 1024,
+                "torch_dtype": "float16",
+            })
+        )
+        (d / "pytorch_model-00001-of-00002.bin").write_bytes(b"a" * 11)
+        (d / "pytorch_model-00002-of-00002.bin").write_bytes(b"b" * 19)
+
+        meta = load_model_meta(d)
+        assert meta is not None
+        assert meta.weight_bytes == 30
+        assert meta.weight_dtype_bytes == 2.0
 
     def test_missing_config_returns_none(self, tmp_path):
         d = tmp_path / "m"
