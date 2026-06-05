@@ -401,8 +401,11 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    # Always-on default = the per-task workspace.
-    assert captured["env"]["RESULT_DIR"] == str(output_dir)
+    # Always-on default = the per-task workspace. With the cold-start
+    # two-round guard, each round runs in its own ``<output_dir>/<round>``
+    # slot; ``captured`` holds the LAST run (the measured round), so the
+    # default RESULT_DIR is the measure-round slot under the task workspace.
+    assert captured["env"]["RESULT_DIR"] == str(output_dir / "measure_round")
 
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
