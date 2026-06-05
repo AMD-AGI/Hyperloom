@@ -129,7 +129,11 @@ jobs:
       max-parallel: 16
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
-      CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
+      # This daily CI authenticates to SaFE with its OWN key (secret KEY_XF),
+      # kept separate from the shared CLAW_API_KEY used by other workflows.
+      # optimize_submit.py reads the CLAW_API_KEY env var, so we just point it
+      # at KEY_XF here (no script change needed).
+      CLAW_API_KEY:                     ${{ secrets.KEY_XF }}
       SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
       HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
       HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
