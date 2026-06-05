@@ -780,10 +780,19 @@ def test_materialize_pr_diff_empty_when_no_ref(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path):
+async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, monkeypatch):
     """End-to-end: apply_mode=checkout_head extracts the PR's net diff via
     an isolated worktree, applies it to the live tree, benches it (mocked
     +10%), and KEEPs. patch_source_mode is surfaced as checkout_head."""
+    # Redirect the KB writeback root to tmp_path: this candidate carries a
+    # head_sha, so the KEEP path triggers write_framework_pr_record. Without
+    # this the record would leak into the real
+    # framework-agent/kb/framework_optimization/lessons.jsonl on every run.
+    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+    monkeypatch.setattr(
+        kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization"
+    )
+
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
