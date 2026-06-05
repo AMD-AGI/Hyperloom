@@ -108,11 +108,17 @@ DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
 DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
-# OOB + TraceLens live next to InferenceX on the same hyperloom-managed mount.
-# Like DEFAULT_INFERENCEX_PATH these are core42 fallbacks; --oob-path /
-# --tracelens-root (or SAFE_OPTIMIZE_* env) override per-cluster.
+# OOB lives next to InferenceX on the same hyperloom-managed mount.
+# Like DEFAULT_INFERENCEX_PATH this is a core42 fallback; --oob-path
+# (or SAFE_OPTIMIZE_OOB_PATH) overrides per-cluster.
 DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
-DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
+# TraceLens has no in-process fallback: kernel-agent/scripts/install.sh
+# clones AMD-AGI/TraceLens into $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens
+# inside the sandbox (pinned to a fixed SHA), so we leave --tracelens-root
+# empty by default and let the installer manage the checkout. Operators
+# can still override by exporting SAFE_OPTIMIZE_TRACELENS_ROOT or passing
+# --tracelens-root to point at an existing cluster checkout.
+DEFAULT_TRACELENS_ROOT = ""
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
 DEFAULT_TARGET_GAIN = 100.0
@@ -2865,9 +2871,13 @@ def _build_parser() -> argparse.ArgumentParser:
                         help=f"OOB checkout path inside the sandbox (defaults to "
                              f"$SAFE_OPTIMIZE_OOB_PATH then '{DEFAULT_OOB_PATH}').")
     parser.add_argument("--tracelens-root", default="",
-                        help=f"TraceLens checkout path inside the sandbox (defaults "
-                             f"to $SAFE_OPTIMIZE_TRACELENS_ROOT then "
-                             f"'{DEFAULT_TRACELENS_ROOT}').")
+                        help="TraceLens checkout path inside the sandbox. "
+                             "Leave empty (the default) so install.sh clones "
+                             "AMD-AGI/TraceLens into "
+                             "$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens "
+                             "and pins it to a fixed SHA. Override via "
+                             "$SAFE_OPTIMIZE_TRACELENS_ROOT or this flag only "
+                             "to point at an existing cluster checkout.")
     parser.add_argument("--prompt-prefix",
                         default=_load_default_prompt_prefix(),
                         help="Free-form prefix prepended to the SaFE-generated "
