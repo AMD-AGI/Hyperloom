@@ -65,9 +65,9 @@ DEFAULT_SCORER_MODELS: tuple[str, ...] = (
 )
 
 # Soft cap on what we feed each model so a pathological proposal_set
-# can't blow up the scoring prompt. proposal_set is already capped
-# upstream (DEFAULT_SPECIALIST_MAX_PROPOSALS), this is defense-in-depth.
-_MAX_PROPOSALS_SCORED: int = 12
+# can't blow up the scoring prompt. Advisory display only — scoring does
+# not gate dispatch, so this just bounds the rendered set.
+_MAX_PROPOSALS_SCORED: int = 16
 _MAX_FIELD_CHARS: int = 600
 
 

@@ -171,8 +171,8 @@ CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 #     GPU count (``2 × GPU``), detected at runtime; a conservative
 #     default applies when detection fails.
 #   * ``DEFAULT_SPECIALIST_MAX_PROPOSALS`` — per-specialist proposal_set
-#     cap; enforced both in the specialist prompt (self-curation) and on
-#     the SpecialistRunner write path (hard truncate before persist).
+#     self-curation target rendered into the specialist prompt. Advisory
+#     only: the SpecialistRunner does not truncate the returned set.
 
 # Conservative research-lane ceiling used when the GPU count cannot be
 # probed (keeps the loop alive on CPU-only boxes / sandboxes).
@@ -263,7 +263,7 @@ MAX_RESEARCH_LANE_CAPACITY: int = research_lane_ceiling()
 # specialists + dynamic_action; kept in lockstep with
 # :data:`resource_lock.LANE_PRIORITY`.
 RESEARCH_LANE_NAME: str = "research_lane"
-DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 3
+DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
 
 # Verdicts that allow ``integrate_patch`` to proceed without an
 # explicit operator override. ``advise`` is treated as a soft

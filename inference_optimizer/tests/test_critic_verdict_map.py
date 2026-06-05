@@ -677,37 +677,37 @@ def _build_specialist_prompt_text(max_proposals: int) -> str:
     return system_prompt + "\n" + user_prompt
 
 
-def test_default_specialist_max_proposals_is_three():
-    """Single-source-of-truth check: policy.py owns the cap (=3) and
-    specialist_prompt_builder re-exports it. Both must agree."""
+def test_default_specialist_max_proposals_is_twelve():
+    """Single-source-of-truth check: policy.py owns the self-curation
+    target (=12) and specialist_prompt_builder re-exports it. Both must
+    agree."""
     from inference_optimizer.orchestrator.policy import (
         DEFAULT_SPECIALIST_MAX_PROPOSALS,
     )
     from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
         DEFAULT_SPECIALIST_MAX_PROPOSALS as PROMPT_DEFAULT,
     )
-    assert DEFAULT_SPECIALIST_MAX_PROPOSALS == 3
-    assert PROMPT_DEFAULT == 3
+    assert DEFAULT_SPECIALIST_MAX_PROPOSALS == 12
+    assert PROMPT_DEFAULT == 12
 
 
 def test_specialist_prompt_renders_max_proposals_5():
-    """Caller can still override to a larger value at the prompt layer
-    (the SpecialistRunner separately clamps to the policy cap)."""
+    """Caller can shrink the prompt-side self-curation target."""
     text = _build_specialist_prompt_text(max_proposals=5)
-    # Section 8 hard cap line.
+    # Section 8 self-curation target line.
     assert "AT MOST **5** entries" in text
-    # Section 1 autonomy paragraph mentions the cap once.
+    # Section 1 autonomy paragraph mentions the target once.
     assert "top-5" in text
     # The Critic-feedback warning is present so the specialist knows
     # marginal candidates have a cost.
     assert "reviews each surviving variant" in text
 
 
-def test_specialist_prompt_renders_default_top_3_cap():
-    text = _build_specialist_prompt_text(max_proposals=3)
-    assert "AT MOST **3** entries" in text
-    assert "top-3" in text
-    # The legacy default 5 must not appear when the cap is 3.
+def test_specialist_prompt_renders_default_top_12_target():
+    text = _build_specialist_prompt_text(max_proposals=12)
+    assert "AT MOST **12** entries" in text
+    assert "top-12" in text
+    # A smaller value must not leak into the default-target rendering.
     assert "AT MOST **5** entries" not in text
 
 

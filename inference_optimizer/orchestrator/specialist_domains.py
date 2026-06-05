@@ -275,10 +275,10 @@ def get_domain(key: str) -> SpecialistDomain | None:
     return None
 
 
-# Maximum number of LLM turns a specialist may run. The stale-detection
+# Default number of LLM turns a specialist may run. The stale-detection
 # threshold is bounded at ``max_turns × per_turn_max_min × 1.5``
 # (default ~10 minutes).
-DEFAULT_SPECIALIST_MAX_TURNS: int = 8
+DEFAULT_SPECIALIST_MAX_TURNS: int = 12
 
 # Hard cap so the LLM can't request ridiculous turn counts. PolicyGate
 # R2's ``specialist_max_turns_excess`` rule enforces this.

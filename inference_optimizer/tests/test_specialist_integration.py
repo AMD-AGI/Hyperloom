@@ -529,7 +529,11 @@ def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     # Default capacity is the research-lane ceiling (2 × visible GPU) so
     # the multi-emit specialist fan-out uses the full lane budget.
     assert args.research_lane_capacity == policy_mod.research_lane_ceiling()
-    assert args.specialist_max_turns == 8
+    from inference_optimizer.orchestrator.specialist_domains import (
+        DEFAULT_SPECIALIST_MAX_TURNS,
+    )
+    assert args.specialist_max_turns == DEFAULT_SPECIALIST_MAX_TURNS
+    assert args.specialist_max_turns == 12
     assert args.specialist_per_turn_max_seconds == 600.0
     # Specialist model defaults to None → cli factory falls back to
     # ``--claude-model`` (the orchestration backend's choice).

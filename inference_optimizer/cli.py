@@ -4208,6 +4208,9 @@ def _default_research_lane_capacity() -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    from inference_optimizer.orchestrator.specialist_domains import (
+        DEFAULT_SPECIALIST_MAX_TURNS as _DEFAULT_SPECIALIST_MAX_TURNS,
+    )
     p = argparse.ArgumentParser(
         prog="inference_optimizer",
         description="Inference Optimizer v0.6 — multi-agent SGLang/vLLM optimization",
@@ -4972,8 +4975,11 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="specialist_max_turns",
         type=int,
         default=int(
-            os.environ.get("INFERENCE_OPTIMIZER_SPECIALIST_MAX_TURNS", "8")
-            or "8"
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_SPECIALIST_MAX_TURNS",
+                str(_DEFAULT_SPECIALIST_MAX_TURNS),
+            )
+            or _DEFAULT_SPECIALIST_MAX_TURNS
         ),
         help="Hard cap on LLM turns per specialist task (KB_design "
              "§3.5 §6). On exhaustion the runner synthesises an empty "

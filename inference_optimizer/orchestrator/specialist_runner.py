@@ -505,13 +505,13 @@ class SpecialistRunner:
                     str(workspace_for_prompt) if workspace_for_prompt else ""
                 ),
                 notes=str(params.get("notes") or ""),
-                # proposal_set cap (single source of truth: policy.py).
-                # Coordinator._warm_specialist_params seeds this; clamp
-                # defensively in case a caller passes a larger value.
-                max_proposals=max(1, min(
-                    DEFAULT_SPECIALIST_MAX_PROPOSALS,
-                    int(params.get("max_proposals") or
-                        DEFAULT_SPECIALIST_MAX_PROPOSALS),
+                # proposal_set self-curation target rendered into the
+                # prompt (single source of truth: policy.py). The runner
+                # does not truncate the returned set; this only shapes
+                # how many picks the prompt asks the specialist to surface.
+                max_proposals=max(1, int(
+                    params.get("max_proposals")
+                    or DEFAULT_SPECIALIST_MAX_PROPOSALS
                 )),
             )
 
@@ -807,28 +807,10 @@ class SpecialistRunner:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
-        # Hard truncate proposal_set to the single-source-of-truth cap.
-        # The prompt asks the specialist to self-curate, but we never
-        # trust LLM output for size limits — anything beyond the cap is
-        # dropped before persist so the on-disk artifact, Coordinator
-        # bookkeeping, Critic review and explore-grid materialisation
-        # all see the same N≤cap shape. ``proposals_truncated_from`` is
-        # picked up by ``coordinator._build_specialist_round_entry`` for
-        # the session_breakdown audit trail.
-        _proposals = done_payload["proposal_set"]
-        if (
-            isinstance(_proposals, list)
-            and len(_proposals) > DEFAULT_SPECIALIST_MAX_PROPOSALS
-        ):
-            _original_len = len(_proposals)
-            done_payload["proposal_set"] = (
-                _proposals[:DEFAULT_SPECIALIST_MAX_PROPOSALS]
-            )
-            done_payload["proposals_truncated_from"] = _original_len
-            notes.append(
-                f"proposal_set_truncated:{_original_len}->"
-                f"{DEFAULT_SPECIALIST_MAX_PROPOSALS}"
-            )
+        # ``max_proposals`` is a prompt-side self-curation target, not a
+        # hard cap: the specialist's full proposal_set is carried back
+        # unmodified so the Coordinator / Critic / explore-grid see every
+        # candidate the specialist surfaced.
         if "empty" not in done_payload:
             done_payload["empty"] = not bool(done_payload["proposal_set"])
         if "summary" not in done_payload:

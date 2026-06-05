@@ -24,7 +24,7 @@ side_effects:
   - workspace_write
 preferred_backend: claude
 preferred_model: claude-opus-4-7
-max_turns: 8
+max_turns: 12
 lease_ttl_sec: 1800
 description: "Dispatch an LLM specialist on research_lane; reads KB / PR feed for knowledge-domain tags, may write worktree patches, emits one specialist_done intent."
 pipeline_phase: explore
@@ -78,7 +78,7 @@ params_schema:
   max_turns:
     type: integer
     description: |
-      Optional. Hard cap on LLM turns (default 8, hard ceiling 16). PolicyGate
+      Optional. Hard cap on LLM turns (default 12, hard ceiling 16). PolicyGate
       R2 ``specialist_max_turns_excess`` rejects values outside (0, 16].
   needs_gpu:
     type: boolean
