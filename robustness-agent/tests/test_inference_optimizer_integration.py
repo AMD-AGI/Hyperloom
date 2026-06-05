@@ -128,8 +128,12 @@ async def test_backend_high_severity_path_passes_gate(tmp_path):
         gate = _gate()
         assert intents
         types_emitted = {i.type.value for i in intents}
+        # Strategic HIGH symptoms now emit alert(high) only; the
+        # escalate / prune / delegate(report) auto-emits were dropped
+        # in loosen P3_19. Orchestration consumes the alert detail and
+        # decides whether to act.
         assert "alert" in types_emitted
-        assert "escalate_strategy_change" in types_emitted
+        assert "escalate_strategy_change" not in types_emitted
         for intent in intents:
             upstream = _to_upstream(intent)
             gate.validate_intent("robustness", upstream)
@@ -182,8 +186,12 @@ async def test_heartbeat_passes_gate(tmp_path):
 async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_path):
     """Full Change A/B round-trip: 2 ticks of "all GPUs full + no live
     owner" -> classifier emits gpu_memory_leaked HIGH -> ladder emits
-    alert + escalate_strategy_change + delegate(recover) -> each intent
-    survives upstream PolicyGate validation.
+    alert + delegate(recover) -> each intent survives upstream
+    PolicyGate validation.
+
+    Loosen P3_19 dropped the strategic ``escalate_strategy_change``
+    auto-emit; ``delegate(recover, force_gpu_cleanup=True)`` stays as
+    the resource-recovery path because Robustness owns it for cleanup.
 
     The reactor pipeline is stateful (the GpuLeakDetector counter), so
     we hand-build the bundle's components and feed SourceData directly
@@ -241,7 +249,8 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
             second, tick_index=1, now_unix=2.0,
         )
         types_emitted = {i.type.value for i in decision.intents}
-        assert {"alert", "escalate_strategy_change", "delegate"} <= types_emitted
+        assert {"alert", "delegate"} <= types_emitted
+        assert "escalate_strategy_change" not in types_emitted
 
         # Every intent the gpu_memory_leaked branch produced must pass
         # the upstream PolicyGate when sourced from role=robustness.

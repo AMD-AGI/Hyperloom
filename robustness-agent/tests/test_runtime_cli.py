@@ -90,6 +90,9 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
+    """Strategic HIGH symptoms (crash_count_high here) emit alert(high)
+    only. The escalate / prune auto-emit was retired in loosen P3_19;
+    Orchestration consumes the alert detail and decides whether to act."""
     from robustness_agent.runtime.cli import _coerce_request, _run_tick
 
     request = _coerce_request(
@@ -99,7 +102,7 @@ async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
     intents = emit["intent_envelope"]["intents"]
     intent_types = {i["intent_type"] for i in intents}
     assert "alert" in intent_types
-    assert "escalate_strategy_change" in intent_types
+    assert "escalate_strategy_change" not in intent_types
 
 
 @pytest.mark.asyncio

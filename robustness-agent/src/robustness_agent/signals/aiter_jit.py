@@ -162,9 +162,9 @@ class AiterJitDetector:
             subject={},
             source="local",
             suggestion=(
-                "escalate_strategy_change: skip the next baseline OR "
-                "extend INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC; do "
-                "not just relaunch"
+                "skip the next baseline OR extend "
+                "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC; do not "
+                "just relaunch (consider escalate_strategy_change)"
             ),
         )
 

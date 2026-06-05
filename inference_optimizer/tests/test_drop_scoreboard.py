@@ -211,17 +211,23 @@ def test_coordinator_source_has_no_scoreboard_callers():
         )
 
 
-def test_family_pruned_denial_hint_has_no_scoreboard_vocab():
-    """KB_gaps/Dead-B §B.4 — the ``family_pruned`` denial hint string
-    must not mention "Action scores" any more."""
+def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
+    """KB_gaps/Dead-B §B.4 — the pruned-family advisory observation
+    string must not mention "Action scores" any more.
+
+    Loosen P3_19 demoted the prune dispatch from a hard PolicyDenied to
+    an advisory observation so the LLM may still pick the family if it
+    judges the prune speculative; the scoreboard-vocab guard simply
+    moved to the advisory hint string.
+    """
     from inference_optimizer.orchestrator import coordinator as _c
 
     src = Path(_c.__file__).read_text(encoding="utf-8")
-    family_pruned_block_idx = src.find('rule="family_pruned"')
-    assert family_pruned_block_idx >= 0
-    window = src[family_pruned_block_idx : family_pruned_block_idx + 800]
+    advisory_idx = src.find('"delegate_pruned_advisory"')
+    assert advisory_idx >= 0
+    window = src[advisory_idx : advisory_idx + 800]
     assert "Action scores" not in window
-    assert "pick another" in window  # the replacement phrasing is present
+    assert "phase-allowed action" in window
 
 
 # ===========================================================================

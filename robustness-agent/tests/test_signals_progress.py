@@ -75,13 +75,11 @@ def test_plateau_with_productive_gain_fires_medium():
     assert sym.severity is SymptomSeverity.MEDIUM
 
 
-def test_plateau_with_zero_gain_fires_high():
-    """After at least one promotion attempt has landed something on the
-    stack, a still-zero validated gain across the window is genuine
-    plateau territory and must fire HIGH so Orchestration can wind
-    down. ``optimization_stack_size > 0`` is what distinguishes this
-    from the cold-start case (see
-    :func:`test_plateau_suppressed_when_stack_empty`)."""
+def test_plateau_with_zero_gain_also_fires_medium():
+    """Loosen P3_19 demoted ``gain_plateau`` to a uniformly MEDIUM
+    advisory: the alert detail surfaces the suggested wind-down hint
+    and Orchestration decides whether to act. Previously a still-zero
+    validated gain across the window fired HIGH."""
     det = ProgressDetector(ProgressConfig(
         gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
     ))
@@ -92,7 +90,8 @@ def test_plateau_with_zero_gain_fires_high():
     out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=0.0,
                             optimization_stack_size=1), SourceData())
     sym = next(s for s in out if s.name == "gain_plateau")
-    assert sym.severity is SymptomSeverity.HIGH
+    assert sym.severity is SymptomSeverity.MEDIUM
+    assert "skip_to_close" in (sym.suggestion or "") or "report" in (sym.suggestion or "")
 
 
 def test_plateau_suppressed_when_stack_empty():
@@ -177,12 +176,12 @@ def test_no_levers_silent_before_min_ticks():
     assert all(s.name != "no_levers_found" for s in out)
 
 
-def test_no_levers_fires_high_when_quotas_met():
-    """Once exploration has started (any of last_explore/sweep
-    rendered as non-(none)) and the elapsed/tick floors
-    are met with stack still empty, fire HIGH so Coordinator can wind
-    down. ``explore_started=True`` is the new precondition added by
-    the 2026-05-22 PR (cold-start regression in xkk9f turn=7)."""
+def test_no_levers_fires_medium_when_quotas_met():
+    """Loosen P3_19 demoted ``no_levers_found`` to MEDIUM (advisory)
+    once the elapsed/tick floors are met with stack still empty;
+    Orchestration consumes the alert and decides whether to wind the
+    run down. ``explore_started=True`` is still the precondition that
+    distinguishes the genuine "no lever" case from cold-start delay."""
     det = ProgressDetector(ProgressConfig(
         no_levers_min_minutes=45.0, no_levers_min_ticks=8,
     ))
@@ -192,7 +191,7 @@ def test_no_levers_fires_high_when_quotas_met():
         SourceData(),
     )
     sym = next(s for s in out if s.name == "no_levers_found")
-    assert sym.severity is SymptomSeverity.HIGH
+    assert sym.severity is SymptomSeverity.MEDIUM
     assert sym.evidence["optimization_stack_size"] == 0
 
 

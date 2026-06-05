@@ -157,9 +157,12 @@ async def test_robustness_agent_real_runtime_heartbeat(
 async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
     session_dir: Path, robustness_agent_root: Path,
 ):
-    """``crash_count >= 10`` flips the reactor into the high-severity ladder
-    rung; the runtime must emit ``alert(high)`` + ``escalate_strategy_change``
-    and the Coordinator must mirror both onto the bus with ``from=robustness``."""
+    """``crash_count >= 10`` flips the reactor into the high-severity
+    ladder rung. Loosen P3_19 demoted strategic HIGH symptoms to
+    ``alert(high)`` only — the ``escalate_strategy_change`` /
+    ``prune_branch`` auto-emits were retired and Orchestration consumes
+    the alert detail to decide. The Coordinator must still mirror the
+    alert onto the bus with ``from=robustness``."""
     _seed_state(session_dir, crash_count=10)
 
     backend = RobustnessAgentBackend(
@@ -200,8 +203,8 @@ async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
     emit = json.loads((workdir / "emit.json").read_text())
     intent_types = {i["intent_type"] for i in emit["intent_envelope"]["intents"]}
     assert "alert" in intent_types
-    assert "escalate_strategy_change" in intent_types, (
-        f"high-severity ladder must escalate, got {intent_types}"
+    assert "escalate_strategy_change" not in intent_types, (
+        f"strategic HIGH symptoms must NOT auto-escalate any more, got {intent_types}"
     )
 
 

@@ -230,16 +230,22 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     finally:
         await c1.stop()
 
-    # Restart — fresh Coordinator must observe the prune
+    # Restart — fresh Coordinator must still observe the prune
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.shared_state.is_pruned("long")
-        # And future proposals of that family are soft-rejected
+        # The prune is advisory after loosen P3_19: future proposals
+        # still flow through to the pending queue and an advisory
+        # observation is dropped onto the inbox so the LLM can decide.
         await c2._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,
             payload={"action_name": "long", "predicted_gain_pct": 5.0},
         ))
-        assert not c2.state.pending_proposals
+        assert c2.state.pending_proposals
+        obs = await c2.bus.tail(topic="observation")
+        assert any(
+            m.payload.get("kind") == "proposal_pruned_advisory" for m in obs
+        )
     finally:
         await c2.stop()
 

@@ -150,25 +150,20 @@ class ProgressDetector:
         delta = max(window) - min(window)
         if delta > cfg.gain_epsilon_pct:
             return None
-        # Plateau is uninteresting if the run has already produced a
-        # validated gain that's large enough to ship — we want the
-        # ``no_levers_found`` rule to handle the empty-stack case
-        # separately.
         if window[-1] >= cfg.productive_gain_pct:
-            severity = SymptomSeverity.MEDIUM
             hint_tail = (
-                "search space is exhausted; consider proposing `report` "
-                "to lock in the validated gain"
+                "search space looks exhausted; consider proposing "
+                "`report` to lock in the validated gain"
             )
         else:
-            severity = SymptomSeverity.HIGH
             hint_tail = (
-                "validated_gain still 0 after a full window; propose "
-                "`report` and end the run"
+                "validated_gain still 0 after a full window; consider "
+                "`escalate_strategy_change(skip_to_close)` or `report` "
+                "to wind the run down"
             )
         return Symptom(
             name="gain_plateau",
-            severity=severity,
+            severity=SymptomSeverity.MEDIUM,
             summary=(
                 f"cumulative_gain_validated flat at "
                 f"{window[-1]:.2f}% across {cfg.gain_window_ticks} ticks "
@@ -183,7 +178,7 @@ class ProgressDetector:
             },
             subject={},
             source="local",
-            suggestion=f"escalate_strategy_change: {hint_tail}",
+            suggestion=hint_tail,
         )
 
     def _no_levers_symptom(self, snap: SharedStateSnapshot) -> Symptom | None:
@@ -218,7 +213,7 @@ class ProgressDetector:
             return None
         return Symptom(
             name="no_levers_found",
-            severity=SymptomSeverity.HIGH,
+            severity=SymptomSeverity.MEDIUM,
             summary=(
                 f"session has run {snap.elapsed_minutes:.0f}min over "
                 f"{snap.tick} ticks but optimization_stack is empty and "
@@ -237,8 +232,9 @@ class ProgressDetector:
             subject={},
             source="local",
             suggestion=(
-                "delegate(report) to finalize and surface the attempted "
-                "candidates; keep `decision_trace.json` for the operator"
+                "consider `escalate_strategy_change(skip_to_close)` or "
+                "`report` to surface the attempted candidates; "
+                "`decision_trace.json` already records what was tried"
             ),
         )
 

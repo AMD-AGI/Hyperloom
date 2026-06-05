@@ -4662,14 +4662,25 @@ class Coordinator:
     # ------------------------------------------------------------------
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
         action_name = intent.payload["action_name"]
-        # Pruned-family check reads from persistent SharedState so resume
-        # after crash still respects the prune.
+        # Pruned families are advisory: the proposal still flows through
+        # to the pending queue, but the inbox carries an advisory note
+        # so the LLM can decide whether to revisit. Resume reads
+        # ``pruned_families`` from persistent SharedState.
         if self.shared_state.is_pruned(action_name):
             await self._record_observation(
                 "coordinator", "observation",
-                {"kind": "proposal_pruned", "from": source, "action": action_name},
+                {
+                    "kind": "proposal_pruned_advisory",
+                    "from": source,
+                    "action": action_name,
+                    "hint": (
+                        f"{action_name!r} is in pruned_families; if the "
+                        "prune was speculative the LLM may pick this "
+                        "action again, otherwise prefer another "
+                        "phase-allowed action."
+                    ),
+                },
             )
-            return
         denied = self._sequence_denial_for_action(
             action_name,
             proposed_params=intent.payload.get("params"),
@@ -5256,20 +5267,20 @@ class Coordinator:
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         action_name = intent.payload["action_name"]
         if self.shared_state.is_pruned(action_name):
-            await self._record_policy_denied(
-                source, intent,
-                PolicyDenied(
-                    f"delegate{{action_name={action_name!r}}} pruned",
-                    rule="family_pruned",
-                    hint=(
-                        f"{action_name!r} is in pruned_families; pick another "
-                        f"phase-allowed action (see the `=== Phase-allowed "
-                        f"actions ===` block)"
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind": "delegate_pruned_advisory",
+                    "from": source,
+                    "action": action_name,
+                    "hint": (
+                        f"{action_name!r} is in pruned_families; if the "
+                        "prune was speculative the LLM may pick this "
+                        "action again, otherwise prefer another "
+                        "phase-allowed action."
                     ),
-                ),
-                action_name=action_name,
+                },
             )
-            return
         denied = self._sequence_denial_for_action(
             action_name,
             proposed_params=intent.payload.get("params"),

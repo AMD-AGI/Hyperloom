@@ -661,7 +661,7 @@ async def test_coordinator_kill_task_by_robustness(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_prune_branch_cancels_family_and_future_proposals(session_dir):
+async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
         a = await c.tasks.create(kind="deep_kernel_analysis", params={}, idempotency_key="ka")
@@ -673,19 +673,24 @@ async def test_coordinator_prune_branch_cancels_family_and_future_proposals(sess
         ))
         a_after = await c.tasks.get(a.task_id)
         b_after = await c.tasks.get(b.task_id)
+        # Active queue still gets cancelled — the prune kills work in
+        # flight even when the dispatch denial was relaxed to advisory.
         assert a_after.state == "cancelled"
         assert b_after.state == "cancelled"
-        # P1-3: pruned_families now lives in persistent SharedState
         assert "deep_kernel_analysis" in c.shared_state.pruned_families
 
-        # Future proposal of same family is soft-rejected
+        # Future propose_action carries an advisory observation but is
+        # NOT silently dropped — Orchestration may still pick it up
+        # (loosen P3_19).
         await c._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,
             payload={"action_name": "deep_kernel_analysis", "predicted_gain_pct": 5.0},
         ))
-        assert not c.state.pending_proposals
+        assert c.state.pending_proposals
         obs = await c.bus.tail(topic="observation")
-        assert any(m.payload.get("kind") == "proposal_pruned" for m in obs)
+        assert any(
+            m.payload.get("kind") == "proposal_pruned_advisory" for m in obs
+        )
     finally:
         await c.stop()
 

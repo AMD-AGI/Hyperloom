@@ -351,15 +351,19 @@ def test_dead_c_robustness_md_prune_branch_family_list():
     """KB_gaps/Dead-C — the Robustness prompt's ``prune_branch`` family
     enumeration drops the retired ``validate_stack`` family (and the
     legacy ``backends`` / ``params`` aliases) and keeps the canonical
-    ``explore`` family."""
+    ``explore`` family. The prompt is a markdown table; we walk the
+    rows looking for the ``prune_branch`` cell."""
     from inference_optimizer.paths import asset_system_prompts_dir
 
     fragment = (asset_system_prompts_dir() / "robustness.md").read_text(
         encoding="utf-8"
     )
-    prune_lines = [ln for ln in fragment.splitlines() if "prune_branch" in ln]
-    assert prune_lines, "prune_branch row missing from robustness.md"
-    row = prune_lines[0]
+    prune_rows = [
+        ln for ln in fragment.splitlines()
+        if ln.strip().startswith("| `prune_branch")
+    ]
+    assert prune_rows, "prune_branch table row missing from robustness.md"
+    row = prune_rows[0]
     for retired in ("validate_stack", "backends", "params"):
         assert retired not in row, (
             f"prune_branch family list still advertises retired {retired!r}"
