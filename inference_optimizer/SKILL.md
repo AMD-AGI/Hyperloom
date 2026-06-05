@@ -118,10 +118,10 @@ or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
 `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
 `kernel-agent/scripts/install.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
-it to a fixed SHA. A shared cluster checkout such as
-`/wekafs/hyperloom/TraceLens-internal` is only used as an explicit
-operator override — export `TRACELENS_ROOT=<path>` to opt in, which
-skips both the clone and the SHA pin) with an **optional** internal
+it to a fixed SHA. A pre-existing checkout you maintain is only used as
+an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
+in, which skips both the clone and the SHA pin) with an **optional**
+internal
 extension at `$TRACELENS_INTERNAL_ROOT` (no default; internal users set
 it to their own existing checkout to opt in,
 otherwise open-source-only; rehydration module — Hyperloom keeps no internal
@@ -451,10 +451,10 @@ export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
 # to $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens and pin it to a
-# fixed SHA. Only export it as an operator override to point at an
-# existing checkout (e.g. /wekafs/hyperloom/TraceLens-internal); this
-# skips both the clone and the SHA pin.
-# export TRACELENS_ROOT=/wekafs/hyperloom/TraceLens-internal
+# fixed SHA. Only export it as an operator override to point at a
+# pre-existing checkout you maintain; this skips both the clone and the
+# SHA pin.
+# export TRACELENS_ROOT=/path/to/your/TraceLens
 # Optional internal extension; export only to enable it (open-source-only if unset):
 # export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 

@@ -162,9 +162,9 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
    manually. By default use the installer-managed clone; only point
-   `TRACELENS_ROOT` at a different checkout (e.g. legacy
-   `/wekafs/hyperloom/TraceLens-internal`) as an explicit operator
-   override — that skips both the clone and the SHA pin:
+   `TRACELENS_ROOT` at a pre-existing checkout you maintain as an
+   explicit operator override — that skips both the clone and the SHA
+   pin:
    ```bash
    export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime}/source-mirrors/TraceLens}"
    cd "$TRACELENS_ROOT"

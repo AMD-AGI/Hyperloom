@@ -19,10 +19,10 @@ Do not write outside `$USER_DATA_PATH` except for reading user-provided
 trace/source paths, the TraceLens public source at
 `$TRACELENS_ROOT` (default `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`,
 i.e. `$USER_DATA_PATH/runtime/source-mirrors/TraceLens`; `install.sh`
-clones `AMD-AGI/TraceLens` there and pins it to a fixed SHA. A shared
-checkout such as `/wekafs/hyperloom/TraceLens-internal` is only used as
-an explicit operator override — export `TRACELENS_ROOT=<path>` to opt in,
-which makes the installer skip both the clone and the SHA pin), and —
+clones `AMD-AGI/TraceLens` there and pins it to a fixed SHA. A
+pre-existing checkout you maintain is only used as an explicit operator
+override — export `TRACELENS_ROOT=<path>` to opt in, which makes the
+installer skip both the clone and the SHA pin), and —
 when enabled — the optional TraceLens-internal source at
 `$TRACELENS_INTERNAL_ROOT` (no default; set it to opt in, otherwise
 open-source-only).
@@ -69,9 +69,9 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
 - TraceLens public editable install from `$TRACELENS_ROOT`
   (default `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
   `install.sh` clones `AMD-AGI/TraceLens` there and pins it to a fixed
-  SHA. Export `TRACELENS_ROOT=<path>` to point at an existing checkout
-  such as `/wekafs/hyperloom/TraceLens-internal` — this is an explicit
-  operator override and skips both the clone and the SHA pin), plus the
+  SHA. Export `TRACELENS_ROOT=<path>` to point at a pre-existing
+  checkout you maintain — this is an explicit operator override and
+  skips both the clone and the SHA pin), plus the
   optional internal extension from `$TRACELENS_INTERNAL_ROOT` only when
   that var is set (no default; unset => open-source-only), and verifies
   `TraceLens_generate_perf_report_pytorch_inference --help`
@@ -338,11 +338,11 @@ to its path. Hyperloom keeps no internal URL/path and never clones it.
 Default base repo (`TRACELENS_ROOT`): `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`
 (i.e. `$USER_DATA_PATH/runtime/source-mirrors/TraceLens`). When unset,
 `install.sh` clones `AMD-AGI/TraceLens` there and pins it to the fixed
-SHA recorded in the installer. A shared cluster checkout such as
-`/wekafs/hyperloom/TraceLens-internal` is **only** used as an explicit
-operator override — export `TRACELENS_ROOT=<path>` to opt in, which
-skips both the clone and the SHA pin and runs `pip install -e` directly
-against that path. The internal extension has **no default path**: it
+SHA recorded in the installer. A pre-existing checkout you maintain is
+**only** used as an explicit operator override — export
+`TRACELENS_ROOT=<path>` to opt in, which skips both the clone and the
+SHA pin and runs `pip install -e` directly against that path. The
+internal extension has **no default path**: it
 is used ONLY when `$TRACELENS_INTERNAL_ROOT` is set to an existing
 checkout you provide.
 Presence of that env var is the sole switch —
@@ -369,8 +369,9 @@ manual editable install + smoke test before analysis:
 
 ```bash
 # Default: use the installer-managed clone under $HYPERLOOM_RUNTIME_DIR.
-# Operator override: export TRACELENS_ROOT to an existing checkout
-# (e.g. /wekafs/hyperloom/TraceLens-internal) before running install.sh.
+# Operator override: export TRACELENS_ROOT (e.g.
+# /path/to/your/TraceLens) before running install.sh to skip the clone
+# and the SHA pin.
 export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime}/source-mirrors/TraceLens}"
 cd "$TRACELENS_ROOT" && pip install -e .
 # OPTIONAL internal extension — only if TRACELENS_INTERNAL_ROOT is set:
