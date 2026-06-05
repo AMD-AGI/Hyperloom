@@ -3194,23 +3194,18 @@ class SharedState:
         }
 
     def to_intervention_mix_summary(self) -> str:
-        """Render the intervention ledger for the Orchestration prompt.
+        """Render the intervention ledger as neutral telemetry.
 
-        Returns ``""`` when the ledger is empty (nothing recorded yet — no
-        escalation possible). Otherwise returns a one-line counts summary,
-        plus an ``ESCALATION`` directive when the session has been
-        config-only for too long, nudging Orchestration to dispatch a
-        code-patch ``serving_specialist`` next. ``record_intervention``
-        maintains the ledger; this is its sole consumer.
-
-        Escalate when ``consecutive_config_only_rounds >= 2`` OR the ledger
-        is config-heavy (>= 5 config keeps) with zero code_patch keeps.
+        Returns ``""`` when the ledger is empty (nothing recorded yet).
+        Otherwise returns a one-line counts summary (config vs code_patch
+        keeps / attempts + the consecutive-config-only counter).
+        ``record_intervention`` maintains the ledger; this is its sole
+        consumer. No directive is emitted — the config-vs-patch choice is
+        the LLM's to make from these facts.
         """
         mix = self.intervention_mix or []
         if not mix:
             return ""
-        escalate_at = 2
-        config_heavy_at = 5
         n_config = sum(
             1 for m in mix if (m or {}).get("change_type") == "config"
         )
@@ -3223,33 +3218,15 @@ class SharedState:
                 "code_patch", "code_patch_attempt",
             )
         )
-        # Config explore rounds that measured but kept nothing still count
-        # toward escalation, so repeated fruitless tuning can hand off to a
-        # code-patch path even without a config KEEP.
         n_config_attempt = sum(
             1 for m in mix if (m or {}).get("change_type") == "config_attempt"
         )
         consec = int(self.consecutive_config_only_rounds or 0)
-        config_pressure = n_config + n_config_attempt
-        lines = [
+        return (
             f"config_keeps={n_config} config_attempts={n_config_attempt} "
             f"code_patch_keeps={n_patch} code_patch_attempts={n_patch_attempt} "
             f"consecutive_config_only_rounds={consec}"
-        ]
-        if (
-            consec >= escalate_at
-            or (n_config >= config_heavy_at and n_patch == 0)
-            or (config_pressure >= escalate_at and n_patch == 0)
-        ):
-            lines.append(
-                "ESCALATION: config-only for too long. Config tuning has a "
-                "low ceiling — your NEXT EXPLORE dispatch SHOULD delegate a "
-                "`serving_specialist` to author a framework SOURCE patch "
-                "(scheduler / kv_cache / chunked-prefill), integrated via "
-                "`integrate_patch`, rather than another config-only "
-                "`params` / `explore` round."
-            )
-        return "\n".join(lines)
+        )
 
     def record_dynamic_action_dispatch(
         self, dyn_id: str, summary: dict[str, Any],

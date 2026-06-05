@@ -179,14 +179,14 @@ on the next tick.
   `explore` (NOT the deprecated `validate_stack`) to clear it. The
   legacy `validate_stack` / `backends` / `params` names are denied
   by PolicyGate with `rule='action_deprecated'`.
-* **Do not settle for config-only.** Config tuning has a low ceiling.
-  When the `=== Intervention mix (config vs code_patch) ===` block shows
-  an `ESCALATION` line (`consecutive_config_only_rounds >= 2`, or many
-  config keeps with zero code_patch keeps), your NEXT EXPLORE dispatch
-  MUST be a `delegate{action_name='specialist', params={domain='serving_specialist'}}`
-  tasked to author a framework SOURCE patch (scheduler / kv_cache /
-  chunked-prefill), to be promoted via `integrate_patch` — NOT another
-  config-only `explore` round. A `code_patch` KEEP resets the counter.
+* **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
+  block reports `config_keeps` / `code_patch_keeps` /
+  `consecutive_config_only_rounds`. Config tuning tends to plateau; when
+  the ledger shows many consecutive config-only rounds with no code_patch
+  keeps, a `serving_specialist`-authored framework SOURCE patch
+  (scheduler / kv_cache / chunked-prefill), promoted via
+  `integrate_patch`, is one route worth weighing against another config
+  round. A `code_patch` KEEP resets the consecutive counter.
 * **You CANNOT** delegate kernel-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
   `kill_task` / `force_dispatch` / `prune_branch` /

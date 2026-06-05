@@ -4601,14 +4601,6 @@ class Coordinator:
             dyn_section = self.shared_state.to_dynamic_actions_prompt_section()
             if dyn_section:
                 sections.append(dyn_section)
-            try:
-                mix_hint = self.shared_state.to_intervention_mix_summary()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: intervention_mix_summary failed")
-                mix_hint = ""
-            if mix_hint:
-                sections.append("=== Intervention mix (advisory) ===")
-                sections.append(mix_hint)
 
         # Cortex T0 warm-start snapshot + structured
         # gaps[] ledger injected into the Orchestration
@@ -4677,15 +4669,15 @@ class Coordinator:
                 sections.append("=== Priors-match (advisory ordering) ===")
                 sections.append(priors_block)
 
-            # Surface the intervention-mix ledger so Orchestration can
-            # escalate from repeated config-only work to code-patch specialists.
+            # Surface the intervention-mix ledger (config vs code_patch
+            # counts) as neutral telemetry for Orchestration.
             try:
                 mix_block = self.shared_state.to_intervention_mix_summary()
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("Coordinator: intervention_mix_summary failed")
                 mix_block = ""
             if mix_block:
-                sections.append("=== Intervention mix (config vs code_patch) ===")
+                sections.append("=== Intervention mix (telemetry) ===")
                 sections.append(mix_block)
 
         # Robustness gets a phase budget telemetry +
@@ -9291,11 +9283,8 @@ class Coordinator:
                 # B2: a config explore round that produced measurements but
                 # KEPT nothing (all REVERT / KEEP_UNSTABLE) still counts as a
                 # config-only *attempt*. Record it so the intervention-mix
-                # ESCALATION can fire on repeated config attempts even when
-                # the noise floor prevents any config KEEP — otherwise the
-                # "do not settle for config-only" nudge never reaches the
-                # Orchestration prompt and the loop never escalates to a
-                # code-patch ``integrate_patch``.
+                # telemetry reflects repeated fruitless config rounds even
+                # when the noise floor prevents any config KEEP.
                 self.shared_state.record_intervention(
                     change_type="config_attempt",
                     action="explore",

@@ -133,8 +133,8 @@ def test_coordinator_intervention_hook_records_config_for_explore():
 def test_coordinator_intervention_hook_skips_explore_with_no_winners():
     """Explore round with empty winners + no best_variant is a no-keep
     round: the contiguous config-KEEP counter does NOT advance, but B2
-    records a ``config_attempt`` so repeated fruitless config rounds can
-    still drive the intervention-mix ESCALATION toward a code patch."""
+    records a ``config_attempt`` so the telemetry still reflects repeated
+    fruitless config rounds."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.task_registry import Task
 
@@ -269,21 +269,23 @@ def test_intervention_mix_summary_no_escalation_when_balanced():
     assert "ESCALATION" not in out
 
 
-def test_intervention_mix_summary_fires_on_two_consecutive_config():
+def test_intervention_mix_summary_renders_counter_for_two_consecutive_config():
     s = SharedState()
     s.record_intervention(change_type="config", action="explore")
     s.record_intervention(change_type="config", action="explore")
     hint = s.to_intervention_mix_summary()
     assert hint
-    assert "config-only" in hint
-    assert "source\n" in hint or "source " in hint or "patch" in hint
+    assert "consecutive_config_only_rounds=2" in hint
+    assert "ESCALATION" not in hint
 
 
-def test_intervention_mix_summary_fires_on_config_heavy():
+def test_intervention_mix_summary_renders_counts_for_config_heavy():
     s = SharedState()
     for _ in range(5):
         s.record_intervention(change_type="config", action="explore")
-    assert s.to_intervention_mix_summary() != ""
+    out = s.to_intervention_mix_summary()
+    assert "config_keeps=5" in out
+    assert "ESCALATION" not in out
 
 
 def test_intervention_mix_summary_respects_threshold():
