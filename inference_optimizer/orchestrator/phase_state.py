@@ -270,6 +270,11 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "framework_pr_phase_done",
     "framework_pr_plateau",
     "framework_pr_force_exit_low_budget",
+
+    # Pre-run context-window preflight (``cli._preflight_context_window``):
+    # the model's max_position_embeddings cannot hold ISL+OSL+headroom, so we
+    # fail fast before booting a server that would 400 every request.
+    "model_context_window_too_small",
 })
 
 
