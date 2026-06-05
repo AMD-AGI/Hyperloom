@@ -51,7 +51,6 @@ if str(_CI_DIR) not in sys.path:
 from optimize_submit import (  # noqa: E402
     DEFAULT_API_URL,
     DEFAULT_GPU_TYPE,
-    DEFAULT_INFERENCEX_PATH,
     DEFAULT_OOB_PATH,
     DEFAULT_REGISTER_WORKSPACE,
     DEFAULT_RESULTS_PATH,
@@ -192,9 +191,10 @@ class TinyController:
                        or DEFAULT_VOLUME)
         self.gpu_type = (args.gpu_type or os.environ.get("SAFE_OPTIMIZE_GPU_TYPE")
                          or DEFAULT_GPU_TYPE)
+        # Unset by default: install.sh clones a writable per-session copy.
         self.inferencex_path = (args.inferencex_path
                                 or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
-                                or DEFAULT_INFERENCEX_PATH)
+                                or "")
         self.oob_path = (args.oob_path or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
                          or DEFAULT_OOB_PATH)
         self.tracelens_root = (args.tracelens_root

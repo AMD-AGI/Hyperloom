@@ -17,9 +17,8 @@ Workload envs — export before launch (Coordinator reuses these for baseline �
   TP={tp} EP={ep} CONC={conc} ISL={isl} OSL={osl} RANDOM_RANGE_RATIO={random_range_ratio} PRECISION={precision} NODES={nodes}
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX={kernel_agent_build_geak_rag_index}
 
-Runtime paths (live on the shared mount; the agent does not need to re-clone):
+Runtime paths (install.sh clones per-session writable copies; these are dev overrides):
   OOB_PATH={oob_path}
-  InferenceX_PATH={inferencex_path}
   TRACELENS_ROOT={tracelens_root}
 {multinode_section}
 Session dir: /workspace/hyperloom (SKILL.md default — do NOT override).
