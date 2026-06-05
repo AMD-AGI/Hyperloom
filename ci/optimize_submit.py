@@ -91,10 +91,21 @@ DEFAULT_REGISTER_WORKSPACE = "core42-hyperloom"
 DEFAULT_SUBMIT_WORKSPACE = "core42-sandbox"
 DEFAULT_VOLUME = "/wekafs"
 DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
-# Cluster-aware default: SaFE backend's NormalizePromptConfig uses MI355X,
-# which is wrong for core42. InferenceX is no longer forced through the
-# optimization-task body; sandbox-side install.sh owns detection/clone and
-# exports INFERENCEX_PATH for the optimizer runtime.
+# Cluster-aware GPU default: the Claw prompt-builder defaults to MI355X,
+# which is wrong for core42 (it's MI300X). Override here so the generated
+# prompt and our TP policy use the right architecture.
+#
+# We deliberately do NOT pin tool source paths. install.sh clones a
+# per-session WRITABLE copy (INFERENCEX_REPO -> $USER_DATA_PATH/runtime/
+# InferenceX) whenever INFERENCEX_PATH is unset, and the orchestrator prompt
+# references it via the $INFERENCEX_PATH env var that install.sh exports.
+# Pinning the shared read-only /wekafs/hyperloom/InferenceX here used to force
+# Magpie's benchmark-script staging into a read-only directory, raising
+# "OSError: [Errno 30] Read-only file system" on every model's first session.
+# Leaving it unset lets each session own a writable per-install checkout
+# (--inferencex-path / SAFE_OPTIMIZE_INFERENCEX_PATH still override for dev).
+# OOB and TraceLens are also explicit opt-in overrides; sandbox-side install
+# owns runtime setup and SaFE should not receive stale shared default paths.
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
@@ -835,11 +846,15 @@ class SafeOptimizeClient:
         if image:
             body["image"] = image
         # Override SaFE backend's wrong-for-core42 defaults (MI355X /
-        # /hyperloom/InferenceX). See DEFAULT_GPU_TYPE/_INFERENCEX_PATH above.
+        # /hyperloom/InferenceX). See DEFAULT_GPU_TYPE comment above.
         if gpu_type:
             body["gpuType"] = gpu_type
-        if inferencex_path:
-            body["inferencexPath"] = inferencex_path
+        # Always send inferencexPath — even when empty — so the SaFE
+        # backend's Zod default ("/hyperloom/InferenceX") does not kick
+        # in. An empty string tells the Claw prompt-builder to leave
+        # the path blank; install.sh then clones a writable per-session
+        # copy instead of reusing the shared read-only mount.
+        body["inferencexPath"] = inferencex_path or ""
         if oob_path:
             body["oobPath"] = oob_path
         if tracelens_root:
@@ -2888,18 +2903,23 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"Known profiles: {', '.join(GPU_PROFILES)}. "
                              f"SaFE backend default is MI355X — must override on core42.")
     parser.add_argument("--inferencex-path", default="",
-                        help="Optional InferenceX checkout override inside the "
-                             "sandbox. Default is unset: sandbox-side "
-                             "install.sh clones/detects InferenceX and exports "
-                             "INFERENCEX_PATH.")
+                        help="Explicit InferenceX checkout path inside the "
+                             "sandbox (dev override; also $SAFE_OPTIMIZE_"
+                             "INFERENCEX_PATH). Leave empty (the default) so "
+                             "install.sh clones a writable per-session copy "
+                             "instead of pinning a shared read-only mount.")
     parser.add_argument("--oob-path", default="",
                         help="Optional OOB checkout override inside the sandbox. "
                              "Default is unset: sandbox-side install.sh prepares "
                              "and exports OOB paths.")
     parser.add_argument("--tracelens-root", default="",
-                        help="Optional TraceLens checkout override inside the "
-                             "sandbox. Default is unset: sandbox-side install.sh "
-                             "prepares TraceLens when available.")
+                        help="TraceLens checkout path inside the sandbox. "
+                             "Leave empty (the default) so install.sh clones "
+                             "AMD-AGI/TraceLens into "
+                             "$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens "
+                             "and pins it to a fixed SHA. Override via "
+                             "$SAFE_OPTIMIZE_TRACELENS_ROOT or this flag only "
+                             "to point at an existing cluster checkout.")
     parser.add_argument("--prompt-prefix",
                         default=_load_default_prompt_prefix(),
                         help="Free-form prefix prepended to the SaFE-generated "
@@ -3027,6 +3047,10 @@ def main() -> int:
                       or DEFAULT_GPU_TYPE)
     gpu_type = canonical_gpu_type(gpu_type_input)
     gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
+    # Unset by default: install.sh clones a writable per-session InferenceX.
+    # Only an explicit --inferencex-path / SAFE_OPTIMIZE_INFERENCEX_PATH pins
+    # a path (dev override); empty -> sends inferencexPath="" to suppress
+    # SaFE's default shared read-only path.
     inferencex_path = (args.inferencex_path
                        or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
                        or "")
@@ -3034,8 +3058,7 @@ def main() -> int:
                 or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
                 or "")
     tracelens_root = (args.tracelens_root
-                      or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT")
-                      or "")
+                      or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT", ""))
     try:
         kernel_backends = parse_kernel_backends(args.kernel_opt_backends)
     except ValueError as e:

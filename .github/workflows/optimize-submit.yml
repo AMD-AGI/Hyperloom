@@ -105,6 +105,10 @@ on:
         description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
         required: false
         default: ''
+      inferencex_path:
+        description: 'Explicit InferenceX checkout path (dev override only). Leave empty (default) so install.sh clones a writable per-session copy instead of pinning a shared read-only mount.'
+        required: false
+        default: ''
       kernel_opt_backends:
         description: 'Kernel optimization backends forwarded to SaFE (GEAK first by default).'
         required: false

@@ -36,77 +36,13 @@ from ..action_registry import (
     ActionRegistry,
     VALID_PIPELINE_PHASES,
 )
-
-
-# ---------------------------------------------------------------------------
-# Default enabled-action sets (mirrors `cli._register_executors`)
-# ---------------------------------------------------------------------------
-FULL_ENABLED_ACTIONS: tuple[str, ...] = (
-    # prep
-    "target_analysis", "baseline",
-    # analysis — roofline is Coordinator-auto-enqueued (PRELUDE + watermark);
-    # not LLM-proposable. deep_kernel_analysis stays as a kernel-owned REQUEST.
-    "roofline", "deep_kernel_analysis",
-    # explore — the single grid-runner entry (per-KEEP stack rebench
-    # inlined).
-    "explore",
-    # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is the LLM sub-agent
-    # dispatch surface; ``integrate_patch`` is the orchestrator-side
-    # apply+restart+gate that consumes specialist worktree patches.
-    # Both live under pipeline_phase=explore in the registry.
-    "specialist",
-    # Supplementary cross-domain ReAct sub-agent channel; EXPLORE-only,
-    # round-cap 1, sits next to specialist in the catalogue.
-    "dynamic_action",
-    "integrate_patch",
-    "sweep",
-    # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
-    "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
-    "gemm_tuning",
-    # finalize
-    "report",
-    # support — ``recover`` frees leaked VRAM and (when
-    # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``) attempts
-    # ``rocm-smi --gpureset``. The replacement path for diagnostic work
-    # is a specialist sub-agent.
-    "recover",
+from ...protocol.action_surfaces import (
+    FULL_ENABLED_ACTIONS,
+    GRID_INJECTABLE_ACTIONS,
+    KERNEL_OWNED_ACTIONS,
+    NO_KERNEL_ENABLED_ACTIONS,
 )
 
-NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
-    # prep
-    "target_analysis", "baseline",
-    # explore (no profile — it only feeds kernel-opt). Carries an
-    # inlined per-KEEP stack rebench.
-    "explore",
-    # PR-A1 (Arbor-into-Hyperloom): specialist + integrate_patch are
-    # always-on; they are EXPLORE-phase actions and unrelated to kernel mode.
-    "specialist",
-    "dynamic_action",
-    "integrate_patch",
-    "sweep",
-    # finalize
-    "report",
-    # support — recover is needed even without kernel-opt because GPU
-    # leaks from baseline / explore / sweep can still hang the session;
-    # the executor itself is kernel-agnostic.
-    "recover",
-)
-
-# Actions that the Kernel agent owns end-to-end (Plan A). Orchestration MUST
-# emit `request{target_agent='kernel', kind=...}` for these instead of
-# `delegate{action_name=...}`. We highlight the difference in the catalogue
-# section so the LLM picks the right transport.
-KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
-    "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
-})
-
-# Actions that accept LLM-injected grid candidates via ``params.grid``.
-# The catalogue section appends a grid-override hint for these so the
-# LLM knows it can expand the search space beyond the shipped defaults.
-GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
-    "explore", "sweep",
-})
 
 # Phase ordering for the catalogue section. Any action whose pipeline_phase
 # is not in this tuple is appended at the end (defensive; current registry
@@ -339,13 +275,8 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
         )
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
-    # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is a synthetic LLM
-    # sub-agent dispatch (no propose_action wrapper — go straight to
-    # delegate with the per-payload contract enforced by PolicyGate's
-    # ``specialist_dispatch_source``). ``integrate_patch`` is the
-    # serving-lane-locked follow-up that consumes a specialist's worktree
-    # patches; expose it as a direct delegate too so the LLM does not
-    # waste a tick proposing it first.
+    # Specialist is an LLM sub-agent delegate. integrate_patch consumes
+    # specialist worktree patches and should be directly delegatable.
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
@@ -541,70 +472,40 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "### FAILURE RECOVERY (apply BEFORE re-proposing an action that just failed)",
         "",
         "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
-        "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
-        "action with the same params. Coordinator stamps an audit trail on every",
-        "attempt; consult these three SharedState surfaces in order:",
+        "or `last_action_failures[-1].action == <X>`, consult the audit trail:",
         "",
-        "1. **`last_<action>`** (snapshot of the latest attempt) and",
-        "   **`<action>_attempts`** (capped per-action history, newest last).",
-        "   Each entry carries `status` / `decision` / `error_class` /",
-        "   `error_excerpt` / `workspace` / `raw_result_path` /",
-        "   `extras.fingerprint`. The fingerprint is the canonical hash of",
-        "   the eight params fields that determine baseline behavior:",
-        "   `benchmark_script` / `result_dir` / `extra_server_args` /",
-        "   `extra_envs` / `model_path` / `gpu_type` / `config_path` /",
-        "   `disable_run_eval`.",
-        "2. **`last_action_failures`** (global rolling log capped at the last",
-        "   10 unpromotable results across ALL kinds, including kernel-owned).",
-        "   Use this when the per-action history doesn't carry the kind you",
-        "   need (e.g. `integrate` failure visible here but `<action>_attempts`",
-        "   only covers the six explore/validate kinds).",
-        "3. **`baseline_failure_streak`** (consecutive failed baselines).",
-        "   Once this hits 3, Coordinator sets `stop_reason='baseline_failed'`",
-        "   and the run terminates; you must recover BEFORE the third failure.",
+        "1. **`last_<action>`** and **`<action>_attempts`** — each entry has",
+        "   `status` / `decision` / `error_class` / `error_excerpt` /",
+        "   `extras.fingerprint`.",
+        "2. **`last_action_failures`** — global rolling log (last 10).",
+        "3. **`baseline_failure_streak`** — consecutive failed baselines.",
+        "   At 3 the run terminates with `stop_reason='baseline_failed'`.",
         "",
-        "Three decision rules apply in order:",
+        "Rules for **baseline** failures:",
         "",
-        "* **RULE F1 — same fingerprint, twice failed → change at least one knob.**",
-        "  If the last two `<action>_attempts` entries share an `extras.fingerprint`",
-        "  with the proposal you're about to emit, PolicyGate WILL deny it with",
-        "  `rule='baseline_self_loop'`. Bump at least one of: `params.benchmark_script`",
-        "  (a sanitized `*.sh` file name — Magpie's `dsr1_fp8_mi300x.sh` hardcodes",
-        "  `--result-dir /workspace/`, but `sglang_mi300x.sh` respects",
-        "  `$RESULT_DIR`), `params.result_dir`, `params.extra_server_args`, or",
-        "  `params.extra_envs`.",
-        "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
-        "  warning ⇒ leak salvage missed.** The script wrote results outside the",
-        "  workspace and outside the configured leak destinations. Override",
-        "  `params.benchmark_script` to a script that respects `$RESULT_DIR`",
-        "  (Coordinator already exports `RESULT_DIR=<workspace>` by default), or",
-        "  set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state` so the next",
-        "  attempt salvages the leak.",
-        "* **RULE F3 — `error_class='subprocess_nonzero'` with same fingerprint",
-        "  ⇒ stop retrying.** Heartbeat with `body_md='blocked: subprocess",
-        "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
-        "  switch action families just to dodge the failure; Robustness'",
-        "  escalation policy needs the heartbeat to fire its RCA.",
+        "* **RULE BF1 — do NOT change baseline params after failure.**",
+        "  PolicyGate denies any baseline proposal whose fingerprint differs",
+        "  from the last failed attempt (`rule='baseline_no_param_change'`).",
+        "  Do not tweak `extra_server_args`, `extra_envs`, `benchmark_script`,",
+        "  or any other params field. Re-propose with the SAME params to retry.",
+        "* **RULE BF2 — 3 consecutive failures → automatic exit.**",
+        "  Coordinator terminates with `stop_reason='baseline_failed'`; the",
+        "  event log carries `error_class` and `error_excerpt` from each",
+        "  failed attempt. No manual recovery is expected.",
+        "* **RULE BF3 — if the cause requires human intervention, heartbeat.**",
+        "  Emit `body_md='blocked: baseline repeatedly failing <error_class>'`",
+        "  and let Robustness escalate. Do NOT invent server args or switch",
+        "  benchmark scripts to dodge the failure.",
+        "",
+        "Rules for **non-baseline** failures:",
+        "",
         "* **RULE F4 — `policy_denial_streak` is a fact, not a lock.** When the",
-        "  per-tick `Recent policy denials` block shows `streak≥2` for an",
+        "  per-tick `Recent policy denials` block shows `streak>=2` for an",
         "  (action, rule) pair, the SAME params will keep colliding.",
-        "  v0.8 §3.9 retired the legacy ``locked_reason`` mirror, but the",
-        "  underlying anti-loop is unchanged: at streak≥5 the family is",
-        "  auto-pruned; at streak≥10 the run stops with",
-        "  ``stop_reason='policy_loop'``. Recover by omitting",
-        "  ``idempotency_key`` (Coordinator derives a fresh tick+content",
-        "  fingerprint) AND changing at least one substantive param —",
-        "  a new ``params.grid`` variant, different ``benchmark_script``,",
-        "  or a sibling action family.",
-        "",
-        "Example (baseline failed twice with `error_class='no_report'`):",
-        "",
-        "    propose_action{action_name='baseline',",
-        "        params={benchmark_script: 'sglang_mi300x.sh',",
-        "                result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
-        "        predicted_gain_pct: 0,",
-        "        notes: 'recover from no_report streak — sglang_mi300x.sh honors",
-        "                $RESULT_DIR; the default model script hardcodes /workspace/'}",
+        "  At streak>=5 the family is auto-pruned; at streak>=10 the run",
+        "  stops with `stop_reason='policy_loop'`. Recover by changing at",
+        "  least one substantive param — a new `params.grid` variant,",
+        "  different `benchmark_script`, or a sibling action family.",
         "",
         "### IDEA GENERATION (apply after EVERY explore round)",
         "",

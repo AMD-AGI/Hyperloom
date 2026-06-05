@@ -40,7 +40,7 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
@@ -380,7 +380,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
     # Monkey-patch ClaudeBackend so the cli factory doesn't reach for
     # the real Anthropic SDK. We replace the symbol the cli adapter
     # closes over so the swap is invisible to the rest of the run.
-    import inference_optimizer.cli as cli_mod
+    import inference_optimizer.cli_executors as cli_mod
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(
         plan, name="specialist-mock",
@@ -457,7 +457,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
         loop_last=True,
     )
 
-    import inference_optimizer.cli as cli_mod
+    import inference_optimizer.cli_executors as cli_mod
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-stale")
     try:

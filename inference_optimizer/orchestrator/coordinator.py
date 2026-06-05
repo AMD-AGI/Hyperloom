@@ -1,23 +1,10 @@
-"""Coordinator main loop.
+"""Coordinator main loop and runtime protocol manager.
 
-The Coordinator is the **protocol manager** (not a decision-maker). It owns:
-
-* MessageBus + ResourceLockManager + TaskRegistry + CursorStore
-* PolicyGate (intent validation choke-point)
-* REQUEST/RESPONSE routing (Plan A: orchestration → kernel only)
-* Critic Review gate (§18) — pending proposals wait for verdict
-* Robustness scheduling-police execution (§19.3): kill_task / prune /
-  force_dispatch / escalate_strategy_change
-* Per-agent reactor loops + dispatcher
-
-**P0-3 scope**: a minimal, bounded-tick reactor that:
-* spins up one reactor task per agent (calls backend.run() each tick)
-* validates emitted intents through PolicyGate
-* persists / routes intents (REQUEST/RESPONSE/REVIEW_VERDICT/etc.)
-* for delegated tasks: enqueues into TaskRegistry and pumps SubAgentRunner
-
-Everything else (real backends, accuracy gate, phase machine, checkpoint
-cadence) lands in P0-5 and beyond.
+The Coordinator owns the durable optimizer loop: phase transitions,
+intent validation, task materialization, backend reactors, Critic and
+Robustness bridges, kernel/framework handoffs, resume state, and final
+artifact production. It should preserve external runtime contracts while
+keeping private scheduling and helper details free to change.
 """
 
 from __future__ import annotations
@@ -40,10 +27,8 @@ from ..compat.payload_aliases import read_extra_server_args
 from ..recipe_kb import RecipeKB, recipe_canonical_id
 from ..recipe_snapshot_constants import detect_framework_version
 
-# Severity tags previously imported from cortex_kb_constants. Kept as
-# inline string literals here since the recipe-snapshot v2 schema has
-# no fixed enum for severity; arbor's recipe.json doesn't either.
-# Coordinator only uses these two values.
+# Recipe snapshot severity tags. The schema has no fixed enum and
+# Coordinator only needs these two values.
 _SEVERITY_CRASH:   str = "crash"
 _SEVERITY_REGRESS: str = "regress"
 from . import phase_state as _phase_state
@@ -62,7 +47,7 @@ from .action_registry import ActionRegistry
 from .agent_role import AgentRole, default_role_registry
 from .backends.base import Backend, BackendError, BackendTurnResult
 from .cursor_store import CursorStore
-from .intent_parser import Intent, IntentType, NoIntentEmitted
+from ..protocol.intent import Intent, IntentType, NoIntentEmitted
 from .kernel_request_handlers import get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
@@ -87,73 +72,25 @@ from .shared_state import SharedState
 from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
 from .action_executors.benchmark_result import is_valid_measurement
+from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
+    _BASELINE_FINGERPRINT_KEYS,
+    _BASELINE_SELF_LOOP_THRESHOLD,
+    _DEFAULT_ROOFLINE_WATERMARK_RATIO,
+    _MULTI_VALUE_SGLANG_FLAGS,
+    _ROOFLINE_WATERMARK_RATIO_ENV,
+    _baseline_params_fingerprint,
+    _dedupe_extra_server_args,
+    _infer_model_class_from_config,
+    _merge_cumulative_extra_sglang_args,
+    _parse_baseline_workload_extra,
+    _parse_iso_unix,
+    _resolve_roofline_watermark_ratio,
+    _summarize_failed_variants,
+    effective_closing_grace_sec,
+)
 
 
 log = logging.getLogger(__name__)
-
-
-def _infer_model_class_from_config(model_path: str) -> str:
-    """Infer a deterministic model_class from local model metadata."""
-    raw_path = (model_path or "").strip()
-    payload: dict[str, Any] = {}
-    if raw_path:
-        cfg = Path(raw_path) / "config.json"
-        try:
-            if cfg.is_file():
-                data = json.loads(cfg.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    payload = data
-        except Exception:  # noqa: BLE001 - best effort only.
-            log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
-
-    text_parts: list[str] = [raw_path.lower()]
-    arch = payload.get("architectures")
-    if isinstance(arch, list):
-        text_parts.extend(str(x).lower() for x in arch if x)
-    elif arch:
-        text_parts.append(str(arch).lower())
-    for key in ("model_type", "attention_type", "attn_type"):
-        if payload.get(key):
-            text_parts.append(str(payload[key]).lower())
-    text = " ".join(text_parts)
-
-    def _positive_int(*keys: str) -> bool:
-        for key in keys:
-            val = payload.get(key)
-            if isinstance(val, bool):
-                continue
-            try:
-                if val is not None and int(val) > 0:
-                    return True
-            except (TypeError, ValueError):
-                continue
-        return False
-
-    is_moe = (
-        _positive_int(
-            "num_experts",
-            "n_routed_experts",
-            "num_local_experts",
-            "moe_num_experts",
-        )
-        or any(k in text for k in (
-            "moe", "mixtral", "deepseek-v2", "deepseek-v3", "deepseek-r1",
-            "kimi", "glm-5", "glm5",
-        ))
-    )
-    is_mla = any(k in text for k in (
-        "mla", "multi-head latent", "deepseek", "kimi", "glm-5", "glm5",
-    ))
-    is_nsa = any(k in text for k in (
-        "nsa", "native sparse attention", "glm-5", "glm5",
-    ))
-    if is_moe and is_mla and is_nsa:
-        return "moe_mla_nsa"
-    if is_moe and is_mla:
-        return "moe_mla"
-    if is_moe:
-        return "moe_swa"
-    return "dense"
 
 
 # Audit-trail kinds (must match shared_state._AUDIT_ACTIONS). Coordinator
@@ -164,46 +101,13 @@ def _infer_model_class_from_config(model_path: str) -> str:
 # (record_kernel_opt / record_kernel_integrate_result).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "sweep", "explore",
-    # F1-3 + N10: see shared_state._AUDIT_ACTIONS for the rationale.
-    # The composite roofline action runs profile + trace_analyze
-    # atomically; each invocation is visible in `roofline_attempts`.
+    # Composite roofline runs profile + trace_analyze atomically; each
+    # invocation is visible in ``roofline_attempts``.
     "roofline",
 })
 
-# ---------------------------------------------------------------------------
-# Baseline self-loop guard (failure-recovery surface).
-#
-# Orchestration can recover from a baseline failure by proposing a fresh
-# baseline with overrides (``params.benchmark_script`` /
-# ``params.result_dir`` / different ``extra_server_args`` / etc. — see
-# SKILL.md "Magpie leak-path salvage"). What it MUST NOT do is propose
-# the *same* params after the same failure mode has fired N times in a
-# row — the PolicyGate stop-loss below promotes that into a
-# ``policy_denied`` observation with a ``baseline_self_loop`` rule tag
-# so the prompt's FAILURE RECOVERY section sees the hint and proposes a
-# different override.
-#
-# The fingerprint covers the eight task.params fields that actually
-# change Magpie's behavior end-to-end (script choice / leak path /
-# config / model / GPU / accuracy gate). Two failed attempts with
-# identical fingerprints + the next proposal carrying the same
-# fingerprint → denial. Bumping the threshold via env override is
-# intentionally a single source of truth (tests rely on overriding
-# this constant rather than monkeypatching the helper).
-_BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
-    "benchmark_script",
-    "result_dir",
-    "extra_server_args",
-    "extra_envs",
-    "model_path",
-    "gpu_type",
-    "config_path",
-    "disable_run_eval",
-)
-_BASELINE_SELF_LOOP_THRESHOLD: int = 2
-
-# IR-7 — closed enum of session_steward_specialist recommendations.
-# Any value outside this set is coerced to ``stop_session`` in
+# Closed enum of session_steward_specialist recommendations. Any value
+# outside this set is coerced to ``stop_session`` in
 # :meth:`Coordinator._route_steward_verdict` (defense in depth — the
 # LLM can write any string but only the enum drives a phase-routing
 # change).
@@ -235,366 +139,11 @@ _ROOFLINE_GATED_ACTIONS: frozenset[str] = frozenset({
 })
 
 
-def effective_closing_grace_sec(
-    max_minutes: float | None,
-    closing_grace_sec: float | None,
-) -> float:
-    """Resolve the closing-phase grace window after the wall-clock deadline.
-
-    When ``closing_grace_sec`` is explicitly set (including ``0`` to disable
-    closing), that value wins. Otherwise default to
-    ``min(120, max_minutes * 60 * 0.02)`` so short smoke runs do not burn
-  2 minutes on report flush.
-    """
-    if closing_grace_sec is not None:
-        return float(closing_grace_sec)
-    return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
-
-
-def _resolve_silent_ticks_closing_threshold() -> int:
-    """N33: how many consecutive idle ticks must elapse before the
-    Coordinator force-enters closing phase.
-
-    "Idle" = ``shared_state.consecutive_silent_ticks`` was bumped
-    because the tick had no queued tasks, no running tasks, no pending
-    proposals and no ``current_action``. Default 120 ticks; with the
-    prod ``tick_interval_sec=5.0`` that is ~10 minutes of total LLM
-    silence before we short-circuit. Override via the env knob; ``0``
-    disables the early-close (legacy behaviour: idle until the wall-
-    clock deadline). Negative / non-numeric values fall back to the
-    default.
-    """
-    raw = os.environ.get(
-        "INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "",
-    ).strip()
-    if not raw:
-        return 120
-    try:
-        v = int(raw)
-    except ValueError:
-        return 120
-    return v if v >= 0 else 120
-
-
-def _parse_iso_unix(ts: str) -> float:
-    """Parse an ISO 8601 UTC timestamp into unix seconds.
-
-    Returns ``0.0`` on any parse failure so callers can treat a missing
-    timestamp as "no information"; never raises. Used by the
-    stale-specialist scanner to compute task-running duration without
-    plumbing a separate ``started_unix`` column through TaskRegistry.
-    """
-    s = (ts or "").strip()
-    if not s:
-        return 0.0
-    try:
-        # ``fromisoformat`` accepts microsecond / timezone-aware strings.
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
-        return 0.0
-    if dt.tzinfo is None:
-        # Treat naive timestamps as UTC for consistency with _now_iso().
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
-
-
-def _summarize_failed_variants(
-    all_results: Any, *, max_entries: int = 10,
-) -> list[dict[str, Any]]:
-    """Project the ``status=='failed'`` rows of a grid_runner result list.
-
-    Returns a compact ``[{name, error_class, error_excerpt,
-    extra_server_args}, ...]`` so the audit-trail extras can carry
-    per-variant failure context without ballooning the prompt context.
-
-    Why this exists: explore / sweep executors run a multi-variant grid
-    via ``run_grid`` and reduce it to one ``record_action_attempt`` entry
-    (1 task = 1 attempt, by Coordinator design). Before this helper the
-    only place a failed variant landed was the ``all_results`` blob
-    inside the raw delegated_result; the LLM prompt assembled from
-    SharedState therefore could not see prior silent aborts and might
-    keep re-proposing the same variant on the next round.
-
-    Truncation: at most ``max_entries`` failed rows so a runaway grid
-    can't bloat attempts_history. ``error_excerpt`` is capped at 400
-    chars (smaller than the per-entry 2000-char cap used by
-    ``_write_variant_abort_marker`` because this lives inside a
-    promptable audit trail, not on-disk forensics).
-    """
-    if not isinstance(all_results, list):
-        return []
-    failed: list[dict[str, Any]] = []
-    for row in all_results:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("status") or "") != "failed":
-            continue
-        err = str(row.get("error") or "")
-        failed.append({
-            "name": str(row.get("name") or ""),
-            "error_class": str(row.get("error_class") or "") or None,
-            "error_excerpt": err[:400] if err else None,
-            "extra_server_args": str(row.get("extra_server_args") or ""),
-        })
-        if len(failed) >= max_entries:
-            break
-    return failed
-
-
-def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
-    """Extract KB tag fields from a baseline-materialized Magpie YAML.
-
-    Looks for the workload-shape fields that materially affect
-    ``best_config`` but live OUTSIDE the small set already covered by
-    ``_collect_workload_tags`` (precision / tp / conc / isl / osl /
-    max_model_len / pp / ep). Surface area picked to maximise warm-
-    start ranking precision without exploding the canonical_id space.
-
-    Returns a dict shaped::
-
-        {
-            "max_running_requests": 128,
-            "max_num_seqs":         256,
-            "chunked_prefill_enabled": True,
-            "enable_torch_compile":    False,
-            "quant_scheme":  "per-tensor",
-            "workload_mode": "streaming",
-        }
-
-    Missing fields are simply absent from the dict (KB attrs filters
-    tolerate missing keys). The YAML is read defensively — parse errors
-    return an empty dict so the rest of the baseline promote path is
-    unaffected.
-
-    The fields are parsed from two places:
-
-    * ``benchmark.envs`` — Magpie's "operator-supplied environment"
-      block; ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` carry the
-      ``--max-running-requests`` / ``--max-num-seqs`` /
-      ``--chunked-prefill`` flags as one big string we light-parse.
-    * top-level ``benchmark`` — ``benchmark_script`` / ``workload_mode``
-      / ``quant_scheme`` if the operator added them as explicit fields.
-    """
-    import yaml as _yaml
-    try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            cfg = _yaml.safe_load(f) or {}
-    except (OSError, _yaml.YAMLError):
-        return {}
-    out: dict[str, Any] = {}
-    bm = cfg.get("benchmark") if isinstance(cfg, dict) else None
-    if not isinstance(bm, dict):
-        return out
-    # Direct fields on benchmark — only present when operator added them.
-    for src, dst in (
-        ("workload_mode", "workload_mode"),
-        ("quant_scheme",  "quant_scheme"),
-    ):
-        v = bm.get(src)
-        if v not in (None, "", 0):
-            out[dst] = v
-    envs = bm.get("envs") if isinstance(bm.get("envs"), dict) else {}
-    # Pick the framework-appropriate extra args blob.
-    extra_args_str = ""
-    for env_key in ("EXTRA_SGLANG_ARGS", "EXTRA_VLLM_ARGS"):
-        v = envs.get(env_key)
-        if isinstance(v, str) and v.strip():
-            extra_args_str = v.strip()
-            break
-    # Light parsing — operator typically writes
-    # ``--max-running-requests 128 --max-num-seqs 256 --enable-chunked-prefill``
-    tokens = extra_args_str.split() if extra_args_str else []
-    for i, tok in enumerate(tokens):
-        if tok in ("--max-running-requests",) and i + 1 < len(tokens):
-            try:
-                out["max_running_requests"] = int(tokens[i + 1])
-            except ValueError:
-                pass
-        elif tok in ("--max-num-seqs",) and i + 1 < len(tokens):
-            try:
-                out["max_num_seqs"] = int(tokens[i + 1])
-            except ValueError:
-                pass
-        elif tok == "--enable-chunked-prefill":
-            out["chunked_prefill_enabled"] = True
-        elif tok == "--disable-chunked-prefill":
-            out["chunked_prefill_enabled"] = False
-        elif tok == "--enable-torch-compile":
-            out["enable_torch_compile"] = True
-    # Torch compile env can also live as a separate env var.
-    if "enable_torch_compile" not in out:
-        tc_env = envs.get("ENABLE_TORCH_COMPILE")
-        if isinstance(tc_env, str):
-            out["enable_torch_compile"] = tc_env.strip().lower() in (
-                "1", "true", "yes", "on",
-            )
-    return out
-
-
-def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
-    """Project ``params`` to the keys that determine baseline behavior.
-
-    Used by :meth:`Coordinator._baseline_self_loop_denial` to compare
-    "is this proposal the same as the last two failed attempts?" and by
-    :meth:`Coordinator._promote_to_shared_state` /
-    :meth:`Coordinator._handle_unpromotable_result` to stamp every
-    audit-trail entry with a stable identifier the prompt can reason
-    about. Missing keys are recorded as ``None`` so absent vs explicit-
-    null are indistinguishable (matches what the prompt sees).
-
-    ``extra_envs`` is normalized into a sorted list of ``[key, value]``
-    pairs so dict ordering doesn't affect equality. All values are
-    stringified for the same reason.
-    """
-    params = params or {}
-    out: dict[str, Any] = {}
-    for key in _BASELINE_FINGERPRINT_KEYS:
-        if key == "extra_envs":
-            envs = params.get(key) or {}
-            if isinstance(envs, dict):
-                out[key] = sorted(
-                    [str(k), str(v)] for k, v in envs.items()
-                )
-            else:
-                out[key] = None
-            continue
-        value = params.get(key)
-        out[key] = None if value is None else str(value)
-    return out
-
-
-# Flags whose argparse consumes multiple bare tokens before the next ``--``.
-_MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset({
-    "--cuda-graph-bs",
-    "--cuda-graph-max-bs",
-})
-
-
-_DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
-_ROOFLINE_WATERMARK_RATIO_ENV: str = "HYPERLOOM_ROOFLINE_WATERMARK_RATIO"
-
 # Default per-repo candidate cap for ``fa phase-discover`` during the
 # FRAMEWORK_PR phase. Higher than the historical implicit 5 so each batch
 # probes deeper; overridable per session via
 # ``SharedState.framework_pr_max_candidates``.
 DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES: int = 8
-
-
-def _resolve_roofline_watermark_ratio() -> float:
-    """Resolve the roofline watermark ratio (env-tunable, safe default).
-
-    Reads ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` so operators can tune the
-    re-roofline threshold without code edits. Any unparseable or unsafe
-    value (``<= 1.0`` would re-fire on every tick) falls back to the 1.10
-    default so a typo can't melt the analysis pipeline.
-    """
-    raw = (os.environ.get(_ROOFLINE_WATERMARK_RATIO_ENV) or "").strip()
-    if not raw:
-        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-    if val <= 1.0:
-        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-    return val
-
-
-def _merge_cumulative_extra_sglang_args(
-    base_args: str,
-    candidate_args: str,
-    full_args: str,
-) -> str:
-    """Build cumulative launch args for a KEEP without double-stacking.
-
-    Explore variants usually record the *full* cumulative ``extra_sglang_args``
-    for the stack layer being kept. Joining ``base_args + candidate_args`` when
-    both are full stacks duplicates flags; dedupe then corrupts multi-value
-    knobs such as ``--cuda-graph-bs``.
-    """
-    base = str(base_args or "").strip()
-    candidate = str(candidate_args or "").strip()
-    full = str(full_args or "").strip()
-    if full and full != candidate:
-        merged = full
-    elif candidate and base:
-        if candidate.startswith(base) or base in candidate.split():
-            merged = candidate
-        else:
-            merged = f"{base} {candidate}".strip()
-    else:
-        merged = candidate or full or base
-    return _dedupe_extra_server_args(merged)
-
-
-def _dedupe_extra_server_args(args_str: str) -> str:
-    """Collapse repeated ``--flag value`` pairs into a unique launch string.
-
-    SGLang / vLLM argparse uses ``action="store"`` for almost every
-    knob, so if ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128
-    --cuda-graph-max-bs 256`` end up on the same command line, only the
-    last value is honored. The original cmdline still works, but
-    ``final.extra_server_args`` exists for dashboard / replay use and
-    looking at it with the same flag repeated 3-15 times is misleading
-    (it reads as "this run actually used N values" when really only the
-    last won).
-
-    Promote / validate_stack rounds previously fed each ``candidate_args``
-    block into ``previous + candidate`` concatenation; when the next
-    round's candidate kept the same multi-value combo, the whole block
-    was re-appended verbatim. Dedupe is a sane normalization: keep each
-    flag once, with the value of its last occurrence — same semantics
-    argparse would have applied at launch.
-
-    Flags in ``_MULTI_VALUE_SGLANG_FLAGS`` (e.g. ``--cuda-graph-bs``) accept
-    multiple values per occurrence; those runs are preserved so dedupe does
-    not leave stray integers between flags.
-
-    Bare flags (no value, e.g. ``--enable-prefix-caching``) are also
-    deduped (kept once, position preserved by first appearance).
-
-    Args:
-        args_str: space-separated ``--flag value`` pairs.
-
-    Returns:
-        Deduped equivalent. Empty input → empty output.
-    """
-    if not args_str:
-        return ""
-    tokens = args_str.split()
-    # Track each flag's last-seen pair, plus its first-seen position so
-    # we emit in stable order (last-wins-for-value, first-wins-for-order).
-    pair_by_flag: dict[str, list[str]] = {}
-    order: list[str] = []
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t.startswith("--"):
-            flag = t
-            i += 1
-            values: list[str] = []
-            if flag in _MULTI_VALUE_SGLANG_FLAGS:
-                while i < len(tokens) and not tokens[i].startswith("--"):
-                    values.append(tokens[i])
-                    i += 1
-            elif i < len(tokens) and not tokens[i].startswith("--"):
-                values = [tokens[i]]
-                i += 1
-            pair = [flag, *values] if values else [flag]
-            if flag not in pair_by_flag:
-                order.append(flag)
-            pair_by_flag[flag] = pair
-        else:
-            # Stray positional token; preserve as-is, in order. Use a
-            # synthetic key so it doesn't collide with anything.
-            key = f"__positional_{len(order)}__"
-            order.append(key)
-            pair_by_flag[key] = [t]
-            i += 1
-    out: list[str] = []
-    for k in order:
-        out.extend(pair_by_flag[k])
-    return " ".join(out)
 
 
 @dataclass
@@ -619,14 +168,9 @@ class PendingProposal:
     # critic-rejected edge in addition to the KEEP/REVERT
     # signal the explore executor produces).
     verdict_map: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # Legacy field — used to carry per-variant KB edge_ids minted by
-    # the T2 hypothesize hook (retired alongside the T2/T3 protocol).
-    # Kept as an always-empty dict for forward compatibility with
-    # callers that still propagate the payload across defer / restore
-    # cycles (``_materialize_approved_proposal`` carries it through
-    # ``deferred_queue`` so resume mid-defer doesn't break the dataclass
-    # shape). No new producers write into this dict; consumers tolerate
-    # the empty-dict default.
+    # Always-empty dict kept for forward compat: no producer writes it,
+    # but callers propagate it across defer/restore (deferred_queue +
+    # resume) so the dataclass shape stays stable.
     kb_edge_ids: dict[str, str] = field(default_factory=dict)
 
 
@@ -677,51 +221,39 @@ class Coordinator:
         # mutex) so it can be shared across the single-event-loop
         # Coordinator.
         # Field name kept as ``cortex_kb`` for grep stability with the
-        # transitional ``cortex_kb=`` kwarg in the CLI / SDK callers;
-        # the type is now :class:`RecipeKB`.
+        # ``cortex_kb=`` kwarg in CLI / SDK callers; type is RecipeKB.
         self.cortex_kb: RecipeKB | None = cortex_kb
-        # Per-session optimization journal — see
-        # ``orchestrator/optimization_journal.py``. Lazy-instantiated
-        # the first time a T3 hook runs (so SharedState is already
-        # populated with model/hardware/framework). Survives
-        # ``--degraded-kb`` because it is local-only.
+        # Per-session optimization journal (optimization_journal.py).
+        # Lazy-instantiated on first use so SharedState already has
+        # model/hardware/framework. Survives ``--degraded-kb`` (local-only).
         self._journal: Journal | None = None
-        # GAP 1 — warm-recipe replay controls (PRELUDE auto-apply of
-        # the KB best_config). ``warm_replay_enabled=False`` flips the
-        # gate off so the warm_start_recipe is rendered into prompts
-        # but never auto-run. The threshold / confidence knobs let
-        # operators tune the fire / drift rule.
+        # Warm-recipe replay controls (PRELUDE auto-apply of the KB
+        # best_config). ``warm_replay_enabled=False`` renders the
+        # warm_start_recipe into prompts but never auto-runs it; the
+        # threshold / confidence knobs tune the fire / drift rule.
         self._warm_replay_enabled: bool = bool(warm_replay_enabled)
         self._warm_replay_min_confidence: float = float(warm_replay_min_confidence)
         self._warm_replay_min_reproduce_pct: float = float(warm_replay_min_reproduce_pct)
         # KnowledgePlane facade.
-        # When non-None, ``_handle_delegate`` pre-warms ``pr_feed`` +
-        # ``kb_subgraph`` for ``delegate{action='specialist'}`` tasks
-        # before enqueue, so the SpecialistRunner prompt assembly sees
-        # the latest knowledge.  ``None`` keeps the legacy code path
-        # (no warmup; specialist still runs but sees empty knowledge
-        # surface).
+        # When non-None, ``_handle_delegate`` pre-warms PR feed plus
+        # advisory knowledge context for ``delegate{action='specialist'}``
+        # tasks before enqueue. ``None`` means no warmup; specialists
+        # still run with empty advisory context.
         self.knowledge_plane: Any = knowledge_plane
         # ProposalScorer facade (advisory). When non-None, a non-empty
-        # specialist ``proposal_set`` is scored by one or more gateway
-        # models in ``_record_specialist_result``; the scores ride on
-        # the specialist round entry under ``ensemble_scores`` and are
-        # surfaced to Orchestration as one reference among many (parallel
-        # to gaps / KB / analysis.md). ``None`` keeps the legacy path
-        # (no scoring). Never gates anything (Inv-9.1: no scoreboard).
+        # specialist ``proposal_set`` is scored in
+        # ``_record_specialist_result``; scores ride on the round entry
+        # under ``ensemble_scores`` as one reference among many. ``None``
+        # disables scoring. Never gates anything (advisory only).
         self._proposal_scorer: Any = proposal_scorer
-        # phase budget percentages (KB_design §3.8 §5.3 +
-        # §3.13 M2 §7). ``None`` means library defaults; CLI flags
-        # populate this dict from ``--max-minutes-<phase>-pct``. We
-        # normalise once at construction so downstream judges can
-        # rely on a complete dict.
+        # Phase budget percentages. ``None`` means library defaults; CLI
+        # flags populate this from ``--max-minutes-<phase>-pct``. Normalised
+        # once at construction so downstream judges see a complete dict.
         self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(
             phase_budget_pct
         )
-        # specialist stale scan threshold (seconds).
-        # M5 wires real specialist sub-agents; M2 only ships the
-        # scanner so the Robustness prompt block lights up the moment
-        # M5 lands. Env override mirrors the rest of the knobs.
+        # Specialist stale scan threshold (seconds). Robustness uses this
+        # to surface domains that stopped producing usable proposals.
         try:
             self._specialist_stale_sec: float = max(
                 0.0,
@@ -731,27 +263,9 @@ class Coordinator:
             )
         except ValueError:
             self._specialist_stale_sec = 600.0
-        # opt-out switch for
-        # the legacy ``params_no_promote_streak`` plateau proxy.
-        # When set, ``compute_next_phase`` skips the m2_proxy branch
-        # entirely; legacy resume sessions without signals fall
-        # through to the wall-clock budget exhaustion exit.
-        self._legacy_plateau_proxy_disabled: bool = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY", "",
-            ).strip().lower() in ("1", "true", "yes")
-        )
-        # External-SKILL-driven configuration. Both replace the deleted
-        # `setup` / `classify` orchestration actions: the SKILL caller is
-        # expected to supply --model-class (or MODEL_CLASS env) and
-        # --compare-against-gpu so the coordinator can seed marathon
-        # priors against the right model_class. ``target_analysis`` is
-        # *always* hard-gated as TODO 0 (independent of this field) so a
-        # marker JSON is written even when no external reference GPU was
-        # requested; the field is still threaded through to the executor
-        # so it knows whether to fetch real InferenceX rows or write a
-        # ``reason='no_target_gpu_configured'`` marker. Both default to
-        # "" so legacy callers keep working.
+        # External launcher configuration. ``target_analysis`` always
+        # writes an artifact; ``compare_against_gpu`` decides whether it
+        # fetches real InferenceX rows or records a no-target marker.
         self._compare_against_gpu: str = (compare_against_gpu or "").strip()
         self._model_class_override: str = (model_class or "").strip()
 
@@ -811,12 +325,10 @@ class Coordinator:
         # otherwise a fresh session that only inferred model_class would look
         # like a resume (state_path.exists() → is_resume=True).
         self._resumed_from = self._detect_resume_state()
-        # External SKILL may fill `model_class` via --model-class /
-        # MODEL_CLASS. If it does not, restore the deleted `classify` action's
-        # lightweight persistence duty by deriving the class once at boot.
-        # Only overwrite a blank value so resumed sessions keep their persisted
-        # class. Persist via ``_ensure_phase_initialised`` (not here) so fresh
-        # sessions are not misclassified as resume.
+        # External launchers may provide model_class via flag/env. If not,
+        # derive it once at boot; never overwrite a resumed session's value.
+        # Persist later via ``_ensure_phase_initialised`` so fresh sessions
+        # are not misclassified as resume.
         if not (self.shared_state.model_class or "").strip():
             self.shared_state.model_class = (
                 self._model_class_override
@@ -836,34 +348,6 @@ class Coordinator:
         self._proposals_awaiting_roofline: list[
             tuple[PendingProposal, set[str] | None]
         ] = []
-
-        # Per-agent consecutive ``BackendError`` streak. Successful turns
-        # reset the counter for that agent; a streak crossing
-        # ``_backend_error_streak_threshold`` records a single
-        # ``backend_unhealthy`` observation so operators (and the
-        # robustness reactor, which tails Coordinator events) notice the
-        # subprocess transport is degraded — particularly relevant for
-        # the robustness-agent / critic-agent subprocess backends whose
-        # in-loop failures otherwise would only show up as scattered
-        # ``backend_error`` events. The escalation observation fires once
-        # per crossing, then the counter must reset and re-arm before it
-        # can fire again, so we never spam the inbox.
-        self._backend_error_streak: dict[str, int] = {
-            name: 0 for name in self.role_registry
-        }
-        self._backend_error_alarm_armed: dict[str, bool] = {
-            name: True for name in self.role_registry
-        }
-        try:
-            self._backend_error_streak_threshold: int = max(
-                1,
-                int(os.environ.get(
-                    "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-                    "5",
-                )),
-            )
-        except ValueError:
-            self._backend_error_streak_threshold = 5
 
         # Per-agent consecutive ``BackendError`` streak. Successful turns
         # reset the counter for that agent; a streak crossing
@@ -919,10 +403,9 @@ class Coordinator:
         # tests).
         self._current_objective: Objective | None = None
 
-        # initialise phase machine. Fresh session enters
-        # PRELUDE; resume from v0.6 (no phase field) infers a phase via
-        # :func:`phase_state.infer_phase_from_state`.  Always idempotent:
-        # second construction on the same session_dir is a no-op.
+        # initialise phase machine. Fresh session enters PRELUDE.
+        # Idempotent: second construction on the same session_dir, and
+        # same-version resume of an already-initialised state, are no-ops.
         self._ensure_phase_initialised()
         # Cortex T0 defensive fallback. The cli
         # is the canonical T0 entry point (fail-fast banner +
@@ -1138,12 +621,10 @@ class Coordinator:
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
-        # T4 safety net (only fires when the CLOSE phase sequencer
+        # safety net (only fires when the CLOSE phase sequencer
         # did NOT get to run — e.g. Ctrl-C / crash mid-EXPLORE).
-        # Drains the NDJSON queue + runs the recipe / journal
-        # finalize. Failures are recorded on ``SharedState.stop_reason``
-        # so the operator sees ``cortex_drain_failed`` in the final
-        # summary; the SQLite close still runs so we don't leak fds.
+        # Runs the recipe / journal finalize. The SQLite close still
+        # runs afterwards so we don't leak fds.
         await self._cortex_t4_hook()
         self.db.close()
 
@@ -1209,19 +690,13 @@ class Coordinator:
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("Coordinator: save after phase budget refresh failed")
             return
-        # Fresh OR legacy resume.
-        if self._resumed_from.get("is_resume"):
-            inferred, evidence = _phase_state.infer_phase_from_state(state)
-            reason = "resumed_from_v06_inferred"
-            evidence = {**evidence, "resume_path": True}
-        else:
-            inferred = _phase_state.PHASE_PRELUDE
-            reason = "phase_entered"
-            evidence = {"trigger": "fresh_session"}
+        # Fresh start. A resume whose state.json never initialised the
+        # phase machine (pre-phase-machine session) is treated as fresh:
+        # cross-version resume of such state is not supported.
         state.record_phase_transition(
-            to_phase=inferred,
-            reason=reason,
-            evidence=evidence,
+            to_phase=_phase_state.PHASE_PRELUDE,
+            reason="phase_entered",
+            evidence={"trigger": "fresh_session"},
         )
         try:
             state.save(self.session_dir)
@@ -1354,7 +829,6 @@ class Coordinator:
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
-            disable_legacy_proxy=self._legacy_plateau_proxy_disabled,
             # Default is True to match SharedState.framework_phase_enabled
             # and the CLI resume fallback at cli.py:3231 (which reads
             # ``getattr(state, "framework_phase_enabled", True)``). The
@@ -1371,10 +845,9 @@ class Coordinator:
         if str(state.phase or "").upper() == "EXPLORE":
             await self._maybe_enqueue_explore_research_scout()
         if next_phase is None:
-            # IR-7 — on plateau but no steward verdict yet,
-            # compute_next_phase returns None and we enqueue the
-            # steward here. The dispatcher's normal loop picks it up;
-            # the next tick will see the verdict and route accordingly.
+            # On EXPLORE plateau without a steward verdict,
+            # compute_next_phase returns None and this schedules the
+            # steward; the next tick routes using its verdict.
             await self._maybe_enqueue_steward()
             return
         target, reason, evidence = next_phase
@@ -1394,8 +867,7 @@ class Coordinator:
         # When a terminal transition (target=CLOSE) fires from a
         # vocab stop_reason that isn't already on the state, mirror
         # it onto state.stop_reason via the ENUM-validated writer so
-        # the next run() tick winds the loop down (KB_design §3.8
-        # §6 + §3.13 M7 §5.3 skip_to_close path).
+        # the next run() tick winds the loop down (skip_to_close path).
         if (
             target == _phase_state.PHASE_CLOSE
             and isinstance(evidence, dict)
@@ -1431,8 +903,7 @@ class Coordinator:
             ))
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: phase_transition event bus write failed")
-        # phase-entry side effects (KB_gaps/Gap-02 PR 5.4 +
-        # follow-up Gap-04 / Gap-05 / Gap-06). Side effects are
+        # phase-entry side effects. Side effects are
         # *additive* — failures inside a hook are logged but never
         # roll back the transition. Keeping the dispatch table inside
         # ``_on_phase_entered`` so the per-phase branches stay together
@@ -1597,12 +1068,8 @@ class Coordinator:
                     # Either we've exhausted retries (failures >= limit),
                     # or the call returned a clean empty payload
                     # (counter was reset to 0). Both are real exits.
-                    # Stamp a summary row so the give-up decision shows
-                    # up in phase_history alongside the per-attempt
-                    # ``framework_pr_discover_failed`` rows — without
-                    # it the final flip to ``phase_done=True`` is
-                    # silent and operators have to infer the reason
-                    # from the retry trail. PR-327 P2.b follow-up.
+                    # Stamp a summary row so the final phase_done flip is
+                    # visible alongside per-attempt discover failures.
                     self._record_framework_pr_phase_done(
                         reason=(
                             "discover_retries_exhausted"
@@ -1625,8 +1092,8 @@ class Coordinator:
                 state.framework_pr_phase_done = True
                 state.save(self.session_dir)
                 return
-        # P1.b: Critic gate before apply. The Critic sees the PR
-        # metadata (diff URL + title + gap target) and returns an
+        # Critic gate before apply. The Critic sees PR metadata
+        # (diff URL + title + gap target) and returns an
         # ``approve`` / ``reject`` verdict. ``reject`` short-circuits
         # the candidate with a ``critic_denied`` progress row so the
         # apply / bench round is never spent on a candidate the Critic
@@ -1790,8 +1257,8 @@ class Coordinator:
         ``phase_history`` describing why the pump gave up.
 
         Per-attempt ``framework_pr_discover_failed`` rows already cover
-        each individual error; this is the summary row so the give-up
-        decision is not silent (PR-327 P2.b follow-up).
+        each individual error; this summary row makes the final give-up
+        decision explicit.
         """
         state = self.shared_state
         try:
@@ -2849,8 +2316,8 @@ class Coordinator:
                 session_gains.append(g)
             if session_gains:
                 expected_gain = max(session_gains)
-        # Last-chance fallback for offline-ingested seed rows that
-        # carry a flat ``gain_pct`` attr (Arbor compat shape).
+        # Last-chance fallback for offline-ingested seed rows carrying a
+        # flat ``gain_pct`` attr.
         if expected_gain <= 0:
             try:
                 fallback = float(recipe_attrs.get("gain_pct") or 0.0)
@@ -3296,6 +2763,51 @@ class Coordinator:
             ),
         )
 
+    async def _roofline_denial_for_action(
+        self, action_name: str,
+    ) -> "PolicyDenied | None":
+        """Apply the auto-analysis gate only to actions that require it."""
+        if action_name not in _ROOFLINE_GATED_ACTIONS:
+            return None
+        return await self._auto_roofline_pending_denial(action_name=action_name)
+
+    async def _defer_approved_proposal_for_roofline(
+        self,
+        pending: PendingProposal,
+        approved_variant_names: set[str] | None,
+    ) -> None:
+        """Queue an approved proposal until the pending analysis task lands."""
+        self._proposals_awaiting_roofline.append(
+            (pending, approved_variant_names),
+        )
+        # Resume contract: this observation carries everything
+        # ``replay_for_resume`` needs to rebuild the deferred queue after a
+        # restart. A subsequent ``approved_proposal`` decision carrying the
+        # same proposal_msg_id signals that the drain dispatched it.
+        await self._record_observation(
+            "coordinator", "observation",
+            {
+                "kind": "proposal_materialize_blocked",
+                "reason": "wait_for_auto_roofline",
+                "proposal_msg_id": pending.proposal_msg_id,
+                "action_name": pending.action_name,
+                "from_agent": pending.from_agent,
+                "pending_roofline_task_id": (
+                    self.shared_state.auto_roofline_pending_task_id
+                    or ""
+                ),
+                "deferred_queue_depth": len(
+                    self._proposals_awaiting_roofline,
+                ),
+                "approved_variant_names": (
+                    sorted(approved_variant_names)
+                    if approved_variant_names is not None
+                    else None
+                ),
+                "kb_edge_ids": dict(pending.kb_edge_ids or {}),
+            },
+        )
+
     async def _drain_proposals_awaiting_roofline(self) -> None:
         """Re-run materialise for proposals deferred by the analysis gate.
 
@@ -3357,7 +2869,7 @@ class Coordinator:
             )
 
     # ------------------------------------------------------------------
-    # v0.8 §3.2 §5.4 + SWEEP phase auto-dispatch
+    # SWEEP phase auto-dispatch
     # ------------------------------------------------------------------
     async def _drain_pending_keep_integrates(self) -> None:
         """Bug #7: drain pending KEEP integrates inherited from KERNEL.
@@ -3735,13 +3247,13 @@ class Coordinator:
         }
 
     # ------------------------------------------------------------------
-    # v0.8 §3.2 §5.5 + CLOSE phase 5-step sequencer
+    # CLOSE phase sequencer
     # ------------------------------------------------------------------
     # Class-level timeouts for the CLOSE sequencer's wait-for-task
     # polls. Class attributes (rather than constants in the method)
     # so tests can override per-instance with small values without
-    # patching method internals. Production defaults match KB_design
-    # §3.2 §5.5: report ≤ 10 min (matches ``BaselineExecutor`` cap);
+    # patching method internals. Production defaults: report ≤ 10 min
+    # (matches ``BaselineExecutor`` cap);
     # session_breakdown ≤ 5 min (tiny report, lots of headroom).
     CLOSE_REPORT_TIMEOUT_SEC: float = 600.0
     CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC: float = 300.0
@@ -3786,12 +3298,11 @@ class Coordinator:
         2.5 ``fact_finalize``   — write final ``update_recipe`` to KB +
                                   finalize the local optimization journal
                                   (``total_gain_pct`` / ``final_throughput``)
-        3. ``ndjson_drain``     — flush the async Cortex write queue
+        3. ``ndjson_drain``     — retired no-op (writes are local-only)
         4. mark ``close_sequence_done`` (and ``stop_reason``)
 
-        (The legacy step 4 ``cortex_commit`` step was retired alongside
-        the T2/T3 hypothesize/verify protocol — fact writes are session-
-        less so there is no remote sid to close.)
+        (The legacy ``cortex_commit`` step was retired — fact writes are
+        session-less so there is no remote sid to close.)
 
         Each step records a row under
         ``phase_history[-1].evidence.close_steps`` so the breakdown
@@ -3805,19 +3316,18 @@ class Coordinator:
         Idempotence: report / session_breakdown enqueue uses fixed
         idempotency_keys (``internal-report-close_phase_entry`` /
         ``internal-session_breakdown-close_phase_entry``) so a phase
-        re-entry (Inv-2.1 forbids in production, but resume from a
-        crash mid-sequencer counts) reuses existing tasks. NDJSON
-        drain + Cortex commit are themselves idempotent for a given
-        sid.
+        re-entry (forbidden in production, but resume from a crash
+        mid-sequencer counts) reuses existing tasks.
 
         The sequencer runs INLINE inside the hook — it doesn't wait
         for the reactor / dispatcher tick boundary. Steps 1 and 2
         enqueue tasks then poll ``_wait_for_task_terminal`` until the
         dispatcher (which the same Coordinator.run() loop drives)
-        picks them up and finishes. Step 3 + 4 call the cortex_kb
-        client synchronously. Step 5 is a single SharedState write.
+        picks them up and finishes. Step 3 (NDJSON drain) is a retired
+        no-op; step 4 (Cortex commit) writes the recipe + journal; step
+        5 is a single SharedState write.
         """
-        log.info("CLOSE entered (from=%s); starting 4-step close sequence",
+        log.info("CLOSE entered (from=%s); starting 5-step close sequence",
                  from_phase or "<unknown>")
         await self._record_close_step("sequencer_started", status="running")
 
@@ -3909,17 +3419,17 @@ class Coordinator:
                 detail=repr(exc)[:240],
             )
 
-        # ---------------- Step 2.5: fact finalize (recipe + journal) ---
-        # Writes update_recipe + finalises the local journal
-        # (final_throughput / total_gain_pct). Runs BEFORE the NDJSON
-        # drain so the recipe write is part of the same flush. Lives
-        # outside the 4-step KB design contract — recorded as an extra
-        # close_step so the breakdown collector can see it.
+        # ---------------- Step 4: fact finalize (Cortex commit) ----------
+        # The canonical step-4 "Cortex session commit": writes
+        # update_recipe + finalises the local journal (final_throughput /
+        # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
+        # Ordered before the retired NDJSON-drain no-op (step 3) so the
+        # recipe write is part of the same flush.
         try:
             self.cortex_finalize_recipe_and_journal()
             await self._record_close_step("fact_finalize", status="done")
         except Exception as exc:  # noqa: BLE001 — defensive
-            log.exception("CLOSE step 2.5 (fact_finalize) failed")
+            log.exception("CLOSE step 4 (fact_finalize) failed")
             await self._record_close_step(
                 "fact_finalize", status="failed", detail=repr(exc)[:240],
             )
@@ -3932,9 +3442,6 @@ class Coordinator:
         # kept as a no-op marker so close-step ledger consumers
         # don't break on a missing entry.
         await self._record_close_step("ndjson_drain", status="skipped")
-
-        # (Step 4 — Cortex session commit — was retired earlier
-        # alongside the T2/T3 hypothesize/verify protocol.)
 
         # ---------------- Step 5: mark done ----------------
         self.shared_state.close_sequence_done = True
@@ -4046,7 +3553,7 @@ class Coordinator:
     async def _enqueue_internal_steward_task(
         self, *, reason: str, retry_attempt: int = 0,
     ) -> "Task | None":
-        """IR-7 — enqueue a Coordinator-owned session_steward_specialist task.
+        """Enqueue a Coordinator-owned session_steward_specialist task.
 
         Mirrors :meth:`_enqueue_internal_report_task` shape, with two
         differences:
@@ -4480,6 +3987,33 @@ class Coordinator:
     # ==================================================================
     # Bounded test interface
     # ==================================================================
+    async def _replay_resume_if_needed(self) -> None:
+        """Rebuild in-memory state once for a resumed session.
+
+        Shared by ``tick()`` and ``run()``: replay the event log, drain
+        proposals that were blocked on a now-complete analysis task, and
+        abandon non-terminal dynamic_action dispatches. No-op when the
+        session is fresh or already rebuilt.
+        """
+        if not (self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]):
+            return
+        await self.replay_for_resume()
+        # The analysis task may have completed during shutdown, so the
+        # normal drain hook in ``_promote_to_shared_state`` will not fire
+        # on restart; kick it explicitly to re-check the roofline gate.
+        if self._proposals_awaiting_roofline:
+            await self._drain_proposals_awaiting_roofline()
+        # Transition orphaned dynamic_action dispatches to ABANDONED and
+        # clean up their worktree + git branch.
+        self._resume_abandon_dynamic_actions()
+
+    async def _pump_framework_pr_phase_safely(self, *, caller: str) -> None:
+        """Best-effort FRAMEWORK_PR pump wrapper shared by tick and run."""
+        try:
+            await self._pump_framework_pr_phase()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("FRAMEWORK_PR pump (%s) failed", caller)
+
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for **every** agent.
 
@@ -4492,21 +4026,7 @@ class Coordinator:
         non-empty session, it lazily reruns ``replay_for_resume()`` so
         in-memory state catches up before any new reactor work runs.
         """
-        if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
-            await self.replay_for_resume()
-            # Replay rebuilt ``_proposals_awaiting_roofline`` from
-            # ``proposal_materialize_blocked`` observations. If the
-            # analysis task already completed during shutdown, the
-            # normal drain hook in ``_promote_to_shared_state`` will
-            # not fire on restart, so kick the drain explicitly. It
-            # re-checks the roofline gate per proposal and re-queues
-            # any that are still blocked.
-            if self._proposals_awaiting_roofline:
-                await self._drain_proposals_awaiting_roofline()
-            # Sweep non-terminal dynamic_action dispatches: walk the
-            # artefact dir + SharedState summary, transition each to
-            # ABANDONED, and clean up the orphan worktree + git branch.
-            self._resume_abandon_dynamic_actions()
+        await self._replay_resume_if_needed()
         for _ in range(n):
             self.shared_state.increment_tick()
             for name in self._tick_roles:
@@ -4515,10 +4035,7 @@ class Coordinator:
             # FRAMEWORK_PR phase pump: enqueue next candidate / fetch
             # next batch when no framework_pr task is in flight. Best-
             # effort; failures degrade to phase_done so we never wedge.
-            try:
-                await self._pump_framework_pr_phase()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("FRAMEWORK_PR pump (tick) failed")
+            await self._pump_framework_pr_phase_safely(caller="tick")
             # phase machine advance at tick boundary.
             await self._advance_phase_if_needed()
 
@@ -4570,7 +4087,6 @@ class Coordinator:
         * ``self._stop`` set (from SIGINT/SIGTERM or ``stop()``)
             → ``stop_reason="signal"``
         * objective.reached(shared_state)  → ``"target_reached"``
-        * no remaining automated levers     → ``"no_more_leverage"``
         * wall-clock budget exceeded        → enter closing phase, then
             ``"time_exhausted"`` after report flush or grace elapses
         * crash_count >= ``crash_emergency_threshold`` → ``"emergency"``
@@ -4609,17 +4125,7 @@ class Coordinator:
                 log.info("Coordinator.run: signal handlers not installed (%s)", exc)
                 previous_handlers = {}
 
-        if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
-            await self.replay_for_resume()
-            # Same drain reasoning as ``tick(...)`` — see the comment
-            # there. Without this, a session that restarted while
-            # analysis was complete but deferred proposals were still
-            # queued would never re-dispatch them.
-            if self._proposals_awaiting_roofline:
-                await self._drain_proposals_awaiting_roofline()
-            # Symmetric dynamic_action resume sweep for the long-run
-            # entry point.
-            self._resume_abandon_dynamic_actions()
+        await self._replay_resume_if_needed()
 
         tick_n = 0
         stop_reason = ""
@@ -4646,10 +4152,7 @@ class Coordinator:
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_PR phase pump: see ``tick()`` for rationale.
                     if not in_closing:
-                        try:
-                            await self._pump_framework_pr_phase()
-                        except Exception:  # noqa: BLE001 — defensive
-                            log.exception("FRAMEWORK_PR pump (run) failed")
+                        await self._pump_framework_pr_phase_safely(caller="run")
                     # phase machine advance at tick boundary.
                     # Runs even when ``in_closing`` so CLOSE phase still gets
                     # recorded into phase_history when the final breakdown
@@ -4663,31 +4166,6 @@ class Coordinator:
                             exc=exc,
                             tick=tick_n,
                         )
-
-                    # N33: bump ``consecutive_silent_ticks`` when the post-
-                    # tick state shows nothing in flight (no queued / running
-                    # task, no pending proposal, no ``current_action``). Any
-                    # non-empty signal means the run is still making forward
-                    # progress (LLM proposed, executor running, critic
-                    # reviewing, etc.) so we reset the counter to 0. Skipped
-                    # while we're already in closing to avoid double-firing
-                    # the closing-phase trigger below.
-                    if not in_closing:
-                        try:
-                            queued_now = len(await self.tasks.queued())
-                            running_now = len(await self.tasks.running())
-                        except Exception:  # noqa: BLE001
-                            queued_now = running_now = 0
-                        tick_is_idle = (
-                            queued_now == 0
-                            and running_now == 0
-                            and not self.state.pending_proposals
-                            and not (self.shared_state.current_action or "").strip()
-                        )
-                        if tick_is_idle:
-                            self.shared_state.consecutive_silent_ticks += 1
-                        else:
-                            self.shared_state.consecutive_silent_ticks = 0
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -4709,13 +4187,6 @@ class Coordinator:
                 if objective.reached(self.shared_state):
                     stop_reason = "target_reached"
                     break
-                # The no-more-leverage safety net (which used to wind the
-                # session down to SWEEP -> CLOSE via the skip_to_sweep hint
-                # when cheap rounds plateaued and every reusable kernel was
-                # rejected) has been removed to prioritise long-run
-                # continuity: the run keeps exploring until the wall-clock
-                # deadline rather than self-winding down on a plateau
-                # judgment.
                 if (
                     deadline is not None
                     and time.monotonic() >= deadline
@@ -4728,13 +4199,6 @@ class Coordinator:
                         grace_sec=grace_sec,
                     )
                     continue
-                # N33 idle-timeout early-close has been removed to
-                # prioritise long-run continuity. ``consecutive_silent_ticks``
-                # is still tracked (the LLM / breakdown can read it), but
-                # the run no longer short-circuits into the closing phase
-                # when the LLM stops proposing actionable work — it keeps
-                # ticking until the wall-clock deadline (or another
-                # stop_reason) fires.
                 if in_closing:
                     report_terminal = await self._closing_report_terminal()
                     grace_blown = (
@@ -5070,7 +4534,7 @@ class Coordinator:
         # projection of SharedState (raw vs validated gain, time spent
         # vs budget, optimization-stack rebench freshness) shown before
         # the verbose SharedState dump so the LLM cannot miss the
-        # ``stack rebench required`` signal (v0.8 M3 / KB_gaps/Gap-10).
+        # ``stack rebench required`` signal.
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
@@ -5202,7 +4666,7 @@ class Coordinator:
                 sections.append(gap_block)
             # Advisory multi-model proposal scores (ProposalScorer).
             # One reference among many — parallel to gaps / KB /
-            # analysis.md, NOT a ranking directive (Inv-9.1). Section
+            # analysis.md, NOT a ranking directive. Section
             # omitted entirely when no recent round carries scores.
             try:
                 scores_block = self.shared_state.to_proposal_scores_summary()
@@ -5225,11 +4689,8 @@ class Coordinator:
                 sections.append("=== Priors-match (advisory ordering) ===")
                 sections.append(priors_block)
 
-            # PR-A8 / D3 (Arbor-into-Hyperloom): surface the intervention-mix
-            # ledger so Orchestration escalates to a code-patch specialist
-            # when it has been config-only for too long (Arbor's "do not
-            # settle for config-only" rule). ``record_intervention`` maintains
-            # the ledger + counter; this block is its consumer.
+            # Surface the intervention-mix ledger so Orchestration can
+            # escalate from repeated config-only work to code-patch specialists.
             try:
                 mix_block = self.shared_state.to_intervention_mix_summary()
             except Exception:  # noqa: BLE001 — defensive
@@ -5430,13 +4891,10 @@ class Coordinator:
             # not blocked; only run_optimization is hard-gated on the
             # same cache by `_sequence_denial_for_request`.
             #
-            # NOTE: read ``last_trace_analyze`` (canonical post-M4 cache
-            # key written by RooflineExecutor and by the inline
-            # ``trace_analyze`` request handler). Reading the removed
-            # ``last_select_kernels`` here was the root cause of the
-            # KERNEL-phase ``select_kernels`` request loop: Roofline
-            # would write only ``last_trace_analyze`` and the guard
-            # would see an empty legacy field and instruct the LLM to
+            # NOTE: read ``last_trace_analyze`` (canonical cache key
+            # written by RooflineExecutor and by the inline
+            # ``trace_analyze`` request handler). Reading a stale empty
+            # field here would make the guard instruct the LLM to
             # emit a redundant ``trace_analyze`` request every tick
             # forever.
             cached = self.shared_state.last_trace_analyze or {}
@@ -5477,20 +4935,9 @@ class Coordinator:
                     "propose/delegate `integrate` / `recover` / `report`) "
                     "before any further explore."
                 )
-            # PR-C TODO 4a/5: hot-kernel must-try gate. Surfaces the
-            # untried hot reusable kernel queue so Orchestration knows
-            # it has to ``run_optimization`` (not ``report``) until the
-            # gpu_pct >= 3% set is drained. Same source of truth as the
-            # ``_sequence_denial_for_action('report')`` denial.
-            #
-            # Only fires when N19c (cheap-exhausted) gate has opened --
-            # otherwise the LLM would propose ``run_optimization``,
-            # bounce off ``execution_order`` repeatedly, and hit the
-            # policy_loop auto-stop (Qwen3-30B-A3B-Base 20260523T014653Z
-            # died at tick=14 this way). When cheap is still earning
-            # marginal gain (last_cheap_delta_gain >= EPSILON), let the
-            # LLM keep exploring; PR-C re-activates the instant N19c
-            # unlocks.
+            # Hot-kernel must-try gate. Surface untried reusable kernels
+            # only once kernel optimization is dispatchable; otherwise the
+            # LLM would bounce between report denial and execution ordering.
             if self._kernel_opt_unlocked():
                 untried_hot = self.shared_state.untried_hot_reusable_kernels()
                 if untried_hot:
@@ -5528,73 +4975,62 @@ class Coordinator:
     def _baseline_self_loop_denial(
         self, proposed_params: dict[str, Any] | None,
     ) -> PolicyDenied | None:
-        """Reject a fresh baseline proposal that just replays the last failure.
+        """Reject baseline proposals that change params after a failure.
 
-        The Orchestration prompt's FAILURE RECOVERY section instructs the
-        LLM to introduce a new ``benchmark_script`` / ``result_dir`` /
-        ``extra_server_args`` override after a baseline failure. This
-        method is the PolicyGate stop-loss that fires when the LLM
-        ignores that instruction.
+        After a baseline failure the agent must retry with **identical**
+        params.  Tweaking ``extra_server_args``, ``extra_envs`` or other
+        knobs to "self-heal" is not allowed — the ``baseline_failure_streak``
+        counter will terminate the run after 3 consecutive failures with
+        ``stop_reason='baseline_failed'`` and the failure details in the
+        event log.
 
-        Fires only when ALL of these hold:
+        Fires when:
 
-        * Two or more consecutive baseline failures have landed on
-          ``shared_state.baseline_attempts`` (any decision tail that
-          isn't ``status=succeeded`` counts).
-        * Those last two failures both carry a
-          ``fingerprint`` in their ``extras`` and the fingerprints
-          match each other.
-        * The current proposal's fingerprint matches the failed-streak
-          fingerprint.
+        * At least one consecutive baseline failure exists in the tail
+          of ``baseline_attempts`` (since the last success).
+        * The most recent failure carries a ``fingerprint`` in ``extras``.
+        * The proposed params fingerprint **differs** from the failed
+          fingerprint — i.e. the agent tried to change something.
 
-        When all three match, return :class:`PolicyDenied` with a
-        ``baseline_self_loop`` rule and a hint pointing at the next
-        override surface so the prompt sees a deterministic recovery
-        path. Returns ``None`` otherwise — the regular execution-order
-        rules still apply.
+        Same-fingerprint retries are allowed; they accumulate the streak
+        counter and exit cleanly at 3.
         """
         attempts = list(self.shared_state.baseline_attempts or [])
-        # Walk the tail backwards collecting *consecutive* failures.
-        tail_failures: list[dict[str, Any]] = []
+        # Find the most recent consecutive failure with a fingerprint.
+        last_failure_fp: dict[str, Any] | None = None
+        last_error_class: str = "unknown"
         for entry in reversed(attempts):
             if not isinstance(entry, dict):
                 break
             if entry.get("status") == "succeeded":
                 break
-            tail_failures.append(entry)
-        if len(tail_failures) < _BASELINE_SELF_LOOP_THRESHOLD:
-            return None
-        recent = tail_failures[: _BASELINE_SELF_LOOP_THRESHOLD]
-        prints: list[Any] = []
-        for entry in recent:
             extras = entry.get("extras") or {}
-            if not isinstance(extras, dict):
-                return None
-            fp = extras.get("fingerprint")
-            if fp is None:
-                return None
-            prints.append(fp)
-        first = prints[0]
-        if any(p != first for p in prints[1:]):
+            if isinstance(extras, dict):
+                fp = extras.get("fingerprint")
+                if fp is not None:
+                    last_failure_fp = fp
+                    last_error_class = entry.get("error_class") or "unknown"
+                    break
+        if last_failure_fp is None:
             return None
         proposed_fp = _baseline_params_fingerprint(proposed_params)
-        if proposed_fp != first:
-            return None
-        error_class = recent[0].get("error_class") or "unknown"
+        if proposed_fp == last_failure_fp:
+            return None  # same params → allow retry (streak handles exit)
         hint = (
-            "the last "
-            f"{_BASELINE_SELF_LOOP_THRESHOLD} `baseline` attempts failed "
-            f"with the SAME params fingerprint (error_class={error_class!r}). "
-            "Re-proposing the same params will fail the same way. Change at "
-            "least one of: params.benchmark_script (sanitized *.sh name, "
-            "e.g. \"sglang_mi300x.sh\" to bypass dsr1_fp8_mi300x.sh's "
-            "hardcoded --result-dir), params.result_dir (sanitized path; "
-            "Coordinator already defaults RESULT_DIR=<workspace>), or "
-            "extra_server_args / extra_envs."
+            f"baseline failed with error_class={last_error_class!r}. "
+            "Changing params (extra_server_args, extra_envs, benchmark_script, "
+            "etc.) to self-heal is disabled. Re-propose baseline with the "
+            "SAME params to retry; the run terminates after 3 consecutive "
+            "failures with stop_reason='baseline_failed' and the failure "
+            "details recorded in the event log. If the root cause requires "
+            "manual intervention, emit a heartbeat with "
+            "body_md='blocked: baseline repeatedly failing' and let "
+            "Robustness escalate."
         )
         return PolicyDenied(
-            "action='baseline' denied: same-fingerprint failure streak",
-            rule="baseline_self_loop",
+            "action='baseline' denied: changing params after failure is "
+            "not allowed",
+            rule="baseline_no_param_change",
             hint=hint,
         )
 
@@ -5806,12 +5242,9 @@ class Coordinator:
                         f"{pending_kid!r}}}}} before any further explore"
                     ),
                 )
-        # PR-C (0270b67) + c900791 yield-to-N19c: hot-kernel report-gate.
-        # Block ``report`` when any reusable hot kernel with gpu_pct >=
-        # 3% has not yet been tried (and is not rejected / integrated).
-        # Prevents the log1 (164910Z) failure mode where tick=8 ->
-        # report_emitted with k001=24% / k002=37% / k004=9.7% untouched.
-        #
+        # Hot-kernel report gate. Block ``report`` when any reusable hot
+        # kernel with gpu_pct >= 3% has not yet been tried, rejected, or
+        # integrated.
         # Allowed through the gate:
         #   - kernel_opt request itself (handled at request layer)
         #   - integrate (still needs to drain prior KEEPs; the
@@ -5821,11 +5254,8 @@ class Coordinator:
         #   - report -- the LLM cannot declare the session done
         #     while a meaningful kernel lever exists.
         #
-        # The hot_kernel_unfinished rule only fires when
-        # ``run_optimization`` is actually dispatchable; otherwise N19c
-        # would reject the LLM's resulting request and we'd deadlock
-        # the LLM between two opposing gates (death-spiral observed on
-        # 20260523T014653Z — see c900791).
+        # Fire only when ``run_optimization`` is dispatchable to avoid
+        # trapping the LLM between opposing gates.
         if action == "report" and self._kernel_opt_unlocked():
             untried = self.shared_state.untried_hot_reusable_kernels()
             if untried:
@@ -5882,11 +5312,8 @@ class Coordinator:
         # ``trace_analyze`` IS the prerequisite request: it produces the
         # ``last_trace_analyze`` cache the rest of the chain consults.
         # It is also used directly by tests / tools passing an explicit
-        # ``trace_input``, so allow it through; later
-        # backends/params/sweep are guarded until the result is cached
-        # in SharedState. (Main M4 renamed ``select_kernels`` →
-        # ``trace_analyze``; this branch dropped the legacy alias, so
-        # only the canonical kind passes the carve-out.)
+        # ``trace_input``, so allow it through; later explore/sweep
+        # actions are guarded until the result is cached in SharedState.
         if req_kind == "trace_analyze":
             return None
         if get_handler(req_kind) is None:
@@ -5913,8 +5340,6 @@ class Coordinator:
                     "`recover` as the escape hatch."
                 ),
             )
-        # Canonical post-M4 cache key; legacy ``last_select_kernels``
-        # was removed in this branch.
         select = self.shared_state.last_trace_analyze or {}
         needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
         if needs_select and req_kind not in {"trace_analyze", "run_gemm_tuning"}:
@@ -5986,15 +5411,6 @@ class Coordinator:
             "failed",
         }
 
-    # Note: main commit c900791 also ports the N22 keyword-implied
-    # advice (``_record_keyword_implied_advice``,
-    # ``_registered_variants_for``). On this branch the equivalent
-    # functionality lives in
-    # ``orchestrator/_analysis_keyword_map.py`` + PolicyGate's
-    # ``analysis_keyword_advisory`` rule. The Coordinator-side
-    # helpers from main are therefore omitted here (they would also
-    # re-import the dropped backends.py / params.py grids).
-
     # ==================================================================
     # Intent handling
     # ==================================================================
@@ -6032,8 +5448,8 @@ class Coordinator:
             elif it == IntentType.UPDATE_STATE:
                 await self._handle_update_state(source, intent)
             elif it == IntentType.SPECIALIST_DONE:
-                # v0.8 §3.5 §10 + terminal intent of a
-                # specialist task. PolicyGate R3 has already validated the
+                # Terminal intent of a specialist task. PolicyGate R3
+                # has already validated the
                 # ``from_agent='specialist:<task_id>'`` prefix + payload
                 # schema + gap/domain match; the handler only does
                 # bookkeeping.  The current SpecialistRunner architecture
@@ -6092,15 +5508,12 @@ class Coordinator:
         # path; ``_materialize_approved_proposal`` carries a symmetric
         # check for the race where the watermark trips while a proposal
         # is already in front of the Critic.
-        if action_name in _ROOFLINE_GATED_ACTIONS:
-            roofline_denied = await self._auto_roofline_pending_denial(
-                action_name=action_name,
+        roofline_denied = await self._roofline_denial_for_action(action_name)
+        if roofline_denied is not None:
+            await self._record_policy_denied(
+                source, intent, roofline_denied, action_name=action_name,
             )
-            if roofline_denied is not None:
-                await self._record_policy_denied(
-                    source, intent, roofline_denied, action_name=action_name,
-                )
-                return
+            return
         denied = self._sequence_denial_for_action(
             action_name,
             proposed_params=intent.payload.get("params"),
@@ -6362,9 +5775,9 @@ class Coordinator:
         """Route a Critic ``review_verdict`` to the per-variant or
         legacy single-verdict handler.
 
-        v0.8 KB_gaps/Gap-11: the
-        intent_parser already validated that exactly one of
-        ``verdict`` / ``verdict_map`` is present. We branch on
+        The protocol-layer validator (protocol/intent) already
+        validated that exactly one of ``verdict`` / ``verdict_map`` is
+        present. We branch on
         ``verdict_map`` first so the batch Explore path takes
         precedence; everything else (kernel_opt / integrate /
         report / specialist dispatch) falls through to the legacy
@@ -6414,8 +5827,8 @@ class Coordinator:
         report / specialist dispatch / any non-grid action). The
         ``approve`` branch materialises the whole proposal as-is.
 
-        PR-A7 (Arbor-into-Hyperloom) adds the integrate_patch critic
-        gate: when the pending proposal is an ``integrate_patch`` for
+        The integrate_patch Critic gate mirrors verdicts: when the
+        pending proposal is an ``integrate_patch`` for
         a specialist whose patches the Critic just reviewed, the
         verdict is mirrored onto ``SharedState.specialist_patch_verdicts``
         so PolicyGate's ``integrate_patch_requires_critic_verdict``
@@ -6436,9 +5849,8 @@ class Coordinator:
             priority=0 if verdict == "reject" else 1,
             in_reply_to=pending.proposal_msg_id,
         ))
-        # PR-A7: mirror specialist / integrate_patch verdicts onto
-        # SharedState so PolicyGate's integrate_patch gate can
-        # consult them on the next tick.
+        # Mirror specialist / integrate_patch verdicts onto SharedState so
+        # PolicyGate's integrate_patch gate can consult them on the next tick.
         try:
             pa_params = pending.payload.get("params") or {}
         except AttributeError:
@@ -6462,8 +5874,8 @@ class Coordinator:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — best-effort mirror
                 log.exception(
-                    "PR-A7: failed to mirror critic verdict for "
-                    "specialist task=%s", sid_candidate,
+                    "failed to mirror critic verdict for specialist task=%s",
+                    sid_candidate,
                 )
         # When the verdict targets a dyn_id (routed via the synthesised
         # ``dyn-<id>`` specialist_task_id), persist the
@@ -6594,10 +6006,8 @@ class Coordinator:
             in_reply_to=pending.proposal_msg_id,
         ))
 
-        # (Step 3 — KB ``refuted`` mirror for critic-rejected variants —
-        # removed alongside the T2/T3 hypothesize/verify protocol. The
-        # critic rejection is still recorded in the verdict event and
-        # in breakdown collectors; we no longer fan it out to KB.)
+        # Critic rejection is recorded in the verdict event and breakdown
+        # collectors; intentionally not fanned out to KB.
 
         # 4. Materialise only the approved subset.
         if approved_names:
@@ -6711,55 +6121,18 @@ class Coordinator:
         # the watermark crossing and the dispatch tick. Defer rather
         # than drop — the Critic already approved, so re-running the
         # round-trip would be wasted budget.
-        if pending.action_name in _ROOFLINE_GATED_ACTIONS:
-            roofline_denied = await self._auto_roofline_pending_denial(
-                action_name=pending.action_name,
+        roofline_denied = await self._roofline_denial_for_action(
+            pending.action_name,
+        )
+        if roofline_denied is not None:
+            await self._defer_approved_proposal_for_roofline(
+                pending, approved_variant_names,
             )
-            if roofline_denied is not None:
-                self._proposals_awaiting_roofline.append(
-                    (pending, approved_variant_names),
-                )
-                # Resume contract: this observation carries everything
-                # ``replay_for_resume`` needs to rebuild the deferred
-                # queue after a restart (proposal_msg_id keys the
-                # PendingProposal in the bus's proposal-topic events;
-                # approved_variant_names + kb_edge_ids preserve the
-                # per-variant filter the Critic produced and the
-                # Cortex T2 edge stamping). A subsequent
-                # ``approved_proposal`` decision carrying the same
-                # proposal_msg_id signals that the drain has dispatched
-                # the proposal so resume should skip it.
-                await self._record_observation(
-                    "coordinator", "observation",
-                    {
-                        "kind": "proposal_materialize_blocked",
-                        "reason": "wait_for_auto_roofline",
-                        "proposal_msg_id": pending.proposal_msg_id,
-                        "action_name": pending.action_name,
-                        "from_agent": pending.from_agent,
-                        "pending_roofline_task_id": (
-                            self.shared_state.auto_roofline_pending_task_id
-                            or ""
-                        ),
-                        "deferred_queue_depth": len(
-                            self._proposals_awaiting_roofline,
-                        ),
-                        "approved_variant_names": (
-                            sorted(approved_variant_names)
-                            if approved_variant_names is not None
-                            else None
-                        ),
-                        "kb_edge_ids": dict(pending.kb_edge_ids or {}),
-                    },
-                )
-                return
+            return
         params = dict(pending.payload.get("params") or {})
-        # Filter the grid down to the Critic-approved subset (Gap-11).
-        # The per-variant ``kb_edge_id`` stamping the T2 hook used to do
-        # here was removed alongside the hypothesize/verify protocol —
-        # variant traceability is now carried by the local journal +
-        # KB fact-write ``source_session_id`` / ``source_task_id``
-        # attrs instead.
+        # Filter the grid down to the Critic-approved subset. Variant
+        # traceability is carried by the local journal + KB fact-write
+        # ``source_session_id`` / ``source_task_id`` attrs.
         if (
             pending.action_name == "explore"
             and isinstance(params.get("grid"), list)
@@ -6767,8 +6140,8 @@ class Coordinator:
             stamped_grid: list[dict[str, Any]] = []
             for variant in params["grid"]:
                 if not isinstance(variant, dict):
-                    # v0.8 KB_gaps/Gap-11: non-dict slots can't carry
-                    # a name, so they are *always* dropped when a
+                    # Non-dict slots can't carry a name, so they are
+                    # *always* dropped when a
                     # variant filter is in effect (no way to match
                     # them); pass-through otherwise so legacy
                     # callers keep working.
@@ -6911,8 +6284,7 @@ class Coordinator:
         # so the proposal lands in ``pending_proposals``, the Critic emits a
         # ``verdict_map``, and ``_handle_verdict_map`` materialises only the
         # approved subset (variants the Critic rejects never reach the
-        # executor; the KB ``refuted`` mirror they used to fire was removed
-        # with the T2/T3 hypothesize/verify protocol).
+        # executor).
         # The proposal path re-runs is_pruned + _sequence_denial_for_action,
         # and ``_materialize_approved_proposal`` writes the task via
         # ``tasks.create_or_return_existing`` directly, so this re-route
@@ -6952,7 +6324,7 @@ class Coordinator:
         # explore directly) but still need the same operational knobs.
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
-        # IR-7 — ``assess_remaining_gaps`` is a thin wrapper: rewrite
+        # ``assess_remaining_gaps`` is a thin wrapper: rewrite
         # the kind to ``specialist`` and force the
         # ``session_steward_specialist`` domain (LLM cannot pick any
         # other domain via this action). Throttle is checked separately
@@ -6995,17 +6367,14 @@ class Coordinator:
         # runs. The gated action set is the module-level
         # ``_ROOFLINE_GATED_ACTIONS`` so propose_action / materialize
         # paths gate against the exact same names.
-        if action_name in _ROOFLINE_GATED_ACTIONS:
-            denied = await self._auto_roofline_pending_denial(
-                action_name=action_name,
+        denied = await self._roofline_denial_for_action(action_name)
+        if denied is not None:
+            await self._record_policy_denied(
+                source, intent, denied, action_name=action_name,
             )
-            if denied is not None:
-                await self._record_policy_denied(
-                    source, intent, denied, action_name=action_name,
-                )
-                return
+            return
 
-        # v0.8 §3.5 + specialist pre-dispatch warmup.
+        # Specialist pre-dispatch warmup.
         # When the Orchestration role delegates a specialist task, the
         # Coordinator is the only place with the KnowledgePlane facade
         # in scope. Warm the prompt's external-knowledge sections here
@@ -7857,7 +7226,7 @@ class Coordinator:
 
         # Mechanical floor passed — materialise the specialist-shaped
         # workspace + push the proposal onto the bus for the Critic
-        # to score. The PR-A7 mirror on _handle_single_verdict will
+        # to score. The mirror on _handle_single_verdict will
         # write the verdict into specialist_patch_verdicts so the
         # PolicyGate gate on the eventual integrate_patch delegate
         # passes.
@@ -8167,7 +7536,7 @@ class Coordinator:
             )
 
     # ------------------------------------------------------------------
-    # v0.8 §3.5 + specialist pre-dispatch warmup
+    # specialist pre-dispatch warmup
     # ------------------------------------------------------------------
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill the specialist task params with KnowledgePlane data
@@ -8196,10 +7565,8 @@ class Coordinator:
           hand.
         * GPU hardware hints (``gpu_type`` / ``tp``) from SharedState.
 
-        Gap-09 (gaps[] field) will later expose ``gap_symptom`` /
-        ``gap_layer`` / ``gap_attempts`` / ``kb_subgraph`` from a real
-        gap ledger; until then those stay empty (PromptBuilder
-        gracefully degrades).
+        Missing fields stay empty; SpecialistPromptBuilder degrades to
+        domain defaults, warm-start facts, PR feed, and research hints.
         """
         state = self.shared_state
         plane = self.knowledge_plane
@@ -8243,41 +7610,10 @@ class Coordinator:
                 plane is not None and getattr(plane, "pr_monitor_enabled", True)
             )
 
-        # PR-A5 (Arbor-into-Hyperloom): KB sub-graph traverse warmup.
-        # The plain ``pr_feed`` covers PR Monitor; this fills the
-        # specialist prompt's ``## 4. KB SUB-GRAPH`` section so the LLM
-        # starts with the Cortex KB anchor expanded rather than having
-        # to call ``mcp__cortex_kb__traverse`` itself.
-        if (
-            plane is not None
-            and getattr(plane, "cortex_enabled", False)
-            and "kb_subgraph" not in params
-        ):
-            try:
-                # PR-A10: pass the (lowercased) hw_slug so the per-domain
-                # fallback in select_kb_for_domain can filter recipe
-                # candidates to the same GPU. The slug rule mirrors the
-                # one ``recipe_kb`` uses (basename + lowercase + space/
-                # slash → underscore) so the two consumers agree.
-                _hw_raw = (state.gpu_type or "").strip()
-                hw_slug = (
-                    _hw_raw.rsplit("/", 1)[-1].lower()
-                    .replace(" ", "_").replace("/", "_")
-                ) if _hw_raw else ""
-                kb_tags = list(tags) or ([domain] if domain else [])
-                subgraph = plane.select_kb_for_domains(
-                    kb_tags, hw_slug=hw_slug or None,
-                )
-                params["kb_subgraph"] = subgraph or {}
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "specialist warmup: select_kb_for_domains(tags=%r) "
-                    "failed: %r",
-                    tags, exc,
-                )
-                params.setdefault("kb_subgraph", {})
-        else:
-            params.setdefault("kb_subgraph", {})
+        # Old Cortex v1 graph subgraphs were removed from KnowledgePlane.
+        # Keep the field defaulted so SpecialistPromptInputs remains stable;
+        # RecipeKB priors arrive through warm_start_* and PR feed instead.
+        params.setdefault("kb_subgraph", {})
 
         # Warm-start recipe + pitfalls + lessons from T0 anchor.
         if state.warm_start_recipe and "warm_start_recipe" not in params:
@@ -8286,7 +7622,7 @@ class Coordinator:
             params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
         if state.warm_start_lessons and "warm_start_lessons" not in params:
             params["warm_start_lessons"] = list(state.warm_start_lessons)
-        # GAP 8 — runtime framework / version so the prompt's
+        # runtime framework / version so the prompt's
         # ``_format_version_note`` can annotate version-mismatched
         # lessons / pitfalls (e.g. "from sglang@0.4, you're on 0.5").
         if "framework" not in params:
@@ -8396,7 +7732,7 @@ class Coordinator:
 
         # fill gap-specific anchors from the
         # gaps[] ledger. Orchestration carries a ``gap_canonical_id``
-        # via ``delegate.params`` (and also as the M5 ``gap`` field);
+        # via ``delegate.params`` (and also as the ``gap`` field);
         # we look up the matching gap row and stamp its symptom /
         # layer / domain_hint / recent attempts onto the task so the
         # SpecialistPromptBuilder section that renders ``gap_symptom``
@@ -8752,7 +8088,7 @@ class Coordinator:
             })
 
     # ------------------------------------------------------------------
-    # v0.8 §3.5 §10 + specialist_done bookkeeping
+    # specialist_done bookkeeping
     # ------------------------------------------------------------------
     async def _handle_specialist_done(
         self, source: str, intent: Intent,
@@ -8943,7 +8279,7 @@ class Coordinator:
             },
         )
 
-        # IR-7 — route session_steward_specialist verdicts. Done payload
+        # route session_steward_specialist verdicts. Done payload
         # carries extra fields beyond the standard schema; see
         # ``actions/assess_remaining_gaps.md`` and the prompt builder
         # focus template. Coerce out-of-vocab recommendations to
@@ -9169,7 +8505,7 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             return raw_rec, next_gap
 
-        # IR-6 is the only thing the depth gate must never override.
+        # The HARD force-exit is the only thing the depth gate must never override.
         try:
             force_exit, _ = _phase_state.should_force_exit_explore(
                 state, budget_pct=self._phase_budget_pct,
@@ -9460,7 +8796,7 @@ class Coordinator:
         # explored deeply enough, rewrite the verdict to
         # ``continue_explore`` and inject a concrete deepening
         # instruction. This may fire any number of times — the only
-        # backstop is the IR-6 budget gate, which is checked first:
+        # backstop is the HARD budget gate, which is checked first:
         # once the budget is (about to be) exhausted the depth gate is
         # bypassed and the original stop / advance stands.
         if raw_rec in ("stop_session", "advance_to_kernel"):
@@ -9533,7 +8869,7 @@ class Coordinator:
                     "steward: append_gap_attempt failed for gap=%s",
                     next_gap,
                 )
-            self.shared_state.params_no_promote_streak = 0
+            self.shared_state.reset_explore_plateau_proxy()
             # Per-domain empty streak reset is a courtesy — Orchestration
             # gets a clean slate to re-dispatch domains.
             self.shared_state.specialist_domain_empty_streak = {}
@@ -9664,7 +9000,7 @@ class Coordinator:
             if handler is not None:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
-                # PR-X (1cd9f7d): force batch dispatch for run_optimization.
+                # force batch dispatch for run_optimization.
                 # ``kernel_request_handlers.run_optimization_handler`` upgrades
                 # the request to ``_run_optimization_batch`` only when the
                 # payload carries ``candidates_path`` (so it can fan out to
@@ -9727,7 +9063,7 @@ class Coordinator:
                         # second/third request with ``integrate_handler requires
                         # base_tput > 0`` (the LLM only consistently remembers the
                         # field for the first integrate). Explicit operator value
-                        # still wins. See PR-B follow-up.
+                        # still wins.
                         if (
                             kind == "integrate"
                             and not merged_payload.get("base_tput")
@@ -9784,9 +9120,7 @@ class Coordinator:
                 # Cache trace_analyze output so subsequent identical
                 # requests are short-circuited next tick. Only cache
                 # real successful runs, not failures, to avoid sticky
-                # errors. Pre-M4 ``select_kernels`` alias was removed
-                # in this branch — only the canonical kind triggers a
-                # cache write.
+                # errors.
                 if (
                     kind == "trace_analyze"
                     and cache_hit_source is None
@@ -9809,11 +9143,9 @@ class Coordinator:
                         isinstance(result, dict) and result.get("batch_mode")
                     ):
                         self.shared_state.record_kernel_opt(result)
-                    # Note: main commit ce36e70 also routes the decision
-                    # into a per-action scoreboard (KEEP / no-promote
-                    # accounting on the action-priority table). The
-                    # scoreboard was retired by KB_design §3.9 on this
-                    # branch (                     # §4), so the post-record bookkeeping is omitted.
+                    # The per-action scoreboard (KEEP / no-promote
+                    # accounting) was retired, so the post-record
+                    # bookkeeping is omitted.
                     self.shared_state.save(self.session_dir)
                 if kind == "run_gemm_tuning":
                     self.shared_state.record_gemm_tuning(result)
@@ -9849,9 +9181,7 @@ class Coordinator:
     def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Return a cached programmatic_handler result if applicable.
 
-        Canonical post-M4 cache key is ``last_trace_analyze``; the
-        legacy ``last_select_kernels`` mirror was removed in this
-        branch.
+        Canonical cache key is ``last_trace_analyze``.
         """
         if kind != "trace_analyze":
             return None
@@ -10382,15 +9712,28 @@ class Coordinator:
         baseline_event_payload: dict[str, Any] | None = None
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             self.shared_state.baseline_failure_streak += 1
-            if self.shared_state.baseline_failure_streak >= 3:
+            streak = self.shared_state.baseline_failure_streak
+            raw_error = result_payload.get("error")
+            error_text = str(raw_error) if raw_error is not None else ""
+            if streak >= 3:
                 self.shared_state.set_stop_reason("baseline_failed")
+                log.warning(
+                    "baseline_failure_streak=%d reached threshold — "
+                    "terminating with stop_reason='baseline_failed' "
+                    "(task_id=%s error_class=%s error=%s)",
+                    streak,
+                    task.task_id,
+                    result_payload.get("error_class"),
+                    error_text[:200],
+                )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
-                "failure_streak": self.shared_state.baseline_failure_streak,
+                "failure_streak": streak,
                 "stop_reason": self.shared_state.stop_reason,
                 "result_status": result_payload.get("status"),
                 "error_class": result_payload.get("error_class"),
+                "error_excerpt": error_text[:500] or None,
             }
             any_changed = True
         # Mirror the roofline failure-handling that lives in the promote
@@ -10597,7 +9940,7 @@ class Coordinator:
                     exc=exc,
                 )
                 continue
-            # v0.8 §3.5 §10 + specialist bookkeeping.
+            # Specialist bookkeeping.
             # SpecialistRunner returns the done payload under
             # ``result.result['specialist_done']`` (Gap-01 adapter
             # contract). We always run the bookkeeping pass for a
@@ -10623,7 +9966,7 @@ class Coordinator:
                             "specialist bookkeeping hook failed for task=%s",
                             task.task_id,
                         )
-                # PR-A8 (Arbor-into-Hyperloom): bump the per-EXPLORE
+                # bump the per-EXPLORE
                 # specialist dispatch counter. Robustness reads this
                 # in its prompt context to detect storms (many
                 # specialists dispatched with no winning proposal).
@@ -10645,7 +9988,7 @@ class Coordinator:
                         "dynamic_action lifecycle hook failed for task=%s",
                         task.task_id,
                     )
-            # PR-A8 — intervention-mix ledger: when an explore or
+            # intervention-mix ledger: when an explore or
             # integrate_patch task succeeds with a kept variant, log
             # the change_type so Robustness can see config-only
             # streaks. ``explore`` carries config-shaped KEEPs;
@@ -10701,18 +10044,14 @@ class Coordinator:
                     exc=exc,
                 )
                 continue
-            # N34 Bug #4's ``report_emitted`` self-stop has been removed
-            # to prioritise long-run continuity: a successful mid-run
-            # ``report`` task no longer terminates the run loop. The LLM
-            # may emit a report snapshot and then keep exploring; the run
-            # continues until the wall-clock deadline (or another
-            # stop_reason) fires. The closing-phase report path still owns
-            # its own terminal transition via ``in_closing``.
+            # A successful mid-run ``report`` task does not terminate the
+            # run loop: the LLM may emit a report snapshot and keep
+            # exploring until the wall-clock deadline (or another
+            # stop_reason). The closing-phase report path still owns its
+            # own terminal transition via ``in_closing``.
             # Fact-write hook. Always called so KEEP / REVERT lands
             # in the local optimization_journal + (when enabled and the
-            # threshold matches) a KB lesson / pitfall write. The
-            # legacy T2/T3 hypothesize/verify protocol was retired;
-            # see ``_fact_write_hook`` for the surviving path.
+            # threshold matches) a KB lesson / pitfall write.
             #
             # ``replay_warm_recipe`` is excluded: it's a verification of
             # an existing KB recipe, not a new fact. The dedicated
@@ -10784,10 +10123,9 @@ class Coordinator:
     # ------------------------------------------------------------------
     # Fact-write dispatcher (KEEP / REVERT entry point)
     # ------------------------------------------------------------------
-    # Replaces the legacy ``_cortex_t3_hook`` family (deleted alongside
-    # the T2/T3 hypothesize/verify protocol). Single responsibility:
-    # route every terminal task result to the journal + KB fact-write
-    # helpers (``_record_fact_per_task`` / ``_record_fact_per_variant``).
+    # Single responsibility: route every terminal task result to the
+    # journal + KB fact-write helpers (``_record_fact_per_task`` /
+    # ``_record_fact_per_variant``).
     # ------------------------------------------------------------------
     def _source_session_id(self) -> str:
         """Return the hyperloom-local session identifier used as the
@@ -10988,8 +10326,8 @@ class Coordinator:
 
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        # No KB upstream point to cite — T2 experiment_node minting is
-        # gone. evidence_refs (log:task-...) still gives full traceability
+        # No KB upstream point to cite; evidence_refs (log:task-...)
+        # still gives full traceability
         # because ``source_session_id`` lands in attrs.
         evidence_refs = [f"log:task-{task.task_id}"]
         # Workload-shape tags written into lesson/pitfall attrs so the
@@ -11374,7 +10712,7 @@ class Coordinator:
                 "rule":   str(d.get("rule") or ""),
                 "reason": str(d.get("reason") or "")[:120],
             })
-        # GAP 1 — surface warm-replay outcome to the steward so its
+        # surface warm-replay outcome to the steward so its
         # "continue / stop / advance" decision can distinguish gain
         # that came from inheriting a KB recipe vs. gain that came
         # from EXPLORE work this session. Without this, +25%
@@ -11460,7 +10798,7 @@ class Coordinator:
         if model_class:
             out["model_class"] = model_class
         # Model family — derived from model_name so future warm-start
-        # queries (``find_recipe_with_fallback`` T3 / T6) can match on
+        # queries (``find_recipe_with_fallback``) can match on
         # family without re-running the slug logic at read time.
         # ``model_family`` was used by the v1 fallback ladder
         # (find_recipe_with_fallback). Under the v2 design we use
@@ -11501,7 +10839,7 @@ class Coordinator:
             pp_n = 0
         if pp_n > 0:
             out["pp"] = pp_n
-        # GAP 5 — runtime version tags. cli writes these into
+        # runtime version tags. cli writes these into
         # ``stack_fingerprint_meta`` from manifest / install fingerprint
         # at boot; resume reads them back from state.json verbatim.
         fp_meta = getattr(ss, "stack_fingerprint_meta", None) or {}
@@ -11520,7 +10858,7 @@ class Coordinator:
                 v = str(fp_meta.get(src_key) or "").strip()
                 if v and v != "unknown":
                     out[dst_key] = v
-        # GAP 5 — per-baseline workload extras (parsed from the
+        # per-baseline workload extras (parsed from the
         # materialized YAML in BaselineExecutor). Empty dict before
         # the first baseline; downstream readers tolerate missing keys.
         #
@@ -12198,7 +11536,7 @@ class Coordinator:
             if isinstance(materialized, str) and materialized:
                 self.shared_state.baseline_config_path = materialized
                 changed = True
-                # GAP 5 — parse workload-shape extras from the YAML so
+                # parse workload-shape extras from the YAML so
                 # subsequent lesson / pitfall writes can stamp them
                 # onto attrs. Best-effort: parse errors fall back to
                 # an empty dict so the rest of the promote path is
@@ -12213,7 +11551,7 @@ class Coordinator:
                     parsed = {}
                 if parsed:
                     self.shared_state.baseline_workload_extra = parsed
-            # Fix E: promote the baseline Magpie wall-clock so the
+            # Promote the baseline Magpie wall-clock so the
             # ExploreExecutor can derive a per-variant overtime kill
             # deadline (``baseline_runtime_sec * explore_overtime_kill_ratio``).
             # Only the success path carries this field; failure paths
@@ -12306,7 +11644,7 @@ class Coordinator:
                 # Step 4 — research scout (parallel, read-only, CPU-only).
                 await self._maybe_enqueue_prelude_research_scout()
         elif task_kind == "replay_warm_recipe":
-            # GAP 1 — separate promote path so the replay result does
+            # separate promote path so the replay result does
             # NOT overwrite ``baseline_tput`` / ``current_best`` via
             # the regular baseline branch. The dedicated helper does
             # its own KEEP / REVERT bookkeeping.
@@ -12317,13 +11655,9 @@ class Coordinator:
             # PRELUDE initial roofline was deferred while replay ran.
             await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
         elif task_kind == "profile":
-            # IR-8 fallback: profile_executor used to short-circuit on
-            # FRAMEWORK=atom with status="skipped" + error_class=
-            # "atom_no_profiler". That short-circuit was removed once
-            # Magpie's atom_mi*x.sh learned to bridge PROFILE=1 to
-            # atom's --torch-profiler-dir (atom natively supports torch
-            # profiler via /start_profile + /stop_profile). This
-            # ``skipped`` arm is now a *defensive* path: it still runs
+            # atom now profiles natively (Magpie's atom_mi*x.sh bridges
+            # PROFILE=1 to --torch-profiler-dir), so this ``skipped``
+            # arm is now a *defensive* path: it still runs
             # cleanly if an out-of-date Magpie clone is in play (the
             # only realistic skipped producer left), or if a future
             # executor returns skipped for a different reason. Audit
@@ -12450,12 +11784,9 @@ class Coordinator:
             # save() path persists the executor's mutations to disk.
             status = str(result.get("status") or "")
             if status == "skipped":
-                # IR-8 fallback: the roofline composite used to short-
-                # circuit on FRAMEWORK=atom with status="skipped"
-                # because profile was a hard dependency and atom had
-                # no profiler wiring. That short-circuit was removed
-                # once Magpie's atom_mi*x.sh learned to bridge PROFILE=1
-                # to atom's --torch-profiler-dir. This arm is now the
+                # atom now profiles natively (Magpie's atom_mi*x.sh
+                # bridges PROFILE=1 to --torch-profiler-dir), so this
+                # arm is now the
                 # *defensive* path: an out-of-date Magpie clone (or a
                 # future skipped-emitting executor) still gets a clean
                 # no-op rather than a spurious "discarded". Do NOT bump
@@ -12479,7 +11810,7 @@ class Coordinator:
                     await self._drain_proposals_awaiting_roofline()
             elif status == "succeeded":
                 audit_decision = "promoted"
-                # N10: prefer the executor's already-published
+                # prefer the executor's already-published
                 # ``last_trace_analyze`` snapshot fields over the
                 # result dict so the audit row stays consistent with
                 # the SharedState view the LLM prompt renders. The
@@ -12503,7 +11834,7 @@ class Coordinator:
                     "profile_workspace": result.get("profile_workspace"),
                     "degraded": bool(result.get("degraded", False)),
                 }
-                # N27 — reset the outer roofline failure streak on a
+                # reset the outer roofline failure streak on a
                 # successful snapshot. The streak is exposed for
                 # prompt-side visibility only. ``hasattr`` lets test
                 # stubs that omit the field still pass.
@@ -12527,7 +11858,7 @@ class Coordinator:
                     "error_class": result.get("error_class"),
                     "error": result.get("error"),
                 }
-                # N27 — bump the outer failure streak. The action_failure
+                # bump the outer failure streak. The action_failure
                 # audit ledger already records the structured ``error_class``
                 # / ``error`` fields; this counter mirrors that signal on
                 # SharedState so prompt renderers
@@ -12563,7 +11894,6 @@ class Coordinator:
                 changed = True
                 await self._drain_proposals_awaiting_roofline()
         elif task_kind == "explore":
-            # v0.8 M3 + KB_gaps/Dead-A.5 (prerequisite to Gap-10) —
             # ``explore`` is the merged grid runner.
             # The executor already does per-variant KEEP/REVERT gating
             # *and* the inlined per-KEEP stack-rebench, so by the time
@@ -12644,13 +11974,8 @@ class Coordinator:
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("depth: note_explore_outcome failed")
             if promoted:
-                # Reset the plateau proxy on a successful KEEP so
-                # the M2 transitional fallback in phase_state stays
-                # aligned with the unified ledger. The proxy is dual-
-                # tracked for resume parity.
-                self.shared_state.params_no_promote_streak = 0
-                # v0.8 M3 §4.4 + explore inlines the
-                # per-KEEP stack rebench, so the post-rebench
+                # explore inlines the per-KEEP stack rebench, so the
+                # post-rebench
                 # ``running_base_tput`` measures the *current*
                 # optimization_stack end-to-end. Promote it into
                 # ``cumulative_gain_validated`` + advance the
@@ -12683,9 +12008,6 @@ class Coordinator:
                         reason="explore_keep_watermark",
                     )
             else:
-                # No KEEP cleared the rebench. Bump the proxy so the
-                # plateau judges see the no-progress run.
-                self.shared_state.params_no_promote_streak += 1
                 changed = True
             audit_decision = "promoted" if promoted else "discarded"
             audit_extras = {

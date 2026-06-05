@@ -48,34 +48,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .orchestrator.action_executors import (
-    TargetAnalysisExecutor,
-    baseline_executor,
-    explore_executor,
-    recover_executor,
-    conc_sweep_executor,
-    report_executor,
-    session_breakdown_executor,
-    sweep_executor,
+from .cli_executors import (  # noqa: F401 - re-exported for callers/tests
+    _NOOP_KINDS_KERNEL_ONLY,
+    _REAL_EXECUTORS_FULL,
+    _build_dynamic_action_executor,
+    _build_specialist_executor,
+    _noop_prep,
+    _register_executors,
 )
-from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
-from .orchestrator.action_executors.framework_pr import FrameworkPrExecutor
-from .orchestrator.action_executors.recover import recover_executor
-from .orchestrator.action_executors.profile import profile_executor
-from .orchestrator.action_executors.roofline import make_roofline_executor
-from .orchestrator.backends import (
-    ClaudeBackend,
-    CodexBackend,
-    CriticAgentBackend,
-    MockCriticBackend,
-    MockRobustnessBackend,
-    RobustnessAgentBackend,
+from .cli_kb import (  # noqa: F401 - re-exported for callers/tests
+    _bootstrap_cortex_kb,
+    _bootstrap_knowledge_plane,
+    _build_recipe_kb_dispatcher,
+    _resolve_local_kb_root,
 )
+from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
+    _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
+    _build_backends,
+    _build_proposal_scorer,
+    _build_robustness_options,
+    _robustness_server_configured,
+)
+from .orchestrator.backends import ClaudeBackend
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
-from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
-from .orchestrator.cortex_t0 import run_t0_anchor
+from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS
 from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
@@ -312,8 +310,8 @@ def _validate_critic_agent_runtime(root: Path) -> None:
             f"  cwd={root}\n"
             f"  cmd={' '.join(cmd)}\n"
             f"Either fix CRITIC_AGENT_ROOT, install critic-agent at "
-            f"$REPO_ROOT/critic-agent, or pass --critic-mock / "
-            f"--critic-codex-bare to bypass critic-agent.",
+            f"$REPO_ROOT/critic-agent, or pass --critic-mock to bypass "
+            f"critic-agent.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -391,7 +389,7 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """IR-8: validate atom-specific CLI knob compatibility.
+    """Validate atom-specific CLI knob compatibility.
 
     The function's only responsibility is the multi-node fail-fast
     guard. The forward-looking alias :data:`_assert_atom_single_node`
@@ -699,140 +697,6 @@ def _autodetect_gpu_type() -> str | None:
         return _GFX_TO_RUNNER.get(gfx)
     except Exception:  # noqa: BLE001
         return None
-
-
-async def _noop_prep(ctx) -> dict:
-    return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
-
-
-def _build_backends(
-    *,
-    claude_model: str,
-    codex_model: str,
-    kernel_codex: bool,
-    critic_choice: str,
-    session_dir: Path,
-    critic_agent_root: Path | None = None,
-    critic_kb_mode: str = "inmemory",
-    robustness_choice: str = "mock",
-    robustness_agent_root: Path | None = None,
-    robustness_options: dict[str, Any] | None = None,
-    no_kernel: bool = False,
-) -> dict[str, Any]:
-    """Construct all per-role backends.
-
-    ``critic_choice`` ∈ {``"mock"``, ``"agent"``, ``"codex_bare"``}:
-
-    * ``mock`` — always-approve adapter (smoke / offline tests).
-    * ``agent`` — :class:`CriticAgentBackend` driving the ``critic-agent``
-      skill runtime. Adds KB priors / writes, session memory, and
-      ``review_constraints``-gated verdicts. Requires ``critic_agent_root``.
-    * ``codex_bare`` — legacy direct :class:`CodexBackend` chat-completion
-      path. Kept available for debugging the LLM layer in isolation.
-
-    ``robustness_choice`` ∈ {``"mock"``, ``"agent"``}:
-
-    * ``mock`` — heartbeat-only :class:`MockRobustnessBackend` (default;
-      keeps optimizer self-contained).
-    * ``agent`` — :class:`RobustnessAgentBackend` driving
-      ``python -m robustness_agent.runtime.cli`` in a subprocess. Mirrors
-      the critic-agent transport. Requires ``robustness_agent_root``.
-    """
-    if critic_choice not in ("mock", "agent", "codex_bare"):
-        raise ValueError(
-            f"_build_backends: critic_choice={critic_choice!r} not in "
-            "{'mock','agent','codex_bare'}"
-        )
-
-    if critic_choice == "mock":
-        critic_backend: Any = MockCriticBackend()
-    elif critic_choice == "codex_bare":
-        critic_backend = CodexBackend(model=codex_model)
-    else:  # "agent"
-        if critic_agent_root is None:
-            raise ValueError(
-                "_build_backends: critic_choice='agent' requires critic_agent_root"
-            )
-        # N38 (May 2026) — feed the registry-derived per-action
-        # verdict policy so the critic-agent runtime sees
-        # ``review_constraints.action_verdict_policy[<action_name>]``
-        # and approves exploration / archival actions without
-        # demanding the before/after evidence they themselves produce.
-        # Replaces the prompt-hardcoded carve-out lists N33/N35/N37
-        # had to patch one action at a time.
-        try:
-            from inference_optimizer.orchestrator.action_registry import (
-                ActionRegistry,
-            )
-            _reg = ActionRegistry().load()
-            _policy = {a.name: a.verdict_class for a in _reg.all()}
-        except Exception:  # noqa: BLE001 — degrade to empty policy
-            _policy = {}
-        critic_backend = CriticAgentBackend(
-            critic_agent_root=critic_agent_root,
-            session_dir=session_dir,
-            codex_model=codex_model,
-            kb_mode=critic_kb_mode,
-            action_verdict_policy=_policy,
-        )
-
-    if robustness_choice not in ("mock", "agent"):
-        raise ValueError(
-            f"_build_backends: robustness_choice={robustness_choice!r} not in "
-            "{'mock','agent'}"
-        )
-    if robustness_choice == "mock":
-        robustness_backend: Any = MockRobustnessBackend()
-    else:  # "agent"
-        if robustness_agent_root is None:
-            raise ValueError(
-                "_build_backends: robustness_choice='agent' requires "
-                "robustness_agent_root"
-            )
-        robustness_backend = RobustnessAgentBackend(
-            robustness_agent_root=robustness_agent_root,
-            session_dir=session_dir,
-            options=robustness_options,
-        )
-
-    backends: dict[str, Any] = {
-        "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
-        "critic":        critic_backend,
-        "robustness":    robustness_backend,
-    }
-    if not no_kernel:
-        if kernel_codex:
-            backends["kernel"] = CodexBackend(model=codex_model)
-        else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=5)
-    return backends
-
-
-def _build_proposal_scorer(
-    args: argparse.Namespace,
-) -> ProposalScorer | None:
-    """Construct the advisory specialist-proposal scorer, or ``None``.
-
-    Returns ``None`` when ``--no-proposal-scoring`` is set or the
-    resolved model list is empty. Models default to
-    :data:`DEFAULT_SCORER_MODELS` (``claude-opus-4-8,gpt-5.5,
-    dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview``).
-    Adding a
-    model = appending its gateway slug to ``--proposal-scorer-models``.
-    The scorer is purely advisory and never gates anything.
-    """
-    if getattr(args, "no_proposal_scoring", False):
-        return None
-    raw = getattr(args, "proposal_scorer_models", None)
-    if raw is None:
-        models = tuple(DEFAULT_SCORER_MODELS)
-    else:
-        models = tuple(
-            m for m in (s.strip() for s in str(raw).split(",")) if m
-        )
-    if not models:
-        return None
-    return ProposalScorer(models=models)
 
 
 def _resume_safe_flag(
@@ -1149,8 +1013,9 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         f"(ISL={isl} + OSL={osl} + headroom={headroom}). The workload exceeds "
         f"the model context window; every request would 400. Refusing to run "
         f"(no --context-length override by policy). Lower ISL/OSL for this "
-        f"model, or raise {_CONTEXT_HEADROOM_ENV} if the headroom is too "
-        f"conservative."
+        f"model, or lower {_CONTEXT_HEADROOM_ENV} if the headroom is too "
+        f"conservative (it is added to `required`, so raising it makes "
+        f"admission stricter, not looser)."
     )
     # Persist the stop reason so CI / the robustness monitor read it from
     # state.json + reports/final.json instead of grepping the run log.
@@ -1163,7 +1028,11 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         from .session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
-        state.stop_reason = "model_context_window_too_small"
+        # Use the validated writer so the vocab-closed invariant (Inv-8.3)
+        # holds: the term is registered in STOP_REASON_VOCAB, so this neither
+        # maps to 'unknown' (lenient) nor raises (strict), and the robustness
+        # monitor's vocab-based terminal check recognises the fail-fast.
+        state.set_stop_reason("model_context_window_too_small")
         state.closing_phase = True
         state.save(session_dir)
         summary = _build_summary_dict(state, {}, [], external_baseline=None)
@@ -1205,7 +1074,7 @@ def _seed_shared_state(
     # research_lane capacity is locked here for the lifetime of the
     # session. Clamp to [0, research-lane ceiling], where the ceiling
     # scales with the visible GPU count (``2 × GPU``). The cap protects
-    # LLM quota and PR Monitor load (§3.14 R-07).
+    # LLM quota and PR Monitor load.
     from inference_optimizer.orchestrator.policy import (
         research_lane_ceiling,
     )
@@ -1243,7 +1112,7 @@ def _seed_shared_state(
         plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
-    # EXPLORE HARD force-exit thresholds (IR-6). Either condition fires
+    # EXPLORE HARD force-exit thresholds. Either condition fires
     # an ``explore_force_exit_low_budget`` exit (overrides plateau /
     # steward / LLM proposals).
     if getattr(args, "explore_force_exit_hours_remaining", None) is not None:
@@ -1254,7 +1123,7 @@ def _seed_shared_state(
         plateau_overrides["force_exit_budget_pct"] = float(
             args.explore_force_exit_budget_pct
         )
-    # IR-7 steward controls.
+    # steward controls.
     if getattr(args, "steward_disabled", False):
         plateau_overrides["steward_disabled"] = True
     if getattr(args, "steward_continuation_cap", None) is not None:
@@ -1319,8 +1188,8 @@ def _seed_shared_state(
         # fallback on its own at use time.
         return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
 
-    # Fix E (--explore-overtime-kill-ratio): mirror the CLI value into
-    # the fresh SharedState so the ExploreExecutor can read it via the
+    # --explore-overtime-kill-ratio: mirror the CLI value into the
+    # fresh SharedState so the ExploreExecutor can read it via the
     # Coordinator-injected task.params on the very first explore round.
     # ``0`` (and any non-positive) disables the gate.
     explore_overtime_kill_ratio_raw = getattr(
@@ -1405,7 +1274,7 @@ def _seed_shared_state(
         tp=_int_env_or_arg("tp", "TP"),
         # ``ep`` mirrors the EP env var so resume in a fresh shell
         # still recovers the value — KB warm-start queries depend on
-        # it for the T2 same-shape filter.
+        # it for the same-shape filter.
         ep=_int_env_or_arg("ep", "EP"),
         precision=(
             str(getattr(args, "precision", None) or os.environ.get("PRECISION", "") or "").strip()
@@ -1526,414 +1395,6 @@ def _default_target_summary(args: argparse.Namespace) -> str:
             f"{args.target_tput} tok/s/GPU within {args.max_hours}h."
         )
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
-
-
-# --- Executor wiring tables ------------------------------------------------
-# Declarative mappings of action_kind → ExecutorFn so tests can introspect
-# what's actually wired without re-parsing the imperative body of
-# ``_register_executors``. Adding a new action with a real executor MUST
-# update these tables; the regression test in
-# ``tests/test_p1_2_full_action_catalogue.py`` enforces consistency between
-# these tables and ``session_paths._runs_actions()``.
-
-# Real executors enabled in every run mode (kernel + no-kernel).
-#
-# The merged ``explore`` action subsumes the per-variant KEEP/REVERT
-# plus the per-KEEP stack rebench; there is no standalone validation
-# action.
-_REAL_EXECUTORS_FULL: dict[str, Any] = {
-    "baseline":          baseline_executor,
-    # GAP 1 — ``replay_warm_recipe`` runs the same Magpie subprocess
-    # as ``baseline`` but applies ``warm_start_recipe.best_config``
-    # (extra_sglang_args + extra_envs) via ``task.params``. We reuse
-    # the BaselineExecutor instance because the subprocess pipeline,
-    # the cold-start timeout logic, the rescue-path salvage, and the
-    # measurement parser are all identical — the only thing that
-    # differs is which params get passed in (and the Coordinator-side
-    # interpretation of the result, see ``_promote_replay_warm_recipe``).
-    "replay_warm_recipe": baseline_executor,
-    # ``profile`` is registered so the Coordinator-internal task path
-    # (kind switched via ``--no-enable-roofline``) can dispatch it
-    # through SubAgentRunner. PolicyGate denies LLM-proposed
-    # delegate{action_name='profile'} via
-    # ``analysis_action_not_llm_proposable``, so this registration is
-    # effectively Coordinator-only.
-    "profile":           profile_executor,
-    "explore":           explore_executor,
-    "sweep":             sweep_executor,
-    # Coordinator-internal post-sweep concurrency comparison.
-    # On by default; disable via ``--no-enable-conc-sweep``. PolicyGate
-    # denies any LLM-proposed delegate{action_name='conc_sweep'}, so
-    # the only entry is the SWEEP-completion auto-enqueue hook.
-    "conc_sweep":        conc_sweep_executor,
-    "report":            report_executor,
-    "session_breakdown": session_breakdown_executor,
-    # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
-    # ``gpu_memory_leaked`` signal (Change A/B): a real executor now
-    # cleans up leaked VRAM owners and, behind
-    # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
-    # ``rocm-smi --gpureset``. See
-    # ``orchestrator/action_executors/recover.py``.
-    "recover":           recover_executor,
-}
-
-# Kernel-only real executors. The composite ``roofline`` action is
-# registered separately by ``_register_executors`` below. ``profile``
-# is registered in ``_REAL_EXECUTORS_FULL`` so the Coordinator's
-# auto-managed analysis path can dispatch it through SubAgentRunner
-# when ``--no-enable-roofline`` is set; the same ``profile_executor``
-# is also called directly from RooflineExecutor's ``_wrap_profile_ctx``
-# in the default roofline mode. PolicyGate denies LLM-proposed
-# delegate{action_name='profile'} regardless of mode.
-_REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
-
-# Kernel-owned action kinds dispatched via
-# ``request{target_agent='kernel', kind=...}``. The executor body is a
-# no-op in this process — actual work happens inside the kernel agent's
-# request handlers — but the names must stay registered so SubAgentRunner
-# does not raise ``no_executor`` on a stale task.
-_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
-    "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
-)
-
-
-def _build_specialist_executor(
-    args: argparse.Namespace,
-    *,
-    session_dir: Path,
-    knowledge_plane: Any,
-) -> "Callable[[Any], Awaitable[dict]]":
-    """v0.8 §3.5 / §3.13 M5 + PR-A2 (Arbor-into-Hyperloom) — build the
-    specialist executor adapter.
-
-    Returns an ``async fn(ctx: RunnerContext) -> dict`` compatible with
-    :data:`SubAgentRunner.ExecutorFn`. The adapter wraps a
-    :class:`SpecialistRunner` and translates its
-    :class:`SpecialistRunResult` dataclass into the dict the dispatcher
-    expects to publish onto the bus.
-
-    Dispatch mode (PR-A2): production wires the
-    :class:`SpecialistSubprocessDispatcher` so each specialist runs in
-    a fresh ``claude`` subprocess inside a per-task git worktree
-    (``runs/specialist/<task_id>/worktree/``). The
-    ``--specialist-dispatch-mode`` flag can fall back to the legacy M5
-    in-process :class:`ClaudeBackend` path (used by tests + when the
-    ``claude`` binary is missing from $PATH).
-
-    Backend choice: every specialist runs on Claude (matching the
-    orchestration role). The CLI flag ``--specialist-model`` overrides
-    the default model (``--claude-model``) so operators can dedicate a
-    cheaper / faster model to specialist research without touching the
-    main orchestration loop. KB_design §3.5 §6 / §3.14 R-05.
-
-    The factory captures ``session_dir`` + ``knowledge_plane`` once at
-    cli boot; the same runner instance handles every specialist task
-    for the session.
-    """
-    import shutil
-
-    from .orchestrator.specialist_mcp_config import write_specialist_mcp_config
-    from .orchestrator.specialist_runner import (
-        DEFAULT_SPECIALIST_TOOLS,
-        SpecialistRunner,
-    )
-    from .orchestrator.specialist_subprocess import SpecialistSubprocessConfig
-
-    claude_model = (
-        (getattr(args, "specialist_model", None) or args.claude_model)
-        .strip()
-    )
-    max_turns = int(getattr(args, "specialist_max_turns", 8) or 8)
-    per_turn_max_seconds = float(
-        getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0
-    )
-    dispatch_mode = (
-        str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess")
-        .strip().lower()
-    )
-
-    # PR-A2: subprocess dispatch is the production default. We fall
-    # back to in-process when (a) the operator picks ``inprocess`` or
-    # (b) the ``claude`` binary is not on $PATH (e.g. dev environments
-    # using only the in-process SDK). The fallback is logged so it's
-    # visible in the manifest.
-    # PR-A2: derive framework_source_roots from the canonical resolver so
-    # the specialist worktree is rooted at the same set the orchestration
-    # prompt + PolicyGate path-validator already trust.
-    framework_source_roots = tuple(resolve_source_file_allowlist())
-    claude_bin = shutil.which("claude") or ""
-    use_subprocess = dispatch_mode != "inprocess" and bool(claude_bin)
-    if dispatch_mode == "subprocess" and not claude_bin:
-        log.warning(
-            "specialist_dispatch_mode=subprocess requested but `claude` "
-            "binary not found on PATH; falling back to in-process backend",
-        )
-
-    if use_subprocess:
-        # Operator-supplied --specialist-mcp-config wins. When unset,
-        # auto-generate ``<session_dir>/runtime/specialist_mcp.json``
-        # from the live KnowledgePlane so the spawned claude subprocess
-        # actually has the PR Monitor MCP server wired (without it the
-        # ``mcp__pr_monitor__*`` tool names in the whitelist resolve to
-        # nothing and the specialist falls back to WebSearch).
-        mcp_config_path: str | None = str(
-            getattr(args, "specialist_mcp_config", "") or ""
-        ) or None
-        if mcp_config_path is None and knowledge_plane is not None:
-            try:
-                pr_mcp_url = knowledge_plane.specialist_mcp_url()
-            except AttributeError:
-                pr_mcp_url = ""
-            generated = write_specialist_mcp_config(
-                session_dir=session_dir,
-                pr_monitor_mcp_url=pr_mcp_url,
-            )
-            if generated is not None:
-                mcp_config_path = str(generated)
-        sub_config = SpecialistSubprocessConfig(
-            claude_executable=claude_bin or "claude",
-            model=claude_model,
-            framework_source_roots=framework_source_roots,
-            mcp_config_path=mcp_config_path,
-            per_turn_max_seconds=per_turn_max_seconds,
-        )
-        runner = SpecialistRunner(
-            subprocess_config=sub_config,
-            session_dir=session_dir,
-            default_tools=DEFAULT_SPECIALIST_TOOLS,
-            default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
-            knowledge_plane=knowledge_plane,
-        )
-    else:
-        def _backend_factory(domain: Any) -> Any:
-            # in-process Claude path (fallback).
-            return ClaudeBackend(
-                model=claude_model, max_turns_default=max_turns,
-            )
-
-        runner = SpecialistRunner(
-            backend_factory=_backend_factory,
-            session_dir=session_dir,
-            default_tools=DEFAULT_SPECIALIST_TOOLS,
-            default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
-            knowledge_plane=knowledge_plane,
-        )
-
-    async def _executor(ctx: Any) -> dict:
-        """Adapter: SubAgentRunner.run_task → SpecialistRunner.run.
-
-        The SubAgentRunner wrapper has already transitioned the task to
-        ``running`` and ``ctx.task`` is the live :class:`Task`. We
-        always return a dict (even on failure) so the dispatcher's
-        ``state.transition('succeeded', evidence={...})`` step gets a
-        well-formed payload. SpecialistRunResult's distinction between
-        ``succeeded`` / ``empty_synthesised`` / ``stale`` etc. is
-        preserved under ``result.runner_status`` for downstream
-        analytics (breakdown.specialist_runs).
-        """
-        run_result = await runner.run(ctx)
-        # Translate dataclass → dict. The Coordinator's
-        # ``_handle_intent`` Gap-03 path (when wired) will pull
-        # ``specialist_done`` out of result.payload['specialist_done'].
-        return {
-            "runner_status": run_result.status,
-            "task_id": run_result.task_id,
-            "domain": run_result.domain,
-            "gap_canonical_id": run_result.gap_canonical_id,
-            "specialist_done": run_result.specialist_done,
-            "turns_used": run_result.turns_used,
-            "workspace": run_result.workspace,
-            "transcript_path": run_result.transcript_path,
-            "done_path": run_result.done_path,
-            "error": run_result.error,
-            "notes": list(run_result.notes or []),
-            "allocated_gpu_ids": list(
-                (run_result.specialist_done or {}).get("allocated_gpu_ids") or []
-            ),
-        }
-
-    return _executor
-
-
-def _build_dynamic_action_executor(
-    args: argparse.Namespace,
-) -> "Callable[[Any], Awaitable[dict]]":
-    """Build a SubAgentRunner-compatible executor backed by
-    :class:`DynamicActionRunner`.
-
-    Production uses a real Claude backend; tests register a
-    :class:`MockBackend` through the same path. Falls back to the
-    stub executor when no ``claude`` binary is on PATH.
-    """
-    import shutil
-
-    from .orchestrator.dynamic_action_runner import (
-        DEFAULT_TURN_CAP,
-        DEFAULT_WALL_CLOCK_BUDGET_SEC,
-        DynamicActionRunner,
-    )
-    from .orchestrator.action_executors.dynamic_action import (
-        dynamic_action_executor as _stub_executor,
-    )
-    from .orchestrator.framework_paths import resolve_source_file_allowlist
-
-    claude_bin = shutil.which("claude") or ""
-    if not claude_bin:
-        log.warning(
-            "dynamic_action: `claude` binary not on PATH; falling "
-            "back to the stub executor (empty proposal_set).",
-        )
-        return _stub_executor
-
-    model = (
-        getattr(args, "dynamic_action_model", None)
-        or getattr(args, "claude_model", "")
-    ).strip()
-    turn_cap_raw = getattr(args, "dynamic_action_turn_cap", None)
-    turn_cap = int(turn_cap_raw) if turn_cap_raw else DEFAULT_TURN_CAP
-    wall_clock_raw = getattr(args, "dynamic_action_wall_clock_sec", None)
-    wall_clock = (
-        float(wall_clock_raw) if wall_clock_raw
-        else DEFAULT_WALL_CLOCK_BUDGET_SEC
-    )
-    backend = ClaudeBackend(
-        model=model, max_turns_default=1, raw_completion=True,
-    )
-    runner = DynamicActionRunner(
-        backend,
-        wall_clock_budget_sec=wall_clock,
-        turn_cap=turn_cap,
-        framework_source_roots=tuple(resolve_source_file_allowlist()),
-    )
-
-    async def _executor(ctx: Any) -> dict:
-        result = await runner.run(ctx)
-        return result.to_dict()
-
-    return _executor
-
-
-def _register_executors(
-    coordinator: Coordinator,
-    *,
-    no_kernel: bool = False,
-    compare_against_gpu: str | None = None,
-    session_dir: Path | None = None,
-    specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
-    dynamic_action_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
-) -> None:
-    """Wire all currently-available action executors.
-
-    Real executors are pulled from ``_REAL_EXECUTORS_FULL`` (always) and
-    ``_REAL_EXECUTORS_KERNEL_ONLY`` (when kernel-mode is on). Kernel-owned
-    kinds (whose work is done inside the kernel agent via emit_intent)
-    get ``_noop_prep`` so SubAgentRunner doesn't fail with "no_executor".
-
-    When ``no_kernel`` is True, the kernel-owned executor table is
-    skipped and the kernel-only no-op stubs are skipped. The Coordinator-
-    internal ``profile`` and ``roofline`` analysis executors are
-    registered unconditionally so PRELUDE's auto-enqueued analysis task
-    (kind switched by ``--enable-roofline``) can always dispatch.
-
-    ``target_analysis`` is *always* registered with the real
-    :class:`TargetAnalysisExecutor`. When ``compare_against_gpu`` is a
-    non-empty string, the executor fetches the matching InferenceX
-    reference; when empty / None, it writes a structured
-    ``reason='no_target_gpu_configured'`` marker JSON so the report
-    section is rendered uniformly in both cases.
-
-    ``specialist_executor`` (v0.8 §3.5 / KB_gaps/Gap-01): the
-    :func:`_build_specialist_executor` adapter, when the operator has
-    ``--research-lane-capacity > 0``. ``None`` keeps the legacy
-    behaviour where a ``delegate{action='specialist'}`` task hits
-    ``no_executor`` and fails (M3 / pre-M5 path).
-    """
-    for kind, fn in _REAL_EXECUTORS_FULL.items():
-        coordinator.sub.register_executor(kind, fn)
-
-    coordinator.sub.register_executor(
-        "target_analysis",
-        TargetAnalysisExecutor(
-            compare_against_gpu=(compare_against_gpu or "").strip(),
-            session_dir=session_dir,
-        ),
-    )
-
-    # v0.8 §3.5 + register the specialist sub-agent
-    # adapter so ``delegate{action='specialist'}`` no longer hits
-    # ``no_executor``. Gated by ``--research-lane-capacity`` upstream
-    # (cli only passes a non-None executor when capacity > 0).
-    if specialist_executor is not None:
-        coordinator.sub.register_executor("specialist", specialist_executor)
-
-    # Register the runner-driven dynamic_action executor when
-    # available; otherwise fall back to the stub.
-    if dynamic_action_executor is not None:
-        coordinator.sub.register_executor(
-            "dynamic_action", dynamic_action_executor,
-        )
-    else:
-        from .orchestrator.action_executors.dynamic_action import (
-            dynamic_action_executor as _stub_dynamic_action_executor,
-        )
-        coordinator.sub.register_executor(
-            "dynamic_action", _stub_dynamic_action_executor,
-        )
-
-    # PR-A4 (Arbor-into-Hyperloom): wire the real IntegratePatchExecutor.
-    # The executor reads the specialist's worktree patches, applies them
-    # to framework_source_roots via ``git apply``, runs a Magpie bench,
-    # and decides KEEP / REVERT. It is the single integration point —
-    # specialists never apply patches themselves (Inv-5.1 updated by
-    # PR-A2; the worktree authorisation gives them write capability,
-    # but the orchestrator-side ``integrate_patch`` is what makes those
-    # patches visible to the serving framework).
-    coordinator.sub.register_executor(
-        "integrate_patch",
-        IntegratePatchExecutor(session_dir=session_dir),
-    )
-
-    # FRAMEWORK_PR phase per-candidate executor — Coordinator-internal
-    # only (PolicyGate denies LLM ``delegate{action='framework_pr'}``
-    # via ``framework_pr_action_not_llm_proposable``).
-    coordinator.sub.register_executor(
-        "framework_pr",
-        FrameworkPrExecutor(session_dir=session_dir),
-    )
-
-    # The composite ``roofline`` action runs profile + trace_analyze
-    # atomically and surfaces analysis.md to the next orchestration
-    # tick. Coordinator auto-enqueues it at PRELUDE and on every 10%
-    # gain watermark crossing — independent of ``--no-kernel`` — so the
-    # executor is unconditionally registered. ``profile`` is the
-    # ``--no-enable-roofline`` alternative and is registered via
-    # ``_REAL_EXECUTORS_FULL`` above. PolicyGate denies LLM-proposed
-    # delegate{action_name='roofline'|'profile'} regardless of mode.
-    coordinator.sub.register_executor(
-        "roofline",
-        make_roofline_executor(shared_state=coordinator.shared_state),
-    )
-
-    if log.isEnabledFor(logging.DEBUG):
-        for required_kind in ("roofline", "profile"):
-            if required_kind not in coordinator.sub.executor_registry:
-                log.debug(
-                    "register_executors: %r missing from sub-agent registry "
-                    "(no_kernel=%s); PRELUDE analysis task will fail with "
-                    "no_executor",
-                    required_kind, no_kernel,
-                )
-
-    if no_kernel:
-        return
-
-    for kind, fn in _REAL_EXECUTORS_KERNEL_ONLY.items():
-        coordinator.sub.register_executor(kind, fn)
-    for kind in _NOOP_KINDS_KERNEL_ONLY:
-        coordinator.sub.register_executor(kind, _noop_prep)
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
@@ -2220,25 +1681,23 @@ def _load_kernel_agent_env_fallback() -> None:
     install.sh`` at ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``
     (overridable via ``$KERNEL_AGENT_ENV``).
 
-    Background: the May 2026 R1 N14 run stalled for 1h 12min because
-    the launcher only sourced the user's basic ``.env`` (3 vars) and
-    missed kernel-agent.env.sh. ``RooflineExecutor``'s trace_analyze
-    sub-step imports ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT``
-    at module load — that read happens before any user code can fix the
-    env, so the only way to recover without a restart is to source the
-    file here, before any orchestrator import. Setting the env in this
+    Background: a run once stalled because the launcher only sourced
+    the user's basic ``.env`` and missed kernel-agent.env.sh.
+    ``RooflineExecutor``'s trace_analyze sub-step imports
+    ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT`` at module
+    load — that read happens before any user code can fix the env, so
+    the only way to recover without a restart is to source the file
+    here, before any orchestrator import. Setting the env in this
     process also propagates to all subprocesses launched by Magpie /
     TraceLens / GEAK runners.
 
-    Hard-fail contract (revised after the May 2026 Qwen1.5-7B 10h
-    silent-stall: env file at the wrong path -> silent WARN-only ->
-    5 rooflines all profile-success / trace_analyze-fail / snapshot
-    stays None / LLM heartbeat-only 7.5h). The function now:
+    Hard-fail contract (a wrong-path env file used to WARN-only and let
+    trace_analyze silently fail for hours). The function now:
 
     * Looks ONLY at ``$KERNEL_AGENT_ENV`` (if set) or
       ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``. USER_DATA_PATH
-      MUST be the workspace root (per N17 split: ``runtime/`` is
-      workspace-shared, not per-session). No parent-dir fallback.
+      MUST be the workspace root (``runtime/`` is workspace-shared,
+      not per-session). No parent-dir fallback.
     * If the file is missing OR parses 0 vars OR
       HYPERLOOM_KERNEL_AGENT_ROOT is still unset after sourcing,
       ``sys.exit(2)`` with a clear actionable message instead of
@@ -2467,7 +1926,7 @@ def _check_tracelens_cli() -> None:
     ``inference_optimizer/scripts/install.sh``) into the *pod-local*
     ``/opt/venv/bin/`` — they do NOT persist across pod restarts even
     when ``$USER_DATA_PATH`` (typically ``/workspace/hyperloom``) is a
-    WekaFS-backed session dir that survives pod recycling. SKILL §IR-2
+    WekaFS-backed session dir that survives pod recycling. SKILL
     therefore requires running ``install.sh`` before every launch; the
     only carve-out is ``--resume`` in the *same shell* that earlier ran
     install.sh.
@@ -2476,14 +1935,14 @@ def _check_tracelens_cli() -> None:
     ``runtime/kernel-agent.env.sh`` and skip install.sh (fresh-start
     ``--model`` path) land here with no TraceLens CLI on PATH. Until this
     gate was added, the missing-CLI failure was surfaced only by the
-    robustness agent's J3 signal at tick ~6 (HIGH severity
-    ``tracelens_cli_missing``) — after baseline had already completed
+    robustness agent's HIGH-severity ``tracelens_cli_missing`` signal
+    at tick ~6 — after baseline had already completed
     (or hung) and a multi-minute setup cost was wasted.
     ``trace_analyze`` / ``kernel_opt`` then fail downstream when they
     shell out to ``tracelens_analysis.py``.
 
-    Moving discovery to launch — mirroring ``_gate_claude_model``
-    (SKILL §Step 2 step 10) — turns a delayed silent strike into a
+    Moving discovery to launch — mirroring ``_gate_claude_model`` —
+    turns a delayed silent strike into a
     fail-fast with an actionable error pointing at the install.sh fix.
     """
     missing = [
@@ -2516,8 +1975,8 @@ def _check_node_claude_cli() -> None:
     ``@anthropic-ai/claude-code`` CLI; without it on PATH the SDK falls
     back to a direct HTTP path against the upstream gateway, so this
     is informational rather than fatal. Same for ``codex`` (used by
-    ``CodexBackend`` whenever Codex is on the wire — i.e. ``--critic-agent``
-    / ``--critic-codex-bare`` and/or ``--kernel-codex``). ``node`` is a
+    ``CriticAgentBackend`` review reasoning and ``--kernel-codex``).
+    ``node`` is a
     transitive dep — if it's missing, npm-based recovery via
     ``kernel-agent/scripts/install.sh`` won't work either.
 
@@ -2627,12 +2086,11 @@ def _emit_preflight_diagnostics(
         print(f"  pr_degraded_reason  = {pr_reason}")
 
     # Issue-H (Saturday May 2026): surface Cortex KB offline-queue
-    # state. The flusher daemon already drains ``.kb_pending.ndjson``
-    # in the background, but a dead-letter pile-up is the canonical
-    # signal for "the prior session's KB writes were rejected (HTTP
-    # 4xx schema), this session is starting cold." Operators have no
-    # in-band way to see this today — they discover it only when
-    # specialists return empty proposal_set.
+    # state. A dead-letter pile-up is the canonical signal for "the
+    # prior session's KB writes were rejected (HTTP 4xx schema), this
+    # session is starting cold." Operators have no in-band way to see
+    # this today — they discover it only when specialists return empty
+    # proposal_set.
     try:
         _print_cortex_kb_queue_status()
     except Exception as exc:  # noqa: BLE001 — defensive
@@ -2642,13 +2100,10 @@ def _emit_preflight_diagnostics(
 def _print_cortex_kb_queue_status() -> None:
     """Emit a one-line summary of the Cortex KB offline NDJSON queue.
 
-    Pure visibility helper. The flusher daemon does the actual draining;
-    we only count rows so the operator sees ``pending=N dead=M`` next
-    to the rest of the preflight diagnostics. When ``pending > 0`` the
-    operator can verify the flusher is alive via
-    ``runtime/cortex/.kb_flusher.pid``; the dead-letter count is the
-    422-style permanent-reject signal that telegraphs an upcoming
-    cold-start session for new models.
+    Pure visibility helper. We count rows so the operator sees
+    ``pending=N dead=M`` next to the rest of the preflight diagnostics.
+    The dead-letter count is the 422-style permanent-reject signal that
+    telegraphs an upcoming cold-start session for new models.
     """
     from .session_paths import (
         cortex_dead_letter_ndjson,
@@ -2887,9 +2342,8 @@ def _smoke_test_codex_model(
     if catalog_ids is None:
         return
     # Codex is needed by the Kernel agent (when kernel-codex is on) and by
-    # the Critic — both via the ``codex_bare`` direct path and the
-    # ``agent`` path (which also calls Codex for review reasoning).
-    critic_uses_codex = args.critic_backend in ("agent", "codex_bare")
+    # the critic-agent path (which calls Codex for review reasoning).
+    critic_uses_codex = args.critic_backend == "agent"
     needs_codex = critic_uses_codex or (
         args.kernel_codex and not getattr(args, "no_kernel", False)
     )
@@ -3117,7 +2571,7 @@ def _preflight(
     # --- TraceLens CLI presence (HARD-FAIL; SKILL Step 2 step 8.5) ---
     # Catches brain-generated launchers that source only env.sh and skip
     # install.sh — without this gate the missing-CLI symptom would not
-    # surface until robustness J3 fires at tick ~6, after baseline.
+    # surface until the robustness probe fires at tick ~6, after baseline.
     _check_tracelens_cli()
 
     # --- IR-3: Cortex KB + PR Monitor reachability (soft degrade) ---
@@ -3221,13 +2675,13 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Default critic backend. Step D of the critic-agent integration plan flipped
 # this from "mock" to "agent" once CriticAgentBackend is wired and tested.
-# Override via env (operator runbook) or the --critic-mock / --critic-agent
-# / --critic-codex-bare flags. Step C tests pin a specific value via the
-# CLI flag so they're insulated from default drift.
+# Override via env (operator runbook) or the --critic-mock /
+# --critic-agent flags. Step C tests pin a specific value via the CLI flag
+# so they're insulated from default drift.
 DEFAULT_CRITIC_BACKEND = os.environ.get(
     "INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND", "agent",
 )
-_VALID_CRITIC_BACKENDS = ("mock", "agent", "codex_bare")
+_VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
 def _resolve_critic_choice(args: argparse.Namespace) -> str:
@@ -3243,7 +2697,7 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     if chosen not in _VALID_CRITIC_BACKENDS:
         print(
             f"ERROR: critic backend {chosen!r} not in {_VALID_CRITIC_BACKENDS!r} "
-            f"(set by --critic-mock / --critic-agent / --critic-codex-bare or "
+            f"(set by --critic-mock / --critic-agent or "
             f"INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND)",
             file=sys.stderr,
         )
@@ -3258,23 +2712,6 @@ DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
     "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND", "agent",
 )
 _VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
-
-
-def _robustness_server_configured(args: argparse.Namespace) -> bool:
-    """Return True when a robustness-server endpoint is configured.
-
-    The server is the only source that gives the agent a cluster-wide
-    view on multi-node — once it is wired the agent runs with
-    ``disable_local_probe`` / ``enable_cluster_pod_metrics`` and the
-    sandbox-local ``LocalProbeSource`` false positives are silenced.
-    We treat the server as configured when the operator passes
-    ``--robustness-server-url`` or sets ``ROBUSTNESS_SERVER_URL`` in the
-    environment.
-    """
-    url = (getattr(args, "robustness_server_url", None) or "").strip()
-    if url:
-        return True
-    return bool((os.environ.get("ROBUSTNESS_SERVER_URL") or "").strip())
 
 
 def _resolve_robustness_choice(args: argparse.Namespace) -> str:
@@ -3343,521 +2780,8 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-_MULTI_NODE_WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
-    "ROBUSTNESS_WORKLOAD_UID",
-    "CLAW_WORKLOAD_UID",
-    "WORKLOAD_UID",
-    "KUBE_WORKLOAD_UID",
-    "RAY_JOB_ID",
-)
-
-
-def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
-    """Collect non-default ``request.options`` overrides from CLI flags.
-
-    Only emits keys the operator actually passed so the runtime CLI
-    falls back to its own defaults / env-discovery for the rest.
-
-    Multi-node policy: when ``--nodes >= 2`` the agent must source its
-    signals from the cluster (robustness-server) rather than the local
-    sandbox, otherwise the per-pod LocalProbe trips false ``ray_head_dead``
-    / ``local_server_unreachable`` symptoms on every worker that does not
-    host the inference server. We therefore default ``disable_local_probe``
-    and ``enable_cluster_pod_metrics`` to True in that mode (unless the
-    operator explicitly opted out) and forward a workload_uid hint so the
-    server can resolve every pod that belongs to the same RayJob.
-
-    For the same reason the hardcoded ``http://127.0.0.1:8888/health``
-    probe baked into ``Config.auto_probe_inference_server`` can never
-    succeed when the inference server lives in the head pod, so we also
-    disable the auto-probe and lift the ``no_levers_found`` elapsed-time
-    floor to 60 min (sglang cold start + baseline + profile + turnaround
-    alone burns 35-50 min before the first explore family runs).
-    Single-node semantics stay untouched.
-    """
-    options: dict[str, Any] = {}
-    server_url = getattr(args, "robustness_server_url", None)
-    if server_url is not None:
-        options["robustness_server_url"] = server_url
-    llm_rca = getattr(args, "robustness_llm_rca", None)
-    if llm_rca is not None:
-        options["llm_rca_enabled"] = bool(llm_rca)
-
-    nodes = int(getattr(args, "nodes", 1) or 1)
-    multi_node = nodes >= 2
-    if nodes > 1:
-        options["nodes"] = nodes
-
-    workload_uid = (getattr(args, "robustness_workload_uid", None) or "").strip()
-    if not workload_uid:
-        for key in _MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
-            candidate = (os.environ.get(key) or "").strip()
-            if candidate:
-                workload_uid = candidate
-                break
-    if workload_uid:
-        options["workload_uid"] = workload_uid
-
-    disable_local = getattr(args, "robustness_disable_local_probe", None)
-    if disable_local is None and multi_node:
-        disable_local = True
-    if disable_local is not None:
-        options["disable_local_probe"] = bool(disable_local)
-
-    enable_pod_metrics = getattr(args, "robustness_enable_cluster_pod_metrics", None)
-    if enable_pod_metrics is None and multi_node:
-        enable_pod_metrics = True
-    if enable_pod_metrics is not None:
-        options["enable_cluster_pod_metrics"] = bool(enable_pod_metrics)
-
-    categories_raw = getattr(args, "robustness_pod_metrics_categories", None)
-    if categories_raw:
-        if isinstance(categories_raw, (list, tuple)):
-            cat_iter = categories_raw
-        else:
-            cat_iter = str(categories_raw).split(",")
-        cat_list = [c.strip() for c in cat_iter if str(c).strip()]
-        if cat_list:
-            options["pod_metrics_categories"] = cat_list
-
-    if multi_node:
-        # The inference server runs in the head pod, so the hardcoded
-        # 127.0.0.1:8888 health probe can never succeed and would flood
-        # the bus with false-positive ``local_server_unreachable``
-        # symptoms each tick — disable the auto-probe in multi-node.
-        options["auto_probe_inference_server"] = False
-        # B3 no_levers_found floor — multi-node large-model spends
-        # 35-50 min on sglang cold start + baseline + profile +
-        # turnaround alone before the first explore family runs.
-        # Bumping the elapsed-time floor from 45 to 60 minutes layers
-        # a wall-clock buffer on top of the explore_started gate
-        # (commit 97318ee) so the symptom only fires when both
-        # exploration has started AND a full hour has elapsed
-        # without finding a lever. Single-node default (45.0) stays
-        # untouched.
-        options["progress_no_levers_min_minutes"] = 60.0
-
-    return options
-
-
-# ---------------------------------------------------------------------------
-# Recipe-snapshot KB dispatcher bootstrap
-# ---------------------------------------------------------------------------
-def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
-    """Resolve the local recipe-snapshot KB root.
-
-    The contract per the local-kb-recipe-snapshot-requirements doc
-    (§2): "本地 KB 路径固定放在 ``${USER_DATA_PATH}/kb``". The
-    ``--local-kb-root`` and ``$HYPERLOOM_LOCAL_KB_ROOT`` overrides
-    exist for tests + sandbox isolation; the default for the
-    operator-visible runtime path is fixed.
-
-    Resolution ladder (highest priority first):
-
-    1. ``--local-kb-root <path>`` — explicit operator override
-       (typically only used by tests).
-    2. ``$HYPERLOOM_LOCAL_KB_ROOT`` — env override.
-    3. ``paths.workspace_root() / "kb"`` — the documented default.
-       :func:`~inference_optimizer.paths.workspace_root` returns
-       ``$USER_DATA_PATH`` when set (so a single ``USER_DATA_PATH``
-       override moves the whole KB tail) and otherwise falls back to
-       ``/workspace/hyperloom`` while emitting a one-shot loud warning,
-       so a degraded sandbox / fresh-image boot lands at
-       ``/workspace/hyperloom/kb`` but never silently.
-
-    The directory is NOT created here — :class:`LocalRecipeStore`
-    handles lazy creation on first write so a degraded run that
-    never touches the KB pays nothing on disk.
-    """
-    explicit = (
-        getattr(args, "local_kb_root", None)
-        or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
-    )
-    if explicit:
-        return Path(str(explicit).strip())
-    return _workspace_root_resolve() / "kb"
-
-
-def _build_recipe_kb_dispatcher(
-    args: argparse.Namespace,
-) -> Any:
-    """Build the local-write / remote-read dispatcher for the
-    recipe-snapshot KB.
-
-    Returns a :class:`recipe_kb.RecipeKB` instance. The remote half
-    is wired according to the operator's flags:
-
-    * ``--degraded-kb`` (or ``$CORTEX_KB_URL`` empty AND
-      ``--cortex-kb-url`` not passed) → ``remote=None`` →
-      local-only mode.
-    * Otherwise → enabled :class:`RemoteRecipeClient` pointed at
-      the resolved URL with the foreground-friendly retry/timeout
-      profile (2 s + 1 retry) so a slow / unreachable kb-service
-      never blocks the optimizer's main loop for more than the
-      side-channel budget the operator already calibrated for the
-      legacy v2 client.
-
-    The local store is always wired, regardless of remote
-    presence — writes have to land somewhere.
-    """
-    from .recipe_kb import LocalRecipeStore, RecipeKB, RemoteRecipeClient
-
-    local_root = _resolve_local_kb_root(args)
-    local_store = LocalRecipeStore(root=local_root)
-
-    if bool(getattr(args, "degraded_kb", False)):
-        # Operator explicitly opted out — no network calls regardless
-        # of CORTEX_KB_URL value.
-        return RecipeKB(local=local_store, remote=None)
-
-    # gbrain read-side remote (opt-in). Selected with
-    # ``RECIPE_KB_REMOTE=gbrain`` + ``GBRAIN_BASE_URL`` / ``GBRAIN_TOKEN``.
-    # Writes still go local-only; gbrain only serves the read side, so
-    # this slots into the same dispatcher contract as the cortex remote.
-    if os.environ.get("RECIPE_KB_REMOTE", "").strip().lower() == "gbrain":
-        from .recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
-
-        gbrain_remote = build_gbrain_remote_from_env()
-        if gbrain_remote is not None and gbrain_remote.enabled:
-            kb = RecipeKB(local=local_store, remote=gbrain_remote)
-            # Mirror policy (``RECIPE_KB_MIRROR_MODE``, default ``external``):
-            #   * ``external`` (default) — the optimizer does NOT mirror; an
-            #     out-of-band service (hyperloom-recipe-mirror CronJob) ingests
-            #     the local store into gbrain, keeping gbrain off the write
-            #     path. REQUIRES that CronJob to be deployed: until it runs,
-            #     new champions persist locally only (durable iff
-            #     USER_DATA_PATH is the injected persistent path) and won't
-            #     appear in gbrain.
-            #   * ``inline`` — close the loop in-process: each local recipe
-            #     write is best-effort mirrored into gbrain (the read cache)
-            #     so a future session's remote read returns the champion
-            #     config. Local write stays authoritative.
-            mirror_mode = (
-                os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
-            )
-            if mirror_mode == "inline":
-                # Opt-in best-effort in-process mirror. Falls back to the bare
-                # dispatcher if the write-side MCP can't be built.
-                from .recipe_kb.gbrain_ingest import (
-                    GbrainMirroringRecipeKB,
-                    build_mirror_mcp_from_env,
-                )
-                mirror_mcp = build_mirror_mcp_from_env()
-                return (
-                    GbrainMirroringRecipeKB(kb, mirror_mcp)
-                    if mirror_mcp is not None
-                    else kb
-                )
-            # ``external`` (default): no in-process mirror.
-            return kb
-        # Selected but not configured: stay local-only rather than
-        # silently falling back to the cortex kb-service.
-        return RecipeKB(local=local_store, remote=None)
-
-    cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
-    if not cortex_url:
-        cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
-    if not cortex_url:
-        # No URL configured anywhere — local-only. There is no
-        # hard-coded default endpoint to fall back to (the old central
-        # kb-service default was retired): with nothing configured the
-        # operator wants local-only.
-        return RecipeKB(local=local_store, remote=None)
-
-    remote = RemoteRecipeClient(
-        kb_url=cortex_url,
-        foreground=True,
-        enabled=True,
-    )
-    return RecipeKB(local=local_store, remote=remote)
-
-
-# ---------------------------------------------------------------------------
-# Cortex KB T0 hook
-# ---------------------------------------------------------------------------
-def _bootstrap_cortex_kb(
-    args: argparse.Namespace,
-    *,
-    session_dir: Path,
-    manifest: dict[str, Any],
-    resume: bool,
-):
-    """Boot the recipe-snapshot KB integration and run the T0 anchor.
-
-    Builds a :class:`recipe_kb.RecipeKB` dispatcher (local writes +
-    optional remote-read fall-through) and runs ``run_t0_anchor``
-    against it. Returns the dispatcher so the caller can thread it
-    into the Coordinator.
-
-    Failure handling:
-
-    * Local store is always wired — even ``--degraded-kb`` runs go
-      through the dispatcher (just with ``remote=None``).
-    * Remote read failures are absorbed by the dispatcher and
-      degrade silently to local-only.
-    * T0 hard failures (e.g. filesystem permission denied) log a
-      warning and continue with an empty warm-start; the recipe
-      will be created on the first KEEP/REVERT.
-    """
-    kb = _build_recipe_kb_dispatcher(args)
-
-    state = SharedState.load_or_init(session_dir)
-    workload = (
-        state.model_name
-        or manifest.get("model_name", "")
-        or Path(manifest.get("model_path", "") or "").name
-        or "unknown_model"
-    )
-    hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
-    stack_fp = manifest.get("stack_fingerprint") or {}
-    image_digest = manifest.get("image") or ""
-    # Mirror version + image fingerprint onto SharedState so the
-    # CLOSE-time recipe write (coordinator._collect_workload_tags)
-    # can stamp them onto the recipe.extras WITHOUT re-reading
-    # manifest at every write. Resume reads ``stack_fingerprint_meta``
-    # back from state.json verbatim.
-    if isinstance(stack_fp, dict) and stack_fp:
-        merged_meta = dict(getattr(state, "stack_fingerprint_meta", {}) or {})
-        for key, value in stack_fp.items():
-            if value not in (None, "", "unknown"):
-                merged_meta[str(key)] = value
-        if image_digest and image_digest != "unknown":
-            merged_meta["image_digest"] = image_digest
-        if merged_meta:
-            state.stack_fingerprint_meta = merged_meta
-    extra_attrs = {
-        "marathon_dispatch_id": manifest.get("session_id", ""),
-        "framework":            state.framework or manifest.get("framework", ""),
-        "model_class":          state.model_class or "",
-        # Operator traceability — the recipe.extras carry the most-
-        # recent tracing tuple so a future debugger can answer
-        # "which Claw job / sandbox produced this best_config".
-        "claw_session_id":      manifest.get("claw_session_id") or "",
-        "sandbox_user_id":      manifest.get("sandbox_user_id") or "",
-    }
-    try:
-        run_t0_anchor(
-            kb,
-            state,
-            workload=workload,
-            hw=hw,
-            image_digest=image_digest,
-            stack_fingerprint=stack_fp,
-            extra_attrs=extra_attrs,
-            resume=resume,
-            # KB unavailability MUST NOT abort the launch. Operator
-            # requirement (May 2026): "if KB is not available, do not
-            # affect the main logic." IR-3 already soft-degrades when
-            # KB is unreachable at preflight; we mirror that policy
-            # here so an IR-3-pass + T0-fail race (KB UP at probe
-            # time but DOWN moments later) also degrades cleanly
-            # instead of aborting the optimizer. The Coordinator
-            # The dispatcher's remote half (if any) absorbs read
-            # failures internally; the local store is always
-            # writable, so a hard failure here is a programming bug
-            # (Path / OSError-class), not a remote outage.
-            fail_fast=False,
-            on_status=print,
-            session_dir=session_dir,
-            save_state=True,
-        )
-    except Exception as exc:  # noqa: BLE001 — defensive
-        print(
-            f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\n"
-            f"Continuing without warm-start (recipes for this 5-tuple "
-            f"will be created on first KEEP/REVERT).",
-            file=sys.stderr,
-        )
-        args.kb_degraded_reason = (
-            getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
-        )
-    return kb
-
-
-# ---------------------------------------------------------------------------
-# Retired (v2 RecipeKB cutover): the Cortex KB flusher daemon was a
-# background NDJSON drainer for failed central-server writes. Under
-# the local-write design writes are local-only so there is nothing
-# to drain. The two helpers below are kept as no-op stubs that
-# write a "skipped" status marker for the breakdown collector,
-# preserving the on-disk layout for a few session-cycles while
-# downstream consumers catch up.
-# ---------------------------------------------------------------------------
-def _maybe_spawn_kb_flusher(
-    args: argparse.Namespace,
-    *,
-    session_dir: Path,
-) -> tuple[subprocess.Popen | None, Path]:
-    """No-op shim — flusher daemon is retired.
-
-    Returns ``(None, pid_path)`` and writes a status marker with
-    ``reason="retired_v2_local_write"`` so the breakdown collector
-    surfaces the cutover state. Full retirement (deleting the
-    helper + its callers + the status marker / pid path machinery)
-    happens in a follow-up commit alongside the cortex_kb_client
-    module deletion.
-    """
-    from .session_paths import (
-        cortex_dir,
-        cortex_flusher_pid,
-        cortex_flusher_status_json,
-    )
-
-    pid_path = cortex_flusher_pid(session_dir)
-    status_path = cortex_flusher_status_json(session_dir)
-    cortex_root = cortex_dir(session_dir)
-    cortex_root.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "enabled":       False,
-        "spawned":       False,
-        "pid":           None,
-        "cmd":           [],
-        "cortex_kb_url": (getattr(args, "cortex_kb_url", None) or "").strip() or None,
-        "interval_sec":  0.0,
-        "batch_size":    0,
-        "reason":        "retired_v2_local_write",
-        "ts":            datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "pid_path":      str(pid_path),
-    }
-    try:
-        status_path.parent.mkdir(parents=True, exist_ok=True)
-        status_path.write_text(
-            json.dumps(payload, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log.warning("kb_flusher status marker write failed: %s", exc)
-    return None, pid_path
-
-
-def _stop_kb_flusher(
-    proc: subprocess.Popen | None,
-    pid_path: Path,
-    *,
-    grace_sec: float = 10.0,
-) -> None:
-    """No-op shim — flusher is retired (always spawned proc=None)."""
-    if proc is None:
-        return
-    # Defensive: if a stale prior daemon still exists, terminate it.
-    if proc.poll() is None:
-        try:
-            proc.send_signal(signal.SIGTERM)
-            proc.wait(timeout=grace_sec)
-        except Exception:  # noqa: BLE001
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
-    try:
-        pid_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# PR Monitor + KnowledgePlane wiring
-# ---------------------------------------------------------------------------
-def _bootstrap_knowledge_plane(
-    args: argparse.Namespace,
-    *,
-    cortex_client: Any = None,
-    session_dir: Path | None = None,
-) -> "KnowledgePlane":
-    """Construct the :class:`KnowledgePlane` facade for one session.
-
-    Wires the (optional) PR Monitor REST client + the (already
-    bootstrapped) Cortex KB client into a single read/write surface.
-    Both backends fail-soft: if either is unreachable the facade
-    returns empty / disabled-status responses so prompt assembly +
-    breakdown collectors don't have to branch on availability.
-
-    ``--degraded-pr`` short-circuits the REST probe and yields a
-    disabled :class:`PRMonitorClient` (which also strips the
-    ``mcp__pr_monitor__*`` tool block on the specialist side via
-    :meth:`SpecialistRunner._resolve_tools`).
-    """
-    from .orchestrator.knowledge_plane import (
-        KnowledgePlane,
-        load_domain_repos,
-    )
-    from .orchestrator.pr_monitor import (
-        DEFAULT_PR_FEED_WINDOW_DAYS,
-        DEFAULT_PR_MONITOR_MCP_URL,
-        PRMonitorClient,
-    )
-
-    pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
-    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip() or None
-    pr_mcp_url = (
-        (getattr(args, "pr_monitor_mcp_url", None) or "").strip()
-        or DEFAULT_PR_MONITOR_MCP_URL
-    )
-    window_days = int(
-        getattr(args, "pr_feed_window_days", DEFAULT_PR_FEED_WINDOW_DAYS)
-        or DEFAULT_PR_FEED_WINDOW_DAYS
-    )
-
-    pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
-    # IR-3 (``_preflight()`` step 13) already probed ``/healthz`` and
-    # set ``args.pr_monitor_enabled`` + ``args.pr_degraded_reason``.
-    # We trust that result here — runtime drift falls back to the
-    # specialist-side empty PR feed surface.
-    if not pr_enabled:
-        reason = getattr(args, "pr_degraded_reason", None) or "explicit_flag"
-        status_text = f"disabled ({reason})"
-        print(f"PR Monitor       : DISABLED ({reason})")
-        pr_reachable = False
-    else:
-        status_text = f"REST {pr_client.base_url} (window={window_days}d)"
-        print(
-            f"PR Monitor       : REST {pr_client.base_url} (window="
-            f"{window_days}d, mcp={pr_mcp_url})"
-        )
-        pr_reachable = True
-
-    # v0.8 §3.6 + record a one-shot status marker so
-    # ``breakdown.warnings`` can surface ``pr_monitor:disabled`` /
-    # ``pr_monitor:unreachable`` without scraping logs. Best-effort: a
-    # write failure here only loses the breakdown row, not the
-    # KnowledgePlane bootstrap itself.
-    if session_dir is not None:
-        try:
-            from .session_paths import pr_monitor_status_json
-            from .paths import asset_actions_dir  # noqa: F401 (unused import warning suppress)
-            marker = pr_monitor_status_json(session_dir)
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(json.dumps({
-                "enabled":      bool(pr_enabled),
-                "url":          (pr_client.base_url if pr_enabled else ""),
-                "reachable":    bool(pr_reachable),
-                "mcp_url":      pr_mcp_url if pr_enabled else "",
-                "window_days":  int(window_days),
-                "status_text":  status_text,
-            }, sort_keys=True, indent=2))
-        except OSError as exc:  # noqa: BLE001 — defensive
-            log.warning(
-                "pr_monitor_status marker write failed: %r "
-                "(breakdown.warnings will miss pr_monitor row)", exc,
-            )
-
-    # NOTE: ``cortex_kb=None`` per the local-kb-recipe-snapshot
-    # design (§3 of the requirements doc): the central kb-service
-    # is only consulted as a recipe-read source via the RecipeKB
-    # dispatcher; KnowledgePlane's legacy /v1/points read+write
-    # surface is no longer wired. PR Monitor (a separate service)
-    # is still routed through KnowledgePlane.
-    return KnowledgePlane.from_clients(
-        cortex_kb=None,
-        pr_monitor=pr_client,
-        domain_repos=load_domain_repos(),
-        pr_feed_window_days=window_days,
-        pr_monitor_mcp_url=pr_mcp_url,
-    )
-
-
 def _reset_state_file(session_dir: Path) -> None:
-    """v0.8 §3.10 — back up the existing ``state.json`` and start fresh.
+    """Back up the existing ``state.json`` and start fresh.
 
     The backup name is ``state.json.preReset.<unix_ts>`` so multiple
     resets in the same session_dir don't clobber each other. Symbolic
@@ -4373,9 +3297,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         args.resume = True
 
     if args.resume:
-        # Resume mode (N17-aware): USER_DATA_PATH stays at workspace
-        # level so runtime/ + logs/ resolution doesn't break (N15
-        # `_load_kernel_agent_env_fallback` looks at $USER_DATA_PATH/
+        # Resume mode: USER_DATA_PATH stays at workspace level so
+        # runtime/ + logs/ resolution doesn't break
+        # (`_load_kernel_agent_env_fallback` looks at $USER_DATA_PATH/
         # runtime/kernel-agent.env.sh, which only exists at workspace
         # level after install.sh ran). We then pick the per-session
         # subdir to resume from via either:
@@ -4644,9 +3568,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=True,
         )
-        kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
-            args, session_dir=session_dir,
-        )
         # KnowledgePlane facade. Bootstrapped
         # alongside the cortex client so a resumed session also gets the
         # PR Monitor + KB readonly tools wired into specialist dispatch.
@@ -4791,8 +3712,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
               f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision} "
               f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}")
 
-        # N17: session_dir is now <workspace_root>/<model>/<UTC ts>/
-        # by default (per-model + per-launch). Workspace_root is
+        # session_dir is <workspace_root>/<model>/<UTC ts>/ by default
+        # (per-model + per-launch). Workspace_root is
         # $USER_DATA_PATH (fallback /workspace/hyperloom). To restore
         # the legacy flat layout, set INFERENCE_OPTIMIZER_SESSION_LAYOUT=
         # flat. `make_session_dir(model_name=...)` does the layout
@@ -4838,12 +3759,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # seed (so model_name / gpu_type / framework are populated for
         # recipe_canonical_id derivation) but before Coordinator is
         # constructed (the Coordinator stores the client + threads it
-        # into T2/T3/T4 hooks). Fails fast unless --degraded-kb.
+        # into its KB hooks). Fails fast unless --degraded-kb.
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=False,
-        )
-        kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
-            args, session_dir=session_dir,
         )
         # KnowledgePlane facade for specialist
         # sub-agents. Wraps cortex_client (already T0'd above) + a
@@ -4916,7 +3834,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # would otherwise blow up on missing runtime). Fail-fast policy: if the
     # operator selected --critic-agent (or it's the default) but the
     # critic-agent runtime is unreachable, we abort with rc=2 instead of
-    # silently falling back to mock/codex_bare.
+    # silently falling back to mock.
     critic_choice = _resolve_critic_choice(args)
     critic_agent_root: Path | None = None
     critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
@@ -4936,7 +3854,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
                 f"runtime/cli.py, or install critic-agent at "
                 f"$REPO_ROOT/critic-agent/.\n"
-                f"  Bypass with --critic-mock or --critic-codex-bare.",
+                f"  Bypass with --critic-mock.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -4999,9 +3917,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # as `policy_denied` in its inbox. Tests omit this and keep the
     # legacy lenient mode for fixture paths under /tmp.
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
-    # flip on PolicyGate R1 phase_incompatible enforcement
-    # for production runs (matches the legacy→v0.8 strict_paths
-    # rollout). Tests construct PolicyGate directly with strict_phase
+    # flip on PolicyGate R1 phase_incompatible enforcement for
+    # production runs. Tests construct PolicyGate directly with strict_phase
     # left at the dataclass default (False) so legacy fixtures aren't
     # broken; this env var only affects the cli boot path.
     if getattr(args, "strict_phase", True):
@@ -5048,8 +3965,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
 
     # Build the phase budget pct dict from CLI flags; ``None`` values
-    # fall back to library defaults inside Coordinator. See KB_design
-    # §3.13 M2 §7 + §3.8 §5.3.
+    # fall back to library defaults inside Coordinator.
     phase_budget_pct: dict[str, float] = {}
     for cli_field, phase_name in (
         ("phase_budget_prelude_pct", "PRELUDE"),
@@ -5082,7 +3998,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         ),
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
-        # v0.8 §3.5 + KB_gaps/Gap-01/Gap-02 — KnowledgePlane facade.
+        # KnowledgePlane facade.
         # ``None`` when --degraded-kb; otherwise wraps Cortex KB +
         # PR Monitor for specialist prompt assembly.
         knowledge_plane=knowledge_plane,
@@ -5091,7 +4007,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # each proposal_set and surfaces the results to Orchestration as
         # one reference among many (never gates anything).
         proposal_scorer=_build_proposal_scorer(args),
-        # GAP 1 — Warm-recipe replay controls. Default ON, fires when
+        # Warm-recipe replay controls. Default ON, fires when
         # warm_start_recipe.confidence >= min_confidence and the
         # measured gain reproduces at least min_reproduce_pct of the
         # recipe's historical claim. Manifest is the persistent
@@ -5134,13 +4050,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     except (TypeError, ValueError):
         coordinator.framework_pr_discover_timeout_sec = 0.0
-    # v0.8 §3.5 + build specialist executor when the
-    # research_lane capacity is non-zero. ``args.research_lane_capacity``
-    # is already clamped to [0, 32] by ``_seed_shared_state``; a value
-    # of 0 means "degrade to M3 LLM-direct grid", and we keep
-    # ``specialist_executor=None`` so the dispatcher falls back to the
-    # legacy ``no_executor`` rejection (which PolicyGate R2 also
-    # short-circuits in practice).
+    # Build specialist executor when the research_lane capacity is
+    # non-zero. ``args.research_lane_capacity`` is already clamped to
+    # [0, 32] by ``_seed_shared_state``; a value of 0 means "degrade to
+    # the LLM-direct grid", and we keep ``specialist_executor=None`` so
+    # the dispatcher falls back to the ``no_executor`` rejection (which
+    # PolicyGate R2 also short-circuits in practice).
     specialist_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 0
     )
@@ -5168,8 +4083,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     if critic_choice == "mock":
         critic_str = "mock"
-    elif critic_choice == "codex_bare":
-        critic_str = f"codex-bare({args.codex_model})"
     else:  # "agent"
         critic_str = (
             f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, "
@@ -5212,21 +4125,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         await coordinator.stop()
-        # v0.8 KB_gaps/Dead-E — stop the flusher daemon (best-effort;
-        # graceful SIGTERM with 10s budget then SIGKILL fallback). Done
-        # before the breakdown safety-net so the final NDJSON drain
-        # numbers reflect a stable post-shutdown queue.
-        try:
-            _stop_kb_flusher(kb_flusher_proc, kb_flusher_pid_path)
-        except Exception:  # noqa: BLE001
-            log.exception("kb_flusher stop failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json
         # for downstream consumers (claw-stats-service / hyperloom-results-
         # service / offline analysis). Best-effort — a failure here MUST NOT
         # mask the actual stop_reason, so we swallow exceptions and log.
         #
-        # v0.8 §3.2 §5.5 / KB_gaps/Gap-06: when the CLOSE phase sequencer
-        # ran to completion, step 2 already wrote the same artifact via
+        # When the CLOSE phase sequencer ran to completion, step 2
+        # already wrote the same artifact via
         # the standard session_breakdown executor. Skip the duplicate
         # write here so the cli.finally path doesn't clobber the
         # sequencer's output (which includes the full CLOSE-step
@@ -5645,7 +4550,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--kernel-claude", action="store_false", dest="kernel_codex",
                       help="Use Claude backend for Kernel agent")
     # Critic backend selection. ``critic_backend`` is the canonical
-    # attribute; the four flags below are convenience aliases that all
+    # attribute; the flags below are convenience aliases that all
     # set the same dest. Default is filled by the CLI default block in
     # ``_resolve_critic_choice``; a single explicit flag wins, conflicts
     # are caught at runtime (mutual exclusion checked there because
@@ -5667,25 +4572,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Force the critic-agent runtime backend (KB + session memory + "
              "review_constraints). Requires CRITIC_AGENT_ROOT or a sibling "
              "$REPO_ROOT/critic-agent/ directory.",
-    )
-    opt.add_argument(
-        "--critic-codex-bare",
-        dest="critic_backend",
-        action="store_const",
-        const="codex_bare",
-        help="Force the legacy bare-Codex Critic (single chat-completion + "
-             "JSON envelope; no KB, no session memory). For debugging the "
-             "LLM layer in isolation.",
-    )
-    # Back-compat alias for the old --critic-real flag (semantically the
-    # same as --critic-codex-bare). Hidden from --help to avoid promoting
-    # the old name; still accepted so existing launchers don't break.
-    opt.add_argument(
-        "--critic-real",
-        dest="critic_backend",
-        action="store_const",
-        const="codex_bare",
-        help=argparse.SUPPRESS,
     )
     # ----- Robustness backend selection (mirrors critic) ------------------
     opt.add_argument(
@@ -5788,14 +4674,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # Cortex KB integration flags
     # ------------------------------------------------------------------
-    # The defaults wire Cortex *on* (matches the "Loop 1" expectation in
-    # the cortex hand-off doc). ``--degraded-kb`` is a debug escape hatch
-    # that fully bypasses T0/T2/T3/T4 so a fresh sandbox can reproduce
-    # the behaviour without any KB writes. ``--cortex-kb-url``
+    # The defaults wire Cortex *on*. ``--degraded-kb`` is a debug escape
+    # hatch that fully bypasses the KB hooks so a fresh sandbox can
+    # reproduce the behaviour without any KB writes. ``--cortex-kb-url``
     # overrides the env value (``CORTEX_KB_URL``) without exporting one
     # process-wide. ``--cortex-strict-fingerprint`` enforces the
     # manifest stack_fingerprint matches a recipe before warm_start is
-    # consumed (M5 consumer; M1 records the flag into manifest only).
+    # consumed.
     opt.add_argument(
         "--cortex-kb-url",
         dest="cortex_kb_url",
@@ -5848,7 +4733,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "in manifest.json). Default: lenient (M1 records the flag "
              "in manifest only; consumed by M5 specialist assembly).",
     )
-    # GAP 1 — Warm-recipe replay (PRELUDE auto-applies the KB best_config
+    # Warm-recipe replay (PRELUDE auto-applies the KB best_config
     # before EXPLORE starts). Three flags control the behavior:
     #
     # 1. ``--no-warm-replay``         — disable the auto-enqueue entirely.
@@ -5893,39 +4778,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "``status=drift`` and continue with the regular EXPLORE "
              "flow without inheriting the warm config.",
     )
-    # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle. The cli
-    # spawns ``scripts.cortex_kb_flusher`` after the T0 anchor (so the
-    # NDJSON pending queue gets drained in the background while the
-    # main loop runs); ``--no-kb-flusher`` short-circuits the spawn for
-    # operators debugging the NDJSON path manually. ``--kb-flusher-*``
-    # overrides forward the same flags to the daemon CLI.
-    opt.add_argument(
-        "--no-kb-flusher",
-        dest="kb_flusher_enabled",
-        action="store_false",
-        default=True,
-        help="Skip spawning the Cortex KB flusher daemon. The NDJSON "
-             "pending queue still accumulates but only drains on the "
-             "next session start (or via manual ``python -m "
-             "inference_optimizer.scripts.cortex_kb_flusher`` run). "
-             "Implied by --degraded-kb.",
-    )
-    opt.add_argument(
-        "--kb-flusher-interval-sec",
-        dest="kb_flusher_interval_sec",
-        type=float,
-        default=5.0,
-        help="Forwarded to the flusher daemon as --interval-sec "
-             "(default 5.0).",
-    )
-    opt.add_argument(
-        "--kb-flusher-batch-size",
-        dest="kb_flusher_batch_size",
-        type=int,
-        default=50,
-        help="Forwarded to the flusher daemon as --batch-size "
-             "(default 50).",
-    )
     # ------------------------------------------------------------------
     # PR Monitor REST + MCP
     # ------------------------------------------------------------------
@@ -5935,7 +4787,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # k8s namespace must port-forward + pass a localhost URL.
     # ``--degraded-pr`` switches the KnowledgePlane.pr_feed_warm
     # path to a no-op and strips ``mcp__pr_monitor__*`` from the
-    # specialist tool whitelist (Inv-6.3 degrade-to-empty).
+    # specialist tool whitelist (degrade-to-empty).
     opt.add_argument(
         "--pr-monitor-url",
         dest="pr_monitor_url",
@@ -5977,14 +4829,14 @@ def _build_parser() -> argparse.ArgumentParser:
              "Default: 30.",
     )
     # ------------------------------------------------------------------
-    # v0.8 M5/M6 — specialist research_lane capacity
+    # specialist research_lane capacity
     # ------------------------------------------------------------------
     # ``--research-lane-capacity`` locks the number of LLM specialists
     # that may run concurrently on the research_lane:
-    #   * 0   → degrade to M3 (no specialist dispatch; EXPLORE uses the
-    #           default_grid path).
-    #   * 1   → v0.8 M5 default (single specialist at a time).
-    #   * 4   → PR-A3 (Arbor-into-Hyperloom) default — enough headroom
+    #   * 0   → no specialist dispatch; EXPLORE uses the default_grid
+    #           path.
+    #   * 1   → single specialist at a time.
+    #   * 4   → default — enough headroom
     #           for the Orchestration LLM to fan out one specialist per
     #           top-K gap inside one tick (multi-emit shape) and have
     #           the dispatcher actually run them in parallel.
@@ -6050,7 +4902,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable the advisory specialist-proposal scorer entirely.",
     )
     # ------------------------------------------------------------------
-    # v0.8 §3.5 / §3.13 M5 + specialist sub-agent
+    # specialist sub-agent
     # backend selection. Specialists run via Claude (default) and inherit
     # the orchestration model unless overridden. Per-task turn / time
     # caps protect against runaway LLM consumption.
@@ -6126,7 +4978,7 @@ def _build_parser() -> argparse.ArgumentParser:
              ".",
     )
     # ------------------------------------------------------------------
-    # PR-A2 (Arbor-into-Hyperloom): specialist dispatch shape.
+    # specialist dispatch shape
     # ------------------------------------------------------------------
     opt.add_argument(
         "--specialist-dispatch-mode",
@@ -6360,7 +5212,7 @@ def _build_parser() -> argparse.ArgumentParser:
             hint=_retired_hint,
         )
     # ------------------------------------------------------------------
-    # Fix E — per-variant explore overtime kill ratio.
+    # Per-variant explore overtime kill ratio.
     #
     # Mirrored into :attr:`SharedState.explore_overtime_kill_ratio`
     # and read by :class:`ExploreExecutor` via task.params (Coordinator
@@ -6486,7 +5338,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # drop scoreboard
     # ------------------------------------------------------------------
-    # v0.8 retires the legacy ``action_scores`` decision system. The
+    # The legacy ``action_scores`` decision system is retired. The
     # flag below controls how a resumed session's leftover
     # scoreboard data is handled:
     #
@@ -6498,8 +5350,8 @@ def _build_parser() -> argparse.ArgumentParser:
     #   a ``breakdown.warnings`` entry so the operator sees the
     #   migration even on a fresh dashboard.
     #
-    # No third "keep" mode is offered: §3.9 §7 explicitly forbids
-    # carrying the field forward (the prompt builder no longer reads
+    # No third "keep" mode is offered: carrying the field forward is
+    # forbidden (the prompt builder no longer reads
     # it; keeping the bytes only inflates state.json).
     opt.add_argument(
         "--legacy-action-scores",
@@ -6636,13 +5488,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "gain sum is computed over. Default 5.",
     )
     # ------------------------------------------------------------------
-    # v0.8 IR-6 — EXPLORE HARD force-exit thresholds (Saturday May 2026)
+    # IR-6 — EXPLORE HARD force-exit thresholds
     # ------------------------------------------------------------------
     # Either condition fires an ``explore_force_exit_low_budget`` exit
-    # which routes EXPLORE → KERNEL (or SWEEP when --no-kernel). Iron
-    # Rule IR-6: this gate is non-negotiable — the steward / plateau /
-    # LLM cannot extend EXPLORE past either threshold. Locked at session
-    # start into ``SharedState.plateau_overrides``.
+    # which routes EXPLORE → KERNEL (or SWEEP when --no-kernel). This
+    # gate is non-negotiable — the steward / plateau / LLM cannot extend
+    # EXPLORE past either threshold. Locked at session start into
+    # ``SharedState.plateau_overrides``.
     opt.add_argument(
         "--explore-force-exit-hours-remaining",
         dest="explore_force_exit_hours_remaining",
@@ -6662,7 +5514,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "0.20 (IR-6).",
     )
     # ------------------------------------------------------------------
-    # IR-7 — session_steward_specialist controls (Saturday May 2026)
+    # IR-7 — session_steward_specialist controls
     # ------------------------------------------------------------------
     # The steward is the soft gate on plateau (HARD IR-6 still wins on
     # low budget). Operators can disable it for smoke runs or cap its
@@ -6689,8 +5541,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # Each phase claims a fraction of the total wall-clock budget. The
     # numbers below are caps — the Coordinator may exit a phase earlier
-    # if the plateau judge fires. Defaults follow §3.8 §5.3.  Sum need
-    # not equal 1.0 (a deliberate padding is encouraged).
+    # if the plateau judge fires. Sum need not equal 1.0 (a deliberate
+    # padding is encouraged).
     opt.add_argument(
         "--max-minutes-prelude-pct",
         dest="phase_budget_prelude_pct",

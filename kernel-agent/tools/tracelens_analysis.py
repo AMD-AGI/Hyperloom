@@ -266,16 +266,14 @@ def _check_selected_chunk_has_gpu_events(
 
 
 # ---------------------------------------------------------------------------
-# N36 — chunk-quality gate (busy_ratio threshold + alternate-mode lookup)
+# chunk-quality gate (busy_ratio threshold + alternate-mode lookup)
 # ---------------------------------------------------------------------------
-# Background: N25 deliberately stays a STRUCTURAL gate (num_gpu_events>0 AND
-# gpu_busy_duration>0). The DSR1-0528 (671B FP8 MoE) TP=8 10k/1k production
-# run on 2026-05-21 exposed a gap: TraceLens' splitter happily produced a
-# ``mixed_steady_state`` chunk with 160 events / 2053us busy out of 3.26s
-# (0.063% busy) -- structurally non-empty so N25 passed -- but
-# substantively garbage. Downstream analysis.md reported "Compute %=0.09%
-# / Idle %=99.90%" with ``reusable_native_kernel_ids=[]`` and the LLM
-# was left with nothing to feed GEAK with.
+# The structural gate (num_gpu_events>0 AND gpu_busy_duration>0) is not
+# enough: TraceLens' splitter can produce a ``mixed_steady_state`` chunk
+# that is structurally non-empty but substantively garbage (e.g. 160
+# events / 2053us busy out of 3.26s = 0.063% busy), yielding an
+# analysis.md with ~0% compute and empty ``reusable_native_kernel_ids``
+# so the LLM has nothing to feed GEAK.
 #
 # Root cause: the profile window calibration in ``_workload_envs``
 # computes ``delay_iters = OSL * (R+1) * 3 - max_iters/2`` -- it only
@@ -284,13 +282,13 @@ def _check_selected_chunk_has_gpu_events(
 # 6016 every batch has finished its single prefill iter and the
 # profiler captures only decode iters where the 8x MI300X is sparse.
 #
-# N36 closes that gap: this helper checks busy_ratio AND looks for an
-# alternate mode with materially higher busy_ratio. When such an
-# alternate exists we emit ``steady_state_chunk_low_quality`` (in the
-# N26 retry allowlist) so the coordinator re-issues trace_analyze
-# automatically. When NO mode is better we return ``None`` -- emitting
-# a retry-warning would spin the same bad trace forever; the
-# ``roofline_failure_streak`` path handles that case (N27 fallback).
+# This helper checks busy_ratio AND looks for an alternate mode with
+# materially higher busy_ratio. When such an alternate exists we emit
+# ``steady_state_chunk_low_quality`` (in the retry allowlist) so the
+# coordinator re-issues trace_analyze automatically. When NO mode is
+# better we return ``None`` -- emitting a retry-warning would spin the
+# same bad trace forever; the ``roofline_failure_streak`` path handles
+# that case.
 _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
 # Alternate mode must beat the requested mode by at least this margin
 # for the auto-retry to be worth it. Otherwise we'd thrash between
@@ -378,8 +376,8 @@ def _check_selected_chunk_has_gpu_events_quality(
     sel_events, sel_busy, sel_dur = _stats(selected_row)
     sel_ratio = _busy_ratio(sel_events, sel_busy, sel_dur)
     if sel_ratio is None:
-        # Can't measure ratio; N25 already covers the structural empty
-        # case. Defer.
+        # Can't measure ratio; the structural empty case is already
+        # covered. Defer.
         return None
     threshold = _resolve_min_busy_ratio()
     if sel_ratio >= threshold:
@@ -462,8 +460,13 @@ RUNTIME_API_NAMES = {
     "cudadevicesynchronize",
     "cudastreamsynchronize",
 }
-DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
-# Internal extension is opt-in: no default path. It is used only when
+# TraceLens public root has no in-process default: install.sh exports
+# TRACELENS_ROOT (default $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens,
+# clone of AMD-AGI/TraceLens pinned to a fixed SHA) into
+# kernel-agent.env.sh, and callers either inherit it from env or pass
+# --tracelens-root. If neither is provided we fail loudly rather than
+# silently fall back to a hard-coded /wekafs path that may not exist.
+# Internal extension is opt-in: no default path either. It is used only when
 # TRACELENS_INTERNAL_ROOT (env) or --tracelens-internal-root is set; an empty
 # value keeps Hyperloom on the open-source-only report.
 DEFAULT_TRACELENS_INTERNAL_ROOT = ""
@@ -2571,7 +2574,11 @@ def main() -> int:
             "for legacy launchers, then to /workspace/hyperloom."
         ),
     )
-    parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
+    parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", ""),
+                        help="TraceLens public checkout (TRACELENS_ROOT). Required: "
+                             "kernel-agent/scripts/install.sh exports it from "
+                             "kernel-agent.env.sh; pass --tracelens-root only when "
+                             "running outside the installer-managed env.")
     parser.add_argument("--tracelens-internal-root",
                         default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
                         help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
@@ -2766,7 +2773,14 @@ def main() -> int:
             update_status(status_path, state="running", current_step="install_tracelens",
                           log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                           started_at=started_at)
-            tl_root = Path(args.tracelens_root)
+            tl_root_arg = (args.tracelens_root or "").strip()
+            if not tl_root_arg:
+                raise SystemExit(
+                    "TraceLens root not provided: set TRACELENS_ROOT in env "
+                    "(kernel-agent/scripts/install.sh writes it to "
+                    "kernel-agent.env.sh) or pass --tracelens-root."
+                )
+            tl_root = Path(tl_root_arg)
             # Internal extension is opt-in: used only when a non-empty
             # --tracelens-internal-root / TRACELENS_INTERNAL_ROOT is provided.
             internal_root_arg = (args.tracelens_internal_root or "").strip()
@@ -2885,15 +2899,14 @@ def main() -> int:
                 # (TraceLens itself has no internal preference between them).
                 # The consumer (us) picks ONE per the configured intent.
                 #
-                # Pre-N25 behaviour was an implicit `mixed or decode_only or
-                # prefilldecode` chain that auto-fell-through silently. This
-                # broke for the SOLAR-10.7B TP=1 case where the mixed window
-                # degenerated to gpu_busy=0.13% (all forward in CUDA graph
-                # + rocprofiler-sdk emits no Dispatch Task aggregate without
-                # TP-multi-stream sync) while the prefilldecode chunk carried
-                # 60% busy + 480 GEMM + 240 paged_attention. Implicit
-                # fall-through hid the issue. N25 makes the mode explicit
-                # (--steady-state-mode flag, default 'mixed') and hard-fails
+                # An implicit `mixed or decode_only or prefilldecode`
+                # fall-through chain silently hid bad windows: e.g. a mixed
+                # window can degenerate to gpu_busy=0.13% (all forward in a
+                # CUDA graph + rocprofiler-sdk emits no Dispatch Task
+                # aggregate without TP-multi-stream sync) while the
+                # prefilldecode chunk carries 60% busy + 480 GEMM + 240
+                # paged_attention. So the mode is explicit
+                # (--steady-state-mode flag, default 'mixed') and we hard-fail
                 # when the selected chunk doesn't exist or is empty so the
                 # operator can re-issue roofline with a different mode.
                 def _collect(prefix: str) -> list[Path]:
@@ -2944,7 +2957,7 @@ def main() -> int:
                     # produced chunks but per TraceLens design we don't pick
                     # them as a silent fallback -- emit a structured warning
                     # so the coordinator can re-issue roofline with a
-                    # different --steady-state-mode (N25 contract).
+                    # different --steady-state-mode.
                     warning = {
                         "code": "steady_state_chunk_missing",
                         "severity": "blocking",
@@ -3020,18 +3033,16 @@ def main() -> int:
                         f"{empty_chunk_warning['non_empty_modes']}"
                     )
 
-                # N36 (May 2026) — quality gate on busy_ratio. N25
-                # only catches structurally empty chunks (events==0
-                # OR busy==0); a chunk like the DSR1-0528 10k/1k case
-                # (160 events / 2ms busy / 3.26s duration = 0.06%
-                # busy) passes N25 but is substantively garbage. The
-                # quality gate looks for an alternate mode with
-                # materially higher busy_ratio and emits a
-                # ``steady_state_chunk_low_quality`` warning the
-                # coordinator's N26 retry path consumes -- same
-                # remediation flow as the empty-chunk case, no
-                # additional wiring required. See N36 module-level
-                # comment + test_n36_chunk_quality_gate.py.
+                # Quality gate on busy_ratio. The structural gate only
+                # catches empty chunks (events==0 OR busy==0); a chunk
+                # like a 10k/1k case (160 events / 2ms busy / 3.26s
+                # duration = 0.06% busy) passes that gate but is
+                # substantively garbage. The quality gate looks for an
+                # alternate mode with materially higher busy_ratio and
+                # emits a ``steady_state_chunk_low_quality`` warning the
+                # coordinator's retry path consumes -- same remediation
+                # flow as the empty-chunk case, no additional wiring
+                # required. See the chunk-quality-gate module comment.
                 low_quality_warning = _check_selected_chunk_has_gpu_events_quality(
                     split_dir=split_dir,
                     selected_chunk=cli_trace_path,
@@ -3332,13 +3343,13 @@ def main() -> int:
         update_status(status_path, state="failed", current_step="failed",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at, error=f"{type(exc).__name__}: {exc}")
-        # N26: include any trace_health_warnings accumulated before the
+        # Include any trace_health_warnings accumulated before the
         # exception fired so the handler / Coordinator can auto-recover
         # (e.g. re-issue with a different --steady-state-mode when a
         # steady_state_chunk_empty warning carries non_empty_modes).
-        # Pre-N26 the failure JSON dropped warnings on the floor, so
-        # the RooflineExecutor saw `status=failed` without the structured
-        # hint it needed to decide between hard-fail and auto-retry.
+        # Otherwise the failure JSON would drop warnings on the floor and
+        # the RooflineExecutor would see `status=failed` without the
+        # structured hint it needs to decide hard-fail vs auto-retry.
         print(json.dumps({
             "tool": "tracelens_analysis",
             "session_id": session_id,

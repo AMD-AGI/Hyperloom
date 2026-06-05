@@ -110,7 +110,8 @@ Installs:
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
     Node/npm, TraceLens, GEAK, and OOB CLI auth.
   - Chains to framework-agent/scripts/install.sh for the `fa` CLI
-    used by the `framework_pr` bandit arm at optimize-time.
+    used by the Coordinator-owned FRAMEWORK_PR phase at optimize-time
+    (candidate discovery via `fa phase-discover`).
     framework-agent is fully standalone; the chain just makes the
     `fa` binary available on PATH inside the same sandbox without
     operators having to run a second installer.
@@ -665,10 +666,10 @@ chain_kernel_agent() {
 
 # --- 5. Chain to framework-agent ---
 # Mirrors chain_kernel_agent but for the `fa` CLI used by the
-# `framework_pr` bandit arm. framework-agent's installer is fully
-# self-contained (zero shared state with kernel-agent), so we just
+# Coordinator-owned FRAMEWORK_PR phase. framework-agent's installer is
+# fully self-contained (zero shared state with kernel-agent), so we just
 # delegate. Failures here are non-fatal: the IO main path still
-# works without fa; only `framework_pr` arm ticks require it.
+# works without fa; only the FRAMEWORK_PR phase requires it.
 chain_framework_agent() {
   if [ "$SKIP_FRAMEWORK_AGENT" -eq 1 ]; then
     log "skipping framework-agent installer (--skip-framework-agent)"
@@ -750,8 +751,8 @@ _probe_framework_source_roots
 # framework-agent (sibling skill — drives the standalone FRAMEWORK_PR
 # phase via ``fa phase-discover`` for batch enumeration. The
 # Coordinator's executor handles the apply/bench loop directly, so
-# ``phase-fetch`` / ``phase-emit-proposal`` ship for ad-hoc use but
-# are not on the inference_optimizer hot path). Owns its own python
+# only ``phase-discover`` is wired/kept on the inference_optimizer
+# path). Owns its own python
 # deps and venv layout; we only need to invoke its installer.
 #
 # Install is ON by default to match the runtime default

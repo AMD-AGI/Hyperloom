@@ -1619,7 +1619,7 @@ def collect_capability_summary(
         if sweep_cap.get("attempts", 0) > 0:
             sweep_cap["status"] = "completed"
 
-    # merged explore action capability row (KB_design §3.4). Carries
+    # merged explore action capability row. Carries
     # the unified explore_search ledger activity, including the
     # validated cumulative gain previously surfaced by validate_stack.
     explore = _capability_for_action(state, "explore")
@@ -1651,7 +1651,7 @@ def collect_capability_summary(
 
     # specialist sub-agent capability row. Counts
     # are derived from ``specialist_rounds`` so they always agree with
-    # ``specialist_runs`` (Inv-12.2 single source).
+    # ``specialist_runs`` (single source).
     specialist_row = _specialist_capability_row(state)
     return {
         "geak":           geak_cap,
@@ -2629,7 +2629,7 @@ def collect_kernel_lifecycle(
 
 
 # ---------------------------------------------------------------------------
-# §10 Param / backends search
+# §10 Explore search ledger
 # ---------------------------------------------------------------------------
 def _shape_ledger(
     ledger: dict[str, Any] | None,
@@ -2724,7 +2724,7 @@ def _patch_winners_history(
     return out
 
 
-def collect_param_search(
+def collect_explore_search(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
@@ -2758,6 +2758,11 @@ def collect_param_search(
             state.get("backend_winners_history") or [], baseline_tput,
         ),
     }
+
+
+# Backwards-compatible function name for older in-repo callers/tests. The
+# returned shape is the merged explore ledger plus archived aliases.
+collect_param_search = collect_explore_search
 
 
 # ---------------------------------------------------------------------------
@@ -3039,7 +3044,7 @@ def _collect_lane_timeline(
             )
             capacities = {r["lane"]: int(r["capacity"]) for r in cur.fetchall()}
         except _sqlite3.OperationalError:
-            # Pre-M6 DB without lane_capacity — fall back to defaults so
+            # Older DB without lane_capacity — fall back to defaults so
             # resume on an old session still produces a stable shape.
             from ..storage.schema import DEFAULT_LANE_CAPACITIES as _DEFAULT
             capacities = dict(_DEFAULT)
@@ -3276,7 +3281,7 @@ def _promote_legacy_gain_entries(
 
 
 # ---------------------------------------------------------------------------
-# §13b Roofline (PR #321 single-path + watermark refresh model)
+# §13b Roofline (single-path + watermark refresh model)
 # ---------------------------------------------------------------------------
 def collect_roofline(
     state: dict[str, Any],
@@ -3356,7 +3361,7 @@ def collect_attribution(
     state_provided = isinstance(state_entries, list) and len(state_entries) > 0
     promoted_from_legacy = False
     if state_provided and any(not isinstance(e, dict) for e in state_entries):
-        # Pre-v0.7 state: bare numeric ledger. Promote into V1 schema
+        # Older state: bare numeric ledger. Promote into V1 schema
         # so source_breakdown bucketing + dashboards see rich entries.
         entries = _promote_legacy_gain_entries(state_entries, state)
         promoted_from_legacy = True
@@ -4289,7 +4294,7 @@ def collect_source_files(
 
 
 # ---------------------------------------------------------------------------
-# §16 Phase segments — v0.8 M2 phase state machine
+# §16 Phase segments — phase state machine
 # ---------------------------------------------------------------------------
 def collect_phase_segments(
     state: dict[str, Any],
@@ -4365,10 +4370,6 @@ def collect_phase_segments(
         if entered_unix is not None and exit_unix is not None:
             elapsed = max(0.0, float(exit_unix) - float(entered_unix))
         evidence_dict = dict(row.get("evidence") or {})
-        if evidence_dict.get("r09_provisional") or (
-            str(evidence_dict.get("evidence") or "") == "m2_proxy"
-        ):
-            proxy_seen = True
         segments.append({
             "phase":           str(row.get("to_phase") or ""),
             "from_phase":      str(row.get("from_phase") or ""),
@@ -4482,12 +4483,9 @@ def collect_kb_provenance(
        Cortex CLI call status. Useful for diagnosing T0 sync failures
        from the breakdown JSON alone.
 
-    Returns a stable shape (always the same keys, even on a `--degraded-kb`
-    session) so downstream readers (claw-stats-service) don't have to
-    branch. ``commit_summary`` / ``pending_edges`` / ``edges_promoted``
-    / ``edges_negated`` keys are kept (always empty) for back-compat
-    with claw-stats-service consumers that pre-date the T2/T3 protocol
-    retirement; remove in a future schema bump.
+    Returns a stable shape for live RecipeKB / PR Monitor observability.
+    The old T2/T3 graph edge placeholders were removed with the
+    KnowledgePlane Cortex graph surface.
     """
     from ..session_paths import (
         cortex_audit_jsonl as _audit_path,
@@ -4499,11 +4497,10 @@ def collect_kb_provenance(
         pr_monitor_status_json as _pr_status_path,
     )
 
-    # v0.8 §3.6 + surface PR Monitor reachability
-    # snapshot written at cli boot. We use ``warnings`` (top-level
-    # breakdown.warnings) rather than a dedicated section so the
-    # operator can grep for ``pr_monitor`` regardless of the schema
-    # version they expect. KB_design §3.14 R-03 探测信号.
+    # Surface the PR Monitor reachability snapshot written at cli boot.
+    # We use ``warnings`` (top-level breakdown.warnings) rather than a
+    # dedicated section so the operator can grep for ``pr_monitor``
+    # regardless of the schema version they expect.
     pr_status_path = _pr_status_path(session_dir)
     if pr_status_path.exists():
         try:
@@ -4517,9 +4514,8 @@ def collect_kb_provenance(
             if not pr_status.get("enabled"):
                 warnings.append("pr_monitor:disabled")
             elif not pr_status.get("reachable"):
-                # KB_design §3.14 R-03 探测信号 — operator dashboard
-                # uses this exact string to light up the "PR Monitor
-                # cross-cluster ingress" alert.
+                # operator dashboard uses this exact string to light up
+                # the "PR Monitor cross-cluster ingress" alert.
                 url = str(pr_status.get("url") or "")
                 warnings.append(
                     f"pr_monitor:unreachable:{url}"[:240] if url
@@ -4562,53 +4558,11 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
-    # ``points_created[]`` aggregation: walk the *full* audit log so
-    # one entry per (canonical_id, kind) is exposed even on long
-    # sessions; ``set`` dedups re-proposed rows.
-    points_created: list[dict[str, Any]] = []
-    points_by_kind: dict[str, int] = {}
-
-    try:
-        if audit_path.exists():
-            seen: set[tuple[str, str]] = set()
-            with audit_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(row, dict):
-                        continue
-                    if str(row.get("op") or "") != "propose_point":
-                        continue
-                    canonical = str(row.get("canonical_id") or "").strip()
-                    kind = str(row.get("kind") or "").strip()
-                    if not canonical or not kind:
-                        continue
-                    key = (canonical, kind)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    points_created.append({
-                        "canonical_id": canonical,
-                        "kind":         kind,
-                        "authority":    str(row.get("authority") or ""),
-                        "source":       str(row.get("source") or ""),
-                        "status":       str(row.get("status") or ""),
-                        "ts":           str(row.get("ts") or ""),
-                    })
-                    points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
-    except OSError as exc:
-        warnings.append(f"kb_provenance: failed to scan {audit_path}: {exc!r}")
-
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
     pitfalls = state.get("warm_start_pitfalls") or []
     lessons = state.get("warm_start_lessons") or []
-    # GAP 1 — warm-recipe replay outcome (one-shot reproduce of the KB
+    # warm-recipe replay outcome (one-shot reproduce of the KB
     # best_config at PRELUDE). Empty dict before the replay completes /
     # when ``--no-warm-replay`` was set; otherwise carries:
     #   {status, expected_gain_pct, actual_gain_pct,
@@ -4622,20 +4576,13 @@ def collect_kb_provenance(
         "warm_start_recipe_tier": str(warm.get("tier") or "") if isinstance(warm, dict) else "",
         "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
         "warm_start_lesson_count": len(lessons) if isinstance(lessons, list) else 0,
-        # GAP 1 — operator-visible replay summary. The outcome dict is
+        # operator-visible replay summary. The outcome dict is
         # passed through verbatim so dashboards can render status
         # transitions over time.
         "warm_replay": dict(warm_replay_outcome) if isinstance(warm_replay_outcome, dict) else {},
         "warm_replay_attempted":   bool(state.get("warm_replay_attempted")),
         "warm_history_injected":   bool(state.get("warm_history_injected")),
         "stack_fingerprint":      manifest.get("stack_fingerprint") or {},
-        # Always-empty back-compat lists (T2 hypothesize protocol retired).
-        # Consumers that diff session_breakdown.json for "pending edges"
-        # / "edges_promoted" must stop relying on these in a follow-up
-        # schema bump.
-        "pending_edges":          [],
-        "edges_promoted":         [],
-        "edges_negated":          [],
         "queue": {
             "pending_lines":     _count_lines(pending_path),
             "flushed_bookmarks": _count_lines(flushed_path),
@@ -4643,16 +4590,6 @@ def collect_kb_provenance(
         },
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
-        "points_created":        sorted(
-            points_created, key=lambda r: r.get("canonical_id", ""),
-        ),
-        "points_by_kind":        points_by_kind,
-        # Empty placeholder kept for back-compat with claw-stats-service.
-        "commit_summary": {
-            "status":             "",
-            "promoted_edges":     [],
-            "derived_summary_id": "",
-        },
         "flusher_status": _collect_flusher_status(
             session_dir,
             status_path=_flusher_status_path(session_dir),
@@ -4923,6 +4860,7 @@ __all__ = [
     "collect_capability_summary",
     "collect_critic_robustness",
     "collect_final",
+    "collect_explore_search",
     "collect_kb_provenance",
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
