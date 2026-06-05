@@ -462,7 +462,6 @@ class SpecialistRunner:
                 warm_start_lessons=list(
                     params.get("warm_start_lessons") or []
                 ),
-                session_snapshot=dict(params.get("session_snapshot") or {}),
                 pr_feed=list(params.get("pr_feed") or []),
                 pr_monitor_available=bool(
                     params.get("pr_monitor_available", True)

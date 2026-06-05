@@ -813,18 +813,13 @@ class SharedState:
     # specialist domain consistently fails to produce ideas
     #.
     specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
-    # session_steward_specialist assessment. Coordinator dispatches this
-    # domain on EXPLORE plateau and routes the recommendation:
-    #   * ``continue_explore``    — inject ``next_gap_canonical_id`` into
-    #                               gaps[], reset plateau counters once;
-    #                               sets ``steward_continuation_used``.
-    #   * ``advance_to_kernel``   — set pending_escalate_hint='skip_to_kernel'.
-    #   * ``stop_session``        — set_stop_reason('no_more_leverage').
+    # Legacy session_steward_specialist assessment slots. The steward
+    # was removed in loosen plan P3_17; these fields stay so resume of
+    # older state.json files (and the report.py renderer) keeps working
+    # — they are never written by any code path anymore.
     last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
     remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
     steward_continuation_used: bool = False
-    # Per EXPLORE-round count of steward subprocess/transport failures
-    # (used to mint retry idempotency keys; not a plateau signal).
     steward_infra_failures_by_round: dict[str, int] = field(
         default_factory=dict,
     )
@@ -1458,52 +1453,6 @@ class SharedState:
         )
         self.stop_reason = "unknown"
         return "unknown"
-
-    # ------------------------------------------------------------------
-    # Session steward assessment writer.
-    # ------------------------------------------------------------------
-    _STEWARD_ASSESSMENT_HISTORY_CAP = 10
-
-    def record_steward_assessment(
-        self,
-        *,
-        recommendation: str,
-        next_gap_canonical_id: str,
-        remaining_potential_pct_estimate: float,
-        rationale: str,
-        task_id: str,
-        round_at_assessment: int,
-        source_payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Stash a session_steward_specialist verdict on SharedState.
-
-        Returns the row that landed in ``last_remaining_gaps_assessment``
-        so the Coordinator can route on it immediately without
-        re-reading state. History capped at
-        :attr:`_STEWARD_ASSESSMENT_HISTORY_CAP` (drops oldest).
-        """
-        row = {
-            "ts": _now_iso(),
-            "recommendation": str(recommendation),
-            "next_gap_canonical_id": str(next_gap_canonical_id or ""),
-            "remaining_potential_pct_estimate": float(
-                remaining_potential_pct_estimate or 0.0
-            ),
-            "rationale": str(rationale or "")[:2000],
-            "task_id": str(task_id or ""),
-            "round_at_assessment": int(round_at_assessment or 0),
-        }
-        if source_payload is not None:
-            # Preserve the full payload (truncated to a manageable size)
-            # so the breakdown collector can dig deeper if needed.
-            row["source_payload_keys"] = sorted(source_payload.keys())
-        self.last_remaining_gaps_assessment = row
-        history = list(self.remaining_gaps_assessments or [])
-        history.append(row)
-        if len(history) > self._STEWARD_ASSESSMENT_HISTORY_CAP:
-            history = history[-self._STEWARD_ASSESSMENT_HISTORY_CAP:]
-        self.remaining_gaps_assessments = history
-        return row
 
     # ------------------------------------------------------------------
     # escalate hint plumbing

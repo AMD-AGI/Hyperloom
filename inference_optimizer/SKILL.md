@@ -226,10 +226,12 @@ brief:
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable
   — leaves buffer for KERNEL → SWEEP → CLOSE + report.
-- **IR-7 honest self-stop**: on EXPLORE plateau a
-  `session_steward_specialist` recommends `stop_session` /
-  `advance_to_kernel` / `continue_explore` (at most one continuation per
-  session). Disable with `--steward-disabled`. IR-6 always overrides it.
+- **Plateau advisory**: EXPLORE / KERNEL / FRAMEWORK_PR plateau signals
+  are computed every tick and rendered as advisory in the orchestration
+  prompt. They do NOT drive phase advance — the LLM may emit
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
+  when it judges further effort unproductive. IR-6 force-exit and the
+  per-phase budget remain the only hard advance gates.
 
 ### FRAMEWORK_PR phase (Coordinator-internal)
 

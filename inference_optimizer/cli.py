@@ -1095,14 +1095,6 @@ def _seed_shared_state(
         plateau_overrides["force_exit_budget_pct"] = float(
             args.explore_force_exit_budget_pct
         )
-    # steward controls.
-    if getattr(args, "steward_disabled", False):
-        plateau_overrides["steward_disabled"] = True
-    if getattr(args, "steward_continuation_cap", None) is not None:
-        plateau_overrides["steward_continuation_cap"] = int(
-            args.steward_continuation_cap
-        )
-
     # Resolve workload metadata from CLI flags first, then env. The
     # same fields are mirrored into manifest.json by manifest.build_manifest
     # (single source of truth); we duplicate the parse here so SharedState
@@ -5448,29 +5440,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="EXPLORE force-exit: phase-budget remaining fraction "
              "(0..1) below which EXPLORE exits immediately. Default "
              "0.20 (IR-6).",
-    )
-    # ------------------------------------------------------------------
-    # IR-7 — session_steward_specialist controls
-    # ------------------------------------------------------------------
-    # The steward is the soft gate on plateau (HARD IR-6 still wins on
-    # low budget). Operators can disable it for smoke runs or cap its
-    # continuation-granting power.
-    opt.add_argument(
-        "--steward-disabled",
-        dest="steward_disabled",
-        action="store_true",
-        default=False,
-        help="Disable session_steward_specialist; plateau directly "
-             "exits EXPLORE without the steward gate (IR-7).",
-    )
-    opt.add_argument(
-        "--steward-continuation-cap",
-        dest="steward_continuation_cap",
-        type=int,
-        default=None,
-        help="Max times the steward may return 'continue_explore' in "
-             "this session (default 1). Beyond the cap, "
-             "continue_explore is coerced to advance_to_kernel.",
     )
     # ------------------------------------------------------------------
     # phase budget percentages

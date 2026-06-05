@@ -111,107 +111,68 @@ def test_exit_normal_framework_pr_no_force_exit_when_remaining_above_ratio():
     assert phase_state.exit_normal_framework_pr(state, max_hours=2.0) is None
 
 
-def test_exit_normal_framework_pr_plateau_after_three_flat_batches():
-    batches = [
-        {"batch_id": "b1", "max_gain_pct_observed_in_batch": 0.4},
-        {"batch_id": "b2", "max_gain_pct_observed_in_batch": 0.0},
-        {"batch_id": "b3", "max_gain_pct_observed_in_batch": 0.7},
-    ]
-    state = _State(framework_pr_batches=batches)
-    out = phase_state.exit_normal_framework_pr(state)
-    assert out is not None
-    reason, ev = out
-    assert reason == "framework_pr_plateau"
-    assert ev["lookback"] == 3
-    assert ev["keep_gain_pct_threshold"] == 1.0
-
-
-def test_exit_normal_framework_pr_no_plateau_when_recent_batch_above_threshold():
-    batches = [
-        {"max_gain_pct_observed_in_batch": 0.4},
-        {"max_gain_pct_observed_in_batch": 0.0},
-        {"max_gain_pct_observed_in_batch": 3.7},  # recent recovery
-    ]
-    state = _State(framework_pr_batches=batches)
-    assert phase_state.exit_normal_framework_pr(state) is None
-
-
-def test_exit_normal_framework_pr_no_plateau_when_latest_batch_undrained():
-    """Regression for P1.a — a freshly-discovered batch whose first
-    candidate has not finished must NOT count toward plateau lookback,
-    even though its ``max_gain_pct_observed_in_batch`` defaults to 0.0
-    on creation. Without the drain check, three such 0.0 entries would
-    trip plateau the moment the pump enqueues the first candidate of
-    the third batch."""
-    batches = [
-        {
-            "batch_id": "b1",
-            "max_gain_pct_observed_in_batch": 0.0,
-            "candidates": [{"id": "c1a"}, {"id": "c1b"}],
-        },
-        {
-            "batch_id": "b2",
-            "max_gain_pct_observed_in_batch": 0.0,
-            "candidates": [{"id": "c2a"}, {"id": "c2b"}],
-        },
-        {
-            "batch_id": "b3",
-            "max_gain_pct_observed_in_batch": 0.0,
-            "candidates": [{"id": "c3a"}, {"id": "c3b"}, {"id": "c3c"}],
-        },
-    ]
-    # Only b1 and b2 are fully drained; b3 has 1 of 3 processed.
-    progress = [
-        {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
-        {"batch_id": "b1", "candidate_id": "c1b", "status": "reject"},
-        {"batch_id": "b2", "candidate_id": "c2a", "status": "reject"},
-        {"batch_id": "b2", "candidate_id": "c2b", "status": "reject"},
-        {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
-    ]
-    state = _State(
-        framework_pr_batches=batches,
-        framework_pr_phase_progress=progress,
-    )
-    assert phase_state.exit_normal_framework_pr(state) is None
-
-
-def test_exit_normal_framework_pr_plateau_fires_when_all_three_batches_complete():
-    """Regression for P1.a — once every batch in the lookback window is
-    fully drained AND below the keep-gain threshold, plateau still fires
-    as it did before the drain check was added."""
+def test_exit_normal_framework_pr_does_not_exit_on_plateau():
+    """Loosen P3_17: FRAMEWORK_PR plateau is advisory only — the phase
+    advances only on force-exit, phase_done, or a terminal stop_reason."""
     batches = [
         {
             "batch_id": "b1",
             "max_gain_pct_observed_in_batch": 0.2,
-            "candidates": [{"id": "c1a"}, {"id": "c1b"}],
+            "candidates": [{"id": "c1a"}],
         },
         {
             "batch_id": "b2",
-            "max_gain_pct_observed_in_batch": 0.5,
-            "candidates": [{"id": "c2a"}, {"id": "c2b"}],
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": "c2a"}],
         },
         {
             "batch_id": "b3",
-            "max_gain_pct_observed_in_batch": 0.7,
-            "candidates": [{"id": "c3a"}, {"id": "c3b"}],
+            "max_gain_pct_observed_in_batch": 0.5,
+            "candidates": [{"id": "c3a"}],
         },
     ]
     progress = [
         {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
-        {"batch_id": "b1", "candidate_id": "c1b", "status": "reject"},
         {"batch_id": "b2", "candidate_id": "c2a", "status": "reject"},
-        {"batch_id": "b2", "candidate_id": "c2b", "status": "reject"},
         {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
-        {"batch_id": "b3", "candidate_id": "c3b", "status": "reject"},
     ]
     state = _State(
         framework_pr_batches=batches,
         framework_pr_phase_progress=progress,
     )
-    out = phase_state.exit_normal_framework_pr(state)
-    assert out is not None
-    reason, ev = out
-    assert reason == "framework_pr_plateau"
+    assert phase_state.exit_normal_framework_pr(state) is None
+
+
+def test_compute_plateau_framework_pr_returns_signal():
+    """compute_plateau_framework_pr remains as a pure advisory."""
+    batches = [
+        {
+            "batch_id": "b1",
+            "max_gain_pct_observed_in_batch": 0.2,
+            "candidates": [{"id": "c1a"}],
+        },
+        {
+            "batch_id": "b2",
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": "c2a"}],
+        },
+        {
+            "batch_id": "b3",
+            "max_gain_pct_observed_in_batch": 0.5,
+            "candidates": [{"id": "c3a"}],
+        },
+    ]
+    progress = [
+        {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
+        {"batch_id": "b2", "candidate_id": "c2a", "status": "reject"},
+        {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
+    ]
+    state = _State(
+        framework_pr_batches=batches,
+        framework_pr_phase_progress=progress,
+    )
+    triggered, ev = phase_state.compute_plateau_framework_pr(state)
+    assert triggered is True
     assert ev["lookback"] == 3
 
 
@@ -250,8 +211,8 @@ def test_exit_normal_framework_pr_phase_done_when_signalled():
     assert ev["evidence"] == "no_more_candidates"
 
 
-def test_exit_normal_framework_pr_force_exit_beats_plateau():
-    """Priority order: force-exit > plateau > phase_done."""
+def test_exit_normal_framework_pr_force_exit_beats_phase_done():
+    """Priority order: force-exit > phase_done."""
     batches = [
         {"max_gain_pct_observed_in_batch": 0.1},
         {"max_gain_pct_observed_in_batch": 0.1},
@@ -293,7 +254,8 @@ def test_compute_next_phase_prelude_to_explore_when_disabled_keeps_prelude_done_
     assert reason == "prelude_done"
 
 
-def test_compute_next_phase_framework_pr_to_explore_on_plateau():
+def test_compute_next_phase_framework_pr_does_not_advance_on_plateau():
+    """Loosen P3_17: plateau no longer drives FRAMEWORK_PR exit."""
     state = _State(
         phase=phase_state.PHASE_FRAMEWORK_PR,
         framework_pr_batches=[
@@ -302,11 +264,7 @@ def test_compute_next_phase_framework_pr_to_explore_on_plateau():
             {"max_gain_pct_observed_in_batch": 0.7},
         ],
     )
-    out = phase_state.compute_next_phase(state, framework_phase_enabled=True)
-    assert out is not None
-    next_phase, reason, _ = out
-    assert next_phase == phase_state.PHASE_EXPLORE
-    assert reason == "framework_pr_plateau"
+    assert phase_state.compute_next_phase(state, framework_phase_enabled=True) is None
 
 
 def test_compute_next_phase_framework_pr_force_exit_passes_max_hours_through():
@@ -365,13 +323,11 @@ def test_compute_next_phase_prelude_skips_to_sweep_when_no_explore_no_kernel():
 
 
 def test_compute_next_phase_framework_pr_skips_explore_to_kernel():
+    """When explore is disabled, FRAMEWORK_PR phase_done routes
+    straight to KERNEL with the explore_skipped marker set."""
     state = _State(
         phase=phase_state.PHASE_FRAMEWORK_PR,
-        framework_pr_batches=[
-            {"max_gain_pct_observed_in_batch": 0.1},
-            {"max_gain_pct_observed_in_batch": 0.0},
-            {"max_gain_pct_observed_in_batch": 0.2},
-        ],
+        framework_pr_phase_done=True,
     )
     out = phase_state.compute_next_phase(
         state,
@@ -382,7 +338,7 @@ def test_compute_next_phase_framework_pr_skips_explore_to_kernel():
     assert out is not None
     next_phase, reason, ev = out
     assert next_phase == phase_state.PHASE_KERNEL
-    assert reason == "framework_pr_plateau"
+    assert reason == "framework_pr_phase_done"
     assert ev.get("explore_skipped") is True
 
 

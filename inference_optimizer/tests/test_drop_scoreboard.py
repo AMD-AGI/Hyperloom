@@ -297,8 +297,8 @@ def test_kernel_opt_body_has_no_scoreboard_vocab():
 def test_kernel_opt_body_references_v08_decision_signals():
     """KB_gaps/Dead-D §5.1 — the body must surface the v0.8 decision
     facts (gaps[] / last_action_failures / last_kernel_opt / PARTIAL
-    cap / plateau_kernel) so KERNEL-phase action selection has a
-    concrete fact list instead of an implicit scoreboard."""
+    cap / KERNEL plateau advisory) so KERNEL-phase action selection has
+    a concrete fact list instead of an implicit scoreboard."""
     from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
         _KERNEL_OPT_PIPELINE_BODY,
     )
@@ -308,7 +308,7 @@ def test_kernel_opt_body_references_v08_decision_signals():
         "state.gaps[]",
         "last_action_failures",
         "last_kernel_opt",
-        "plateau_kernel",
+        "KERNEL plateau",
         "rejected_kernel_ids",
         "_DEFAULT_KERNEL_OPT_MAX_PARTIAL",
     ):

@@ -99,15 +99,15 @@ grid-runner entry):
     uncertainty signal; when scores conflict with the analysis.md markers
     or KB evidence, prefer the measured / evidence-backed signal.
 
-    **Self-stop**: when EXPLORE's plateau fires, the Coordinator runs
-    a `session_steward_specialist` and routes its
-    `recommendation in {continue_explore, advance_to_kernel,
-    stop_session}` to you — you need not propose `assess_remaining_gaps`.
-    On `continue_explore`, your next round MUST target
-    `next_gap_canonical_id`; the steward grants at most one
-    continuation, then EXPLORE→KERNEL is mandatory. The HARD
-    force-exit gate (`=== Phase ===` `session_buffer_sec`) overrides
-    every soft signal — as it nears zero prefer compact KEEPs.
+    **Plateau advisory**: when EXPLORE plateau signals fire (low recent
+    KEEP gain plus specialist empty streak) the Coordinator surfaces an
+    informational `Plateau advisory` block. Phase advance is never
+    triggered by that block on its own — only the HARD force-exit gate
+    (`=== Phase ===` `session_buffer_sec`), the EXPLORE phase budget,
+    or an explicit `escalate_strategy_change` hint can move EXPLORE
+    forward. Use the advisory to decide when to emit such a hint
+    (`skip_to_kernel` / `skip_to_sweep` / `skip_to_close`) rather than
+    spinning further exploration rounds.
   - **KERNEL**: the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`.
     Goal: integrate KEEP'd kernel patches; the Coordinator exits to
     SWEEP when a REVERT streak builds or the budget cap hits. Roofline

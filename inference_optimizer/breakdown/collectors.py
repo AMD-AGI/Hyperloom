@@ -1558,8 +1558,8 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
     The headline counts (``status`` / ``attempts`` / ``keeps`` /
     ``tested``) aggregate across every domain. ``by_specialist``
     breaks them out per SpecialistDomain.key so the dashboard can
-    render six (or seven, including session_steward) per-specialist
-    cards without re-aggregating client-side.
+    render one card per catalogue entry without re-aggregating
+    client-side.
     """
     rounds = state.get("specialist_rounds") or []
     if not isinstance(rounds, list) or not rounds:
@@ -3033,7 +3033,6 @@ _SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
     "compiler_specialist",
     "system_specialist",
     "pr_intel_specialist",
-    "session_steward_specialist",
     "research_scout_specialist",
 )
 

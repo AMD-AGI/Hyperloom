@@ -127,7 +127,6 @@ _EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset({
     "deep_kernel_analysis",
     "operator_tuning",
     "vendor_kernel_config",
-    "assess_remaining_gaps",
 })
 
 _FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset({

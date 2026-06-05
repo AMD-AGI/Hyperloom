@@ -61,18 +61,14 @@ def test_every_domain_has_focus_template():
         )
 
 
-def test_specialist_domains_m5_covers_all_six():
-    """PR-A6 widened the M5 active set so SpecialistRunner no longer
-    logs ``generic prompt template`` notes for M6-only domains.
-
-    IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow; the
-    read-only ``research_scout_specialist`` is the 8th. We keep the
-    assertion shape (M5 still covers the full catalogue) but bump the
-    expected count.
+def test_specialist_domains_m5_covers_all_active_domains():
+    """The M5 active set covers the full catalogue. P3_17 retired the
+    ``session_steward_specialist`` domain, leaving seven entries: six
+    proposal-authoring domains plus the read-only
+    ``research_scout_specialist``.
     """
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 8
+    assert len(SPECIALIST_DOMAINS_M5) == 7
 
 
 # ---------------------------------------------------------------------------
@@ -317,14 +313,12 @@ def _valid_done_payload(
 # ===========================================================================
 # 1. specialist_domains catalogue
 # ===========================================================================
-def test_specialist_domains_catalogue_has_six_entries():
-    """IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow; the
-    read-only ``research_scout_specialist`` is the 8th. The test name
-    stays for git-blame continuity but the assertion tracks the actual
-    count.
+def test_specialist_domains_catalogue_has_seven_entries():
+    """Loosen P3_17 retired ``session_steward_specialist``; the active
+    catalogue is six proposal-authoring domains plus the read-only
+    ``research_scout_specialist``.
     """
-    assert len(SPECIALIST_DOMAINS) == 8
+    assert len(SPECIALIST_DOMAINS) == 7
     assert SPECIALIST_DOMAIN_KEYS == frozenset(
         d.key for d in SPECIALIST_DOMAINS
     )

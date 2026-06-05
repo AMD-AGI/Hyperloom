@@ -235,7 +235,12 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
 
 
 def _format_steward_section(summary: dict[str, Any]) -> list[str]:
-    """IR-7 — render the session_steward verdict + history."""
+    """Render any legacy session_steward verdict + history.
+
+    The steward path was retired in P3_17; this section stays for
+    backward-compat with older state.json files that still carry a
+    populated ``last_remaining_gaps_assessment`` slot.
+    """
     assessment = summary.get("remaining_gaps_assessment") or {}
     history = summary.get("remaining_gaps_assessments_history") or []
     if not assessment and not history:

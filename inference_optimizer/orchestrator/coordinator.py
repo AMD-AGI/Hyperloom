@@ -106,18 +106,6 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "roofline",
 })
 
-# Closed enum of session_steward_specialist recommendations. Any value
-# outside this set is coerced to ``stop_session`` in
-# :meth:`Coordinator._route_steward_verdict` so the audit row carries a
-# known value; the recommendation itself is advisory only and does not
-# drive phase routing.
-_STEWARD_RECS: frozenset[str] = frozenset({
-    "continue_explore", "advance_to_kernel", "stop_session",
-})
-# Retries for session_steward subprocess / LLM transport failures only.
-# Empty or malformed *LLM* verdicts still coerce to stop_session.
-_STEWARD_MAX_INFRA_RETRIES: int = 3
-
 # Default per-repo candidate cap for ``fa phase-discover`` during the
 # FRAMEWORK_PR phase. Higher than the historical implicit 5 so each batch
 # probes deeper; overridable per session via
@@ -711,10 +699,6 @@ class Coordinator:
         if str(state.phase or "").upper() == "EXPLORE":
             await self._maybe_enqueue_explore_research_scout()
         if next_phase is None:
-            # On EXPLORE plateau without a steward verdict,
-            # compute_next_phase returns None and this schedules the
-            # steward; the next tick routes using its verdict.
-            await self._maybe_enqueue_steward()
             return
         target, reason, evidence = next_phase
         if target == (state.phase or "").upper():
@@ -3275,110 +3259,6 @@ class Coordinator:
             )
         return task
 
-    @staticmethod
-    def _steward_infrastructure_failure(done_payload: dict[str, Any]) -> bool:
-        """True when the steward subprocess failed before a real verdict."""
-        if not isinstance(done_payload, dict):
-            return True
-        reason = str(done_payload.get("reason") or "").strip().lower()
-        if reason.startswith("subprocess_"):
-            return True
-        if bool(done_payload.get("empty")) and not str(
-            done_payload.get("recommendation") or "",
-        ).strip():
-            return True
-        return False
-
-    async def _enqueue_internal_steward_task(
-        self, *, reason: str, retry_attempt: int = 0,
-    ) -> "Task | None":
-        """Enqueue a Coordinator-owned session_steward_specialist task.
-
-        Mirrors :meth:`_enqueue_internal_report_task` shape, with two
-        differences:
-
-        * ``kind='specialist'`` (the standard SpecialistRunner path
-          handles the LLM dispatch + worktree-less subprocess);
-        * idempotency key includes the current EXPLORE round id so
-          repeated calls within the same round collapse to one task,
-          while a new plateau in a later round can dispatch fresh.
-
-        Bypasses PolicyGate the same way ``closing_report_task`` does
-        (Coordinator-internal callers don't go through the
-        propose/delegate validation path). LLM-side proposals of
-        ``assess_remaining_gaps`` are unthrottled (the steward is
-        advisory; loosen plan P2_13).
-
-        Returns ``None`` when a task already exists in the registry
-        with the same idempotency key (whether queued / running /
-        succeeded). The caller (``_maybe_enqueue_steward``) treats
-        ``None`` as "nothing to do this tick".
-        """
-        round_id = int(
-            (self.shared_state.explore_search or {}).get("cursor") or 0
-        )
-        idempotency_key = f"internal-steward-round{round_id}"
-        if retry_attempt > 0:
-            idempotency_key = (
-                f"{idempotency_key}-retry{int(retry_attempt)}"
-            )
-        # Avoid re-enqueueing if a steward verdict already landed in
-        # this round (paranoia — wants_steward_assessment should have
-        # returned False, but defense-in-depth).
-        last = self.shared_state.last_remaining_gaps_assessment or {}
-        if isinstance(last, dict) and last.get(
-            "round_at_assessment"
-        ) == round_id:
-            last_rec = str(last.get("recommendation") or "").strip().lower()
-            if last_rec in _STEWARD_RECS:
-                return None
-        params: dict[str, Any] = {
-            "domain": "session_steward_specialist",
-            "gap_canonical_id": f"gap.steward.round{round_id}",
-            "gap_symptom": (
-                "EXPLORE plateau triggered; assess remaining leverage "
-                "and recommend continue_explore / advance_to_kernel / "
-                "stop_session."
-            ),
-            "gap_layer": "session_strategy",
-            "max_turns": 8,
-            "source": "coordinator_internal",
-            "reason": str(reason),
-        }
-        # Warm the specialist params the same way the LLM-dispatch path
-        # does so the prompt sees real hardware + workload context.
-        await self._warm_specialist_params(params)
-        try:
-            task, was_existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=params,
-                idempotency_key=idempotency_key,
-                requires_lanes=["research_lane"],
-                allowed_tools=[
-                    "emit_intent", "Read", "Grep", "Glob", "Bash",
-                    "WebSearch", "WebFetch",
-                ],
-                side_effects=["workspace_write"],
-                lease_ttl_sec=1800,
-            )
-        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
-            log.exception(
-                "internal-steward: enqueue failed (round=%d)", round_id,
-            )
-            return None
-        if was_existing:
-            log.info(
-                "internal-steward task reused (task_id=%s, state=%s)",
-                task.task_id, task.state,
-            )
-        else:
-            log.info(
-                "internal-steward dispatched: task_id=%s round=%d "
-                "reason=%s",
-                task.task_id, round_id, reason,
-            )
-        return task
-
     async def _enqueue_internal_research_scout_task(
         self, *, reason: str, round_id: int,
     ) -> "Task | None":
@@ -3561,28 +3441,6 @@ class Coordinator:
                 log.exception(
                     "research-scout: upsert_gap failed for %s", cid,
                 )
-
-    async def _maybe_enqueue_steward(self) -> None:
-        """IR-7 — enqueue a steward task when phase_state says we need one.
-
-        Called from ``_advance_phase_if_needed`` after
-        ``compute_next_phase`` returns ``None``. The helper is pure
-        sugar over :meth:`_enqueue_internal_steward_task` + the
-        phase_state predicate.
-        """
-        try:
-            wants = _phase_state.wants_steward_assessment(
-                self.shared_state,
-                budget_pct=self._phase_budget_pct,
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("steward: wants_steward_assessment failed")
-            return
-        if not wants:
-            return
-        await self._enqueue_internal_steward_task(
-            reason="coordinator_plateau",
-        )
 
     async def _enqueue_internal_session_breakdown_task(
         self, *, reason: str,
@@ -4397,6 +4255,15 @@ class Coordinator:
             if mix_block:
                 sections.append("=== Intervention mix (telemetry) ===")
                 sections.append(mix_block)
+
+            try:
+                plateau_block = self._plateau_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: plateau advisory failed")
+                plateau_block = ""
+            if plateau_block:
+                sections.append("=== Plateau advisory ===")
+                sections.append(plateau_block)
 
         # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
@@ -5440,37 +5307,6 @@ class Coordinator:
         # explore directly) but still need the same operational knobs.
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
-        # ``assess_remaining_gaps`` is a thin wrapper: rewrite
-        # the kind to ``specialist`` and force the
-        # ``session_steward_specialist`` domain (LLM cannot pick any
-        # other domain via this action). Throttling was removed in
-        # loosen plan P2_13 — the steward is advisory and the LLM may
-        # request it whenever it suspects plateau.
-        if action_name == "assess_remaining_gaps":
-            # Force the steward domain + a deterministic gap id so
-            # PolicyGate R2 passes. Preserve params.reason verbatim
-            # so the audit trail captures why the LLM proposed.
-            llm_reason = str(params.get("reason") or "").strip()
-            round_id = int(
-                (self.shared_state.explore_search or {}).get("cursor") or 0
-            )
-            params["domain"] = "session_steward_specialist"
-            params["gap_canonical_id"] = (
-                params.get("gap_canonical_id")
-                or f"gap.steward.round{round_id}.llm"
-            )
-            params["gap_symptom"] = (
-                "LLM-initiated steward assessment (reason="
-                f"{llm_reason or 'unspecified'!r})"
-            )
-            params.setdefault("gap_layer", "session_strategy")
-            params.setdefault("max_turns", 8)
-            params.setdefault("source", "orchestration")
-            params["reason"] = llm_reason or "llm_uncertainty"
-            # Rewire to the specialist task kind so the standard
-            # SpecialistRunner picks it up.
-            action_name = "specialist"
-
         # Specialist pre-dispatch warmup.
         # When the Orchestration role delegates a specialist task, the
         # Coordinator is the only place with the KnowledgePlane facade
@@ -5852,9 +5688,8 @@ class Coordinator:
     def _dynamic_action_round_id(self) -> int:
         """Stable round id used in the ``dyn-<round>-<seq>`` template.
 
-        Mirrors the round derivation used by the IR-7 assess_remaining_gaps
-        wrapper: ``explore_search.cursor`` is the canonical EXPLORE-round
-        cursor, falling back to 0 when the ledger is empty.
+        ``explore_search.cursor`` is the canonical EXPLORE-round cursor,
+        falling back to 0 when the ledger is empty.
         """
         cursor = (self.shared_state.explore_search or {}).get("cursor")
         try:
@@ -6734,18 +6569,6 @@ class Coordinator:
                     if v and v != "unknown":
                         params["framework_version"] = v
 
-        # session_steward gets a panoramic state digest inlined into
-        # its prompt (the steward needs stack depth, gain trajectory,
-        # plateau signals, gaps, denial history to decide
-        # continue_explore / advance_to_kernel / stop_session).
-        # Other specialists don't see this — keeps their prompt
-        # focused on the task at hand.
-        if (
-            str(params.get("domain") or "") == "session_steward_specialist"
-            and "session_snapshot" not in params
-        ):
-            params["session_snapshot"] = self._build_session_snapshot()
-
         # Local-source navigation hint — same source the kernel agent
         # uses for ``source_file`` containment.
         if "framework_source_roots" not in params:
@@ -7375,25 +7198,6 @@ class Coordinator:
             },
         )
 
-        # route session_steward_specialist verdicts. Done payload
-        # carries extra fields beyond the standard schema; see
-        # ``actions/assess_remaining_gaps.md`` and the prompt builder
-        # focus template. Coerce out-of-vocab recommendations to
-        # ``stop_session`` (defense in depth — the LLM is allowed to
-        # write any string but we only honour the closed enum).
-        if domain == "session_steward_specialist":
-            try:
-                await self._route_steward_verdict(
-                    task=task, done_payload=done_payload,
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "steward routing failed for task=%s; assessment "
-                    "left in last_remaining_gaps_assessment but no "
-                    "phase-routing change applied",
-                    task.task_id,
-                )
-
         # Harvest research-scout output: persist hints + competitor
         # target, seed advisory gaps, and dedup PR ids against
         # FRAMEWORK_PR. Fail-soft; never blocks the round.
@@ -7443,6 +7247,114 @@ class Coordinator:
                 "B3: specialist patch autosubmit failed for task=%s",
                 task.task_id,
             )
+
+    def _plateau_advisory_block(self) -> str:
+        """Render the plateau-judgment advisory block.
+
+        Computes :func:`phase_state.compute_plateau_explore` and
+        :func:`phase_state.compute_plateau_kernel` against the current
+        SharedState, then renders any triggered signal as a neutral
+        fact for the orchestration prompt. The values never gate phase
+        transitions — they exist purely so the LLM can reason about
+        diminishing returns and decide when to emit an explicit
+        ``escalate_strategy_change`` hint.
+
+        Returns the empty string when no plateau signal is active for
+        the current phase (callers omit the section header).
+        """
+        state = self.shared_state
+        phase = (getattr(state, "phase", "") or "").strip().upper()
+        overrides = getattr(state, "plateau_overrides", None) or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        lines: list[str] = []
+        if phase == _phase_state.PHASE_EXPLORE:
+            triggered, evidence = _phase_state.compute_plateau_explore(
+                state,
+                lookback=int(overrides.get(
+                    "explore_lookback",
+                    _phase_state.DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+                )),
+                keep_gain_threshold_pct=float(overrides.get(
+                    "explore_keep_gain_pct",
+                    _phase_state.DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+                )),
+                empty_streak_threshold=int(overrides.get(
+                    "explore_empty_streak",
+                    _phase_state.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+                )),
+            )
+            if triggered:
+                lines.append(
+                    "EXPLORE plateau detected: low recent KEEP gain plus "
+                    "specialist empty streak."
+                )
+                lines.append(
+                    "  recent_keep_gain_pct="
+                    f"{evidence.get('recent_keep_gain_pct', 0.0)} "
+                    f"threshold={evidence.get('keep_gain_threshold_pct', 0.0)} "
+                    f"empty_streak={evidence.get('empty_streak', 0)} "
+                    f"streak_threshold={evidence.get('empty_streak_threshold', 0)}"
+                )
+        elif phase == _phase_state.PHASE_KERNEL:
+            triggered, evidence = _phase_state.compute_plateau_kernel(
+                state,
+                lookback=int(overrides.get(
+                    "kernel_lookback",
+                    _phase_state.DEFAULT_PLATEAU_KERNEL_LOOKBACK,
+                )),
+                revert_streak_threshold=int(overrides.get(
+                    "kernel_revert_streak",
+                    _phase_state.DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
+                )),
+                keep_gain_threshold_pct=float(overrides.get(
+                    "kernel_keep_gain_pct",
+                    _phase_state.DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
+                )),
+            )
+            if triggered:
+                lines.append(
+                    "KERNEL plateau detected: REVERT streak or low recent "
+                    "KEEP gain."
+                )
+                lines.append(
+                    "  revert_streak="
+                    f"{evidence.get('revert_streak', 0)} "
+                    f"threshold={evidence.get('revert_streak_threshold', 0)} "
+                    f"recent_keep_gain_pct={evidence.get('recent_keep_gain_pct', 0.0)} "
+                    f"keep_gain_threshold_pct={evidence.get('keep_gain_threshold_pct', 0.0)}"
+                )
+        elif phase == _phase_state.PHASE_FRAMEWORK_PR:
+            triggered, evidence = _phase_state.compute_plateau_framework_pr(
+                state,
+                lookback=int(overrides.get(
+                    "framework_pr_lookback",
+                    _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
+                )),
+                keep_gain_threshold_pct=float(overrides.get(
+                    "framework_pr_keep_gain_pct",
+                    _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+                )),
+            )
+            if triggered:
+                lines.append(
+                    "FRAMEWORK_PR plateau detected: recent batches all below "
+                    "keep-gain threshold."
+                )
+                lines.append(
+                    "  lookback="
+                    f"{evidence.get('lookback', 0)} "
+                    f"keep_gain_pct_threshold={evidence.get('keep_gain_pct_threshold', 0.0)} "
+                    f"batch_max_gains={evidence.get('batch_max_gains', [])}"
+                )
+        if not lines:
+            return ""
+        lines.append(
+            "Phase advance is driven only by hard limits (IR-6 force-exit, "
+            "phase budget, terminal stop_reason) or explicit "
+            "escalate_strategy_change hints; this block is informational."
+        )
+        return "\n".join(lines)
 
     def _target_gap_advisory_block(self) -> str:
         """Build the advisory "External target gap" prompt block.
@@ -7691,181 +7603,6 @@ class Coordinator:
             log.exception(
                 "B3: save after specialist patch autosubmit failed for "
                 "task=%s", sid,
-            )
-
-    async def _route_steward_verdict(
-        self, *, task: "Task", done_payload: dict[str, Any],
-    ) -> None:
-        """Record a session_steward_specialist verdict as advisory.
-
-        The recommendation is written into
-        ``last_remaining_gaps_assessment`` (and the bounded history
-        ledger) so the orchestration prompt can show it as a second
-        opinion, but the steward no longer drives phase transitions:
-
-        * ``stop_session`` / ``advance_to_kernel`` → recorded, no
-          ``pending_escalate_hint`` is set; phase transitions are
-          driven by IR-6 force-exit, phase-budget exhaustion, or an
-          explicit LLM / robustness ``skip_to_*`` hint.
-        * ``continue_explore`` → append ``next_gap_canonical_id`` to
-          the gap ledger and reset plateau counters as a neutral aid
-          to the next round; ``steward_continuation_used`` is still
-          flipped as an audit marker.
-
-        Infrastructure failures (stale heartbeat, subprocess timeout,
-        empty synthesis) schedule up to
-        :data:`_STEWARD_MAX_INFRA_RETRIES` fresh steward tasks with a
-        new idempotency key. Out-of-vocab strings coerce to
-        ``stop_session`` so the audit row carries a known value.
-        """
-        raw_rec = str(done_payload.get("recommendation") or "").strip().lower()
-        if raw_rec not in _STEWARD_RECS:
-            if Coordinator._steward_infrastructure_failure(done_payload):
-                round_at = int(
-                    (self.shared_state.explore_search or {}).get("cursor") or 0
-                )
-                failures = dict(
-                    getattr(
-                        self.shared_state,
-                        "steward_infra_failures_by_round",
-                        None,
-                    ) or {},
-                )
-                round_key = str(round_at)
-                attempt = int(failures.get(round_key, 0) or 0) + 1
-                failures[round_key] = attempt
-                self.shared_state.steward_infra_failures_by_round = failures
-                fail_reason = str(done_payload.get("reason") or "")[:240]
-                self.shared_state.record_steward_assessment(
-                    recommendation="",
-                    next_gap_canonical_id="",
-                    remaining_potential_pct_estimate=0.0,
-                    rationale=(
-                        f"steward infrastructure failure ({fail_reason}); "
-                        f"attempt {attempt}/{_STEWARD_MAX_INFRA_RETRIES}"
-                    ),
-                    task_id=task.task_id,
-                    round_at_assessment=round_at,
-                    source_payload=done_payload,
-                )
-                try:
-                    self.shared_state.save(self.session_dir)
-                except Exception:  # noqa: BLE001
-                    log.exception("steward: save after infra failure failed")
-                if attempt < _STEWARD_MAX_INFRA_RETRIES:
-                    log.warning(
-                        "steward: infrastructure failure (%s) for task=%s; "
-                        "scheduling retry %d/%d",
-                        fail_reason or "unknown",
-                        task.task_id,
-                        attempt,
-                        _STEWARD_MAX_INFRA_RETRIES,
-                    )
-                    await self._enqueue_internal_steward_task(
-                        reason="infra_retry",
-                        retry_attempt=attempt,
-                    )
-                    return
-                log.warning(
-                    "steward: infrastructure retries exhausted for "
-                    "round=%s; defaulting to advance_to_kernel "
-                    "(not stop_session)",
-                    round_at,
-                )
-                raw_rec = "advance_to_kernel"
-            else:
-                log.warning(
-                    "steward: out-of-vocab recommendation=%r for task=%s; "
-                    "coercing to 'stop_session'",
-                    raw_rec, task.task_id,
-                )
-                raw_rec = "stop_session"
-        next_gap = str(
-            done_payload.get("next_gap_canonical_id") or ""
-        ).strip()
-        if raw_rec == "continue_explore" and not next_gap:
-            log.warning(
-                "steward: continue_explore missing next_gap_canonical_id "
-                "for task=%s; coercing to 'advance_to_kernel'",
-                task.task_id,
-            )
-            raw_rec = "advance_to_kernel"
-
-        # Record the assessment unconditionally so the audit trail
-        # captures it even when the recommendation was coerced.
-        try:
-            potential_raw = done_payload.get(
-                "remaining_potential_pct_estimate"
-            )
-            potential = (
-                float(potential_raw)
-                if isinstance(potential_raw, (int, float)) else 0.0
-            )
-        except (TypeError, ValueError):
-            potential = 0.0
-        round_at = int(
-            (self.shared_state.explore_search or {}).get("cursor") or 0
-        )
-        self.shared_state.record_steward_assessment(
-            recommendation=raw_rec,
-            next_gap_canonical_id=next_gap,
-            remaining_potential_pct_estimate=potential,
-            rationale=str(done_payload.get("rationale") or ""),
-            task_id=task.task_id,
-            round_at_assessment=round_at,
-            source_payload=done_payload,
-        )
-        # Recommendation is advisory: log it but do not drive phase.
-        if raw_rec == "stop_session":
-            log.info(
-                "steward (advisory): recommendation='stop_session' for "
-                "task=%s; no phase change applied",
-                task.task_id,
-            )
-        elif raw_rec == "advance_to_kernel":
-            log.info(
-                "steward (advisory): recommendation='advance_to_kernel' "
-                "for task=%s; no phase change applied",
-                task.task_id,
-            )
-        elif raw_rec == "continue_explore":
-            # Inject the next gap and reset plateau counters so the next
-            # tick does not immediately re-trigger plateau judgment on
-            # the same evidence.
-            try:
-                self.shared_state.append_gap_attempt(next_gap, {
-                    "action": "steward",
-                    "variant_name": "session_steward_specialist",
-                    "outcome": "CONTINUATION_GRANTED",
-                    "rationale": str(
-                        done_payload.get("rationale") or ""
-                    )[:480],
-                })
-            except Exception:  # noqa: BLE001
-                log.exception(
-                    "steward: append_gap_attempt failed for gap=%s",
-                    next_gap,
-                )
-            self.shared_state.reset_explore_plateau_proxy()
-            # Per-domain empty streak reset is a courtesy — Orchestration
-            # gets a clean slate to re-dispatch domains.
-            self.shared_state.specialist_domain_empty_streak = {}
-            self.shared_state.steward_continuation_used = True
-            log.info(
-                "steward: recommendation='continue_explore' for task=%s "
-                "-> next_gap=%r, plateau counters reset, "
-                "continuation marker set",
-                task.task_id, next_gap,
-            )
-        # Persist immediately so a crash between this routing and the
-        # broader _record_specialist_result.save still leaves the
-        # routing decision durable.
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "steward: SharedState.save after routing failed for task=%s",
-                task.task_id,
             )
 
     def _build_specialist_round_entry(
@@ -9595,127 +9332,6 @@ class Coordinator:
                     "now":                 now_iso,
                 },
             )
-
-    def _build_session_snapshot(self) -> dict[str, Any]:
-        """Build a session-wide state digest for ``session_steward_specialist``.
-
-        The steward specialist needs a panoramic view of where the
-        session stands (stack depth, gain trajectory, plateau signals,
-        outstanding gaps, recent policy denials) to recommend
-        ``continue_explore`` / ``advance_to_kernel`` / ``stop_session``.
-
-        Previously its prompt told the LLM "everything is in
-        $SESSION_DIR/state.json which the Coordinator pre-warms below"
-        but no inline rendering existed — the steward had to use Bash
-        to read state.json off disk, costing a turn and contradicting
-        the prompt. This helper produces a compact dict the prompt
-        builder renders inline so the steward sees the data in its
-        first turn.
-
-        Returned shape (all keys present, empty / 0 when source is
-        empty so the prompt template never branches):
-
-        * ``phase`` / ``tick`` — current phase + monotonic tick.
-        * ``optimization_stack_len`` — count of KEEP'd entries.
-        * ``cumulative_gain_pct`` / ``cumulative_gain_validated_pct``
-          — total session uplift (validated_pct is the post-rebench
-          number; cumulative is the raw running sum).
-        * ``gain_per_stack_entry_tail`` — last 5 entries of the
-          per-stack gain ledger, exposing diminishing-returns trends.
-        * ``rejected_counts`` — REVERT reasons grouped by the
-          explore_search ``reason`` field (``stack_unstable`` /
-          ``gain_below_threshold`` / ...). A long tail of one kind is
-          a plateau signal.
-        * ``specialist_empty_streak`` — per-domain empty-round
-          counter (``specialist_domain_empty_streak``). Three
-          consecutive ``empty=True`` rounds is a hard plateau.
-        * ``gaps_count`` / ``gaps_top5_canonical_ids`` — count + the
-          first 5 open gap canonical_ids. Steward references one of
-          these in ``next_gap_canonical_id`` when recommending
-          ``continue_explore``.
-        * ``policy_denial_history_tail`` — last 10 PolicyGate
-          denials (rule + reason). Recurrence on the same rule means
-          the LLM is thrashing — strong signal to stop.
-        * ``steward_continuation_used`` — IR-7 antiloop flag; the
-          steward must not recommend ``continue_explore`` twice.
-        """
-        ss = self.shared_state
-        explore_search = getattr(ss, "explore_search", {}) or {}
-        rejected_rows = explore_search.get("rejected") or []
-        rejected_counts: dict[str, int] = {}
-        for row in rejected_rows:
-            if not isinstance(row, dict):
-                continue
-            reason = str(row.get("reason") or "unknown").strip() or "unknown"
-            rejected_counts[reason] = rejected_counts.get(reason, 0) + 1
-        gain_tail_raw = list(getattr(ss, "gain_per_stack_entry", []) or [])[-5:]
-        # Coerce None → 0.0 so the prompt renderer can json.dump
-        # without leaking ``null`` tokens (LLM-friendly).
-        gain_tail: list[float] = []
-        for v in gain_tail_raw:
-            try:
-                gain_tail.append(float(v) if v is not None else 0.0)
-            except (TypeError, ValueError):
-                gain_tail.append(0.0)
-        gaps = list(getattr(ss, "gaps", []) or [])
-        gaps_top5_ids = [
-            str((g or {}).get("canonical_id") or "")
-            for g in gaps[:5]
-            if isinstance(g, dict) and (g or {}).get("canonical_id")
-        ]
-        denial_tail_raw = list(getattr(ss, "policy_denial_history", []) or [])[-10:]
-        denial_tail: list[dict[str, str]] = []
-        for d in denial_tail_raw:
-            if not isinstance(d, dict):
-                continue
-            denial_tail.append({
-                "rule":   str(d.get("rule") or ""),
-                "reason": str(d.get("reason") or "")[:120],
-            })
-        # surface warm-replay outcome to the steward so its
-        # "continue / stop / advance" decision can distinguish gain
-        # that came from inheriting a KB recipe vs. gain that came
-        # from EXPLORE work this session. Without this, +25%
-        # cumulative_gain at tick=0 looks identical to +25% earned
-        # over 30 EXPLORE rounds — the steward might wrongly conclude
-        # we already have a long stack worth keeping.
-        # R4-9 defense: SharedState fields can be tampered by
-        # resume / migration / tests. Guard against non-dict values
-        # before dereferencing ``.get`` so the snapshot never throws
-        # AttributeError mid-render.
-        wro_raw = getattr(ss, "warm_replay_outcome", None)
-        warm_replay = dict(wro_raw) if isinstance(wro_raw, dict) else {}
-        warm_replay_status = str(warm_replay.get("status") or "")
-        try:
-            warm_replay_actual_gain = float(warm_replay.get("actual_gain_pct") or 0.0)
-        except (TypeError, ValueError):
-            warm_replay_actual_gain = 0.0
-        return {
-            "phase":                            str(getattr(ss, "phase", "") or ""),
-            "tick":                             int(getattr(ss, "tick", 0) or 0),
-            "optimization_stack_len":           len(
-                getattr(ss, "optimization_stack", []) or []
-            ),
-            "cumulative_gain_pct":              float(
-                getattr(ss, "cumulative_gain", 0.0) or 0.0
-            ),
-            "cumulative_gain_validated_pct":    float(
-                getattr(ss, "cumulative_gain_validated", 0.0) or 0.0
-            ),
-            "gain_per_stack_entry_tail":        gain_tail,
-            "rejected_counts":                  rejected_counts,
-            "specialist_empty_streak":          dict(
-                getattr(ss, "specialist_domain_empty_streak", {}) or {}
-            ),
-            "gaps_count":                       len(gaps),
-            "gaps_top5_canonical_ids":          gaps_top5_ids,
-            "policy_denial_history_tail":       denial_tail,
-            "steward_continuation_used":        bool(
-                getattr(ss, "steward_continuation_used", False)
-            ),
-            "warm_replay_status":               warm_replay_status,
-            "warm_replay_actual_gain_pct":      warm_replay_actual_gain,
-        }
 
     def _collect_workload_tags(self) -> dict[str, Any]:
         """Return the workload-shape KB tag dict for the current session.

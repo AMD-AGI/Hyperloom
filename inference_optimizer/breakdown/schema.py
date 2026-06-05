@@ -185,7 +185,7 @@ class CapabilityEntry(TypedDict, total=False):
     # SpecialistDomain.key strings (``serving_specialist`` /
     # ``kernel_switch_specialist`` / ``comm_specialist`` /
     # ``compiler_specialist`` / ``system_specialist`` /
-    # ``pr_intel_specialist`` / ``session_steward_specialist``). Every
+    # ``pr_intel_specialist`` / ``research_scout_specialist``). Every
     # catalogue domain is seeded with a not_attempted entry so the
     # dashboard can iterate without presence checks.
     by_specialist: dict[str, "CapabilityEntry"]

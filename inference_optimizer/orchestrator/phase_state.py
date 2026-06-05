@@ -109,10 +109,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # integrate_patch, which holds the serving lane and benchmarks the
         # result.
         "integrate_patch",
-        # Thin wrapper that dispatches the session steward specialist.
-        # Coordinator may enqueue it internally on plateau; LLM-side
-        # proposals are throttled.
-        "assess_remaining_gaps",
         # Supplementary cross-domain sub-agent channel; orchestration-only
         # dispatch, capped per EXPLORE round by PolicyGate.
         "dynamic_action",
@@ -979,9 +975,6 @@ def exit_normal_explore(
     *,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
-    plateau_keep_gain_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-    plateau_empty_streak: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-    plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
     force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
@@ -1000,11 +993,11 @@ def exit_normal_explore(
        ``evidence='llm_escalation'``.
     2. Explicit ``skip_to_sweep`` hint → ``no_more_leverage`` (winds
        EXPLORE → SWEEP → CLOSE non-terminally).
-    3. Real ``plateau_explore`` (:func:`compute_plateau_explore`)
-       when signals are present (``explore_search.winners_history``
-       or ``specialist_rounds``). The session_steward verdict is
-       advisory only and no longer gates this exit.
-    4. Phase budget exhausted.
+    3. Phase budget exhausted.
+
+    The plateau judgment (:func:`compute_plateau_explore`) is computed
+    elsewhere as a pure advisory signal injected into the orchestration
+    prompt; it never drives this exit.
     """
     forced, force_ev = should_force_exit_explore(
         state,
@@ -1030,32 +1023,6 @@ def exit_normal_explore(
             "evidence": "no_more_leverage",
             "hint": hint,
         }
-    explore_search = getattr(state, "explore_search", None) or {}
-    has_v08_signals = (
-        isinstance(explore_search, dict)
-        and (explore_search.get("winners_history") or [])
-    ) or bool(getattr(state, "specialist_rounds", None) or [])
-    if has_v08_signals:
-        triggered, evidence = compute_plateau_explore(
-            state,
-            lookback=plateau_lookback,
-            keep_gain_threshold_pct=plateau_keep_gain_pct,
-            empty_streak_threshold=plateau_empty_streak,
-        )
-        if triggered:
-            assessment = getattr(
-                state, "last_remaining_gaps_assessment", None,
-            ) or {}
-            rec = str(
-                assessment.get("recommendation") or ""
-            ).strip().lower() if isinstance(assessment, dict) else ""
-            out_evidence: dict[str, Any] = {
-                "evidence": "plateau_judgment",
-                **evidence,
-            }
-            if rec:
-                out_evidence["steward_recommendation"] = rec
-            return "plateau_explore", out_evidence
     remaining = phase_budget_remaining_seconds(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )
@@ -1066,87 +1033,11 @@ def exit_normal_explore(
     return None
 
 
-def wants_steward_assessment(
-    state: Any,
-    *,
-    budget_pct: dict[str, float] | None = None,
-    now_unix: float | None = None,
-    plateau_keep_gain_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-    plateau_empty_streak: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-    plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
-) -> bool:
-    """Return True when Coordinator should enqueue a steward task NOW.
-
-    Pre-conditions (all must hold):
-
-    * current phase is EXPLORE,
-    * plateau has triggered (real plateau judgment),
-    * no fresh ``last_remaining_gaps_assessment`` exists (otherwise we
-      already routed on the existing verdict),
-    * steward is not disabled by operator,
-    * HARD force-exit has not already fired (in which case there's no
-      time to dispatch an LLM run — IR-6 wins outright).
-
-    The Coordinator calls this on every tick after
-    :func:`compute_next_phase` returns ``None``; ``True`` means enqueue
-    a ``session_steward_specialist`` task (bypassing PolicyGate; the
-    same idempotency pattern as ``closing_report_task_id``).
-    """
-    phase = (getattr(state, "phase", "") or "").strip().upper()
-    if phase != PHASE_EXPLORE:
-        return False
-    overrides = _resolve_plateau_overrides(state)
-    if bool(overrides.get("steward_disabled", False)):
-        return False
-    # HARD force-exit takes precedence — if it fires, it routes us
-    # straight to KERNEL and the steward never runs.
-    forced, _ = should_force_exit_explore(
-        state,
-        hours_remaining_threshold=float(overrides.get(
-            "force_exit_hours_remaining",
-            DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
-        )),
-        budget_pct_threshold=float(overrides.get(
-            "force_exit_budget_pct",
-            DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-        )),
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if forced:
-        return False
-    explore_search = getattr(state, "explore_search", None) or {}
-    has_v08_signals = (
-        isinstance(explore_search, dict)
-        and (explore_search.get("winners_history") or [])
-    ) or bool(getattr(state, "specialist_rounds", None) or [])
-    if not has_v08_signals:
-        return False
-    triggered, _ = compute_plateau_explore(
-        state,
-        lookback=plateau_lookback,
-        keep_gain_threshold_pct=plateau_keep_gain_pct,
-        empty_streak_threshold=plateau_empty_streak,
-    )
-    if not triggered:
-        return False
-    assessment = getattr(state, "last_remaining_gaps_assessment", None) or {}
-    if isinstance(assessment, dict):
-        rec = str(assessment.get("recommendation") or "").strip().lower()
-        if rec in ("continue_explore", "advance_to_kernel", "stop_session"):
-            # Already have a routable verdict.
-            return False
-    return True
-
-
 def exit_normal_kernel(
     state: Any,
     *,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
-    plateau_revert_streak: int = DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
-    plateau_keep_gain_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
-    plateau_lookback: int = DEFAULT_PLATEAU_KERNEL_LOOKBACK,
 ) -> tuple[str, dict[str, Any]] | None:
     """KERNEL normal exit.
 
@@ -1157,16 +1048,13 @@ def exit_normal_kernel(
        ``stop_reason=robustness_escalated``). Returns ``None`` here so
        the global path wins.
     2. ``skip_to_sweep`` hint (non-terminal "no more leverage" from the
-       steward's ``stop_session`` verdict) → ``no_more_leverage``; KERNEL
-       already exits to SWEEP so this just forces the wind-down now.
-    3. FP8 GEMM tuning completed and no source-level kernel attempts are
-       queued/recorded → move on to SWEEP. GEMM tuning is the deterministic
-       KERNEL-entry operator-level lever; if it succeeded and the LLM has
-       not produced kernel_opt work, do not burn the entire KERNEL budget
-       on heartbeat turns.
-    4. Real :func:`compute_plateau_kernel` (KB_design §3.8 §5.2
-       OR-of clauses).
-    5. Phase budget exhausted.
+       LLM / robustness) → ``no_more_leverage``; KERNEL already exits
+       to SWEEP so this just forces the wind-down now.
+    3. Phase budget exhausted.
+
+    The plateau judgment (:func:`compute_plateau_kernel`) is computed
+    elsewhere as a pure advisory signal injected into the orchestration
+    prompt; it never drives this exit.
     """
     if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
         return "no_more_leverage", {
@@ -1175,33 +1063,6 @@ def exit_normal_kernel(
         }
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
-    last_gemm = getattr(state, "last_gemm_tuning", None) or {}
-    kernel_attempts = getattr(state, "kernel_opt_attempts", None) or {}
-    if (
-        isinstance(last_gemm, dict)
-        and str(last_gemm.get("status") or "").lower() in {"complete", "completed", "ok", "succeeded", "success"}
-        and str(last_gemm.get("decision") or "").upper() == "KEEP"
-        and not kernel_attempts
-        and not bool(getattr(state, "continue_kernel_after_gemm", True))
-    ):
-        return "plateau_kernel", {
-            "evidence": "gemm_tuning_complete_no_kernel_opt",
-            "rejected_kernel_count": rejected_count,
-            "gemm_speedup": last_gemm.get("best_speedup"),
-            "tuned_file": last_gemm.get("tuned_file"),
-        }
-    triggered, evidence = compute_plateau_kernel(
-        state,
-        lookback=plateau_lookback,
-        revert_streak_threshold=plateau_revert_streak,
-        keep_gain_threshold_pct=plateau_keep_gain_pct,
-    )
-    if triggered:
-        return "plateau_kernel", {
-            "evidence": "plateau_judgment",
-            "rejected_kernel_count": rejected_count,
-            **evidence,
-        }
     remaining = phase_budget_remaining_seconds(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )
@@ -1287,6 +1148,69 @@ def _framework_pr_batch_is_complete(
     return processed >= total
 
 
+def compute_plateau_framework_pr(
+    state: Any,
+    *,
+    lookback: int = DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
+    keep_gain_threshold_pct: float = DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+) -> tuple[bool, dict[str, Any]]:
+    """Pure plateau judgment for FRAMEWORK_PR.
+
+    Returns ``(triggered, evidence)``. Triggers when the most recent
+    ``lookback`` *fully-processed* batches in
+    ``state.framework_pr_batches`` each carry
+    ``max_gain_pct_observed_in_batch < keep_gain_threshold_pct``.
+    Mirrors the legacy :func:`exit_normal_framework_pr` plateau gate
+    but never drives a phase exit; the result is rendered as advisory
+    in the orchestration prompt.
+    """
+    batches = getattr(state, "framework_pr_batches", None) or []
+    lookback_int = int(lookback or 0)
+    base_evidence = {
+        "lookback":                lookback_int,
+        "keep_gain_pct_threshold": float(keep_gain_threshold_pct),
+        "batch_max_gains":         [],
+    }
+    if (
+        not isinstance(batches, list)
+        or lookback_int <= 0
+        or len(batches) < lookback_int
+    ):
+        return False, base_evidence
+    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    progress_by_batch: dict[str, int] = {}
+    for row in progress:
+        if isinstance(row, dict):
+            bid = str(row.get("batch_id") or "")
+            progress_by_batch[bid] = progress_by_batch.get(bid, 0) + 1
+    complete_tail: list[dict[str, Any]] = []
+    for entry in reversed(batches):
+        if not isinstance(entry, dict):
+            continue
+        if _framework_pr_batch_is_complete(entry, progress_by_batch):
+            complete_tail.append(entry)
+            if len(complete_tail) >= lookback_int:
+                break
+    if len(complete_tail) < lookback_int:
+        return False, base_evidence
+    max_gains: list[float] = []
+    for entry in complete_tail:
+        try:
+            max_gains.append(
+                float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
+            )
+        except (TypeError, ValueError):
+            max_gains.append(0.0)
+    triggered = bool(max_gains) and all(
+        g < float(keep_gain_threshold_pct) for g in max_gains
+    )
+    return triggered, {
+        "lookback":                lookback_int,
+        "keep_gain_pct_threshold": float(keep_gain_threshold_pct),
+        "batch_max_gains":         list(reversed(max_gains)),
+    }
+
+
 def _framework_pr_pending_candidate_count(state: Any) -> int:
     """Count candidates discovered into a batch but missing a progress
     row. Surfaced in force-exit evidence so operators see how many
@@ -1319,8 +1243,6 @@ def exit_normal_framework_pr(
     *,
     max_hours: float | None = None,
     now_unix: float | None = None,
-    lookback: int = DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
-    plateau_keep_gain_pct: float = DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
     force_exit_hours_remaining_ratio: float = (
         DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO
     ),
@@ -1335,25 +1257,16 @@ def exit_normal_framework_pr(
        design's "leave the rest of the session breathing room" intent.
        Evidence carries ``pending_candidate_count`` so operators see how
        much was skipped.
-    1. Plateau — fires when the last ``lookback`` **fully-processed**
-       batches in ``state.framework_pr_batches`` each have
-       ``max_gain_pct_observed_in_batch < plateau_keep_gain_pct``. A
-       batch is fully-processed when every candidate it carries has a
-       matching row in ``framework_pr_phase_progress``; in-flight or
-       newly-discovered batches do NOT count toward the lookback. This
-       prevents the case where the pump enqueues the first candidate of
-       a fresh batch, ``max_gain_pct_observed_in_batch`` is still its
-       initial 0.0, and the plateau judge mistakes that for a real "no
-       gain" data point and exits early.
-    2. Normal completion — fires when the Coordinator marked the phase
+    1. Normal completion — fires when the Coordinator marked the phase
        done by setting ``state.framework_pr_phase_done = True`` (no
        more candidates to enqueue / ``fa phase-discover`` returned 0).
        Reason: ``framework_pr_phase_done``.
 
     Returns ``None`` when none of the above apply (the Coordinator
-    stays in FRAMEWORK_PR and enqueues the next batch).
+    stays in FRAMEWORK_PR and enqueues the next batch). The plateau
+    signal across recent batches is exposed as a pure advisory in the
+    orchestration prompt; it never drives this exit.
     """
-    # Priority 0 — force-exit on remaining wall-clock.
     if max_hours and max_hours > 0:
         remaining_min_fn = getattr(state, "remaining_minutes", None)
         if callable(remaining_min_fn):
@@ -1376,45 +1289,7 @@ def exit_normal_framework_pr(
                 "pending_candidate_count": _framework_pr_pending_candidate_count(state),
             }
 
-    # Priority 1 — plateau over the last ``lookback`` fully-processed batches.
     batches = getattr(state, "framework_pr_batches", None) or []
-    lookback_int = int(lookback)
-    if isinstance(batches, list) and lookback_int > 0 and len(batches) >= lookback_int:
-        progress = getattr(state, "framework_pr_phase_progress", None) or []
-        progress_by_batch: dict[str, int] = {}
-        for row in progress:
-            if isinstance(row, dict):
-                bid = str(row.get("batch_id") or "")
-                progress_by_batch[bid] = progress_by_batch.get(bid, 0) + 1
-        complete_tail: list[dict[str, Any]] = []
-        # Walk newest-to-oldest, take the most recent ``lookback`` *complete*
-        # batches. Skipping incomplete batches means a still-pumping batch
-        # cannot count toward (or block) plateau.
-        for entry in reversed(batches):
-            if not isinstance(entry, dict):
-                continue
-            if _framework_pr_batch_is_complete(entry, progress_by_batch):
-                complete_tail.append(entry)
-                if len(complete_tail) >= lookback_int:
-                    break
-        if len(complete_tail) >= lookback_int:
-            max_gains: list[float] = []
-            for entry in complete_tail:
-                try:
-                    max_gains.append(
-                        float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
-                    )
-                except (TypeError, ValueError):
-                    max_gains.append(0.0)
-            if max_gains and all(g < float(plateau_keep_gain_pct) for g in max_gains):
-                return "framework_pr_plateau", {
-                    "evidence":              "plateau_judgment",
-                    "lookback":              lookback_int,
-                    "keep_gain_pct_threshold": float(plateau_keep_gain_pct),
-                    "batch_max_gains":       list(reversed(max_gains)),
-                }
-
-    # Priority 2 — Coordinator-signalled normal completion.
     if bool(getattr(state, "framework_pr_phase_done", False)):
         return "framework_pr_phase_done", {
             "evidence": "no_more_candidates",
@@ -1498,14 +1373,6 @@ def compute_next_phase(
             state,
             max_hours=max_hours,
             now_unix=now_unix,
-            lookback=int(overrides.get(
-                "framework_pr_lookback",
-                DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
-            )),
-            plateau_keep_gain_pct=float(overrides.get(
-                "framework_pr_keep_gain_pct",
-                DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
-            )),
             force_exit_hours_remaining_ratio=float(overrides.get(
                 "framework_pr_force_exit_hours_ratio",
                 DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO,
@@ -1528,18 +1395,6 @@ def compute_next_phase(
             state,
             budget_pct=budget_pct,
             now_unix=now_unix,
-            plateau_keep_gain_pct=float(overrides.get(
-                "explore_keep_gain_pct",
-                DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-            )),
-            plateau_empty_streak=int(overrides.get(
-                "explore_empty_streak",
-                DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-            )),
-            plateau_lookback=int(overrides.get(
-                "explore_lookback",
-                DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
-            )),
             force_exit_hours_remaining=float(overrides.get(
                 "force_exit_hours_remaining",
                 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
@@ -1567,18 +1422,6 @@ def compute_next_phase(
             state,
             budget_pct=budget_pct,
             now_unix=now_unix,
-            plateau_revert_streak=int(overrides.get(
-                "kernel_revert_streak",
-                DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
-            )),
-            plateau_keep_gain_pct=float(overrides.get(
-                "kernel_keep_gain_pct",
-                DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
-            )),
-            plateau_lookback=int(overrides.get(
-                "kernel_lookback",
-                DEFAULT_PLATEAU_KERNEL_LOOKBACK,
-            )),
         )
         if norm is not None:
             return PHASE_SWEEP, norm[0], norm[1]
@@ -1663,6 +1506,7 @@ __all__ = [
     "apply_escalate_budget_bump",
     "compute_next_phase",
     "compute_plateau_explore",
+    "compute_plateau_framework_pr",
     "compute_plateau_kernel",
     "exit_normal_explore",
     "exit_normal_framework_pr",
@@ -1685,5 +1529,4 @@ __all__ = [
     "session_remaining_seconds",
     "should_force_exit_explore",
     "warm_replay_in_flight",
-    "wants_steward_assessment",
 ]

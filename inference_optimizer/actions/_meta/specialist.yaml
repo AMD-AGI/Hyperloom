@@ -48,8 +48,7 @@ params_schema:
       Known keys include:
       ``serving_specialist`` / ``kernel_switch_specialist`` / ``comm_specialist``
       / ``compiler_specialist`` / ``system_specialist`` /
-      ``pr_intel_specialist`` / ``session_steward_specialist`` /
-      ``research_scout_specialist``.
+      ``pr_intel_specialist`` / ``research_scout_specialist``.
   gap_canonical_id:
     type: string
     description: |

@@ -297,17 +297,16 @@ def test_request_with_analysis_kind_is_denied(gate, action_name):
 def test_phase_explore_allowlist_drops_legacy_actions():
     """The EXPLORE allowlist contains only the canonical action set:
     merged grid runner, specialist dispatch, integrate_patch,
-    assess_remaining_gaps (IR-7 self-stop wrapper), dynamic_action
-    (dynamic_action.MD P1 supplementary cross-domain channel), the
-    auto-managed analysis kinds (``roofline`` and ``profile``, both
-    Coordinator-enqueued on watermark crossings; mode picked by
-    ``--enable-roofline``), and ``recover``. PolicyGate's R1
-    ``phase_incompatible`` rule keeps the LLM from delegating either
+    dynamic_action (dynamic_action.MD P1 supplementary cross-domain
+    channel), the auto-managed analysis kinds (``roofline`` and
+    ``profile``, both Coordinator-enqueued on watermark crossings;
+    mode picked by ``--enable-roofline``), and ``recover``. PolicyGate's
+    R1 ``phase_incompatible`` rule keeps the LLM from delegating either
     analysis kind directly (they are never LLM-proposable).
     """
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
         "explore", "specialist", "integrate_patch",
-        "assess_remaining_gaps", "dynamic_action",
+        "dynamic_action",
         "roofline", "profile", "recover",
     })
 

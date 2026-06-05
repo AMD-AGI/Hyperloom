@@ -1091,7 +1091,7 @@ def test_capability_summary_specialist_by_specialist_from_domain_breakdown(
     # Untouched domains remain not_attempted.
     for d in (
         "compiler_specialist", "system_specialist",
-        "pr_intel_specialist", "session_steward_specialist",
+        "pr_intel_specialist", "research_scout_specialist",
     ):
         assert bs[d]["status"] == "not_attempted"
         assert bs[d]["attempts"] == 0
@@ -2639,7 +2639,7 @@ def test_capability_summary_specialist_row_when_no_rounds(tmp_path):
     for d in (
         "serving_specialist", "kernel_switch_specialist",
         "comm_specialist", "compiler_specialist", "system_specialist",
-        "pr_intel_specialist", "session_steward_specialist",
+        "pr_intel_specialist", "research_scout_specialist",
     ):
         assert spec["by_specialist"][d] == {
             "status": "not_attempted",

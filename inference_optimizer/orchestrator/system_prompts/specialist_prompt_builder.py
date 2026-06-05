@@ -343,67 +343,6 @@ def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-def _focus_session_steward_specialist(
-    inp: SpecialistPromptInputs,
-) -> list[str]:
-    return [
-        "You are the **session steward** — an honest end-of-EXPLORE assessor.",
-        "Your single job is to look at the session as a whole and recommend",
-        "one of three exits: continue exploring, advance to kernel phase, or",
-        "stop the session. You are NOT proposing knobs or patches.",
-        "",
-        "**What to read first** — the Coordinator inlines a panoramic",
-        "state digest into **§ 5d. SESSION SNAPSHOT** below. Use that as",
-        "your primary evidence; you may use ``Bash`` to ``cat",
-        "$SESSION_DIR/state.json`` only if § 5d is empty (KB-degraded",
-        "boot) or you need a field that isn't included. Key signals:",
-        "- ``optimization_stack_len`` + ``gain_per_stack_entry_tail`` —",
-        "  diminishing returns over the last 5 KEEPs.",
-        "- ``rejected_counts`` — REVERT reasons aggregated from",
-        "  ``explore_search.rejected``. A long tail of one kind",
-        "  (``stack_unstable`` / ``gain_below_threshold``) is a signal.",
-        "- ``specialist_empty_streak`` — per-domain empty-round counter.",
-        "  Three consecutive ``empty=True`` rounds across the active",
-        "  domains is a hard plateau signal.",
-        "- ``gaps_count`` + ``gaps_top5_canonical_ids`` — open gaps the",
-        "  Coordinator believes still exist. If non-empty and the",
-        "  recommended specialist domain has not been exhausted,",
-        "  ``continue_explore`` may be justified.",
-        "- ``policy_denial_history_tail`` — when the LLM has been",
-        "  thrashing against the same rule, this is evidence that further",
-        "  exploration is unlikely to land KEEPs.",
-        "- ``steward_continuation_used`` — IR-7 antiloop flag; if True",
-        "  you've already burned your one continuation and must NOT",
-        "  recommend ``continue_explore`` again.",
-        "",
-        "**Output protocol** (your single ``specialist_done`` payload must",
-        "carry these extra fields beyond the standard schema):",
-        "- ``recommendation`` ∈ ``{continue_explore, advance_to_kernel, stop_session}``",
-        "  — REQUIRED. Anything else is coerced to ``stop_session``.",
-        "- ``next_gap_canonical_id``: str (REQUIRED iff",
-        "  ``recommendation='continue_explore'``). Must reference an entry",
-        "  the Coordinator can plausibly act on; otherwise the",
-        "  Coordinator falls back to ``advance_to_kernel``.",
-        "- ``remaining_potential_pct_estimate``: float — your best estimate",
-        "  of cumulative gain still reachable in EXPLORE. Used for the",
-        "  final report's section 9.1 (remaining gaps).",
-        "- ``rationale``: str (<= 2000 chars). One paragraph; the final",
-        "  report quotes this verbatim, so write for an operator reader.",
-        "",
-        "**Antiloop** — you can be invoked at most twice per session. The",
-        "Coordinator records ``steward_continuation_used=True`` after the",
-        "first ``continue_explore`` you return; the second invocation MUST",
-        "NOT recommend ``continue_explore`` again (the Coordinator coerces",
-        "to ``advance_to_kernel`` if you do). Use the first continuation",
-        "judiciously.",
-        "",
-        "**Iron-rule alignment**",
-        "- IR-6: when ``=== Phase ===`` reports ``session_buffer_sec < 0``",
-        "  the HARD force-exit gate is about to fire on the next tick;",
-        "  ``stop_session`` is the only honest answer.",
-    ]
-
-
 def _focus_research_scout_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
@@ -475,7 +414,6 @@ _DOMAIN_FOCUS_TEMPLATES: dict[
     "compiler_specialist":  _focus_compiler_specialist,
     "system_specialist":    _focus_system_specialist,
     "pr_intel_specialist":  _focus_pr_intel_specialist,
-    "session_steward_specialist": _focus_session_steward_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
 }
 
@@ -559,13 +497,6 @@ class SpecialistPromptInputs:
     # § 5b for the specialist (separate from § 5 recipe so the LLM can
     # reason about each independently).
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
-    # session_steward_specialist panoramic state digest. Only
-    # populated when the dispatcher is dispatching a session_steward
-    # task (other specialists get an empty dict and the section is
-    # skipped entirely). See ``Coordinator._build_session_snapshot``
-    # for the field shape. Rendered as § 5d.
-    session_snapshot: dict[str, Any] = field(default_factory=dict)
-
     # PR feed
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
@@ -1126,37 +1057,6 @@ def _render_measured_impact(raw: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Section 5d — Session snapshot (session_steward specialist only)
-# ---------------------------------------------------------------------------
-def _section_session_snapshot(inp: SpecialistPromptInputs) -> list[str]:
-    """Inline the panoramic SharedState digest the session_steward
-    specialist consumes to decide ``continue_explore`` /
-    ``advance_to_kernel`` / ``stop_session``.
-
-    Returns an empty list (section omitted entirely) when
-    ``session_snapshot`` is empty, so non-steward specialists never
-    see this section. The dispatcher populates this dict only for
-    ``session_steward_specialist`` tasks (see
-    :meth:`Coordinator._warm_specialist_params`).
-
-    Renders as a single fenced JSON block — small enough that the LLM
-    parses it in one pass, structured enough that the field-name
-    references in the focus block resolve to concrete values.
-    """
-    snap = inp.session_snapshot or {}
-    if not snap:
-        return []
-    rows = [
-        "## 5d. SESSION SNAPSHOT (panoramic state for steward decision)",
-        "",
-        "```json",
-        json.dumps(snap, sort_keys=True, indent=2),
-        "```",
-    ]
-    return rows
-
-
-# ---------------------------------------------------------------------------
 # Section 5c — Known pitfalls (anti-priors from prior REVERTs)
 # ---------------------------------------------------------------------------
 def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
@@ -1435,16 +1335,6 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_pr_feed(inp),            # 7: § 6
         _section_source_hint(inp),        # 8: § 7
     ]
-    # § 5d session snapshot — only the session_steward specialist
-    # populates ``session_snapshot``; for everyone else this section
-    # function returns ``[]`` and gets stripped by the flattener.
-    # Insert between § 5c (pitfalls, index 6) and § 6 (PR feed, was
-    # index 7). Done as conditional insert (rather than always in the
-    # list) so the section number stays meaningful — non-steward
-    # specialists don't see a "## 5d." header at all.
-    snapshot_section = _section_session_snapshot(inp)
-    if snapshot_section:
-        user_sections.insert(7, snapshot_section)
     if inp.notes:
         user_sections.append([
             "## 10. NOTES FROM ORCHESTRATION",

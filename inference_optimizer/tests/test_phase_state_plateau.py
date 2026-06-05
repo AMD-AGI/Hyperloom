@@ -251,9 +251,10 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
 # ===========================================================================
 # 4. exit_normal_explore / exit_normal_kernel — wired to real plateau
 # ===========================================================================
-def test_exit_normal_explore_triggers_via_real_plateau():
-    # Steward verdict (loosen P2_13) no longer gates plateau exit; once
-    # the plateau judge fires we exit directly.
+def test_exit_normal_explore_does_not_exit_on_plateau():
+    """Loosen P3_17: plateau is advisory only; the EXPLORE exit is now
+    driven exclusively by IR-6 force-exit, an explicit skip hint, or
+    phase budget exhaustion. A bare plateau signal must NOT exit."""
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -268,14 +269,8 @@ def test_exit_normal_explore_triggers_via_real_plateau():
         pending_escalate_hint="",
         stop_reason="",
         plateau_overrides={},
-        last_remaining_gaps_assessment={},
-        steward_continuation_used=False,
     )
-    out = exit_normal_explore(state)
-    assert out is not None
-    reason, evidence = out
-    assert reason == "plateau_explore"
-    assert evidence["evidence"] == "plateau_judgment"
+    assert exit_normal_explore(state) is None
 
 
 def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
@@ -296,7 +291,9 @@ def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
     assert out[1]["evidence"] == "llm_escalation"
 
 
-def test_exit_normal_kernel_triggers_via_real_plateau():
+def test_exit_normal_kernel_does_not_exit_on_plateau():
+    """Loosen P3_17: KERNEL plateau is advisory only; only the
+    skip_to_sweep hint or phase-budget exhaustion may exit KERNEL."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
@@ -310,13 +307,12 @@ def test_exit_normal_kernel_triggers_via_real_plateau():
         pending_escalate_hint="",
         stop_reason="",
     )
-    out = exit_normal_kernel(state)
-    assert out is not None
-    assert out[0] == "plateau_kernel"
-    assert out[1]["evidence"] == "plateau_judgment"
+    assert exit_normal_kernel(state) is None
 
 
-def test_exit_normal_kernel_after_gemm_tuning_complete_no_kernel_opt():
+def test_exit_normal_kernel_after_gemm_does_not_exit():
+    """Loosen P3_17: the GEMM-completed shortcut is removed.
+    GEMM completion alone never advances KERNEL → SWEEP."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
@@ -325,30 +321,6 @@ def test_exit_normal_kernel_after_gemm_tuning_complete_no_kernel_opt():
         kernel_integrate_attempts={},
         kernel_opt_attempts={},
         continue_kernel_after_gemm=False,
-        rejected_kernel_ids=[],
-        last_gemm_tuning={
-            "status": "complete",
-            "decision": "KEEP",
-            "best_speedup": 1.48,
-            "tuned_file": "/tmp/tuned.csv",
-        },
-        stop_reason="",
-    )
-    out = exit_normal_kernel(state)
-    assert out is not None
-    assert out[0] == "plateau_kernel"
-    assert out[1]["evidence"] == "gemm_tuning_complete_no_kernel_opt"
-    assert out[1]["gemm_speedup"] == 1.48
-
-
-def test_exit_normal_kernel_continues_after_gemm_by_default():
-    state = SimpleNamespace(
-        phase="KERNEL",
-        phase_started_unix=0.0,
-        max_minutes=0,
-        phase_budget_pct={},
-        kernel_integrate_attempts={},
-        kernel_opt_attempts={},
         rejected_kernel_ids=[],
         last_gemm_tuning={
             "status": "complete",
@@ -531,18 +503,18 @@ def test_stop_reason_vocab_has_v08_additions():
 
 
 # ===========================================================================
-# 7. plateau_overrides — operator-tuned thresholds
+# 7. plateau is advisory only — pure compute_plateau_* still works
 # ===========================================================================
-def test_compute_next_phase_honors_plateau_overrides():
-    """With aggressive override (keep_gain threshold = 10%) the same
-    state that wouldn't normally trigger plateau still triggers.
-    """
+def test_compute_next_phase_does_not_advance_on_plateau():
+    """Loosen P3_17: even when the EXPLORE plateau judge fires,
+    compute_next_phase returns None unless an explicit hint or hard
+    budget gate is active."""
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
-        explore_search={"winners_history": [{"gain_pct": 2.0}]},
+        explore_search={"winners_history": [{"gain_pct": 0.1}]},
         specialist_rounds=[
             {"proposals_total": 0, "proposals_kept": 0},
             {"proposals_total": 0, "proposals_kept": 0},
@@ -553,15 +525,11 @@ def test_compute_next_phase_honors_plateau_overrides():
         optimization_stack=[],
         pending_escalate_hint="",
         stop_reason="",
-        last_remaining_gaps_assessment={},
-        steward_continuation_used=False,
-        plateau_overrides={"explore_keep_gain_pct": 10.0},
+        plateau_overrides={},
     )
-    out = compute_next_phase(state, kernel_enabled=True)
-    assert out is not None
-    target, reason, _ev = out
-    assert target == "KERNEL"
-    assert reason == "plateau_explore"
+    assert compute_next_phase(state, kernel_enabled=True) is None
+    triggered, _ = compute_plateau_explore(state)
+    assert triggered is True
 
 
 # ===========================================================================

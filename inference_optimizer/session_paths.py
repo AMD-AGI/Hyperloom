@@ -69,7 +69,6 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "specialist",
     "integrate_patch",
     "framework_pr",
-    "assess_remaining_gaps",
     "dynamic_action",
     "integrate", "kernel_opt", "deep_kernel_analysis", "gemm_tuning",
     "operator_tuning", "vendor_kernel_config",

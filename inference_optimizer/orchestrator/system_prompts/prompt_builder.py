@@ -576,8 +576,11 @@ a `state.gaps[]` `layer='kernel'` gap with attempts left →
 `last_kernel_opt` (KEEP→integrate next; PARTIAL→retry at most
 `_DEFAULT_KERNEL_OPT_MAX_PARTIAL` then rejected; REVERT→rejected) →
 skip ids in `rejected_kernel_ids` → recover from `last_action_failures`.
-When `plateau_kernel` fires (3 REVERTs across distinct kernels) the
-Coordinator auto-advances KERNEL → SWEEP — stop and let it.
+A KERNEL plateau signal (3 REVERTs across distinct kernels, or low
+recent KEEP gain) is rendered as advisory; KERNEL → SWEEP advance is
+driven by the phase budget, an `escalate_strategy_change` hint, or a
+terminal stop_reason. Read the advisory and emit `skip_to_sweep` if
+you want to wind down sooner.
 
 ### `trace_analyze` — must precede every `run_optimization`
 
