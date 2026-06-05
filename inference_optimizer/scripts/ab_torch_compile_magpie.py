@@ -8,7 +8,7 @@ kernel-agent targeting.
 Arm A — baseline flags only (optionally pass --base-extra-args).
 Arm B — skill-aligned pair from inference-optimization/actions/baseline.md:
         ``--enable-torch-compile --mem-fraction-static 0.6`` so memory matches
-        marathon scripts when compile is on.
+        benchmark scripts when compile is on.
 
 Outputs JSON with both arms' benchmark_report paths and throughput.
 

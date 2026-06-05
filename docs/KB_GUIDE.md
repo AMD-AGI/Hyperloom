@@ -5,15 +5,13 @@
 > do when you don't have either. Both KB stores are **optional** for a
 > first run; Hyperloom degrades gracefully when they are missing.
 
-Hyperloom references two distinct KB stores:
+Hyperloom references one optional KB store:
 
 | KB                                     | Owner / process                | Purpose                                                                                              |
 |----------------------------------------|--------------------------------|------------------------------------------------------------------------------------------------------|
 | **`INFERENCE_OPTIMIZER_KB_ROOT`**      | `inference_optimizer` / Critic | Cross-run optimization lessons (architecture quirks, validated wins, crash patterns).                |
-| **Marathon KB** (`marathon_optimization/kb/`) | Marathon offline pipeline      | Bulk-import store of per-model optimization traces used to seed `INFERENCE_OPTIMIZER_KB_ROOT`.        |
 
-The two stores share a JSONL schema (`{category, model, lesson, confidence, ...}`)
-but are populated by different pipelines.
+The KB uses a JSONL schema (`{category, model, lesson, confidence, ...}`).
 
 ---
 
@@ -125,26 +123,7 @@ The path is arbitrary, but recommended layouts:
 
 ---
 
-## 3. Marathon KB — offline bulk import
-
-The `marathon_optimization/` subtree is an **offline** pipeline that
-batch-processes session breakdowns from many models into a single KB
-suitable for seeding `INFERENCE_OPTIMIZER_KB_ROOT`. It is **internal
-tooling** and not required for normal Hyperloom use.
-
-If you are not running the marathon pipeline, you can safely:
-
-* Ignore the `marathon_optimization/` directory.
-* Leave any `MARATHON_KB_*` environment variables unset.
-
-If you are running it (typically AMD-internal users with access to
-historical session archives on WekaFS), see
-`marathon_optimization/README.md` in the marathon subtree for the
-pipeline-specific instructions.
-
----
-
-## 4. KB-unreachable behaviour
+## 3. KB-unreachable behaviour
 
 When `judge_bundle.kb_read_skipped_reason == "kb_unreachable"` (or
 `kb_read_disabled`), Critic was unable to read the KB for that turn.
@@ -162,7 +141,7 @@ in `$USER_DATA_PATH/critic-session-memory/kb_drafts/`, and proceed.
 
 ---
 
-## 5. Quick FAQ
+## 4. Quick FAQ
 
 **Q: I'm on PrimusClaw. Do I need to set anything?**
 No. The sandbox mounts a shared KB and sets
