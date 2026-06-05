@@ -531,6 +531,7 @@ def _matrix_entry(entry: dict | str) -> dict:
             "pool_id", "pool_index", "task_count", "positive_task_count",
             "last_success_at", "framework", "precision", "gpu", "tp",
             "conc", "gain", "task_id", "created_at",
+            "nodes", "rayjob_image",
         ):
             if entry.get(key) is not None:
                 out[key] = entry[key]
