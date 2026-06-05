@@ -23,11 +23,11 @@ name: Inference Optimization Daily (fixed models)
 # --concurrency so nothing is auto-detected at run time.
 
 on:
-  # Once per day. The exact clock hour is not significant (operator only asked
-  # for "daily"); 00:00 UTC keeps it aligned with the existing optimize-submit
-  # cron. Every run pins the sandbox to that moment's latest main commit.
+  # Once per day at 00:00 Beijing time (Asia/Shanghai, UTC+8). GitHub Actions
+  # cron runs in UTC, so 16:00 UTC == 00:00 next-day Beijing. Every run pins the
+  # sandbox to that moment's latest main commit.
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 16 * * *'
   workflow_dispatch:
     inputs:
       models:
