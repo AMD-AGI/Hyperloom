@@ -284,7 +284,7 @@ def apply_multi_node_invalid_variants(
 #   * mem_fraction — bumping mem-fraction-static unlocks KV-cache
 #     headroom for long-context workloads; cheap to test, sometimes
 #     big.
-#   * max_num_seqs — marathon KB validated +84% on Kimi-K2.5; tier-1
+#   * max_num_seqs — KB validated +84% on Kimi-K2.5; tier-1
 #     KV-cache class param.
 #   * decode_steps — continuous decode steps; modest leverage.
 #   * schedule / nccl — historically marginal or negative.
@@ -1778,7 +1778,7 @@ def pick_winners(
     keep_threshold_pct: float | None = None,
 ) -> list[VariantResult]:
     """Filter variants whose throughput beats ``baseline_tput`` by
-    ``keep_threshold_pct`` percent (marathon §params: > 1% = KEEP).
+    ``keep_threshold_pct`` percent (> 1% = KEEP).
 
     Resolution order for ``keep_threshold_pct``:
 
