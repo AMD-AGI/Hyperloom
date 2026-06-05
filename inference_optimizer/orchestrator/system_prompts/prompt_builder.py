@@ -401,9 +401,10 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
 
 def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
     lines = [
-        "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
+        "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
         "",
-        "Read the dynamic SharedState section and apply, in order:",
+        "These are reference heuristics and objective facts, not a forced",
+        "sequence. Read the dynamic SharedState section and decide:",
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain >= target_gain_pct`,",
         "   propose `report` once (if not already done) then heartbeat 'goal-reached'.",
@@ -418,11 +419,12 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "4. **Analysis is auto-managed**. Roofline (or profile under "
         "``--no-enable-roofline``) is enqueued by the Coordinator at "
         "PRELUDE and at every +10% validated-gain watermark crossing. "
-        "Do not propose ``profile`` or ``roofline`` — PolicyGate denies "
-        "both with ``rule='analysis_action_not_llm_proposable'``. While "
-        "the analysis task is in flight, ``specialist`` / ``explore`` / "
-        "kernel-owned dispatches are deferred until ``analysis.md`` / "
-        "``last_profile_trace`` refreshes.",
+        "Do not propose ``profile`` or ``roofline`` — they are "
+        "Coordinator-managed and never in the per-phase proposable set, "
+        "so PolicyGate denies both with ``rule='phase_incompatible'``. "
+        "While the analysis task is in flight, ``specialist`` / "
+        "``explore`` / kernel-owned dispatches are deferred until "
+        "``analysis.md`` / ``last_profile_trace`` refreshes.",
     )
     lines.extend([
         "5. **Phase-aware action selection**. v0.8",
@@ -446,11 +448,11 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "*qualitative* hints (what worked / what failed last time).",
         "   d. **specialist proposal_set** (M5+) — when an explore round just",
         "      finished, the proposal_set drives the next `explore` grid.",
-        "   e. **Mandatory MUST-FIRST rules**: baseline before anything else.",
-        "      ``analysis.md`` / ``last_profile_trace`` arrive automatically",
-        "      from the Coordinator-owned analysis task at PRELUDE and at",
-        "      every +10% watermark crossing — do not gate ``kernel_opt`` on",
-        "      a manually-proposed profile.",
+        "   e. **Ordering facts**: baseline runs before anything else",
+        "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
+        "      automatically from the Coordinator-owned analysis task at",
+        "      PRELUDE and at every +10% watermark crossing — you do not",
+        "      need a manually-proposed profile before ``kernel_opt``.",
         "6. **Phase budget awareness**. The `=== Phase ===` block carries",
         "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
         "   prefer lower-cost / known-good actions (explore over kernel_opt).",

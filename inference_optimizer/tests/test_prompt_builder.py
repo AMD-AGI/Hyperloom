@@ -130,7 +130,7 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "## 4. ACTIONS YOU MAY USE",
-        "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
+        "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
         # N20-A "BACKENDS GRID CATALOGUE" + "PARAMS GRID CATALOGUE"
         # sections retired on this branch alongside the v0.6
         # backends / params executors (KB_design §3.4 / Dead-A).

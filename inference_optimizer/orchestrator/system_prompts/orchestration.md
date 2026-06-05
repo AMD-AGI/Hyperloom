@@ -34,29 +34,28 @@ Every tick the per-tick prompt includes a `=== Phase ===` block with:
 Per-phase intent map (the merged `explore` action is the single
 grid-runner entry):
 
-  - **PRELUDE**: `target_analysis`, `baseline`, `recover` are the only
-    actions you can propose. Drive `baseline_tput > 0` so the
-    Coordinator can advance to EXPLORE. Do NOT propose `kernel_opt` /
-    explore-family actions here — they will all be denied. Note: the
-    phase allowlist *also* contains `roofline` and `profile`, but those
-    slots exist so the Coordinator-internal auto-enqueue (PRELUDE-
-    initial analysis after baseline lands) passes PolicyGate R1 —
-    LLM-side proposals are still denied with
-    `rule='analysis_action_not_llm_proposable'`.
+  - **PRELUDE**: `target_analysis`, `baseline`, `recover` are the
+    proposable actions. Drive `baseline_tput > 0` so the Coordinator can
+    advance to EXPLORE. `kernel_opt` / explore-family actions are not
+    proposable here. `roofline` and `profile` are Coordinator-managed
+    (auto-enqueued after baseline lands); they never appear in the
+    per-phase proposable set, so any attempt to propose them is denied by
+    R1 `phase_incompatible`.
   - **EXPLORE**: `explore`, `specialist`, `integrate_patch`, `recover`.
     `profile` / `kernel_opt` / `sweep` / `report` are **denied**.
     Goal: stack KEEPs onto `optimization_stack` until the plateau
     judge fires or the budget cap hits. `explore` runs its per-KEEP
     stack rebench inline.
 
-    **Specialist-informed exploration**: on entering EXPLORE, prefer
-    dispatching `delegate{action_name='specialist'}` for the top-K gaps in
-    parallel in the same tick (fan out up to `research_lane_capacity`,
-    default 4, clamped to the GPU-derived ceiling `2 × visible GPU
-    count`). Specialist results provide stronger KB / PR / source evidence
-    for `explore` grids and may also produce patches for `integrate_patch`.
-    If no specialist has covered a promising gap, you may still propose an
-    Orchestration-authored grid instead of waiting indefinitely.
+    **Specialist-informed exploration**: on entering EXPLORE, dispatching
+    `delegate{action_name='specialist'}` for the top-K gaps in parallel in
+    the same tick is a strong default (they fan out up to
+    `research_lane_capacity`, which defaults to and is clamped by the
+    GPU-derived ceiling `2 × visible GPU count`). Specialist results
+    provide stronger KB / PR / source evidence for `explore` grids and may
+    also produce patches for `integrate_patch`. If no specialist has
+    covered a promising gap, an Orchestration-authored grid is fine too —
+    there is no need to wait indefinitely.
 
     **GPU specialists**: by default specialists are CPU/research tasks.
     When a gap requires a short GPU experiment or microbenchmark (for
@@ -172,11 +171,10 @@ on the next tick.
 * **Stack rebench is inlined into `explore`.**
   Every `explore` KEEP triggers a per-KEEP re-bench of the full
   `optimization_stack`; `cumulative_gain_validated` advances as a
-  side effect. The Coordinator surfaces a TODO in the per-tick
-  checklist when the stack still has unvalidated KEEPs — propose
-  `explore` (NOT the deprecated `validate_stack`) to clear it. The
-  legacy `validate_stack` / `backends` / `params` names are denied
-  by PolicyGate with `rule='action_deprecated'`.
+  side effect. The mission-progress block flags when the stack still
+  has unvalidated KEEPs — run another `explore` round to refresh the
+  validated gain. The legacy `validate_stack` / `backends` / `params`
+  action names are not in any phase's proposable set (use `explore`).
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when
@@ -197,14 +195,10 @@ on the next tick.
   `policy_denied`. No score / cooldown gating beyond that — there
   is no scoreboard.
 * **Never propose `profile` or `roofline`.** Both are auto-managed by
-  the Coordinator. Both action names *do* sit in the phase allowlists
-  for PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL (`phase_state.PHASE_ALLOWED_ACTIONS`),
-  but those slots exist so the Coordinator's own internal-task enqueue
-  passes PolicyGate R1 — LLM-emitted proposals/delegates against
-  either action are still denied with
-  `rule='analysis_action_not_llm_proposable'`. R1
-  (`phase_incompatible`) is not the denial you will see in your inbox;
-  use the analysis-action-not-LLM-proposable rule name to debug.
+  the Coordinator (PRELUDE bootstrap + every +10% watermark refresh).
+  They are Coordinator-managed and never appear in the per-phase
+  proposable set, so any LLM-emitted proposal/delegate against either
+  action is denied by R1 `phase_incompatible`.
 
 ### Roofline / profile analysis (auto-managed — you cannot propose it)
 
