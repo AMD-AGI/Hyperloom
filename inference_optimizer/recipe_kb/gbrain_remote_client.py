@@ -15,18 +15,21 @@ for READS only.
 
 Schema adaptation (read-time): gbrain stores recipes as better-landing
 pages (``type: recipe`` + ``tags: model:/gpu:/framework:`` + flat
-``attrs``). On read we re-derive the v2 5-tuple identity
+``attrs``). On read we re-derive the 5-tuple identity
 (``inference:model:hardware:framework:framework_version:precision``)
 from the page attrs, fall back to the ``unknown_*`` default slugs for
-dimensions gbrain never recorded, and project the page into the v2
-``Recipe`` dict shape. The recipe corpus is small (tens-to-hundreds of
-rows), so ``search`` lists the ``recipe`` type and filters client-side,
-which sidesteps slug-scheme differences between gbrain tags and the v2
-canonical id.
+dimensions gbrain never recorded, and project the page into the unified
+nested KB-interface envelope. The recipe corpus is small
+(tens-to-hundreds of rows), so ``search`` lists the ``recipe`` type and
+filters client-side, which sidesteps slug-scheme differences between
+gbrain tags and the canonical id.
 
-Wire shape returned by every read mirrors :meth:`recipe_kb.schema.Recipe.to_dict`
-so a dispatcher consumer sees identical dicts whether they come from
-this client or the central kb-service.
+Wire shape returned by every read is the SAME nested KB-interface
+envelope (``labels`` / ``body`` / ``metrics`` / ``findings`` /
+``failures`` / ``gaps`` / ``lessons`` / ``pitfalls``) the cortex
+kb-service emits, so the :class:`recipe_kb.RecipeKB` dispatcher runs a
+single ``_v2_to_arbor`` translation regardless of which backend served
+the row. The gbrain page store is the adapter's private storage detail.
 """
 
 from __future__ import annotations
@@ -184,7 +187,14 @@ def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Adapt a gbrain recipe page's frontmatter to a v2 ``Recipe`` dict.
+    """Adapt a gbrain recipe page's frontmatter to the unified KB shape.
+
+    Returns the nested KB-interface envelope (``labels`` / ``body`` /
+    ``metrics`` / ``findings`` / ``failures`` / ``gaps`` / ``lessons`` /
+    ``pitfalls``) so the ``RecipeKB`` dispatcher runs the single
+    :func:`recipe_kb.dispatcher._v2_to_arbor` translation on it — exactly
+    like the cortex kb-service. gbrain's page store is the adapter's
+    private storage detail; the dispatcher never sees the flat page shape.
 
     Returns ``None`` when the page lacks the minimum identity (model /
     hardware) needed to build a canonical id.
@@ -201,68 +211,82 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         model=model, hardware=hardware, framework=framework,
         framework_version=framework_version, precision=precision,
     )
+    throughput = _as_float(
+        attrs.get("best_throughput") or attrs.get("output_throughput")
+    )
+    validated_gain_pct = _as_float(attrs.get("validated_gain_pct"))
     return {
         C.F_CANONICAL_ID: canonical,
         C.F_VERSION: 1,
         "created_at": str(frontmatter.get("created_at") or ""),
         "updated_at": str(frontmatter.get("updated_at") or ""),
-        "model": model,
-        "hardware": hardware,
-        "framework": framework,
-        "framework_version": framework_version,
-        "precision": precision,
-        "best_config": _best_config_from_attrs(attrs),
-        "best_throughput": _as_float(
-            attrs.get("best_throughput") or attrs.get("output_throughput")
+        # Slug-clean 5-tuple identity. ``_labels_match`` runs both sides
+        # through ``canonical_labels`` so the raw page model string and
+        # the slugged label converge; we surface the canonical labels so
+        # the dispatcher's ``_v2_to_arbor`` reads identity from one place.
+        "labels": C.canonical_labels(
+            model=model, hardware=hardware, framework=framework,
+            framework_version=framework_version, precision=precision,
         ),
-        "what_worked": _json_list(attrs.get("what_worked")),
-        "what_failed": _json_list(attrs.get("what_failed")),
-        "remaining_gaps": _json_list(attrs.get("remaining_gaps")),
-        "prs_tested": [],
+        "body": {
+            "best_config": _best_config_from_attrs(attrs),
+            "best_throughput": throughput,
+            "stack_fingerprint": dict(attrs.get("stack_fingerprint") or {}),
+            "sessions": [],
+            "last_profiled": "",
+            "prs_tested": [],
+        },
+        "metrics": {
+            "throughput": throughput,
+            # gbrain-only signal surfaced for consumers that want it.
+            "validated_gain_pct": validated_gain_pct,
+        },
+        "findings": _json_list(attrs.get("what_worked")),
+        "failures": _json_list(attrs.get("what_failed")),
+        "gaps": _json_list(attrs.get("remaining_gaps")),
         "pitfalls": _json_list(attrs.get("pitfalls")),
         "lessons": _json_list(attrs.get("lessons")),
-        "last_profiled": "",
-        "stack_fingerprint": dict(attrs.get("stack_fingerprint") or {}),
-        "sessions": [],
         C.F_AUTHORITY: str(frontmatter.get("authority") or C.AUTHORITY_EXPERIENTIAL),
         C.F_CONFIDENCE: _as_float(frontmatter.get("confidence")) or C.DEFAULT_CONFIDENCE,
         C.F_EVIDENCE_REFS: list(frontmatter.get("evidence_refs") or []),
         C.F_PROVENANCE: dict(frontmatter.get("provenance") or {}),
-        # gbrain-only signal surfaced for consumers that want it.
-        "validated_gain_pct": _as_float(attrs.get("validated_gain_pct")),
     }
 
 
 def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> bool:
     """True when every provided label equals the recipe's slugged value.
 
-    Both sides are run through the canonical 5-tuple builder so the
-    comparison is slug-normalized (``Qwen/Qwen3`` vs ``qwen3`` converge).
+    The recipe carries already-slugged identity under ``labels`` (set by
+    :func:`_page_to_recipe`); the caller's ``label_match`` may be a raw or
+    slugged value, so we re-run it through ``canonical_labels`` to make
+    the comparison slug-normalized (``Qwen/Qwen3`` vs ``qwen3`` converge).
     """
     if not label_match:
         return True
-    dims = {
-        C.F_LABEL_MODEL: recipe.get("model", ""),
-        C.F_LABEL_HARDWARE: recipe.get("hardware", ""),
-        C.F_LABEL_FRAMEWORK: recipe.get("framework", ""),
-        C.F_LABEL_FRAMEWORK_VERSION: recipe.get("framework_version", ""),
-        C.F_LABEL_PRECISION: recipe.get("precision", ""),
-    }
-    recipe_labels = C.canonical_labels(
-        model=str(dims[C.F_LABEL_MODEL]),
-        hardware=str(dims[C.F_LABEL_HARDWARE]),
-        framework=str(dims[C.F_LABEL_FRAMEWORK]),
-        framework_version=str(dims[C.F_LABEL_FRAMEWORK_VERSION]),
-        precision=str(dims[C.F_LABEL_PRECISION]),
-    )
+    recipe_labels = recipe.get("labels")
+    if not isinstance(recipe_labels, Mapping):
+        recipe_labels = {}
     want = C.canonical_labels(
-        model=str(label_match.get(C.F_LABEL_MODEL, "") or dims[C.F_LABEL_MODEL]),
-        hardware=str(label_match.get(C.F_LABEL_HARDWARE, "") or dims[C.F_LABEL_HARDWARE]),
-        framework=str(label_match.get(C.F_LABEL_FRAMEWORK, "") or dims[C.F_LABEL_FRAMEWORK]),
-        framework_version=str(
-            label_match.get(C.F_LABEL_FRAMEWORK_VERSION, "") or dims[C.F_LABEL_FRAMEWORK_VERSION]
+        model=str(
+            label_match.get(C.F_LABEL_MODEL, "")
+            or recipe_labels.get(C.F_LABEL_MODEL, "")
         ),
-        precision=str(label_match.get(C.F_LABEL_PRECISION, "") or dims[C.F_LABEL_PRECISION]),
+        hardware=str(
+            label_match.get(C.F_LABEL_HARDWARE, "")
+            or recipe_labels.get(C.F_LABEL_HARDWARE, "")
+        ),
+        framework=str(
+            label_match.get(C.F_LABEL_FRAMEWORK, "")
+            or recipe_labels.get(C.F_LABEL_FRAMEWORK, "")
+        ),
+        framework_version=str(
+            label_match.get(C.F_LABEL_FRAMEWORK_VERSION, "")
+            or recipe_labels.get(C.F_LABEL_FRAMEWORK_VERSION, "")
+        ),
+        precision=str(
+            label_match.get(C.F_LABEL_PRECISION, "")
+            or recipe_labels.get(C.F_LABEL_PRECISION, "")
+        ),
     )
     # Only compare the dimensions the caller actually constrained.
     for key in label_match:
@@ -276,12 +300,10 @@ class GbrainRemoteRecipeClient:
 
     Duck-types :class:`recipe_kb.RemoteRecipeClient`. Constructed by
     ``cli._build_recipe_kb_dispatcher`` when ``RECIPE_KB_REMOTE=gbrain``.
+    Every read returns the unified nested KB-interface envelope (same
+    shape as the cortex kb-service) so the ``RecipeKB`` dispatcher runs a
+    single translation regardless of which backend served the row.
     """
-
-    # Capability flag read by ``RecipeKB._normalize_remote_row``: every
-    # read already returns the flat arbor (``Recipe.to_dict()``) shape, so
-    # the dispatcher must NOT re-run the v2->arbor projection on our rows.
-    returns_arbor_shape = True
 
     def __init__(
         self,
@@ -405,8 +427,16 @@ class GbrainRemoteRecipeClient:
         updated_since: str | None = None,
         order_by: str = C.ORDER_BY_UPDATED_AT_DESC,
         limit: int = 50,
+        prefer: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Client-side filtered recipe search over the gbrain corpus."""
+        """Client-side filtered recipe search over the gbrain corpus.
+
+        ``prefer`` (workload-similarity hints) is accepted for the
+        unified KB-interface signature; the dispatcher applies the
+        client-side rerank over the normalized rows, so this adapter
+        only honours the ``required`` (``label_match`` / metric) filter.
+        """
+        del prefer  # client-side rerank lives in RecipeKB
         if not self.enabled:
             return []
         candidates = self._scan_recipes(limit=_RECIPE_SCAN_CAP)
@@ -433,11 +463,18 @@ class GbrainRemoteRecipeClient:
 
 
 def _passes_metric_filters(recipe: Mapping[str, Any], metric_filters: Mapping[str, Any]) -> bool:
-    """Apply ``{metric: {min,max}}`` filters against the recipe's flat metrics."""
+    """Apply ``{metric: {min,max}}`` filters against the recipe's metrics.
+
+    The recipe is the nested KB-interface envelope, so throughput lives
+    under ``metrics.throughput`` / ``body.best_throughput``. We accept
+    both the ``throughput`` and the ``best_throughput`` filter aliases.
+    """
+    metrics = recipe.get("metrics") if isinstance(recipe.get("metrics"), Mapping) else {}
+    body = recipe.get("body") if isinstance(recipe.get("body"), Mapping) else {}
     for metric, bounds in (metric_filters or {}).items():
-        val = recipe.get(metric)
-        if val is None and metric == "best_throughput":
-            val = recipe.get("best_throughput")
+        val = metrics.get(metric)
+        if val is None and metric in ("best_throughput", "throughput"):
+            val = body.get("best_throughput") or metrics.get("throughput")
         if val is None:
             return False
         fval = _as_float(val)

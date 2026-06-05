@@ -87,6 +87,140 @@ def _default_status_emitter(line: str) -> None:
     log.info("%s", line)
 
 
+# ---------------------------------------------------------------------------
+# Warm-start helpers (prefer rerank / seed-only detection / WarmStartContext)
+# ---------------------------------------------------------------------------
+# Numeric workload knobs threaded into the KB ``prefer`` block so a
+# closer-workload recipe is reranked first (the dispatcher does the actual
+# rerank; the 5-tuple ``required`` filter is unchanged).
+_PREFER_NUMERIC_ATTRS: tuple[str, ...] = (
+    "tp", "ep", "conc", "isl", "osl", "max_model_len",
+)
+
+
+def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, Any]:
+    """Assemble the ``prefer`` similarity hints from SharedState.
+
+    Only non-empty values are included; the dispatcher skips absent
+    fields. ``quant_scheme`` / ``workload_mode`` ride on the per-baseline
+    ``baseline_workload_extra`` map when present.
+    """
+    prefer: dict[str, Any] = {}
+    for attr in _PREFER_NUMERIC_ATTRS:
+        val = getattr(shared_state, attr, None)
+        if val not in (None, "", 0):
+            prefer[attr] = val
+    fv = str(framework_version or "").strip()
+    if fv:
+        prefer["framework_version"] = fv
+    wl_extra = getattr(shared_state, "baseline_workload_extra", None) or {}
+    if isinstance(wl_extra, Mapping):
+        for key in ("quant_scheme", "workload_mode"):
+            v = str(wl_extra.get(key) or "").strip()
+            if v:
+                prefer[key] = v
+    return prefer
+
+
+def _remote_is_gbrain(kb: Any) -> bool:
+    """Best-effort source tag for the WarmStartContext.
+
+    Reports ``True`` when the dispatcher's active remote is the gbrain
+    adapter; otherwise the source is the cortex kb-service (or local-only
+    fallback, which we still label ``cortex-kb`` since that is the
+    configured remote contract).
+    """
+    remote = getattr(kb, "remote", None)
+    return type(remote).__name__ == "GbrainRemoteRecipeClient"
+
+
+def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
+    """True when a warm recipe carries something worth replaying / priors.
+
+    A bare local draft anchor (T0 ``put_recipe`` stamps identity + tracing
+    tags but no champion / experiential lists) is NOT actionable: treating
+    it as a confident hit would let warm-replay apply an empty config and
+    starve the specialist prompt of real priors.
+    """
+    if not isinstance(row, Mapping):
+        return False
+    best_config = row.get("best_config")
+    if isinstance(best_config, Mapping) and best_config:
+        # An env-only or args-only config is still actionable.
+        args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
+        envs = best_config.get("extra_envs") or best_config.get("envs") or {}
+        if args or (isinstance(envs, Mapping) and envs):
+            return True
+    try:
+        if float(row.get("best_throughput") or 0.0) > 0.0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    for key in ("what_worked", "what_failed", "pitfalls", "lessons"):
+        if row.get(key):
+            return True
+    return False
+
+
+def _build_warm_start_context(
+    *,
+    status: str,
+    tier: str,
+    confidence: float,
+    canonical_id: str,
+    source: str,
+    recipe: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the model-facing WarmStartContext from a KB recipe row.
+
+    ``status`` is one of ``hit`` / ``seed_only`` / ``miss`` / ``error``.
+    Decouples model consumption from the KB row layout: it surfaces a
+    ready-to-replay champion plus the experiential lists, so consumers
+    (warm-replay / specialist prompt / ledger) never parse the raw
+    recipe shape.
+    """
+    ctx: dict[str, Any] = {
+        "status": status,
+        "match": {
+            "tier": tier,
+            "confidence": float(confidence),
+            "source": source,
+            "canonical_id": canonical_id,
+        },
+        "recommended_replay": {},
+        "proven_prior": [],
+        "do_not_repeat": [],
+        "lessons": [],
+        "pitfalls": [],
+    }
+    if status not in ("hit",) or not isinstance(recipe, Mapping):
+        return ctx
+    best_config = recipe.get("best_config") if isinstance(recipe.get("best_config"), Mapping) else {}
+    args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
+    envs = best_config.get("extra_envs") or best_config.get("envs") or {}
+    if not isinstance(envs, Mapping):
+        envs = {}
+    try:
+        best_tput = float(recipe.get("best_throughput") or 0.0)
+    except (TypeError, ValueError):
+        best_tput = 0.0
+    try:
+        expected_gain = float(recipe.get("validated_gain_pct") or 0.0)
+    except (TypeError, ValueError):
+        expected_gain = 0.0
+    ctx["recommended_replay"] = {
+        "extra_server_args": args,
+        "extra_envs": {str(k): str(v) for k, v in envs.items()},
+        "expected_gain_pct": expected_gain,
+        "best_throughput": best_tput,
+    }
+    ctx["proven_prior"] = list(recipe.get("what_worked") or [])
+    ctx["do_not_repeat"] = list(recipe.get("what_failed") or [])
+    ctx["lessons"] = list(recipe.get("lessons") or [])
+    ctx["pitfalls"] = list(recipe.get("pitfalls") or [])
+    return ctx
+
+
 def run_t0_anchor(
     kb: RecipeKB,
     shared_state: Any,
@@ -415,8 +549,13 @@ def run_t0_anchor(
     warm_point: dict[str, Any] = {}
     warm_tier: str = "miss"
     warm_conf: float = 0.0
+    # Workload-similarity hints (``prefer``) reorder candidate rows so the
+    # closest workload surfaces first; they NEVER change the 5-tuple
+    # ``required`` filter. Built from SharedState; absent values are
+    # skipped by the dispatcher's rerank.
+    warm_prefer = _build_warm_prefer(shared_state, _fw_version)
     try:
-        row = kb.get_recipe(canonical_id=cid)
+        row = kb.get_recipe(canonical_id=cid, prefer=warm_prefer or None)
     except Exception as exc:  # noqa: BLE001 — dispatcher absorbs RemoteRecipeClientError
         log.info("warm-start get_recipe non-fatal failure: %s", exc)
         row = None
@@ -432,6 +571,15 @@ def run_t0_anchor(
             # before-applied rather than trusted blindly.
             warm_tier = "relative"
             warm_conf = 0.7
+        # A row can be a bare local draft anchor: the T0 ``put_recipe``
+        # above writes the 5-tuple identity + tracing tags but no
+        # ``best_config`` / experiential lists. Reading it straight back
+        # would otherwise mis-report as a confident ``exact`` hit and let
+        # warm-replay try to apply an empty config. Demote such anchors so
+        # downstream consumers treat them as seed-only.
+        if not _recipe_is_actionable(row):
+            warm_tier = "seed_only"
+            warm_conf = 0.0
     # Keep the on-disk warm.json envelope shape stable so existing
     # readers (kb_explorer, breakdown collectors) keep working;
     # new readers should prefer shared_state.warm_start_recipe.
@@ -459,6 +607,30 @@ def run_t0_anchor(
         }
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)
+
+    # WarmStartContext — the model-facing projection of the KB result.
+    # Parallel structure (does NOT replace ``warm_start_recipe`` /
+    # ``.kb_warm.json`` which breakdown / kb_explorer still read). Status
+    # is explicit so consumers branch on hit / seed_only / miss without
+    # re-deriving it from tier+confidence.
+    if not warm_point:
+        wsc_status = "miss"
+    elif warm_tier == "seed_only":
+        wsc_status = "seed_only"
+    else:
+        wsc_status = "hit"
+    warm_source = "gbrain" if _remote_is_gbrain(kb) else "cortex-kb"
+    try:
+        shared_state.warm_start_context = _build_warm_start_context(
+            status=wsc_status,
+            tier=warm_tier,
+            confidence=warm_conf,
+            canonical_id=cid,
+            source=warm_source,
+            recipe=warm_point or None,
+        )
+    except Exception:  # noqa: BLE001 — defensive; context is advisory
+        log.exception("warm_start_context build failed")
 
     # warm_start_pitfalls / warm_start_lessons — under the v2 design
     # these are embedded fields of the recipe row (one row per
