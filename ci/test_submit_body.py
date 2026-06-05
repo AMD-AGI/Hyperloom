@@ -10,9 +10,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
-
-import pytest
 
 _CI_DIR = Path(__file__).resolve().parent
 if str(_CI_DIR) not in sys.path:
