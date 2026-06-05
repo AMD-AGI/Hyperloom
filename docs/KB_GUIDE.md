@@ -1,9 +1,9 @@
 # Knowledge-Base Guide
 
-> **Scope.** This page explains the two knowledge-base (KB) stores
-> referenced by Hyperloom, how to obtain or populate them, and what to
-> do when you don't have either. Both KB stores are **optional** for a
-> first run; Hyperloom degrades gracefully when they are missing.
+> **Scope.** This page explains the optional knowledge-base (KB) store
+> referenced by Hyperloom, how to obtain or populate it, and what to do
+> when you don't have one. The KB is **optional** for a first run;
+> Hyperloom degrades gracefully when it is missing.
 
 Hyperloom references one optional KB store:
 
@@ -17,7 +17,7 @@ The KB uses a JSONL schema (`{category, model, lesson, confidence, ...}`).
 
 ## 1. TL;DR — I just want to start a run
 
-You don't need either KB to start. Run optimization without setting
+You don't need the KB to start. Run optimization without setting
 `INFERENCE_OPTIMIZER_KB_ROOT`, and Hyperloom will:
 
 * Skip the KB-prior step in scoring (every action starts at its base
@@ -168,7 +168,7 @@ A single-model KB is typically <100 KB; a full cross-model KB
 
 ---
 
-## 6. See also
+## 5. See also
 
 * [ENV_AND_AUTH.md](ENV_AND_AUTH.md) — credentials and path env.
 * [CONFIGURATION_REFERENCE.md](CONFIGURATION_REFERENCE.md) — all
