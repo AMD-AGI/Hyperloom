@@ -700,7 +700,7 @@ What this controls:
   cold-start with no LLM input.
 - Which extra-args env name `_grid_runner` writes
   (`EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS`)
-- Which Marathon KB partition orchestration reads for hints
+- Which KB partition orchestration reads for hints
 
 Mixing frameworks in a single session is not supported; the CLI
 locks `$FRAMEWORK` for the run. Resume re-reads `$FRAMEWORK` from the

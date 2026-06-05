@@ -750,11 +750,7 @@ class Coordinator:
             getattr(state, "model_name", "") or "unknown_model"
         )
         hw = getattr(state, "gpu_type", "") or "unknown_gpu"
-        # ``marathon_dispatch_id`` mirrors the cli path: it's the
-        # hyperloom-internal manifest session id (state.session_id is
-        # the same value when populated from manifest).
         extra_attrs = {
-            "marathon_dispatch_id": getattr(state, "session_id", "") or "",
             "framework":   getattr(state, "framework", "") or "",
             "model_class": getattr(state, "model_class", "") or "",
             "claw_session_id":  getattr(state, "claw_session_id", "") or "",
@@ -4625,7 +4621,7 @@ class Coordinator:
         # Cortex T0 warm-start snapshot + structured
         # gaps[] ledger injected into the Orchestration
         # prompt. ``kb_digest`` was retired upstream (origin/main commit
-        # befbd1381814 — removed the hardcoded marathon path), so this
+        # befbd1381814 — removed the hardcoded legacy path), so this
         # block is the replacement: a structured per-session
         # snapshot the DECISION FRAMEWORK consumes directly.
         if agent_name == "orchestration":
@@ -10249,7 +10245,7 @@ class Coordinator:
         * otherwise (silent revert, ties, no-op-ish negative) → ``None``
 
         Filtering at write time avoids polluting the shared KB with
-        the long tail of marginal regressions that every marathon
+        the long tail of marginal regressions that every session
         produces.
         """
         if not isinstance(result_dict, dict):

@@ -227,7 +227,7 @@ def run_t0_anchor(
 
     # Backfill metadata onto the recipe anchor so subsequent reads
     # (warm-start) and the CLOSE-time update_recipe see the operator-
-    # tracing fields (model_class, image_digest, marathon_dispatch_id,
+    # tracing fields (model_class, image_digest, claw_session_id,
     # ...). T0 only stamps metadata — best_config / best_throughput /
     # what_worked etc. stay whatever they were (preserved across the
     # read-modify-write below). The CLOSE-time hook in coordinator
@@ -276,7 +276,7 @@ def run_t0_anchor(
         _extras["aiter_version"] = aiter_v
     if image_digest and image_digest != "unknown":
         _extras["image_digest"] = str(image_digest).strip()
-    for src_key in ("marathon_dispatch_id", "claw_session_id", "sandbox_user_id"):
+    for src_key in ("claw_session_id", "sandbox_user_id"):
         v = str(_extra.get(src_key) or "").strip()
         if v:
             _extras[src_key] = v
