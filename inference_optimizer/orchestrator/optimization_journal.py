@@ -300,7 +300,7 @@ class Journal:
         written file. Best-effort: an IOError is logged at warning
         level and swallowed — the journal is a forensic aid, not a
         correctness invariant, and the coordinator must not abort
-        a marathon because of a disk hiccup.
+        a session because of a disk hiccup.
         """
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
