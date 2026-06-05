@@ -186,3 +186,37 @@ class TestWriteAndLoad:
     def test_load_raises_when_missing(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             mf.load_manifest(tmp_path)
+
+
+class TestDependencyEscapeGuard:
+    """``_describe_dep`` must never raise out (provenance-capture contract),
+    even when the dependency path makes ``Path.resolve`` raise.
+
+    On CPython 3.10 ``Path.resolve(strict=False)`` raises
+    ``RuntimeError('Symlink loop ...')`` on a self-referential symlink. The
+    escape-guard's ``resolve`` calls only caught ``(OSError, ValueError)``, so
+    such a dep path bubbled the RuntimeError out of manifest generation.
+    """
+
+    def test_describe_dep_survives_symlink_loop(self, tmp_path, monkeypatch):
+        udp = tmp_path / "udp"
+        udp.mkdir()
+        monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, str(udp))
+        # Real a -> b -> a loop; resolve(strict=False) raises RuntimeError.
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.symlink_to(b)
+        b.symlink_to(a)
+        monkeypatch.setenv("HYPERLOOM_TEST_DEP_LOOP", str(a))
+
+        out = mf._describe_dep("HYPERLOOM_TEST_DEP_LOOP")  # must not raise
+
+        assert out == {"path": str(a), "commit": "", "remote": ""}
+
+    def test_path_is_relative_to_handles_symlink_loop(self, tmp_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.symlink_to(b)
+        b.symlink_to(a)
+        # Unresolvable path must degrade to False, not raise.
+        assert mf._path_is_relative_to(a, tmp_path) is False

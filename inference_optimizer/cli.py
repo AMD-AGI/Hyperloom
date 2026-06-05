@@ -1013,8 +1013,9 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         f"(ISL={isl} + OSL={osl} + headroom={headroom}). The workload exceeds "
         f"the model context window; every request would 400. Refusing to run "
         f"(no --context-length override by policy). Lower ISL/OSL for this "
-        f"model, or raise {_CONTEXT_HEADROOM_ENV} if the headroom is too "
-        f"conservative."
+        f"model, or lower {_CONTEXT_HEADROOM_ENV} if the headroom is too "
+        f"conservative (it is added to `required`, so raising it makes "
+        f"admission stricter, not looser)."
     )
     # Persist the stop reason so CI / the robustness monitor read it from
     # state.json + reports/final.json instead of grepping the run log.
@@ -1027,7 +1028,11 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         from .session_paths import reports_dir
 
         state = SharedState.load_or_init(session_dir)
-        state.stop_reason = "model_context_window_too_small"
+        # Use the validated writer so the vocab-closed invariant (Inv-8.3)
+        # holds: the term is registered in STOP_REASON_VOCAB, so this neither
+        # maps to 'unknown' (lenient) nor raises (strict), and the robustness
+        # monitor's vocab-based terminal check recognises the fail-fast.
+        state.set_stop_reason("model_context_window_too_small")
         state.closing_phase = True
         state.save(session_dir)
         summary = _build_summary_dict(state, {}, [], external_baseline=None)
