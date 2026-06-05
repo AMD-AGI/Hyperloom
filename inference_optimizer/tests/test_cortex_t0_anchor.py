@@ -37,6 +37,7 @@ class _FakeSharedState:
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[Any] = field(default_factory=list)
     warm_start_lessons: list[Any] = field(default_factory=list)
+    warm_start_context: dict[str, Any] = field(default_factory=dict)
     framework: str = "sglang"
     framework_version: str = "0.4.5"
     precision: str = "fp8"
@@ -47,6 +48,7 @@ class _FakeSharedState:
     osl: int = 0
     max_model_len: int = 0
     model_class: str = ""
+    baseline_workload_extra: dict[str, Any] = field(default_factory=dict)
 
     def save(self, _path: Path) -> None:  # noqa: D401
         """No-op save — tests don't care about disk persistence here."""
@@ -132,11 +134,16 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
     assert warm_path.is_file()
     import json
     payload = json.loads(warm_path.read_text())
-    # Empty warm on first put — recipe just got created, but the
+    # First put — the T0 anchor created a bare draft row (identity +
+    # tracing tags, but no best_config / experiential lists). The
     # warm_start lookup happens AFTER the put_recipe so the row IS
-    # present and tier == "exact".
-    assert payload["tier"] == "exact"
-    assert payload["confidence"] == 1.0
+    # present, but it is NOT actionable: it must be classified
+    # ``seed_only`` (conf 0.0), not a confident ``exact`` hit, so
+    # warm-replay does not try to apply an empty config.
+    assert payload["tier"] == "seed_only"
+    assert payload["confidence"] == 0.0
+    # The WarmStartContext mirrors this as a seed_only status.
+    assert state.warm_start_context.get("status") == "seed_only"
 
 
 # ===========================================================================
