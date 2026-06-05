@@ -31,9 +31,8 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     _build_variant_yaml,
     _parse_skip_spec,
     _run_magpie,
-    apply_multi_node_invalid_variants,
+    annotate_multi_node_cuda_graph_max_bs,
     apply_runtime_benchmark_overrides,
-    apply_single_node_invalid_variants,
     apply_user_skip_list,
     coerce_extra_envs,
     resolve_skip_spec,
@@ -204,17 +203,15 @@ class TestParseSkipSpec:
         assert _parse_skip_spec("") == []
 
 
-class TestMultiNodeInvalidFilter:
-    def test_short_circuits_in_single_node(self, monkeypatch):
+class TestMultiNodeCudaGraphMaxBsAdvisory:
+    def test_no_notes_in_single_node(self, monkeypatch):
         grid = [
             GridVariant(name="a", extra_server_args="--cuda-graph-max-bs 8"),
         ]
-        kept, dropped = apply_multi_node_invalid_variants(grid)
-        assert kept == grid
-        assert dropped == []
+        notes = annotate_multi_node_cuda_graph_max_bs(grid)
+        assert notes == []
 
-    def test_drops_undersized_cuda_graph_max_bs_in_multi_node(self, monkeypatch):
-        monkeypatch.setattr(gr, "is_multi_node", lambda: True, raising=False)
+    def test_emits_advisory_in_multi_node_without_dropping(self, monkeypatch):
         from inference_optimizer.orchestrator.action_executors import (
             _multi_node_env as mne,
         )
@@ -225,42 +222,11 @@ class TestMultiNodeInvalidFilter:
             GridVariant(name="bad", extra_server_args="--cuda-graph-max-bs 8"),
             GridVariant(name="ok",  extra_server_args="--max-num-seqs 128"),
         ]
-        kept, dropped = apply_multi_node_invalid_variants(grid)
-        assert [k.name for k in kept] == ["ok"]
-        assert [d["name"] for d in dropped] == ["bad"]
-        assert "CONC=64" in dropped[0]["reason"]
-
-
-class TestSingleNodeInvalidFilter:
-    def test_drops_multi_node_only_in_single_node(self):
-        grid = [
-            GridVariant(name="legacy", extra_server_args="--foo 1"),
-            GridVariant(
-                name="mn_only",
-                extra_server_args="--enable-deepep-moe",
-                note="multi_node_only_moe",
-            ),
-        ]
-        kept, dropped = apply_single_node_invalid_variants(grid)
-        assert [k.name for k in kept] == ["legacy"]
-        assert [d["name"] for d in dropped] == ["mn_only"]
-
-    def test_short_circuits_in_multi_node(self, monkeypatch):
-        from inference_optimizer.orchestrator.action_executors import (
-            _multi_node_env as mne,
-        )
-
-        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-        grid = [
-            GridVariant(
-                name="mn_only",
-                extra_server_args="--enable-deepep-moe",
-                note="multi_node_only_moe",
-            ),
-        ]
-        kept, dropped = apply_single_node_invalid_variants(grid)
-        assert [k.name for k in kept] == ["mn_only"]
-        assert dropped == []
+        notes = annotate_multi_node_cuda_graph_max_bs(grid)
+        assert [n["name"] for n in notes] == ["bad"]
+        assert "CONC=64" in notes[0]["reason"]
+        # Grid itself is unchanged: nothing is dropped.
+        assert [v.name for v in grid] == ["bad", "ok"]
 
 
 class TestApplyUserSkipList:

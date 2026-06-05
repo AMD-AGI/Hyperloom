@@ -1206,11 +1206,6 @@ def _seed_shared_state(
     except (TypeError, ValueError):
         explore_variant_timeout_safety_margin = 0.5
 
-    # ``--explore-roofline-hard-gate`` mirror (opt-in roofline filter).
-    explore_roofline_hard_gate = bool(getattr(
-        args, "explore_roofline_hard_gate", False,
-    ))
-
     # KB architecture tags from the model weights' config.json
     # (``architectures`` + ``model_type``). Fresh-launch only — resume
     # rehydrates the persisted values from state.json (see load_or_init).
@@ -1280,7 +1275,6 @@ def _seed_shared_state(
         explore_enabled=not bool(getattr(args, "no_explore", False)),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
-        explore_roofline_hard_gate=explore_roofline_hard_gate,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
         research_scout_interval=max(
             1, int(getattr(args, "research_scout_interval", 3) or 3)
@@ -5276,22 +5270,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "backstop. No effect when --explore-variant-timeout-sec is "
              "set to a positive value. Env: "
              "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN.",
-    )
-    opt.add_argument(
-        "--explore-roofline-hard-gate",
-        dest="explore_roofline_hard_gate",
-        action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_EXPLORE_ROOFLINE_HARD_GATE", "0",
-        ).strip() == "1",
-        help="(Opt-in, off by default.) Drop EXPLORE variants whose flags "
-             "target only roofline directions that the latest snapshot "
-             "shows saturated above 80%%. Saves variant slots on slow "
-             "workloads where (e.g.) host-overhead reducers cannot help "
-             "a memory-bound model. The existing soft "
-             "``--roofline-saturation-advisory`` prompt hint is unchanged "
-             "either way. Env: "
-             "INFERENCE_OPTIMIZER_EXPLORE_ROOFLINE_HARD_GATE=1.",
     )
     # ------------------------------------------------------------------
     # drop scoreboard

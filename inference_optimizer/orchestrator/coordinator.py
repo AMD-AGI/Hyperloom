@@ -5203,8 +5203,9 @@ class Coordinator:
             (``0`` = auto-derive in ExploreExecutor).
           * ``variant_timeout_safety_margin`` — auto-derive headroom (no
             effect when ``variant_timeout_sec`` is pinned above).
-          * ``roofline_hard_gate`` (+ snapshot) — opt-in saturation filter;
-            soft advisory is independent and untouched here.
+          * ``roofline_saturation_snapshot`` — advisory snapshot the
+            executor uses to flag ``likely_saturated`` variants without
+            dropping them; nothing is gated on this value.
         """
         br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
         if br > 0:
@@ -5226,17 +5227,13 @@ class Coordinator:
             params.setdefault(
                 "variant_timeout_safety_margin", safety_margin_override,
             )
-        if bool(getattr(
-            self.shared_state, "explore_roofline_hard_gate", False,
-        )):
-            params.setdefault("roofline_hard_gate", True)
-            history = list(getattr(
-                self.shared_state, "roofline_saturation_history", [],
-            ) or [])
-            if history and isinstance(history[-1], dict):
-                params.setdefault(
-                    "roofline_saturation_snapshot", dict(history[-1]),
-                )
+        history = list(getattr(
+            self.shared_state, "roofline_saturation_history", [],
+        ) or [])
+        if history and isinstance(history[-1], dict):
+            params.setdefault(
+                "roofline_saturation_snapshot", dict(history[-1]),
+            )
         # Thread the persisted explore_search ledger so the ExploreExecutor's
         # canonical_fingerprint dedup has cross-turn memory. Without it,
         # params["explore_search"] is unset every round: the executor restarts

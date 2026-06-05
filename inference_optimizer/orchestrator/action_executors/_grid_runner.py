@@ -221,187 +221,53 @@ _RE_CUDA_GRAPH_MAX_BS = re.compile(
 )
 
 
-def apply_multi_node_invalid_variants(
+def annotate_multi_node_cuda_graph_max_bs(
     grid: list["GridVariant"],
-) -> tuple[list["GridVariant"], list[dict]]:
-    """Drop variants known to underperform in multi-node mode.
+) -> list[dict]:
+    """Return advisory notes for ``--cuda-graph-max-bs N < $CONC`` variants.
 
-    Currently enforces one rule, which has been confirmed empirically
-    on the GLM-5 TP16 multi-node setup:
-
-      - ``--cuda-graph-max-bs N`` where ``N < $CONC`` is auto-skipped.
-        Justification: the cuda graph cache can hold only ``N`` distinct
-        batch sizes; when the bench runs with concurrency > N, every
-        cross-node decode tick misses the graph cache and falls back to
-        eager mode, costing ~50% throughput. Three runs at
-        ``max_bs`` ∈ {8, 16, 32} with CONC=64 produced ~245 tok/s vs the
-        baseline 549 tok/s — i.e. 35-40 min per variant of certain
-        regression. Single-node has the same theoretical issue but the
-        per-variant cost is small enough (~10 min) that empirical
-        confirmation is still useful, so the filter is multi-node-only.
-
-    Returns ``(kept, dropped)`` matching ``apply_user_skip_list``'s
-    shape. Single-node short-circuits to ``(list(grid), [])`` so the
-    call site stays branch-free; the per-variant ``log.info`` in callers
-    only fires for actual multi-node drops.
+    Historically these variants were auto-dropped in multi-node mode
+    because the cuda graph cache misses every cross-node decode tick
+    and the variant regresses by ~50%. We now keep the variant in the
+    grid and return an advisory note instead; the LLM (or the operator)
+    decides whether to skip it. Returns ``[]`` when not in multi-node
+    mode, when ``$CONC`` is unset / non-positive, or when no variant
+    matches.
     """
     from ._multi_node_env import is_multi_node
     if not is_multi_node():
-        return list(grid), []
+        return []
     try:
         conc = int(os.environ.get("CONC", "64") or 64)
     except ValueError:
         conc = 64
     if conc <= 0:
-        return list(grid), []
-    kept: list[GridVariant] = []
-    dropped: list[dict] = []
+        return []
+    notes: list[dict] = []
     for v in grid:
         m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
         if m and int(m.group(1)) < conc:
-            dropped.append({
+            notes.append({
                 "name": v.name,
-                "source": "multi_node_invalid",
+                "source": "multi_node_advisory",
                 "reason": (
                     f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
-                    "(multi-node graph-cache miss → known regression)"
+                    "(multi-node graph-cache miss is a known regression; "
+                    "advisory only, not auto-skipped)"
                 ),
             })
-        else:
-            kept.append(v)
-    return kept, dropped
-
-
-# Multi-node likely-winner priority for grid reordering. Tags are matched
-# against ``GridVariant.name`` and ``GridVariant.note`` as case-insensitive
-# substrings; earlier tags win. Rationale per tag:
-#
-# Params (`_MN_PARAMS_PRIORITY`):
-#   * cuda_graph_max_bs — matches CONC is the empirical single best
-#     server-param lever in multi-node TP runs (24ldn implied +0.93%
-#     vs baseline; A1 already pre-filters bs<CONC, leaving only the
-#     viable cap as the leading candidate).
-#   * mem_fraction — bumping mem-fraction-static unlocks KV-cache
-#     headroom for long-context workloads; cheap to test, sometimes
-#     big.
-#   * max_num_seqs — marathon KB validated +84% on Kimi-K2.5; tier-1
-#     KV-cache class param.
-#   * decode_steps — continuous decode steps; modest leverage.
-#   * schedule / nccl — historically marginal or negative.
-#
-# Backends (`_MN_BACKENDS_PRIORITY`):
-#   * aiter — covers attn_aiter / decode_aiter / moe_aiter, the largest
-#     historical multi-node wins (+10-30%).
-#   * tier3_fusion — enable_fused_moe / enable_mixed_chunk.
-#   * tier2_schedule — lpm / dfs / overlap policies.
-#   * tier5_comm — custom_ar (small leverage, expensive to test).
-#
-# Names not matching any tag sort to the end in original order.
-_MN_PARAMS_PRIORITY: tuple[str, ...] = (
-    "cuda_graph_max_bs",
-    "mem_fraction",
-    "max_num_seqs",
-    "decode_steps",
-    "schedule",
-    "nccl",
-)
-_MN_BACKENDS_PRIORITY: tuple[str, ...] = (
-    "aiter",
-    "tier3_fusion",
-    "tier2_schedule",
-    "tier5_comm",
-)
-
-
-def reorder_grid_for_multi_node(
-    grid: list["GridVariant"],
-    *,
-    priority_tags: tuple[str, ...],
-) -> list["GridVariant"]:
-    """Reorder grid so likely-winners run first in multi-node mode.
-
-    Single-node short-circuits to ``list(grid)`` (preserves the original
-    DEFAULT_*_GRID order bit-for-bit). Multi-node sorts each variant
-    into a bucket by the first ``priority_tag`` that appears as a
-    case-insensitive substring of ``variant.name`` or ``variant.note``.
-    Variants matching no tag land at the end. Sort is stable so ties
-    preserve original grid order.
-
-    Why this matters for multi-node only: each variant costs ~35-40 min
-    (cmd_restart_server + bench + cleanup), so a 5-6 hr grid easily
-    hits the run's ``--max-hours`` cap before the likely winners get a
-    chance. Reordering surfaces empirically-strong candidates in the
-    first 1-3 rounds, leaving the long-tail variants to optional later
-    rounds.
-    """
-    from ._multi_node_env import is_multi_node
-    if not is_multi_node():
-        return list(grid)
-
-    def _priority(v: GridVariant) -> int:
-        haystack = f"{v.name} {v.note or ''}".lower()
-        for i, tag in enumerate(priority_tags):
-            if tag.lower() in haystack:
-                return i
-        return len(priority_tags)
-
-    return sorted(grid, key=_priority)
+    return notes
 
 
 # ---------------------------------------------------------------------------
-# Single-node + compatibility filters (companion to A1's multi-node filter).
+# Framework / hardware compatibility filter.
 #
-# These two helpers protect single-node and incompatible-model paths from
-# wasted sglang restarts on variants whose flags either (a) only make sense
-# in multi-node, or (b) require a model class / sglang version that the
-# current run does not have. Each fires BEFORE the variant is dispatched
-# to a real benchmark, so a 5-10 min restart per filtered variant is saved.
-#
-# Both are conservative: probe failures (e.g. ``sglang --help`` not
-# importable in the sandbox) fall through to "no filtering" so the
-# downstream grid_runner's ``status="failed"`` + rejected-ledger path
-# still handles the bad variant gracefully. Net effect: in the best
-# case we save the time, in the worst case we waste one restart per
-# bad variant (same as the no-filter baseline).
+# Drops variants whose flag literals are not supported by the live
+# framework + model class. This is a real-incompatibility filter
+# (``--enable-deepep-moe`` on a dense model, ``--enable-flashinfer-mla``
+# on a non-MLA model, or a flag that does not appear in the framework's
+# ``--help`` output) rather than a strategy gate, so it stays.
 # ---------------------------------------------------------------------------
-
-
-def apply_single_node_invalid_variants(
-    grid: list["GridVariant"],
-) -> tuple[list["GridVariant"], list[dict]]:
-    """Drop variants whose ``note`` is ``multi_node_only_*`` when single-node.
-
-    Companion to :func:`apply_multi_node_invalid_variants`. Variants the
-    grid library has tagged with ``note="multi_node_only_..."`` (e.g.
-    DeepEP MoE, ep_moe — flags that NCCL-cross-node-distribute MoE
-    expert shards) are silently dropped in single-node mode where they
-    would either reject the flag or no-op silently. Multi-node path
-    returns ``(list(grid), [])`` so the multi-node grid is preserved
-    bit-for-bit.
-
-    The convention ``note="multi_node_only_*"`` is owned by the grid
-    definitions in the ``explore`` executor; we never invent the
-    classification here.
-    """
-    from ._multi_node_env import is_multi_node
-    if is_multi_node():
-        return list(grid), []
-    kept: list[GridVariant] = []
-    dropped: list[dict] = []
-    for v in grid:
-        note_l = (v.note or "").lower()
-        if note_l.startswith("multi_node_only"):
-            dropped.append({
-                "name": v.name,
-                "source": "single_node_invalid",
-                "reason": (
-                    f"variant note={v.note!r} is multi-node-only "
-                    "(silently dropped in single-node path)"
-                ),
-            })
-        else:
-            kept.append(v)
-    return kept, dropped
 
 
 # Multi-node-hot sglang flags that depend on model class (MLA / MoE) or
@@ -1883,7 +1749,6 @@ __all__ = [
     "inject_sglang_watchdog_timeout",
     "merge_server_args",
     "pick_winners",
-    "reorder_grid_for_multi_node",
     "resolve_sglang_watchdog_timeout",
     "run_grid",
     "sanitize_result_dir",

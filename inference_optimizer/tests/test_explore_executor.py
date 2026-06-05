@@ -381,16 +381,16 @@ async def test_explore_executor_safety_margin_param_overrides_default(
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_roofline_hard_gate_drops_saturated_variants(
+async def test_explore_executor_roofline_advisory_annotates_without_dropping(
     sub_agent_runner, tmp_path,
 ):
-    """``roofline_hard_gate=True`` + a saturation snapshot drops variants
-    whose flags target only saturated directions; uncategorized / multi-
-    direction variants survive."""
+    """A saturation snapshot now produces a per-variant
+    ``roofline_advisory`` list; every runnable variant is still
+    benched (loosen plan P2_15 demoted the hard gate)."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-roofline-gate"
+    output_dir = tmp_path / "explore-roofline-advisory"
 
     benched_variants: list[str] = []
 
@@ -399,7 +399,6 @@ async def test_explore_executor_roofline_hard_gate_drops_saturated_variants(
             VariantResult,
         )
         grid = list(kwargs.get("grid") or [])
-        # The executor calls run_grid once per variant (single-element grid).
         assert len(grid) == 1
         gv = grid[0]
         benched_variants.append(gv.name)
@@ -442,16 +441,12 @@ async def test_explore_executor_roofline_hard_gate_drops_saturated_variants(
             "output_dir":  str(output_dir),
             "base_tput":   800.0,
             "grid":        grid,
-            # Roofline says memory is at 92 % (saturated), host_overhead
-            # is at 18 % (plenty of headroom). The gate should drop
-            # `memory_only` and keep `host_only` + `uncategorized`.
-            "roofline_hard_gate": True,
             "roofline_saturation_snapshot": {
                 "compute": 25.0, "memory": 92.0,
                 "host_overhead": 18.0, "comm": 0.0,
             },
         },
-        idempotency_key="ex-roofline-gate",
+        idempotency_key="ex-roofline-advisory",
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -462,27 +457,30 @@ async def test_explore_executor_roofline_hard_gate_drops_saturated_variants(
 
     assert res.state == "succeeded"
     out = res.result
-    # The inlined stack_rebench path re-benches a KEEP'd variant under
-    # ``<name>__stack_rebench`` — ignore that suffix when asserting which
-    # base variants the gate let through.
     base_benched = {n.split("__")[0] for n in benched_variants}
-    assert base_benched == {"host_only", "uncategorized"}
+    assert base_benched == {"host_only", "memory_only", "uncategorized"}
+    advisory = out.get("roofline_advisory") or []
+    names = {entry["name"] for entry in advisory}
+    assert names == {"memory_only"}
+    assert advisory[0]["reason"] == "likely_saturated"
+    assert advisory[0]["saturated_directions"] == ["memory"]
+    # The advisory path never lands variants in skipped_dup.
     skip_reasons = {
         s.get("name"): s.get("reason") for s in out.get("skipped_dup", [])
     }
-    assert skip_reasons.get("memory_only") == "roofline_saturated"
+    assert "memory_only" not in skip_reasons
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_roofline_gate_disabled_by_default(
+async def test_explore_executor_roofline_advisory_empty_when_below_threshold(
     sub_agent_runner, tmp_path,
 ):
-    """Without ``roofline_hard_gate=True``, the soft advisory path is the
-    only one in play and every variant runs (legacy behaviour)."""
+    """When no axis crosses the saturation threshold, the advisory list
+    is empty and every variant still runs."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-roofline-default"
+    output_dir = tmp_path / "explore-roofline-empty"
 
     benched_variants: list[str] = []
 
@@ -517,13 +515,12 @@ async def test_explore_executor_roofline_gate_disabled_by_default(
             "output_dir":  str(output_dir),
             "base_tput":   800.0,
             "grid":        grid,
-            # snapshot present, but flag is OFF (or omitted).
             "roofline_saturation_snapshot": {
-                "compute": 5.0, "memory": 99.0,
+                "compute": 5.0, "memory": 10.0,
                 "host_overhead": 5.0, "comm": 0.0,
             },
         },
-        idempotency_key="ex-roofline-off",
+        idempotency_key="ex-roofline-empty",
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -535,6 +532,7 @@ async def test_explore_executor_roofline_gate_disabled_by_default(
     assert res.state == "succeeded"
     base_benched = {n.split("__")[0] for n in benched_variants}
     assert base_benched == {"memory_only"}
+    assert res.result.get("roofline_advisory") == []
 
 
 @pytest.mark.asyncio

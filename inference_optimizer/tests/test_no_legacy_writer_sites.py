@@ -107,8 +107,6 @@ ALLOWED_FILES: dict[str, str] = {
         "compat helper test surface",
     "inference_optimizer/tests/test_back_compat_legacy_field_name.py":
         "back-compat regression tests",
-    "inference_optimizer/tests/test_explore_roofline_filter.py":
-        "roofline filter tests exercise GridVariant.extra_sglang_args",
     "inference_optimizer/tests/test_grid_runner.py":
         "GridVariant back-compat tests exercise extra_sglang_args kwarg",
     "inference_optimizer/tests/test_coordinator_kb_writes.py":

@@ -62,7 +62,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
-from ._explore_roofline_filter import filter_variants_by_roofline
+from ._explore_roofline_filter import compute_saturation_advisory
 from ._grid_runner import (
     GridVariant,
     _resolve_session_dir,
@@ -82,7 +82,9 @@ log = logging.getLogger(__name__)
 # Per-variant KEEP threshold (gain-pct + accuracy gate). The inlined
 # stack rebench acts as a second gate — a marginal win won't survive
 # into ``optimization_stack`` unless the cumulative stack still wins
-# after this variant is layered onto it.
+# after this variant is layered onto it. Advisory default: callers may
+# override per-task via ``params['keep_threshold_pct']`` (the
+# Orchestration LLM owns the per-batch policy).
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 # Stack rebench stability threshold. After a KEEP, the stack-applied
@@ -90,7 +92,8 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 # otherwise the variant is evicted (KEEP_UNSTABLE → REVERT). Set below
 # the single-variant KEEP threshold so a genuine win that loses a little
 # headroom when layered onto the cumulative stack is not immediately
-# evicted.
+# evicted. Advisory default: callers may override per-task via
+# ``params['stack_stable_threshold_pct']``.
 DEFAULT_STACK_STABLE_PCT = 0.5
 
 def _now_iso() -> str:
@@ -749,45 +752,30 @@ class ExploreExecutor:
             len(grid), len(runnable), len(skipped_dup),
         )
 
-        # Opt-in roofline-categorized filter.
-        # Coordinator-injected ``roofline_hard_gate=True`` together with a
-        # non-empty ``roofline_saturation_snapshot`` activates the gate;
-        # the executor drops variants whose flags target only directions
-        # the latest roofline run reports above the saturation threshold.
-        # Dropped variants land in ``skipped_dup`` with
-        # ``reason='roofline_saturated'`` so the per-variant outcomes
-        # collector and ``state.json`` audit trail surface them next to
-        # the dedup skips. Default is off — when ``roofline_hard_gate``
-        # is missing / falsy, the soft advisory remains the only signal
-        # (legacy behaviour).
-        if bool(params.get("roofline_hard_gate", False)) and runnable:
-            saturation_snapshot = params.get("roofline_saturation_snapshot")
-            if isinstance(saturation_snapshot, dict) and saturation_snapshot:
-                kept_runnable, dropped_by_roofline = filter_variants_by_roofline(
-                    runnable, saturation_snapshot,
+        # Roofline saturation advisory (never drops, only annotates).
+        # When the caller supplies a ``roofline_saturation_snapshot`` we
+        # surface a per-variant advisory list noting variants whose flags
+        # only target directions the latest roofline reports above the
+        # saturation threshold. Surfaced through the result dict so the
+        # Orchestration prompt can prioritise different knobs next round
+        # without code dropping work the LLM might still want to try.
+        roofline_advisory: list[dict[str, Any]] = []
+        saturation_snapshot = params.get("roofline_saturation_snapshot")
+        if isinstance(saturation_snapshot, dict) and saturation_snapshot and runnable:
+            roofline_advisory = compute_saturation_advisory(
+                runnable, saturation_snapshot,
+            )
+            if roofline_advisory:
+                log.info(
+                    "explore roofline advisory: %d/%d variants flagged "
+                    "as likely_saturated (saturated=%s)",
+                    len(roofline_advisory),
+                    len(runnable),
+                    ",".join(sorted(
+                        d for d, p in saturation_snapshot.items()
+                        if isinstance(p, (int, float)) and float(p) >= 80.0
+                    )),
                 )
-                if dropped_by_roofline:
-                    for entry in dropped_by_roofline:
-                        skipped_dup.append({
-                            "name": entry.get("name", ""),
-                            "extra_server_args": entry.get("extra_server_args", ""),
-                            "reason": "roofline_saturated",
-                            "categories": entry.get("categories", []),
-                            "saturated_directions": entry.get(
-                                "saturated_directions", [],
-                            ),
-                        })
-                    log.info(
-                        "explore roofline gate: %d/%d variants dropped "
-                        "(saturated=%s)",
-                        len(dropped_by_roofline),
-                        len(runnable),
-                        ",".join(sorted(
-                            d for d, p in saturation_snapshot.items()
-                            if isinstance(p, (int, float)) and float(p) >= 80.0
-                        )),
-                    )
-                runnable = kept_runnable
 
         round_id_seed = int(search.get("cursor") or 0) + 1
         round_id = f"explore-{round_id_seed:03d}"
@@ -1330,6 +1318,7 @@ class ExploreExecutor:
             "losers": losers,
             "keep_unstable_in_stack": keep_unstable,
             "skipped_dup": skipped_dup,
+            "roofline_advisory": roofline_advisory,
             # flat per-variant outcomes.
             "per_variant_outcomes": per_variant_outcomes,
             "explore_search_update": search_update,

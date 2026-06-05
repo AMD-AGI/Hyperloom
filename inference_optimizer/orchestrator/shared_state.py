@@ -669,15 +669,6 @@ class SharedState:
     # Has no effect when ``explore_variant_timeout_sec_override > 0``
     # (operator-pinned timeout bypasses the auto-derive).
     explore_variant_timeout_safety_margin: float = 0.5
-    # Opt-in hard filter: when True AND the latest
-    # ``roofline_saturation_history`` snapshot has at least one direction
-    # crossing the saturation threshold, ExploreExecutor drops every
-    # variant whose flags target ONLY saturated directions before running
-    # the grid. Variants targeting at least one non-saturated direction
-    # (or that don't match the categorization table) are kept. The
-    # existing ``roofline_saturation_advisory`` (soft prompt hint) stays
-    # unchanged. Mirrored from ``--explore-roofline-hard-gate`` (CLI).
-    explore_roofline_hard_gate: bool = False
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
