@@ -40,18 +40,18 @@ SEED_KIT_FIELDS: frozenset[str] = frozenset({
 })
 
 # Total seed-kit budget.
-MAX_SEED_KIT_TOKENS: int = 8_000
+MAX_SEED_KIT_TOKENS: int = 16_000
 
 # Per-section item count caps.
-MAX_PROFILE_KEYSLICES: int = 6
-MAX_KEPT_PATCHES: int = 20
-MAX_REVERTED_PATCHES: int = 10
-MAX_KB_PITFALLS: int = 10
+MAX_PROFILE_KEYSLICES: int = 10
+MAX_KEPT_PATCHES: int = 40
+MAX_REVERTED_PATCHES: int = 20
+MAX_KB_PITFALLS: int = 20
 
 # Per-section char budgets (≈ 4 chars per token), kept well below
 # ``MAX_SEED_KIT_TOKENS`` so all sections combined stay within budget.
-_MAX_MOTIVATION_CHARS: int = 4_000
-_MAX_ROOFLINE_CHARS: int = 4_000
+_MAX_MOTIVATION_CHARS: int = 8_000
+_MAX_ROOFLINE_CHARS: int = 8_000
 _MAX_PITFALL_CHARS_EACH: int = 600
 _MAX_RATIONALE_CHARS_EACH: int = 240
 
@@ -88,9 +88,10 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 def _is_kernel_only_entry(entry: dict[str, Any]) -> bool:
-    """True for patches whose action is kernel-only; defensively
-    filtered out of the seed kit even though PolicyGate already
-    rejects kernel-only scope at dispatch."""
+    """True for patches whose action is kernel-only. Carried into the
+    seed kit with a ``kernel_only`` advisory tag (not dropped) so the
+    sub-agent sees the full history; PolicyGate still rejects kernel-only
+    scope at dispatch."""
     action = str(entry.get("action") or "").strip().lower()
     return action.startswith("kernel_") or action == "integrate"
 
@@ -148,16 +149,17 @@ def _kept_patches(state: Any) -> list[dict[str, Any]]:
     for entry in accepted[-MAX_KEPT_PATCHES:]:
         if not isinstance(entry, dict):
             continue
-        if _is_kernel_only_entry(entry):
-            continue
-        rows.append({
+        row = {
             "name": entry.get("name") or entry.get("variant_name"),
             "action": entry.get("action") or "explore",
             "gain_pct": entry.get("gain_pct"),
             "rationale": _truncate(
                 str(entry.get("rationale") or ""), _MAX_RATIONALE_CHARS_EACH,
             ),
-        })
+        }
+        if _is_kernel_only_entry(entry):
+            row["kernel_only"] = True
+        rows.append(row)
     return rows
 
 
@@ -171,13 +173,14 @@ def _reverted_patches(state: Any) -> list[dict[str, Any]]:
     for entry in rejected[-MAX_REVERTED_PATCHES:]:
         if not isinstance(entry, dict):
             continue
-        if _is_kernel_only_entry(entry):
-            continue
-        rows.append({
+        row = {
             "name": entry.get("name") or entry.get("variant_name"),
             "reason": str(entry.get("reason") or "").strip(),
             "gain_pct": entry.get("gain_pct"),
-        })
+        }
+        if _is_kernel_only_entry(entry):
+            row["kernel_only"] = True
+        rows.append(row)
     return rows
 
 

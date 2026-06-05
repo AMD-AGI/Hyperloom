@@ -5,8 +5,8 @@ tool call; only validated payloads land in ``proposal_set.json``.
 
 Terminal-state and lifecycle enums anchor the canonical labels read
 by the state machine. Reject reasons are stable strings — the runner
-echoes them into the journal so the sub-agent can iterate within
-:data:`MAX_PROPOSAL_REJECTS`.
+echoes them into the journal so the sub-agent can iterate; the turn /
+wall-clock caps bound the run.
 """
 
 from __future__ import annotations
@@ -209,8 +209,8 @@ SUMMARY_PROMPT_FIELDS: frozenset[str] = frozenset({
     "updated_at",
 })
 
-# Hard cap on the prompt-facing motivation excerpt.
-MOTIVATION_GAP_SHORT_MAX_CHARS: int = 200
+# Cap on the prompt-facing motivation excerpt.
+MOTIVATION_GAP_SHORT_MAX_CHARS: int = 600
 
 
 # ---------------------------------------------------------------------------
@@ -252,11 +252,10 @@ EXPECTED_PROVENANCE: str = "dynamic"
 # (``001_<name>.patch``) well under the filesystem limit.
 MAX_PROPOSAL_NAME_CHARS: int = 80
 
-# Cap on the number of entries the runner accepts per dispatch.
+# integrate contract: the runner accepts exactly one proposal per
+# dispatch (one patch → one integrate_patch). This is an invariant, not
+# a breadth cap.
 MAX_PROPOSAL_SET_LEN: int = 1
-
-# Consecutive validation rejects before the runner gives up.
-MAX_PROPOSAL_REJECTS: int = 2
 
 # Catches obvious numeric speedup claims smuggled into the qualitative
 # argument (``X%`` / ``X.Yx`` / ``X.Y ms`` / ``speedup of X``).
@@ -306,12 +305,16 @@ class ProposalValidationResult:
     normalised: dict[str, Any] | None = None
     reason: str = ""
     detail: str = ""
+    # Non-blocking advisory notes (e.g. unverified numeric claims). The
+    # Critic judges these; they do not gate acceptance.
+    warnings: tuple[str, ...] = ()
 
     def to_journal_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
             "reason": self.reason,
             "detail": self.detail,
+            "warnings": list(self.warnings),
         }
 
 
@@ -441,26 +444,21 @@ def validate_proposal(
         return ProposalValidationResult(
             ok=False, reason="cross_domain_rationale_empty",
         )
-    missing_mentions = [
-        d for d in scope
-        if d.lower() not in rationale.lower()
-    ]
-    if missing_mentions:
-        return ProposalValidationResult(
-            ok=False, reason="cross_domain_rationale_missing_domain_mention",
-            detail=f"missing={missing_mentions!r}",
-        )
 
     qualitative = str(proposal.get("expected_qualitative_argument") or "")
     if not qualitative.strip():
         return ProposalValidationResult(
             ok=False, reason="expected_qualitative_argument_empty",
         )
+
+    # Unverified numeric speedup claims are surfaced as an advisory the
+    # Critic judges, not a hard reject. The forbidden-field check above
+    # still blocks fabricated quantitative fields (anti-gaming).
+    warnings: list[str] = []
     numeric_hits = _numeric_claims(qualitative)
     if numeric_hits:
-        return ProposalValidationResult(
-            ok=False, reason="numeric_claim_in_qualitative_argument",
-            detail=f"hits={numeric_hits!r}",
+        warnings.append(
+            f"unverified_numeric_claim:{numeric_hits!r}"
         )
 
     normalised = {
@@ -471,7 +469,9 @@ def validate_proposal(
         "cross_domain_rationale": rationale.strip(),
         "expected_qualitative_argument": qualitative.strip(),
     }
-    return ProposalValidationResult(ok=True, normalised=normalised)
+    return ProposalValidationResult(
+        ok=True, normalised=normalised, warnings=tuple(warnings),
+    )
 
 
 def build_proposal_set_payload(
@@ -506,7 +506,6 @@ __all__ = [
     "FORBIDDEN_PROPOSAL_FIELDS",
     "LAST_OUTCOME_BY_STATUS",
     "MAX_PROPOSAL_NAME_CHARS",
-    "MAX_PROPOSAL_REJECTS",
     "MAX_PROPOSAL_SET_LEN",
     "MOTIVATION_GAP_SHORT_MAX_CHARS",
     "ProposalValidationResult",

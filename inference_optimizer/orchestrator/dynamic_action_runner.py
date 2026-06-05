@@ -27,7 +27,6 @@ from ..session_paths import (
 from .backends.base import Backend, BackendError
 from .dynamic_action_proposal import (
     DynamicRunnerTerminalState,
-    MAX_PROPOSAL_REJECTS,
     ProposalValidationResult,
     build_proposal_set_payload,
     validate_proposal,
@@ -69,8 +68,8 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Budget defaults
 # ---------------------------------------------------------------------------
-DEFAULT_WALL_CLOCK_BUDGET_SEC: float = 15 * 60.0
-DEFAULT_TURN_CAP: int = 12
+DEFAULT_WALL_CLOCK_BUDGET_SEC: float = 25 * 60.0
+DEFAULT_TURN_CAP: int = 20
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +221,6 @@ class DynamicActionRunner:
                 parsed_action={"tool": "runner_setup", "args": {}},
             ))
         deadline = time.monotonic() + self.wall_clock_budget_sec
-        consecutive_rejects = 0
         terminal: tuple[DynamicRunnerTerminalState, str, dict[str, Any] | None] | None = None
         error_msg = ""
 
@@ -265,13 +263,8 @@ class DynamicActionRunner:
                         parsed_action={"tool": "<unparsable>", "args": {}},
                         tool_result={"ok": False, "reason": str(exc)},
                     ))
-                    consecutive_rejects += 1
-                    if consecutive_rejects > MAX_PROPOSAL_REJECTS:
-                        terminal = (
-                            DynamicRunnerTerminalState.FAILED,
-                            "unparsable_output", None,
-                        )
-                        break
+                    # Log and let the ReAct loop self-correct; the turn /
+                    # wall-clock caps bound the run.
                     continue
 
                 if action.tool == TOOL_EMIT_PROPOSAL:
@@ -305,19 +298,14 @@ class DynamicActionRunner:
                         worktree_cumulative_diff=cumulative_diff,
                     )
                     if not verdict.ok:
-                        consecutive_rejects += 1
                         journal.append(JournalTurn(
                             turn=turn,
                             llm_text=raw_text,
                             parsed_action={"tool": action.tool, "args": action.args},
                             proposal_validation=verdict.to_journal_dict(),
                         ))
-                        if consecutive_rejects > MAX_PROPOSAL_REJECTS:
-                            terminal = (
-                                DynamicRunnerTerminalState.FAILED,
-                                "proposal_validation_failed", None,
-                            )
-                            break
+                        # Log the rejection and let the sub-agent retry;
+                        # the turn / wall-clock caps bound the run.
                         continue
                     journal.append(JournalTurn(
                         turn=turn,
@@ -325,6 +313,7 @@ class DynamicActionRunner:
                         parsed_action={"tool": action.tool, "args": action.args},
                         proposal_validation={
                             "ok": True, "reason": "accepted",
+                            "warnings": list(verdict.warnings),
                         },
                     ))
                     terminal = (
@@ -344,17 +333,10 @@ class DynamicActionRunner:
                             "tool": action.tool,
                         },
                     ))
-                    consecutive_rejects += 1
-                    if consecutive_rejects > MAX_PROPOSAL_REJECTS:
-                        terminal = (
-                            DynamicRunnerTerminalState.FAILED,
-                            "unparsable_output", None,
-                        )
-                        break
+                    # Log and continue; the turn / wall-clock caps bound
+                    # the run.
                     continue
 
-                # Forward progress resets the consecutive-reject counter.
-                consecutive_rejects = 0
                 tool_result = await self._dispatch_tool(
                     action=action, session_dir=session_dir,
                     worktree=worktree, dyn_id=dyn_id, call_id=str(turn),

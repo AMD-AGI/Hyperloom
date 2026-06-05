@@ -15,7 +15,7 @@ side_effects:
   - workspace_write
 preferred_backend: claude
 preferred_model: claude-opus-4-7
-max_turns: 12
+max_turns: 20
 lease_ttl_sec: 1800
 description: "Dispatch a multi-turn ReAct sub-agent for one cross-domain patch combination that no single specialist can cover. Supplementary EXPLORE channel; not the default path."
 pipeline_phase: explore

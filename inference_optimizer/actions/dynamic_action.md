@@ -58,6 +58,8 @@ delegate{
 | Knob                              | Default |
 |-----------------------------------|---------|
 | `scope_domains` min length        | 1       |
+| ReAct turn cap (`DEFAULT_TURN_CAP`) | 20 (override via `--dynamic-action-turn-cap`) |
+| wall-clock budget                 | 25 min (override via `--dynamic-action-wall-clock-sec`) |
 | `MAX_RESEARCH_LANE_CAPACITY`      | 2 × visible GPU (shared with specialists) |
 
 There is no per-round dynamic dispatch cap: breadth is bounded by the

@@ -11,7 +11,6 @@ from inference_optimizer.orchestrator.dynamic_action_proposal import (
     DynamicRunnerTerminalState,
     EXPECTED_PROVENANCE,
     FORBIDDEN_PROPOSAL_FIELDS,
-    MAX_PROPOSAL_REJECTS,
     MAX_PROPOSAL_SET_LEN,
     REQUIRED_PROPOSAL_FIELDS,
     TERMINAL_REASONS,
@@ -63,7 +62,6 @@ def test_constants_locked():
     }
     assert EXPECTED_PROVENANCE == "dynamic"
     assert MAX_PROPOSAL_SET_LEN == 1
-    assert MAX_PROPOSAL_REJECTS == 2
 
 
 def test_terminal_state_reasons_closed():
@@ -148,12 +146,14 @@ def test_validate_proposal_rejects_patch_not_unified_diff():
     assert r.reason == "patch_text_not_unified_diff"
 
 
-def test_validate_proposal_requires_rationale_to_mention_each_domain():
+def test_validate_proposal_allows_rationale_without_every_domain_mention():
+    """The per-domain substring check was removed — the Critic judges
+    cross-domain depth, not a mechanical keyword scan."""
     r = validate_proposal(
         _good_proposal(cross_domain_rationale="serving only"),
         spec_scope_domains=SCOPE,
     )
-    assert r.reason == "cross_domain_rationale_missing_domain_mention"
+    assert r.ok is True
 
 
 @pytest.mark.parametrize("claim", [
@@ -162,12 +162,15 @@ def test_validate_proposal_requires_rationale_to_mention_each_domain():
     "saves ~5 ms per step",
     "speedup of 30 over baseline",
 ])
-def test_validate_proposal_rejects_numeric_claims(claim: str):
+def test_validate_proposal_flags_numeric_claims_as_advisory(claim: str):
+    """Numeric speedup claims no longer reject the proposal — they are
+    carried back as a non-blocking advisory warning for the Critic."""
     r = validate_proposal(
         _good_proposal(expected_qualitative_argument=claim),
         spec_scope_domains=SCOPE,
     )
-    assert r.reason == "numeric_claim_in_qualitative_argument"
+    assert r.ok is True
+    assert any("unverified_numeric_claim" in w for w in r.warnings)
 
 
 # ===========================================================================

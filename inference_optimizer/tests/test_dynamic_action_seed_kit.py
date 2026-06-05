@@ -214,9 +214,11 @@ def test_profile_keyslices_capped_and_sorted_by_gpu_pct():
     assert gpu_pcts == sorted(gpu_pcts, reverse=True)
 
 
-def test_kept_patches_filter_drops_kernel_only_entries():
-    """Kernel-owned action entries are filtered out of the kept-patches
-    section even though PolicyGate already rejects kernel-only scope."""
+def test_kept_patches_tag_kernel_only_entries_without_dropping():
+    """Kernel-owned action entries are carried into the kept-patches
+    section with a ``kernel_only`` advisory tag (not dropped) so the
+    sub-agent sees the full history; PolicyGate still rejects kernel-only
+    scope at dispatch."""
     state = _StateDouble(
         explore_search={
             "accepted": [
@@ -226,9 +228,11 @@ def test_kept_patches_filter_drops_kernel_only_entries():
         },
     )
     result = assemble_seed_kit(state, _payload())
-    names = {r["name"] for r in result.payload["kept_patches"]}
-    assert "fwd" in names
-    assert "kfa" not in names
+    rows = {r["name"]: r for r in result.payload["kept_patches"]}
+    assert "fwd" in rows
+    assert "kfa" in rows
+    assert rows["kfa"].get("kernel_only") is True
+    assert "kernel_only" not in rows["fwd"]
 
 
 def test_kb_pitfalls_filtered_by_scope_domain_substring():

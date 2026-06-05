@@ -76,7 +76,7 @@ def test_terminal_statuses_have_empty_allowed_transitions():
 
 
 def test_motivation_gap_short_cap_locked():
-    assert MOTIVATION_GAP_SHORT_MAX_CHARS == 200
+    assert MOTIVATION_GAP_SHORT_MAX_CHARS == 600
 
 
 # ===========================================================================
@@ -601,7 +601,7 @@ def test_dispatch_truncation_obeys_motivation_cap():
     """The dispatch hook truncates motivation_gap_text down to
     MOTIVATION_GAP_SHORT_MAX_CHARS for the summary; the full text
     remains in spec.json on disk."""
-    long_text = "x" * 500
+    long_text = "x" * (MOTIVATION_GAP_SHORT_MAX_CHARS + 200)
     truncated = long_text[: MOTIVATION_GAP_SHORT_MAX_CHARS - 3].rstrip() + "..."
     assert len(truncated) <= MOTIVATION_GAP_SHORT_MAX_CHARS
 

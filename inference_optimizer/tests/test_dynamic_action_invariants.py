@@ -194,14 +194,16 @@ class TestInvariant_1_MicroBench:
         "1.5x speedup",
         "speedup of 30",
     ])
-    def test_inv_microbench_numeric_claim_blocked_in_qualitative(self, claim: str):
-        """Even when packaged inside expected_qualitative_argument,
-        numeric claims are rejected — the validator is the second
-        defence after the bench-tool whitelist."""
-        bad = _good_proposal(expected_qualitative_argument=claim)
-        result = validate_proposal(bad, spec_scope_domains=SCOPE)
-        assert result.ok is False
-        assert result.reason == "numeric_claim_in_qualitative_argument"
+    def test_inv_microbench_numeric_claim_flagged_as_advisory(self, claim: str):
+        """A numeric claim inside expected_qualitative_argument no longer
+        rejects the proposal at the runner validator — it is surfaced as
+        a non-blocking advisory the Critic judges. Fabricated
+        quantitative *fields* are still blocked by the forbidden-field
+        check (see above)."""
+        flagged = _good_proposal(expected_qualitative_argument=claim)
+        result = validate_proposal(flagged, spec_scope_domains=SCOPE)
+        assert result.ok is True
+        assert any("unverified_numeric_claim" in w for w in result.warnings)
 
     def test_inv_microbench_not_in_critic_envelope_after_floor(self):
         """Even if a proposal slips through the runner, the critic

@@ -26,7 +26,6 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
 )
 from inference_optimizer.orchestrator.dynamic_action_proposal import (
     DynamicRunnerTerminalState,
-    MAX_PROPOSAL_REJECTS,
 )
 from inference_optimizer.orchestrator.dynamic_action_runner import (
     DEFAULT_TURN_CAP,
@@ -219,43 +218,44 @@ async def test_p3_scenario_03_wall_clock_exhausted(tmp_path: Path):
 
 
 # ===========================================================================
-# §10 #4 — emit with numeric claim → reject → corrected
+# §10 #4 — emit with numeric claim is accepted with an advisory
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_p3_scenario_04_numeric_claim_rejected_then_corrected(
+async def test_p3_scenario_04_numeric_claim_accepted_with_advisory(
     tmp_path: Path,
 ):
     _seed_dispatch(tmp_path)
-    bad = _proposal_block(
+    claim = _proposal_block(
         expected_qualitative_argument="should give 20% speedup",
     )
-    good = _proposal_block()
-    plan = ScriptedPlan(turns=[
-        MockTurn(raw_text=bad),
-        MockTurn(raw_text=good),
-    ])
+    plan = ScriptedPlan(turns=[MockTurn(raw_text=claim)])
     result = await _runner(plan).run(_ctx(tmp_path))
     assert result.terminal_state == DynamicRunnerTerminalState.COMPLETED
     journal = Path(result.journal_path).read_text(encoding="utf-8")
-    assert "numeric_claim_in_qualitative_argument" in journal
+    # The numeric claim is surfaced as a non-blocking advisory warning.
+    assert "unverified_numeric_claim" in journal
+    assert "numeric_claim_in_qualitative_argument" not in journal
 
 
 # ===========================================================================
-# §10 #5 — repeated rejects → FAILED
+# §10 #5 — repeated invalid proposals no longer abort the run; the turn
+# cap is the only backstop.
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_p3_scenario_05_repeated_rejects_fail(tmp_path: Path):
+async def test_p3_scenario_05_repeated_invalid_runs_to_turn_cap(tmp_path: Path):
     _seed_dispatch(tmp_path)
-    bad = _proposal_block(
-        expected_qualitative_argument="hits 20% perf",
-    )
+    # A forbidden field is a hard reject (anti-gaming), but no longer
+    # aborts the run — the loop keeps going until the turn cap.
+    bad = _proposal_block(score=0.9)
     plan = ScriptedPlan(
-        turns=[MockTurn(raw_text=bad)] * (MAX_PROPOSAL_REJECTS + 3),
+        turns=[MockTurn(raw_text=bad)],
         loop_last=True,
     )
-    result = await _runner(plan).run(_ctx(tmp_path))
-    assert result.terminal_state == DynamicRunnerTerminalState.FAILED
-    assert result.reason == "proposal_validation_failed"
+    result = await _runner(plan, turn_cap=3).run(_ctx(tmp_path))
+    assert result.terminal_state == DynamicRunnerTerminalState.TIMED_OUT
+    assert result.reason == "turn_cap_exhausted"
+    journal = Path(result.journal_path).read_text(encoding="utf-8")
+    assert "forbidden_field_present" in journal
 
 
 # ===========================================================================
@@ -313,10 +313,11 @@ async def test_p3_scenario_08_cross_dyn_id_artifact_denied(tmp_path: Path):
 
 
 # ===========================================================================
-# §10 #9 — unparsable output → reject → eventually FAILED
+# §10 #9 — unparsable output is logged and the loop runs to the turn cap
+# (no early abort).
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_p3_scenario_09_unparsable_output_repeated_fails(
+async def test_p3_scenario_09_unparsable_output_runs_to_turn_cap(
     tmp_path: Path,
 ):
     _seed_dispatch(tmp_path)
@@ -324,9 +325,9 @@ async def test_p3_scenario_09_unparsable_output_repeated_fails(
         turns=[MockTurn(raw_text="no action block at all")],
         loop_last=True,
     )
-    result = await _runner(plan).run(_ctx(tmp_path))
-    assert result.terminal_state == DynamicRunnerTerminalState.FAILED
-    assert result.reason == "unparsable_output"
+    result = await _runner(plan, turn_cap=3).run(_ctx(tmp_path))
+    assert result.terminal_state == DynamicRunnerTerminalState.TIMED_OUT
+    assert result.reason == "turn_cap_exhausted"
 
 
 # ===========================================================================
