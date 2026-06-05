@@ -18,10 +18,8 @@ from typing import Any
 from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
 
 _CAPABILITY_ORDER = (
-    # ``explore`` is the primary row for sessions
-    #. backends / params / validate_stack
-    # remain as compatibility aliases so legacy resume reports stay
-    # readable.
+    # ``explore`` is the primary row for current sessions. The legacy
+    # rows remain readable for archived sessions rebuilt from old state.
     "explore",
     "backends", "params", "sweep", "geak", "oob", "validate_stack",
 )
@@ -67,7 +65,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             extras.append(f"validated_gain={fmt_pct(v['last_validated_gain_pct'])}")
         if "grid_size" in v and v["grid_size"] is not None:
             extras.append(f"grid={v['grid_size']}")
-        # v0.8 M3 explore extras.
+        # explore extras.
         if "keep_unstable_count" in v and v["keep_unstable_count"]:
             extras.append(f"keep_unstable={v['keep_unstable_count']}")
         if "winners_history" in v and v["winners_history"]:

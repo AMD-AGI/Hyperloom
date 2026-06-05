@@ -40,7 +40,7 @@ from inference_optimizer.orchestrator.backends.base import BackendError
 from inference_optimizer.orchestrator.backends.critic_agent import (
     _extract_review_json,
 )
-from inference_optimizer.orchestrator.intent_parser import IntentType
+from inference_optimizer.protocol.intent import IntentType
 
 
 # ---------------------------------------------------------------------------
@@ -1080,7 +1080,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
 

@@ -79,7 +79,7 @@ class RcaThrottle:
         self._config = config or RcaThrottleConfig()
         self._state_view = state_view
         # Disk-backed per-key cooldown timestamps — the 60s default
-        # cooldown is meaningless without persistence under M1
+        # cooldown is meaningless without persistence under the
         # subprocess-per-tick transport (every subprocess sees an
         # empty dict and calls the LLM again). ``_tick_calls`` /
         # ``_tick_id`` deliberately stay in-memory: they're per-tick
