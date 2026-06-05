@@ -28,11 +28,6 @@ fresh TraceLens snapshot (`last_profile_trace` +
   would normally do for a top-level profile task are reproduced
   inline (limited to the trace_path / status / args fields that
   downstream trace_analyze depends on).
-
-N2a stub kept (`RooflineStubExecutor` + `make_roofline_stub_executor`)
-as the §11 risk-mitigation fallback wiring: operators who want to
-temporarily disable the real executor without removing the action
-entry can wire the stub instead.
 """
 
 from __future__ import annotations
@@ -49,22 +44,13 @@ def _now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
-# N26 — auto-recover from TraceLens steady_state_chunk_* failures
+# auto-recover from TraceLens steady_state_chunk_* failures
 # ---------------------------------------------------------------------------
-# Pre-N26 the RooflineExecutor returned `status=failed` whenever
-# trace_analyze sub-step failed -- including the (very recoverable)
-# N25 case where the splitter produced a structurally empty chunk for
-# the requested mode but other modes' chunks did carry real GPU work.
-# Operators had to manually kill the session, set
-# INFERENCE_OPTIMIZER_STEADY_STATE_MODE=<other_mode>, and restart.
-#
-# N26 closes that loop: when trace_analyze fails with a structured
-# steady_state_chunk_{empty,missing} warning that carries
-# `non_empty_modes`, we re-issue trace_analyze ONCE with the first
-# non-empty mode automatically. This is NOT a busy-% heuristic or
-# inference_optimizer-side chunk ordering -- the alternate mode comes
-# directly from TraceLens splitter's own execution_details.csv. We
-# are simply consuming the splitter's structured recovery hint.
+# When trace_analyze fails with a structured
+# steady_state_chunk_{empty,missing} warning carrying ``non_empty_modes``,
+# re-issue trace_analyze ONCE with the first non-empty mode. The alternate
+# mode comes directly from TraceLens's splitter (execution_details.csv),
+# not an inference_optimizer-side busy-% heuristic.
 #
 # Single-retry contract: prevents infinite loops. If the retry also
 # fails (or no alternate mode was offered) we propagate the original
@@ -72,12 +58,11 @@ def _now_iso() -> str:
 _AUTO_RETRY_WARNING_CODES = frozenset({
     "steady_state_chunk_empty",
     "steady_state_chunk_missing",
-    # N36 (May 2026): low-quality chunk (non-empty but busy_ratio
-    # below threshold AND a materially-higher-busy_ratio alternate
-    # exists). Same recovery path as N25 — alternate mode comes from
-    # the warning's ``non_empty_modes`` list, populated by the
-    # tracelens_analysis._check_selected_chunk_has_gpu_events_quality
-    # gate.
+    # low-quality chunk (non-empty but busy_ratio below threshold AND a
+    # materially-higher-busy_ratio alternate exists). Same recovery
+    # path; alternate mode comes from the warning's ``non_empty_modes``
+    # list, populated by the
+    # tracelens_analysis._check_selected_chunk_has_gpu_events_quality gate.
     "steady_state_chunk_low_quality",
 })
 
@@ -126,50 +111,6 @@ def _extract_steady_state_retry_mode(
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip(), w
     return None
-
-
-# ---------------------------------------------------------------------------
-# Stub (N2a) — kept for the §11 fallback wiring path
-# ---------------------------------------------------------------------------
-class RooflineStubExecutor:
-    """Stub executor used as a fallback when the real `RooflineExecutor`
-    must be disabled (operator override / debug scenarios). Returns
-    `succeeded` + `degraded=True` with diagnostic `error` field."""
-
-    def __init__(self, *, shared_state: Any = None):
-        self.shared_state = shared_state
-
-    async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
-        snapshot_id = 0
-        analysis_md_path = ""
-        last_profile_trace = ""
-        if self.shared_state is not None:
-            cached = (
-                getattr(self.shared_state, "last_trace_analyze", {}) or {}
-            )
-            snap_raw = cached.get("roofline_snapshot_id")
-            if isinstance(snap_raw, int):
-                snapshot_id = snap_raw
-            analysis_md_path = str(cached.get("analysis_md_path") or "")
-            last_profile_trace = str(
-                getattr(self.shared_state, "last_profile_trace", "") or ""
-            )
-        return {
-            "status": "succeeded",
-            "degraded": True,
-            "error": "roofline_stub_executor_active",
-            "executed_at_iso": _now_iso(),
-            "snapshot_id": snapshot_id,
-            "last_profile_trace": last_profile_trace,
-            "analysis_md_path": analysis_md_path,
-        }
-
-
-def make_roofline_stub_executor(
-    *, shared_state: Any = None,
-) -> RooflineStubExecutor:
-    """Stub factory — kept as the explicit safe-fallback wiring path."""
-    return RooflineStubExecutor(shared_state=shared_state)
 
 
 # ---------------------------------------------------------------------------
@@ -272,14 +213,12 @@ class RooflineExecutor:
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
-        # IR-8 (atom): the historical short-circuit returned status="skipped"
-        # because profile was a hard dependency and atom had no profiler
-        # wiring. The Magpie atom wrapper now bridges PROFILE=1 to atom's
-        # --torch-profiler-dir CLI flag, so the composite's profile sub-
-        # step succeeds and the trace_analyze sub-step consumes the
-        # resulting *.pt.trace.json.gz unchanged (TraceLens is framework-
-        # agnostic). The executor falls through to the same path as
-        # sglang/vllm.
+        # atom: the Magpie atom wrapper bridges PROFILE=1 to atom's
+        # --torch-profiler-dir CLI flag, so the composite's profile
+        # sub-step succeeds and the trace_analyze sub-step consumes the
+        # resulting *.pt.trace.json.gz unchanged (TraceLens is
+        # framework-agnostic). The executor falls through to the same
+        # path as sglang/vllm.
         # Lazy imports avoid pulling shell-out / yaml machinery at
         # module load time (consistent with how the BaselineExecutor
         # subclass is constructed lazily by cli).
@@ -345,7 +284,7 @@ class RooflineExecutor:
         except Exception as exc:  # noqa: BLE001
             # Stale cache invariant: failure leaves last_profile_trace
             # pointing at the new trace but no fresh analysis_md_text
-            # for it. Clear the cache so the prompt renderer (N5) shows
+            # for it. Clear the cache so the prompt renderer shows
             # "(no TraceLens snapshot yet)" instead of stale advice
             # tied to the previous trace.
             self.shared_state.last_trace_analyze = {}
@@ -357,7 +296,7 @@ class RooflineExecutor:
                 f"trace_analyze_handler returned non-dict: {type(ta_result).__name__}",
             )
 
-        # N26 auto-retry: when trace_analyze failed AND the failure
+        # auto-retry: when trace_analyze failed AND the failure
         # carries a steady_state_chunk_{empty,missing} warning with
         # `non_empty_modes`, the TraceLens splitter is telling us
         # exactly which alternate mode it CAN serve. Re-issue ONCE
@@ -410,7 +349,7 @@ class RooflineExecutor:
                     ),
                 )
             # Stamp the result so the recorder / prompt renderer can
-            # surface "this snapshot came from N26 auto-retry" to the
+            # surface "this snapshot came from an auto-retry" to the
             # LLM (helps it self-document any subsequent explore
             # decisions). Stamping is best-effort; field naming is
             # under `n26_auto_retry` to keep it discoverable in
@@ -491,16 +430,11 @@ class RooflineExecutor:
 
 
 def make_roofline_executor(*, shared_state: Any) -> RooflineExecutor:
-    """Production factory used by `cli._register_executors`.
-
-    Same call-site signature `make_roofline_stub_executor` exposes so
-    swapping stub → real is a one-line change in cli.py."""
+    """Production factory used by `cli._register_executors`."""
     return RooflineExecutor(shared_state=shared_state)
 
 
 __all__ = [
     "RooflineExecutor",
-    "RooflineStubExecutor",
     "make_roofline_executor",
-    "make_roofline_stub_executor",
 ]

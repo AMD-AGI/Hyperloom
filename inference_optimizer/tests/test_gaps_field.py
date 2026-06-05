@@ -36,7 +36,7 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.policy import (

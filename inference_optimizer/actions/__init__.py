@@ -1,4 +1,4 @@
-"""Optimization action catalogue ().
+"""Optimization action catalogue.
 
 Layout:
 

@@ -231,7 +231,6 @@ class SweepExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
-        # See backends.py for rationale.
         try:
             override_script = sanitize_script_name(params.get("benchmark_script"))
             override_result_dir = sanitize_result_dir(params.get("result_dir"))

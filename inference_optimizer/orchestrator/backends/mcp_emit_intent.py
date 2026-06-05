@@ -25,7 +25,7 @@ import importlib
 import logging
 from typing import Any, Callable
 
-from ..intent_parser import (
+from ...protocol.intent import (
     IntentType,
     IntentValidationError,
     _PAYLOAD_REQUIRED,  # type: ignore[attr-defined]

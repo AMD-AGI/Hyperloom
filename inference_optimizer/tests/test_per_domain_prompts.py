@@ -158,7 +158,7 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
     from inference_optimizer.orchestrator.backends.mock_backend import (
         MockBackend, MockTurn, ScriptedPlan,
     )
-    from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+    from inference_optimizer.protocol.intent import Intent, IntentType
     from inference_optimizer.orchestrator.specialist_runner import SpecialistRunner
     from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
     from inference_optimizer.orchestrator.task_registry import Task
@@ -237,7 +237,7 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
     IntentValidationError,
@@ -645,7 +645,7 @@ def test_prompt_builder_emits_nine_sections():
     # User sections (2-7)
     assert "## 2. HARDWARE CONTEXT" in usr_p
     assert "## 3. GAP STATEMENT" in usr_p
-    assert "## 4. CORTEX KB SUB-GRAPH" in usr_p
+    assert "## 4. KB CONTEXT (optional, advisory)" in usr_p
     assert "## 5. WARM-START RECIPE SUMMARY" in usr_p
     assert "## 6. PR FEED" in usr_p
     assert "## 7. LOCAL SOURCE NAVIGATION HINT" in usr_p

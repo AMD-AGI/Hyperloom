@@ -84,7 +84,7 @@ _PATCH_SENTINEL = '${NUM_PROMPTS:-$max_concurrency}'
 _LOCK_PATH = "/tmp/hyperloom_benchmark_lib_patcher.lock"
 
 
-# PR-D §2: ``benchmark_serving.py`` hardcodes
+# ``benchmark_serving.py`` hardcodes
 # ``extra_body={"num_steps": 1, "merge_profiles": True, "profile_by_stage":
 # True}`` on the ``/start_profile`` request to SGLang. Hyperloom sets
 # ``PROFILE_EXTRA_BODY`` env var (with shape_discovery / roofline_annotations
@@ -363,7 +363,7 @@ def ensure_benchmark_lib_patched(
 
 
 # =====================================================================
-# PR-D §2: PROFILE_EXTRA_BODY consumer patch for benchmark_serving.py
+# PROFILE_EXTRA_BODY consumer patch for benchmark_serving.py
 # =====================================================================
 def _resolve_benchmark_serving_paths(
     inferencex_path: Path | str | None,
