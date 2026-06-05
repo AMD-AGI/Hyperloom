@@ -56,7 +56,6 @@ from optimize_submit import (  # noqa: E402
     DEFAULT_REGISTER_WORKSPACE,
     DEFAULT_RESULTS_PATH,
     DEFAULT_TARGET_GAIN,
-    DEFAULT_TRACELENS_ROOT,
     DEFAULT_VOLUME,
     HuggingFaceClient,
     SafeOptimizeClient,
@@ -199,8 +198,7 @@ class TinyController:
         self.oob_path = (args.oob_path or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
                          or DEFAULT_OOB_PATH)
         self.tracelens_root = (args.tracelens_root
-                               or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT")
-                               or DEFAULT_TRACELENS_ROOT)
+                               or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT", ""))
         self.hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
         self.webhook_url = args.webhook_url or os.environ.get("WEBHOOK_URL", "")
         self.dashboard_url = args.dashboard_url or os.environ.get("DASHBOARD_URL", "")

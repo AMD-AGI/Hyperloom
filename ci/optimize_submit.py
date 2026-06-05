@@ -114,11 +114,9 @@ DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
 DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
 # TraceLens has no in-process fallback: kernel-agent/scripts/install.sh
 # clones AMD-AGI/TraceLens into $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens
-# inside the sandbox (pinned to a fixed SHA), so we leave --tracelens-root
-# empty by default and let the installer manage the checkout. Operators
-# can still override by exporting SAFE_OPTIMIZE_TRACELENS_ROOT or passing
-# --tracelens-root to point at an existing cluster checkout.
-DEFAULT_TRACELENS_ROOT = ""
+# inside the sandbox (pinned to a fixed SHA), so --tracelens-root stays
+# empty by default and the installer manages the checkout. Operators can
+# still override via $SAFE_OPTIMIZE_TRACELENS_ROOT or --tracelens-root.
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
 DEFAULT_TARGET_GAIN = 100.0
@@ -3012,8 +3010,7 @@ def main() -> int:
                 or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
                 or DEFAULT_OOB_PATH)
     tracelens_root = (args.tracelens_root
-                      or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT")
-                      or DEFAULT_TRACELENS_ROOT)
+                      or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT", ""))
     try:
         kernel_backends = parse_kernel_backends(args.kernel_opt_backends)
     except ValueError as e:
