@@ -215,7 +215,7 @@ class KernelAgentToolTests(unittest.TestCase):
         skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
-        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
+        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors/TraceLens}"', install_text)
         # Internal extension is opt-in: no default path (open-source-only unless
         # TRACELENS_INTERNAL_ROOT is explicitly set).
         self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)
@@ -288,20 +288,40 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('chmod 600 "$env_file"', install_text)
         self.assertIn("GEAK_MEMORY_STORE_PATH", ray_runtime_text)
         self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
-        self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"', trace_tool_text)
+        # tracelens_analysis no longer hard-codes a /wekafs fallback for
+        # TRACELENS_ROOT: install.sh exports it via kernel-agent.env.sh and
+        # the tool fails loudly when it is missing rather than silently
+        # poking a path that may not exist on the node.
+        self.assertNotIn("DEFAULT_TRACELENS_ROOT", trace_tool_text)
+        self.assertIn(
+            'parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", "")',
+            trace_tool_text,
+        )
+        self.assertIn(
+            "TraceLens root not provided: set TRACELENS_ROOT in env",
+            trace_tool_text,
+        )
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens}"', install_text)
         self.assertNotIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
-        # Read-only TRACELENS_INTERNAL_ROOT must trigger a writable mirror
-        # under ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to GEAK / OOB),
-        # and write_env_file() must export the resolved roots so CLI
-        # subprocesses inherit mirrors instead of falling back to the
-        # read-only /wekafs default.
+        # TraceLens public follows Magpie / InferenceX: clone the open-source
+        # repo into the runtime tree by default, independent of HYPERLOOM_ROOT.
+        # Explicit TRACELENS_ROOT remains an operator-owned override.
+        self.assertIn(
+            'TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"',
+            install_text,
+        )
+        self.assertIn('TRACELENS_REF="c35c787ef31f0425fa0028a605ffc8c60a737c2c"', install_text)
+        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors/TraceLens}"', install_text)
+        self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"', install_text)
+        self.assertIn('git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
+        self.assertNotIn('TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"', install_text)
+        # Read-only TRACELENS_INTERNAL_ROOT may still trigger a writable mirror
+        # under ${HYPERLOOM_ROOT}/TraceLens-internal (optional extension).
         self.assertIn(
             'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"',
             install_text,
         )
-        self.assertIn('cp -r "$TRACELENS_INTERNAL_ROOT" "$TRACELENS_MIRROR_DIR"', install_text)
         self.assertIn('export TRACELENS_INTERNAL_ROOT', install_text)
         self.assertIn(
             "echo \"export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'\"",
