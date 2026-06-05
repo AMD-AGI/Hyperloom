@@ -85,9 +85,8 @@ def _seed_post_baseline(coord: Coordinator) -> None:
     Includes writing the target_baseline.json marker — the
     ``target_analysis`` gate now fires unconditionally and would otherwise
     mask the downstream gates these tests target. Also populates
-    ``last_trace_analyze`` matching the trace so the P3 analyze gate
-    (TODO 3/5) is open by default; tests targeting integrate / validate_stack
-    don't care about the analyze gate and would otherwise be masked by it.
+    ``last_trace_analyze`` matching the trace so the analyze prerequisite
+    is satisfied for tests targeting the integrate / stack gates.
     """
     _write_baseline_json(coord.session_dir)
     s = coord.shared_state
@@ -99,83 +98,9 @@ def _seed_post_baseline(coord: Coordinator) -> None:
     }
 
 
-def test_trace_analyze_cache_satisfies_analyze_gate(session_dir):
-    """Roofline writes last_trace_analyze; KERNEL must not loop on select."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(coord.session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_select_kernels = {}
-    s.last_trace_analyze = {
-        "trace_input": "/tmp/profile.tar.gz",
-        "candidates_path": "/tmp/kernel_candidates.json",
-        "hot_kernels_top15": [],
-        "reusable_native_kernel_ids": [],
-    }
-
-    todo = coord._required_next_step()
-
-    assert "TODO 3/5" not in todo
-    assert "select_kernels" not in todo
-
-
 # ===========================================================================
 # target_analysis gate
 # ===========================================================================
-def test_target_analysis_gate_fires_when_compare_unset_and_json_missing(session_dir):
-    """Gate fires unconditionally on missing target_baseline.json — even
-    without --compare-against-gpu — because the executor still runs and
-    writes a 'no_target_gpu_configured' marker JSON."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    todo = coord._required_next_step()
-    assert "TODO 0/5" in todo
-    assert "target_analysis is required now" in todo
-    assert "no_target_gpu_configured" in todo
-    assert "baseline is required now" not in todo
-
-
-def test_target_analysis_gate_fires_when_compare_set_and_json_missing(session_dir):
-    coord = Coordinator(
-        session_dir, backends=_backends_full(),
-        compare_against_gpu="b300",
-    )
-    todo = coord._required_next_step()
-    assert "TODO 0/5" in todo
-    assert "target_analysis is required now" in todo
-    assert "b300" in todo
-
-
-def test_target_analysis_gate_clears_after_baseline_json_written(session_dir):
-    coord = Coordinator(
-        session_dir, backends=_backends_full(),
-        compare_against_gpu="b300",
-    )
-    _write_baseline_json(session_dir)
-    todo = coord._required_next_step()
-    assert "target_analysis" not in todo
-    # baseline TODO takes precedence next.
-    assert "baseline is required now" in todo
-
-
-def test_target_analysis_gate_clears_after_marker_json_written_unset(session_dir):
-    """A 'no_target_gpu_configured' marker JSON is enough to satisfy the
-    gate; the executor writes one even without --compare-against-gpu."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    path = target_baseline_json(session_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({
-            "status": "skipped",
-            "reason": "no_target_gpu_configured",
-        }),
-        encoding="utf-8",
-    )
-    todo = coord._required_next_step()
-    assert "target_analysis is required now" not in todo
-    assert "baseline is required now" in todo
-
-
 def test_target_analysis_denial_blocks_baseline_when_gate_open(session_dir):
     coord = Coordinator(
         session_dir, backends=_backends_full(),
@@ -227,7 +152,6 @@ def test_integrate_gate_inactive_without_keep(session_dir):
     _seed_post_baseline(coord)
     # No last_kernel_opt -> gate closed.
     assert coord._kernel_opt_keep_pending() == ""
-    assert coord._required_next_step() == ""
 
 
 def _seed_kernel_opt_state(coord, *, kernel_id: str, decision: str,
@@ -268,13 +192,6 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
         source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
     )
     assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
-    todo = coord._required_next_step()
-    # P3 renumbered the integrate gate from 3/4 to 4/5 (analyze is the
-    # new 3/5). `_seed_post_baseline` populates last_trace_analyze so
-    # the analyze gate is satisfied; the integrate gate is what fires.
-    assert "TODO 4/5" in todo
-    assert "integrate is required now" in todo
-    assert "k-rmsnorm" in todo
 
 
 def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
@@ -288,15 +205,9 @@ def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
         {"action": "integrate", "kernel_id": "k-rmsnorm",
          "target_file": "/p/rmsnorm.py"},
     ]
+    # The integrate KEEP is now on the stack, so the integrate gate
+    # closes.
     assert coord._kernel_opt_keep_pending() == ""
-    # The integrate entry counts as an unvalidated KEEP -> the
-    # stack-rebench gate fires next, not integrate. v0.8 M3 +
-    # KB_gaps/Gap-10: the rebench is inlined into ``explore``; the
-    # TODO surfaces with that wording instead of the deprecated
-    # ``validate_stack``.
-    todo = coord._required_next_step()
-    assert "integrate is required now" not in todo
-    assert "stack rebench required" in todo
 
 
 def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
@@ -305,7 +216,6 @@ def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
     _seed_kernel_opt_state(coord, kernel_id="k-bad", decision="KEEP")
     coord.shared_state.rejected_kernel_ids = ["k-bad"]
     assert coord._kernel_opt_keep_pending() == ""
-    assert coord._required_next_step() == ""
 
 
 def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
@@ -412,12 +322,9 @@ def test_report_allowed_after_every_hot_kernel_tried(session_dir):
         assert denied.rule != "hot_kernel_unfinished", denied
 
 
-def test_required_next_step_surfaces_untried_hot_kernels(session_dir):
-    """``_required_next_step`` should also surface the TODO 4a line so
-    Orchestration sees the explicit list when no KEEP is pending.
-
-    Requires the kernel_opt request gate open (roofline snapshot on
-    record) -- otherwise the TODO is intentionally hidden.
+def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
+    """The mission summary surfaces the untried reusable hot kernels as a
+    neutral fact so Orchestration sees them without an enforced checklist.
     """
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
@@ -427,12 +334,12 @@ def test_required_next_step_surfaces_untried_hot_kernels(session_dir):
         {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
          "source_file": "/p/rmsnorm.py"},
     ])
-    coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    coord.shared_state.explore_attempts = [{"variant_name": "x"}]
-    todo = coord._required_next_step()
-    assert "TODO 4a/5" in todo
-    # Highest gpu_pct first
-    assert todo.find("k002") < todo.find("k001"), todo
+    summary = coord.shared_state.to_mission_summary()
+    assert "untried_hot_kernels" in summary
+    assert "k001" in summary
+    assert "k002" in summary
+    # Highest gpu_pct first.
+    assert summary.find("k002") < summary.find("k001"), summary
 
 
 def test_report_gate_inactive_when_no_reusable_hot_kernel_above_threshold(
@@ -541,57 +448,6 @@ def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
             f"{action!r} hit the removed trace_analyze action-layer "
             f"gate: {denied!s}"
         )
-
-
-def test_analyze_gate_surfaces_trace_analyze_todo_when_cache_stale(session_dir):
-    """When ``last_profile_trace`` is set but ``last_trace_analyze`` is
-    empty/stale, ``_required_next_step()`` surfaces a TODO 3/5 (analyze)
-    guidance prompt telling the LLM to emit a `trace_analyze` REQUEST
-    before any kernel_opt cycle.
-
-    NB: This is a GUIDANCE-only gate. ``_sequence_denial_for_action``
-    still does NOT block explore actions (params/backends/sweep) on a
-    stale cache — see ``test_trace_analyze_gate_does_not_block_explore_actions``
-    which remains valid. The TODO only adds an LLM-visible prompt; it
-    does not add a new action-layer denial.
-    """
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
-    todo = coord._required_next_step()
-    assert "TODO 3/5" in todo
-    assert "analyze is required now" in todo
-    assert "trace_analyze" in todo
-    assert "trace_input" in todo
-
-
-def test_analyze_gate_clears_when_trace_analyze_cache_matches_trace(session_dir):
-    """REGRESSION: this is the test that would have caught the
-    KERNEL-phase ``trace_analyze`` request loop. Once
-    ``last_trace_analyze.trace_input`` matches the current
-    ``last_profile_trace`` — the canonical cache populated by
-    RooflineExecutor — the P3 analyze gate must clear and the chain
-    falls through to the next guard (integrate / validate_stack /
-    empty). Previously the guard read the removed
-    ``last_select_kernels`` field, which Roofline never wrote, so the
-    TODO 3/5 stayed open forever and the LLM kept re-emitting
-    ``trace_analyze`` every tick."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {
-        "trace_input": "/tmp/profile.tar.gz",
-        "candidates_path": "/tmp/cands.json",
-    }
-    todo = coord._required_next_step()
-    assert "analyze is required now" not in todo
-    # No other gate is open in this state, so the chain is empty.
-    assert todo == ""
 
 
 def test_trace_analyze_gate_still_blocks_run_optimization_request(session_dir):

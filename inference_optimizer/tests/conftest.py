@@ -11,10 +11,9 @@ This module hosts two responsibilities:
    modules).
 
 2. ``seed_target_analysis_marker`` (opt-in helper for individual tests).
-   :class:`Coordinator` now hard-gates ``target_analysis`` as TODO 0
+   :class:`Coordinator` now hard-gates ``target_analysis``
    *unconditionally*: when the marker JSON is missing it denies any
-   sequence action other than ``target_analysis`` and the
-   ``_required_next_step`` text demands it (independent of the
+   sequence action other than ``target_analysis`` (independent of the
    ``--compare-against-gpu`` flag — when unset, the executor still runs
    and writes a ``reason='no_target_gpu_configured'`` marker).
 

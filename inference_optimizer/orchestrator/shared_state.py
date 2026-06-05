@@ -3778,16 +3778,26 @@ class SharedState:
             "(per-KEEP stack rebench is inlined)"
             if unvalidated else ""
         )
-        return (
-            f"baseline  : {self.baseline_tput} tok/s/GPU\n"
-            f"current   : {self._format_current_best_for_mission()}\n"
+        lines = [
+            f"baseline  : {self.baseline_tput} tok/s/GPU",
+            f"current   : {self._format_current_best_for_mission()}",
             f"gain      : per-round-sum={self.cumulative_gain:.2f}% "
-            f"validated={self.cumulative_gain_validated:.2f}%{validated_age}\n"
+            f"validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}\n"
-            f"{budget_line}"
-        )
+            f"{unvalidated_tag}",
+        ]
+        # Neutral fact: reusable hot kernels that still owe a kernel_opt
+        # attempt. ``pending_keep_kernels`` is already in to_prompt_summary;
+        # this surfaces the untried set so the fact stays visible without a
+        # checklist.
+        untried_hot = self.untried_hot_reusable_kernels()
+        if untried_hot:
+            lines.append(
+                f"untried_hot_kernels: {', '.join(untried_hot)}"
+            )
+        lines.append(budget_line)
+        return "\n".join(lines)
 
     def _format_current_best_for_mission(self) -> str:
         if not isinstance(self.current_best, dict) or not self.current_best:

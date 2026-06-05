@@ -2,17 +2,16 @@
 must not tell the LLM to propose ``profile`` / ``roofline``.
 
 PolicyGate denies LLM-emitted ``propose_action`` / ``delegate`` against
-either action with ``rule='analysis_action_not_llm_proposable'``. Three
-sites in coordinator.py previously emitted hints like *"propose/delegate
-`profile`"* even after the single-path refactor. If the
-PRELUDE / watermark auto-analysis fails (or the pending field gets stuck
-mid-restart), those hints would point the LLM at a guaranteed denial and
-trip a policy loop — there is no manual recovery path for the LLM other
-than ``recover``.
+either action with ``rule='analysis_action_not_llm_proposable'``. The
+sequence-denial hints in coordinator.py previously emitted phrasing like
+*"propose/delegate `profile`"* even after the single-path refactor. If
+the PRELUDE / watermark auto-analysis fails (or the pending field gets
+stuck mid-restart), those hints would point the LLM at a guaranteed
+denial and trip a policy loop — there is no manual recovery path for the
+LLM other than ``recover``.
 
-This test pins all three sites:
+This test pins the sequence-denial sites:
 
-  * ``_required_next_step()`` — the TODO surfaced in the prompt every tick.
   * ``_sequence_denial_for_action()`` — execution_order denial for
     sequence-gated actions when last_profile_trace is empty.
   * ``_sequence_denial_for_request()`` — execution_order denial for
@@ -65,9 +64,10 @@ def coord(tmp_path: Path) -> Coordinator:
     c.shared_state = _BareState()
     c.role_registry = {"kernel": object()}
     c._compare_against_gpu = ""
-    # ``_required_next_step`` calls ``_target_analysis_baseline_exists``
-    # — short-circuit it so we skip the TODO 0 branch and reach the
-    # profile-trace branch that owns the offending hint.
+    # ``_sequence_denial_for_action`` calls
+    # ``_target_analysis_baseline_exists`` — short-circuit it so the
+    # target_analysis gate doesn't mask the profile-prereq denial branch
+    # the sequence-denial tests below target.
     c._target_analysis_baseline_exists = lambda: True  # type: ignore[assignment]
     return c
 
@@ -79,28 +79,6 @@ def _assert_no_forbidden(blob: str, where: str) -> None:
             f"PolicyGate will deny with analysis_action_not_llm_proposable. "
             f"Full text: {blob!r}"
         )
-
-
-def test_required_next_step_does_not_tell_llm_to_propose_profile(
-    coord: Coordinator,
-):
-    """``_required_next_step`` is rendered into the orchestration prompt
-    every tick. When ``last_profile_trace`` is empty (the PRELUDE /
-    watermark analysis hasn't landed yet), the hint must point at the
-    auto-enqueued Coordinator task or ``recover`` — never at a manual
-    propose/delegate that PolicyGate will deny."""
-    coord.shared_state.last_profile_trace = ""
-    coord.shared_state.baseline_tput = 100.0
-    todo = coord._required_next_step()
-    assert todo, "expected a TODO when last_profile_trace is empty"
-    _assert_no_forbidden(todo, "_required_next_step")
-    # Positive contract: must mention the auto-enqueue or recovery
-    # path so the LLM knows what to do instead.
-    low = todo.lower()
-    assert any(tok in low for tok in ("auto-enqueue", "coordinator", "recover")), (
-        "_required_next_step: must point the LLM at the Coordinator-"
-        "internal analysis task or `recover`; got: %r" % todo
-    )
 
 
 @pytest.mark.parametrize(

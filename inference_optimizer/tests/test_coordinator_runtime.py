@@ -620,7 +620,9 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
 
 
 @pytest.mark.asyncio
-async def test_execution_checklist_is_in_orchestration_prompt(session_dir):
+async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
+    """The Coordinator no longer injects an enforced next-step checklist;
+    the LLM derives the next action from SharedState facts directly."""
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
         c.shared_state.baseline_tput = 100.0
@@ -629,11 +631,7 @@ async def test_execution_checklist_is_in_orchestration_prompt(session_dir):
 
         prompt = await c._compose_prompt("orchestration")
 
-        assert "Execution checklist" in prompt
-        # Post single-path refactor: the TODO is the wait-for-Coordinator-
-        # internal-analysis hint, not the legacy "profile is required now".
-        assert "Coordinator-internal analysis" in prompt
-        assert "last_profile_trace" in prompt
+        assert "Execution checklist" not in prompt
     finally:
         await c.stop()
 
