@@ -227,6 +227,42 @@ def _with_image_env_prompt_prefix(prompt_prefix: str | None, image: str | None) 
     return f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
 
 
+# RDMA bnxt_re tar package staged on WekaFS — same path the validated
+# ci-config.yaml multi-node entries hand the agent. Kept as a module constant
+# so the orchestrator (Claw-direct) and this SaFE path stay in sync.
+_MULTINODE_BNXT_TAR = "/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz"
+
+
+def _multinode_prompt_suffix(nodes: int, rayjob_image: str) -> str:
+    """RayJob topology block injected into the agent prompt when nodes > 1.
+
+    The SaFE ``/api/v1/optimization/tasks`` body has no node-count field (tp/ep
+    only), so a model that does not fit on one 8-GPU node is expressed the same
+    way the validated Claw-direct CI does it (ci-config.yaml + orchestrator.py
+    ``build_prompt``): tell the agent it MUST fan out to an N-node RayJob and
+    hand it the exact topology (image / per-node resources / NODES=N / bnxt tar).
+
+    Returns "" for single-node runs so the default path is byte-for-byte
+    unchanged.
+    """
+    if nodes <= 1:
+        return ""
+    return (
+        f"\n\nMulti-node run ({nodes} nodes): this model does NOT fit on a single "
+        f"8-GPU sandbox node. You CANNOT benchmark it directly in the sandbox -- "
+        f"launch it as a SaFE RayJob (Claw fan-out) and export NODES={nodes} "
+        f"before starting `inference_optimizer optimize` so the Coordinator sizes "
+        f"the cluster for {nodes}x8 GPUs (TP spans all nodes).\n"
+        f"Task submission ({nodes}-node):\n"
+        f"RayJob image: {rayjob_image}\n"
+        f"RayJob resource per node: CPU=96, GPU=8, memory=1024Gi, ephemeralStorage=400Gi\n"
+        f"RayJob node count: {nodes}\n"
+        f"env:\n"
+        f"- NODES={nodes}\n"
+        f"- PATH_TO_BNXT_TAR_PACKAGE={_MULTINODE_BNXT_TAR}\n"
+    )
+
+
 def parse_kernel_backends(raw: str | None) -> list[str]:
     """Normalize user-facing kernel backend names for SaFE's API payload."""
 
@@ -2812,8 +2848,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Override detected framework")
     parser.add_argument("--precision", choices=["FP8", "FP4", "BF16", "INT4"],
                         help="Override detected precision")
-    parser.add_argument("--tp", type=int, choices=[1, 2, 4, 8],
-                        help="Override detected tensor parallel size")
+    parser.add_argument("--tp", type=int, choices=[1, 2, 4, 8, 16, 32],
+                        help="Override detected tensor parallel size. Values >8 "
+                             "require --nodes>1 (multi-node RayJob); tp must be "
+                             "<= nodes*8.")
     parser.add_argument("--concurrency", type=int,
                         help="Override detected concurrency")
     parser.add_argument("--image", help="Override container image")
@@ -2822,6 +2860,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=["local", "claw"], default="local",
                         help="Execution mode passed to SaFE (default: local — "
                              "agent runs in sandbox directly; 'claw' routes via RayJob)")
+    parser.add_argument("--nodes", type=int, default=1, metavar="N",
+                        help="Node count for the run. N>1 spreads the model across "
+                             "an N-node RayJob (8 GPUs/node): forces --mode claw and "
+                             "injects the RayJob topology (image, per-node resources, "
+                             "NODES=N, bnxt tar) into the agent prompt — mirrors the "
+                             "validated ci-config.yaml multi-node entries. Default 1.")
+    parser.add_argument("--rayjob-image", default="",
+                        help="Container image for the multi-node RayJob (used only "
+                             "when --nodes>1). Falls back to --image when empty.")
 
     parser.add_argument("--api-url", default="",
                         help="SaFE base URL (defaults to $SAFE_BASE_URL or $SAFE_API_URL)")
@@ -3075,6 +3122,42 @@ def main() -> int:
         "source_task_id": args.pool_source_task_id,
     }
 
+    # ── Multi-node resolution ──────────────────────────────────────────────
+    # --nodes>1 means the model spans an N-node RayJob (8 GPUs/node). The SaFE
+    # optimization-task body carries no node count (tp/ep only), so we express
+    # topology the same way the validated Claw-direct CI does (ci-config.yaml +
+    # orchestrator.build_prompt): force mode=claw (the documented RayJob
+    # fan-out path) and append the RayJob topology block to the prompt suffix.
+    # A global --nodes applies to every --model in this invocation; the daily
+    # matrix runs one model per invocation, so in practice it is per-model.
+    effective_mode = args.mode
+    effective_prompt_suffix = args.prompt_suffix or None
+    _nodes = args.nodes or 1
+    # tp must fit the cluster: nodes * 8 GPUs/node. Enforced for single-node too
+    # (tp<=8), so a stray --tp 16 without --nodes>1 is rejected at submit time
+    # instead of failing at runtime on an 8-GPU sandbox.
+    if args.tp and args.tp > _nodes * 8:
+        log.error("--tp %d exceeds --nodes %d * 8 GPUs = %d; lower --tp or raise "
+                  "--nodes (tp>8 requires multi-node).",
+                  args.tp, _nodes, _nodes * 8)
+        return 2
+    if _nodes > 1:
+        if effective_mode != "claw":
+            log.warning("--nodes %d > 1 needs RayJob fan-out; forcing --mode claw "
+                        "(was %r)", _nodes, effective_mode)
+            effective_mode = "claw"
+        rayjob_image = (args.rayjob_image or args.image or "").strip()
+        if not rayjob_image:
+            log.warning("--nodes %d > 1 but no --rayjob-image/--image set; the agent "
+                        "must pick a RayJob image itself", args.nodes)
+        effective_prompt_suffix = (
+            (args.prompt_suffix or "")
+            + _multinode_prompt_suffix(args.nodes, rayjob_image)
+        ) or None
+        log.info("multi-node: nodes=%d tp=%s mode=%s rayjob_image=%s",
+                 args.nodes, args.tp, effective_mode,
+                 rayjob_image or "(agent-chosen)")
+
     records: list[SubmissionRecord] = []
     for repo in repos:
         log.info("=" * 60)
@@ -3083,13 +3166,13 @@ def main() -> int:
             repo, hf, safe, overrides,
             args.isl, args.osl, args.dry_run, args.hf_token,
             manual_mode=args.manual,
-            mode=args.mode,
+            mode=effective_mode,
             gpu_type=gpu_type,
             inferencex_path=inferencex_path,
             oob_path=oob_path,
             tracelens_root=tracelens_root,
             prompt_prefix=args.prompt_prefix or None,
-            prompt_suffix=args.prompt_suffix or None,
+            prompt_suffix=effective_prompt_suffix,
             kernel_backends=kernel_backends,
             max_hours=args.max_hours,
             target_gain=args.target_gain,
