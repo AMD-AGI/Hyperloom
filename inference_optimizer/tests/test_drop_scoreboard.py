@@ -279,7 +279,7 @@ def test_kernel_opt_body_has_no_scoreboard_vocab():
     forbidden = (
         "scoreboard",
         "score_mult",
-        "marathon_priors",
+        "legacy_priors",
         "effective_score",
         "eff_score",
         "cooldown_until_tick",
