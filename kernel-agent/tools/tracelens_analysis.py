@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tracelens_arch_benchmark import ensure_gpu_arch_json
 from tracelens_skill_runner import (
     aggregate_by_source_function,
     discover_capture_folder,
@@ -2821,6 +2822,38 @@ def main() -> int:
 
             tracelens_dir = run_dir / "tracelens"
             tracelens_dir.mkdir(parents=True, exist_ok=True)
+
+            update_status(
+                status_path,
+                state="running",
+                current_step="ensure_gpu_arch_json",
+                log_path=log_path,
+                artifact_paths=artifacts,
+                run_id=run_id,
+                started_at=started_at,
+            )
+            arch_benchmark_timeout_s = max(
+                600,
+                int(
+                    os.environ.get(
+                        "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC",
+                        str(int(args.budget_minutes * 60 // 2)),
+                    )
+                ),
+            )
+            gpu_arch_path = ensure_gpu_arch_json(
+                tracelens_root=tl_root,
+                platform=args.target_platform,
+                log=lambda msg: append_log(log_path, msg),
+                run_command=lambda cmd, *, cwd, timeout_s: run_command(
+                    cmd,
+                    cwd=cwd,
+                    log_path=log_path,
+                    timeout_s=timeout_s,
+                ),
+                timeout_s=arch_benchmark_timeout_s,
+            )
+            artifacts["tracelens_gpu_arch_json"] = str(gpu_arch_path)
 
             # ---- #127: split inference trace into steady-state chunks ----
             # The filtered trace from vLLM/SGLang spans the full benchmark
