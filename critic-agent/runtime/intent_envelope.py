@@ -66,7 +66,7 @@ ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset({
 
 
 # Required payload fields per intent type — same set the Coordinator's
-# PolicyGate enforces. See ``_PAYLOAD_REQUIRED`` in intent_parser.py.
+# PolicyGate enforces. See ``_PAYLOAD_REQUIRED`` in protocol/intent.py.
 _PAYLOAD_REQUIRED: dict[str, tuple[str, ...]] = {
     "send_message": ("topic",),
     "ask_question": ("topic", "question"),
