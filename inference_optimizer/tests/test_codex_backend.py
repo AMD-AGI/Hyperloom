@@ -10,7 +10,7 @@ import pytest
 from inference_optimizer.orchestrator.backends import CodexBackend
 from inference_optimizer.orchestrator.backends.base import BackendError
 from inference_optimizer.orchestrator.backends.codex import _extract_envelope
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     IntentType,
     NoIntentEmitted,
 )

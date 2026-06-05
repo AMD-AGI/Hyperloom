@@ -1,11 +1,8 @@
-"""Shared helper for backends / params executors.
+"""Shared helper for the ``explore`` executor's grid runs.
 
-Each runner's job is essentially: take a base Magpie YAML + a list of
+The job is essentially: take a base Magpie YAML + a list of
 (name, extra_server_args, extra_envs) variants, run Magpie once per
 variant, parse `benchmark_report.json`, return the winners.
-
-We share the "run one Magpie variant" loop here so backends.py / params.py
-stay tiny and only declare the grid (the marathon DFS playbook).
 """
 
 from __future__ import annotations
@@ -51,7 +48,7 @@ log = logging.getLogger(__name__)
 #     aggressive — two flag strings differing only in token order produce the
 #     same fingerprint. Real "later wins" overrides should be expressed as a
 #     single flag with the final value, not a re-emit in a different order;
-#     this is documented in the Orchestration IR-26 prompt.
+#     this is documented in the Orchestration prompt.
 #   * envs: ``(str(k), str(v))`` pairs sorted by key. ``str()`` matches the
 #     ``_baseline_params_fingerprint`` convention so ``"1"`` and ``1`` collide
 #     (Magpie ultimately sees the value as a shell-exported string anyway).
@@ -383,7 +380,7 @@ def apply_single_node_invalid_variants(
     bit-for-bit.
 
     The convention ``note="multi_node_only_*"`` is owned by the grid
-    library (``params.py`` / ``backends.py``); we never invent the
+    definitions in the ``explore`` executor; we never invent the
     classification here.
     """
     from ._multi_node_env import is_multi_node
@@ -1490,9 +1487,8 @@ async def run_grid(
         )
         try:
             # PD knobs auto-resolved by the helper from $PD_* env. The
-            # grid runner doesn't sweep PD ratio yet (see params.py for
-            # the grid surface), so PD config stays constant across
-            # variants within one run.
+            # grid runner doesn't sweep PD ratio yet, so PD config
+            # stays constant across variants within one run.
             await restart_server_for_round(
                 extra_server_args=merge_server_args(
                     base_extra_args, variant.extra_server_args,
@@ -1585,7 +1581,7 @@ async def run_grid(
                 break
             continue
 
-        # Fix E (Q3c): the soft overtime gate fired. Record a synthetic
+        # Soft overtime gate fired. Record a synthetic
         # ``killed_overtime=True`` VariantResult with no tput / report
         # so the ExploreExecutor can demote this variant to the
         # ``KILLED_OVERTIME`` ledger outcome (no fingerprint promotion,

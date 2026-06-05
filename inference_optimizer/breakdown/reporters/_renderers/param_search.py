@@ -10,16 +10,24 @@ from ..base import RenderedSection, md_table, register_renderer
 @register_renderer("param_search")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     ps = breakdown.get("param_search") or {}
+    explore = ps.get("explore") or {}
     backends = ps.get("backends") or {}
     params = ps.get("params") or {}
     flags = ps.get("discovered_flags") or {}
     winners = ps.get("backend_winners_history") or []
     synergy = ps.get("synergy_attempted") or []
 
+    explore_accepted = len((explore.get("accepted") or []) if isinstance(explore, dict) else [])
+    explore_tested = len((explore.get("tested") or {}) if isinstance(explore, dict) else {})
     backends_accepted = len((backends.get("accepted") or []) if isinstance(backends, dict) else [])
     backends_tested = len((backends.get("tested") or {}) if isinstance(backends, dict) else {})
     params_accepted = len((params.get("accepted") or []) if isinstance(params, dict) else [])
     params_tested = len((params.get("tested") or {}) if isinstance(params, dict) else {})
+    has_explore = (
+        explore_accepted or explore_tested
+        or (explore.get("cursor") if isinstance(explore, dict) else None) is not None
+        or (explore.get("last_round") if isinstance(explore, dict) else None) is not None
+    )
 
     facts: list[str] = []
     facts.append(
@@ -28,6 +36,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts.append(
         f"params DFS: tested={params_tested}, accepted={params_accepted}"
     )
+    if has_explore:
+        facts.append(
+            f"explore ledger: tested={explore_tested}, accepted={explore_accepted}"
+        )
     if winners:
         facts.append(f"backend_winners_history: {len(winners)} round(s).")
     if synergy:
@@ -60,6 +72,15 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
           (params.get("cursor") if isinstance(params, dict) else None),
           (params.get("last_round") if isinstance(params, dict) else None)]],
     ))
+    if has_explore:
+        md_parts.append("")
+        md_parts.append("**Explore Search:**")
+        md_parts.append(md_table(
+            ["accepted", "tested", "cursor", "last_round"],
+            [[explore_accepted, explore_tested,
+              (explore.get("cursor") if isinstance(explore, dict) else None),
+              (explore.get("last_round") if isinstance(explore, dict) else None)]],
+        ))
 
     if winners:
         md_parts.append("")
@@ -87,6 +108,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     no_search_data = (
         not winners and not synergy and not flags
+        and explore_accepted == 0 and explore_tested == 0
         and backends_accepted == 0 and backends_tested == 0
         and params_accepted == 0 and params_tested == 0
     )

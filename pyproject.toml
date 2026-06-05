@@ -47,13 +47,8 @@ inference_optimizer = [
     "README.md",
     "actions/*.md",
     "actions/_meta/*.yaml",
-    "agents/*/agent_card.yaml",
-    "agents/*/system_prompt.md",
-    "agents/*/SKILL.md",
-    "agents/*/scripts/*",
     "benches/*.sh",
     "benches/README.md",
-    "kernel_opt/*.md",
     "orchestrator/system_prompts/*.md",
     "scripts/*",
 ]
@@ -72,18 +67,17 @@ filterwarnings = [
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
-# source so test files / examples / __init__.py do not dilute the
+# source so test files / __init__.py do not dilute the
 # headline number. Run with ``pytest --cov`` to use these defaults.
 #
 # omit patterns exclude:
-#   * tests / examples / __init__.py / __main__.py — non-source
+#   * tests / __init__.py / __main__.py — non-source
 #   * CLI driver scripts whose body is subprocess plumbing (hard to
 #     unit-test without re-implementing the subprocess; covered by
 #     end-to-end flows instead)
 #   * subprocess wrappers (`run_with_session_kill`, GEAK/OOB submit,
 #     Ray dashboard polling) — same reasoning
-#   * legacy / deprecated runtime entrypoints superseded by the role
-#     reactor (`robustness_agent/agent.py`, `main.py`, `rca.py`)
+#   * standalone robustness-agent reactor CLI wrapper
 #   * standalone kernel-agent tools (kernel_optimization, tracelens_*,
 #     apply_kernel_patch, geak_prompt_patcher) — these are CLI tools
 #     consumed by the runtime, not import-level libraries
@@ -96,7 +90,6 @@ source = [
 ]
 omit = [
     "*/tests/*",
-    "*/examples/*",
     "*/__init__.py",
     "*/__main__.py",
     "setup.py",
@@ -109,16 +102,10 @@ omit = [
     "inference_optimizer/orchestrator/action_executors/_subprocess_kill.py",
     "inference_optimizer/orchestrator/action_executors/_multi_node_server_lifecycle.py",
     "inference_optimizer/orchestrator/action_executors/_multi_node_env.py",
-    # External backend submission shells.
-    "inference_optimizer/orchestrator/backends/oob_submit.py",
-    "inference_optimizer/orchestrator/backends/geak_submit.py",
-    "inference_optimizer/orchestrator/backends/ray_runtime.py",
     # Breakdown LLM HTTP client.
     "inference_optimizer/breakdown/reporters/llm_client.py",
-    # Legacy robustness-agent runtime (replaced by role reactor / CLI).
-    "robustness-agent/src/robustness_agent/agent.py",
+    # Robustness-agent standalone reactor CLI wrapper.
     "robustness-agent/src/robustness_agent/main.py",
-    "robustness-agent/src/robustness_agent/rca.py",
     # Stand-alone kernel-agent CLI tools.
     "kernel-agent/tools/kernel_optimization.py",
     "kernel-agent/tools/tracelens_analysis.py",
@@ -132,11 +119,6 @@ omit = [
     # exercise; treated as test files for coverage purposes).
     "kernel-agent/tools/test_*.py",
     "kernel-agent/tools/_collective_names.py",
-    # PMC roofline integration module — pure-Python helpers are covered
-    # by ``test_roofline_integration_units``; the rest of the file is a
-    # rocprofv3 + sglang subprocess driver that is exercised by GPU-bound
-    # integration tests on real hardware.
-    "inference_optimizer/orchestrator/roofline_integration.py",
     # Local-host metrics probes — wrap ``rocm-smi`` / ``nvidia-smi`` /
     # ``ps`` / ``df`` / ``ray status``. Each shell-out has a unit test
     # through the provider/factory layers; the local_probe glue itself
@@ -164,10 +146,6 @@ omit = [
     # Legacy conductor SQLite bridge superseded by the M1 reactor / CLI
     # transport. Kept for backwards compat; not unit-tested.
     "robustness-agent/src/robustness_agent/conductor.py",
-    # framework_pr_discover is dominated by `fa` + `git` subprocess
-    # plumbing; the testable helpers have direct unit tests, the rest
-    # is integration coverage only.
-    "inference_optimizer/orchestrator/framework_pr_discover.py",
     # Critic agent backend talks to the critic-agent runtime via a real
     # subprocess transport; exercised end-to-end by the critic_agent_e2e
     # marker tests.
