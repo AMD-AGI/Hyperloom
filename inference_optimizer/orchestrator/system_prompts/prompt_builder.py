@@ -144,9 +144,9 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
     """
     # Lazy import: phase_state imports only stdlib so this is safe at
     # module-import time, but keeping it local makes the lazy
-    # dependency explicit (and lets tests stub PHASE_ALLOWED_ACTIONS
+    # dependency explicit (and lets tests stub the action sets
     # without rewriting this file).
-    from ..phase_state import PHASE_ALLOWED_ACTIONS, PHASE_NAMES
+    from ..phase_state import PHASE_LLM_PROPOSABLE_ACTIONS, PHASE_NAMES
 
     lines: list[str] = [
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
@@ -154,19 +154,23 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
         "The Coordinator runs the optimization in a 6-phase linear pipeline",
         "(FRAMEWORK_PR collapses out with `--no-framework`, leaving 5).",
         "Each tick it injects a `=== Phase ===` block with the current",
-        "phase. Per-phase action allowlists (PolicyGate R1 enforces these):",
+        "phase. Per-phase proposable action sets (PolicyGate R1 enforces these):",
         "",
     ]
     for phase in PHASE_NAMES:
-        allowed = sorted(PHASE_ALLOWED_ACTIONS.get(phase, frozenset()))
+        proposable = sorted(PHASE_LLM_PROPOSABLE_ACTIONS.get(phase, frozenset()))
         if not kernel_enabled and phase == "KERNEL":
             # No-kernel run will not enter KERNEL phase; render but flag.
             lines.append(
-                f"- **{phase}**: {', '.join(allowed)} (skipped in --no-kernel runs)"
+                f"- **{phase}**: {', '.join(proposable)} (skipped in --no-kernel runs)"
             )
         else:
-            lines.append(f"- **{phase}**: {', '.join(allowed)}")
+            lines.append(f"- **{phase}**: {', '.join(proposable)}")
     lines.extend([
+        "",
+        "roofline, profile, replay_warm_recipe and framework_pr are never",
+        "in the sets above: the Coordinator auto-manages them and PolicyGate",
+        "denies any attempt to propose them.",
         "",
         "Phase transitions are Coordinator-owned and based on machine-",
         "judgeable signals: `baseline_tput > 0` exits PRELUDE; plateau",

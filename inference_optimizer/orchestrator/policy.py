@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 from .framework_paths import resolve_source_file_allowlist
 from ..protocol.intent import Intent, IntentType
 from ..protocol.action_surfaces import (
-    FRAMEWORK_PR_INTERNAL_ACTION_NAMES,
+    COORDINATOR_INTERNAL_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_OWNED_ACTIONS,
 )
@@ -36,8 +36,8 @@ from .phase_state import (
     PHASE_EXPLORE,
     PHASE_NAMES,
     PHASE_SWEEP,
-    allowed_actions_for,
-    is_action_allowed_in_phase,
+    is_action_llm_proposable_in_phase,
+    llm_proposable_actions_for,
 )
 from .specialist_domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
@@ -855,14 +855,6 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
-        # analysis_action_not_llm_proposable —
-        # roofline / profile are Coordinator-internal (PRELUDE bootstrap
-        # + watermark-triggered). Block the LLM from racing the auto
-        # path regardless of which channel (delegate / propose / request)
-        # it tries to smuggle the name through.
-        self._validate_action_not_llm_proposable(
-            action_name, intent_kind="delegate",
-        )
         # Plan A — kernel-owned actions are not directly delegatable.
         if action_name in KERNEL_OWNED_ACTIONS:
             raise PolicyDenied(
@@ -980,11 +972,6 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        # analysis_action_not_llm_proposable
-        # (propose channel) — same rule, same hint.
-        self._validate_action_not_llm_proposable(
-            action_name, intent_kind="propose_action",
-        )
         # Soft check — propose is advisory; only reject if registry is wired
         # AND the name is unknown AND it's not a kernel-owned action (which
         # are listed in metadata under their canonical names).
@@ -1124,15 +1111,16 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # analysis_action_not_llm_proposable —
-        # defense in depth: nobody REQUESTs roofline/profile today, but
-        # an extension that does would race the auto-managed gate.
-        self._validate_action_not_llm_proposable(kind, intent_kind="request")
-        # R1 phase_incompatible. For
-        # orchestration → kernel REQUEST we treat the request *kind* as
-        # the action name (kernel-owned actions named identically to
-        # their REQUEST kind: kernel_opt / integrate / etc.).
-        if target == "kernel" and kind in KERNEL_OWNED_ACTIONS:
+        # R1 phase_incompatible. For orchestration → kernel REQUEST we
+        # treat the request *kind* as the action name (kernel-owned
+        # actions named identically to their REQUEST kind: kernel_opt /
+        # integrate / etc.). Coordinator-managed kinds (roofline /
+        # profile / replay_warm_recipe / framework_pr) are denied as
+        # never-proposable; other request kinds (e.g. trace_analyze) are
+        # not action names and skip the phase contract.
+        if (
+            target == "kernel" and kind in KERNEL_OWNED_ACTIONS
+        ) or kind in COORDINATOR_INTERNAL_ACTIONS:
             self._validate_phase_action(role, kind, intent_kind="request")
         self._validate_fp8_only_action(kind, intent_kind="request")
         # R4 / R5 — defense in depth: a REQUEST.kind cannot
@@ -1213,69 +1201,13 @@ class PolicyGate:
                 )
 
     # ------------------------------------------------------------------
-    # analysis_action_not_llm_proposable —
-    # deny LLM proposals of ``roofline`` / ``profile``
-    # ------------------------------------------------------------------
-    def _validate_action_not_llm_proposable(
-        self,
-        action_name: str,
-        *,
-        intent_kind: str,
-    ) -> None:
-        """Reject LLM-proposed analysis actions.
-
-        ``roofline`` and ``profile`` are Coordinator-auto-managed at
-        PRELUDE bootstrap and on every +10% watermark crossing; the
-        kind selected is controlled by
-        :attr:`SharedState.enable_roofline` (``--enable-roofline`` /
-        ``--no-enable-roofline``). The LLM has no business proposing
-        either name — doing so would race the auto-managed pending-task
-        gate and could double-enqueue.
-
-        No-op when ``action_name`` isn't in
-        :data:`INTERNAL_ONLY_ACTION_NAMES`. Fires *before* the
-        kernel-owned / phase / unknown gates, so the canonical hint
-        always wins.
-        """
-        if not action_name:
-            return
-        if action_name in FRAMEWORK_PR_INTERNAL_ACTION_NAMES:
-            raise PolicyDenied(
-                f"action {action_name!r} is Coordinator-internal; the LLM "
-                f"must not propose it ({intent_kind})",
-                rule="framework_pr_action_not_llm_proposable",
-                hint=(
-                    "``framework_pr`` is driven by the FRAMEWORK_PR phase "
-                    "pump (one candidate per tick, plateau-based exit). "
-                    "Propose ``specialist`` or ``explore`` instead, or "
-                    "pass ``--no-framework`` to skip the phase entirely."
-                ),
-            )
-        if action_name not in INTERNAL_ONLY_ACTION_NAMES:
-            return
-        raise PolicyDenied(
-            f"action {action_name!r} is Coordinator-internal; the LLM "
-            f"must not propose it ({intent_kind})",
-            rule="analysis_action_not_llm_proposable",
-            hint=(
-                "roofline / profile / replay_warm_recipe are auto-enqueued "
-                "by the Coordinator (PRELUDE bootstrap + +10% watermark "
-                "crossings + warm-recipe replay). Selection is controlled "
-                "by ``--enable-roofline`` / ``--no-enable-roofline`` / "
-                "``--no-warm-replay``. Propose ``specialist`` or "
-                "``explore`` instead — these analysis snapshots will "
-                "refresh automatically when their gate fires."
-            ),
-        )
-
-    # ------------------------------------------------------------------
     # NOTE: no ``framework_atom_action_unsupported`` rule exists. atom
     # has no action that needs framework-specific denial at the
     # PolicyGate layer — multi-node is guarded at the CLI level, and
-    # ``framework_pr`` is still caught for all frameworks by the
-    # earlier ``framework_pr_action_not_llm_proposable`` rule (LLMs
-    # cannot propose ``framework_pr`` regardless of framework; the
-    # Coordinator drives it directly).
+    # ``framework_pr`` is still caught for all frameworks by R1
+    # ``phase_incompatible`` (it is Coordinator-managed and never sits
+    # in any phase's LLM-proposable set, so LLMs cannot propose it
+    # regardless of framework; the Coordinator drives it directly).
     #
     # Anti-regression guards live in
     # ``inference_optimizer/tests/test_policy_atom_invariants.py``
@@ -1292,34 +1224,54 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject an action that isn't legal in the current phase.
+        """Reject an action the LLM cannot propose in the current phase.
 
-        Behaviour matrix (mode flipping via ``strict_phase``):
+        Single rejection source for the per-phase action contract over
+        :data:`phase_state.PHASE_LLM_PROPOSABLE_ACTIONS` — the set the
+        prompt advertises is exactly the set this rule accepts.
 
-        * ``strict_phase=True`` (production) → raise PolicyDenied with
-          ``rule='phase_incompatible'`` so the LLM self-corrects via
-          the inbox ``policy_denied`` event.
-        * ``strict_phase=False`` (legacy / tests) → swallow the denial
-          but bump :attr:`policy_denial_streak` so the audit trail
-          surfaces the would-be denial. Returns silently.
+        Behaviour matrix:
+
+        * Coordinator-managed actions (``roofline`` / ``profile`` /
+          ``replay_warm_recipe`` / ``framework_pr``) are auto-driven and
+          never sit in any phase's LLM-proposable set, so they are
+          denied structurally (phase- and ``strict_phase``-independent).
+        * Otherwise the phase contract flips via ``strict_phase``:
+          ``True`` (production) raises ``rule='phase_incompatible'`` so
+          the LLM self-corrects via the inbox ``policy_denied`` event;
+          ``False`` (legacy / tests) swallows the denial but bumps
+          :attr:`policy_denial_streak` for the audit trail.
 
         Cheap path: when SharedState is missing / phase isn't
-        initialised, the rule is a no-op (Inv-2.1 doesn't apply to a
-        run that hasn't entered the machine yet — Coordinator sets
-        phase before the first reactor tick anyway).
+        initialised, the phase contract is a no-op (Inv-2.1 doesn't
+        apply to a run that hasn't entered the machine yet — Coordinator
+        sets phase before the first reactor tick anyway).
         """
+        if action_name in COORDINATOR_INTERNAL_ACTIONS:
+            raise PolicyDenied(
+                f"action {action_name!r} is Coordinator-managed and not "
+                f"LLM-proposable ({intent_kind})",
+                rule="phase_incompatible",
+                hint=(
+                    "roofline / profile / replay_warm_recipe / framework_pr "
+                    "are driven by the Coordinator (PRELUDE bootstrap, +10% "
+                    "watermark refresh, warm-recipe replay, FRAMEWORK_PR "
+                    "pump) and never appear in any phase's LLM-proposable "
+                    "set. Propose ``specialist`` or ``explore`` instead."
+                ),
+            )
         state = self.shared_state
         if state is None:
             return
         phase = (getattr(state, "phase", "") or "").strip().upper()
         if not phase or phase not in PHASE_NAMES:
             return
-        if is_action_allowed_in_phase(action_name, phase):
+        if is_action_llm_proposable_in_phase(action_name, phase):
             return
-        allowed = allowed_actions_for(phase)
+        allowed = llm_proposable_actions_for(phase)
         hint = (
             f"you are in phase={phase}; action {action_name!r} is not in "
-            f"the allowed set {list(allowed)!r}. Either propose an "
+            f"the LLM-proposable set {list(allowed)!r}. Either propose an "
             f"action from that list, or wait for the Coordinator to "
             f"advance the phase. See KB_design §3.2 for the per-phase "
             f"action contract."

@@ -86,24 +86,24 @@ def _section_run_context(
 def _section_phase_review_contract() -> list[str]:
     """Static phase-aware verdict contract (v0.8 §3.3 §4.3).
 
-    Mirrors the per-phase allowed-action map in
-    ``phase_state.PHASE_ALLOWED_ACTIONS`` so the Critic verdict
+    Mirrors the per-phase LLM-proposable map in
+    ``phase_state.PHASE_LLM_PROPOSABLE_ACTIONS`` so the Critic verdict
     process stays aligned with PolicyGate R1's phase_incompatible
-    rule. The dynamic *current* phase is in ``judge_bundle.phase``
-    each tick.
+    rule and only sees what the LLM can actually propose. The dynamic
+    *current* phase is in ``judge_bundle.phase`` each tick.
     """
-    from ..phase_state import PHASE_ALLOWED_ACTIONS, PHASE_NAMES
+    from ..phase_state import PHASE_LLM_PROPOSABLE_ACTIONS, PHASE_NAMES
 
     lines: list[str] = [
         "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
         "",
         "Each `judge_bundle` carries a `phase` (PRELUDE / FRAMEWORK_PR /",
-        "EXPLORE / KERNEL / SWEEP / CLOSE). Phase-allowed action sets:",
+        "EXPLORE / KERNEL / SWEEP / CLOSE). Phase-proposable action sets:",
         "",
     ]
     for phase in PHASE_NAMES:
-        allowed = sorted(PHASE_ALLOWED_ACTIONS.get(phase, frozenset()))
-        lines.append(f"- **{phase}**: {', '.join(allowed)}")
+        proposable = sorted(PHASE_LLM_PROPOSABLE_ACTIONS.get(phase, frozenset()))
+        lines.append(f"- **{phase}**: {', '.join(proposable)}")
     lines.extend([
         "",
         "If the proposal's `action_name` is NOT in the bundle's phase",

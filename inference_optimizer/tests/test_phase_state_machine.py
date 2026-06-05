@@ -83,6 +83,47 @@ def test_is_action_allowed_in_phase_handles_unknowns():
     assert not phase_state.is_action_allowed_in_phase("", "PRELUDE")
 
 
+def test_llm_proposable_set_drops_coordinator_internal_actions():
+    from inference_optimizer.protocol.action_surfaces import (
+        COORDINATOR_INTERNAL_ACTIONS,
+    )
+
+    # The proposable set is the allowlist minus everything the
+    # Coordinator auto-manages (roofline / profile / replay_warm_recipe
+    # / framework_pr). Nothing else is dropped.
+    for phase in phase_state.PHASE_NAMES:
+        allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
+        proposable = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS[phase]
+        assert proposable == allowed - COORDINATOR_INTERNAL_ACTIONS
+        assert proposable.isdisjoint(COORDINATOR_INTERNAL_ACTIONS)
+        # recover is phase-orthogonal and stays proposable everywhere.
+        assert "recover" in proposable
+    # The advertised analysis / framework_pr names are never proposable.
+    explore = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["EXPLORE"]
+    assert "roofline" not in explore
+    assert "profile" not in explore
+    assert "explore" in explore and "specialist" in explore
+    framework_pr = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_PR"]
+    assert "framework_pr" not in framework_pr
+    assert "integrate_patch" in framework_pr
+
+
+def test_is_action_llm_proposable_in_phase_handles_unknowns():
+    assert phase_state.is_action_llm_proposable_in_phase("baseline", "PRELUDE")
+    assert phase_state.is_action_llm_proposable_in_phase("explore", "EXPLORE")
+    # roofline lives in the allowlist but is never LLM-proposable.
+    assert phase_state.is_action_allowed_in_phase("roofline", "EXPLORE")
+    assert not phase_state.is_action_llm_proposable_in_phase("roofline", "EXPLORE")
+    assert not phase_state.is_action_llm_proposable_in_phase("framework_pr", "FRAMEWORK_PR")
+    # Unknown phase / empty action → deny by default.
+    assert not phase_state.is_action_llm_proposable_in_phase("baseline", "UNKNOWN")
+    assert not phase_state.is_action_llm_proposable_in_phase("", "PRELUDE")
+    # llm_proposable_actions_for is sorted and excludes internal names.
+    explore = phase_state.llm_proposable_actions_for("EXPLORE")
+    assert explore == tuple(sorted(explore))
+    assert "roofline" not in explore and "profile" not in explore
+
+
 def test_phase_exit_reasons_includes_required_vocab():
     for reason in (
         "prelude_done", "plateau_explore", "plateau_kernel",
@@ -330,12 +371,12 @@ def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
         shared_state=state,
         strict_phase=True,
     )
-    # ``profile`` / ``roofline`` are now LLM-denied earlier via the
-    # ``analysis_action_not_llm_proposable`` rule (Coordinator-internal
-    # analysis actions never reach R1), and ``params`` is denied with
-    # ``action_deprecated``. We pick ``sweep`` instead — a non-deprecated,
-    # non-internal action that is allowed only in the SWEEP phase, so the
-    # propose lands cleanly on R1 phase_incompatible while in PRELUDE.
+    # ``profile`` / ``roofline`` are Coordinator-managed and denied by
+    # R1 ``phase_incompatible`` regardless of phase, and ``params`` is
+    # denied with ``action_deprecated``. We pick ``sweep`` instead — a
+    # non-deprecated, non-internal action that is proposable only in the
+    # SWEEP phase, so the propose lands on R1 phase_incompatible via the
+    # per-phase set while in PRELUDE.
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "sweep", "predicted_gain_pct": 1.0},

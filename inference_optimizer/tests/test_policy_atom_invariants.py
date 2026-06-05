@@ -15,9 +15,9 @@ this layer:
   PolicyGate's allowlist, ``_REUSABLE_SOURCE_ROOTS``, and the
   server-flag pre-flight probe.
 * ``framework_pr`` — Coordinator-driven, not LLM-proposable
-  regardless of framework. The cross-framework
-  ``framework_pr_action_not_llm_proposable`` rule still fires for
-  any LLM that tries to propose / delegate it directly.
+  regardless of framework. R1 ``phase_incompatible`` still fires for
+  any LLM that tries to propose / delegate it directly (it never
+  sits in any phase's LLM-proposable set).
 * ``--nodes >= 2`` — guarded at the CLI level
   (``_apply_atom_auto_tighten``).
 
@@ -168,21 +168,21 @@ def _propose(action_name: str, **extra) -> Intent:
 
 
 @pytest.mark.parametrize("channel", ["delegate", "propose_action"])
-def test_framework_pr_still_denied_via_action_not_llm_proposable_under_atom(
+def test_framework_pr_still_denied_via_phase_incompatible_under_atom(
     channel: str,
 ):
     """LLM-proposed ``framework_pr`` under FRAMEWORK=atom must still
-    be denied — by the cross-framework
-    ``framework_pr_action_not_llm_proposable`` rule (not by the now-
-    removed atom-specific rule). Confirms removing the atom-specific
+    be denied — now by R1 ``phase_incompatible`` (it is
+    Coordinator-managed and never LLM-proposable), not by the now-
+    removed atom-specific rule. Confirms removing the atom-specific
     gate didn't open up the LLM-proposability hole."""
     gate = _gate(_BareSharedState(framework="atom"))
     intent = _delegate("framework_pr") if channel == "delegate" else _propose("framework_pr")
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "framework_pr_action_not_llm_proposable", (
-        f"expected the cross-framework LLM-proposability rule to deny "
-        f"framework_pr under atom; got rule={exc.value.rule!r}"
+    assert exc.value.rule == "phase_incompatible", (
+        f"expected R1 phase_incompatible to deny framework_pr under "
+        f"atom; got rule={exc.value.rule!r}"
     )
 
 

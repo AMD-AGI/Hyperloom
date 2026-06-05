@@ -34,6 +34,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..protocol.action_surfaces import COORDINATOR_INTERNAL_ACTIONS
+
 
 # ---------------------------------------------------------------------------
 # Phase identifiers + ordering (monotonic chain)
@@ -170,6 +172,45 @@ def allowed_actions_for(phase: str) -> tuple[str, ...]:
     Stable order so prompt rendering / R1 hints are deterministic.
     """
     return tuple(sorted(PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())))
+
+
+# ---------------------------------------------------------------------------
+# Phase ↔ LLM-proposable action set
+# ---------------------------------------------------------------------------
+#
+# The subset of each phase allowlist that the LLM may actually emit through
+# propose_action / delegate / request. Coordinator-managed actions
+# (``roofline`` / ``profile`` / ``replay_warm_recipe`` analysis snapshots and
+# the ``framework_pr`` pump) stay in ``PHASE_ALLOWED_ACTIONS`` so the internal
+# enqueue passes R1, but they are auto-driven and never proposable. Rendering
+# this set keeps "what the prompt advertises" identical to "what PolicyGate
+# accepts" so the model never proposes into a guaranteed denial.
+PHASE_LLM_PROPOSABLE_ACTIONS: dict[str, frozenset[str]] = {
+    phase: actions - COORDINATOR_INTERNAL_ACTIONS
+    for phase, actions in PHASE_ALLOWED_ACTIONS.items()
+}
+
+
+def is_action_llm_proposable_in_phase(action_name: str, phase: str) -> bool:
+    """Return True iff ``action_name`` is LLM-proposable in ``phase``.
+
+    Mirror of :func:`is_action_allowed_in_phase` over the LLM-proposable
+    subset. Unknown phase defaults to *deny*.
+    """
+    proposable = PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper())
+    if proposable is None:
+        return False
+    return (action_name or "").strip() in proposable
+
+
+def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
+    """Return ``PHASE_LLM_PROPOSABLE_ACTIONS[phase]`` as a sorted tuple.
+
+    Stable order so prompt rendering / R1 hints are deterministic.
+    """
+    return tuple(sorted(
+        PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper(), frozenset())
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -1754,6 +1795,7 @@ __all__ = [
     "ESCALATE_HINT_SKIP_TO_SWEEP",
     "ESCALATE_HINT_VOCAB",
     "PHASE_ALLOWED_ACTIONS",
+    "PHASE_LLM_PROPOSABLE_ACTIONS",
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
     "PHASE_EXPLORE",
@@ -1780,6 +1822,8 @@ __all__ = [
     "exit_normal_sweep",
     "exit_terminal_prelude",
     "is_action_allowed_in_phase",
+    "is_action_llm_proposable_in_phase",
+    "llm_proposable_actions_for",
     "is_pause_specialist_hint",
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",

@@ -254,9 +254,9 @@ def test_delegate_with_analysis_action_is_denied(gate, action_name):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "analysis_action_not_llm_proposable"
+    assert exc.value.rule == "phase_incompatible"
     assert action_name in str(exc.value)
-    assert "--enable-roofline" in (exc.value.hint or "")
+    assert "Coordinator-managed" in str(exc.value)
 
 
 @pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
@@ -270,14 +270,14 @@ def test_propose_action_with_analysis_action_is_denied(gate, action_name):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "analysis_action_not_llm_proposable"
+    assert exc.value.rule == "phase_incompatible"
     assert action_name in str(exc.value)
 
 
 @pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
 def test_request_with_analysis_kind_is_denied(gate, action_name):
-    """A REQUEST whose ``kind`` names roofline/profile is denied with
-    the same rule — the Coordinator-internal enqueue bypasses
+    """A REQUEST whose ``kind`` names roofline/profile is denied by R1
+    phase_incompatible — the Coordinator-internal enqueue bypasses
     PolicyGate, but any LLM-routed REQUEST must not."""
     intent = Intent(
         type=IntentType.REQUEST,
@@ -288,7 +288,7 @@ def test_request_with_analysis_kind_is_denied(gate, action_name):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "analysis_action_not_llm_proposable"
+    assert exc.value.rule == "phase_incompatible"
 
 
 # ===========================================================================
@@ -301,9 +301,9 @@ def test_phase_explore_allowlist_drops_legacy_actions():
     (dynamic_action.MD P1 supplementary cross-domain channel), the
     auto-managed analysis kinds (``roofline`` and ``profile``, both
     Coordinator-enqueued on watermark crossings; mode picked by
-    ``--enable-roofline``), and ``recover``. PolicyGate's
-    ``analysis_action_not_llm_proposable`` rule keeps the LLM from
-    delegating either analysis kind directly.
+    ``--enable-roofline``), and ``recover``. PolicyGate's R1
+    ``phase_incompatible`` rule keeps the LLM from delegating either
+    analysis kind directly (they are never LLM-proposable).
     """
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
         "explore", "specialist", "integrate_patch",
