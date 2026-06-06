@@ -1132,7 +1132,7 @@ def test_capability_summary_specialist_by_specialist_falls_back_to_domains_list(
 
 
 # ---------------------------------------------------------------------------
-# A1.1: kernel_roofline (Dashboard-Roofline 对接清单 §1)
+# A1.1: kernel_roofline (Dashboard-Roofline integration spec §1)
 # ---------------------------------------------------------------------------
 # The collector mirrors ``<sd>/reports/kernel_roofline.json`` so the
 # dashboard's hot-kernel table is fed directly from sbd. The on-disk
@@ -1161,7 +1161,7 @@ def test_kernel_roofline_missing_file_returns_empty_dict(tmp_path: Path) -> None
 
 def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
     """Happy path: every field arrives as documented in
-    Dashboard-Roofline 对接清单 §1, types are preserved, and the
+    Dashboard-Roofline integration spec §1, types are preserved, and the
     kernels list keeps its on-disk order (dashboard sorts client-side)."""
     payload = {
         "schema_version": 1,
@@ -1274,7 +1274,7 @@ def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# kernel_optimization_summary (Breakdown 面板对接文档 §A1; PR #399)
+# kernel_optimization_summary (Breakdown panel integration spec §A1; PR #399)
 # ---------------------------------------------------------------------------
 # The collector mirrors ``<sd>/reports/kernel_optimization_summary.json``
 # verbatim (light shape guards only) so the dashboard reads sbd alone.
@@ -1421,7 +1421,7 @@ def test_kernel_opt_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# conc_sweep_summary (Breakdown 面板对接文档 §A2; PR #399)
+# conc_sweep_summary (Breakdown panel integration spec §A2; PR #399)
 # ---------------------------------------------------------------------------
 def test_conc_sweep_summary_missing_file_returns_empty_dict(tmp_path: Path) -> None:
     """No report → empty dict, no warning (conc_sweep often disabled;
@@ -1508,7 +1508,7 @@ def test_conc_sweep_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# A1.2: roofline_progress (Dashboard-Roofline 对接清单 §2)
+# A1.2: roofline_progress (Dashboard-Roofline integration spec §2)
 # ---------------------------------------------------------------------------
 # The optimization-progress chart consumer. Inputs are entirely
 # in-memory state + manifest; collector never re-runs benchmarks.

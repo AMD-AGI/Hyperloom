@@ -94,7 +94,7 @@ def test_resolve_local_kb_root_falls_back_to_user_data_path(
     """Tier 3: ``$USER_DATA_PATH/kb`` when neither flag nor
     HYPERLOOM_LOCAL_KB_ROOT is set. Path matches the documented
     contract in the local-kb-recipe-snapshot-requirements doc §2:
-    "本地 KB 路径固定放在 ``${USER_DATA_PATH}/kb``"."""
+    "the local KB path is fixed at ``${USER_DATA_PATH}/kb``"."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     args = _ns()
     assert _resolve_local_kb_root(args) == tmp_path / "kb"

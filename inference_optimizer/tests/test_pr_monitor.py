@@ -370,7 +370,7 @@ def test_plane_pr_feed_warm_wildcard_expands_via_list_repos(monkeypatch):
 def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
     for t in PR_MONITOR_MCP_TOOLS:
         assert t in DEFAULT_SPECIALIST_TOOLS
-    # 12-tool surface per primus-cortex-pr-monitor-access.md §"可用 tools".
+    # 12-tool surface per primus-cortex-pr-monitor-access.md §"Available Tools".
     assert len(PR_MONITOR_MCP_TOOLS) == 12
 
 

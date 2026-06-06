@@ -37,7 +37,7 @@ field names):
           "change": "VLLM_ROCM_USE_AITER_FP4BMM=1",
           "outcome": "REVERT",
           "error_class": "crash",
-          "reason": "gfx942 不支持",
+          "reason": "gfx942 not supported",
           "ts": "..."
         }
       ]

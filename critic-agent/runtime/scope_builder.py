@@ -32,7 +32,7 @@ from .errors import ScopeError
 
 ORG_DEFAULT = "hyperloom"
 
-# 6 必填维度
+# 6 required dimensions
 CRITICAL_SCOPE_KEYS: tuple[str, ...] = (
     "org",
     "framework",
@@ -42,7 +42,7 @@ CRITICAL_SCOPE_KEYS: tuple[str, ...] = (
     "precision",
 )
 
-# 可选维度 — 不写 "unknown"，要么填要么不填 key
+# Optional dimensions — never write "unknown"; either set the value or omit the key
 OPTIONAL_SCOPE_KEYS: tuple[str, ...] = ("scale", "objective")
 
 

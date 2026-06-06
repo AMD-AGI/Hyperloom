@@ -3,9 +3,10 @@
 KB_gaps/Gap-05 root cause: ``_advance_phase_if_needed`` updated the
 ``phase`` field on EXPLORE/KERNEL → SWEEP transition but did not
 enqueue anything. KB_design §3.2 §5.4 says SWEEP entry must
-"自动构造 sweep grid (来自 SKILL.md 默认 grid + Cortex
-``recipe.sweep_grid`` 字段, 后者优先), 自动 enqueue ``sweep``
-action". Without this, SWEEP degrades to "LLM 自觉发 sweep" — and
+"automatically construct a sweep grid (from SKILL.md default grid +
+Cortex ``recipe.sweep_grid`` field, the latter takes precedence), and
+automatically enqueue the ``sweep`` action". Without this, SWEEP
+degrades to "LLM voluntarily emits sweep" — and
 when ``max_minutes`` is tight, the run terminates with zero sweep
 coverage.
 

@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 
 
 # Default service URL — primus-cortex-pr-api in the primus-cortex
-# namespace (see primus-cortex-pr-monitor-access.md §"服务地址"). When
+# namespace (see primus-cortex-pr-monitor-access.md §"Service URL"). When
 # the marathon pod runs outside the primus-cortex cluster, the operator
 # must override via ``--pr-monitor-url`` / env var with a port-forward.
 DEFAULT_PR_MONITOR_URL: str = (

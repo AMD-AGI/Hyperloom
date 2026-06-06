@@ -157,7 +157,7 @@ def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     else:
         return None, "not_a_session_breakdown"
 
-    # Reject incomplete or error-aborted runs (user request: 不完整的报错的 都不要上传).
+    # Reject incomplete or error-aborted runs (user request: do not upload incomplete or errored runs).
     ok, reason = is_complete_session(data)
     if not ok:
         return None, reason

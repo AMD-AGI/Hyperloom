@@ -7,16 +7,16 @@ any item shows up under a self-describing test name.
 
 The 9 items from the doc:
 
-1. 五元组 canonical id 生成正确
-2. 本地 KB root 是 ``${USER_DATA_PATH}/kb``
-3. 默认不传中心化 KB 时，读写都走本地 KB
-4. 指定中心化 KB 且可用时，读走中心化 KB，写仍走本地 KB
-5. 指定中心化 KB 但不可用时，读自动 fallback 到本地 KB，写仍走本地 KB
-6. 本地 recipe 文件或目录能区分五元组
-7. model 包含 ``/`` 时，本地路径仍然安全
-8. session 写入会合并已有 recipe 历史，不会清空已有
+1. Canonical id is generated correctly from the 5-tuple
+2. Local KB root is ``${USER_DATA_PATH}/kb``
+3. When the centralized KB is not configured, both reads and writes go to the local KB
+4. When the centralized KB is configured and available, reads go to the centralized KB, writes still go to the local KB
+5. When the centralized KB is configured but unavailable, reads automatically fall back to the local KB, writes still go to the local KB
+6. Local recipe files or directories can disambiguate the 5-tuple
+7. When ``model`` contains ``/``, the local path is still safe
+8. Session writes merge with existing recipe history and do not clear existing
    ``sessions`` / ``what_worked`` / ``what_failed`` / ``pitfalls``
-9. 最终本地 KB 文件的数据字段和 Arbor recipe 保持一致
+9. Final local KB file data fields stay consistent with the Arbor recipe
 
 These run as ordinary pytest unit tests against real
 ``LocalRecipeStore`` instances + ``respx``-mocked remote server.
@@ -78,7 +78,7 @@ def _ns(**overrides: Any) -> argparse.Namespace:
 
 
 # ===========================================================================
-# §4 Item 1 — 五元组 canonical id 生成正确
+# §4 Item 1 — Canonical id is generated correctly from the 5-tuple
 # ===========================================================================
 def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
     cid = recipe_canonical_id(
@@ -101,7 +101,7 @@ def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
 
 
 # ===========================================================================
-# §4 Item 2 — 本地 KB root 是 ${USER_DATA_PATH}/kb
+# §4 Item 2 — Local KB root is ${USER_DATA_PATH}/kb
 # ===========================================================================
 def test_item2_default_local_kb_root_is_user_data_path_kb(
     env_clean: None,
@@ -129,7 +129,7 @@ def test_item2_explicit_flag_wins_over_user_data_path(
 
 
 # ===========================================================================
-# §4 Item 3 — 默认不传中心化 KB 时，读写都走本地 KB
+# §4 Item 3 — When the centralized KB is not configured, both reads and writes go to the local KB
 # ===========================================================================
 def test_item3_no_central_url_reads_and_writes_go_local(
     env_clean: None,
@@ -158,7 +158,7 @@ def test_item3_no_central_url_reads_and_writes_go_local(
 
 
 # ===========================================================================
-# §4 Item 4 — 指定中心化 KB 且可用时，读走中心化 KB，写仍走本地 KB
+# §4 Item 4 — Centralized KB configured and available: reads go centralized, writes still local
 # ===========================================================================
 def test_item4_central_kb_reads_central_writes_local(
     env_clean: None,
@@ -220,7 +220,7 @@ def test_item4_central_kb_reads_central_writes_local(
 
 
 # ===========================================================================
-# §4 Item 5 — 指定中心化 KB 但不可用时，读自动 fallback 到本地，写仍走本地
+# §4 Item 5 — Centralized KB configured but unavailable: reads fall back to local, writes still local
 # ===========================================================================
 def test_item5_unreachable_central_falls_back_to_local(
     env_clean: None,
@@ -271,7 +271,7 @@ def test_item5_unreachable_central_falls_back_to_local(
 
 
 # ===========================================================================
-# §4 Item 6 — 本地 recipe 文件或目录能区分五元组
+# §4 Item 6 — Local recipe files or directories can disambiguate the 5-tuple
 # ===========================================================================
 def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
     """Two recipes that differ only in framework_version (or any
@@ -331,7 +331,7 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
 
 
 # ===========================================================================
-# §4 Item 7 — model 包含 / 时，本地路径仍然安全
+# §4 Item 7 — When model contains '/', the local path is still safe
 # ===========================================================================
 def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
     """A model arg like ``/hyperloom/models/Qwen-Qwen3-30B-A3B-Base``
@@ -390,14 +390,14 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
 
 
 # ===========================================================================
-# §4 Item 8 — session 写入会合并已有 recipe 历史
+# §4 Item 8 — Session writes merge with existing recipe history
 # ===========================================================================
 def test_item8_second_put_preserves_what_worked_when_not_overridden(
     tmp_path: Path,
 ) -> None:
     """When the second put_recipe doesn't supply ``what_worked``, the
     previously written value MUST survive. Otherwise the legacy
-    requirement "不会清空已有 what_worked" fails."""
+    requirement "must not clear existing what_worked" fails."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
         model="m", hardware="hw", framework="fw",
@@ -482,7 +482,7 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
 
 
 # ===========================================================================
-# §4 Item 9 — 最终本地 KB 文件的数据字段和 Arbor recipe 保持一致
+# §4 Item 9 — Final local KB file data fields stay consistent with the Arbor recipe
 # ===========================================================================
 def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     """The persisted ``recipe.json`` must use arbor's documented

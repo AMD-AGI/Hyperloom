@@ -793,8 +793,8 @@ class ExploreExecutor:
         # ``stack_extra_args`` / ``stack_extra_envs`` carry the running
         # accumulation; after a KEEP they get extended with the KEEP'd
         # variant so the *next* variant in the same batch is benched on
-        # top of the freshest stack ("重新
-        # 计算 base_extra_args 给后续 variant").
+        # top of the freshest stack ("recompute base_extra_args for
+        # subsequent variants").
         stack_extra_args = base_extra_args
         stack_extra_envs = dict(base_extra_envs)
         running_base_tput = base_tput

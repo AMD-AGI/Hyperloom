@@ -251,7 +251,7 @@ def test_p7_scenario_08_prompt_volume_delta_within_budget(
 # §3.3 + §1.8 guards — content the prompt MUST NOT contain
 # ===========================================================================
 def test_dynamic_action_block_omits_example_motivations(prompt: str):
-    """§3.3: 'any "dynamic action 比 specialist 强" implicit suggestion'
+    """§3.3: 'any "dynamic action is stronger than specialist" implicit suggestion'
     and 'any motivation_gap_text example' must NOT appear in the
     block — examples would let the LLM pattern-match into
     inappropriate dispatches.
@@ -276,7 +276,7 @@ def test_dynamic_action_block_omits_example_motivations(prompt: str):
 def test_dynamic_action_block_omits_specialist_failure_fallback(prompt: str):
     """§3.3 / §1.7: must not write 'when specialist fails N times,
     consider dynamic' — that would position dynamic as the
-    specialist-failure兜底."""
+    specialist-failure fallback."""
     block = re.search(
         r"## 6b\. DYNAMIC ACTION.*?(?=^## )", prompt, re.S | re.M,
     ).group(0)
@@ -317,8 +317,8 @@ def test_dynamic_action_block_omits_cooldown_or_cost_guidance(prompt: str):
 
 
 def test_dynamic_action_block_omits_internal_mechanics(prompt: str):
-    """§3.3: 'sub-agent 内部工作方式的描述（multi-turn / micro-bench
-    等）' must NOT appear — the LLM does not need to know
+    """§3.3: 'descriptions of sub-agent internals (multi-turn / micro-bench
+    etc.)' must NOT appear — the LLM does not need to know
     implementation details and will only invent boundary-pushing
     ideas if it does."""
     block = re.search(

@@ -188,7 +188,7 @@ def build(
                                         ),
                                         warnings,
                                         default={})
-    # Kernel-agent attempt outcome summary (Breakdown 面板对接文档 §A1).
+    # Kernel-agent attempt outcome summary (Breakdown panel integration spec §A1).
     # Mirrors ``<sd>/reports/kernel_optimization_summary.json`` (written
     # by the report action at CLOSE step 1, before this export at step
     # 2). Empty dict when absent → dashboard hides Block 1.
@@ -197,7 +197,7 @@ def build(
         lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
         warnings,
         default={})
-    # Post-optimization concurrency sweep (Breakdown 面板对接文档 §A2).
+    # Post-optimization concurrency sweep (Breakdown panel integration spec §A2).
     # Mirrors ``<sd>/reports/conc_sweep_summary.json`` (written by the
     # conc_sweep action during SWEEP). Empty dict when absent →
     # dashboard hides Block 2.
@@ -281,22 +281,22 @@ def build(
         # ``state.optimization_stack[]`` verbatim. Empty list on
         # pre-baseline / fresh sessions.
         "optimization_stack":  optimization_stack,
-        # Hot-kernel roofline table (Dashboard-Roofline 对接清单 §1).
+        # Hot-kernel roofline table (Dashboard-Roofline integration spec §1).
         # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
         # absent — the dashboard hides the table on empty.
         "kernel_roofline":     kernel_roofline,
-        # Kernel-agent attempt outcome summary (Breakdown 面板对接文档
-        # §A1). Mirror of ``reports/kernel_optimization_summary.json``;
+        # Kernel-agent attempt outcome summary (Breakdown panel integration
+        # spec §A1). Mirror of ``reports/kernel_optimization_summary.json``;
         # empty dict on absence (dashboard hides Block 1).
         "kernel_optimization_summary": kernel_optimization_summary,
-        # Post-optimization concurrency sweep (Breakdown 面板对接文档
-        # §A2). Mirror of ``reports/conc_sweep_summary.json``; empty
+        # Post-optimization concurrency sweep (Breakdown panel integration
+        # spec §A2). Mirror of ``reports/conc_sweep_summary.json``; empty
         # dict on absence (dashboard hides Block 2).
         "conc_sweep_summary":  conc_sweep_summary,
         # Per-snapshot roofline comparison list (markdown-report
         # source). Built from ``state.roofline_snapshots``.
         "roofline":            roofline,
-        # Optimization-progress curve (Dashboard-Roofline 对接清单 §2).
+        # Optimization-progress curve (Dashboard-Roofline integration spec §2).
         # Always populated when baseline ran; ``ceiling_available`` is
         # False on sessions that never ran the watermark roofline
         # pipeline (dashboard hides the reference lines).

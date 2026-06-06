@@ -11,9 +11,9 @@ to:
 * a stable id used by PolicyGate R2 + breakdown ``specialist_runs``.
 
 The catalogue is intentionally a runtime constant rather than per-domain
-yaml: §3.5 §5 says "domain 是 prompt 装配维度, 不是新 IntentType, 不是
-新 Role" — adding a domain is a one-line change here plus a prompt
-template entry in ``specialist_prompt_builder.py``.
+yaml: §3.5 §5 says "domain is a prompt-assembly dimension, not a new
+IntentType, not a new Role" — adding a domain is a one-line change here
+plus a prompt template entry in ``specialist_prompt_builder.py``.
 
 M5 ships only ``serving_specialist`` (per §3.13 M5 §2 scope); the
 other five (kernel/comm/compiler/system/pr_intel) are listed here so
@@ -113,7 +113,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
     ),
     SpecialistDomain(
         key="system_specialist",
-        layer="KFD / driver / 内存 / dispatch overhead",
+        layer="KFD / driver / memory / dispatch overhead",
         kb_anchor="systems",
         pr_repos=("ROCm/ROCm",),
         available_in="M6",

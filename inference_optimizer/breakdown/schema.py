@@ -716,7 +716,7 @@ class SourceFiles(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 # Roofline — optimization-progress curve for the dashboard
 # ---------------------------------------------------------------------------
-# Drives the "优化进度曲线" panel (Dashboard-Roofline 对接清单 §2): a
+# Drives the "Optimization-Progress Curve" panel (Dashboard-Roofline integration spec §2): a
 # stepped line from baseline through every KEEP, plotted against two
 # horizontal reference lines (ceiling = vendor peak, target = ceiling
 # × 0.70). All inputs derived from ``state.json`` so the dashboard
@@ -781,7 +781,7 @@ class RooflineProgress(TypedDict, total=False):
        horizontal dashed lines on the chart. ``ceiling`` is the
        vendor's theoretical peak (from the latest snapshot);
        ``target = ceiling × ceiling_ratio_target`` (default 0.70 — see
-       Dashboard 对接清单 §2.1 for why we don't aim at 100%).
+       Dashboard integration spec §2.1 for why we don't aim at 100%).
 
     2. **Trajectory** (``trajectory[]``): the stepped line itself —
        baseline + every KEEP, sorted by ts.
@@ -790,7 +790,7 @@ class RooflineProgress(TypedDict, total=False):
     entries verbatim for tooltips / drill-downs; consumers that just
     want to render the chart can ignore it.
 
-    Edge cases (Dashboard-Roofline 对接清单 §5):
+    Edge cases (Dashboard-Roofline integration spec §5):
     * No snapshot ever taken → ``ceiling_available = False``,
       ``ceiling_tok_per_sec / target_tok_per_sec`` absent. Dashboard
       hides the reference lines.
@@ -900,7 +900,7 @@ class KernelRooflineEntry(TypedDict, total=False):
     Keys mirror the on-disk shape; collector passes them through
     verbatim (with type coercion) to keep the schema loose-coupled to
     the tracelens output format. Fields documented in
-    ``Dashboard-Roofline 对接清单.md`` §1.
+    ``Dashboard-Roofline integration spec.md`` §1.
     """
     kernel_id: str                 # ``k001``..``k010``
     name: str                      # ``aiter::ck_moe_stage1`` etc
@@ -933,7 +933,7 @@ class KernelRoofline(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# Kernel Optimization Summary (Breakdown 面板对接文档 A1; PR #399 lishuoshuo)
+# Kernel Optimization Summary (Breakdown panel integration spec A1; PR #399 lishuoshuo)
 # ---------------------------------------------------------------------------
 # Mirror of ``<session_dir>/reports/kernel_optimization_summary.json``
 # (produced deterministically by the ``report`` action via
@@ -943,7 +943,7 @@ class KernelRoofline(TypedDict, total=False):
 # The collector mirrors the report verbatim (light top-level shape
 # guards only) so new producer fields ride through without a schema
 # change; the deeply-nested ``by_kernel[]`` rows therefore stay loose
-# (``dict``) and are documented in roofline优化对接文档.md §A1.4.
+# (``dict``) and are documented in roofline_optimization_integration_spec.md §A1.4.
 class KernelOptimizationSummary(TypedDict, total=False):
     schema_version: int                    # producer schema (currently 1; int, unlike conc_sweep's str)
     session_id: str                        # global id ``{model}_{ts}_{short_uuid}``
@@ -960,7 +960,7 @@ class KernelOptimizationSummary(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# Conc Sweep Summary (Breakdown 面板对接文档 A2; PR #399 lishuoshuo)
+# Conc Sweep Summary (Breakdown panel integration spec A2; PR #399 lishuoshuo)
 # ---------------------------------------------------------------------------
 # Mirror of ``<session_dir>/reports/conc_sweep_summary.json`` (produced
 # by the ``conc_sweep`` action during SWEEP). Extends the single-CONC
@@ -1035,16 +1035,16 @@ class SessionBreakdown(TypedDict, total=False):
     # list for their respective consumers and don't carry the full
     # per-entry metadata.
     optimization_stack: list["OptimizationStackEntry"]
-    # Hot-kernel table for the dashboard (Dashboard-Roofline 对接清单
-    # §1). Mirrors ``<sd>/reports/kernel_roofline.json`` so consumers
+    # Hot-kernel table for the dashboard (Dashboard-Roofline integration
+    # spec §1). Mirrors ``<sd>/reports/kernel_roofline.json`` so consumers
     # don't have to walk the kernel-agent output tree themselves.
     kernel_roofline: KernelRoofline
-    # Kernel-agent attempt outcome summary (Breakdown 面板对接文档 §A1).
+    # Kernel-agent attempt outcome summary (Breakdown panel integration spec §A1).
     # Mirrors ``<sd>/reports/kernel_optimization_summary.json``. Empty
     # dict when the report is absent (session predates PR #399 or the
     # ``report`` action never ran) — the dashboard hides Block 1.
     kernel_optimization_summary: KernelOptimizationSummary
-    # Post-optimization concurrency sweep (Breakdown 面板对接文档 §A2).
+    # Post-optimization concurrency sweep (Breakdown panel integration spec §A2).
     # Mirrors ``<sd>/reports/conc_sweep_summary.json``. Empty dict when
     # conc_sweep never ran — the dashboard hides Block 2.
     conc_sweep_summary: ConcSweepSummary
@@ -1054,7 +1054,7 @@ class SessionBreakdown(TypedDict, total=False):
     # mode / baseline / latest / delta``.
     roofline: list[dict[str, Any]]
     # Optimization-progress curve for the dashboard
-    # (Dashboard-Roofline 对接清单 §2). Carries the trajectory
+    # (Dashboard-Roofline integration spec §2). Carries the trajectory
     # (baseline + KEEP points), the ceiling/target reference lines,
     # and the headline current-best numbers. Renamed from ``roofline``
     # to ``roofline_progress`` to coexist with the existing list-

@@ -1,6 +1,6 @@
 """Guard tests for the ``$USER_DATA_PATH`` write-determinism contract.
 
-These lock the "写死" (make-it-deterministic) requirement:
+These lock the make-it-deterministic requirement:
 
 1. When ``$USER_DATA_PATH`` IS set, no resolver may ever yield the
    pod-local ``/workspace/hyperloom`` default — every artefact path is

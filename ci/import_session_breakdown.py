@@ -585,8 +585,8 @@ def extract_row(data: Dict) -> Dict[str, Any]:
             row[key] = round(float(v), 2)
 
     # Clip negative gain values to 0 across every column. Only triggers when
-    # the field is present AND < 0 (per request: "需要 gain 存在并且小于 0
-    # 才做这个操作"). Process-history paths inside raw_data (e.g.
+    # the field is present AND < 0 (per request: "only act when gain
+    # exists and is less than 0"). Process-history paths inside raw_data (e.g.
     # optimization_stack[].delta_pct, unified_log[].key_metric) are NOT
     # touched -- negative there is meaningful (a "REVERT"/"NEEDS_REVIEW"
     # attempt). enrich_raw_data() mirrors this clip only on the

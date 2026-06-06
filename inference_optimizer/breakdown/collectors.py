@@ -3639,14 +3639,14 @@ _KERNEL_ROOFLINE_REL_PATH = "reports/kernel_roofline.json"
 
 
 # ---------------------------------------------------------------------------
-# Roofline — optimization-progress curve (Dashboard 对接清单 §2)
+# Roofline — optimization-progress curve (Dashboard integration spec §2)
 # ---------------------------------------------------------------------------
 # Default ratio of vendor-peak HBM bandwidth that's actually achievable.
 # Vendor specs are theoretical maxima; sustained throughput is bounded
 # by memory-controller scheduling, cache-line granularity, thermal /
 # power throttling, and (for multi-GPU) XGMI arbitration. 70% is the
 # conservative target Hyperloom optimizes against — see Dashboard-
-# Roofline 对接清单 §2 for rationale.
+# Roofline integration spec §2 for rationale.
 DEFAULT_ROOFLINE_TARGET_RATIO = 0.70
 
 
@@ -3657,7 +3657,7 @@ def collect_roofline_progress(
     warnings: list[str],
 ) -> dict[str, Any]:
     """Build the ``roofline_progress`` section feeding the
-    optimization-progress chart (Dashboard-Roofline 对接清单 §2).
+    optimization-progress chart (Dashboard-Roofline integration spec §2).
 
     Originally exported as the top-level ``roofline`` field, but that
     name collided with the markdown-report renderer's existing
@@ -3849,8 +3849,8 @@ def collect_kernel_roofline(
     The kernel-agent watermark roofline pipeline writes this file once
     per successful trace analysis (minute-cadence on a live session,
     once at end-of-session post-mortem). The dashboard renders one row
-    per kernel for the "Kernel Roofline 表格" panel
-    (Dashboard-Roofline 对接清单 §1).
+    per kernel for the "Kernel Roofline Table" panel
+    (Dashboard-Roofline integration spec §1).
 
     File missing → empty dict + warning. Malformed JSON → empty dict +
     warning (``_load_json_safe`` already records the parse error).
@@ -3916,7 +3916,7 @@ def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Kernel Optimization Summary (Breakdown 面板对接文档 §A1; PR #399)
+# Kernel Optimization Summary (Breakdown panel integration spec §A1; PR #399)
 # ---------------------------------------------------------------------------
 _KERNEL_OPT_SUMMARY_REL_PATH = "reports/kernel_optimization_summary.json"
 
@@ -3927,7 +3927,7 @@ def collect_kernel_optimization_summary(
 ) -> dict[str, Any]:
     """Mirror ``<session_dir>/reports/kernel_optimization_summary.json``
     into the breakdown's ``kernel_optimization_summary`` section
-    (Breakdown 面板对接文档 §A1).
+    (Breakdown panel integration spec §A1).
 
     The file is produced deterministically by the ``report`` action
     (``orchestrator.kernel_attempt_summary.build_kernel_optimization_summary``),
@@ -4002,7 +4002,7 @@ def collect_kernel_optimization_summary(
 
 
 # ---------------------------------------------------------------------------
-# Conc Sweep Summary (Breakdown 面板对接文档 §A2; PR #399)
+# Conc Sweep Summary (Breakdown panel integration spec §A2; PR #399)
 # ---------------------------------------------------------------------------
 _CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
 
@@ -4012,7 +4012,7 @@ def collect_conc_sweep_summary(
     warnings: list[str],
 ) -> dict[str, Any]:
     """Mirror ``<session_dir>/reports/conc_sweep_summary.json`` into the
-    breakdown's ``conc_sweep_summary`` section (Breakdown 面板对接文档 §A2).
+    breakdown's ``conc_sweep_summary`` section (Breakdown panel integration spec §A2).
 
     Produced by the ``conc_sweep`` action during SWEEP (well before
     CLOSE), so it is already on disk when sbd exports. Surfacing it here

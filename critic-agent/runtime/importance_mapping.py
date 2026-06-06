@@ -8,7 +8,7 @@ values within Critic's allowed range.
 
 The two helpers cover the two write triggers we care about today:
 
-* :func:`importance_for_verdict` — Trigger A (review_verdict 落地后).
+* :func:`importance_for_verdict` — Trigger A (after review_verdict lands).
 * :func:`importance_for_kb_draft` — Trigger B (session close kb_draft).
 """
 
