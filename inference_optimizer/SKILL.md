@@ -270,13 +270,17 @@ Rules that look reasonable but break the current flow:
   specialist-informed flow.
   Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
   before EXPLORE; the LLM never proposes the `framework_pr`
-  action (PolicyGate denies it via
-  `framework_pr_action_not_llm_proposable`). Use `--no-framework`
-  to skip the phase entirely.
-- **`kernel_opt` sequencing** is gated by
-  `explore_attempts_minimum_before_kernel_opt`, which reads
-  `gain_per_stack_entry` (at least one successful explore round on
-  record) rather than any per-action attempt counter.
+  action — it is Coordinator-managed and absent from
+  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any
+  LLM-side propose / delegate with `rule='phase_incompatible'`.
+  Use `--no-framework` to skip the phase entirely.
+- **`kernel_opt` sequencing** is no longer gated by an
+  explore-minimum check (the
+  `explore_attempts_minimum_before_kernel_opt` rule was retired
+  in loosen_plan P1_06). KERNEL phase may propose `kernel_opt`
+  directly; the `trace_analyze → run_optimization` data
+  dependency (P2_11 handler-level check) and the reusable
+  `kernel_id` validation still keep the inputs valid.
 
 ## Setup
 
@@ -908,8 +912,10 @@ The optimizer should:
   PRELUDE (after baseline) and at each validated-tput watermark
   (`current_tput / last_roofline_tput >= 1.10`; compound). Default is
   `roofline` (profile + trace_analyze + analysis.md); `--no-enable-roofline`
-  switches to plain `profile`. The LLM cannot propose either
-  (`analysis_action_not_llm_proposable`); concurrent GPU work is
+  switches to plain `profile`. The LLM cannot propose either —
+  both names are Coordinator-managed and absent from
+  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 returns
+  `rule='phase_incompatible'`. Concurrent GPU work is
   serialised by the lane / GPU lease rather than a policy deny, so
   explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling

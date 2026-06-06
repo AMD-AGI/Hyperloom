@@ -88,10 +88,10 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # specialist sees a populated trace (and, when roofline is on,
         # an ``analysis.md`` snapshot). The Coordinator picks the kind
         # via ``shared_state.enable_roofline`` — both names sit in the
-        # allowlist so the internal-enqueue passes R1
-        # ``phase_incompatible``. LLM-side propose_action /
-        # delegate is denied by PolicyGate's
-        # ``analysis_action_not_llm_proposable`` rule for both names.
+        # ALLOWED set so the internal-enqueue passes R1
+        # ``phase_incompatible``, but they are absent from
+        # ``PHASE_LLM_PROPOSABLE_ACTIONS``, so any LLM-side
+        # propose_action / delegate is rejected by the same R1 rule.
         "target_analysis", "baseline", "roofline", "profile", "recover",
     }),
     PHASE_FRAMEWORK_PR: frozenset({
@@ -102,8 +102,9 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # the Critic-gated patch flow. ``roofline`` / ``profile`` are
         # auto-enqueued on watermark crossings here too (KEEP path
         # writes ``cumulative_gain_validated`` via the same single-
-        # writer hook). LLM-side ``framework_pr`` proposes are denied
-        # by ``framework_pr_action_not_llm_proposable``.
+        # writer hook). ``framework_pr`` is absent from
+        # ``PHASE_LLM_PROPOSABLE_ACTIONS``, so any LLM-side proposal
+        # is denied by R1 ``phase_incompatible``.
         "framework_pr", "integrate_patch", "roofline", "profile", "recover",
     }),
     PHASE_EXPLORE: frozenset({
@@ -522,7 +523,7 @@ def apply_escalate_budget_bump(
     resulting dict is suitable for assigning back into
     :attr:`SharedState.phase_budget_pct`.
 
-    "上限 80% (绝对值)".
+    "Cap at 80% (absolute)".
     """
     phase_key = (phase or "").strip().upper()
     if phase_key not in PHASE_NAMES:

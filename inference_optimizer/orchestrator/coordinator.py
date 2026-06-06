@@ -789,7 +789,7 @@ class Coordinator:
           watermark-driven mid-run refresh).
         * ``SWEEP`` — auto-enqueue ``sweep`` with a recipe-driven
           (or defaults-driven) grid so SWEEP doesn't degrade to
-          "LLM 自觉发 sweep".
+          "LLM voluntarily emits sweep".
           Same idempotency contract as KERNEL.
         * ``CLOSE`` — run the 5-step closing sequencer (report →
           session_breakdown → NDJSON drain → Cortex commit → mark
@@ -1881,8 +1881,10 @@ class Coordinator:
 
         Both kinds share the same enqueue + watermark-anchor +
         pending-task-gate plumbing; the kind name is the only thing
-        that differs. PolicyGate denies either name when the LLM tries
-        to propose it (``analysis_action_not_llm_proposable``).
+        that differs. Both names are absent from
+        ``PHASE_LLM_PROPOSABLE_ACTIONS``, so any LLM-side
+        propose_action / delegate is denied by PolicyGate R1
+        ``phase_incompatible``.
         """
         return "roofline" if bool(
             getattr(self.shared_state, "enable_roofline", True),
@@ -2656,10 +2658,11 @@ class Coordinator:
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue a ``sweep`` task on SWEEP entry.
 
-        SWEEP must "自动构造 sweep grid (来自
-        SKILL.md 默认 grid + Cortex ``recipe.sweep_grid`` 字段, 后者
-        优先), 自动 enqueue ``sweep`` action". Without this hook the
-        phase degrades to "LLM 自觉发 sweep" — and if ``max_minutes``
+        SWEEP must "automatically construct a sweep grid (from
+        SKILL.md default grid + Cortex ``recipe.sweep_grid`` field, the
+        latter takes precedence), and automatically enqueue the
+        ``sweep`` action". Without this hook the phase degrades to
+        "LLM voluntarily emits sweep" — and if ``max_minutes``
         runs out before the LLM proposes, ``_enter_closing_phase``
         force-enqueues report and the run finishes with zero sweep
         coverage. Operators lose the cross-workload validation that
@@ -2861,8 +2864,9 @@ class Coordinator:
     def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
         """Pick a sweep grid: Cortex recipe first, defaults fallback.
 
-        "来自 SKILL.md 默认 grid + Cortex
-        ``recipe.sweep_grid`` 字段, 后者优先". The recipe lookup is
+        "From SKILL.md default grid + Cortex
+        ``recipe.sweep_grid`` field, the latter takes precedence". The
+        recipe lookup is
         defensive — at the time of writing the Cortex T0 response is
         still free-text under ``warm_start_recipe.raw``; a future
         Cortex schema PR (§3.14 R-13) will add a structured

@@ -2,11 +2,13 @@
 propose ``roofline`` / ``profile``.
 
 After the single-path refactor the Coordinator owns the analysis
-lifecycle. PolicyGate denies any LLM-emitted
+lifecycle. ``roofline`` and ``profile`` are absent from
+``PHASE_LLM_PROPOSABLE_ACTIONS``, so PolicyGate R1
+``phase_incompatible`` denies any LLM-emitted
 ``propose_action{action='roofline'|'profile'}`` /
-``delegate{action='roofline'|'profile'}`` with rule
-``analysis_action_not_llm_proposable``. Prompts that still tell the LLM
-to propose either cause a guaranteed denial loop on every session.
+``delegate{action='roofline'|'profile'}``. Prompts that still tell
+the LLM to propose either cause a guaranteed denial loop on every
+session.
 
 This test scans every prompt-facing file (orchestration / specialist
 prompts, action ``*.md`` and ``_meta/*.yaml`` next-step strings) and
@@ -123,10 +125,11 @@ def test_shared_state_empty_analysis_md_does_not_tell_llm_to_propose():
     """``SharedState._format_analysis_md_full`` renders straight into
     the per-tick orchestration prompt via ``format_for_prompt``. When
     no analysis snapshot exists yet, the fallback string must NOT tell
-    the LLM to propose ``roofline`` / ``profile`` — PolicyGate denies
-    that with ``analysis_action_not_llm_proposable``. Pin the exact
-    output so the grep guard above (line-based regex) is reinforced
-    by an end-to-end behaviour check."""
+    the LLM to propose ``roofline`` / ``profile`` — both names are
+    absent from ``PHASE_LLM_PROPOSABLE_ACTIONS``, so PolicyGate R1
+    rejects any such proposal with ``rule='phase_incompatible'``.
+    Pin the exact output so the grep guard above (line-based regex)
+    is reinforced by an end-to-end behaviour check."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState()
@@ -137,11 +140,8 @@ def test_shared_state_empty_analysis_md_does_not_tell_llm_to_propose():
     assert "propose `profile`" not in low
     assert "propose roofline" not in low
     assert "propose profile" not in low
-    # Positive contract: the fallback must point at the auto-enqueue
-    # path or name the denial rule so the LLM knows why it cannot
-    # propose itself.
     assert (
         "auto-enqueued" in low
         or "coordinator" in low
-        or "analysis_action_not_llm_proposable" in low
+        or "phase_incompatible" in low
     )

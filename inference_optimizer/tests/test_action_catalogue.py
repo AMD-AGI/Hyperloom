@@ -39,8 +39,9 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "baseline":             "prep",
     # GAP 1 — Coordinator-internal one-shot warm-recipe replay.
     # Same prep family as ``baseline`` (it is essentially a re-baseline
-    # with the KB best_config applied). PolicyGate denies LLM
-    # propose_action / delegate via ``analysis_action_not_llm_proposable``.
+    # with the KB best_config applied). The action is absent from
+    # ``PHASE_LLM_PROPOSABLE_ACTIONS``, so PolicyGate R1
+    # ``phase_incompatible`` denies LLM propose_action / delegate.
     "replay_warm_recipe":   "prep",
     # analysis (2) — Coordinator-internal analysis actions, selected
     # at runtime by ``shared_state.enable_roofline`` (``--enable-roofline``
@@ -49,9 +50,10 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     #     analysis.md snapshot);
     #   * ``profile`` — lightweight trace-only fallback.
     # Both are registered so the Coordinator-internal task path can
-    # dispatch them through SubAgentRunner. PolicyGate denies LLM
-    # propose_action / delegate for either name
-    # (``analysis_action_not_llm_proposable``).
+    # dispatch them through SubAgentRunner. Both names are absent
+    # from ``PHASE_LLM_PROPOSABLE_ACTIONS``, so PolicyGate R1
+    # ``phase_incompatible`` denies LLM propose_action / delegate
+    # for either.
     "roofline":             "analysis",
     "profile":              "analysis",
     # shallow (5) — ``explore`` is the merged grid-runner entry.
@@ -60,8 +62,9 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "explore":              "shallow",
     "integrate_patch":      "shallow",
     # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor.
-    # Mirrors integrate_patch's role for the new phase; LLM may not
-    # propose it (framework_pr_action_not_llm_proposable, Stage 3).
+    # Mirrors integrate_patch's role for the new phase; the action is
+    # absent from ``PHASE_LLM_PROPOSABLE_ACTIONS``, so PolicyGate R1
+    # ``phase_incompatible`` denies any LLM-side proposal.
     "framework_pr":         "shallow",
     "sweep":                "shallow",
     # SWEEP-phase post-sweep concurrency comparison (Coordinator-

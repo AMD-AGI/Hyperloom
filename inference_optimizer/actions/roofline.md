@@ -52,7 +52,9 @@ GPU lease rather than a policy deny.
 
 `propose_action{action_name='roofline'|'profile'}` and
 `delegate{action_name='roofline'|'profile'}` are denied at PolicyGate
-with `rule='analysis_action_not_llm_proposable'`. To run a profile
+with `rule='phase_incompatible'`: both names are Coordinator-managed
+and absent from `PHASE_LLM_PROPOSABLE_ACTIONS`, so the single LLM-
+facing R1 phase rule rejects any LLM-side proposal. To run a profile
 instead of a full roofline, the operator launches with
 `--no-enable-roofline` (the Coordinator then auto-enqueues a `profile`
 task in PRELUDE and at every watermark crossing); there is no

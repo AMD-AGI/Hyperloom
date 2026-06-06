@@ -575,9 +575,9 @@ class SharedState:
     # standard Critic-gated ``integrate_patch``-style benchmark, and
     # KEEPs winners to ``optimization_stack``. Operators opt out via
     # ``--no-framework`` (PRELUDE → EXPLORE directly, ``prelude_done``
-    # reason preserved). PolicyGate's
-    # ``framework_pr_action_not_llm_proposable`` rule keeps the LLM
-    # from proposing the action itself.
+    # reason preserved). ``framework_pr`` is absent from
+    # ``PHASE_LLM_PROPOSABLE_ACTIONS``, so PolicyGate R1
+    # ``phase_incompatible`` keeps the LLM from proposing it.
     framework_phase_enabled: bool = True
     # FRAMEWORK_PR phase progress tracker. One entry per candidate
     # benchmark, written by the FrameworkPrExecutor: ``{candidate_id,
@@ -630,8 +630,9 @@ class SharedState:
     # plain ``profile`` instead (no trace_analyze, no analysis.md);
     # behaviour is otherwise identical (same idempotency keys, same
     # pending-task gate, same watermark anchor update). Both kinds
-    # remain Coordinator-internal and are denied by PolicyGate when
-    # proposed by the LLM (``analysis_action_not_llm_proposable``).
+    # remain Coordinator-internal and are absent from
+    # ``PHASE_LLM_PROPOSABLE_ACTIONS``, so any LLM-side propose /
+    # delegate is denied by PolicyGate R1 ``phase_incompatible``.
     enable_roofline: bool = True
     # Per-variant overtime kill multiplier for ExploreExecutor: when
     # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
@@ -4392,10 +4393,11 @@ class SharedState:
                 "by the Coordinator at the end of PRELUDE and on every "
                 "+10% validated-gain crossing; wait for the pending "
                 "task to land, or continue with specialist / explore "
-                "work that does not need analysis.md. PolicyGate denies "
-                "any LLM-emitted propose_action/delegate against "
-                "`roofline` or `profile` with rule "
-                "`analysis_action_not_llm_proposable`.)"
+                "work that does not need analysis.md. `roofline` and "
+                "`profile` are Coordinator-managed and absent from "
+                "`PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 "
+                "denies any LLM-emitted propose_action/delegate "
+                "against either name with rule `phase_incompatible`.)"
             )
         md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")

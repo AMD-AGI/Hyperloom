@@ -1,14 +1,15 @@
 """Post-PR-321 review Finding 1 regression — Coordinator runtime hints
 must not tell the LLM to propose ``profile`` / ``roofline``.
 
-PolicyGate denies LLM-emitted ``propose_action`` / ``delegate`` against
-either action with ``rule='analysis_action_not_llm_proposable'``. The
-sequence-denial hints in coordinator.py previously emitted phrasing like
-*"propose/delegate `profile`"* even after the single-path refactor. If
-the PRELUDE / watermark auto-analysis fails (or the pending field gets
-stuck mid-restart), those hints would point the LLM at a guaranteed
-denial and trip a policy loop — there is no manual recovery path for the
-LLM other than ``recover``.
+Both names are absent from ``PHASE_LLM_PROPOSABLE_ACTIONS``, so any
+LLM-emitted ``propose_action`` / ``delegate`` is denied by PolicyGate
+R1 with ``rule='phase_incompatible'``. The sequence-denial hints in
+coordinator.py previously emitted phrasing like *"propose/delegate
+`profile`"* even after the single-path refactor. If the PRELUDE /
+watermark auto-analysis fails (or the pending field gets stuck mid-
+restart), those hints would point the LLM at a guaranteed denial and
+trip a policy loop — there is no manual recovery path for the LLM
+other than ``recover``.
 
 This test pins the sequence-denial sites:
 

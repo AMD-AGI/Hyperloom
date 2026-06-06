@@ -25,9 +25,10 @@ approved candidate to:
      ``git reset --hard <pre_apply_sha>`` followed by ``git clean -fd``
      to restore exactly the pre-apply state.
 
-This is a Coordinator-internal action (``framework_pr_action_not_llm_proposable``
-denies any LLM-side delegate / propose_action / request). It is
-registered for the FRAMEWORK_PR phase only.
+This is a Coordinator-internal action: ``framework_pr`` is absent
+from ``PHASE_LLM_PROPOSABLE_ACTIONS``, so PolicyGate R1
+``phase_incompatible`` denies any LLM-side delegate / propose_action
+/ request. It is registered for the FRAMEWORK_PR phase only.
 
 Inputs (``ctx.task.params``):
     candidate (dict, required) — PR metadata row:
