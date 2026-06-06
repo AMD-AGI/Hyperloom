@@ -70,27 +70,33 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
         assert registry.get(name) is not None
 
 
-def test_recover_is_enabled_and_has_real_executor(registry):
-    """``recover`` was re-enabled in 2026-05 alongside RecoverExecutor.
+def test_recover_is_robustness_delegate_only_with_real_executor(registry):
+    """``recover`` is a ROBUSTNESS_DELEGATE_ONLY action.
 
-    Pin all three legs of the contract so a future drift makes this
-    test fire instead of silently regressing to the old ``no_executor``
-    failure mode:
+    It keeps a real executor + registry metadata for the robustness
+    ``gpu_memory_leaked`` ladder, but is intentionally removed from the
+    Orchestration prompt surface so Orchestration can neither propose nor
+    delegate it. Pin every leg so a future drift fires this test:
 
     * registry metadata still loads (covered by parametrized check).
-    * ``recover`` appears in both enabled-action sets so the
-      Orchestration prompt offers it as a delegatable action.
-    * ``cli._REAL_EXECUTORS_FULL`` binds it to a real callable
-      (:data:`recover_executor`) rather than ``_noop_prep``.
+    * ``recover`` is NOT in either enabled-action set (the Orchestration
+      prompt no longer advertises it).
+    * ``recover`` is the sole ROBUSTNESS_DELEGATE_ONLY_ACTIONS member.
+    * ``cli._REAL_EXECUTORS_FULL`` still binds it to a real callable
+      (:data:`recover_executor`) so the robustness delegate path works.
     """
     from inference_optimizer.cli import _REAL_EXECUTORS_FULL
     from inference_optimizer.orchestrator.action_executors.recover import (
         RecoverExecutor,
         recover_executor,
     )
+    from inference_optimizer.protocol.action_surfaces import (
+        ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
+    )
 
-    assert "recover" in FULL_ENABLED_ACTIONS
-    assert "recover" in NO_KERNEL_ENABLED_ACTIONS
+    assert "recover" not in FULL_ENABLED_ACTIONS
+    assert "recover" not in NO_KERNEL_ENABLED_ACTIONS
+    assert "recover" in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
     assert registry.get("recover") is not None
     assert "recover" in _REAL_EXECUTORS_FULL
     assert _REAL_EXECUTORS_FULL["recover"] is recover_executor

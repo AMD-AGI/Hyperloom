@@ -48,14 +48,14 @@ Every tick the per-tick prompt includes a `=== Phase ===` block with:
 Per-phase intent map (the merged `explore` action is the single
 grid-runner entry):
 
-  - **PRELUDE**: `target_analysis`, `baseline`, `recover` are the
+  - **PRELUDE**: `target_analysis`, `baseline` are the
     proposable actions. Drive `baseline_tput > 0` so the Coordinator can
     advance to EXPLORE. `kernel_opt` / explore-family actions are not
     proposable here. `roofline` and `profile` are Coordinator-managed
     (auto-enqueued after baseline lands); they never appear in the
     per-phase proposable set, so any attempt to propose them is denied by
     R1 `phase_incompatible`.
-  - **EXPLORE**: `explore`, `specialist`, `integrate_patch`, `recover`.
+  - **EXPLORE**: `explore`, `specialist`, `integrate_patch`.
     `profile` / `kernel_opt` / `sweep` / `report` are **denied**.
     Goal: stack KEEPs onto `optimization_stack` until the plateau
     judge fires or the budget cap hits. `explore` runs its per-KEEP
@@ -122,13 +122,13 @@ grid-runner entry):
     forward. Use the advisory to decide when to emit such a hint
     (`skip_to_kernel` / `skip_to_sweep` / `skip_to_close`) rather than
     spinning further exploration rounds.
-  - **KERNEL**: the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`.
+  - **KERNEL**: the 5 KERNEL_OWNED_ACTIONS via REQUEST.
     Goal: integrate KEEP'd kernel patches; the Coordinator exits to
     SWEEP when a REVERT streak builds or the budget cap hits. Roofline
     is auto-managed (not proposable); see "Roofline" below.
-  - **SWEEP**: `sweep`, `recover`. Goal: validate `current_best` over a
+  - **SWEEP**: `sweep`. Goal: validate `current_best` over a
     workload grid. Coordinator exits to CLOSE on `sweep_done`.
-  - **CLOSE**: `report`, `session_breakdown`, `recover`. Coordinator
+  - **CLOSE**: `report`, `session_breakdown`. Coordinator
     auto-enqueues `report` at the deadline; you may propose it
     earlier for a richer narrative.
 

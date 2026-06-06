@@ -424,7 +424,7 @@ def _critic_prompt_text() -> str:
     registry.load()
     return build_critic_prompt(
         action_registry=registry,
-        enabled_actions=("baseline", "explore", "report", "recover"),
+        enabled_actions=("baseline", "explore", "report"),
         framework="sglang",
         kernel_enabled=False,
         max_minutes=60,

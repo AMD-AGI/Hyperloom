@@ -313,10 +313,12 @@ def test_phase_explore_allowlist_drops_legacy_actions():
 
 def test_full_enabled_actions_still_contains_explore():
     """Sanity: the replacement action stays enabled. Same for
-    ``sweep`` / ``recover`` / ``baseline`` (canonical retentions)."""
+    ``sweep`` / ``baseline`` (canonical retentions). ``recover`` is
+    intentionally NOT enabled — it is a robustness-delegate-only action
+    and no longer advertised on the Orchestration prompt surface."""
     assert "explore" in FULL_ENABLED_ACTIONS
     assert "sweep" in FULL_ENABLED_ACTIONS
-    assert "recover" in FULL_ENABLED_ACTIONS
+    assert "recover" not in FULL_ENABLED_ACTIONS
     assert "baseline" in FULL_ENABLED_ACTIONS
 
 

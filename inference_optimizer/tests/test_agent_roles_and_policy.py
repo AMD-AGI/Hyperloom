@@ -292,6 +292,55 @@ def test_gate_orchestration_delegate_recover_rejected_by_source(gate):
     assert "robustness" in str(exc.value)
 
 
+def test_gate_orchestration_propose_recover_rejected_by_source(gate):
+    """Orchestration must NOT reach ``recover`` through the propose_action
+    channel either — the source allowlist gates both intent kinds so the
+    spurious no-op recover loop (server-restart connect-error false alarms)
+    cannot recur."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={"action_name": "recover"},
+        ))
+    assert exc.value.rule == "propose_action_source"
+    assert "robustness" in str(exc.value)
+
+
+def test_gate_robustness_delegate_recover_in_phase_ok():
+    """The robustness ``gpu_memory_leaked`` ladder still delegates
+    ``recover`` even with a live phase set: ``recover`` is phase-allowed in
+    every phase, and the ROBUSTNESS_DELEGATE_ONLY bypass in
+    ``_validate_phase_action`` accepts the robustness delegate despite the
+    action being absent from PHASE_LLM_PROPOSABLE_ACTIONS."""
+    state = SharedState(phase="EXPLORE", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    gate.validate_intent("robustness", Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "recover",
+            "params": {
+                "reason": "gpu_memory_leaked",
+                "force_gpu_cleanup": True,
+                "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
+            },
+        },
+    ))
+
+
+def test_gate_orchestration_propose_recover_in_phase_rejected():
+    """With a live phase set, Orchestration's propose(recover) is denied.
+    The source gate fires first (phase-independent), guaranteeing the
+    denial regardless of which phase the run is in."""
+    state = SharedState(phase="EXPLORE", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={"action_name": "recover"},
+        ))
+    assert exc.value.rule == "propose_action_source"
+
+
 def test_gate_robustness_delegate_recover_missing_evidence_rejected(gate):
     """Even from robustness, ``recover`` without evidence is denied so the
     audit trail always captures the symptom that justified the kill."""

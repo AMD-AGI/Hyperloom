@@ -38,6 +38,7 @@ from typing import Any
 from ..protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     KERNEL_OWNED_ACTIONS,
+    ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 
 
@@ -77,7 +78,11 @@ def phase_index(phase: str) -> int:
 #
 # * EXPLORE allowlist contains the merged ``explore`` action and the
 #   ``specialist`` LLM sub-agent.
-# * ``recover`` stays in every phase — phase-orthogonal.
+# * ``recover`` stays in every phase — phase-orthogonal — but is a
+#   ROBUSTNESS_DELEGATE_ONLY action: it is subtracted from
+#   ``PHASE_LLM_PROPOSABLE_ACTIONS`` below so Orchestration can neither
+#   propose nor delegate it. Only the robustness ``gpu_memory_leaked``
+#   ladder may delegate it (see PolicyGate ``_validate_phase_action``).
 # * ``session_breakdown`` is a CLOSE action (it materializes the
 #   report bundle). The per-KEEP stack rebench is inlined into
 #   ``explore``.
@@ -180,14 +185,19 @@ def allowed_actions_for(phase: str) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 #
 # The subset of each phase allowlist that the LLM may actually emit through
-# propose_action / delegate / request. Coordinator-managed actions
-# (``roofline`` / ``profile`` / ``replay_warm_recipe`` analysis snapshots and
-# the ``framework_pr`` pump) stay in ``PHASE_ALLOWED_ACTIONS`` so the internal
-# enqueue passes R1, but they are auto-driven and never proposable. Rendering
-# this set keeps "what the prompt advertises" identical to "what PolicyGate
-# accepts" so the model never proposes into a guaranteed denial.
+# propose_action / delegate / request. Two families are subtracted:
+#   * Coordinator-managed actions (``roofline`` / ``profile`` /
+#     ``replay_warm_recipe`` analysis snapshots and the ``framework_pr``
+#     pump) — auto-driven and never proposable.
+#   * Robustness-delegate-only actions (``recover``) — driven solely by the
+#     robustness ``gpu_memory_leaked`` action-ladder; Orchestration must
+#     emit an ALERT instead of proposing/delegating them.
+# Both families stay in ``PHASE_ALLOWED_ACTIONS`` so the internal enqueue /
+# robustness delegate passes R1. Rendering this set keeps "what the prompt
+# advertises" identical to "what PolicyGate accepts for Orchestration" so the
+# model never proposes into a guaranteed denial.
 PHASE_LLM_PROPOSABLE_ACTIONS: dict[str, frozenset[str]] = {
-    phase: actions - COORDINATOR_INTERNAL_ACTIONS
+    phase: actions - COORDINATOR_INTERNAL_ACTIONS - ROBUSTNESS_DELEGATE_ONLY_ACTIONS
     for phase, actions in PHASE_ALLOWED_ACTIONS.items()
 }
 

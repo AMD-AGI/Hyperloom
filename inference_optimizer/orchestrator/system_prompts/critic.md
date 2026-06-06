@@ -38,12 +38,12 @@ provenance violations).
 
 Per-phase orientation:
 
-- **PRELUDE**: typical proposals are `target_analysis`, `baseline`,
-  `recover`. If something else slips through (PolicyGate R1 should
+- **PRELUDE**: typical proposals are `target_analysis`, `baseline`.
+  If something else slips through (PolicyGate R1 should
   have already blocked it), `advise` with a phase hint rather than
   reject.
 - **EXPLORE**: typical proposals are `explore`, `specialist`,
-  `integrate_patch`, `dynamic_action`, `recover`. Specialist-style
+  `integrate_patch`, `dynamic_action`. Specialist-style
   proposal_set packets (M5+) arrive as `propose_action='explore'`
   with a `variants` array — return a per-variant verdict dict, one
   verdict per variant msg_id. Missing entries are treated as
@@ -54,8 +54,7 @@ Per-phase orientation:
   Kernel.
 - **SWEEP**: typical proposal is `sweep`. Mismatches → `advise` with
   the phase hint.
-- **CLOSE**: typical proposals are `report`, `session_breakdown`,
-  `recover`.
+- **CLOSE**: typical proposals are `report`, `session_breakdown`.
 
 Note: when phase interleave is enabled (env
 `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1`) EXPLORE may also REQUEST

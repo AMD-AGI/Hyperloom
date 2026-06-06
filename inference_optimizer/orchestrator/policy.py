@@ -31,11 +31,13 @@ from ..protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_OWNED_ACTIONS,
+    ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from .phase_state import (
     PHASE_EXPLORE,
     PHASE_NAMES,
     PHASE_SWEEP,
+    is_action_allowed_in_phase,
     is_action_llm_proposable_in_phase_with_interleave,
     llm_proposable_actions_for_with_interleave,
 )
@@ -985,6 +987,24 @@ class PolicyGate:
             self._validate_conc_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
+        # Per-action source allowlist (e.g. ``recover`` is robustness-only).
+        # Mirrors the delegate-path guard so Orchestration cannot reach a
+        # robustness-delegate-only action through the propose_action channel
+        # either. This is a phase-independent hard denial; the proposable-set
+        # subtraction in PHASE_LLM_PROPOSABLE_ACTIONS handles the phase-aware
+        # path and keeps the prompt from advertising the action.
+        allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
+        if allowed_sources is not None and role.name not in allowed_sources:
+            raise PolicyDenied(
+                f"role={role.name!r} cannot propose action={action_name!r} "
+                f"(allowed: {sorted(allowed_sources)!r})",
+                rule="propose_action_source",
+                hint=(
+                    "side-effecting actions like `recover` are reserved for "
+                    "the robustness agent; emit an ALERT and let robustness "
+                    "escalate via its action-ladder instead"
+                ),
+            )
         self._validate_fp8_only_action(action_name, intent_kind="propose_action")
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
@@ -1192,6 +1212,19 @@ class PolicyGate:
             return
         phase = (getattr(state, "phase", "") or "").strip().upper()
         if not phase or phase not in PHASE_NAMES:
+            return
+        # Robustness-delegate-only actions (e.g. ``recover``) are absent
+        # from PHASE_LLM_PROPOSABLE_ACTIONS so Orchestration can neither
+        # propose nor delegate them, but the robustness ``gpu_memory_leaked``
+        # ladder still delegates them. The DELEGATE_ACTION_SOURCE_ALLOWLIST
+        # check in ``_validate_delegate`` already guarantees only robustness
+        # reaches this point on the delegate path, so accept the delegate as
+        # long as the action is phase-allowed.
+        if (
+            intent_kind == "delegate"
+            and action_name in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
+            and is_action_allowed_in_phase(action_name, phase)
+        ):
             return
         if is_action_llm_proposable_in_phase_with_interleave(
             action_name, phase,

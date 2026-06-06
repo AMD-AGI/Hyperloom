@@ -86,18 +86,26 @@ def test_is_action_allowed_in_phase_handles_unknowns():
 def test_llm_proposable_set_drops_coordinator_internal_actions():
     from inference_optimizer.protocol.action_surfaces import (
         COORDINATOR_INTERNAL_ACTIONS,
+        ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
     )
 
     # The proposable set is the allowlist minus everything the
     # Coordinator auto-manages (roofline / profile / replay_warm_recipe
-    # / framework_pr). Nothing else is dropped.
+    # / framework_pr) AND the robustness-delegate-only actions
+    # (``recover``). Nothing else is dropped.
     for phase in phase_state.PHASE_NAMES:
         allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
         proposable = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS[phase]
-        assert proposable == allowed - COORDINATOR_INTERNAL_ACTIONS
+        assert proposable == (
+            allowed
+            - COORDINATOR_INTERNAL_ACTIONS
+            - ROBUSTNESS_DELEGATE_ONLY_ACTIONS
+        )
         assert proposable.isdisjoint(COORDINATOR_INTERNAL_ACTIONS)
-        # recover is phase-orthogonal and stays proposable everywhere.
-        assert "recover" in proposable
+        # recover stays phase-allowed (robustness delegate) but is
+        # never LLM-proposable by Orchestration.
+        assert "recover" in allowed
+        assert "recover" not in proposable
     # The advertised analysis / framework_pr names are never proposable.
     explore = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["EXPLORE"]
     assert "roofline" not in explore
