@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P1-1 ActionRegistry + ActionMetadata + PolicyGate integration tests.
 
 Covers:

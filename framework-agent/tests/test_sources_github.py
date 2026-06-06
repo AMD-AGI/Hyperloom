@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.sources.github.
 
 Hermetic - monkeypatches urlopen. Verifies best-effort policy

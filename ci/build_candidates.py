@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ci/build_candidates.py — one-time HF top-N candidate builder.
 
 Fetches HuggingFace top-N text-generation models, applies a hard filter

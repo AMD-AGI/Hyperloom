@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — CLOSE phase 5-step sequencer tests.
 
 KB_gaps/Gap-06 root cause: CLOSE phase had three uncoordinated exit

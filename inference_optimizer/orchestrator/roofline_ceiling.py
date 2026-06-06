@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Theoretical peak ``output_throughput`` ceiling (decode memory roofline).
 
 Hardware ceiling for the ``output_throughput`` (tok/s) field that

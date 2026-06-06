@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Mock Robustness backend — heartbeat-only, non-intervening.
 
 Used in P0 main-path tests. Real Robustness (§7.4 / §19) implements

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smoke tests for the ``breakdown.reporters`` compose pipeline.
 
 We feed each renderer a hand-built ``session_breakdown.json`` shape

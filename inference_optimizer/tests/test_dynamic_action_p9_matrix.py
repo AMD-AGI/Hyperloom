@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Meta-tests pinning the dynamic_action test-suite thresholds.
 
 Verifies the per-layer count gates (unit / integration / invariant),

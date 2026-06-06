@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Resume-time abandoned sweep for ``dynamic_action``.
 
 Coordinator startup hook that:

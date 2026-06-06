@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Map Critic confidence / verdict signals to KB ``importance`` floats.
 
 Critic is forbidden from writing the top tier (``>= 0.85``) — that range is

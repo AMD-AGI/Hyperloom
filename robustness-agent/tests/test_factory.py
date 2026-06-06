@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smoke tests for the M1 factory."""
 
 from __future__ import annotations

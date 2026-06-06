@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Cover the P1.b fix — Critic gate before FRAMEWORK_PR apply.
 
 The gate lives in Coordinator._critic_review_framework_pr_candidate

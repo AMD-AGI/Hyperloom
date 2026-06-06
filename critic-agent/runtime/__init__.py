@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Critic runtime adapter package.
 
 This package provides the deterministic Python layer that backs the

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """CI orchestrator: parse config → create Claw sessions → monitor → report."""
 
 from __future__ import annotations

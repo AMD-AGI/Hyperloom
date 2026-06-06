@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Configuration for the Robustness Agent.
 
 No custom environment variables — everything is auto-detected or uses

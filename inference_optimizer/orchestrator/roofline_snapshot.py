@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Structured roofline snapshot extraction for final report / dashboards.
 
 Parses TraceLens ``analysis.md`` Executive Summary tables and

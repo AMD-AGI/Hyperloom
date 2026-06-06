@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Schema (TypedDict shape) for ``session_breakdown.json``.
 
 This is the single contract between ``inference_optimizer`` (producer)

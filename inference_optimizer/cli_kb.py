@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Recipe-snapshot KB + KnowledgePlane bootstrap for the CLI.
 
 Resolves the local KB root, builds the RecipeKB local-write/remote-read

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end test: real robustness-agent runtime + Coordinator.
 
 Mirrors :mod:`test_p2_critic_agent_e2e` for the robustness role: actually

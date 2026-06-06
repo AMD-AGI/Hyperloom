@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Conformance tests for the local-kb-recipe-snapshot requirements doc.
 
 This module mirrors the checklist in §4 of

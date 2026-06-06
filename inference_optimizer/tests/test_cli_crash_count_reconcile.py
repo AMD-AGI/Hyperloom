@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``_reconcile_crash_count`` in ``cli.py``.
 
 The ReportExecutor and breakdown writer both reload state from

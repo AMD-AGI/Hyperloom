@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Static guard: only the explicit back-compat surfaces are allowed to
 mention ``extra_sglang_args``.
 

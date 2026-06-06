@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """LLM prompt builders for the narrative pass.
 
 The LLM is allowed to do exactly two things:

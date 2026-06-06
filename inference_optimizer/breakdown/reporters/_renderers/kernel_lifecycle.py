@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Kernel lifecycle renderer.
 
 Single table view: **every** detected kernel as one row with its full
