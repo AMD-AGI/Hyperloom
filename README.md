@@ -321,7 +321,7 @@ PrimusClaw tier:
 
 | Resource                          | Hosted default                                                                 |
 |-----------------------------------|---------------------------------------------------------------------------------|
-| Per-session GPU budget            | 1 ├ù MI300X / MI325X / MI355X for single-node runs; 2–8 GPUs via RayJob for multi-node |
+| Per-session GPU budget            | 1–8 × MI300X / MI325X / MI355X for single-node runs (matches TP); 16+ GPUs via RayJob for multi-node (nodes ≥ 2) |
 | Concurrent sessions per account   | 2                                                                               |
 | Session wall-clock                | 24 hours (extensible on request)                                                |
 | `USER_DATA_PATH` quota            | 200 GB per session, with daily snapshots                                        |
