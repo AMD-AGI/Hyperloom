@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Translate Symptoms into Coordinator Intents.
 
 The ladder has three tiers, matching:

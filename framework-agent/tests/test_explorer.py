@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.explorer pure logic, plan mode, and
 end-to-end ranking_mode / keep_winner_only / build_concurrency flows.
 

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for the ``--enable-conc-sweep`` default.
 
 Pins three things at once:

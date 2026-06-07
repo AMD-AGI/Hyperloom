@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ExploreExecutor — v0.8 M3.
 
 Merges the legacy ``backends`` / ``params`` / ``validate_stack`` actions
@@ -13,8 +15,9 @@ Per-variant flow:
    (rename-resistant; LLM/specialist/default_grid all collapse to the
    same row when content matches).
 2. Render the variant's Magpie YAML, run E2E bench.
-3. Immediate KEEP/REVERT decision (0.2% gain threshold + accuracy gate
-   when the variant trips ``_accuracy_gate.is_high_accuracy_risk``).
+3. Immediate KEEP/REVERT decision (``DEFAULT_KEEP_THRESHOLD_PCT`` gain
+   threshold, 1.0% + accuracy gate when the variant trips
+   ``_accuracy_gate.is_high_accuracy_risk``).
 4. KEEP triggers an inlined stack rebench: re-bench the cumulative
    stack including the just-KEEP'd variant. If the rebench tput is
    below the configurable threshold (default: baseline_tput * 1.005),
@@ -82,27 +85,19 @@ from ._workload_envs import (
 log = logging.getLogger(__name__)
 
 
-# Per-variant KEEP threshold ("0.2% 阈值 + accuracy
-# gate"). Looser than v0.6 backends (1.0%) and ``ParamsExecutor`` (0.5%)
-# because the inlined stack rebench acts as the second gate — even a
-# marginal +0.3% won't survive into ``optimization_stack`` unless the
-# cumulative stack still wins after this variant is layered onto it.
-DEFAULT_KEEP_THRESHOLD_PCT = 0.2
+# Per-variant KEEP threshold (gain-pct + accuracy gate). The inlined
+# stack rebench acts as a second gate — a marginal win won't survive
+# into ``optimization_stack`` unless the cumulative stack still wins
+# after this variant is layered onto it.
+DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 # Stack rebench stability threshold. After a KEEP, the stack-applied
 # rebench tput must beat ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)``;
-# otherwise the variant is evicted (KEEP_UNSTABLE → REVERT).
-#
-# Default lowered from 0.5% → 0.2% so the rebench gate matches
-# ``DEFAULT_KEEP_THRESHOLD_PCT`` (per-variant KEEP threshold). The 0.5%
-# default was originally KB_design §3.4 §4.4's "保守值"; in practice it
-# sat squarely inside the ±1% inter-run noise band observed on MI300X
-# (e.g. Qwen3-32B FP8: single-run +0.4% rebench dipping to −0.4% on the
-# 2nd run), which silently downgraded otherwise-real wins to
-# KEEP_UNSTABLE and pushed `cumulative_gain_validated` to 0%.
-# Matching the single-variant KEEP threshold keeps both decisions
-# consistent under the same noise floor.
-DEFAULT_STACK_STABLE_PCT = 0.2
+# otherwise the variant is evicted (KEEP_UNSTABLE → REVERT). Set below
+# the single-variant KEEP threshold so a genuine win that loses a little
+# headroom when layered onto the cumulative stack is not immediately
+# evicted.
+DEFAULT_STACK_STABLE_PCT = 0.5
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -135,8 +130,8 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
           "extra_args" | "extra_server_args": str,
           "extra_envs": dict[str,str],
           "note": str,
-          "provenance": str,            # default_grid / llm_direct / specialist:<domain>
-          "kb_evidence": list,          # passthrough (M5/M6 uses)
+          "provenance": str,            # llm_direct / default_grid / specialist:<tag> / dynamic
+          "kb_evidence": list,          # passthrough
           "pr_evidence": list,          # passthrough
           "source_evidence": list,      # passthrough
         }
@@ -144,13 +139,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     Unknown keys are ignored. ``provenance`` defaults to ``'default_grid'``
     when the LLM/specialist forgot to stamp it.
 
-    PR-A9 (Arbor-into-Hyperloom): the legacy ``'llm_direct'`` default
-    was retired. PolicyGate's ``explore_requires_specialist_provenance``
-    rule denies grids whose variants are all ``llm_direct``, so we
-    fall back to ``'default_grid'`` for unstamped variants — that
-    keeps the executor running on cold-start grids while still
-    letting the policy gate flag deliberately llm_direct-stamped
-    grids upstream.
+    Unstamped variants default to ``'default_grid'`` so generated seed
+    grids remain distinguishable from deliberate ``'llm_direct'``
+    Orchestration hypotheses. PolicyGate treats provenance as an audit
+    label; only specialist/dynamic per-round caps are enforced.
     """
     out: list[GridVariant] = []
     for raw in payload or []:
@@ -165,7 +157,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             extra_envs=envs,
             note=str(raw.get("note") or raw.get("provenance") or ""),
         )
-        # Stash the extra M3 metadata on the GridVariant instance so the
+        # Stash the extra metadata on the GridVariant instance so the
         # ledger writer below can pull provenance / evidence without
         # round-tripping through a parallel list. GridVariant is a plain
         # dataclass, so adding attrs is safe (they just aren't part of
@@ -439,8 +431,8 @@ class ExploreExecutor:
         self.keep_threshold_pct = float(keep_threshold_pct)
         self.stack_stable_threshold_pct = float(stack_stable_threshold_pct)
         # Stack-rebench can be disabled for unit tests / fast smoke runs.
-        # KB_design §3.4 §4.4 says the inlined rebench is the legacy
-        # default; flipping this off recovers behaviour.
+        # The inlined rebench is the default; flipping this off recovers
+        # the no-rebench behaviour.
         self.enable_stack_rebench = bool(enable_stack_rebench)
 
     async def __call__(self, ctx) -> dict[str, Any]:
@@ -513,8 +505,8 @@ class ExploreExecutor:
             "enable_stack_rebench", self.enable_stack_rebench,
         ))
 
-        # Fix E (per-variant overtime kill — Q1: anchored on baseline
-        # wall-clock; Q4: single-variant runs only, NOT stack_rebench).
+        # per-variant overtime kill — anchored on baseline wall-clock;
+        # single-variant runs only, NOT stack_rebench.
         # The Coordinator injects ``baseline_runtime_sec`` and
         # ``explore_overtime_kill_ratio`` into task.params from
         # SharedState. When either is missing / non-positive the
@@ -605,10 +597,9 @@ class ExploreExecutor:
             # seed grid exists for the active framework, fall through
             # to the seed instead of failing the task. Stamps each
             # variant with
-            # ``provenance='default_grid'`` so PolicyGate's
-            # ``explore_requires_specialist_provenance`` rule (which
-            # accepts ``specialist:*`` OR ``default_grid``) is
-            # satisfied. The seed honours
+            # ``provenance='default_grid'`` so cold-start seed variants
+            # are visibly distinct from Orchestration-authored
+            # ``llm_direct`` hypotheses. The seed honours
             # ``provenance='default_grid'`` already (see
             # ``_atom_default_grid``); no extra stamping needed.
             seed_model_class = (
@@ -764,7 +755,7 @@ class ExploreExecutor:
             len(grid), len(runnable), len(skipped_dup),
         )
 
-        # Opt-in roofline-categorized filter (PR-B).
+        # Opt-in roofline-categorized filter.
         # Coordinator-injected ``roofline_hard_gate=True`` together with a
         # non-empty ``roofline_saturation_snapshot`` activates the gate;
         # the executor drops variants whose flags target only directions
@@ -885,7 +876,7 @@ class ExploreExecutor:
                     continue
                 r = results[0]
 
-                # Fix E (Q3c): the per-variant overtime gate fired.
+                # The per-variant overtime gate fired.
                 # Record a dedicated ``KILLED_OVERTIME`` row carrying
                 # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline``
                 # (no tput, no gain — Q3 explicitly said "don't fake a
@@ -992,9 +983,9 @@ class ExploreExecutor:
                                 baseline_accuracy, float(accuracy_value),
                             )
                         else:
-                            # No eval result emitted; KB_design §3.4 §7
-                            # is silent on this exact case but we follow
-                            # the legacy BackendsExecutor convention of
+                            # No eval result emitted; design is silent on
+                            # this exact case but we follow the legacy
+                            # BackendsExecutor convention of
                             # "no accuracy data => skip the gate" so
                             # high-risk flags without an eval don't get
                             # auto-rejected on a benign measurement gap.
@@ -1236,13 +1227,12 @@ class ExploreExecutor:
                 continue
             rejected_dedup[fp] = entry
 
-        # KB_gaps/Gap-08 / flat
-        # per-variant outcomes for the Coordinator's per-variant T3
-        # hook. Built from ``tested_update`` (this round only) plus
-        # ``skipped_dup`` so KEEP / REVERT / FAILED / KEEP_UNSTABLE /
-        # SKIPPED_DEDUP are all exposed. The Coordinator iterates
-        # this list and calls ``cortex_kb.verify`` once per variant.
-        # Stays JSON-friendly so v0.6 readers stay happy.
+        # Flat per-variant outcomes for the Coordinator's per-variant
+        # fact-write hook. Built from ``tested_update`` (this round only)
+        # plus ``skipped_dup`` so KEEP / REVERT / FAILED / KEEP_UNSTABLE /
+        # SKIPPED_DEDUP are all exposed. The Coordinator iterates this
+        # list and calls ``cortex_kb.verify`` once per variant. Stays
+        # JSON-friendly for older readers.
         reasons_by_fp: dict[str, str] = {
             str(r.get("fingerprint") or ""): str(r.get("reason") or "")
             for r in rejected_update
@@ -1265,7 +1255,7 @@ class ExploreExecutor:
                 metrics["gain_pct"] = te.get("gain_pct")
             if te.get("stack_rebench_tput") is not None:
                 metrics["stack_rebench_tput"] = te.get("stack_rebench_tput")
-            # Fix E: surface wall-clock + kill ratio so the orchestration
+            # surface wall-clock + kill ratio so the orchestration
             # LLM (and downstream KB writers) see "ran too slow → early
             # kill" instead of an opaque FAILED row with no signal.
             if te.get("runtime_sec") is not None:
@@ -1343,7 +1333,7 @@ class ExploreExecutor:
         else:
             output_throughput = None
 
-        # Successful in the M3 sense = at least one bench actually
+        # Successful = at least one bench actually
         # produced a measurement (KEEP, REVERT-with-gain, KEEP_UNSTABLE)
         # OR was deliberately reaped by the Fix-E overtime gate
         # (KILLED_OVERTIME) — the latter is a real, useful signal the
@@ -1369,7 +1359,7 @@ class ExploreExecutor:
             "losers": losers,
             "keep_unstable_in_stack": keep_unstable,
             "skipped_dup": skipped_dup,
-            # flat per-variant outcomes for T3.
+            # flat per-variant outcomes.
             "per_variant_outcomes": per_variant_outcomes,
             "explore_search_update": search_update,
             "discovered_flags_update": None,

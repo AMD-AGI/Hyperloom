@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-node sglang / vllm server killer.
 
 Counterpart to ``launch_multinode.py``. Submitted via Ray Dashboard REST

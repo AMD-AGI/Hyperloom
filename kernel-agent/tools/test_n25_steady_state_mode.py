@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """N25 — TraceLens splitter steady-state chunk selection contract.
 
 Background — the May 2026 SOLAR-10.7B TP=1 BF16 case:

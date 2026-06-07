@@ -1,6 +1,8 @@
-"""SQLite schema for the unified Coordinator state DB ().
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Five tables consolidated into a single WAL database
+"""SQLite schema for the unified Coordinator state DB.
+
+Seven tables consolidated into a single WAL database
 ``$SESSION_DIR/storage/coordinator.db``:
 
 * ``leases``         — resource lock state.  v0.6 had PK ``lane``
@@ -15,6 +17,9 @@ Five tables consolidated into a single WAL database
 * ``events``         — A2A message bus source-of-truth, AUTOINCREMENT seq
 * ``cursors``        — per-agent ``last_processed_seq`` for idempotent replay
 * ``tasks``          — DelegatedTask lifecycle state machine
+* ``gpu_leases``     — specialist GPU pool leases. Separate from serving
+                       lanes so short GPU specialist experiments can be
+                       capacity-limited without blocking benchmark/profile.
 
 We deliberately *don't* declare FK constraints between ``tasks`` and
 ``leases`` / ``events`` because lifetimes don't match: a task can complete
@@ -26,18 +31,19 @@ from __future__ import annotations
 
 import sqlite3
 
-# bump from 1 → 2 to mark the leases PK widening +
+# bump from 2 → 3 to add the specialist GPU pool leases table.
+# v2 marked the leases PK widening +
 # lane_capacity table introduction. ``ensure_schema`` migrates v1 DBs
 # in place by recreating ``leases`` with the new PK; the migration is
 # defensive against active sessions because BEGIN IMMEDIATE serialises
 # the rebuild.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 # default lane capacities. ``research_lane`` defaults to 1
-# (M5 single-specialist) so a fresh DB without operator config still
-# runs the M5 behaviour; the CLI flag ``--research-lane-capacity``
-# upgrades this row at session boot. Serving lanes stay at 1 (Inv-7.1).
+# (single-specialist) so a fresh DB without operator config still runs;
+# the CLI flag ``--research-lane-capacity`` upgrades this row at session
+# boot. Serving lanes stay at 1.
 DEFAULT_LANE_CAPACITIES: dict[str, int] = {
     "server_lifecycle":   1,
     "workspace_mutation": 1,
@@ -49,7 +55,7 @@ DEFAULT_LANE_CAPACITIES: dict[str, int] = {
 
 _DDL = [
     # ------------------------------------------------------------------
-    # leases — Resource Lock Manager (DESIGN §3.5 + KB_design §3.7 §4.1)
+    # leases — Resource Lock Manager (DESIGN §3.5)
     # ------------------------------------------------------------------
     # PK is the composite ``(lane, holder_id)``. The capacity
     # cap per lane lives in ``lane_capacity``; ``acquire_many`` selects
@@ -70,7 +76,7 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_leases_lane ON leases(lane)",
     # ------------------------------------------------------------------
-    # lane_capacity — v0.8 M6
+    # lane_capacity — per-lane concurrency cap
     # ------------------------------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS lane_capacity (
@@ -132,6 +138,20 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_idem ON tasks(idempotency_key)",
     # ------------------------------------------------------------------
+    # gpu_leases — specialist GPU pool (separate from serving lanes)
+    # ------------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS gpu_leases (
+        gpu_id       INTEGER PRIMARY KEY,
+        holder_id    TEXT    NOT NULL,
+        task_id      TEXT    NOT NULL,
+        acquired_at  TEXT    NOT NULL,
+        expires_at   TEXT    NOT NULL,
+        heartbeat_at TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
+    # ------------------------------------------------------------------
     # schema_version — tracks future migrations
     # ------------------------------------------------------------------
     """
@@ -144,7 +164,7 @@ _DDL = [
 
 
 _MANAGED_TABLES = (
-    "leases", "lane_capacity", "events", "cursors",
+    "leases", "lane_capacity", "gpu_leases", "events", "cursors",
     "tasks", "schema_version",
 )
 

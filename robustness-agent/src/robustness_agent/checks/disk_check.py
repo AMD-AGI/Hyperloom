@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Disk usage check — detects low disk space and Triton cache bloat."""
 
 from __future__ import annotations

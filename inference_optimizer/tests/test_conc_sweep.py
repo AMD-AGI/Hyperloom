@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the post-optimization concurrency sweep runner.
 
 Pins the contract for ``orchestrator.conc_sweep.run_conc_sweep``:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Integration tests for the prepare/commit lifecycle.
 
 These tests use :class:`InMemoryKBClient` and a temp session-memory root,

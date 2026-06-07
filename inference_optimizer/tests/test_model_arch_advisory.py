@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Advisory ``model_arch`` profile: loader, serialization, renderer, and
 specialist warm-param injection.
 
