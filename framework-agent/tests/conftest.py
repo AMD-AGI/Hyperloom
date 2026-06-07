@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared pytest fixtures for framework_agent tests."""
 
 from __future__ import annotations

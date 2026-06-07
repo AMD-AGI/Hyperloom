@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Run TraceLens analysis-orchestrator skill through Claude SDK.
 
 This is the LLM-backed path for issue #124. It deliberately lives outside
@@ -22,7 +24,7 @@ DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 
 
-# Upstream-defined kernel category enum (TraceLens-internal v0.3,
+# Upstream-defined kernel category enum (TraceLens,
 # see TraceLens/Agent/Analysis/utils/orchestrator_prepare.py CATEGORY_SKILL_MAP).
 # Hyperloom's GEAK pipeline expects a small fixed set of category labels;
 # this map keeps the upstream → GEAK translation in one place so a future
@@ -134,6 +136,7 @@ def build_orchestrator_prompt(
     trace_path: Path,
     output_dir: Path,
     tracelens_root: Path,
+    tracelens_internal_root: Path | None,
     platform: str,
     framework: str,
     analysis_mode: str,
@@ -149,6 +152,16 @@ def build_orchestrator_prompt(
     else:
         exec_mode = "default"
 
+    internal_root_text = (
+        str(tracelens_internal_root) if tracelens_internal_root
+        else "(not installed; OSS-only mode)"
+    )
+    tl_extension_text = (
+        "TraceLens_internal" if tracelens_internal_root
+        else "(unset)"
+    )
+
+    comparison_scope = "standalone"
     capture_text = str(capture_folder) if capture_folder else "N/A"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
@@ -160,15 +173,19 @@ questions; proceed with the analysis.
 
 Execution context:
 - Environment: local
-- TraceLens project root: {tracelens_root}
+- TraceLens root: {tracelens_root}
+- TraceLens-internal root: {internal_root_text}
 - Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
 - Trace file path: {trace_path}
 - Output directory: {output_dir}
 - Platform: {platform}
 - Framework: {framework or "unknown"}
+- Comparison scope: {comparison_scope}
 - Analysis mode: {analysis_mode}
 - Inference execution mode: {exec_mode}
 - Capture folder path: {capture_text}
+- TL_EXTENSION: {tl_extension_text}
+
 
 Important requirements:
 1. Use the provided command prefix cache for all shell commands.
@@ -177,7 +194,7 @@ Important requirements:
    capture folder to the inference perf-report CLI exactly as the skill says.
 4. Write all TraceLens outputs under the output directory above.
 5. Ensure this file exists before you finish:
-   - {output_dir / "analysis.md"}  (TraceLens v0.3 final report; REQUIRED)
+   - {output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
 6. Do not run GEAK, OOB kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
@@ -214,6 +231,7 @@ async def run_tracelens_skill(
     trace_path: Path,
     output_dir: Path,
     tracelens_root: Path,
+    tracelens_internal_root: Path | None,
     platform: str,
     framework: str,
     analysis_mode: str,
@@ -233,6 +251,7 @@ async def run_tracelens_skill(
         trace_path=trace_path,
         output_dir=output_dir,
         tracelens_root=tracelens_root,
+        tracelens_internal_root=tracelens_internal_root,
         platform=platform,
         framework=framework,
         analysis_mode=analysis_mode,
@@ -291,12 +310,12 @@ async def run_tracelens_skill(
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
 
-    # TraceLens v0.3 ships the final report as ``analysis.md`` per
+    # TraceLens ships the final report as ``analysis.md`` per
     # ``TraceLens/Agent/Analysis/utils/templates/analysis_template.md``.
     # We deliberately do NOT accept the v0.2 ``standalone_analysis.md``
     # fallback any longer: in #203 that fallback was found to silently
     # paper over SDK-orchestrator failures by picking up a stale
-    # Hyperloom-fabricated bullet list from a prior run. The v0.3 layout
+    # Hyperloom-fabricated bullet list from a prior run. The layout
     # has been the contract since #148, so any miss here is a real
     # upstream failure that should surface to the operator.
     #
@@ -335,7 +354,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-# --- analysis.md parser (TraceLens v0.3 final-report contract) -------------
+# --- analysis.md parser (TraceLens final-report contract) ------------------
 #
 # The reviewer-preferred exit interface for the TraceLens analysis-orchestrator
 # is the final ``analysis.md`` report (see PR #155 review by @tsrikris). The
@@ -393,7 +412,7 @@ _EFFICIENCY_RE = re.compile(
     r"([\d.]+)\s*%\s*of\s*([\d.]+)\s*([A-Za-z/]+)",
     re.IGNORECASE,
 )
-# TraceLens v0.3 Detailed Analysis blocks include three sibling labels:
+# TraceLens Detailed Analysis blocks include three sibling labels:
 #   **Reasoning for Slowdown:** <prose>
 #   **Resolution:**             <prose>
 #   **Impact estimate:**        Low end ...: <ms> ms savings (<pct>% E2E)
@@ -678,7 +697,7 @@ _IDLE_PCT_TABLE_RE = re.compile(
 def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
     """Extract ``Idle %`` from the Executive Summary table in ``analysis.md``.
 
-    The TraceLens v0.3 ``analysis_template.md`` always emits an Executive
+    The TraceLens ``analysis_template.md`` always emits an Executive
     Summary table whose rows are ``| Metric | Value |``; the row of
     interest looks exactly like ``| Idle % | 0.25% |``. Per
     ``Report_Interfacing.docx`` §1 (Executive Summary schema) and §2
@@ -745,7 +764,7 @@ def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
 
 
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
-    """Parse the TraceLens v0.3 ``analysis.md`` final report into hot-kernels.
+    """Parse the TraceLens ``analysis.md`` final report into hot-kernels.
 
     This is the only place in Hyperloom that reads TraceLens candidate
     data. The returned list follows the priority order required by
@@ -1166,7 +1185,7 @@ def _resolve_source_target(
     # ``_row_to_candidate``) so AST resolution still works after
     # ``_finalize_candidates`` overwrites ``source_file`` with the
     # grep-located absolute path. Fall back to ``source_file`` /
-    # ``kernel_path`` for candidates from non-v0.3 sources (raw trace
+    # ``kernel_path`` for candidates from non-TraceLens sources (raw trace
     # parser, priority_data.json fallback, csv) that never had a
     # launcher-formatted Kernel Path field.
     kernel_path = str(

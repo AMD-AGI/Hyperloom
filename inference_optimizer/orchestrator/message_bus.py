@@ -1,4 +1,6 @@
-"""MessageBus ().
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""MessageBus.
 
 The ``events`` table is the source of truth. ``seq`` is the AUTOINCREMENT
 primary key, so we never have to coordinate sequence allocation in
@@ -40,7 +42,7 @@ TOPIC_ALLOWLIST = frozenset({
     # Coordinator mirrors request/response payloads onto these topics so the
     # target agent's inbox picks them up (kernel agent contract).
     "request", "response",
-    # v0.6 Critic Review Protocol — verdict broadcast topic.
+    # Critic Review Protocol — verdict broadcast topic.
     "review_verdict", "advice", "strategy_change",
     # Robustness handle / scheduling-police mirror topics for audit trail.
     "kill",

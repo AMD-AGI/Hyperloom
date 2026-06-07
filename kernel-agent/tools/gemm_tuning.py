@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Run GEAK's FP8 GEMM tuning workflow as a Hyperloom kernel-agent tool.
 
 This wrapper intentionally passes the long task via a file / in-memory Python

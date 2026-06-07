@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the opt-in roofline-categorized variant filter."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """IR-6 — EXPLORE HARD force-exit gate tests.
 
 Covers ``phase_state.should_force_exit_explore`` and its integration via
@@ -51,9 +53,8 @@ def _make_explore_state(
     if phase_budget_pct is None:
         phase_budget_pct = dict(phase_state.DEFAULT_PHASE_BUDGET_PCT)
     state.phase_budget_pct = phase_budget_pct
-    # Seed v0.8 plateau signals so any later plateau judgment paths
-    # don't fire from m2_proxy noise; we focus the test on the force-exit
-    # gate.
+    # Seed plateau signals so any later plateau judgment paths don't
+    # interfere; we focus the test on the force-exit gate.
     state.explore_search = {
         "schema_version": 1,
         "tested": {},

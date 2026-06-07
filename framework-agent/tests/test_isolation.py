@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.isolation (disk preflight + cleanup)."""
 
 from __future__ import annotations

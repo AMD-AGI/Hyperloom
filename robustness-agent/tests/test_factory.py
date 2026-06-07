@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smoke tests for the M1 factory."""
 
 from __future__ import annotations
@@ -144,5 +146,71 @@ async def test_factory_propagates_severity_min_config(tmp_path: Path):
         assert engine.throttle is not None
         assert engine.throttle.config.severity_min is SymptomSeverity.MEDIUM
         await engine.aclose()
+    finally:
+        await bundle.aclose()
+
+
+# ---------------------------------------------------------------------------
+# M2 multi-node policy: disable_local_probe + cluster fan-out wiring
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_factory_uses_quiet_fallback_when_local_probe_disabled(tmp_path: Path):
+    """``disable_local_probe`` swaps the LocalProbe for the quiet stub.
+
+    The quiet stub never yields high-severity local symptoms — exactly
+    the policy we want when the agent runs on a Ray worker that does
+    not host the inference server.
+    """
+    from robustness_agent.factory import _QuietFallback
+    from robustness_agent.sources.local_probe import LocalProbeSource
+
+    config = Config(session_dir=tmp_path, disable_local_probe=True)
+    bundle = build_reactor_components(config)
+    try:
+        router = bundle.components.router
+        fallback = router._fallback  # type: ignore[attr-defined]
+        assert isinstance(fallback, _QuietFallback)
+        assert not isinstance(fallback, LocalProbeSource)
+        data = await fallback.fetch(None)
+        assert data.local_processes == []
+        assert data.local_server_health == []
+        assert data.degraded_reason and "local-probe disabled" in data.degraded_reason
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_default_keeps_local_probe_fallback(tmp_path: Path):
+    from robustness_agent.sources.local_probe import LocalProbeSource
+
+    config = Config(session_dir=tmp_path)
+    bundle = build_reactor_components(config)
+    try:
+        router = bundle.components.router
+        fallback = router._fallback  # type: ignore[attr-defined]
+        assert isinstance(fallback, LocalProbeSource)
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_forwards_multi_node_options_to_server_source(tmp_path: Path):
+    """``enable_cluster_pod_metrics`` / ``workload_uid`` reach the server source."""
+
+    config = Config(
+        session_dir=tmp_path,
+        robustness_server_url="http://example.invalid:8000",
+        enable_cluster_pod_metrics=True,
+        pod_metrics_categories=("gpu", "memory"),
+        workload_uid="wl-42",
+    )
+    bundle = build_reactor_components(config)
+    try:
+        router = bundle.components.router
+        primary = router._primary  # type: ignore[attr-defined]
+        assert primary._enable_cluster_pod_metrics is True  # type: ignore[attr-defined]
+        assert primary._pod_metrics_categories == ("gpu", "memory")  # type: ignore[attr-defined]
+        assert primary._workload_uid == "wl-42"  # type: ignore[attr-defined]
     finally:
         await bundle.aclose()

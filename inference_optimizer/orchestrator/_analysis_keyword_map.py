@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 N22: analysis.md keyword → variant requirement mapping.
 
 Bridges the gap left by N20-A (which only renders the catalogue and

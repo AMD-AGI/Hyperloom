@@ -1,4 +1,6 @@
-"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude ().
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude.
 
 P1-5 implementation:
 
@@ -17,8 +19,6 @@ Out of scope for P1-5:
 * JSON-in-text fallback (silently degrades to NoIntentEmitted error)
 * Repair-prompt retry on parse failure (let the Coordinator surface the
   policy_denied / observation event so the agent self-corrects)
-* Codex backend — ships in a follow-up commit; the Critic role still
-  uses MockCriticBackend until then
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ..intent_parser import (
+from ...protocol.intent import (
     Intent,
     IntentValidationError,
     NoIntentEmitted,
@@ -103,7 +103,7 @@ def _import_sdk() -> tuple[Any, Any, Any]:
 
 @dataclass
 class ClaudeBackend:
-    """Production Claude backend (). Implements :class:`Backend`.
+    """Production Claude backend. Implements :class:`Backend`.
 
     Args:
         model: Claude model id (e.g. ``"claude-opus-4-7"``); defaults to
@@ -223,10 +223,9 @@ class ClaudeBackend:
             max_turns=max_turns_use,
             system_prompt=system_prompt,
         )
-        # Combine N6 (cache metric extraction via 4-tuple from
-        # _invoke_and_collect) with main's timeout guard (#243 area):
-        # wrap the SDK call in asyncio.wait_for so an upstream proxy
-        # stall doesn't park the reactor indefinitely.
+        # Cache-metric extraction (4-tuple from _invoke_and_collect)
+        # plus a timeout guard: wrap the SDK call in asyncio.wait_for so
+        # an upstream proxy stall doesn't park the reactor indefinitely.
         try:
             intents, raw_text, tool_block_count, usage = await asyncio.wait_for(
                 self._invoke_and_collect(full_prompt, options),
@@ -243,9 +242,9 @@ class ClaudeBackend:
                 f"Claude backend timed out after {self.call_timeout_s:.0f}s "
                 "(likely upstream proxy stall)"
             ) from exc
-        # N6: stash the per-tick cache metric on backend.calls so the
-        # audit scripts (N7) can compute session-level cache_hit_rate
-        # without needing a separate Coordinator wiring path.
+        # Stash the per-tick cache metric on backend.calls so the audit
+        # scripts can compute session-level cache_hit_rate without
+        # needing a separate Coordinator wiring path.
         cache_creation = self._safe_int(
             usage.get("cache_creation_input_tokens") if usage else None
         )
@@ -269,9 +268,9 @@ class ClaudeBackend:
                 f"claude reply contained no parseable emit_intent tool_use "
                 f"blocks (raw_text_len={len(raw_text)}, tool_blocks={tool_block_count})"
             )
-        # N6: expose cache metrics on metadata too so a Coordinator-side
-        # post-tick hook (future / N7+) can read them off the
-        # BackendTurnResult without scanning backend.calls.
+        # Expose cache metrics on metadata too so a Coordinator-side
+        # post-tick hook can read them off the BackendTurnResult without
+        # scanning backend.calls.
         return BackendTurnResult(
             intents=intents, raw_text=raw_text,
             metadata={
@@ -386,7 +385,7 @@ class ClaudeBackend:
                 result_text = getattr(message, "result", None)
                 if isinstance(result_text, str) and result_text:
                     result_chunks.append(result_text)
-                # N6: ResultMessage carries .usage on terminal messages
+                # ResultMessage carries .usage on terminal messages
                 # (Anthropic Messages API response schema). The SDK
                 # propagates this dict verbatim. We overwrite (not
                 # accumulate) because the last message of a multi-turn

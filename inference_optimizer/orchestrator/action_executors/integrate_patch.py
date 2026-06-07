@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """IntegratePatchExecutor — PR-A4 (Arbor-into-Hyperloom).
 
 The serving-lane-locked patch integration step that consumes a
@@ -432,7 +434,7 @@ class IntegratePatchExecutor:
         # ``extra_envs`` knob; we mirror that.
         config_changes_applied = dict(config_changes)
 
-        # PR-A7 (Arbor-into-Hyperloom): defensive double-check on the
+        # Defensive double-check on the
         # critic verdict. PolicyGate's
         # ``integrate_patch_requires_critic_verdict`` already gates the
         # delegate; this is belt-and-braces in case the executor is
