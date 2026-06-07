@@ -1387,14 +1387,11 @@ class TestPerfModelBreakdown:
         assert _resolve_achievable_tflops("mi300x", "fp8") == 1273.0
 
     def test_perfmodel_breakdown_when_traceLens_available(self):
-        """When TraceLens is importable the result is a valid PerfModelBreakdown."""
+        """When model metadata is complete the result is a valid PerfModelBreakdown."""
         from inference_optimizer.orchestrator.roofline_ceiling import (
             compute_roofline_from_perfmodel,
-            _try_import_traceLens_perfmodel,
             PerfModelBreakdown,
         )
-        if _try_import_traceLens_perfmodel() is None:
-            pytest.skip("TraceLens not importable in this environment")
 
         meta = self._make_meta()
         result = compute_roofline_from_perfmodel(

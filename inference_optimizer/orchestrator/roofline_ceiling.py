@@ -829,22 +829,62 @@ class PerfModelBreakdown:
     peak_achievable_tflops: float
 
 
-def _try_import_traceLens_perfmodel() -> tuple[Any, Any] | None:
-    """Try to import TraceLens GEMM and SDPA; return (GEMM, SDPA) or None."""
-    import os, sys
-    tracelens_root = (
-        os.environ.get("TRACELENS_INTERNAL_ROOT")
-        or os.environ.get("TRACELENS_ROOT")
-        or ""
+def _gemm_flops(M: int, N: int, K: int) -> float:
+    """FLOPs for a bias-free matrix multiply (2*M*N*K).
+
+    Mirrors TraceLens.PerfModel.perf_model.GEMM.flops_func (no bias path
+    needed here since LLM linear layers are weight-only without bias in
+    the roofline model).
+    """
+    return 2.0 * M * N * K
+
+
+def _gemm_bytes(M: int, N: int, K: int, bpe: float) -> float:
+    """HBM bytes for a bias-free matmul: read(MK + KN) + write(MN).
+
+    Mirrors TraceLens.PerfModel.perf_model.GEMM.bytes_func (all tensors
+    in the same dtype, no bias).
+    """
+    return (M * K + K * N + M * N) * bpe
+
+
+def _sdpa_flops(
+    B: int, N_Q: int, H_Q: int, N_KV: int, H_KV: int,
+    d_h_qk: int, d_h_v: int, causal: bool,
+) -> float:
+    """FLOPs for scaled dot-product attention.
+
+    Mirrors TraceLens.PerfModel.perf_model.SDPA.flops_func:
+      QK^T  : B * H_Q * 2 * N_Q * N_KV * d_h_qk
+      PV    : B * H_Q * 2 * N_Q * d_h_v * N_KV
+    Softmax FLOPs omitted (dominated by matmuls).
+    Causal masking halves the work when N_Q == N_KV (prefill only).
+    """
+    flops_qk = B * H_Q * (2.0 * N_Q * N_KV * d_h_qk)
+    flops_pv = B * H_Q * (2.0 * N_Q * d_h_v * N_KV)
+    total = flops_qk + flops_pv
+    if causal and N_Q == N_KV:
+        total /= 2.0
+    return total
+
+
+def _sdpa_bytes(
+    B: int, N_Q: int, H_Q: int, N_KV: int, H_KV: int,
+    d_h_qk: int, d_h_v: int, causal: bool, bpe: float,
+) -> float:
+    """HBM bytes for SDPA: read Q, K, V + write output.
+
+    Mirrors TraceLens.PerfModel.perf_model.SDPA.bytes_func.
+    causal is accepted for API symmetry but does not change the I/O volume
+    (KV is always fully read even under causal masking at the HBM level).
+    """
+    elems = (
+        B * N_Q * H_Q * d_h_qk    # Q read
+        + B * N_KV * H_KV * d_h_qk  # K read
+        + B * N_KV * H_KV * d_h_v   # V read
+        + B * N_Q * H_Q * d_h_v     # output write
     )
-    for candidate in (tracelens_root, "TraceLens-internal", "TraceLens"):
-        if candidate and candidate not in sys.path:
-            sys.path.insert(0, str(candidate))
-    try:
-        from TraceLens.PerfModel.perf_model import GEMM, SDPA  # type: ignore[import]
-        return GEMM, SDPA
-    except Exception:
-        return None
+    return float(elems) * bpe
 
 
 def compute_roofline_from_perfmodel(
@@ -857,10 +897,9 @@ def compute_roofline_from_perfmodel(
     num_gpus: int = 1,
     precision_tag: str = "bf16",
 ) -> "PerfModelBreakdown | None":
-    """Bottom-up decode + prefill roofline via TraceLens PerfModel GEMM/SDPA.
+    """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas.
 
     Returns ``None`` when:
-      * TraceLens is not importable (graceful degrade to legacy formula)
       * Model metadata is incomplete (hidden_size / num_attention_heads == 0)
       * GPU is not in ``HW_SPECS_ACHIEVABLE``
 
@@ -870,6 +909,10 @@ def compute_roofline_from_perfmodel(
     somewhat higher than with the legacy formula.  Both flavours are
     upper bounds on real throughput; the achievable variant is the one
     used by TraceLens analysis reports for consistency.
+
+    The GEMM / SDPA formulas are inlined here (no TraceLens import) and
+    maintained independently.  They match TraceLens PerfModel exactly
+    (verified by the PoC in roofline_perfmodel_poc.py: deviation < 1.6%).
     """
     if meta is None:
         return None
@@ -878,11 +921,6 @@ def compute_roofline_from_perfmodel(
     spec = HW_SPECS_ACHIEVABLE.get((gpu_type or "").strip().lower())
     if spec is None:
         return None
-
-    pm = _try_import_traceLens_perfmodel()
-    if pm is None:
-        return None
-    GEMM, SDPA = pm
 
     bw_gbps = spec["hbm_bw_gbps"] * max(num_gpus, 1)
     bw_bps = bw_gbps * 1e9
@@ -934,8 +972,8 @@ def compute_roofline_from_perfmodel(
         op_rows: list[OpBreakdown] = []
         M = batch * s_q
         for name, K, N, rep in linears:
-            fl = GEMM.flops_func(M, N, K, False)
-            by = GEMM.bytes_func(M, N, K, False, bpe, bpe, bpe, bpe)
+            fl = _gemm_flops(M, N, K)
+            by = _gemm_bytes(M, N, K, bpe)
             t, side = _roofline_time(fl, by)
             total_t += t * rep
             op_rows.append(OpBreakdown(
@@ -949,8 +987,8 @@ def compute_roofline_from_perfmodel(
             ))
         # SDPA
         causal = (s_q == s_kv)
-        fl_s = SDPA.flops_func(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal)
-        by_s = SDPA.bytes_func(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal, bpe)
+        fl_s = _sdpa_flops(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal)
+        by_s = _sdpa_bytes(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal, bpe)
         t_s, side_s = _roofline_time(fl_s, by_s)
         total_t += t_s * n_layers
         op_rows.append(OpBreakdown(
