@@ -62,7 +62,7 @@ no `bootstrap` / `verify` step):
 
 ```bash
 python3 -m inference_optimizer.multi_node create-dynamo --image <img-with-sshd> --nodes <N> \
-  [--pd-mode disaggregated --pd-prefill-nodes N --pd-decode-nodes M] [--kv-transfer-backend nixl]
+  [--pd-mode disaggregated --pd-prefill-nodes N --pd-decode-nodes M] [--kv-transfer-backend mooncake]
 python3 -m inference_optimizer.multi_node restart-server --framework sglang --model <path> --tp <N> [--ep <N>] [--extra-args "..."]
 python3 -m inference_optimizer.multi_node kill-inference
 python3 -m inference_optimizer.multi_node stop-rayjob [--clear-state]
@@ -72,6 +72,10 @@ Native params via `restart-server --extra-args` (standard sglang knobs:
 `--ep-size`, `--enable-dp-attention`, `--attention-backend aiter`,
 `--mem-fraction-static`) and `dynamo.frontend --router-mode {round-robin,kv}`.
 `--kv-transfer-backend {nixl,mori,mooncake}` selects the PD KV plane.
+Prefer `mooncake` for sglang on this RoCE/bnxt fabric: `nixl` completes
+requests with HTTP 200 but produces 0 output tokens (prefill OK, decode emits
+nothing — KV handoff via UCX/nixl fails to register/transfer). `mooncake`
+auto-detects the RDMA device and is the sglang framework default.
 
 Kernel-agent on the Dynamo backend (no Ray): GEAK and OOB (claude/codex/cursor)
 run on a GPU pod over SSH (`KERNEL_AGENT_GPU_PLACEMENT=ssh`, injected only when
@@ -125,7 +129,7 @@ Typical prompt fields and where they land:
 | `PD_PREFILL_TP` / `PD_DECODE_TP` | `optimize --pd-prefill-tp N --pd-decode-tp M` (or export; default = `--tp`). A PD role spans nodes (LWS) only when its TP > GPUs-per-pod. |
 | `PD_PREFILL_EP` / `PD_DECODE_EP` | **Dynamo PD only.** export `$PD_PREFILL_EP` / `$PD_DECODE_EP` (read by `restart-server` as defaults). Per-role expert-parallel size; `0` (default) ⇒ fall back to the shared `--ep`. Lets prefill run EP1 while decode runs EP8 (InferenceX disagg recipe). Ignored by RayJob/aggregated/single-node. |
 | `PD_PREFILL_EXTRA_ARGS` / `PD_DECODE_EXTRA_ARGS` | **Dynamo PD only.** export these; appended to the **per-role** sglang launch AFTER the shared `--extra-args` base (role-specific wins on duplicate keys). Used to give prefill vs decode different server flags (e.g. decode `--enable-dp-attention --moe-a2a-backend deepep --deepep-mode normal --moe-dense-tp-size 1 --enable-dp-lm-head`; prefill `--mem-fraction-static 0.8 --disable-radix-cache`). Empty (default) ⇒ both roles use only the shared `--extra-args`. **Sandbox-only** (do NOT `--rayjob-extra-env`). |
-| `PD_TRANSFER_BACKEND` | `optimize --pd-transfer-backend nixl` (or export `$PD_TRANSFER_BACKEND`); `nixl|mori|mooncake`. |
+| `PD_TRANSFER_BACKEND` | `optimize --pd-transfer-backend mooncake` (or export `$PD_TRANSFER_BACKEND`); `nixl|mori|mooncake`. **Use `mooncake` for sglang** — `nixl` returns 200 OK but 0 output tokens on this RoCE/bnxt fabric (decode KV handoff fails). |
 | `ISL` / `OSL` / `CONC` / `PRECISION` | `export` + `optimize --isl` / `--osl` / `--conc` / `--precision` |
 | `KERNEL_OPT_*` / `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX` | `export` before `install.sh` / `optimize` |
 | prompt `env:` block lines (e.g. `PATH_TO_AINIC_TAR_PACKAGE=…`, `PATH_TO_BNXT_TAR_PACKAGE=…`, `NCCL_DEBUG=INFO`) | `create-rayjob --extra-env K=V` (one per line, repeatable); `optimize --rayjob-extra-env K=V` (same shape). Skip `*_API_KEY` / `*_BASE_URL` (credential fanout auto-injects) and `RAY_JOB_ENTRYPOINT` (reserved). CLI owns no defaults — values come verbatim from the prompt. **Do NOT forward sandbox-side tool source fields** (`OOB_SRC` / `INFERENCEX_PATH` / `TRACELENS_ROOT`) here — they are sandbox-only; see `inference_optimizer/SKILL.md` "Tool source fields". |
