@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Normalize Hyperloom optimization artifacts into a stable data shape.
 
 This module is intentionally entrypoint-agnostic: GitHub CI, the Hyperloom web
@@ -576,4 +578,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

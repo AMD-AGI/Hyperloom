@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 from .base import MetricsProvider
 from .local import LocalProvider
 from .robust import RobustProvider

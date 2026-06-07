@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.6 / M4 — KnowledgePlane **integration** tests.
 
 KB_gaps/Gap-02 root cause: ``cli._bootstrap_knowledge_plane`` was

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end ``dynamic_action`` lifecycle acceptance tests.
 Auxiliary tests pin the pipeline helpers + Coordinator hooks the
 acceptance flow leans on.

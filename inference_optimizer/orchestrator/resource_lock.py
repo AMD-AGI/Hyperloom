@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ResourceLockManager + SqliteLeaseBackend ( + KB_design §3.7).
 
 All ``acquire_many`` writes happen inside a single ``BEGIN IMMEDIATE``
@@ -54,13 +56,11 @@ KNOWN_LANES = (
     "workspace_mutation",
     "benchmark_lane",
     "profile_lane",
-    # research_lane carries LLM specialist
-    # sub-agents. M5 keeps capacity=1 (single specialist at a time)
-    # so the legacy leases-table PK-on-lane semantics still hold; M6
-    # widens capacity to 6 with a (lane, holder_id) schema upgrade.
-    # research_lane has NO LANE_CONFLICTS with the four serving lanes
-    # (Inv-7.2): a specialist reading source / KB / PR can coexist
-    # with a benchmark / profile / server restart on the same tick.
+    # research_lane carries LLM specialist sub-agents. It has NO
+    # LANE_CONFLICTS with the four serving lanes: a specialist reading
+    # source / KB / PR can coexist with a benchmark / profile / server
+    # restart on the same tick. Capacity may exceed 1 via a
+    # (lane, holder_id) schema.
     "research_lane",
 )
 
@@ -70,9 +70,8 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
     "profile_lane":   frozenset({"benchmark_lane", "server_lifecycle"}),
     "server_lifecycle": frozenset({"benchmark_lane", "profile_lane"}),
     "workspace_mutation": frozenset(),
-    # Inv-7.2 research_lane does not conflict with any
-    # serving-side lane. (Capacity caps come from a separate table in
-    # M6; M5 still uses single-holder PK.)
+    # research_lane does not conflict with any serving-side lane.
+    # (Capacity caps come from a separate table.)
     "research_lane": frozenset(),
 }
 
@@ -251,7 +250,7 @@ class SqliteLeaseBackend:
                     ),
                 )
 
-            # Inv-7.2 — distinguish capacity (LaneFull) from
+            # distinguish capacity (LaneFull) from
             # cross-lane mutex (LaneBusy). For capacity == 1 lanes
             # (serving side) the two converge in behaviour; we still
             # surface the right exception class so dispatchers can

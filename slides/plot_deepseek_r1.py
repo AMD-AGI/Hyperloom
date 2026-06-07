@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

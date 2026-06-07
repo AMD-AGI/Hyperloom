@@ -82,7 +82,7 @@ params_schema:
   keep_threshold_pct:
     type: number
     description: |
-      Optional. KEEP threshold in percent (default 0.2). The gated
+      Optional. KEEP threshold in percent (default 1.0). The gated
       throughput must improve at least this much over baseline_tput to be
       kept; otherwise REVERT.
   accuracy_baseline:

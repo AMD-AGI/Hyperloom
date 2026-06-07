@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for signal rules + classifier."""
 
 from __future__ import annotations

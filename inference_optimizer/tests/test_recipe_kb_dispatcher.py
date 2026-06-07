@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :class:`RecipeKB` — the local-write / remote-read dispatcher.
 
 Covers the contract documented at the top of ``recipe_kb/dispatcher.py``:
