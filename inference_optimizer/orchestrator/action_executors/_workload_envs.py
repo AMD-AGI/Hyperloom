@@ -48,7 +48,11 @@ from typing import Any
 import yaml
 
 from ...paths import asset_root
-from ._grid_runner import inject_sglang_watchdog_timeout, server_args_env_name
+from ._grid_runner import (
+    inject_sglang_context_length,
+    inject_sglang_watchdog_timeout,
+    server_args_env_name,
+)
 from ._server_patcher import (
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
@@ -512,20 +516,33 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
-    # MI300X cold-compile guard: ensure sglang's scheduler watchdog is long
-    # enough to survive the first-request aiter ``mha_batch_prefill`` JIT
-    # compile. sglang's 300s default fires SIGQUIT mid-warmup on a cold aiter
-    # cache and the server dies -> baseline_failed / throughput 0. We resolve
-    # the FINAL framework env (after the server_args + extra_envs merges
-    # above) so a user-pinned ``--watchdog-timeout`` (via extra_server_args,
-    # extra_envs, or the YAML) is honored and never doubled. No-op for
-    # vllm/atom, and never touches ``--context-length`` / MAX_MODEL_LEN. This
-    # is the single choke point every benchmark path (baseline / profile /
-    # sweep / explore / framework_pr / conc_sweep) funnels through before the
-    # YAML is handed to Magpie, so the flag reaches every sglang launch.
+    # sglang server-arg guards, applied at the FINAL framework env (after the
+    # server_args + extra_envs merges above) so any operator-pinned flag (via
+    # extra_server_args, extra_envs, or the YAML) is honored and never doubled.
+    # Both are no-ops for vllm/atom. This is the single choke point every
+    # benchmark path (baseline / profile / sweep / explore / framework_pr /
+    # conc_sweep) funnels through before the YAML is handed to Magpie, so the
+    # flags reach every sglang launch.
+    #
+    # 1. --context-length cap: sglang defaults context_length=None and sizes
+    #    max_total_tokens off the model's max_position_embeddings; a huge
+    #    native window (e.g. Mistral-Nemo's 1024000) balloons the aiter
+    #    workspace_buffer past GPU memory -> HIP OOM -> baseline_failed. We cap
+    #    to ISL+OSL+headroom (floored, clamped to the native window). vllm
+    #    already passes --max-model-len $MAX_MODEL_LEN, so this only fixes the
+    #    sglang asymmetry; sglang ignores MAX_MODEL_LEN entirely.
+    # 2. MI300X cold-compile guard: ensure sglang's scheduler watchdog is long
+    #    enough to survive the first-request aiter ``mha_batch_prefill`` JIT
+    #    compile. sglang's 300s default fires SIGQUIT mid-warmup on a cold
+    #    aiter cache and the server dies -> baseline_failed / throughput 0.
     framework_env = server_args_env_name(bench.get("framework"))
+    resolved_server_args = str(envs.get(framework_env, "")).strip()
+    resolved_server_args = inject_sglang_context_length(
+        resolved_server_args, bench.get("framework"),
+        bench.get("model"), isl_val, osl_val,
+    )
     resolved_server_args = inject_sglang_watchdog_timeout(
-        str(envs.get(framework_env, "")).strip(), bench.get("framework"),
+        resolved_server_args, bench.get("framework"),
     )
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
