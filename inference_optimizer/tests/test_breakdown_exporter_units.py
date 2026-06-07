@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Targeted unit tests for ``inference_optimizer.breakdown.exporter`` helpers.
 
 The end-to-end ``build`` flow has integration coverage via

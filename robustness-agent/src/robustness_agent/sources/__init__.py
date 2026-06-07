@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Data sources used by the reactor.
 
 Layered as ``robustness-server`` (preferred) -> ``local probe`` (fallback)

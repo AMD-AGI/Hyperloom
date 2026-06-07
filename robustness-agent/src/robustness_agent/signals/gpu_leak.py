@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """GPU memory leak detector.
 
 Fires when **every** visible GPU reports near-100% memory utilization (or

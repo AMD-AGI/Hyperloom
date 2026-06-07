@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """sglang ``--watchdog-timeout`` injection tests.
 
 On MI300X with the aiter attention backend the FIRST inference request

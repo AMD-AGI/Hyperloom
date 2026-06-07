@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the Critic cross-domain review primitives.
 Auxiliary tests pin the closed envelope schema, classifier idempotency,
 and the CriticAgentBackend enrichment helper.

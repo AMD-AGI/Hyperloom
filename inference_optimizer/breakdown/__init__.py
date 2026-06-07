@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Session breakdown exporter.
 
 Produces ``session_breakdown.json`` — a single self-contained snapshot of

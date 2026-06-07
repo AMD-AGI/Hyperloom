@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 name: Inference Optimization PR-CI
 
 # Dedicated PR-CI workflow for the inference-optimization pipeline.

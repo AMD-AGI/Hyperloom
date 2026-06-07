@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Cover the --no-explore CLI flag + resume write-back semantics.
 
 Mirrors test_cli_no_framework_resume.py. --no-explore is CLI-only (no

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the FRAMEWORK_PR phase-discover subcommand.
 
 Hermetic - stubs ``sources.enumerate_candidates`` so no network/git is

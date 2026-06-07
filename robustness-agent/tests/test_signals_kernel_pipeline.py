@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """F1-F5 kernel-pipeline health signal tests."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Session-end finalize layer (L1 + L2).
 
 When the inference_optimizer Coordinator sets ``state.json::stop_reason``

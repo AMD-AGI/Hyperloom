@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SQLite schema for the unified Coordinator state DB.
 
 Seven tables consolidated into a single WAL database

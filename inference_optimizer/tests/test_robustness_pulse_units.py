@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``action_executors._robustness_pulse``.
 
 The pulse is a best-effort subprocess shim; the autouse fixture sets

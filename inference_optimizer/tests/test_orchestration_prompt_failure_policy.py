@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """FAILURE RECOVERY block contract tests for the orchestration prompt.
 
 The block must:

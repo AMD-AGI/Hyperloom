@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared action-surface constants.
 
 Keep ownership, transport, and prompt-visibility classifications here so

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Exploration-depth gate: tracker bookkeeping, pure gate, verdict rewrite.
 
 Covers:

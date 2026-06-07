@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared workload-env materialization (single source of truth).
 
 The optimizer used to have TWO YAML-rendering paths:

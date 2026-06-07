@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for process, GPU, server health, and log-tailer monitors.
 
 The process / GPU monitors are exercised via the shared FakeProvider

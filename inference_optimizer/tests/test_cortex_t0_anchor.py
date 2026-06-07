@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``run_t0_anchor`` after the RecipeKB cutover.
 
 The anchor is now a thin read-modify-write against the local

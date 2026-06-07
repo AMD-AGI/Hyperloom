@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ResourceLockManager + SqliteLeaseBackend ( + KB_design §3.7).
 
 All ``acquire_many`` writes happen inside a single ``BEGIN IMMEDIATE``
