@@ -11,11 +11,13 @@
 #   1. inference_optimizer + extras (pulls in claude_agent_sdk via
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) into $HYPERLOOM_RUNTIME_DIR/Magpie
-#      (= $USER_DATA_PATH/runtime/Magpie by default)
+#      (= $USER_DATA_PATH/runtime/Magpie by default), pinned to MAGPIE_REF
+#      (a commit SHA, mirrors the GEAK_REF pin in kernel-agent)
 #   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
-#       (bugs.md §C #1 root-cause fix; fail-loud)
-#   3. InferenceX checkout: clone latest from upstream (no SHA pin yet),
-#      sets INFERENCEX_PATH for runtime
+#       (bugs.md §C #1 root-cause fix; fail-soft — a no-op when MAGPIE_REF
+#       is pinned to an upstream-atomic commit)
+#   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
+#      (a commit SHA), sets INFERENCEX_PATH for runtime
 #   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
 #      bring-up, Node/npm, TraceLens, GEAK, OOB and CLI auth-file setup.
 #      kernel-agent itself is the canonical owner of those — we just
@@ -92,8 +94,25 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/framework-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
+# Pin Magpie to a *commit SHA* (not a branch name) so a fresh install is
+# deterministic and an upstream force-push / rebase cannot silently change
+# what every fresh clone gets. This default-branch HEAD drift is the root
+# cause of bugs.md §C #1 version skew: Magpie merged the atomic-copy refactor
+# (`_copy_benchmark_script_atomic` in Magpie/modes/benchmark/benchmarker.py)
+# between 06-06 and 06-07. Pre-refactor clones still had the legacy
+# `shutil.copy2` + `chmod` block the in-place patcher targets; post-refactor
+# clones do not ("legacy block not found"). We deliberately pin to a
+# post-refactor SHA: the upstream code is already atomic, so the in-place
+# patch (ensure_magpie_atomic_scripts_patch) becomes a no-op and is
+# fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
+# (mirrors GEAK_REF in kernel-agent/scripts/install.sh).
+MAGPIE_REF="${MAGPIE_REF:-b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7}"
 MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
+# Pin InferenceX to a current default-branch HEAD *commit SHA* so the
+# per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
+# can re-pin with INFERENCEX_REF=<tag|branch|sha>.
+INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
 INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${HYPERLOOM_RUNTIME_DIR}/InferenceX}"
 
 DRY_RUN=0
@@ -127,7 +146,12 @@ Options:
 
 Env overrides:
   REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
-  MAGPIE_DIR, INFERENCEX_REPO, INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
+  MAGPIE_REF (commit SHA / tag / branch the Magpie clone is pinned to;
+    default is a commit that already copies benchmark scripts atomically),
+  MAGPIE_DIR, INFERENCEX_REPO,
+  INFERENCEX_REF (commit SHA / tag / branch the InferenceX clone is pinned
+    to; default is a current upstream HEAD SHA),
+  INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
   PYTHON, TRACELENS_ROOT,
   TRACELENS_INTERNAL_ROOT (set to enable the optional internal extension;
     unset => open-source-only),
@@ -159,6 +183,30 @@ run() {
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
     "$@"
   fi
+}
+
+# Clone a dependency pinned to $ref into $dir, mirroring the GEAK pin in
+# kernel-agent/scripts/install.sh. `git clone --branch` only accepts
+# tags/branches, not raw SHAs, so a 7-40 hex char ref triggers a shallow
+# fetch-checkout dance instead (GitHub serves shallow SHA fetches via
+# uploadpack.allowReachableSHA1InWant=true). DRY_RUN / CHECK_ONLY are honoured
+# through the shared `run` helper. On success the checkout has a valid HEAD at
+# $ref, so manifest.py's _git_revision_at() still resolves the pinned commit.
+# Returns non-zero (stopping at the first failed step) so callers can choose
+# fail-loud (Magpie) or fail-soft (InferenceX).
+git_fetch_pinned() {
+  local repo="$1" dir="$2" ref="$3" label="$4"
+  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    log "fetching ${label} pinned to commit ${ref} (shallow fetch-checkout)"
+    run git init -q "$dir" || return 1
+    run git -C "$dir" remote add origin "$repo" || return 1
+    run git -C "$dir" fetch --depth 1 origin "$ref" || return 1
+    run git -C "$dir" checkout -q FETCH_HEAD || return 1
+  else
+    log "cloning ${label} pinned to ref ${ref} (--branch)"
+    run git clone --depth 1 --branch "$ref" "$repo" "$dir" || return 1
+  fi
+  return 0
 }
 
 # Serialize concurrent installs that share one $USER_DATA_PATH. Installs
@@ -473,8 +521,8 @@ ensure_magpie() {
     mkdir -p "$(dirname "$MAGPIE_DIR")"
   fi
   if [ ! -f "$MAGPIE_DIR/setup.py" ] && [ ! -f "$MAGPIE_DIR/pyproject.toml" ]; then
-    log "cloning Magpie from $MAGPIE_REPO"
-    run git clone --depth 1 "$MAGPIE_REPO" "$MAGPIE_DIR"
+    log "cloning Magpie from $MAGPIE_REPO pinned to ${MAGPIE_REF}"
+    git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_DIR" "$MAGPIE_REF" "Magpie"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
@@ -492,11 +540,16 @@ ensure_magpie() {
 # patcher itself is idempotent + flock-serialised + atomic-rename
 # (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
 #
-# Escalation: this is a known root-cause fix. A `False` return means
-# Magpie was refactored upstream and our pattern no longer matches; we
-# `die` so the operator notices instead of silently shipping a broken
-# install. Override the gate via PATCH_MAGPIE=0 for the (rare) case
-# where you've already landed an upstream PR locally.
+# Fail-soft (was fail-loud): a `False` return means the legacy
+# `shutil.copy2` block was not found. With MAGPIE_REF now pinned to an
+# upstream commit that already copies scripts atomically
+# (`_copy_benchmark_script_atomic`), that is the EXPECTED no-op state —
+# bugs.md §C #1 is already mitigated upstream, so we `warn` and continue
+# instead of aborting every install. (A sibling branch makes the patcher
+# itself upstream-aware; this warn is the defense-in-depth complement.) If
+# you re-pin MAGPIE_REF to a pre-refactor commit and the patch still cannot
+# apply, the script-tearing race is genuinely unpatched — review the
+# warning. Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
 ensure_magpie_atomic_scripts_patch() {
   if [ "${PATCH_MAGPIE:-1}" -eq 0 ]; then
     log "PATCH_MAGPIE=0 — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
@@ -507,7 +560,7 @@ ensure_magpie_atomic_scripts_patch() {
     return 0
   fi
   log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
-  MAGPIE_DIR="$MAGPIE_DIR" "$PYTHON" - <<'PY' || die "Magpie atomic-write patch failed; see warnings above. bugs.md §C #1 is NOT mitigated. Set PATCH_MAGPIE=0 to skip if you know what you are doing."
+  if MAGPIE_DIR="$MAGPIE_DIR" "$PYTHON" - <<'PY'
 import os, sys
 from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
     ensure_magpie_atomic_scripts_patch,
@@ -515,7 +568,21 @@ from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
 ok = ensure_magpie_atomic_scripts_patch(os.environ["MAGPIE_DIR"])
 sys.exit(0 if ok else 1)
 PY
-  log "Magpie #C1 patch OK"
+  then
+    log "Magpie #C1 patch OK"
+  else
+    # Fail-soft (was fail-loud): with MAGPIE_REF now pinned to an upstream
+    # commit that already copies benchmark scripts atomically
+    # (_copy_benchmark_script_atomic), the in-place patcher finds no legacy
+    # `shutil.copy2` block and returns False — which is the EXPECTED no-op
+    # state, not a regression. bugs.md §C #1 is already mitigated upstream in
+    # that case. A sibling branch makes the patcher upstream-aware; this warn
+    # is defense in depth so a pinned/atomic Magpie does not abort install.
+    # If you are NOT on a pinned/atomic Magpie, the script-tearing race is
+    # genuinely unpatched — review _magpie_patcher.py. PATCH_MAGPIE=0 skips
+    # this step entirely.
+    warn "Magpie atomic-write patch did not apply (legacy block not found). Expected when MAGPIE_REF is pinned to an upstream-atomic commit (patch is a no-op); otherwise bugs.md §C #1 may be unpatched — review _magpie_patcher.py or set PATCH_MAGPIE=0."
+  fi
 }
 
 # --- 3. InferenceX checkout: fresh clone from upstream ---
@@ -536,15 +603,17 @@ PY
 #   * INFERENCEX_PATH set and exists -> preserve verbatim. This is the
 #     dev / CI override (caller is explicitly opting out of fresh
 #     clones, e.g. iterating on a local edit).
-#   * Otherwise -> always `git clone --depth 1` from INFERENCEX_REPO
-#     into INFERENCEX_DEFAULT_DIR. If a clone already exists there from
-#     a previous install we leave it as-is (idempotent re-runs) — the
-#     per-install isolation guarantee is already met, and re-cloning
-#     would just churn benchmark scripts that the Magpie patch already
-#     keeps consistent on disk.
-#   * No SHA pin yet (deferred). We record whatever commit `git clone`
-#     resolves into the session manifest (see manifest.py) so failed
-#     runs can be reproduced.
+#   * Otherwise -> fetch INFERENCEX_REF from INFERENCEX_REPO into
+#     INFERENCEX_DEFAULT_DIR via the shared git_fetch_pinned() dance
+#     (SHA-aware shallow fetch-checkout, mirrors the GEAK pin). If a clone
+#     already exists there from a previous install we leave it as-is
+#     (idempotent re-runs) — the per-install isolation guarantee is already
+#     met, and re-cloning would just churn benchmark scripts that the Magpie
+#     patch already keeps consistent on disk.
+#   * Pinned to INFERENCEX_REF (a commit SHA by default) so a fresh install
+#     is reproducible. We still record the resolved commit into the session
+#     manifest (see manifest.py / _describe_dep) so runs stay traceable even
+#     when an operator overrides INFERENCEX_REF.
 ensure_inferencex() {
   if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
     log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env; skipping fresh clone)"
@@ -562,19 +631,19 @@ ensure_inferencex() {
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would: git clone --depth 1 ${INFERENCEX_REPO} ${INFERENCEX_PATH}"
+    log "would fetch InferenceX pinned to INFERENCEX_REF=${INFERENCEX_REF} from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
     export INFERENCEX_PATH
     return 0
   fi
-  log "cloning fresh InferenceX from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
+  log "cloning fresh InferenceX pinned to ${INFERENCEX_REF} from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
   mkdir -p "$(dirname "$INFERENCEX_PATH")"
-  if ! git clone --depth 1 "$INFERENCEX_REPO" "$INFERENCEX_PATH"; then
+  if ! git_fetch_pinned "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF" "InferenceX"; then
     warn "InferenceX clone failed. GSM8K eval will fail without it. Set"
     warn "INFERENCEX_PATH to a pre-cloned tree to skip this step."
     return 0
   fi
   export INFERENCEX_PATH
-  log "InferenceX cloned at ${INFERENCEX_PATH}"
+  log "InferenceX cloned at ${INFERENCEX_PATH} (pinned ${INFERENCEX_REF})"
 }
 
 # --- 4. InferenceX bench_serving runtime deps ---
