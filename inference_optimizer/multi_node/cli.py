@@ -935,6 +935,35 @@ def _dynamo_require_state() -> dict[str, Any]:
     return state
 
 
+# Env-var prefixes forwarded from the controller (prompt -> setup_env.sh ->
+# os.environ) to the SSH-launched framework child. These are sandbox-side tuning
+# vars that are NOT in the pod container env and are NOT recovered from pid1, so
+# without explicit forwarding the child sees framework defaults (e.g. mori
+# SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK defaults to 4096 and prefill
+# aborts when chunked_prefill_size exceeds it).
+_FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
+
+
+def _collect_forward_env() -> dict[str, str]:
+    """Read prompt-provided tuning vars from os.environ for SSH forwarding."""
+    fwd = {
+        k: v
+        for k, v in os.environ.items()
+        if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)
+    }
+    # Multi-node torch profiler: the dynamo SSH path (unlike the RayJob path in
+    # launch_multinode.py) never pins SGLANG_TORCH_PROFILER_DIR, so sglang writes
+    # traces to pod-local /tmp where the sandbox cannot read them -> roofline's
+    # profile_no_trace_failed. Translate the controller's shared-FS trace dir
+    # (HYPERLOOM_MN_PROFILE_TRACE_DIR, set by restart_server_for_round) into
+    # SGLANG_TORCH_PROFILER_DIR so the SSH-launched sglang emits traces to the
+    # wekafs path both server pods and the sandbox mount.
+    trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
+        fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
+    return fwd
+
+
 def _dynamo_fanout_launch(
     state: dict[str, Any], launch_args: str, worker_ips: list[str], *,
     label: str, poll_timeout: int, print_logs: bool,
@@ -948,6 +977,9 @@ def _dynamo_fanout_launch(
     script = _read_pod_script("launch_dynamo_node.py")
     key_path = state["ssh_key_path"]
     port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
+    forward_env = _collect_forward_env()
+    if forward_env:
+        info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
     rc_total = 0
     for ip in worker_ips:
@@ -956,6 +988,7 @@ def _dynamo_fanout_launch(
             cp = ssh_client.ssh_run_script(
                 ip, script, "python3", launch_args,
                 key_path=key_path, port=port, timeout=poll_timeout,
+                env=forward_env,
             )
         except subprocess.TimeoutExpired:
             warn(f"{label}: {ip} timed out after {poll_timeout}s")
@@ -1152,6 +1185,78 @@ def _dynamo_ssh_node_op(
     return _extract_pod_json(cp.stdout or ""), {
         "rc": cp.returncode, "stderr": (cp.stderr or "")[-1500:],
     }
+
+
+def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
+    """Dynamo apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch
+    set to every GPU pod via ``apply_tracelens_patch_multinode.py --local``.
+
+    The ray path submits a Ray-actor fan-out; the dynamo path has no ray, so
+    each GPU pod runs the patcher locally over SSH. Both annotate the sglang
+    torch.profiler output the same way, so the NFS-shared trace dir (see
+    SGLANG_TORCH_PROFILER_DIR forwarding in _collect_forward_env) is consumable
+    by TraceLens identically — only the dispatch differs. Idempotent: the
+    in-pod script sentinel-greps and returns status=skipped on already-patched
+    pods, so it is safe to call on every restart_server_for_round.
+    """
+    state = _dynamo_require_state()
+    tracelens_root = (
+        args.tracelens_root or os.environ.get("TRACELENS_ROOT", "").strip()
+    )
+    if not tracelens_root:
+        err(
+            "apply-tracelens-patch (dynamo) requires --tracelens-root or "
+            "$TRACELENS_ROOT (an NFS path visible from every GPU pod)"
+        )
+        return EXIT_CONFIG_ERROR
+    gpu_ips = _dynamo_all_gpu_ips(state)
+    if not gpu_ips:
+        err("apply-tracelens-patch (dynamo): no GPU pod IPs in state")
+        return EXIT_CONFIG_ERROR
+    script = _read_pod_script("apply_tracelens_patch_multinode.py")
+    key_path = state["ssh_key_path"]
+    port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
+    pin = getattr(args, "sglang_version_pin", None) or ""
+    op_args = f"--local --tracelens-root {tracelens_root!r}"
+    if pin:
+        op_args += f" --sglang-version-pin {pin!r}"
+    timeout = _poll_timeout_from_args(args)
+    per_pod: list[dict] = []
+    failures: list[dict] = []
+    for ip in gpu_ips:
+        info(f"apply-tracelens-patch (dynamo): ssh -> {ip}")
+        try:
+            cp = ssh_client.ssh_run_script(
+                ip, script, "python3", op_args,
+                key_path=key_path, port=port, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            failures.append({"host": ip, "error": f"timeout after {timeout}s"})
+            continue
+        parsed = _extract_pod_json(cp.stdout or "")
+        pods = (parsed or {}).get("per_pod") or []
+        if parsed and str(parsed.get("status")) in ("applied", "skipped") and pods:
+            for r in pods:
+                r["host"] = ip
+                per_pod.append(r)
+        else:
+            failures.append({
+                "host": ip,
+                "error": (parsed or {}).get("error")
+                or (cp.stderr or "")[-800:] or "unknown",
+                "rc": cp.returncode,
+            })
+    overall = "applied" if not failures else "failed"
+    if overall == "applied" and per_pod and all(
+        r.get("status") == "skipped" for r in per_pod
+    ):
+        overall = "skipped"
+    print(json.dumps(
+        {"command": "apply-tracelens-patch", "backend": "dynamo",
+         "status": overall, "per_pod": per_pod, "failures": failures},
+        indent=2, sort_keys=True,
+    ))
+    return 0 if not failures else 1
 
 
 def _dynamo_apply_patch(args: argparse.Namespace) -> int:
@@ -2232,6 +2337,8 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
 
     Multi-node only.
     """
+    if _load_state().get("backend") == "dynamo":
+        return _dynamo_apply_tracelens_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
