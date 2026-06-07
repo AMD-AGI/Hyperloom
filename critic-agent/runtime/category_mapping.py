@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Translate Critic ``kb_drafts[].category`` into KB ``kind`` (contract §2.1).
 
 The KB contract enumerates exactly four ``kind`` values; the Critic

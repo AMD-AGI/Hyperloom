@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """RobustnessAgentBackend — bridges the standalone ``robustness-agent``
 runtime into the ``inference_optimizer`` Coordinator as a real Robustness
 Backend.
@@ -38,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from ..intent_parser import (
+from ...protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,

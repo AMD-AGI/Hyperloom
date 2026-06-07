@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``breakdown.claw_mirror.mirror_breakdown_to_claw_storage``.
 
 The hyperloom CLI writes ``session_breakdown.json`` into ``session_dir``

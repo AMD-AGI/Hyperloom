@@ -1,17 +1,20 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Integration + unit tests for :class:`TargetAnalysisExecutor`.
 
-Integration tests (full-flow with a stubbed analyzer / mock HTTP server):
+Integration tests (full-flow reading the LLM-authored competitor target):
 
 * ``test_no_flag_writes_skipped_marker`` — without ``--compare-against-gpu``
   the executor still runs (it is wired unconditionally in
   ``cli._register_executors``) and writes a structured
   ``reason='no_target_gpu_configured'`` marker JSON.
-* ``test_fetch_timeout_graceful`` — when the upstream is unreachable the
-  task still returns ``status=succeeded`` and ``baseline_status=fetch_error``.
-* ``test_model_mapping_miss`` — unknown model name skips the HTTP call
-  entirely and persists a ``skipped`` summary.
-* ``test_happy_path_writes_files`` — full pipeline with a local mock
-  HTTP server; verifies JSON + MD on disk and the bus-friendly payload.
+* ``test_no_competitor_target_graceful`` — when no ``competitor_target.json``
+  exists the task still returns ``status=succeeded`` and
+  ``baseline_status=no_match``.
+* ``test_model_mapping_miss`` — unknown model name persists a ``skipped``
+  summary.
+* ``test_happy_path_writes_files`` — full pipeline reading a sourced
+  competitor target; verifies JSON + MD on disk and the bus payload.
 
 Unit tests (TestEnvHelpers / TestResolveSessionDir / TestExecutor) cover
 the small helper utilities (env coercion, ctx fallbacks) and the failure
@@ -20,12 +23,7 @@ branches so the "never fail" guarantee for the runner stays locked.
 
 from __future__ import annotations
 
-import gzip
-import http.server
-import io
 import json
-import socketserver
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,67 +34,6 @@ import pytest
 from inference_optimizer.orchestrator.action_executors import TargetAnalysisExecutor
 from inference_optimizer.orchestrator.action_executors import target_analysis as ta
 from inference_optimizer.orchestrator.task_registry import Task
-
-
-# ---------------------------------------------------------------------------
-# Local mock InferenceX (mirrors the one in test_baseline_comparison.py)
-# ---------------------------------------------------------------------------
-_SAMPLE_ROW = {
-    "hardware":      "b300",
-    "framework":     "vllm",
-    "model":         "minimaxm2.5",
-    "precision":     "fp8",
-    "spec_method":   "none",
-    "disagg":        False,
-    "is_multinode":  False,
-    "decode_tp":     2,
-    "isl":           1024,
-    "osl":           1024,
-    "conc":          64,
-    "metrics": {
-        "tput_per_gpu":        2781.5,
-        "output_tput_per_gpu": 1390.7,
-        "mean_ttft":           0.094,
-        "mean_tpot":           0.022,
-        "mean_e2el":           20.6,
-    },
-    "date":   "2026-04-17",
-}
-
-
-class _StaticHandler(http.server.BaseHTTPRequestHandler):
-    payload: list[dict[str, Any]] = []
-    response_status: int = 200
-    gzip_response: bool = False
-
-    def do_GET(self):  # noqa: N802
-        body = json.dumps(self.payload).encode("utf-8")
-        self.send_response(self.response_status)
-        self.send_header("Content-Type", "application/json")
-        if self.gzip_response:
-            buf = io.BytesIO()
-            with gzip.GzipFile(fileobj=buf, mode="wb") as f:
-                f.write(body)
-            body = buf.getvalue()
-            self.send_header("Content-Encoding", "gzip")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format, *args):  # noqa: A002, ARG002
-        return
-
-
-def _start_mock(payload, status=200, gzip_response=False):
-    handler = _StaticHandler
-    handler.payload = payload
-    handler.response_status = status
-    handler.gzip_response = gzip_response
-    server = socketserver.TCPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.server_address
-    return f"http://{host}:{port}", server.shutdown
 
 
 # ---------------------------------------------------------------------------
@@ -157,14 +94,8 @@ async def test_no_flag_writes_skipped_marker(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_fetch_timeout_graceful(session_dir, monkeypatch):
-    """Upstream unreachable → succeeded + baseline_status=fetch_error."""
-    # Point the client at a port that nothing is listening on, with a
-    # very short timeout + single attempt so the test runs fast.
-    monkeypatch.setenv("INFERENCEX_BASE_URL", "http://127.0.0.1:1")  # reserved port
-    monkeypatch.setenv("INFERENCEX_TIMEOUT_SEC", "0.5")
-    monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "1")
-
+async def test_no_competitor_target_graceful(session_dir):
+    """No ``competitor_target.json`` on disk → succeeded + no_match."""
     executor = TargetAnalysisExecutor(compare_against_gpu="b300",
                                        session_dir=session_dir)
     params = {
@@ -176,9 +107,8 @@ async def test_fetch_timeout_graceful(session_dir, monkeypatch):
     }
     result = await executor(_ctx(session_dir, params))
     assert result["status"] == "succeeded"
-    assert result["baseline_status"] == "fetch_error"
-    assert result["reason"] == "fetch_error"
-    assert "warning" in result and result["warning"]
+    assert result["baseline_status"] == "no_match"
+    assert result["reason"] == "no_competitor_target"
     assert (session_dir / "target_analysis" / "target_baseline.json").exists()
 
 
@@ -208,49 +138,50 @@ async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_happy_path_writes_files(session_dir, monkeypatch):
-    """Full pipeline against a local mock server."""
-    url, shutdown = _start_mock([_SAMPLE_ROW])
-    try:
-        monkeypatch.setenv("INFERENCEX_BASE_URL", url)
-        monkeypatch.setenv("INFERENCEX_TIMEOUT_SEC", "2.0")
-        monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "1")
+async def test_happy_path_writes_files(session_dir):
+    """Full pipeline reading an LLM-authored competitor target."""
+    from inference_optimizer.orchestrator import research_hints
+    research_hints.write_competitor_target(session_dir, {
+        "gpu": "b300", "model": "MiniMax-M2.5",
+        "framework": "vllm", "precision": "fp8",
+        "per_conc": [
+            {"conc": 64, "tput_per_gpu": 2781.5, "tpot_ms": 22.0,
+             "source": "https://pr/9"},
+        ],
+        "notes": "scout-authored",
+    })
 
-        executor = TargetAnalysisExecutor(compare_against_gpu="b300",
-                                           session_dir=session_dir)
-        result = await executor(_ctx(session_dir, {
-            "model_path": "/wekafs/models/MiniMaxAI-MiniMax-M2.5",
-            "framework":  "vllm",
-            "precision":  "fp8",
-            "isl":        1024,
-            "osl":        1024,
-        }))
-        assert result["status"] == "succeeded"
-        assert result["baseline_status"] == "ok"
-        assert result["reason"] == "ok"
-        assert result["row_count"] == 1
-        assert result["best_tput_per_gpu"] == pytest.approx(2781.5)
-        assert result["best_conc"] == 64
+    executor = TargetAnalysisExecutor(compare_against_gpu="b300",
+                                       session_dir=session_dir)
+    result = await executor(_ctx(session_dir, {
+        "model_path": "/wekafs/models/MiniMaxAI-MiniMax-M2.5",
+        "framework":  "vllm",
+        "precision":  "fp8",
+        "isl":        1024,
+        "osl":        1024,
+    }))
+    assert result["status"] == "succeeded"
+    assert result["baseline_status"] == "ok"
+    assert result["reason"] == "ok"
+    assert result["row_count"] == 1
+    assert result["best_tput_per_gpu"] == pytest.approx(2781.5)
+    assert result["best_conc"] == 64
 
-        json_path = Path(result["json_path"])
-        md_path = Path(result["md_path"])
-        assert json_path.exists()
-        assert md_path.exists()
+    json_path = Path(result["json_path"])
+    md_path = Path(result["md_path"])
+    assert json_path.exists()
+    assert md_path.exists()
 
-        on_disk = json.loads(json_path.read_text())
-        assert on_disk["status"] == "ok"
-        assert on_disk["reason"] == "ok"
-        assert on_disk["best"]["tput_per_gpu"] == pytest.approx(2781.5)
-        assert on_disk["query"]["model"] == "MiniMax-M2.5"
-        assert on_disk["query"]["gpu"] == "b300"
+    on_disk = json.loads(json_path.read_text())
+    assert on_disk["status"] == "ok"
+    assert on_disk["reason"] == "ok"
+    assert on_disk["best"]["tput_per_gpu"] == pytest.approx(2781.5)
+    assert on_disk["query"]["model"] == "MiniMax-M2.5"
+    assert on_disk["query"]["gpu"] == "b300"
+    assert on_disk["source"] == "llm_authored"
 
-        md_text = md_path.read_text()
-        assert "## Reference best" in md_text
-        # No KPI-like phrasing leaked into the report.
-        assert "gap" not in md_text.lower()
-        assert "should reach" not in md_text.lower()
-    finally:
-        shutdown()
+    md_text = md_path.read_text()
+    assert "## Reference best" in md_text
 
 
 @pytest.mark.asyncio

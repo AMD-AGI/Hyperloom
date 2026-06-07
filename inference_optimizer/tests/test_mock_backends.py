@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P0-4 mock Critic + mock Robustness adapter tests.
 
 Covers:
@@ -27,7 +29,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
 

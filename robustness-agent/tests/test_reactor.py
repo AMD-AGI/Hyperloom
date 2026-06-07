@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end reactor + backend adapter tests, plus L1/L2 finalizer
 integration.
 

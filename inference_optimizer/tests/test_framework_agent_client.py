@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """framework_agent_client helper-utility tests.
 
 Coverage: ``repo_url_for_framework`` lookup table and ``_resolve_fa_binary``

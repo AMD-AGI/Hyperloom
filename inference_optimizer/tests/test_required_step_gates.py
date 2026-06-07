@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Coordinator hard-gate regression tests for the post-classify pipeline.
 
 After the deletion of the in-loop ``setup`` / ``classify`` actions, two
@@ -38,7 +40,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
 from inference_optimizer.orchestrator.shared_state import SharedState

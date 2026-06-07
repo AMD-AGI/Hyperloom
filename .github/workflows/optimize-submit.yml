@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 name: SaFE Optimize Submit
 
 # Submits SaFE inference optimization tasks via the same API the SaFE script
@@ -15,8 +17,9 @@ name: SaFE Optimize Submit
 #                                    register, so download is overlapped
 #                                    with the rest of the batch (no serial
 #                                    prewarm stage that blocks optimize).
-#                                    default max_parallel=60 so the whole
-#                                    scheduled batch can dispatch at once.
+#                                    schedule forces max_parallel=100 so the
+#                                    whole 100-model batch dispatches at once
+#                                    (dispatch default stays 60).
 #   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
 #                                    Gain% desc, with medals), publish the
@@ -31,8 +34,12 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Cron is intentionally disabled while optimize-thunder runs the full
-  # 3B-12B pool. Keep manual dispatch for targeted submit runs.
+  # Production large-B pool: 100 models twice a day, firing at UTC
+  # 00:00 / 12:00 (Beijing 08:00 / 20:00). The matrix generator rotates
+  # deterministically by UTC 12-hour slot — these hours map cleanly to
+  # hour//12 -> 0 / 1 so the rotation stays continuous.
+  schedule:
+    - cron: '0 0,12 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
@@ -71,18 +78,17 @@ on:
         required: false
         default: '7'
       max_parallel:
-        description: 'Max parallel optimize jobs (default 60 = scheduled batch size)'
+        description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 100 to match the 100-model batch).'
         required: false
         default: '60'
       submit_workspaces:
-        # Comma-separated round-robin pool. Empty = use single
-        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret (current behavior =
-        # core42-sandbox only). 'core42-sandbox,core42-hyperloom' spreads
-        # the batch across both workspaces and roughly doubles the
-        # effective GPU pool for the optimization step.
-        description: 'Round-robin submit workspaces (comma-separated). Empty = use SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret only.'
+        # Comma-separated round-robin pool. Default spreads the batch across
+        # hyperloom + sandbox instead of sending every task to sandbox. Set
+        # empty explicitly only when you want to fall back to the single
+        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
+        description: 'Round-robin submit workspaces (comma-separated). Default uses hyperloom+sandbox.'
         required: false
-        default: ''
+        default: 'core42-hyperloom,core42-sandbox'
       isl:
         description: 'Input sequence length'
         required: false
@@ -102,7 +108,7 @@ on:
         required: false
         default: ''
       inferencex_path:
-        description: 'InferenceX checkout path inside the sandbox. Leave empty to use script default (/wekafs/hyperloom/InferenceX for core42).'
+        description: 'Explicit InferenceX checkout path (dev override only). Leave empty (default) so install.sh clones a writable per-session copy instead of pinning a shared read-only mount.'
         required: false
         default: ''
       kernel_opt_backends:
@@ -186,7 +192,7 @@ jobs:
       # refreshed only when we want to bring in newly-published models.
       INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_hf_2026-05-25.json' || github.event.inputs.candidates_file }}
       INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
-      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '60' || github.event.inputs.batch_size }}
+      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '100' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
       # Schedule no longer excludes leaderboard-known models — that was for
@@ -221,7 +227,7 @@ jobs:
     timeout-minutes: 780
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(github.event.inputs.max_parallel || '60') }}
+      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '100' || github.event.inputs.max_parallel || '60') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
@@ -277,11 +283,10 @@ jobs:
           INPUT_OSL:              ${{ github.event.inputs.osl }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
-          INPUT_INFERENCEX_PATH:  ${{ github.event.inputs.inferencex_path }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event.inputs.submit_workspaces }}
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
@@ -313,9 +318,6 @@ jobs:
           if [ -n "${INPUT_GPU_TYPE:-}" ]; then
             ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
           fi
-          if [ -n "${INPUT_INFERENCEX_PATH:-}" ]; then
-            ARGS+=(--inferencex-path "${INPUT_INFERENCEX_PATH}")
-          fi
           if [ -n "${INPUT_KERNEL_OPT_BACKENDS:-}" ]; then
             ARGS+=(--kernel-opt-backends "${INPUT_KERNEL_OPT_BACKENDS}")
           fi
@@ -323,7 +325,6 @@ jobs:
           # for these two critical values. SaFE consumes them and renders the
           # generated prompt tail consistently with the CI prefix.
           ARGS+=(--max-hours "${INPUT_MAX_HOURS:-12}")
-          ARGS+=(--results-path '$RESULT_DIR')
           # Hard guarantee: SaFE promptPrefix MUST be non-empty. Workflow
           # input is only populated on workflow_dispatch — for schedule
           # trigger we fall back to ci/prompt_prefix.txt (single source of

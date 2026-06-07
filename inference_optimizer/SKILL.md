@@ -50,7 +50,9 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 │   ├── kernel-agent.env.sh
 │   ├── geak-config/local.yaml
 │   ├── Magpie/
-│   └── source-mirrors/{geak,OOB,TraceLens-internal}/
+│   └── source-mirrors/{Primus-Claw,OOB,InferenceX,TraceLens[,TraceLens-internal]}/
+│       # TraceLens public is required; TraceLens-internal is optional and only
+│       # present when TRACELENS_INTERNAL_ROOT is set (open-source-only otherwise)
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
@@ -58,7 +60,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
         ├── state.json
         ├── storage/coordinator.db
         ├── agents/{orchestration,kernel,critic,robustness}/
-        ├── runs/{baseline,profile,roofline,backends,params,...}/<task_id>/
+        ├── runs/{baseline,profile,roofline,explore,sweep,...}/<task_id>/
         ├── kernel-agent/runs/<session_id>/
         ├── kernel-agent-workspace/<kernel_id>/
         ├── optimizer_runs/               # per-session launcher logs / PID / monitor
@@ -81,37 +83,51 @@ so ``session_dir == workspace_root`` (no ``<model>/<ts>`` subdirs).
 
 ### Path resolution (do not guess)
 
+`paths.py` is the single authority for Hyperloom paths. The launching
+agent does not need to recreate that logic in shell; it only needs to run
+`install.sh`, source the generated `runtime/kernel-agent.env.sh`, and read
+the session dir printed by the CLI.
+
 | Concept | Env / helper | Meaning |
 |---|---|---|
-| Workspace root | ``$USER_DATA_PATH`` → ``paths.workspace_root()`` | Shared ``runtime/``, parent of all sessions |
-| Session dir | ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` → ``paths.session_dir()`` | Where ``manifest.json`` / ``state.json`` live |
-| Session id | ``manifest.json`` → ``session_id`` | Logical label only — **not** a directory name |
+| Workspace root | ``$USER_DATA_PATH`` → ``paths.workspace_root()`` | Shared ``runtime/`` + ``logs/`` and parent of all sessions |
+| Session dir | ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` → ``paths.session_dir()`` | Per-run directory containing ``manifest.json`` / ``state.json`` / ``storage/coordinator.db`` |
 
-Resolution order for ``paths.session_dir()``:
+**Launcher rule:** do not hand-build, create, delete, or repair paths
+under ``$USER_DATA_PATH/runtime/`` (especially ``source-mirrors/``).
+Those are workspace-shared assets owned by `install.sh`, including
+Magpie, GEAK, OOB, TraceLens mirrors, env files, and config. Manual edits
+there can corrupt another run's checkout. If install state looks wrong,
+rerun `install.sh` or follow the Recovery section; do not clone or clean
+the mirrors by hand.
 
-1. ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (pin from CLI — **authoritative**)
-2. ``$USER_DATA_PATH`` (legacy flat / tests without pin)
-3. ``/workspace/hyperloom``
-
-**Iron rule for agents:** never treat ``$USER_DATA_PATH`` as the session
-dir when ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set. Read
-``manifest.json`` / ``state.json`` from the **session dir** (CLI prints
-``Session dir : …`` at startup). For monitoring after launch, parse that
-line or walk ``$USER_DATA_PATH/<model_basename>/`` for the latest
-``*T*Z/`` timestamp dir.
-
-The optimizer code uses `paths.*` / `session_paths.*` helpers
-internally (don't string-concat); the launcher only needs
-`paths.workspace_root()` = `$USER_DATA_PATH`, `paths.session_dir()` =
-the pinned session dir, and `paths.db_path_for(sd)` =
-`<sd>/storage/coordinator.db`.
+**Session rule:** never treat ``$USER_DATA_PATH`` as the session dir when
+``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set. Read
+``manifest.json`` / ``state.json`` / ``coordinator.db`` from the
+**session dir**. For monitoring after launch, learn the session dir from
+the **launch-info JSON** written by ``--launch-info-file`` (``jq -r
+.session_dir <file>``) or, equivalently, from the single
+``HYPERLOOM_LAUNCH key=value …`` sentinel line the CLI prints to stdout
+(``session_dir=…``). Those are the authoritative, machine-readable
+sources. Never guess by walking ``$USER_DATA_PATH/<model_basename>/`` for
+the latest ``*T*Z/`` timestamp dir — overlapping sessions on the same
+host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
-or warm-start caches): `$TRACELENS_ROOT` (default `/wekafs/hyperloom/
-TraceLens-internal`; **must** be at tag `Hyperloom_integration_v0.3.1`
-or the matching `release/hyperloom_integration_v0.3.1` branch — the
-per-version `sglang_roofline_patches/sglang_<minor>_<patch>/` layout is
-required by `_server_patcher`),
+or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
+`$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
+`kernel-agent/scripts/install.sh` clones
+[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
+it to a fixed SHA. A pre-existing checkout you maintain is only used as
+an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
+in, which skips both the clone and the SHA pin) with an **optional**
+internal
+extension at `$TRACELENS_INTERNAL_ROOT` (no default; internal users set
+it to their own existing checkout to opt in,
+otherwise open-source-only; rehydration module — Hyperloom keeps no internal
+URL/path). See README Local Mode step 1. The per-version
+`sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
+TraceLens is required by `_server_patcher`),
 `$OOB_SRC` / `$HYPERLOOM_BUNDLE`,
 `/sgl-workspace/{aiter,sglang,vllm}/`, `~/.claude/config.json` +
 `~/.codex/auth.json`, `~/.cache/amd-ai-devtool/semantic-index/`
@@ -195,13 +211,21 @@ These govern the optimizer's EXPLORE phase, not the launcher; the full
 contract lives in `orchestrator/system_prompts/orchestration.md`. In
 brief:
 
-- **IR-4 — EXPLORE is specialist-first**: EXPLORE grids must carry
-  `provenance='specialist:<domain>'` (up to `research_lane_capacity` per
-  round, hard cap 6) or `'default_grid'`
-  (cold-start, uncapped); all-`llm_direct` grids are denied
-  (`explore_requires_specialist_provenance`). Specialists
-  author patches into an isolated worktree; `integrate_patch` does the
-  actual `git apply` + throughput/accuracy gate.
+- **IR-4 — EXPLORE is specialist-informed**: prefer specialist- or
+  research-backed variants when available, but `llm_direct`,
+  `default_grid`, `specialist:<domain-or-tag>`, and `dynamic` provenance
+  values are all accepted audit labels when phase and sequence gates pass.
+  Specialist-sourced variants are capped by `research_lane_capacity`
+  (clamped to the `2 × visible GPU count` ceiling); dynamic variants use
+  their own per-round cap. Specialists author patches into an isolated
+  worktree; `integrate_patch` does the actual `git apply` +
+  throughput/accuracy gate after Critic review.
+  Optional GPU specialists are off by default: launch with
+  `--gpu-specialist-capacity N` (or
+  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) before Orchestration may
+  dispatch `delegate{action_name='specialist', params={needs_gpu: true,
+  gpu_count: ...}}`. They are limited to short GPU experiments /
+  microbenchmarks and must not start serving servers or Magpie loops.
 - **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable
@@ -237,21 +261,15 @@ under **Framework Selection** below.
 
 ## Retired modules and rules (do not re-introduce)
 
-These orchestrator modules were intentionally removed; the
-`actions/_meta/*.yaml` registry + `_grid_runner.py` + specialist-first
-EXPLORE flow replaced them. Re-adding them re-creates conflicting
-decision paths:
+The live runtime uses `actions/_meta/*.yaml`, `_grid_runner.py`, and the
+unified specialist-informed `explore` flow. Do not recreate the retired
+`backends` / `params` / `validate_stack` / scoring modules.
 
-- `orchestrator/backends.py` (the action-routing one — distinct from
-  the LLM-adapter directory `orchestrator/backends/`)
-- `orchestrator/params.py`
-- `orchestrator/validate_stack.py`
-- `orchestrator/scoring.py`
-
-Related rules that look reasonable but break things:
+Rules that look reasonable but break the current flow:
 
 - **No `framework_pr first-explore priority` rule** in
-  `system_prompts/orchestration.md` — conflicts with **IR-4**.
+  `system_prompts/orchestration.md` — conflicts with the EXPLORE
+  specialist-informed flow.
   Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
   before EXPLORE; the LLM never proposes the `framework_pr`
   action (PolicyGate denies it via
@@ -312,7 +330,8 @@ of `inference_optimizer/install.sh`):
 | Component | Provided by |
 |---|---|
 | `ray==2.44.1` + `click<8.3.0` | pip |
-| TraceLens internal (perf-report CLI) | `ensure_tracelens` (`cp -r` from read-only WekaFS mount to `${HYPERLOOM_ROOT}/TraceLens-internal` = `$USER_DATA_PATH/runtime/source-mirrors/TraceLens-internal`) |
+| TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
+| TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
 | GEAK CLI + `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` | `ensure_geak` |
 | Node.js/npm + OOB CLI + claude/codex npm CLIs + `@cursor/sdk` global install + `~/.claude/config.json` + `~/.codex/auth.json` | `ensure_node` + `ensure_oob` (mirrors `${HYPERLOOM_BUNDLE}/OOB` → `${HYPERLOOM_ROOT}/OOB/oob_cli`) |
 | `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
@@ -335,9 +354,10 @@ does not consume these.
 |---|---|---|
 | `OOB_SRC: <path>` | `$OOB_SRC` | `kernel-agent/scripts/install.sh:ensure_oob` |
 | `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `inference_optimizer/scripts/install.sh:ensure_inferencex` |
-| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` |
+| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (public) |
+| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` (internal; only when set) |
 
-**Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
+**Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
 `rsync -a` them into `$SESSION_DIR/vendor/<name>/` and override the matching
 env vars BEFORE running `install.sh`. Single-node WekaFS-mount setups (the
@@ -365,8 +385,10 @@ Steps for the launching agent:
    type, attention variant, expert counts, MTP, SWA window) and set
    `"source": "config_classify"`.
 3. **Write the convention file** — write the profile to
-   `$USER_DATA_PATH/model_arch.json` (the workspace root, parent of all
-   model/session dirs). Include `model_name` (required for the stale-file
+   exactly `$USER_DATA_PATH/model_arch.json`: the file named
+   `model_arch.json` at the workspace root. Do not create a subdirectory
+   such as `model_arch_advisory/`; the CLI only reads the root-level
+   convention file. Include `model_name` (required for the stale-file
    guard — its basename must match the launched `--model` basename or
    Hyperloom ignores the file). All other fields are optional; renderers
    drop empty fields.
@@ -427,7 +449,14 @@ CLI:
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+# TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
+# to $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens and pin it to a
+# fixed SHA. Only export it as an operator override to point at a
+# pre-existing checkout you maintain; this skips both the clone and the
+# SHA pin.
+# export TRACELENS_ROOT=/path/to/your/TraceLens
+# Optional internal extension; export only to enable it (open-source-only if unset):
+# export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
@@ -475,6 +504,17 @@ which piece is missing, then re-run full install:
 bash "$REPO_ROOT/inference_optimizer/scripts/install.sh" --check-only
 bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 ```
+
+If install repeatedly fails while building GEAK / `mini-swe-agent` with
+missing files such as `src/minisweagent/...`, the workspace-shared GEAK
+mirror may be half-created (`.git` exists but `src/` is incomplete) or
+the filesystem may be showing stale metadata. Do not manually clone GEAK,
+delete only `build/`, or edit `source-mirrors/` in place. Stop any other
+installer using the same `$USER_DATA_PATH`, remove the entire
+`${HYPERLOOM_ROOT:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/source-mirrors}/geak`
+directory, then rerun the full install so `install.sh` owns the fresh
+clone. Multiple concurrent installs sharing one `$USER_DATA_PATH` also
+share `source-mirrors/`; avoid running them at the same time.
 
 In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):
@@ -575,9 +615,9 @@ Operators only interact through two `task.params` knobs (full schema in
 each `actions/_meta/<action>.yaml`): `params.benchmark_script` (bare
 sanitized `*.sh` name; overrides the gpu_type auto-pick) and
 `params.result_dir` (forwarded as `$RESULT_DIR`). The Coordinator's
-`baseline_self_loop` PolicyGate rule denies a third baseline attempt
-that repeats a twice-failed param fingerprint, pointing FAILURE RECOVERY
-at the next override surface.
+`baseline_no_param_change` PolicyGate rule denies any baseline proposal
+that changes params after a failure — the agent must retry with
+identical params and the run terminates after 3 consecutive failures.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 
@@ -592,18 +632,16 @@ tput). Per-variant `extra_envs` still win (applied last).
 
 ## Critic Backend Selection
 
-The Critic role has three backend modes, picked by mutually-exclusive
-CLI flags. Default is `--critic-agent` (no flag needed).
+The Critic role has two backend modes. Default is `--critic-agent` (no
+flag needed).
 
 | Flag | Backend class | Behaviour |
 |---|---|---|
 | (none) / `--critic-agent` | `CriticAgentBackend` | Drives the standalone `critic-agent/` skill runtime via `python -m runtime.cli prepare-review` → Codex chat completion → `python -m runtime.cli commit-review`. Adds KB priors lookup (with circuit-breaker for unreachable services), per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
 | `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
-| `--critic-codex-bare` | `CodexBackend` | Legacy direct chat-completion path with no KB / session memory / `review_constraints`. Available for debugging the LLM layer in isolation. (`--critic-real` is a hidden back-compat alias.) |
 
 Default is overridable per pod via
-`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent` /
-`codex_bare`).
+`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent`).
 
 ### Required env when `--critic-agent` is active
 
@@ -618,9 +656,9 @@ Default is overridable per pod via
 
 `_preflight()` checks `CRITIC_AGENT_ROOT` resolves to a real directory
 with `runtime/cli.py`, then runs `python -m runtime.cli --help` (5s
-timeout) before the Coordinator boots. Missing or broken runtime
-aborts the run with a clear error pointing at `--critic-mock` /
-`--critic-codex-bare` as bypasses.
+timeout) before the Coordinator boots. Missing or broken runtime aborts
+the run with a clear error pointing at `--critic-mock` as the offline
+bypass.
 
 ### Per-turn artefacts (audit trail)
 
@@ -662,7 +700,7 @@ What this controls:
   cold-start with no LLM input.
 - Which extra-args env name `_grid_runner` writes
   (`EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS`)
-- Which Marathon KB partition orchestration reads for hints
+- Which KB partition orchestration reads for hints
 
 Mixing frameworks in a single session is not supported; the CLI
 locks `$FRAMEWORK` for the run. Resume re-reads `$FRAMEWORK` from the
@@ -746,8 +784,10 @@ if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
-# RUN_LOG/PID under workspace until session_dir is known; move or re-tail
-# from $session_dir/optimizer_runs/ after parsing "Session dir" from stdout.
+# RUN_LOG/PID/launch-info live under the workspace until the session_dir
+# is known; move or re-tail from $session_dir/optimizer_runs/ after reading
+# session_dir from the launch-info JSON below.
+# /workspace/hyperloom is only the fallback when $USER_DATA_PATH is unset.
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
@@ -760,6 +800,7 @@ setsid nohup inference_optimizer --verbose optimize \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --kernel-claude \
+  --launch-info-file "$RUN_DIR/launch_${RUN_TAG}.json" \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"
 ```
@@ -768,8 +809,8 @@ echo $! > "$PID_FILE"
 shell can die on SSH disconnect.
 
 Critic defaults to `--critic-agent`; Robustness defaults to `--robustness-agent`.
-See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock` /
-`--critic-codex-bare` overrides; pod-level overrides via
+See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock`;
+pod-level overrides via
 `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` /
 `INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND`.
 
@@ -779,11 +820,16 @@ After launching, do a short health check:
 sleep 30
 pid="$(cat "$PID_FILE")"
 test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
-# Parse session dir from RUN_LOG or resolve latest timestamp subdir:
-session_dir="$(grep -m1 '^Session dir' "$RUN_LOG" 2>/dev/null | sed 's/^Session dir[[:space:]]*:[[:space:]]*//')"
+# Authoritative session dir from the launch-info JSON (--launch-info-file).
+# Never guess by timestamp: overlapping sessions break any "latest dir" pick.
+launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
+session_dir="$(jq -r '.session_dir // empty' "$launch_info" 2>/dev/null)"
 if [ -z "$session_dir" ]; then
-  model_base="$(basename "$MODEL_PATH")"
-  session_dir="$(ls -d "${USER_DATA_PATH:-/workspace/hyperloom}/$model_base/"*T*Z 2>/dev/null | sort | tail -1)"
+  echo "ERROR: no .session_dir in $launch_info (launch-info JSON missing or" \
+       "malformed). The optimizer likely died before emitting launch info;" \
+       "inspect the HYPERLOOM_LAUNCH line and errors in $RUN_LOG." \
+       "Refusing to guess the session dir from timestamps." >&2
+  return 1 2>/dev/null || exit 1
 fi
 test -f "$session_dir/manifest.json" && echo "manifest_present=true session_dir=$session_dir"
 test -f "$session_dir/state.json" && echo "state_exists=true" \
@@ -818,6 +864,10 @@ without those markers (unexpected crash).
 ```bash
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 mkdir -p "$RUN_DIR"
+# Point the monitor at the authoritative session dir: it reads
+# $INFERENCE_OPTIMIZER_SESSION_DIR first, else .session_dir from the
+# launch-info JSON in $LAUNCH_INFO_FILE (written by --launch-info-file).
+export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 cp "$REPO_ROOT/optimizer_runs/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
@@ -826,9 +876,12 @@ setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
   2>&1 < /dev/null &
 ```
 
-Reads `$PID_FILE` and (optional) `$USER_DATA_PATH` / `$MAX_HOURS` /
-`$TARGET_GAIN`. Edit the example before copying if defaults need to
-change. `stop_reason` interpretation matches the `## Monitoring` reader.
+Reads `$PID_FILE` plus (optional) `$INFERENCE_OPTIMIZER_SESSION_DIR` /
+`$LAUNCH_INFO_FILE` / `$MAX_HOURS` / `$TARGET_GAIN`. The session dir comes
+from `$INFERENCE_OPTIMIZER_SESSION_DIR` when set, else from `.session_dir`
+in the launch-info JSON at `$LAUNCH_INFO_FILE` (never from a timestamp
+guess). Edit the example before copying if defaults need to change.
+`stop_reason` interpretation matches the `## Monitoring` reader.
 
 ## Monitoring
 
@@ -1001,8 +1054,8 @@ gate is intentional — opus-4-5 / haiku silently degraded prior runs.
 ### Critic-agent runtime errors
 
 Inspect `$SESSION_DIR/critic-workdir/<latest>/{request,judge_bundle,review,emit}.json`.
-Bypass with `--critic-mock` (offline / smoke) or `--critic-codex-bare` (legacy
-direct Codex). See `## Critic Backend Selection`.
+Bypass with `--critic-mock` for offline / smoke runs. See
+`## Critic Backend Selection`.
 
 | Symptom | Fix |
 |---|---|
@@ -1026,6 +1079,6 @@ Report concise status:
 
 - session id (from `manifest.json`) and log path
 - `cumulative_gain` and `current_best`
-- params accepted/rejected summary
+- explore accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
 - whether the process is still running or stopped and why

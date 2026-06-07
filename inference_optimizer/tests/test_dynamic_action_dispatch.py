@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``dynamic_action`` dispatch validation and round-cap accounting.
 
 PolicyGate is exercised against the real ``default_role_registry``;
@@ -15,10 +17,9 @@ from typing import Any
 import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     DYNAMIC_ACTION_NAME,
-    EXPLORE_PERMISSIVE_PROVENANCE_LITERALS,
     MAX_DYNAMIC_PER_ROUND,
     MAX_DYNAMIC_SOURCED_VARIANTS,
     PolicyDenied,
@@ -294,18 +295,11 @@ def test_rejected_dispatch_does_not_bump_round_counter():
 
 
 # ===========================================================================
-# IR-4 provenance white-list extension
+# Explore-grid provenance is advisory-only
 # ===========================================================================
-def test_ir4_provenance_whitelist_contains_dynamic_literal():
-    """``dynamic`` is the single literal added by P1; no composite form
-    like ``dynamic:foo`` is accepted (audit must collapse to one row)."""
-    assert "dynamic" in EXPLORE_PERMISSIVE_PROVENANCE_LITERALS
-    assert "default_grid" in EXPLORE_PERMISSIVE_PROVENANCE_LITERALS
-
-
-def test_explore_grid_with_dynamic_provenance_passes_ir4_gate():
-    """Mixed-provenance explore grid with one ``dynamic`` variant must
-    survive _validate_explore_provenance (no llm_direct denial)."""
+def test_explore_grid_with_dynamic_provenance_passes_grid_gate():
+    """Mixed-provenance explore grid with one ``dynamic`` variant is
+    accepted; the explore-grid gate only caps specialist fan-out."""
     state = _State(phase="EXPLORE")
     gate = _gate(state)
     explore_payload = {

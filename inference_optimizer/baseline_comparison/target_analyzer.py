@@ -1,21 +1,22 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Top-level orchestration for the external baseline comparison step.
 
-Layered above :mod:`inferencex_client` and :mod:`name_mapping`. The
-:func:`analyze` entry point is the **only** function the action
+The :func:`analyze` entry point is the **only** function the action
 executor calls; everything else here is helper code kept module-local
 so the executor file stays tiny.
 
 Flow:
 
-1. Map the local model path to an InferenceX display name. Miss →
-   return a ``BaselineSummary`` with ``status="skipped"`` (no HTTP).
-2. Fetch all rows for that model from InferenceX. Failure →
-   ``status="fetch_error"``.
-3. Filter by ``(gpu, framework, precision, isl, osl)``. Zero rows →
+1. Map the local model path to a canonical display name. Miss →
+   return a ``BaselineSummary`` with ``status="skipped"``.
+2. Read the LLM-authored ``competitor_target.json`` (produced by the
+   research scout, every datapoint source-backed). No sourced rows →
    ``status="no_match"``.
-4. Pick the best per-GPU throughput row as ``best``; record every
-   concurrency we saw (deduplicated, sorted by conc) for the report.
-5. Materialise the summary to disk:
+3. Project each per-concurrency target row into a ``BaselinePoint``;
+   pick the best per-GPU throughput row as ``best`` and record every
+   concurrency (deduplicated, sorted by conc) for the report.
+4. Materialise the summary to disk:
 
    * ``target_analysis/target_baseline.json`` — machine-readable
    * ``target_analysis/target_analysis_report.md`` — short human note
@@ -32,94 +33,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .inferencex_client import DEFAULT_BASE_URL, fetch_rows
+from .inferencex_client import DEFAULT_BASE_URL
 from .name_mapping import to_inferencex_name
 from .types import BaselinePoint, BaselineQuery, BaselineSummary
 
 
 log = logging.getLogger(__name__)
 
+LLM_AUTHORED_SOURCE = "llm_authored"
+
 
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _strip_str(value: Any) -> str:
-    return str(value or "").strip()
-
-
-def _strip_lower(value: Any) -> str:
-    return _strip_str(value).casefold()
-
-
-def _filter_rows(
-    rows: list[dict[str, Any]],
-    *,
-    gpu: str,
-    framework: str,
-    precision: str,
-    isl: int,
-    osl: int,
-) -> list[dict[str, Any]]:
-    """Apply the per-row filter that the Go ``filterRows`` performs.
-
-    All string comparisons are case-insensitive; integer comparisons
-    are strict. Pass ``""`` / ``0`` to skip a dimension (matches the
-    handler's query-param semantics).
-    """
-    out: list[dict[str, Any]] = []
-    gpu_n = gpu.casefold()
-    fw_n = framework.casefold()
-    prec_n = precision.casefold()
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        if gpu_n and _strip_lower(r.get("hardware")) != gpu_n:
-            continue
-        if fw_n and _strip_lower(r.get("framework")) != fw_n:
-            continue
-        if prec_n and _strip_lower(r.get("precision")) != prec_n:
-            continue
-        if isl and int(r.get("isl") or 0) != int(isl):
-            continue
-        if osl and int(r.get("osl") or 0) != int(osl):
-            continue
-        out.append(r)
-    return out
-
-
-def _row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
-    """Project one upstream row into a ``BaselinePoint``.
-
-    Returns ``None`` if the row's metrics block is missing the
-    ``tput_per_gpu`` key (we cannot rank without it).
-    """
-    metrics = row.get("metrics")
-    if not isinstance(metrics, dict):
-        return None
-    try:
-        tput = float(metrics.get("tput_per_gpu"))
-    except (TypeError, ValueError):
-        return None
-    if tput <= 0:
-        return None
-
-    def _fnum(key: str) -> float:
-        try:
-            return float(metrics.get(key))
-        except (TypeError, ValueError):
-            return 0.0
-
-    return BaselinePoint(
-        tput_per_gpu=tput,
-        output_tput_per_gpu=_fnum("output_tput_per_gpu"),
-        conc=int(row.get("conc") or 0),
-        decode_tp=int(row.get("decode_tp") or 0),
-        mean_ttft_ms=_fnum("mean_ttft") * 1000.0,
-        mean_tpot_ms=_fnum("mean_tpot") * 1000.0,
-        mean_e2el_ms=_fnum("mean_e2el") * 1000.0,
-        date=_strip_str(row.get("date")),
-    )
 
 
 def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
@@ -237,6 +162,34 @@ def _persist(
     return json_path, md_path
 
 
+def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
+    """Project one LLM-authored ``per_conc`` row into a ``BaselinePoint``.
+
+    Returns ``None`` when ``tput_per_gpu`` is missing or non-positive.
+    ``tpot_ms`` is the per-output-token latency; ``interactivity`` (when
+    present) is informational only and not folded into the point shape.
+    """
+    def _fnum(key: str) -> float:
+        try:
+            return float(row.get(key))
+        except (TypeError, ValueError):
+            return 0.0
+
+    tput = _fnum("tput_per_gpu")
+    if tput <= 0:
+        return None
+    return BaselinePoint(
+        tput_per_gpu=tput,
+        output_tput_per_gpu=0.0,
+        conc=int(row.get("conc") or 0),
+        decode_tp=0,
+        mean_ttft_ms=0.0,
+        mean_tpot_ms=_fnum("tpot_ms"),
+        mean_e2el_ms=0.0,
+        date="",
+    )
+
+
 def analyze(
     *,
     session_dir: Path,
@@ -247,30 +200,26 @@ def analyze(
     isl: int = 0,
     osl: int = 0,
 ) -> BaselineSummary:
-    """Run the full target-analysis pipeline and persist the artefacts.
+    """Build the target-analysis summary from LLM-authored competitor data.
 
-    Never raises. The returned ``BaselineSummary.status`` is one of:
+    The reference numbers come from ``competitor_target.json`` (produced
+    by the research scout, every datapoint source-backed) rather than a
+    live HTTP pull. Persists the same ``BaselineSummary`` disk contract so
+    the report renderer is unchanged.
 
-    * ``ok``         — upstream had matching rows, ``best`` populated
-    * ``skipped``    — model name mapping miss OR ``compare_against_gpu``
-                      was empty; no HTTP issued
-    * ``fetch_error`` — upstream HTTP / decode failed
-    * ``no_match``   — upstream had data but nothing matched the filter
+    Never raises. ``BaselineSummary.status`` is one of:
 
-    Callers that need to branch on *why* the run was skipped should look
-    at ``BaselineSummary.reason`` instead of regex-matching the warning
-    string. ``reason`` is one of:
+    * ``ok``       — competitor target had a usable per-conc row
+    * ``skipped``  — model name mapping miss OR ``compare_against_gpu``
+                     was empty
+    * ``no_match`` — no ``competitor_target.json`` / no sourced rows
 
-    * ``ok``                       — populated ``best``
-    * ``model_mapping_miss``       — local model has no InferenceX name
-    * ``no_target_gpu_configured`` — empty ``compare_against_gpu`` (the
-                                      caller deliberately passed nothing)
-    * ``fetch_error``              — upstream call failed
-    * ``no_match``                 — fetched rows but filter dropped all
-
-    The caller (target_analysis ActionRunner) treats every status as
-    a success — the optimizer loop never blocks on this step.
+    ``reason`` mirrors ``status`` with finer granularity:
+    ``ok`` / ``model_mapping_miss`` / ``no_target_gpu_configured`` /
+    ``no_competitor_target``.
     """
+    from ..orchestrator import research_hints
+
     canonical_model = to_inferencex_name(model_path) or ""
     query = BaselineQuery(
         model=canonical_model,
@@ -292,9 +241,9 @@ def analyze(
             reason="model_mapping_miss",
             warning=(
                 f"model name mapping miss for {model_path!r}; "
-                "no InferenceX display name found"
+                "no display name found"
             ),
-            source=DEFAULT_BASE_URL,
+            source=LLM_AUTHORED_SOURCE,
         )
         _persist(summary, session_dir=session_dir)
         return summary
@@ -308,35 +257,14 @@ def analyze(
             status="skipped",
             reason="no_target_gpu_configured",
             warning="compare_against_gpu is empty",
-            source=DEFAULT_BASE_URL,
+            source=LLM_AUTHORED_SOURCE,
         )
         _persist(summary, session_dir=session_dir)
         return summary
 
-    rows, fetch_warn = fetch_rows(canonical_model)
-    if rows is None:
-        summary = BaselineSummary(
-            query=query,
-            fetched_at=now,
-            row_count=0,
-            best=None,
-            status="fetch_error",
-            reason="fetch_error",
-            warning=fetch_warn or "unknown fetch failure",
-            source=DEFAULT_BASE_URL,
-        )
-        _persist(summary, session_dir=session_dir)
-        return summary
-
-    matched = _filter_rows(
-        rows,
-        gpu=query.gpu,
-        framework=query.framework,
-        precision=query.precision,
-        isl=query.isl,
-        osl=query.osl,
-    )
-    points = [p for p in (_row_to_point(r) for r in matched) if p is not None]
+    target = research_hints.load_competitor_target(Path(session_dir))
+    rows = list((target or {}).get("per_conc") or [])
+    points = [p for p in (_target_row_to_point(r) for r in rows) if p is not None]
 
     if not points:
         summary = BaselineSummary(
@@ -345,29 +273,33 @@ def analyze(
             row_count=0,
             best=None,
             status="no_match",
-            reason="no_match",
+            reason="no_competitor_target",
             warning=(
-                f"fetched {len(rows)} rows for {canonical_model!r} but none "
-                f"matched filter (gpu={query.gpu!r}, framework={query.framework!r}, "
-                f"precision={query.precision!r}, isl={query.isl}, osl={query.osl})"
+                "no sourced competitor_target.json available "
+                "(research scout disabled or produced no targets)"
             ),
-            source=DEFAULT_BASE_URL,
+            source=LLM_AUTHORED_SOURCE,
         )
         _persist(summary, session_dir=session_dir)
         return summary
 
     all_points = _dedup_by_conc(points)
     best = max(points, key=lambda p: p.tput_per_gpu)
+    target_sources = sorted({
+        str(r.get("source")).strip() for r in rows if str(r.get("source") or "").strip()
+    })
     summary = BaselineSummary(
         query=query,
         fetched_at=now,
-        row_count=len(matched),
+        row_count=len(points),
         best=best,
         all_concurrencies=all_points,
         status="ok",
         reason="ok",
-        warning="",
-        source=DEFAULT_BASE_URL,
+        warning=(
+            "sources: " + "; ".join(target_sources) if target_sources else ""
+        ),
+        source=LLM_AUTHORED_SOURCE,
     )
     _persist(summary, session_dir=session_dir)
     return summary
