@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for FlyDSL kernel classification in tracelens_analysis."""
 
 from __future__ import annotations

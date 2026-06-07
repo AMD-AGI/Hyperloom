@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P5 decision-framework regression tests.
 
 The v0.6 ``backends`` / ``params`` promote-threshold tests were
@@ -23,7 +25,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
@@ -52,9 +54,17 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     # work even when the host env var is unset.
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
-    # Skip the `python3 -c "import Magpie"` probe inside _resolve_magpie_python
-    # so subprocess.run mocks only see the actual Magpie launch command.
+    # Keep the unit test hermetic: stub the interpreter resolver so it never
+    # spawns a real ``python3 -c "import Magpie"`` probe. (Setting
+    # MAGPIE_PYTHON alone no longer short-circuits the probe — the resolver
+    # validates the env value via run_with_session_kill since the
+    # stale-interpreter self-heal landed.) The mocked Magpie launch only ever
+    # sees this fixed interpreter as ``cmd[0]``.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
+    from inference_optimizer.orchestrator.action_executors import _grid_runner
+    monkeypatch.setattr(
+        _grid_runner, "_resolve_magpie_python", lambda: "/usr/bin/python3",
+    )
     return make_session_dir()
 
 

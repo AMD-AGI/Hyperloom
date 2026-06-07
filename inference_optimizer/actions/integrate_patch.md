@@ -34,7 +34,7 @@ patch *files*; this action produces *outcomes*.
 | `specialist_task_id` | string   | yes      | Task id of the specialist whose worktree carries the patches. |
 | `patches`            | list[str]| no       | Explicit patch path list (relative to specialist workspace or absolute under `SESSION_DIR`). Defaults to `specialist_done.patches_written`. |
 | `config_changes`     | object   | no       | `env_var -> value` map layered onto the server-launch env before restart. Reverted with the patches on gate failure. |
-| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput, default 0.2. |
+| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput, default 1.0. |
 | `accuracy_baseline`  | object   | no       | Per-(task, metric) baseline scores; defaults to `$SESSION_DIR/baseline_accuracy.json`. |
 
 ## EMIT format

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Stub ``dynamic_action`` executor used when no ReAct backend is
 configured.
 

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """High-level builders that turn a :class:`Config` into a running reactor.
 
 Single entry point:
@@ -123,6 +125,9 @@ def build_reactor_components(
         primary = RobustnessServerSource(
             server_client,
             metrics_window_s=config.metrics_window_s,
+            enable_cluster_pod_metrics=config.enable_cluster_pod_metrics,
+            pod_metrics_categories=tuple(config.pod_metrics_categories),
+            workload_uid=config.workload_uid,
         )
     else:
         primary = _NoServerSource(
@@ -157,36 +162,50 @@ def build_reactor_components(
             *(g.strip() for g in config.server_log_extra_globs.split(":") if g.strip()),
         )
 
-    fallback = LocalProbeSource(
-        LocalProbeConfig(
-            session_dir=config.session_dir,
-            process_patterns=tuple(
-                config.server_process_patterns + config.benchmark_process_patterns
-            ),
-            health_probe_targets=tuple(probe_targets),
-            health_probe_timeout_s=config.health_probe_timeout_s,
-            ray_probe_enabled=config.ray_probe_enabled,
-            ray_probe_timeout_s=config.ray_probe_timeout_s,
-            fd_probe_enabled=config.fd_probe_enabled,
-            fd_probe_pid=config.fd_probe_pid,
-            decision_audit_enabled=config.decision_audit_enabled,
-            decision_audit_max_integrate=config.decision_audit_max_integrate,
-            decision_audit_max_oob_attempts=(
-                config.decision_audit_max_oob_attempts
-            ),
-            preflight_enabled=config.preflight_enabled,
-            critic_health_enabled=config.critic_health_enabled,
-            max_critic_judge_bundles=config.critic_health_max_judge_bundles,
-            extra_server_log_globs=extra_log_globs,
-            max_extra_server_logs=config.server_log_max_extra,
-            state_integrity_enabled=config.state_integrity_enabled,
-            external_deps_enabled=config.external_deps_enabled,
-            external_mount_stat_timeout_s=(
-                config.external_mount_stat_timeout_s
-            ),
-            external_gateway_probe_url=config.external_gateway_probe_url,
+    # Multi-node guard: when ``disable_local_probe`` is on we swap the
+    # LocalProbe for a quiet stub so per-pod sandbox probes (ps,
+    # rocm-smi, local HTTP) cannot emit false-positive symptoms on Ray
+    # workers that legitimately do not run the inference server. The
+    # router still degrades on primary failure but the fallback then
+    # yields an empty SourceData with a descriptive ``degraded_reason``
+    # instead of a high-severity local symptom.
+    fallback: Source
+    if config.disable_local_probe:
+        fallback = _QuietFallback(
+            name="local-probe",
+            reason="config.disable_local_probe is True (multi-node policy)",
         )
-    )
+    else:
+        fallback = LocalProbeSource(
+            LocalProbeConfig(
+                session_dir=config.session_dir,
+                process_patterns=tuple(
+                    config.server_process_patterns + config.benchmark_process_patterns
+                ),
+                health_probe_targets=tuple(probe_targets),
+                health_probe_timeout_s=config.health_probe_timeout_s,
+                ray_probe_enabled=config.ray_probe_enabled,
+                ray_probe_timeout_s=config.ray_probe_timeout_s,
+                fd_probe_enabled=config.fd_probe_enabled,
+                fd_probe_pid=config.fd_probe_pid,
+                decision_audit_enabled=config.decision_audit_enabled,
+                decision_audit_max_integrate=config.decision_audit_max_integrate,
+                decision_audit_max_oob_attempts=(
+                    config.decision_audit_max_oob_attempts
+                ),
+                preflight_enabled=config.preflight_enabled,
+                critic_health_enabled=config.critic_health_enabled,
+                max_critic_judge_bundles=config.critic_health_max_judge_bundles,
+                extra_server_log_globs=extra_log_globs,
+                max_extra_server_logs=config.server_log_max_extra,
+                state_integrity_enabled=config.state_integrity_enabled,
+                external_deps_enabled=config.external_deps_enabled,
+                external_mount_stat_timeout_s=(
+                    config.external_mount_stat_timeout_s
+                ),
+                external_gateway_probe_url=config.external_gateway_probe_url,
+            )
+        )
 
     router = DegradeRouter(
         primary,
@@ -433,6 +452,30 @@ class _NoServerSource:
 
     async def fetch(self, ctx: Any) -> SourceData:
         raise SourceUnavailable(self.reason)
+
+
+@dataclass
+class _QuietFallback:
+    """Silent fallback used when ``disable_local_probe`` is on.
+
+    Returns an empty :class:`SourceData` instead of raising so the
+    DegradeRouter does not enter the ``FAILED`` state — it just keeps
+    serving empty snapshots while the primary recovers. The agent's
+    signal layer treats empty fields as "no data" and stays quiet,
+    which is exactly the multi-node policy: no LocalProbe-driven
+    symptoms when robustness-server is down. Operators still see the
+    transition via the router's ``primary_state`` and the
+    ``degraded_reason`` we attach.
+    """
+
+    name: str
+    reason: str
+
+    async def fetch(self, ctx: Any) -> SourceData:  # noqa: ARG002 - protocol
+        return SourceData(
+            degraded_reason=f"local-probe disabled: {self.reason}",
+            sources_used=[self.name],
+        )
 
 
 __all__ = [

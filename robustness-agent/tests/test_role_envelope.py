@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for :mod:`robustness_agent.role.envelope`.
 
 Covers:

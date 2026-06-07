@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``run_t0_anchor`` after the RecipeKB cutover.
 
 The anchor is now a thin read-modify-write against the local
@@ -97,7 +99,6 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
         extra_attrs={
             "framework": "sglang",
             "model_class": "moe",
-            "marathon_dispatch_id": "marathon-42",
         },
         session_dir=session_dir,
     )
@@ -112,7 +113,6 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
     # extras splatted at the top level (arbor convention)
     assert row.get("model_class")          == "moe"
     assert row.get("image_digest")         == "img-sha-abc"
-    assert row.get("marathon_dispatch_id") == "marathon-42"
     assert row.get("tp")                   == 8
 
 

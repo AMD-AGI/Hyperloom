@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Helper that bridges the multi-node CLI state into Magpie subprocesses.
 
 Why this lives here (orchestrator/action_executors/), not in

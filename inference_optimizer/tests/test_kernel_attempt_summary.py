@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the kernel-optimization attempt summary aggregator.
 
 Pins the contract for ``build_kernel_optimization_summary``:

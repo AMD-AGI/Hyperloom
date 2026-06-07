@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Resume contract for Critic-approved proposals deferred by the
 auto-roofline gate (post-PR-321 review Finding 1, P1).
 
@@ -34,7 +36,7 @@ from inference_optimizer.orchestrator.backends import (
     MockRobustnessBackend,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.message_bus import Message
 from inference_optimizer.paths import make_session_dir
 

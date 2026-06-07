@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.runtime.tools_api.
 
 Hermetic - patches sources.primus_cortex / sources.github helpers so

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tiny stderr logger used by the rayjob CLIs.
 
 Why not :mod:`logging`? The rayjob CLIs are invoked from shell wrappers

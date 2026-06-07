@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Aiter JIT-cache regression detector (A7).
 
 Hyperloom's baseline cold-start cost is dominated by aiter's JIT
@@ -67,7 +69,7 @@ class AiterJitDetector:
         # baseline used for the regression comparison; ``last_build_count``
         # and ``stale_build_streak`` track the build-dir staling rule.
         # Without persistence the regression check never has a prior
-        # value to compare against under M1 subprocess transport.
+        # value to compare against under the subprocess-per-tick transport.
         loaded = state_view.load() if state_view is not None else {}
         last_so = loaded.get("last_so_count")
         self._last_so_count: int | None = (

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Build the production rerun corpus directly from the HuggingFace catalog.
 
 The pool selection rule:

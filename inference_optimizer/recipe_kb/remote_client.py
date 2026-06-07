@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Read-only HTTP client for the central recipe-snapshot kb-service.
 
 The local store (:class:`recipe_kb.LocalRecipeStore`) is the source
@@ -291,6 +293,12 @@ class RemoteRecipeClient:
     retry_attempts: int | None = None
 
     _transport: _HttpTransport | None = field(default=None, init=False, repr=False)
+
+    # Capability flag read by ``RecipeKB._normalize_remote_row``: the
+    # central kb-service returns the nested v2 envelope, so the dispatcher
+    # must run the v2->arbor projection on our rows. Bare (un-annotated)
+    # so the dataclass does not treat it as an init field.
+    returns_arbor_shape = False
 
     def __post_init__(self) -> None:
         if not self.kb_url:

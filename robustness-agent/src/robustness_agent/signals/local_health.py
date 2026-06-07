@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Symptoms derived from LocalProbe-only data.
 
 These rules fire only when DegradeRouter has handed control to

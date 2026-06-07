@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared T0 (PRELUDE) Cortex anchor — KB warm-start only.
 
 The T0 anchor is the boot-time KB ritual every session runs before
@@ -227,7 +229,7 @@ def run_t0_anchor(
 
     # Backfill metadata onto the recipe anchor so subsequent reads
     # (warm-start) and the CLOSE-time update_recipe see the operator-
-    # tracing fields (model_class, image_digest, marathon_dispatch_id,
+    # tracing fields (model_class, image_digest, claw_session_id,
     # ...). T0 only stamps metadata — best_config / best_throughput /
     # what_worked etc. stay whatever they were (preserved across the
     # read-modify-write below). The CLOSE-time hook in coordinator
@@ -257,6 +259,17 @@ def run_t0_anchor(
     _extras: dict[str, Any] = {}
     if _model_class:
         _extras["model_class"] = _model_class
+    # Architecture-identity tags from the model's config.json (carried on
+    # SharedState by ``cli._load_model_config_tags``). Stamped so a
+    # fine-tuned model's recipe records the same architecture as its base.
+    _architectures = getattr(shared_state, "model_architectures", None) or []
+    if isinstance(_architectures, list):
+        _arch_list = [str(a).strip() for a in _architectures if str(a or "").strip()]
+        if _arch_list:
+            _extras["architectures"] = _arch_list
+    _model_type = str(getattr(shared_state, "model_type", "") or "").strip()
+    if _model_type:
+        _extras["model_type"] = _model_type
     rocm_v = str(fp.get("rocm") or "").strip()
     if rocm_v and rocm_v != "unknown":
         _extras["rocm_version"] = rocm_v
@@ -265,7 +278,7 @@ def run_t0_anchor(
         _extras["aiter_version"] = aiter_v
     if image_digest and image_digest != "unknown":
         _extras["image_digest"] = str(image_digest).strip()
-    for src_key in ("marathon_dispatch_id", "claw_session_id", "sandbox_user_id"):
+    for src_key in ("claw_session_id", "sandbox_user_id"):
         v = str(_extra.get(src_key) or "").strip()
         if v:
             _extras[src_key] = v
@@ -505,7 +518,7 @@ def run_t0_anchor(
                 sid, workload,
             )
 
-    # PR-A10: warm_present reflects whether the fallback ladder actually
+    # warm_present reflects whether the fallback ladder actually
     # found a usable record (i.e. tier != "miss" and confidence > 0). The
     # old `bool(warm_text.strip())` check fired on every 200 OK including
     # empty `{"points":[]}` responses, which misled operators into
