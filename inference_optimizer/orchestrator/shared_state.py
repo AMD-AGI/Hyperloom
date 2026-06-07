@@ -1902,6 +1902,15 @@ class SharedState:
             or (result.get("candidate") or {}).get("source_file")
             or ""
         )
+        # Extract test_command from the first attempt that recorded one so
+        # after_kernel_opt rocprof can reuse it without re-deriving from scratch.
+        test_command = ""
+        for _attempt in (result.get("attempts") or []):
+            if isinstance(_attempt, dict):
+                _tc = str((_attempt.get("backend_paths") or {}).get("test_command") or "").strip()
+                if _tc:
+                    test_command = _tc
+                    break
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
         # A pure infra failure is a backend ladder that produced no
@@ -1955,6 +1964,8 @@ class SharedState:
         entry["last_source_file"] = source_file
         entry["last_ts"] = ts
         entry["history"] = history
+        if test_command:
+            entry["test_command"] = test_command
 
         # Overwrite policy for last_kernel_opt:
         #   * KEEP always wins (highest micro bubbles up).
