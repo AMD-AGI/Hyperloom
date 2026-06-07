@@ -2,20 +2,11 @@
 
 """Roofline-aware advisory annotator for the EXPLORE grid.
 
-Previously this module exposed a hard filter that dropped every variant
-whose flags targeted only saturated roofline directions. The drop
-behaviour was a strategy gate — the LLM (and the wall-clock budget /
-overtime kill / per-variant timeout) already decide what's worth
-running — so the filter is now advisory only:
-
-* :func:`categorize_variant` still maps a variant's flags + envs onto
-  the set of roofline directions it targets.
-* :func:`compute_saturation_advisory` returns an opt-in annotation list
-  the executor surfaces in its result dict (``roofline_advisory``) and
-  in the prompt; nothing is dropped.
-
-The categorisation table is intentionally lenient: anything we don't
-recognise lands in the empty-set bucket (no advisory).
+Advisory only (no longer a hard filter — the LLM / budget / overtime kill
+decide what runs): :func:`categorize_variant` maps a variant's flags + envs
+to the roofline directions it targets, and :func:`compute_saturation_advisory`
+returns annotations the executor surfaces (``roofline_advisory``); nothing is
+dropped. Unrecognised flags land in the empty-set bucket (no advisory).
 """
 
 from __future__ import annotations
@@ -122,13 +113,10 @@ def compute_saturation_advisory(
         threshold_pct: Saturation cutoff.
 
     Returns:
-        Per-variant advisory dicts of the form
-        ``{name, extra_server_args, categories, saturated_directions,
-        reason}``. Empty when no snapshot is supplied, no direction
-        crosses the threshold, or every runnable variant is either
-        uncategorized or targets a non-saturated direction. The caller
-        never drops variants based on this list; it is surfaced to the
-        Orchestration prompt as advisory context.
+        Per-variant advisory dicts ``{name, extra_server_args, categories,
+        saturated_directions, reason}``. Empty when no snapshot, no direction
+        crosses the threshold, or no categorized variant targets a saturated
+        direction. Advisory only — the caller never drops variants on this.
     """
     if not saturation_snapshot:
         return []

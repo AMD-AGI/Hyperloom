@@ -2,9 +2,9 @@
 
 """Shared helper for the ``explore`` executor's grid runs.
 
-The job is essentially: take a base Magpie YAML + a list of
-(name, extra_server_args, extra_envs) variants, run Magpie once per
-variant, parse `benchmark_report.json`, return the winners.
+Takes a base Magpie YAML + a list of (name, extra_server_args, extra_envs)
+variants, runs Magpie once per variant, parses ``benchmark_report.json``,
+returns the winners.
 """
 
 from __future__ import annotations
@@ -36,45 +36,26 @@ from .benchmark_result import (
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Content-based variant fingerprint (cross-action dedup ledger key).
-#
-# Identity-by-name was too easy for an LLM-supplied grid to bypass: re-emitting
-# an already-tested ``--block-size 128`` under a freshly invented name silently
-# re-burned the wall clock. The fingerprint hashes the *content* that actually
-# changes Magpie behavior (server args + env overrides) so any rename ends up
-# at the same key in ``SharedState.explore_search.tested``.
-#
-# Normalization rules:
-#   * args: ``shlex.split`` → sorted token tuple. Sorting is intentionally
-#     aggressive — two flag strings differing only in token order produce the
-#     same fingerprint. Real "later wins" overrides should be expressed as a
-#     single flag with the final value, not a re-emit in a different order;
-#     this is documented in the Orchestration prompt.
-#   * envs: ``(str(k), str(v))`` pairs sorted by key. ``str()`` matches the
-#     ``_baseline_params_fingerprint`` convention so ``"1"`` and ``1`` collide
-#     (Magpie ultimately sees the value as a shell-exported string anyway).
-#   * 16-char SHA-1 prefix: collision-resistant enough for a per-session dedup
-#     ledger while staying compact in ``state.json`` and prompt summaries.
-# ---------------------------------------------------------------------------
+# Content-based variant fingerprint (cross-action dedup ledger key). Hashes the
+# content that changes Magpie behavior (server args + env overrides) so a rename
+# maps to the same key in ``SharedState.explore_search.tested``. Normalization:
+# args ``shlex.split`` → sorted tokens (order-insensitive); envs ``(str(k),
+# str(v))`` sorted by key (so ``"1"`` and ``1`` collide); 16-char SHA-1 prefix.
 def variant_fingerprint(
     extra_server_args: str | None,
     extra_envs: dict[str, Any] | None,
 ) -> str:
     """Stable content fingerprint for a (extra_server_args, extra_envs) pair.
 
-    See module-level rationale. Name and note are intentionally NOT part of
-    the input — two variants with identical content but different names
-    (e.g. ``A`` and ``A_v2``) must collapse to the same fingerprint.
+    Name and note are NOT inputs — variants with identical content but
+    different names collapse to the same fingerprint.
     """
     args_text = str(extra_server_args or "")
     try:
         args_tokens = sorted(shlex.split(args_text))
     except ValueError:
-        # Unbalanced quotes / shell-parse failure: fall back to a stable
-        # whitespace split so we still produce *some* fingerprint instead
-        # of crashing the grid pre-flight. Callers can still distinguish
-        # different bad strings; identical bad strings still collide.
+        # Shell-parse failure: whitespace split so we still produce a
+        # fingerprint (identical bad strings still collide).
         args_tokens = sorted(args_text.split())
     env_pairs = sorted(
         (str(k), str(v)) for k, v in (extra_envs or {}).items()
@@ -89,32 +70,16 @@ def variant_fingerprint(
 def _resolve_magpie_python() -> str:
     """Resolve the Python interpreter for Magpie subprocesses.
 
-    Order: $MAGPIE_PYTHON env (only when it can actually ``import Magpie``)
-    > first `python3` on PATH that can ``import Magpie``
-    > /opt/venv/bin/python (the canonical Magpie venv baked into the
-    Hyperloom image) as the unconditional last resort.
-
-    A stale ``$MAGPIE_PYTHON`` that points at an interpreter WITHOUT Magpie
-    must NOT be trusted blindly: ``kernel-agent/scripts/install.sh`` resolves
-    the value BEFORE Magpie is pip-installed, so a fresh env can bake in e.g.
-    ``/usr/bin/python3`` — using it makes every Magpie benchmark fail with
-    ``ModuleNotFoundError: No module named 'Magpie'`` (surfaced as
-    ``subprocess_nonzero`` / baseline_failed). We validate the env value and
-    fall through to auto-detection instead.
-
-    The last resort is returned unconditionally — we never fall back to a
-    PATH ``python3`` we already proved cannot ``import Magpie``, since
-    returning it would just resurface ``ModuleNotFoundError`` at benchmark
-    time. If even the canonical interpreter lacks Magpie the subprocess
-    fails loudly on an actionable path rather than silently benchmarking
-    with a Magpie-less ``/usr/bin/python3``.
+    Order: $MAGPIE_PYTHON (only when it can ``import Magpie``) > first PATH
+    ``python3`` that can ``import Magpie`` > /opt/venv/bin/python (canonical
+    Magpie venv) as unconditional last resort. A stale ``$MAGPIE_PYTHON``
+    resolved before Magpie was pip-installed (e.g. ``/usr/bin/python3``) is
+    validated and skipped to avoid ``ModuleNotFoundError`` at benchmark time.
     """
     def _can_import_magpie(py: str) -> bool:
         try:
-            # NB: ``run_with_session_kill`` always captures stdout/stderr via
-            # PIPE internally and does NOT accept ``capture_output`` — passing
-            # it raises TypeError, which the broad ``except`` would swallow as
-            # "cannot import", silently disabling the whole probe.
+            # ``run_with_session_kill`` captures stdout/stderr internally and
+            # rejects ``capture_output`` (would raise TypeError).
             proc = run_with_session_kill(
                 [py, "-c", "import Magpie"],
                 timeout=10,
@@ -145,10 +110,9 @@ def _resolve_magpie_python() -> str:
 def _resolve_session_dir() -> Path:
     """Resolve the active session_dir for executors that need an output root.
 
-    Reads :func:`inference_optimizer.paths.session_dir`; this honors
-    ``$USER_DATA_PATH`` and otherwise returns ``/workspace/hyperloom``.
-    Used by executor-class fallback paths when ``ctx.extra["workspace"]``
-    was not pre-mkdir'd by SubAgentRunner.
+    Reads :func:`inference_optimizer.paths.session_dir` (honors
+    ``$USER_DATA_PATH``, else ``/workspace/hyperloom``). Used by fallback
+    paths when ``ctx.extra["workspace"]`` was not pre-mkdir'd.
     """
     from ...paths import session_dir as _sd
     return _sd()
@@ -158,28 +122,10 @@ _MAGPIE_CWD_DEFAULT = "/tmp"
 _VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 workload
 
 
-# ---------------------------------------------------------------------------
-# User-declared variant skip list
-#
-# Operators (or the brain agent via the prompt's Environment block) can
-# pre-prune the search grid by declaring SKIP_VARIANTS. The value is a
-# comma/whitespace-separated list of variant patterns; each pattern is
-# matched against ``GridVariant.name`` either exactly or as a fnmatch glob
-# (``*`` / ``?`` / ``[abc]`` supported). Empty patterns are ignored.
-#
-# Examples
-# --------
-#   SKIP_VARIANTS=attn_aiter                 # exact name
-#   SKIP_VARIANTS=attn_aiter,sched_dfs       # two exact names
-#   SKIP_VARIANTS=attn_*,vllm_aiter_fp8bmm   # glob + exact mixed
-#
-# Resolution order (most-specific wins):
-#   params["skip_variants"]  >  $SKIP_VARIANTS  >  ""
-#
-# The helper is intentionally *only* a name-based filter; no model/TP
-# predicates here. Model-aware static rules live in each executor's own
-# ``_filter_incompatible_variants`` (kept as a safety net) and will
-# eventually migrate to the KB.
+# User-declared variant skip list: SKIP_VARIANTS is a comma/whitespace list of
+# patterns matched (exact or fnmatch glob) against ``GridVariant.name``.
+# Resolution order: params["skip_variants"] > $SKIP_VARIANTS > "". Name-based
+# only; model/TP predicates live in each executor's filter.
 import fnmatch as _fnmatch  # noqa: E402  (kept near callers for grep-ability)
 
 
@@ -214,10 +160,8 @@ def _parse_skip_spec(spec: str) -> list[str]:
     return out
 
 
-# Compiled here so callers don't re-compile per grid iteration.
-# Matches both ``--cuda-graph-max-bs 64`` (space-separated) and
-# ``--cuda_graph_max_bs=64`` (underscore + equals) so glob-style or
-# pep8-style flag strings both parse. Captures the integer value.
+# Matches ``--cuda-graph-max-bs 64`` and ``--cuda_graph_max_bs=64``; captures
+# the integer value.
 _RE_CUDA_GRAPH_MAX_BS = re.compile(
     r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)"
 )
@@ -228,13 +172,10 @@ def annotate_multi_node_cuda_graph_max_bs(
 ) -> list[dict]:
     """Return advisory notes for ``--cuda-graph-max-bs N < $CONC`` variants.
 
-    Historically these variants were auto-dropped in multi-node mode
-    because the cuda graph cache misses every cross-node decode tick
-    and the variant regresses by ~50%. We now keep the variant in the
-    grid and return an advisory note instead; the LLM (or the operator)
-    decides whether to skip it. Returns ``[]`` when not in multi-node
-    mode, when ``$CONC`` is unset / non-positive, or when no variant
-    matches.
+    These regress ~50% in multi-node mode (cuda graph cache misses every
+    cross-node decode tick), but the variant is kept in the grid and surfaced
+    as an advisory rather than auto-dropped. Returns ``[]`` outside multi-node
+    mode, when ``$CONC`` is unset/non-positive, or when no variant matches.
     """
     from ._multi_node_env import is_multi_node
     if not is_multi_node():
@@ -261,22 +202,10 @@ def annotate_multi_node_cuda_graph_max_bs(
     return notes
 
 
-# ---------------------------------------------------------------------------
-# Framework / hardware compatibility filter.
-#
-# Drops variants whose flag literals are not supported by the live
-# framework + model class. This is a real-incompatibility filter
-# (``--enable-deepep-moe`` on a dense model, ``--enable-flashinfer-mla``
-# on a non-MLA model, or a flag that does not appear in the framework's
-# ``--help`` output) rather than a strategy gate, so it stays.
-# ---------------------------------------------------------------------------
-
-
-# Multi-node-hot sglang flags that depend on model class (MLA / MoE) or
-# sglang version. Each entry maps a substring of ``extra_server_args`` to
-# a compatibility predicate. Keep this list small and well-documented;
-# anything more dynamic should live in the action_registry's
-# ``applicable_when`` schema instead.
+# Framework / hardware compatibility filter: drops variants whose flag literals
+# are unsupported by the live framework + model class (real incompatibility,
+# not a strategy gate). Each entry maps an ``extra_server_args`` substring to a
+# required model class.
 _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
     ("--enable-flashinfer-mla", "mla"),
     ("--enable-deepep-moe",      "moe"),
@@ -284,20 +213,12 @@ _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
 )
 
 
-# Per-framework cache for ``_probe_server_help_text`` — populated on
-# first call per framework so we avoid spawning a subprocess per-variant.
-# Cleared by ``importlib.reload`` during tests. Empty results are NOT
-# cached so a transient failure (e.g. mocked subprocess raises once)
-# re-probes on the next call. The single-key ``_SGLANG_HELP_CACHE``
-# this replaces is preserved as a back-compat alias below; callers that
-# pre-date the rename keep working through ``_probe_sglang_help_text``.
+# Per-framework cache for ``_probe_server_help_text`` (avoids a subprocess per
+# variant). Empty results are NOT cached so a transient failure re-probes.
 _HELP_TEXT_CACHE: dict[str, str] = {}
 
-# Per-framework subprocess command for ``--help`` text extraction. Each
-# command must be a single-shot ``python3 -c <inline>`` invocation so
-# the probe's 10-second timeout covers the import cost. Failure paths
-# (importerror / argparse exit / etc.) are captured by the broad
-# ``except Exception`` in ``_probe_server_help_text``.
+# Per-framework ``--help`` extraction commands. Each is a single-shot
+# ``python3 -c <inline>`` so the probe's 10s timeout covers the import cost.
 _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
     "sglang": (
         "python3", "-c",
@@ -308,10 +229,8 @@ _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
         "from vllm.entrypoints.openai.api_server import make_arg_parser; "
         "make_arg_parser(None).print_help()",
     ),
-    # atom branch: the audited atom version exposes EngineArgs.add_cli_args
-    # on ``atom.model_engine.arg_utils`` (mirrors vLLM's EngineArgs). Build
-    # a throwaway ArgumentParser, let atom populate it, and print the help
-    # surface for substring matching against grid-variant flag literals.
+    # atom exposes EngineArgs.add_cli_args on ``atom.model_engine.arg_utils``
+    # (mirrors vLLM); populate a throwaway parser and print its help.
     "atom": (
         "python3", "-c",
         "import argparse; from atom.model_engine.arg_utils import EngineArgs; "
@@ -322,26 +241,13 @@ _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
 
 
 def _probe_server_help_text(framework: str) -> str:
-    """Best-effort fetch of ``<framework> --help`` text for grid-variant
-    flag validation.
+    """Best-effort fetch of ``<framework> --help`` text for flag validation.
 
-    Supported frameworks: ``sglang``, ``vllm``, ``atom``. Unknown values
-    return ``""`` (defer to graceful runtime failure). The cache is
-    keyed by framework so a multi-framework test box doesn't leak the
-    first-probed framework's output into the second's slot.
-
-    Returns ``""`` on ANY failure (subprocess timeout, framework not
-    importable in the current Python, sandbox without the framework
-    installed, test-time subprocess mocks that mis-handle this probe's
-    argv shape, ValueError from a too-strict mock side_effect, etc.).
-    Callers MUST treat empty as "I don't know what this framework
-    supports" and fall through to NOT filtering. Empty results are NOT
-    cached so a transient mock-side failure does not poison the cache.
-
-    The broad ``except Exception`` is deliberate: this probe is purely
-    a perf optimisation (saves a wasted 10-min server restart per
-    incompatible variant). It must NEVER crash the optimizer or fail
-    a unit test that mocks ``subprocess.run`` for unrelated reasons.
+    Supported: ``sglang``, ``vllm``, ``atom``; unknown values return ``""``.
+    Returns ``""`` on ANY failure — callers MUST treat empty as "unknown" and
+    fall through to NOT filtering. Empty results are NOT cached. The broad
+    ``except`` is deliberate: this probe is a perf optimisation only and must
+    never crash the optimizer.
     """
     fw = (framework or "").strip().lower()
     if fw in _HELP_TEXT_CACHE:
@@ -365,9 +271,8 @@ def _probe_server_help_text(framework: str) -> str:
 def _probe_sglang_help_text() -> str:
     """Back-compat shim — defer to the framework-keyed probe.
 
-    Pre-dates the multi-framework rename; kept so in-process tests that
-    monkey-patch this exact name still work. New call sites should use
-    ``_probe_server_help_text("sglang")`` directly.
+    Kept so tests that monkey-patch this exact name still work; new call
+    sites should use ``_probe_server_help_text("sglang")``.
     """
     return _probe_server_help_text("sglang")
 
@@ -375,16 +280,10 @@ def _probe_sglang_help_text() -> str:
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     """Heuristic detect of (is_mla_model, is_moe_model) from model path.
 
-    Uses lowercased substring match on the model path. This is a cheap
-    O(N) check intended to filter out an obviously-wrong variant before
-    spending 10 min on a doomed sglang restart. False negatives (model
-    we don't recognise) defer to graceful runtime failure; false
-    positives (we mis-classify a model as MLA/MoE) cost one restart
-    same as if we hadn't filtered.
-
-    Known MLA models: DeepSeek (V2/V3/R1), GLM-5, Kimi-K2 — all share
-    MLA-style multi-head latent attention. Known MoE models: anything
-    in the MLA set + Qwen3-MoE.
+    Lowercased substring match — a cheap check to skip an obviously-wrong
+    variant before a 10-min doomed sglang restart. Misclassifications cost at
+    most one restart. MLA: DeepSeek (V2/V3/R1), GLM-5, Kimi-K2; MoE: MLA set +
+    Qwen3-MoE.
     """
     p = model_path.lower()
     mla_keys = ("glm-5", "glm5", "deepseek", "kimi-k2", "kimi_k2", "kimi")
@@ -402,21 +301,10 @@ def apply_compatibility_filter(
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Skip variants known to be incompatible with current model/sglang.
 
-    Two filter dimensions, each conservative on probe failure:
-
-    1. **Model class** — variants requiring MLA attention (e.g.
-       ``--enable-flashinfer-mla``) or expert-parallel MoE (e.g.
-       ``--enable-deepep-moe``) are dropped when ``$MODEL_PATH`` lacks
-       the corresponding model-family keyword. If ``$MODEL_PATH`` is
-       unset, both predicates are assumed True (let the variant try).
-    2. **sglang version** — variants whose flag literal does NOT appear
-       in ``sglang launch_server --help`` output are dropped. If the
-       help text can't be fetched (sglang not importable in sandbox),
-       both predicates are assumed True (defer to graceful failure).
-
-    Returns the same ``(kept, dropped)`` shape as
-    ``apply_user_skip_list`` so callers can merge dropped entries
-    uniformly.
+    Two dimensions, each conservative (assume compatible) on probe failure:
+    model class (MLA / MoE flags dropped when ``$MODEL_PATH`` lacks the family
+    keyword), and sglang version (flags absent from ``launch_server --help``
+    dropped). Returns the ``(kept, dropped)`` shape of ``apply_user_skip_list``.
     """
     model_path = os.environ.get("MODEL_PATH", "")
     if model_path:
@@ -425,11 +313,8 @@ def apply_compatibility_filter(
         # No MODEL_PATH set -> can't detect -> assume compatible.
         is_mla, is_moe = True, True
 
-    # Pick the live framework's --help text. Default to sglang so
-    # existing test fixtures that don't pass ``framework=`` (and pre-
-    # atom call sites) keep their old behaviour. atom / vllm flow in
-    # through callers that thread the rendered ``benchmark.framework``
-    # value down here.
+    # Live framework's --help text; defaults to sglang for fixtures/callers
+    # that don't thread ``benchmark.framework``.
     fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     help_text = _probe_server_help_text(fw)
     help_available = bool(help_text)
@@ -454,9 +339,7 @@ def apply_compatibility_filter(
                     f"{required_class.upper()}-class"
                 )
                 break
-            # Framework flag-support predicate (only when help is
-            # readable). Reason mentions the active framework so log
-            # readers can tell which `--help` rejected the variant.
+            # Framework flag-support predicate (only when help is readable).
             if help_available and flag not in help_text:
                 skip_reason = (
                     f"{flag} not present in `{fw} --help` output; "
@@ -482,9 +365,7 @@ def apply_user_skip_list(
     """Drop variants whose name matches any pattern in ``skip_spec``.
 
     Returns ``(kept, dropped)`` where each dropped entry is
-    ``{"name", "reason", "source"}`` with source=``"user_skip"`` so
-    callers can distinguish user-driven skips from model/kernel
-    incompatibility skips when both layers run.
+    ``{"name", "reason", "source"}`` with source=``"user_skip"``.
     """
     patterns = _parse_skip_spec(skip_spec)
     if not patterns:
@@ -495,10 +376,7 @@ def apply_user_skip_list(
     for v in grid:
         matched_pat: str | None = None
         for pat in patterns:
-            # Exact name first (cheaper, more common), then fnmatch for
-            # globs. fnmatch also accepts plain names so the second branch
-            # alone would suffice, but keeping the fast-path makes logs
-            # explicit ("matched 'attn_aiter'" vs "matched 'attn_*'").
+            # Exact name first (cheaper), then fnmatch for globs.
             if pat == v.name or _fnmatch.fnmatchcase(v.name, pat):
                 matched_pat = pat
                 break
@@ -531,12 +409,8 @@ class GridVariant:
         *,
         extra_sglang_args: str | None = None,
     ) -> None:
-        # Back-compat keyword alias for the historical
-        # ``extra_sglang_args`` kwarg name. Operators / tests /
-        # third-party callers may still construct
-        # ``GridVariant(extra_sglang_args="x")``; route that into the
-        # canonical attribute with a single DeprecationWarning so the
-        # callsite shows up in audit logs.
+        # Back-compat alias for the historical ``extra_sglang_args`` kwarg;
+        # routed into the canonical attribute with a DeprecationWarning.
         if extra_sglang_args is not None:
             import warnings as _warnings
             _warnings.warn(
@@ -562,35 +436,17 @@ class GridVariant:
 def coerce_extra_envs(value: Any) -> dict[str, str]:
     """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``.
 
-    The Orchestration LLM tends to emit ``extra_envs`` in three shapes
-    even though only the dict form is contractually correct:
-
-    1. ``{"FOO": "1", "BAR": "2"}`` — canonical.
-    2. ``"FOO=1 BAR=2"`` or ``"FOO=1\nBAR=2"`` — shell-style string; the
-       LLM cribs this from `export FOO=1 BAR=2` examples in prompts.
-    3. ``["FOO=1", "BAR=2"]`` — list of ``KEY=VAL`` tokens; sometimes
-       emitted alongside ``synergy_groups`` lists.
-
-    Previously the grid-construction sites accepted only shape #1 and
-    silently propagated #2/#3 into :class:`GridVariant.extra_envs`, where
-    :func:`_run_magpie` and :func:`variant_fingerprint` call ``.items()``
-    and crash with ``AttributeError("'str' object has no attribute
-    'items'")`` — taking the entire ``backends`` / ``params`` round
-    down. This helper keeps the contract narrow at the boundary so the
-    downstream pipeline only ever sees a clean dict.
-
-    Unknown shapes (anything that isn't dict/str/list/None) are coerced
-    to an empty dict; the action ledger records the round but no envs
-    are exported. Caller logging surfaces the variant name so the LLM
-    can self-correct on the next round.
+    Accepts the three shapes the LLM emits — canonical dict, shell-style
+    ``"FOO=1 BAR=2"`` string, and ``["FOO=1", "BAR=2"]`` token list — so
+    downstream ``.items()`` callers never crash on a non-dict. Unknown shapes
+    coerce to an empty dict.
     """
     if isinstance(value, dict):
         return {str(k): str(v) for k, v in value.items() if k is not None}
     if isinstance(value, str):
         out: dict[str, str] = {}
-        # Accept newline, semicolon, or whitespace separation; values
-        # never contain ``=`` in practice but we split on the first ``=``
-        # only to preserve URL-style assignments like ``HF_ENDPOINT=https://...``.
+        # Split on the first ``=`` only to preserve URL-style assignments
+        # like ``HF_ENDPOINT=https://...``.
         tokens = re.split(r"[\s;]+", value.strip())
         for tok in tokens:
             if not tok:
@@ -607,8 +463,7 @@ def coerce_extra_envs(value: Any) -> dict[str, str]:
         out_l: dict[str, str] = {}
         for item in value:
             if isinstance(item, dict):
-                # ``[{"FOO": "1"}, {"BAR": "2"}]`` — merge in order so
-                # later entries win, mirroring shell ``export`` semantics.
+                # ``[{"FOO": "1"}, {"BAR": "2"}]`` — later entries win.
                 for k, v in item.items():
                     if k is None:
                         continue
@@ -648,27 +503,16 @@ class VariantResult:
     returncode: int | None = None
     nonfatal_warnings: list[str] = field(default_factory=list)
     error: str | None = None
-    # Short tag for failure classification — matches the label used by
-    # ``_write_variant_abort_marker`` (e.g. ``mn_server_restart_failed``,
-    # ``magpie_timeout``, ``yaml_build_error``, ``no_benchmark_workspace``,
-    # ``magpie_nonzero_invalid_measurement``, ``benchmark_report_missing``,
-    # ``benchmark_report_invalid_metric``). Empty string for succeeded
-    # variants. Threaded into ``coordinator._summarize_failed_variants``
-    # so the LLM critic prompt sees ``failed_variants[*].error_class``
-    # instead of a generic ``None``.
+    # Short failure-classification tag matching ``_write_variant_abort_marker``
+    # (e.g. ``magpie_timeout``, ``yaml_build_error``); empty for successes.
+    # Surfaced in the LLM critic prompt as ``failed_variants[*].error_class``.
     error_class: str = ""
     note: str = ""
-    # Fix-E (Q3 — Q3c): wall-clock seconds the Magpie subprocess
-    # actually consumed. Populated on success AND on the
-    # ``killed_overtime`` path so the ExploreExecutor can record
-    # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline`` against the
-    # variant ledger without re-measuring.
+    # Fix-E: wall-clock seconds the Magpie subprocess consumed; populated on
+    # success AND on the ``killed_overtime`` path.
     runtime_sec: float | None = None
-    # Fix-E: True iff this variant was reaped by the
-    # ``baseline_runtime_sec * explore_overtime_kill_ratio`` soft
-    # deadline (vs a regular crash / hard timeout / success). Caller
-    # is expected to demote this to a synthetic outcome
-    # ``KILLED_OVERTIME`` (no tput, no fingerprint promotion).
+    # Fix-E: True iff reaped by the overtime soft deadline; caller demotes to
+    # the synthetic ``KILLED_OVERTIME`` outcome (no tput / fingerprint).
     killed_overtime: bool = False
 
     @property
@@ -705,19 +549,10 @@ class VariantResult:
         }
 
 
-# ---------------------------------------------------------------------------
-# Shared sanitization for Orchestration-supplied overrides. Magpie picks the
-# benchmark script via ``cfg["benchmark"]["benchmark_script"]`` (a bare file
-# name; Magpie prepends its own scripts dir) and writes ``inferencex_result.
-# json`` into ``$RESULT_DIR``. Both knobs are surfaced as ``task.params``
-# fields so Orchestration can route around scripts that hardcode
-# ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path salvage"
-# and the failure-recovery section). Both must be sanitized before they
-# touch a YAML or an env var because they originate from an LLM proposal:
-# we reject anything that contains path separators or shell metacharacters.
-# The helpers raise ``ValueError`` so callers can surface ``error_class=
-# bad_param`` (Coordinator promotes that to a ``policy_denied`` observation
-# instead of running an unsafe subprocess).
+# Shared sanitization for Orchestration-supplied overrides (benchmark_script /
+# result_dir). Both originate from LLM proposals so we reject path separators /
+# shell metacharacters; the helpers raise ``ValueError`` (Coordinator surfaces
+# ``error_class=bad_param``) instead of running an unsafe subprocess.
 _SCRIPT_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.sh$")
 _RESULT_DIR_FORBID_RE = re.compile(r"[\s\"'`$;&|<>(){}\[\]\\*?!]")
 
@@ -725,12 +560,8 @@ _RESULT_DIR_FORBID_RE = re.compile(r"[\s\"'`$;&|<>(){}\[\]\\*?!]")
 def sanitize_script_name(value: Any) -> str | None:
     """Return ``value`` if it's a safe Magpie benchmark script file name.
 
-    Magpie prepends its own ``scripts/`` directory to the value, so the
-    value MUST be a bare ``*.sh`` file name (no slashes / no ``..``).
-    Empty / ``None`` returns ``None`` (caller should treat as "no
-    override"). Raises ``ValueError`` for anything that looks like a
-    shell injection attempt — Orchestration can then propose a corrected
-    value on the next tick.
+    Must be a bare ``*.sh`` name (no slashes / ``..``). Empty/``None`` →
+    ``None``; anything resembling shell injection raises ``ValueError``.
     """
     if value is None:
         return None
@@ -748,10 +579,9 @@ def sanitize_script_name(value: Any) -> str | None:
 def sanitize_result_dir(value: Any) -> str | None:
     """Return ``value`` if it's a safe absolute (or workspace-relative) dir.
 
-    Magpie passes the value through to ``$RESULT_DIR``, which lands in a
-    shell ``cd`` / ``mkdir`` inside the benchmark script. We reject any
-    character class that would let an LLM-supplied override escape into
-    a different shell word. Empty / ``None`` returns ``None``.
+    Lands in a shell ``cd`` / ``mkdir`` via ``$RESULT_DIR``, so reject any
+    character that could escape into a different shell word. Empty/``None`` →
+    ``None``.
     """
     if value is None:
         return None
@@ -769,9 +599,8 @@ def sanitize_result_dir(value: Any) -> str | None:
 def server_args_env_name(framework: str | None) -> str:
     """Return the Magpie env var used to append backend server args."""
     name = str(framework or "").strip().lower()
-    # atom check first: "atom" is not a substring of vllm/sglang, but keep
-    # ordering explicit so future framework names with overlapping substrings
-    # cannot accidentally match the wrong branch.
+    # atom checked first so a future overlapping-substring framework name
+    # cannot match the wrong branch.
     if "atom" in name:
         return "EXTRA_ATOM_ARGS"
     if "vllm" in name:
@@ -782,38 +611,22 @@ def server_args_env_name(framework: str | None) -> str:
 def merge_server_args(*parts: str | None) -> str:
     """Merge server arg strings preserving left-to-right override semantics.
 
-    vLLM/SGLang command lines are assembled by shell-appending
-    ``EXTRA_{VLLM,SGLANG}_ARGS`` after the default server args. Some flags are
-    intentionally repeated so later variants can override base args (e.g. a
-    model-specific ``--block-size 1`` plus a grid candidate ``--block-size
-    256``). Therefore this helper only removes empty chunks; it does not try to
-    de-duplicate option names.
+    Only removes empty chunks; does NOT de-duplicate option names, because
+    repeated flags are how later args override base args (e.g. ``--block-size
+    1`` then ``--block-size 256``).
     """
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-# ---------------------------------------------------------------------------
-# sglang scheduler watchdog timeout injection
-#
-# On MI300X with the aiter attention backend, the FIRST inference request
-# JIT-compiles the ``mha_batch_prefill`` kernel; that compile can take longer
-# than sglang's default ``--watchdog-timeout`` of 300s. When it does, the
-# scheduler fires ``SIGQUIT`` and the server dies mid-warmup -> the benchmark
-# reports ``baseline_failed`` with throughput 0 (non-deterministic across
-# models: same-arch models pass once the aiter cache is warm). InferenceX's
-# ``sglang_mi300x.sh`` appends ``$EXTRA_SGLANG_ARGS`` after its own
-# DEFAULT_ARGS and never sets ``--watchdog-timeout`` itself, so routing the
-# flag through ``EXTRA_SGLANG_ARGS`` reliably reaches
-# ``python -m sglang.launch_server``. We inject a longer timeout by default
-# unless the user already pinned one.
-# ---------------------------------------------------------------------------
+# sglang scheduler watchdog timeout injection: on MI300X with aiter, the first
+# request's ``mha_batch_prefill`` JIT compile can exceed sglang's 300s default
+# watchdog, firing SIGQUIT mid-warmup -> baseline_failed. Inject a longer
+# timeout via ``EXTRA_SGLANG_ARGS`` unless the user already pinned one.
 DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC = 1800
 SGLANG_WATCHDOG_TIMEOUT_ENV = "SGLANG_WATCHDOG_TIMEOUT"
 _SGLANG_WATCHDOG_FLAG = "--watchdog-timeout"
-# Matches the flag in space- or equals-separated form so a user-pinned
-# ``--watchdog-timeout 600`` / ``--watchdog-timeout=600`` both suppress
-# injection, while a longer flag (no such sglang flag today, but defensive)
-# does not false-match.
+# Matches space- or equals-separated form so a user-pinned value suppresses
+# injection without false-matching a longer flag.
 _SGLANG_WATCHDOG_RE = re.compile(r"--watchdog-timeout(?:[=\s]|$)")
 
 
@@ -852,22 +665,10 @@ def inject_sglang_watchdog_timeout(
 ) -> str:
     """Append ``--watchdog-timeout <N>`` to ``server_args`` for sglang runs.
 
-    Returns ``server_args`` unchanged (coerced to a stripped string) when
-    either guard trips:
-
-    * ``framework`` does not route to ``EXTRA_SGLANG_ARGS`` — vllm / atom
-      have no such flag, so they are left untouched. Framework detection
-      reuses :func:`server_args_env_name`, so an empty/unknown framework is
-      treated as sglang (the default backend), matching how every other
-      arg-routing site in this module behaves.
-    * ``server_args`` already contains ``--watchdog-timeout`` (in space- or
-      equals-separated form) — a user/variant-supplied value wins and is
-      never doubled.
-
-    Otherwise it appends ``--watchdog-timeout <N>`` where ``N`` comes from
-    :func:`resolve_sglang_watchdog_timeout`. Only this flag is added; the
-    function never touches ``--context-length`` / ``MAX_MODEL_LEN`` or any
-    other existing flag.
+    Returns ``server_args`` unchanged when the framework is not sglang
+    (empty/unknown is treated as sglang) or the flag is already present.
+    Otherwise appends the value from :func:`resolve_sglang_watchdog_timeout`;
+    no other flag is touched.
     """
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
@@ -878,33 +679,19 @@ def inject_sglang_watchdog_timeout(
     return merge_server_args(args, f"{_SGLANG_WATCHDOG_FLAG} {timeout}")
 
 
-# ---------------------------------------------------------------------------
-# sglang ``--context-length`` cap injection
-#
-# sglang's ``launch_server`` defaults ``context_length`` to None, which makes
-# it size ``max_total_tokens`` from the model's ``max_position_embeddings``.
-# For a model that advertises a huge native window (e.g. Mistral-Nemo-12B =
-# ``max_position_embeddings=1024000``) sglang sizes ``max_total_tokens`` to
-# ~701062 and the aiter attention backend then allocates a ``workspace_buffer``
-# of >100 GiB -> ``torch.OutOfMemoryError: HIP out of memory`` -> the server
-# exits 1 and the benchmark reports ``baseline_failed`` with throughput 0.
-# InferenceX's ``vllm_*.sh`` scripts already cap their window via
-# ``--max-model-len $MAX_MODEL_LEN`` (default 4096), but ``sglang_*.sh`` passes
-# no ``--context-length`` and never consumes the YAML's ``MAX_MODEL_LEN``, so
-# the asymmetry only hurts sglang. We cap the context to the actual workload
-# (ISL+OSL+headroom, floored to a sane minimum) but NEVER above the model's
-# native window, and NEVER when the operator/YAML already pinned the flag.
-# Routing through ``EXTRA_SGLANG_ARGS`` (appended verbatim after the script's
-# DEFAULT_ARGS) reliably reaches ``python -m sglang.launch_server``.
-# ---------------------------------------------------------------------------
+# sglang ``--context-length`` cap injection: sglang sizes ``max_total_tokens``
+# off the model's ``max_position_embeddings``, so a huge native window (e.g.
+# Mistral-Nemo's 1024000) balloons the aiter workspace_buffer past GPU memory
+# -> HIP OOM -> baseline_failed. vllm already caps via ``--max-model-len``, so
+# this fixes the sglang-only asymmetry: cap to ISL+OSL+headroom (floored,
+# clamped to the native window) unless the flag is already pinned.
 DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS = 2048
 DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS = 8192
 SGLANG_CONTEXT_HEADROOM_ENV = "SGLANG_CONTEXT_HEADROOM_TOKENS"
 SGLANG_CONTEXT_FLOOR_ENV = "SGLANG_CONTEXT_FLOOR_TOKENS"
 _SGLANG_CONTEXT_LENGTH_FLAG = "--context-length"
-# Matches the flag in space- or equals-separated form so an operator-pinned
-# ``--context-length 6144`` / ``--context-length=6144`` both suppress
-# injection, while a longer flag never false-matches.
+# Matches space- or equals-separated form so an operator-pinned value
+# suppresses injection without false-matching a longer flag.
 _SGLANG_CONTEXT_LENGTH_RE = re.compile(r"--context-length(?:[=\s]|$)")
 
 
@@ -935,14 +722,10 @@ def _resolve_nonneg_int_env(name: str, default: int) -> int:
 def resolve_sglang_context_cap(isl: int, osl: int) -> int:
     """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
 
-    Returns ``max(isl + osl + headroom, floor)`` where ``headroom`` and
-    ``floor`` come from :data:`DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS` /
-    :data:`DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS`, each operator-tunable via
-    ``$SGLANG_CONTEXT_HEADROOM_TOKENS`` / ``$SGLANG_CONTEXT_FLOOR_TOKENS``.
-    The headroom absorbs the BOS/chat-template tokens and random-dataset
-    length jitter on top of the nominal workload; the floor keeps short smoke
-    workloads from pinning the window absurdly low. The caller clamps the
-    result to the model's native window before injecting.
+    Returns ``max(isl + osl + headroom, floor)`` (headroom / floor are
+    operator-tunable via ``$SGLANG_CONTEXT_HEADROOM_TOKENS`` /
+    ``$SGLANG_CONTEXT_FLOOR_TOKENS``). Caller clamps to the model's native
+    window before injecting.
     """
     headroom = _resolve_nonneg_int_env(
         SGLANG_CONTEXT_HEADROOM_ENV, DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
@@ -962,36 +745,18 @@ def inject_sglang_context_length(
 ) -> str:
     """Append ``--context-length <N>`` to ``server_args`` for sglang runs.
 
-    Returns ``server_args`` unchanged (coerced to a stripped string) when any
-    guard trips:
-
-    * ``framework`` does not route to ``EXTRA_SGLANG_ARGS`` -- vllm / atom
-      already cap their window via ``--max-model-len $MAX_MODEL_LEN`` in the
-      benchmark scripts, so they are left untouched. Framework detection
-      reuses :func:`server_args_env_name`, so an empty/unknown framework is
-      treated as sglang (the default backend), matching every other
-      arg-routing site in this module.
-    * ``server_args`` already contains ``--context-length`` (in space- or
-      equals-separated form) -- an operator/YAML/``extra_sglang_args`` value
-      wins and is never overridden or doubled.
-    * the model's ``max_position_embeddings`` cannot be read -- fail-safe to
-      today's behaviour (inject nothing) rather than guessing a window.
-
-    Otherwise it appends ``--context-length min(max_pos, cap)`` where ``cap``
-    comes from :func:`resolve_sglang_context_cap`. The clamp to ``max_pos``
-    means we never stretch the context above the model's native window (RoPE
-    extrapolation / learned-absolute-position breakage); the cap means we
-    never let sglang size ``max_total_tokens`` off a huge native window and
-    OOM the aiter ``workspace_buffer``. Only this flag is added.
+    Returns ``server_args`` unchanged when the framework is not sglang
+    (empty/unknown treated as sglang), the flag is already present, or the
+    model's ``max_position_embeddings`` cannot be read. Otherwise appends
+    ``min(max_pos, cap)`` from :func:`resolve_sglang_context_cap`; only this
+    flag is added.
     """
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
         return args
     if _SGLANG_CONTEXT_LENGTH_RE.search(args):
         return args
-    # Imported lazily: cli.py is the heavy top-level module and only imports
-    # this package lazily itself, so a module-level import here would risk a
-    # cycle. The loader handles nested ``text_config`` for multimodal configs.
+    # Lazy import to avoid a module-level cycle through the heavy cli.py.
     from ...cli import _load_model_max_position_embeddings
     max_pos = _load_model_max_position_embeddings(str(model_path or ""))
     if not max_pos:
@@ -1012,20 +777,11 @@ def apply_runtime_benchmark_overrides(
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML.
 
-    This is the single shared path used by baseline/profile and grid
-    executors. Historically only ``baseline.py`` applied these overrides, so
-    backends/params/sweep silently fell back to shipped YAML defaults like
-    ``TP=1`` and ``ROCR_VISIBLE_DEVICES="1"``. Large models (DeepSeek-R1-0528)
-    then OOM-failed even though the launch environment had ``TP=8``.
-
-    ``benchmark_script`` (when non-empty) lets the caller force-select a
-    specific Magpie script (e.g. a model-specific ``dsr1_fp8_mi300x.sh``)
-    that the operator deliberately wants benchmarked. The value MUST
-    already be sanitized via :func:`sanitize_script_name` — callers at
-    the executor boundary do that so any ``ValueError`` surfaces as
-    ``error_class=bad_param`` instead of an unsafe subprocess invocation.
-    The override is written AFTER the ``gpu_type``-derived generic script
-    below so the operator-supplied pick wins over Hyperloom's default.
+    Single shared path for baseline/profile and grid executors so
+    backends/params/sweep no longer fall back to shipped YAML defaults.
+    ``benchmark_script`` (must be pre-sanitized via :func:`sanitize_script_name`)
+    force-selects a specific Magpie script, applied AFTER the
+    ``gpu_type``-derived generic script so the operator pick wins.
     """
     if model_path:
         bench["model"] = str(model_path)
@@ -1036,13 +792,10 @@ def apply_runtime_benchmark_overrides(
 
     if gpu_type:
         bench["runner_type"] = str(gpu_type)
-        # Magpie priority: explicit benchmark_script > InferenceX native
-        # script > runner_type-derived generic script. Force-pin the
-        # generic ``{framework}_{gpu_type}.sh`` so Magpie's resolver hits
-        # priority 1 and never falls through to InferenceX native
-        # scripts (e.g. ``dsr1_fp8_mi300x.sh``) that hardcode
-        # ``--result-dir /workspace/`` and ignore ``EXTRA_*_ARGS``. See
-        # ``design/magpie-generic-script-and-user-data-path.md``.
+        # Force-pin the generic ``{framework}_{gpu_type}.sh`` so Magpie's
+        # resolver doesn't fall through to InferenceX native scripts that
+        # hardcode ``--result-dir /workspace/`` and ignore ``EXTRA_*_ARGS``.
+        # See ``design/magpie-generic-script-and-user-data-path.md``.
         framework = str(bench.get("framework") or "").lower()
         if framework:
             bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
@@ -1057,9 +810,8 @@ def apply_runtime_benchmark_overrides(
         val = os.environ.get(env_key, "").strip()
         if not val:
             continue
-        # TP yaml-explicit wins: a stale state.tp re-exported on resume
-        # must not silently downgrade a YAML-pinned TP (e.g. baseline
-        # config TP=2 → sglang TP=1 because state.tp defaulted to 1).
+        # TP yaml-explicit wins: a stale state.tp re-exported on resume must
+        # not downgrade a YAML-pinned TP.
         if env_key == "TP":
             yaml_tp = envs.get("TP")
             if yaml_tp not in (None, 0, "", "0"):
@@ -1082,7 +834,6 @@ def apply_runtime_benchmark_overrides(
     return envs
 
 
-# ---------------------------------------------------------------------------
 def _build_variant_yaml(
     base_yaml_path: Path,
     base_extra_args: str,
@@ -1095,25 +846,10 @@ def _build_variant_yaml(
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk.
 
-    Magpie's sglang_mi300x.sh honors ``EXTRA_SGLANG_ARGS`` from envs to
-    append flags after the auto-generated server args, so we just inject
-    the variant's flags there.
-
-    ``model_path`` (when non-empty) overrides ``benchmark.model``; the
-    shipped configs all have a legacy hardcoded Qwen-Qwen3-8B path that
-    would otherwise win over the user's runtime selection.
-
-    ``gpu_type`` (when non-empty) injects ``benchmark.runner_type`` and
-    force-pins ``benchmark.benchmark_script`` to the generic
-    ``{framework}_{gpu_type}.sh`` so Magpie's resolver does NOT fall
-    through to an InferenceX native script (which hardcodes
-    ``--result-dir /workspace/`` and ignores ``EXTRA_*_ARGS``).
-
-    ``benchmark_script`` (when non-empty, must already be sanitized via
-    :func:`sanitize_script_name`) force-pins the Magpie script per
-    variant when an operator deliberately wants a specific (often
-    model-specific) script benchmarked. Applied AFTER the
-    ``gpu_type``-derived generic script so the operator pick wins.
+    Injects the variant's flags via ``EXTRA_SGLANG_ARGS``. ``model_path``
+    overrides the legacy hardcoded ``benchmark.model``; ``gpu_type`` pins the
+    generic ``{framework}_{gpu_type}.sh``; ``benchmark_script`` (pre-sanitized)
+    force-pins a script, applied last so the operator pick wins.
     """
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -1156,23 +892,11 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
 def _kill_stale_servers() -> None:
     """Deep-clean any lingering inference server processes + shared memory.
 
-    Magpie's server_cleanup.sh only kills the process group leader and waits,
-    but vLLM::Worker / EngineCore children often escape the pgrp (Ray-spawned
-    or multiprocessing.spawn). Without this pre-clean, the next vLLM startup
-    hangs for 5 minutes on zmq socket / shared mem conflicts:
-      "Did not receive response from front-end process within 5 minutes"
-
-    We call this BEFORE every Magpie invocation so each grid variant starts
-    on a pristine server state.
-
-    NOTE: uses /proc scan instead of `subprocess.run(["pgrep",...])` to avoid
-    conflicting with test mocks that patch subprocess.run for Magpie calls.
-
-    Multi-node short-circuit: in --nodes>=2 mode the inference servers run
-    inside the RayJob pods, NOT in this sandbox. Scanning sandbox /proc
-    finds nothing matching, and clearing sandbox /dev/shm/vllm* would only
-    remove unrelated state. Skip the whole sweep + the 2s settle sleep —
-    server lifecycle there is owned by `multi_node restart-server`.
+    Magpie's server_cleanup.sh only reaps the pgrp leader, but vLLM::Worker /
+    EngineCore children escape it; without this pre-clean the next startup
+    hangs ~5 min on zmq / shared-mem conflicts. Called before every Magpie
+    invocation. Uses /proc scan (not pgrep) to avoid clashing with test
+    subprocess mocks. No-op in multi-node mode (servers live in RayJob pods).
     """
     from ._multi_node_env import is_multi_node
     if is_multi_node():
@@ -1184,18 +908,13 @@ def _kill_stale_servers() -> None:
 
     _KILL_PATTERNS = ("VLLM::Worker", "VLLM::EngineCore", "vllm.entrypoints",
                       "vllm serve", "sglang.srt", "sglang.launch_server",
-                      # atom server entrypoint (analogous to vllm.entrypoints).
                       "atom.entrypoints", "atom.entrypoints.openai_server")
 
-    # atom spawns its ModelRunner workers via ``multiprocessing.spawn`` — their
-    # cmdline is the generic ``spawn_main ... --multiprocessing-fork`` so they
-    # cannot be matched by _KILL_PATTERNS. On server teardown they routinely
-    # orphan to init (ppid=1) yet keep their full HIP/VRAM reservation (~87 %
-    # of each MI3xx GPU for an 8B+ model), which OOM-kills the *next* atom
-    # server (baseline ok, then roofline/profile/explore all fail to allocate
-    # KV cache). We identify these survivors by the atom install (and aiter
-    # JIT cache) mmap'd into their address space — a signature the optimizer's
-    # own Ray / multiprocessing children never carry.
+    # atom's ModelRunner workers spawn via ``multiprocessing.spawn`` (generic
+    # ``spawn_main ... --multiprocessing-fork`` cmdline, unmatchable by
+    # _KILL_PATTERNS) and orphan to init holding their full HIP/VRAM, OOM-ing
+    # the next atom server. Identify survivors by the atom / aiter JIT mmaps in
+    # their address space — a signature our own children never carry.
     _FORK_MARKERS = (b"--multiprocessing-fork", b"spawn_main")
     _ATOM_MAP_SIGNATURES = ("/ATOM/atom/", "/aiter/jit/", "/aiter-test/aiter/")
 
@@ -1236,8 +955,8 @@ def _kill_stale_servers() -> None:
         is_atom_server = "atom.entrypoints" in text
         if any(pat in text for pat in _KILL_PATTERNS) or _is_orphaned_atom_worker(pid, cmdline):
             killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
-            # Kill the whole process group when we can — atom servers fan out
-            # ModelRunner children that must die with the leader.
+            # Kill the whole pgrp — atom ModelRunner children must die with the
+            # leader.
             try:
                 pgid = os.getpgid(pid)
                 if pgid not in (my_pgid, 0):
@@ -1249,7 +968,7 @@ def _kill_stale_servers() -> None:
             except (ProcessLookupError, PermissionError):
                 pass
 
-    # Clear /dev/shm vllm/nccl/cuda/torch segments that prevent re-binding.
+    # Clear /dev/shm segments that prevent re-binding.
     for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*",
                     "/dev/shm/torch*", "/dev/shm/atom*"):
         for f in glob.glob(pattern):
@@ -1258,9 +977,7 @@ def _kill_stale_servers() -> None:
             except OSError:
                 pass
 
-    # Brief pause for KFD (ROCm kernel driver) async VRAM release. Atom workers
-    # hold tens-to-hundreds of GB, whose async teardown lags well past 2s, so
-    # give the driver longer to actually reclaim before the next server boots.
+    # Pause for KFD async VRAM release; atom workers' teardown lags past 2s.
     time.sleep(8 if killed_atom else 2)
 
 
@@ -1276,23 +993,13 @@ def _run_magpie(
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
-    ``result_dir`` (when non-empty, must already be sanitized via
-    :func:`sanitize_result_dir`) overrides ``$RESULT_DIR`` for this
-    invocation. The env var is ALWAYS set (defaults to ``output_dir``
-    when caller doesn't override) so even a Magpie script that respects
-    ``$RESULT_DIR`` writes ``inferencex_result.json`` into the per-task
-    workspace rather than ``/workspace/``.
-
-    ``soft_deadline_sec`` is the Fix-E per-variant overtime cap. When
-    set, ``run_with_session_kill`` reaps the tree once the deadline
-    elapses and returns a sentinel ``returncode = OVERTIME_KILL_RETURNCODE``
-    instead of raising ``TimeoutExpired``. The caller distinguishes
-    "overtime kill" (returncode sentinel) from "hard timeout"
-    (TimeoutExpired) and from "crash" (any other nonzero).
+    ``result_dir`` (pre-sanitized via :func:`sanitize_result_dir`) overrides
+    ``$RESULT_DIR``, which is always set (default ``output_dir``) so results
+    land in the per-task workspace, not ``/workspace/``. ``soft_deadline_sec``
+    is the Fix-E overtime cap: the tree is reaped and a sentinel
+    ``OVERTIME_KILL_RETURNCODE`` returned instead of raising ``TimeoutExpired``.
     """
-    # Pre-clean: kill lingering server processes + clear shared memory so the
-    # next vLLM/SGLang startup doesn't collide with stale resources.
-    # Skip in test environments to avoid 2s sleep per variant.
+    # Pre-clean lingering servers + shared memory (skip under pytest).
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         _kill_stale_servers()
 
@@ -1302,43 +1009,25 @@ def _run_magpie(
     if magpie_dir:
         env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
 
-    # Multi-node mode: tell Magpie to skip its local-server launch and
-    # point benchmark_serving at the head pod's ClusterIP. Returns {} in
-    # single-node mode so the env stays exactly as before (no-op guard).
+    # Multi-node: tell Magpie to skip its local-server launch and point
+    # benchmark_serving at the head pod's ClusterIP ({} in single-node).
     from ._multi_node_env import magpie_remote_env
     env.update(magpie_remote_env())
 
-    # #210 (Deval, comment 8): pin Magpie's InferenceX-resolution to
-    # ``$INFERENCEX_PATH`` so Magpie loads the SAME InferenceX checkout
-    # that Hyperloom's ``_inferencex_patcher`` has patched. Without
-    # this, Magpie's ``_resolve_default_inferencex_dir`` falls through
-    # to ``./InferenceX`` next to its repo or
-    # ``$XDG_CACHE_HOME/magpie/InferenceX``, either of which may be a
-    # separate, unpatched checkout — the symptom reported in #210
-    # comments 4 + 6. ``MAGPIE_INFERENCEX_PATH`` is the highest-
-    # precedence resolution rung in Magpie itself
-    # (``Magpie/modes/benchmark/inferencex.py:43``), so this is the
-    # documented contract for tying the two checkouts together.
+    # #210: pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH`` so it
+    # loads the SAME checkout ``_inferencex_patcher`` patched, not a stale
+    # ``./InferenceX`` / cache copy. ``MAGPIE_INFERENCEX_PATH`` is Magpie's
+    # highest-precedence resolution rung.
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if inferencex_path:
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-    # Always-on RESULT_DIR default: covers Magpie scripts that respect
-    # the env var (and would otherwise fall back to a hardcoded path).
-    # Scripts that ignore RESULT_DIR (e.g. ``dsr1_fp8_mi300x.sh`` with its
-    # hardcoded ``--result-dir /workspace/``) still leak; the
-    # ``extract_benchmark_measurement`` salvage path picks those up.
+    # Always-on RESULT_DIR default; scripts that ignore it still leak and are
+    # picked up by the ``extract_benchmark_measurement`` salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
-    # Magpie's ``InferenceX/benchmarks/single_node/*.sh`` wrappers default
-    # ``SERVER_LOG=/workspace/server.log`` and the GPU monitor's
-    # ``GPU_METRICS_CSV=/workspace/gpu_metrics.csv``. Both honor env-var
-    # overrides — pin them per-task so server stdout/stderr and per-second
-    # GPU telemetry land alongside ``benchmark_report.json`` instead of
-    # leaking outside the session. Always overwrite (not ``setdefault``)
-    # so a stale value inherited from the parent shell can't redirect a
-    # variant's logs into a previous run's slot.
-    # ``harvest_leaked_artifacts`` still runs as defense-in-depth for any
-    # wrapper that ignores these vars (the older
-    # ``inferencex_result.json`` leak path also stays covered).
+    # Pin SERVER_LOG / GPU_METRICS_CSV per-task so logs land alongside
+    # ``benchmark_report.json`` instead of leaking to ``/workspace/``. Always
+    # overwrite so a stale parent value can't redirect into a prior run's slot;
+    # ``harvest_leaked_artifacts`` covers wrappers that ignore these vars.
     env["SERVER_LOG"] = str(output_dir / "server.log")
     env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
     cmd = [
@@ -1347,13 +1036,9 @@ def _run_magpie(
         "--output-dir", str(output_dir),
         "--run-mode", "local",
     ]
-    # ``run_with_session_kill`` (imported at module level so tests can
-    # patch it as ``_grid_runner.run_with_session_kill``) is the
-    # ``subprocess.run``-compatible wrapper that launches Magpie in its
-    # own POSIX session and tears down the whole descendant tree on
-    # every exit path (bugs.md §B — leaked vLLM / SGLang servers across
-    # grid variants were what later sourced half-truncated benchmark
-    # scripts in bugs.md §C #1). See ``_subprocess_kill.py``.
+    # run_with_session_kill launches Magpie in its own POSIX session and tears
+    # down the whole descendant tree on every exit path (bugs.md §B). See
+    # ``_subprocess_kill.py``.
     proc = run_with_session_kill(
         cmd, env=env, cwd=cwd, timeout=timeout_sec,
         soft_deadline_sec=soft_deadline_sec,
@@ -1361,7 +1046,6 @@ def _run_magpie(
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
-# ---------------------------------------------------------------------------
 async def run_grid(
     *,
     base_yaml_path: Path,
@@ -1380,47 +1064,22 @@ async def run_grid(
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
-    Returns the per-variant :class:`VariantResult` list (all attempts,
-    including failed ones). Caller decides which variants are "winners".
-
-    Synchronous subprocess call wrapped in ``asyncio.to_thread`` so the
+    Returns the per-variant :class:`VariantResult` list (all attempts); the
+    caller picks winners. Subprocess calls run in ``asyncio.to_thread`` so the
     Coordinator reactor isn't blocked.
 
-    ``model_path`` and ``gpu_type`` are forwarded to every variant's YAML
-    render; pass the values resolved by the executor (task.params or
-    $MODEL_PATH / $GPU_TYPE) so each Magpie invocation benchmarks the
-    user's actual model on the user's actual GPU rather than the YAML's
-    legacy default.
-
-    ``benchmark_script`` / ``result_dir`` (both must already be sanitized
-    via :func:`sanitize_script_name` / :func:`sanitize_result_dir`) let
-    the executor route around a model-default script that hardcodes
-    ``--result-dir /workspace/`` — see SKILL.md "Magpie leak-path
-    salvage". ``benchmark_script`` rewrites the variant YAML so Magpie
-    runs the operator-picked script; ``result_dir`` is forwarded as
-    ``$RESULT_DIR`` so scripts that respect the env var write into the
-    variant slot. The salvage path is still wired in (mtime-gated per
-    variant below) for scripts that ignore both knobs.
-
-    ``soft_deadline_sec`` (Fix E — per-variant overtime kill): when
-    set, every variant's Magpie subprocess is reaped once its
-    wall-clock exceeds this many seconds; the resulting
-    :class:`VariantResult` has ``status='failed'``,
-    ``killed_overtime=True`` and ``runtime_sec`` populated. Caller
-    (ExploreExecutor) demotes those to the synthetic
-    ``KILLED_OVERTIME`` outcome instead of running them through the
-    normal KEEP / REVERT / FAILED ladder. None / 0 = disabled (legacy
-    behaviour, only ``variant_timeout_sec`` is enforced).
+    ``model_path`` / ``gpu_type`` are forwarded to every variant's YAML render.
+    ``benchmark_script`` / ``result_dir`` (pre-sanitized) route around scripts
+    that hardcode ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path
+    salvage"). ``soft_deadline_sec`` (Fix E): reap a variant once wall-clock
+    exceeds it, marking it ``killed_overtime=True``; None/0 disables (legacy).
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
     results: list[VariantResult] = []
-    # Variant-boundary robustness pulse — runs a bounded deterministic
-    # robustness tick after every variant (success OR failure) so that a
-    # mid-grid GPU leak, SGLang crash, or ROCm error spike surfaces
-    # between variants instead of waiting for the whole grid (often
-    # 30+ minutes) to finish. Best-effort, ≤ ``_PULSE_TIMEOUT_SEC``;
-    # see ``_robustness_pulse.py`` for the contract.
+    # Variant-boundary robustness pulse: a bounded deterministic tick after
+    # every variant so a mid-grid leak/crash surfaces between variants instead
+    # of after the whole grid. Best-effort; see ``_robustness_pulse.py``.
     async def _pulse_after_variant(idx: int) -> None:
         try:
             await _robustness_pulse(tick_index=idx)
@@ -1470,18 +1129,16 @@ async def run_grid(
             i + 1, len(grid), variant.name, variant.extra_server_args,
         )
 
-        # Multi-node only: restart sglang/vllm with this variant's
-        # server-side flags so each grid row runs against a fresh server
-        # (parity with single-node Magpie's PHASE=all). No-op in
-        # single-node mode — the helper short-circuits when nodes<2.
+        # Multi-node only: restart sglang/vllm with this variant's flags so
+        # each row runs against a fresh server (parity with single-node
+        # PHASE=all). No-op in single-node mode.
         from ._multi_node_server_lifecycle import (
             ServerRestartFailed,
             restart_server_for_round,
         )
         try:
-            # PD knobs auto-resolved by the helper from $PD_* env. The
-            # grid runner doesn't sweep PD ratio yet, so PD config
-            # stays constant across variants within one run.
+            # PD knobs auto-resolved from $PD_* env; PD config stays constant
+            # across variants within one run.
             await restart_server_for_round(
                 extra_server_args=merge_server_args(
                     base_extra_args, variant.extra_server_args,
@@ -1514,12 +1171,9 @@ async def run_grid(
                 break
             continue
 
-        # Snapshot wall-clock immediately before launch so the salvage
-        # path can mtime-gate documented Magpie leak destinations
-        # per-variant. Without this gate a stale
-        # ``/workspace/inferencex_result.json`` from a prior run (or
-        # from an earlier variant in this same grid) silently
-        # masquerades as the current variant's result.
+        # Snapshot wall-clock before launch so the salvage path can mtime-gate
+        # leak destinations per-variant (else a stale prior-run artifact
+        # masquerades as this variant's result).
         variant_started_unix = time.time()
         try:
             rc, stdout, stderr = await asyncio.to_thread(
@@ -1533,10 +1187,8 @@ async def run_grid(
                 soft_deadline_sec=soft_deadline_sec,
             )
         except subprocess.TimeoutExpired as exc:
-            # Harvest pre-timeout leaks (``server.log`` / GPU metrics /
-            # partial profile relay) so the NFS clone of the variant
-            # slot captures what the wrapper managed to write before
-            # the timer fired — usually the smoking gun.
+            # Harvest pre-timeout leaks so the variant slot captures whatever
+            # the wrapper wrote before the timer fired.
             to_candidates = sorted(slot.glob("benchmark_*"))
             to_destination = to_candidates[-1] if to_candidates else slot
             to_harvested = harvest_leaked_artifacts(
@@ -1574,14 +1226,9 @@ async def run_grid(
                 break
             continue
 
-        # Soft overtime gate fired. Record a synthetic
-        # ``killed_overtime=True`` VariantResult with no tput / report
-        # so the ExploreExecutor can demote this variant to the
-        # ``KILLED_OVERTIME`` ledger outcome (no fingerprint promotion,
-        # no stack advance). We still run harvest_leaked_artifacts so
-        # any server.log / GPU metrics the wrapper managed to write
-        # before being reaped land alongside ``variant_NN_<name>/`` for
-        # post-mortem.
+        # Soft overtime gate fired: record a ``killed_overtime=True`` result
+        # with no tput so the ExploreExecutor demotes it to ``KILLED_OVERTIME``.
+        # Still harvest leaks for post-mortem.
         if rc == OVERTIME_KILL_RETURNCODE:
             variant_runtime_sec = round(
                 max(0.0, time.time() - variant_started_unix), 2,
@@ -1622,14 +1269,9 @@ async def run_grid(
 
         # Locate workspace inside slot.
         candidates = sorted(slot.glob("benchmark_*"))
-        # Always-on artifact harvest (parity with BaselineExecutor —
-        # see ``harvest_leaked_artifacts``). Without this each variant
-        # in a backends / params / sweep grid leaks its own
-        # ``/workspace/server.log`` + ``gpu_metrics.csv`` + profile
-        # relay, which makes the NFS clone of
-        # ``<session>/runs/<action>/<task_id>/<variant>/`` empty of
-        # wrapper diagnostics — exactly the per-variant evidence
-        # Robustness needs to RCA a flaky variant.
+        # Always-on artifact harvest (parity with BaselineExecutor) so each
+        # variant slot keeps its server.log / gpu_metrics / profile relay for
+        # Robustness RCA.
         harvest_destination = candidates[-1] if candidates else slot
         harvested = harvest_leaked_artifacts(
             harvest_destination,
@@ -1773,23 +1415,10 @@ def pick_winners(
     """Filter variants whose throughput beats ``baseline_tput`` by
     ``keep_threshold_pct`` percent (> 1% = KEEP).
 
-    Resolution order for ``keep_threshold_pct``:
-
-    1. Explicit caller value (any float, including 0.5/1.0/3.0) wins.
-       This preserves legacy single-node behaviour bit-for-bit (callers
-       like the params executor still pass their own 0.5% default).
-    2. ``None`` (i.e. caller did not pass a value) falls back to:
-       * **multi-node**: ``MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (2.0%).
-         Multi-node noise floor is empirically ~1-2% (jitter from
-         cross-node RDMA + Ray scheduling + GPU clock drift), so the
-         1.0% single-node default produced false positives that wasted
-         a ~40-min ``validate_stack`` round each.
-       * **single-node**: ``SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT``
-         (1.0%) — identical to the pre-multi-node-aware default.
-
-    Single-node call sites are bit-for-bit equivalent: ``is_multi_node()``
-    short-circuits to False without touching state, so the cutoff math
-    is unchanged.
+    Resolution of ``keep_threshold_pct``: an explicit caller value wins; ``None``
+    falls back to ``MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (2.0%, the empirical
+    cross-node noise floor) in multi-node mode, else
+    ``SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (1.0%).
     """
     if keep_threshold_pct is None:
         from ._multi_node_env import is_multi_node
@@ -1822,26 +1451,11 @@ def _write_variant_abort_marker(
 ) -> None:
     """Write ``abort_reason.json`` into the variant slot directory.
 
-    Why this exists: when a variant aborts before benchmark_report.json
-    is produced (ServerRestartFailed / yaml_build_error / magpie timeout
-    / no benchmark_* workspace / invalid measurement), the slot dir is
-    left with only ``config.yaml`` and a session reader cannot tell
-    "tested-but-failed" from "untested / skipped". The final-report
-    renderer and any later post-mortem tool then under-report grid
-    coverage.
-
-    Drop a small JSON marker so:
-
-    * final-report / breakdown can count failed-but-tested variants;
-    * a session reader inspecting ``runs/<action>/<task_id>/<variant>/``
-      sees an explicit reason even after the main process log was
-      rotated or truncated;
-    * the marker pairs with the ``log.warning`` line emitted next to
-      each catch site for grep-from-log triage.
-
-    Failure to write the marker is non-fatal — log and continue so a
-    full-disk / permissions issue can't escalate a single-variant
-    abort into a whole-grid abort.
+    When a variant aborts before benchmark_report.json exists, the slot has
+    only ``config.yaml`` and a reader can't tell "tested-but-failed" from
+    "untested". This marker lets final-report / post-mortem tools count failed
+    variants and find an explicit reason even after the log rotated. Failure
+    to write it is non-fatal (log and continue).
     """
     try:
         slot.mkdir(parents=True, exist_ok=True)

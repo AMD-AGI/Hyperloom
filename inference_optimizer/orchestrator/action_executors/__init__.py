@@ -2,13 +2,8 @@
 
 """Concrete ActionRunner implementations.
 
-Each runner is an ``async def fn(RunnerContext) -> dict`` that the
-SubAgentRunner dispatches when a queued task's ``kind`` matches its
-registered name.
-
-The merged :class:`ExploreExecutor` is the single grid-runner entry;
-it maintains the unified ``explore_search`` ledger on
-:class:`SharedState`.
+Each runner is an ``async def fn(RunnerContext) -> dict`` dispatched by
+SubAgentRunner when a queued task's ``kind`` matches its registered name.
 """
 
 from .baseline import (

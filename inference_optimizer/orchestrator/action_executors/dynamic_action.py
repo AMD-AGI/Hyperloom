@@ -1,14 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Stub ``dynamic_action`` executor used when no ReAct backend is
-configured.
+"""Stub ``dynamic_action`` executor used when no ReAct backend is configured.
 
-* Locate the artefact dir from ``ctx.task.params['artifact_path']``
-  (falls back to ``ctx.extra['workspace']``) and append one closed-
-  schema ``SUB_AGENT_DONE`` row to ``dispatch_history.jsonl``.
-* Write an empty ``proposal_set.json`` into the same dir.
-* Return ``proposal_set=[]`` so the empty path takes over without
-  critic / grid runner.
+Appends one ``SUB_AGENT_DONE`` row to ``dispatch_history.jsonl``, writes an
+empty ``proposal_set.json``, and returns ``proposal_set=[]`` so the empty
+path takes over without critic / grid runner.
 """
 
 from __future__ import annotations
@@ -29,8 +25,8 @@ def _now_iso() -> str:
 
 
 def _resolve_artifact_dir(ctx: RunnerContext) -> Path | None:
-    """Prefer ``params['artifact_path']``; fall back to the per-task
-    workspace; return None when neither resolves."""
+    """Prefer ``params['artifact_path']``, then the per-task workspace;
+    None when neither resolves."""
     explicit = ctx.task.params.get("artifact_path")
     if explicit:
         return Path(explicit)
@@ -41,8 +37,7 @@ def _resolve_artifact_dir(ctx: RunnerContext) -> Path | None:
 
 
 async def dynamic_action_executor(ctx: RunnerContext) -> dict[str, Any]:
-    """Append one ``SUB_AGENT_DONE`` history row + write empty
-    ``proposal_set.json``."""
+    """Append one ``SUB_AGENT_DONE`` history row + write empty proposal_set."""
     dyn_id = str(ctx.task.params.get("dyn_id") or ctx.task.task_id)
     artifact_dir = _resolve_artifact_dir(ctx)
     if artifact_dir is not None:
@@ -65,8 +60,7 @@ async def dynamic_action_executor(ctx: RunnerContext) -> dict[str, Any]:
                 "dyn_id=%s: %r",
                 dyn_id, exc,
             )
-        # Append closed-schema history when the artefact dir matches
-        # the canonical session layout.
+        # Append history when the artefact dir matches the session layout.
         session_dir = _session_dir_from_artifact(artifact_dir, dyn_id)
         if session_dir is not None:
             from ..dynamic_action_history import (

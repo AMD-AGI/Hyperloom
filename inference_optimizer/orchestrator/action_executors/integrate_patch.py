@@ -2,18 +2,14 @@
 
 """IntegratePatchExecutor — PR-A4 (Arbor-into-Hyperloom).
 
-The serving-lane-locked patch integration step that consumes a
-specialist's worktree patches, applies them to the live framework
-source roots, runs a throughput + (optional) accuracy gate, and either
-KEEPs the patch (advances the optimization stack) or REVERTs it
-(rolls back the source tree).
+Serving-lane-locked patch integration: consumes a specialist's worktree
+patches, applies them to the live framework source roots, runs a
+throughput + optional accuracy gate, then KEEPs (advances the stack) or
+REVERTs (rolls back the tree).
 
-This is the orchestrator-side counterpart of Arbor's ``integrate`` step
-in the optimization loop. It is a **deterministic Python executor**
-(no LLM driver) — the only place in the legacy + PR-A2 design where
-``git apply`` against framework_source_roots is allowed (Inv-5.1
-updated: specialists author patches into their isolated worktree;
-this executor is the single integration channel).
+Deterministic Python executor (no LLM). Per Inv-5.1, this is the single
+allowed ``git apply`` channel against framework_source_roots (specialists
+author patches into their isolated worktree only).
 
 Inputs (``ctx.task.params``):
     specialist_task_id (str, required) — completed specialist task
@@ -24,11 +20,9 @@ Inputs (``ctx.task.params``):
     config_changes (dict[str, str], optional) — env vars layered on
         the variant's launch env. Reverted with the patches on REVERT.
     keep_threshold_pct (float, optional) — KEEP threshold; defaults to
-        DEFAULT_KEEP_THRESHOLD_PCT (1.0). Unlike the ExploreExecutor
-        (per-variant KEEP 0.2 + cumulative stack rebench), the patch
-        integrate path has no second-stage stack rebench, so its sole
-        KEEP gate is set at the single-node grid noise floor (1.0%) to
-        avoid permanently committing noise-level "gains".
+        DEFAULT_KEEP_THRESHOLD_PCT (1.0). No stack rebench here, so the
+        sole gate sits at the grid noise floor (1.0%) to avoid committing
+        noise-level "gains".
     accuracy_baseline (float | dict, optional) — accuracy gate input;
         forwarded to the existing accuracy gate utilities.
     base_tput (float, optional) — baseline throughput to compare
@@ -95,11 +89,10 @@ def _now_iso() -> str:
 
 
 def _resolve_framework_root(explicit: str | None) -> Path | None:
-    """Pick the framework source root to apply patches against.
+    """Pick the framework source root for patches.
 
-    Precedence: explicit param → first existing entry of
-    ``resolve_source_file_allowlist()``. Returns None when nothing
-    resolves (executor returns ``apply_failed`` in that case).
+    Precedence: explicit param → first existing
+    ``resolve_source_file_allowlist()`` entry. None when nothing resolves.
     """
     if explicit:
         p = Path(explicit)
@@ -113,9 +106,7 @@ def _resolve_framework_root(explicit: str | None) -> Path | None:
         p = Path(root)
         if p.is_dir() and (p / ".git").exists():
             return p
-    # Last resort: a non-git directory still works for `git apply` if
-    # caller uses --unsafe-paths, but we prefer to surface this as a
-    # clean apply_failed.
+    # Last resort: a non-git dir (prefer surfacing as clean apply_failed).
     for root in resolve_source_file_allowlist():
         p = Path(root)
         if p.is_dir():
@@ -147,9 +138,8 @@ def _git_apply(
 def _git_apply_reverse(
     framework_root: Path, patch_path: Path,
 ) -> tuple[bool, str]:
-    """Reverse-apply ``patch_path`` (``git apply -R -p1``) — used as
-    the REVERT path. We try ``-R`` first; if it fails we fall back to
-    ``git checkout`` which discards every uncommitted change."""
+    """Reverse-apply ``patch_path`` (``git apply -R -p1``) as the REVERT
+    path; caller falls back to ``git checkout`` on failure."""
     cmd = ["git", "-C", str(framework_root), "apply", "-R", "-p1", str(patch_path)]
     try:
         cp = subprocess.run(
@@ -183,13 +173,9 @@ def _resolve_patch_paths(
 ) -> list[Path]:
     """Resolve the list of patch files to apply.
 
-    Order of preference:
-      1. ``params.patches`` (explicit list from caller).
-      2. ``specialist_done.patches_written``.
-      3. Filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
-
-    Each entry is normalised to an absolute Path; missing entries are
-    silently dropped (with a log line).
+    Order: ``params.patches`` → ``specialist_done.patches_written`` →
+    filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
+    Entries normalised to absolute Paths; missing ones logged + dropped.
     """
     candidates: list[str] = []
     if explicit_patches:
@@ -212,9 +198,7 @@ def _resolve_patch_paths(
     out: list[Path] = []
     for c in candidates:
         p = Path(c)
-        # Resolve relative paths against the specialist workspace and
-        # its worktree (specialist patch entries are typically
-        # "patches/001_<slug>.patch").
+        # Resolve relative paths against the specialist workspace + worktree.
         if not p.is_absolute():
             for base in (
                 specialist_workspace / "worktree",
@@ -310,7 +294,7 @@ class IntegratePatchExecutor:
             done_payload=done_payload,
         )
         config_changes = dict(params.get("config_changes") or {})
-        # Allow specialist_done to seed config_changes when params didn't.
+        # Seed config_changes from specialist_done when params didn't.
         if not config_changes and done_payload:
             cc = done_payload.get("config_changes")
             if isinstance(cc, dict):
@@ -332,9 +316,7 @@ class IntegratePatchExecutor:
         framework_root = _resolve_framework_root(
             params.get("framework_source_root") or None,
         )
-        # Allow caller to skip git when ``apply_only=False`` and no
-        # patches; pure config_changes path works without any framework
-        # root.
+        # Pure config_changes path works without a framework root.
         if patch_paths and framework_root is None:
             return {
                 "status": "apply_failed",
@@ -374,8 +356,7 @@ class IntegratePatchExecutor:
                 err = err2
             applied.append(patch)
         if apply_errors:
-            # Apply failed somewhere in the middle — reverse the partial
-            # set so the source tree returns to clean.
+            # Mid-apply failure — reverse the partial set back to clean.
             reverted = self._revert_patches(framework_root, applied)
             await self._maybe_write_framework_pr_kb_record(
                 done_payload=done_payload,
@@ -394,19 +375,14 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             }
 
-        # Stage 2: layer config_changes onto the launch env. The
-        # baseline / explore executors honour env via the variant's
-        # ``extra_envs`` knob; we mirror that.
+        # Stage 2: layer config_changes onto the launch env (via the
+        # variant's ``extra_envs`` knob).
         config_changes_applied = dict(config_changes)
 
-        # Defensive double-check on the
-        # critic verdict. PolicyGate's
+        # Defensive double-check on the Critic verdict. PolicyGate's
         # ``integrate_patch_requires_critic_verdict`` already gates the
-        # delegate; this is belt-and-braces in case the executor is
-        # invoked from a code path that bypassed PolicyGate (e.g.
-        # legacy resume / direct task injection in tests). When
-        # SharedState is unavailable (test fixtures that build the
-        # executor without a Coordinator), this short-circuit no-ops.
+        # delegate; this is belt-and-braces for paths that bypass PolicyGate
+        # (legacy resume / test injection). No-ops when SharedState is absent.
         shared_state = extra.get("shared_state") or extra.get("state")
         if (
             shared_state is not None
@@ -456,7 +432,6 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
             )
         except Exception as exc:  # noqa: BLE001
-            # Unhandled bench failure → REVERT.
             reverted = self._revert_patches(framework_root, applied)
             return {
                 "status": "reverted",
@@ -550,20 +525,14 @@ class IntegratePatchExecutor:
             "workspace": str(output_root),
         }
 
-    # ------------------------------------------------------------------
     # Helpers
-    # ------------------------------------------------------------------
     @staticmethod
     def _find_framework_pr_proposal(
         done_payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         """Return the first proposal whose provenance starts with
-        ``specialist:serving:framework_pr``.
-
-        F2-5: framework-PR proposals are flagged via the canonical
-        provenance string. Returns ``None`` for legacy / kernel
-        specialist outputs so the KB writeback hook is a strict
-        no-op for them.
+        ``specialist:serving:framework_pr`` (F2-5); ``None`` otherwise so
+        the KB writeback hook no-ops for legacy / kernel outputs.
         """
         if not isinstance(done_payload, dict):
             return None
@@ -586,16 +555,11 @@ class IntegratePatchExecutor:
         tps_delta_pct: float,
         extra: dict[str, Any],
     ) -> None:
-        """F2-5: append a JSONL record to
-        ``framework-agent/kb/framework_optimization/lessons.jsonl``
-        when the integrated patch came from the FRAMEWORK_PR phase.
+        """F2-5: append a JSONL record to ``lessons.jsonl`` when the patch
+        came from the FRAMEWORK_PR phase.
 
-        Strict no-op when the proposal carries any other provenance,
-        or when the proposal is missing both ``fa_pr_url`` and
-        ``fa_pr_sha`` (the dedup keys; without them the record is
-        useless to future ``fa phase-discover`` runs). Errors during
-        the write are logged + swallowed so a flaky shared filesystem
-        cannot fail an otherwise-successful integrate.
+        No-op for other provenance or when both dedup keys (``fa_pr_url`` /
+        ``fa_pr_sha``) are missing. Write errors are logged + swallowed.
         """
         proposal = self._find_framework_pr_proposal(done_payload)
         if proposal is None:
@@ -642,13 +606,12 @@ class IntegratePatchExecutor:
     def _revert_patches(
         self, framework_root: Path | None, applied: list[Path],
     ) -> list[Path]:
-        """Reverse-apply the patches we already applied. Returns the
-        patches actually reverted (best-effort)."""
+        """Reverse-apply the applied patches (best-effort); returns those
+        actually reverted."""
         reverted: list[Path] = []
         if framework_root is None or not applied:
             return reverted
-        # Reverse in reverse order so dependent patches unstick in the
-        # right sequence.
+        # Reverse order so dependent patches unstick correctly.
         for patch in reversed(applied):
             ok, err = _git_apply_reverse(framework_root, patch)
             if ok:
@@ -659,12 +622,9 @@ class IntegratePatchExecutor:
                     "falling back to git checkout",
                     patch, err,
                 )
-                # If any reverse-apply fails, fall back to a checkout
-                # which clears every uncommitted change at once.
+                # Reverse-apply failed → checkout clears all uncommitted at once.
                 ok2, err2 = _git_checkout_clean(framework_root)
                 if ok2:
-                    # checkout covers everything from here back; record
-                    # them all as reverted and exit the loop.
                     reverted = list(applied)
                     break
                 log.error(
@@ -681,14 +641,11 @@ class IntegratePatchExecutor:
         config_changes_applied: dict[str, str],
         specialist_task_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run a 1-variant Magpie bench under the patched server, then
-        evaluate the accuracy gate.
+        """Run a 1-variant Magpie bench under the patched server + accuracy gate.
 
-        Returns ``(bench_result_dict, gate_evidence)``. ``bench_result``
-        carries the variant's throughput; ``gate_evidence`` carries
-        ``accuracy_pass`` (True / False / None).
+        Returns ``(bench_result_dict, gate_evidence)`` where gate_evidence
+        carries ``accuracy_pass`` (True / False / None).
         """
-        # Resolve base config (same pattern as ExploreExecutor).
         config_path = Path(
             params.get("config_path")
             or self.default_config_path
@@ -717,8 +674,7 @@ class IntegratePatchExecutor:
             out_name="integrate_patch.with_envs.yaml",
         )
 
-        # Build a single-variant grid that layers config_changes_applied
-        # as the variant's extra_envs.
+        # Single-variant grid with config_changes_applied as extra_envs.
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
             extra_server_args=str(params.get("base_extra_args") or "").strip(),
@@ -758,9 +714,8 @@ class IntegratePatchExecutor:
                 ),
             }
 
-        # Accuracy gate. We only run the gate if the bench actually
-        # succeeded AND the caller provided a baseline. Otherwise pass
-        # ``None`` which lets the KEEP gate skip the accuracy check.
+        # Accuracy gate runs only on a succeeded bench with a baseline;
+        # else ``None`` (KEEP gate skips the accuracy check).
         accuracy_pass: bool | None = None
         baseline_accuracy = params.get("accuracy_baseline")
         if (

@@ -3,45 +3,13 @@
 """Reliable subprocess-tree teardown for Magpie-launched servers
 (Hyperloom ``bugs.md`` §B).
 
-Why this exists
----------------
-
-``BaselineExecutor`` / ``ProfileExecutor`` shell out to Magpie, which in
-turn ``execve`` s a shell wrapper that starts a vLLM / SGLang server,
-then runs the benchmark client. Many of those wrapper scripts:
-
-* ``trap`` on EXIT but ``exit`` the *script*, leaving the server child
-  reparented to PID 1 when the wrapper itself dies first.
-* ``setsid`` themselves to escape the wrapper's controlling terminal.
-* ``nohup`` the server so SIGHUP from a closing stdin doesn't kill it.
-
-The cumulative effect is that on every Hyperloom-side timeout (subprocess
-``TimeoutExpired``) or even on graceful Magpie exit-with-error, the
-server child remains running, holds GPU memory, and — most importantly
-for ``bugs.md`` §C #1 — keeps a ``bash`` interpreter alive that will
-later re-source ``vllm_mi300x.sh`` while the *next* Magpie invocation
-is mid-``shutil.copy2`` over the same file.
-
-Closing the leak
-----------------
-
-The two-line fix is:
-
-1. Launch Magpie inside its own POSIX session
-   (``start_new_session=True`` / ``preexec_fn=os.setsid``). Every
-   descendant inherits the session id; ``os.killpg(pgid, signal)``
-   reaches them all in one syscall, regardless of how many ``setsid``
-   layers a script tried to peel away.
-
-2. From every BaselineExecutor / ProfileExecutor exit path call
-   :func:`kill_my_spawned_server` with the launched Popen handle. The
-   helper is idempotent and never raises — safe to slap into a
-   ``finally:`` even when the launch itself failed.
-
-Compared to ``recover``'s pattern-based killer (which is scoped to a
-robustness-action surface and can match unrelated processes), this
-helper is **scoped strictly to the PID tree we created**. That makes it
-safe to run on every benchmark call, not only during recovery.
+Magpie's shell wrappers ``trap``/``setsid``/``nohup`` the vLLM/SGLang server,
+so on a Hyperloom-side timeout or error the server child survives, holds GPU
+memory, and keeps a ``bash`` alive that later re-sources a script mid-copy
+(bugs.md §C #1). Fix: launch Magpie in its own POSIX session
+(``start_new_session=True``) so ``os.killpg`` reaps the whole tree, and call
+:func:`kill_my_spawned_server` from every exit path (idempotent, never raises).
+Scoped strictly to the tree we created, so it's safe on every benchmark call.
 """
 
 from __future__ import annotations
@@ -55,24 +23,14 @@ import time
 log = logging.getLogger(__name__)
 
 
-# Grace window between SIGTERM and SIGKILL. Magpie / vLLM / SGLang
-# servers normally flush their request buffer + GPU allocator state
-# within ~1–2 s of receiving SIGTERM; 5 s leaves headroom for the slow
-# graphs-capture teardown path without dragging out the cleanup window
-# (operators have already given up on the call by this point).
+# Grace window between SIGTERM and SIGKILL; 5s leaves headroom for the slow
+# graphs-capture teardown.
 _TERM_GRACE_SECONDS = 5.0
 
 
-# Subprocess-launch kwargs that ensure every descendant lives in the
-# same POSIX session. Importing this from the launch site keeps the
-# os-specific dance in one place — Windows installs don't run Magpie
-# but we leave the branch in to keep the helper portable for tests.
 def new_session_kwargs() -> dict:
-    """``kwargs`` to feed ``subprocess.Popen`` so the child gets its
-    own POSIX session (=> killable via ``os.killpg(pid, signal)``).
-
-    Returns ``{}`` on non-POSIX where ``setsid`` is meaningless; the
-    helpers below detect that and fall through to ``proc.terminate``.
+    """``Popen`` kwargs so the child gets its own POSIX session (killable via
+    ``os.killpg``). Returns ``{}`` on non-POSIX.
     """
     if os.name == "posix":
         return {"start_new_session": True}
@@ -82,11 +40,8 @@ def new_session_kwargs() -> dict:
 def _process_group_alive(pgid: int) -> bool:
     """Return True iff at least one process is still in ``pgid``.
 
-    ``killpg(pgid, 0)`` is the standard "does this group exist?" probe:
-    it sends no signal but raises ``ProcessLookupError`` once the group
-    is empty (no member processes remain). Any other ``OSError``
-    (typically ``EPERM`` from a sandbox) is treated as "still alive"
-    since we can't prove otherwise.
+    ``killpg(pgid, 0)`` raises ``ProcessLookupError`` once the group is empty;
+    any other ``OSError`` (e.g. sandbox ``EPERM``) is treated as "still alive".
     """
     if os.name != "posix":
         return False
@@ -121,25 +76,11 @@ def kill_my_spawned_server(
 ) -> None:
     """Tear down the entire process tree rooted at ``proc``.
 
-    Contract:
-
-    * No-op when ``proc`` is ``None`` or has already exited (``poll() ==
-      <int>``). Callers don't have to guard with ``if proc is not None``.
-    * SIGTERM to the process group, wait up to ``grace_seconds`` for the
-      group to drain, then SIGKILL whatever survived. This is the only
-      ordering that reliably reaps grandchildren on Linux while still
-      giving co-operating children a chance to flush state (e.g. close
-      GPU contexts cleanly).
-    * Never raises. We log a warning if signalling failed for an
-      unexpected reason (``EPERM`` etc.) but proceed — the alternative
-      is letting the exception bubble out of a ``finally:`` and mask
-      the executor's real return value.
-
-    Requires the child to have been launched with
-    :func:`new_session_kwargs` (or ``preexec_fn=os.setsid`` /
-    ``start_new_session=True``) so ``os.getpgid(proc.pid)`` returns a
-    pgid distinct from Hyperloom's own — otherwise we would risk
-    killing the Coordinator. We assert this defensively below.
+    No-op when ``proc`` is ``None`` or already exited. SIGTERM the group, wait
+    up to ``grace_seconds``, then SIGKILL survivors. Never raises (logs a
+    warning on unexpected signalling failure). Requires the child to have been
+    launched with :func:`new_session_kwargs` so its pgid is distinct from
+    Hyperloom's own; asserted defensively below.
     """
     if proc is None:
         return
@@ -207,19 +148,10 @@ def kill_my_spawned_server(
         pass
 
 
-# Sentinel ``returncode`` used when ``run_with_session_kill`` reaps a
-# child because its ``soft_deadline_sec`` elapsed (vs the legacy
-# ``timeout=`` hard cap which still raises ``TimeoutExpired``).
-# Callers that opted into the soft deadline detect this by checking
-# ``returncode == OVERTIME_KILL_RETURNCODE``; the ExploreExecutor in
-# particular turns this into the ``KILLED_OVERTIME`` per-variant
-# outcome (no tput, no fingerprint promotion).
-#
-# Value chosen so it cannot collide with a real POSIX signal-based
-# returncode (which is encoded as ``-N`` for signal ``N``; the largest
-# defined signal on Linux is well under 100). 909 is the canonical
-# Hyperloom "soft overtime kill" sentinel — grep this constant first
-# when triaging a mystery returncode.
+# Sentinel ``returncode`` when ``run_with_session_kill`` reaps a child for an
+# elapsed ``soft_deadline_sec`` (vs the ``timeout=`` hard cap, which still
+# raises ``TimeoutExpired``). Chosen not to collide with a real signal-based
+# ``-N`` returncode; the ExploreExecutor maps it to ``KILLED_OVERTIME``.
 OVERTIME_KILL_RETURNCODE: int = -909
 
 
@@ -233,45 +165,19 @@ def run_with_session_kill(
     soft_deadline_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
     """``subprocess.run``-compatible call that ALSO tears down the entire
-    descendant tree on every exit path (success, nonzero, timeout,
-    exception).
+    descendant tree on every exit path.
 
-    Why a wrapper instead of just ``subprocess.run(...)``:
+    Unlike ``subprocess.run`` (which discards the Popen handle and can't reach
+    leaked grandchildren — the bugs.md §B server leak), this launches via
+    ``Popen(start_new_session=True)`` and reaps the tree in a ``finally:``.
+    Returns a ``CompletedProcess`` and re-raises ``TimeoutExpired`` like
+    ``subprocess.run``.
 
-    * ``subprocess.run`` returns a ``CompletedProcess`` and discards the
-      Popen handle. Once it returns, there is no portable way for the
-      caller to reach the (possibly-leaked) grandchildren — and the
-      grandchildren are exactly what ``bugs.md`` §B is about: Magpie's
-      shell wrapper exits cleanly, the vLLM/SGLang server it spawned
-      via ``nohup`` / ``setsid`` survives, and the leaked bash
-      interpreter is what later re-sources a half-truncated benchmark
-      script in ``bugs.md`` §C #1.
-    * We therefore launch via ``Popen(start_new_session=True)`` so the
-      whole tree shares a pgid we control, ``communicate()`` for the
-      same return shape ``subprocess.run`` provides, and
-      ``kill_my_spawned_server`` in a ``finally:`` so the tree is
-      guaranteed to be gone before the function returns.
-
-    Returns a ``CompletedProcess`` (so callers can keep their existing
-    ``.returncode / .stdout / .stderr`` access) and re-raises
-    ``subprocess.TimeoutExpired`` exactly like ``subprocess.run`` does.
-
-    ``soft_deadline_sec``: optional secondary deadline that fires
-    BEFORE the (typically much larger) ``timeout=`` hard cap. When
-    set, the helper polls the child every 0.5 s; once the deadline
-    elapses, the process tree is reaped and the function returns a
-    :class:`subprocess.CompletedProcess` with
-    ``returncode = OVERTIME_KILL_RETURNCODE`` (does NOT raise). This
-    lets the ExploreExecutor implement the per-variant
-    "wall-clock > baseline × ratio" early-kill rule (Fix E) while
-    preserving the legacy ``TimeoutExpired`` semantics for any
-    caller that doesn't opt in. Pass ``None`` (or any value ≤ 0) to
-    keep the legacy behaviour.
-
-    Tests that previously patched ``subprocess.run`` should patch this
-    function instead (e.g.
-    ``patch("inference_optimizer.orchestrator.action_executors._subprocess_kill.run_with_session_kill")``)
-    — the call shape and return type are intentionally identical.
+    ``soft_deadline_sec`` (Fix E): an optional deadline firing before the
+    ``timeout=`` hard cap; on elapse the tree is reaped and a
+    ``CompletedProcess`` with ``returncode = OVERTIME_KILL_RETURNCODE`` is
+    returned (does NOT raise). ``None`` / ≤ 0 keeps legacy behaviour. Tests
+    should patch this function instead of ``subprocess.run``.
     """
     proc: subprocess.Popen | None = None
     try:
@@ -291,12 +197,10 @@ def run_with_session_kill(
                 soft_deadline_sec=soft_deadline_sec,
             )
         except subprocess.TimeoutExpired:
-            # Reap before re-raising so the caller's `finally:` /
-            # `except:` doesn't see a still-running tree.
+            # Reap before re-raising so the caller doesn't see a running tree.
             kill_my_spawned_server(proc)
             try:
-                # Drain whatever the pipes have so the exception carries
-                # the partial output (subprocess.run does the same).
+                # Drain the pipes so the exception carries partial output.
                 stdout, stderr = proc.communicate(timeout=2.0)
             except subprocess.TimeoutExpired:
                 stdout, stderr = "", ""
@@ -329,10 +233,8 @@ def run_with_session_kill(
 
 
 class _SoftDeadlineExceeded(Exception):
-    """Internal sentinel raised by :func:`_communicate_with_soft_deadline`
-    when the soft (Fix-E) wall-clock deadline elapses. NEVER bubbles
-    past :func:`run_with_session_kill` — converted into a sentinel
-    ``CompletedProcess`` instead.
+    """Internal sentinel for an elapsed soft (Fix-E) deadline. Never bubbles
+    past :func:`run_with_session_kill` (converted to a ``CompletedProcess``).
     """
 
     def __init__(self, *, deadline_sec: float, elapsed_sec: float) -> None:
@@ -352,16 +254,10 @@ def _communicate_with_soft_deadline(
 ) -> tuple[str | bytes, str | bytes]:
     """``proc.communicate`` shim that also enforces ``soft_deadline_sec``.
 
-    No-op fast path (``soft_deadline_sec`` falsy or ≤ 0) delegates
-    straight to ``proc.communicate(timeout=hard_timeout)`` so callers
-    that did not opt in see byte-identical behaviour.
-
-    When ``soft_deadline_sec`` is positive, polls ``proc.communicate``
-    in 0.5 s slices, raising :class:`_SoftDeadlineExceeded` once the
-    monotonic wall-clock exceeds the deadline. The legacy
-    ``hard_timeout`` is still enforced via ``communicate``'s own
-    timeout argument on the final slice so a stuck child can't dodge
-    both gates.
+    Falsy / ≤ 0 deadline delegates straight to
+    ``proc.communicate(timeout=hard_timeout)``. Otherwise polls in 0.5s slices,
+    raising :class:`_SoftDeadlineExceeded` once the deadline passes; the
+    ``hard_timeout`` is still enforced so a stuck child can't dodge both gates.
     """
     if soft_deadline_sec is None or float(soft_deadline_sec) <= 0.0:
         return proc.communicate(timeout=hard_timeout)
@@ -376,9 +272,8 @@ def _communicate_with_soft_deadline(
             raise _SoftDeadlineExceeded(
                 deadline_sec=deadline_sec, elapsed_sec=elapsed,
             )
-        # The slice we wait this iteration: bounded above by the soft
-        # remaining AND the hard remaining (so ``TimeoutExpired`` still
-        # fires at the right wall-clock if the soft deadline is huge).
+        # Slice bounded by both soft and hard remaining so ``TimeoutExpired``
+        # still fires at the right wall-clock.
         slice_sec = min(poll_interval, remaining_soft)
         if hard_timeout is not None:
             hard_remaining = float(hard_timeout) - elapsed
