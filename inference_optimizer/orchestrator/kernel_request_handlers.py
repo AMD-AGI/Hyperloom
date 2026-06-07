@@ -2158,6 +2158,16 @@ async def _run_after_kernel_opt_rocprof(
             if str(lko.get("kernel_id") or "") == kernel_id:
                 bp = lko.get("backend_paths") or {}
                 test_command = str(bp.get("test_command") or "").strip()
+        # Derive workdir from last_source_file (mirrors before-opt _rocprof_workdir logic).
+        # Falls back to session_dir when source_file is absent or inaccessible.
+        run_workdir: Path = session_dir
+        source_file = str(attempt.get("last_source_file") or "").strip()
+        if source_file:
+            sf = Path(source_file)
+            if sf.is_file():
+                run_workdir = sf.parent
+            elif sf.is_dir():
+                run_workdir = sf
     except Exception as exc:
         return {"status": "skipped", "reason": f"state_load_error: {type(exc).__name__}"}
 
@@ -2177,7 +2187,7 @@ async def _run_after_kernel_opt_rocprof(
 
     cmd = [
         "python3", str(tool),
-        "--workdir", str(session_dir),
+        "--workdir", str(run_workdir),
         "--cmd", test_command,
         "--out-json", str(out_json),
         "--out-txt", str(out_txt),

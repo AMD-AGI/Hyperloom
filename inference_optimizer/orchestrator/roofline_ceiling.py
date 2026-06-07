@@ -844,22 +844,31 @@ def _fused_moe_flops(M: int, K: int, N: int, topk: int) -> float:
     return 2.0 * M * K * N * topk * 2 + 2.0 * M * K * N * topk + M * K * (2 * topk - 1)
 
 
-def _fused_moe_bytes(M: int, K: int, N: int, num_experts: int, topk: int, bpe: float) -> float:
+def _fused_moe_bytes(
+    M: int, K: int, N: int, num_experts: int, topk: int,
+    weight_bpe: float, act_bpe: float | None = None,
+) -> float:
     """HBM bytes for one gated SwiGLU MoE forward using the coupon-collector
     active-expert count, inlined from TraceLens FusedMoE.bytes_func.
 
-    E_active = n * (1 - ((n - k) / n) ** M)  [uniform routing estimate]
-      input  : M * K * bpe
-      fc1 (gate+up weights): E_active * N * K * bpe * 2
-      fc2 (down weights)   : E_active * N * K * bpe
-      output : M * K * bpe
+    Mirrors the TraceLens separation of input/weight/output dtypes:
+      input  : M * K * act_bpe
+      fc1 (gate+up weights): E_active * N * K * weight_bpe * 2
+      fc2 (down weights)   : E_active * N * K * weight_bpe
+      output : M * K * act_bpe
+
+    act_bpe defaults to weight_bpe when not provided. For FP8/FP4-weight
+    models pass act_bpe=2.0 (bf16 activations) to match TraceLens semantics
+    where input_bpe != weight_bpe.
     """
+    if act_bpe is None:
+        act_bpe = weight_bpe
     e_active = num_experts * (1.0 - ((num_experts - topk) / num_experts) ** M)
     return (
-        M * K * bpe          # input read
-        + e_active * N * K * bpe * 2   # gate + up weight reads
-        + e_active * N * K * bpe       # down weight reads
-        + M * K * bpe        # output write
+        M * K * act_bpe                      # input read
+        + e_active * N * K * weight_bpe * 2  # gate + up weight reads
+        + e_active * N * K * weight_bpe       # down weight reads
+        + M * K * act_bpe                     # output write
     )
 
 
@@ -906,13 +915,18 @@ def _gemm_flops(M: int, N: int, K: int) -> float:
     return 2.0 * M * N * K
 
 
-def _gemm_bytes(M: int, N: int, K: int, bpe: float) -> float:
-    """HBM bytes for a bias-free matmul: read(MK + KN) + write(MN).
+def _gemm_bytes(
+    M: int, N: int, K: int, weight_bpe: float, act_bpe: float | None = None,
+) -> float:
+    """HBM bytes for a bias-free matmul: read(act MK + weight KN) + write(act MN).
 
-    Mirrors TraceLens.PerfModel.perf_model.GEMM.bytes_func (all tensors
-    in the same dtype, no bias).
+    Mirrors TraceLens.PerfModel.perf_model.GEMM.bytes_func with bpe_mat1=act_bpe
+    (input activation), bpe_mat2=weight_bpe (weight), bpe_output=act_bpe (output).
+    act_bpe defaults to weight_bpe; for FP8/FP4-weight models pass act_bpe=2.0
+    (bf16 activations) to correctly separate activation from weight bytes.
     """
-    return (M * K + K * N + M * N) * bpe
+    a = act_bpe if act_bpe is not None else weight_bpe
+    return M * K * a + K * N * weight_bpe + M * N * a
 
 
 def _sdpa_flops(
@@ -997,6 +1011,10 @@ def compute_roofline_from_perfmodel(
         return None
     f_peak = f_peak_tflops * 1e12
     bpe = float(meta.weight_dtype_bytes or 2.0)
+    # Activations (input/output) are at least bf16 even for quantized-weight models.
+    # Mirrors TraceLens FusedMoE.bytes() where input_bpe defaults to 2 (bf16)
+    # and weight_bpe defaults to 1 (FP8), keeping them separate.
+    act_bpe = max(bpe, 2.0)
 
     hidden = meta.hidden_size
     ffn = meta.intermediate_size
@@ -1044,7 +1062,7 @@ def compute_roofline_from_perfmodel(
         M = batch * s_q
         for name, K, N, rep in linears:
             fl = _gemm_flops(M, N, K)
-            by = _gemm_bytes(M, N, K, bpe)
+            by = _gemm_bytes(M, N, K, bpe, act_bpe)
             t, side = _roofline_time(fl, by)
             total_t += t * rep
             op_rows.append(OpBreakdown(
@@ -1063,7 +1081,7 @@ def compute_roofline_from_perfmodel(
             fl_moe = _fused_moe_flops(M, hidden, meta.moe_intermediate_size, meta.experts_per_tok)
             by_moe = _fused_moe_bytes(
                 M, hidden, meta.moe_intermediate_size,
-                meta.num_experts, meta.experts_per_tok, bpe,
+                meta.num_experts, meta.experts_per_tok, bpe, act_bpe,
             )
             t_moe, side_moe = _roofline_time(fl_moe, by_moe)
             total_t += t_moe * n_layers
@@ -1079,7 +1097,7 @@ def compute_roofline_from_perfmodel(
         # SDPA
         causal = (s_q == s_kv)
         fl_s = _sdpa_flops(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal)
-        by_s = _sdpa_bytes(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal, bpe)
+        by_s = _sdpa_bytes(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal, act_bpe)
         t_s, side_s = _roofline_time(fl_s, by_s)
         total_t += t_s * n_layers
         op_rows.append(OpBreakdown(
@@ -1125,12 +1143,17 @@ def compute_roofline_from_perfmodel(
 
 
 def compute_roofline_breakdown_from_state_v2(state: Any) -> "tuple[RooflineBreakdown, PerfModelBreakdown | None]":
-    """Return both the legacy aggregate breakdown AND the per-op PerfModel breakdown.
+    """Return the primary roofline breakdown AND the per-op PerfModel breakdown.
 
-    The legacy ``RooflineBreakdown`` preserves full backward compatibility
-    (used by coordinator watermark / within_roofline_pct).  The
-    ``PerfModelBreakdown`` is optional (``None`` when TraceLens is unavailable
-    or model config is incomplete) and provides per-op FLOPs/bytes/time/bound.
+    The first element is a ``RooflineBreakdown`` from
+    ``compute_roofline_breakdown_from_state``: ``mem_tok_per_sec`` and
+    ``cmp_tok_per_sec`` come from the aggregate top-down formula (preserved for
+    dashboard compatibility), while ``peak_tok_per_sec`` and ``bound_kind`` are
+    driven by the bottom-up PerfModel when the model config is complete.
+
+    The second element is the full per-op ``PerfModelBreakdown`` (``None`` when
+    the GPU or model config is unsupported).  Its ``decode_tok_per_s`` equals
+    ``breakdown.peak_tok_per_sec`` for supported configs.
     """
     legacy = compute_roofline_breakdown_from_state(state)
     meta = load_model_meta(

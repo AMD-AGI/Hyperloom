@@ -2672,6 +2672,8 @@ class SharedState:
             from .roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
+                compute_roofline_from_perfmodel,
+                load_model_meta,
             )
             # Two-sided roofline (T_mem + T_cmp + min) — see formula
             # change in roofline_ceiling.py. ``peak_tput`` continues to
@@ -2700,6 +2702,44 @@ class SharedState:
                 cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
                 bound_kind=breakdown.bound_kind,
             )
+            # Per-op PerfModel breakdown for dashboard visualization.
+            try:
+                meta = load_model_meta(
+                    getattr(self, "model_path", ""),
+                    precision_hint=str(getattr(self, "precision", "") or ""),
+                )
+                if meta is not None:
+                    from .roofline_ceiling import _resolve_effective_concurrency
+                    pm_bd = compute_roofline_from_perfmodel(
+                        meta=meta,
+                        gpu_type=str(getattr(self, "gpu_type", "") or ""),
+                        concurrency=_resolve_effective_concurrency(self),
+                        isl=int(getattr(self, "isl", 0) or 0),
+                        osl=int(getattr(self, "osl", 0) or 0),
+                        num_gpus=int(getattr(self, "tp", 0) or 0),
+                        precision_tag=str(getattr(self, "precision", "") or "bf16") or "bf16",
+                    )
+                    if pm_bd is not None:
+                        history_entry["perfmodel_breakdown"] = {
+                            "decode_tok_per_s": pm_bd.decode_tok_per_s,
+                            "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
+                            "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
+                            "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
+                            "ops": [
+                                {
+                                    "name": op.name,
+                                    "flops": op.flops,
+                                    "bytes_moved": op.bytes_moved,
+                                    "ai": op.ai,
+                                    "time_s": op.time_s,
+                                    "bound": op.bound,
+                                    "pct_time": op.pct_time,
+                                }
+                                for op in pm_bd.ops
+                            ],
+                        }
+            except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
+                pass
             history_entry["trace_input"] = str(trace_input)
             history_entry["analysis_md_path"] = str(analysis_md_path)
             # 9fe4609 sidecar artifact pointer: dashboards read this
