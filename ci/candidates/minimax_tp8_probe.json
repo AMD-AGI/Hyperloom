@@ -1,0 +1,37 @@
+{
+  "schema_version": "hyperloom.production_corpus.v1",
+  "pool_id": "minimax-tp8-probe",
+  "source": "manual",
+  "_readme": [
+    "TEMPORARY probe: 2 MiniMax models forced to tp8, dispatched to core42-hyperloom.",
+    "Purpose: observe whether tp8 actually fails (intermediate 1536/8=192 is not a",
+    "multiple of the FP8 block size 128). Delete this file after the probe run starts."
+  ],
+  "policy": {"rotation": "none", "refresh_mode": "manual"},
+  "candidates": [
+    {
+      "pool_id": "minimax-tp8-probe",
+      "pool_index": 0,
+      "label": "MiniMax M2.5 tp8",
+      "repo_id": "MiniMaxAI/MiniMax-M2.5",
+      "framework": "vllm",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "note": "tp8 probe @ core42-hyperloom"
+    },
+    {
+      "pool_id": "minimax-tp8-probe",
+      "pool_index": 1,
+      "label": "MiniMax M2.7 tp8",
+      "repo_id": "MiniMaxAI/MiniMax-M2.7",
+      "framework": "vllm",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "note": "tp8 probe @ core42-hyperloom"
+    }
+  ]
+}
