@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end integration with inference_optimizer.
 
 Round-trip: build a Coordinator-style prompt, drive it through the

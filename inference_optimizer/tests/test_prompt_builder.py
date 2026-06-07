@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``orchestrator/system_prompts/prompt_builder.py``.
 
 These tests pin the public contract of :func:`build_orchestration_prompt`

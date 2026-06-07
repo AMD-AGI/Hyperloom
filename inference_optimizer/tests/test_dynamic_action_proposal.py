@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the proposal validator and proposal-set builder."""
 
 from __future__ import annotations

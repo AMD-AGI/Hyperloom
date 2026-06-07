@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-A8 (Arbor-into-Hyperloom): Robustness storm detector + intervention-mix.
 
 The data primitives Robustness consumes to detect:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """RobustnessAgentBackend — bridges the standalone ``robustness-agent``
 runtime into the ``inference_optimizer`` Coordinator as a real Robustness
 Backend.

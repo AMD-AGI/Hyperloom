@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``dynamic_action`` dispatch validation and round-cap accounting.
 
 PolicyGate is exercised against the real ``default_role_registry``;

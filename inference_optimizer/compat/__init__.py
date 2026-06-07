@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Backwards-compatibility shims for inference_optimizer.
 
 Modules in this sub-package implement deprecation-window helpers for

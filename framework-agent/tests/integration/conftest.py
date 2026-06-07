@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Fake Primus Cortex HTTP server fixture for integration tests.
 
 Spawns a stdlib ``http.server.ThreadingHTTPServer`` on an OS-assigned

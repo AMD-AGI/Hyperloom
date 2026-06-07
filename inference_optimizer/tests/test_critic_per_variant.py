@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-A7 (Arbor-into-Hyperloom): Critic gate over specialist patches.
 
 Pins three contracts:

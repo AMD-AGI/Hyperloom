@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline Comparison pipeline tests — `report.py` ↔ `roofline_snapshots`.
 
 Covers the data path that produces ``final.json["roofline_comparison"]``

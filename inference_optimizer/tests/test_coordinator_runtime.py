@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P0-3 Coordinator + MockBackend + SubAgentRunner tests.
 
 Covers:

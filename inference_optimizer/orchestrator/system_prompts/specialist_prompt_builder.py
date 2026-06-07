@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Specialist sub-agent prompt assembler — v0.8 M5.
 
 The Coordinator hands the SpecialistRunner a typed input bundle and

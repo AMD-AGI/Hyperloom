@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``report`` ActionRunner report action.
 
 Reads the session's SharedState + bus event log and produces:

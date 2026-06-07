@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P2-1 Objective + Coordinator.run() long-loop tests."""
 
 from __future__ import annotations

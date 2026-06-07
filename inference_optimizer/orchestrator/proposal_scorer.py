@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ProposalScorer — advisory multi-model scorer for specialist proposals.
 
 This component is **purely advisory**. It scores each variant in a

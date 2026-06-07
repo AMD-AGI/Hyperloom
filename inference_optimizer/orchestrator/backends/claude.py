@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude.
 
 P1-5 implementation:

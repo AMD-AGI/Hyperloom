@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.5 / M5 — specialist sub-agent **integration** smoke test.
 
 KB_gaps/Gap-01 root cause: M5 unit tests covered SpecialistRunner /

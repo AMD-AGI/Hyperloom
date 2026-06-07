@@ -115,10 +115,15 @@ host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`/wekafs/hyperloom/TraceLens-internal`, the shared cluster checkout; base repo
-[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens))
-with an **optional** internal extension at `$TRACELENS_INTERNAL_ROOT` (no
-default; internal users set it to their own existing checkout to opt in,
+`$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
+`kernel-agent/scripts/install.sh` clones
+[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
+it to a fixed SHA. A pre-existing checkout you maintain is only used as
+an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
+in, which skips both the clone and the SHA pin) with an **optional**
+internal
+extension at `$TRACELENS_INTERNAL_ROOT` (no default; internal users set
+it to their own existing checkout to opt in,
 otherwise open-source-only; rehydration module — Hyperloom keeps no internal
 URL/path). See README Local Mode step 1. The per-version
 `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
@@ -451,7 +456,12 @@ CLI:
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+# TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
+# to $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens and pin it to a
+# fixed SHA. Only export it as an operator override to point at a
+# pre-existing checkout you maintain; this skips both the clone and the
+# SHA pin.
+# export TRACELENS_ROOT=/path/to/your/TraceLens
 # Optional internal extension; export only to enable it (open-source-only if unset):
 # export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
@@ -612,9 +622,9 @@ Operators only interact through two `task.params` knobs (full schema in
 each `actions/_meta/<action>.yaml`): `params.benchmark_script` (bare
 sanitized `*.sh` name; overrides the gpu_type auto-pick) and
 `params.result_dir` (forwarded as `$RESULT_DIR`). The Coordinator's
-`baseline_self_loop` PolicyGate rule denies a third baseline attempt
-that repeats a twice-failed param fingerprint, pointing FAILURE RECOVERY
-at the next override surface.
+`baseline_no_param_change` PolicyGate rule denies any baseline proposal
+that changes params after a failure — the agent must retry with
+identical params and the run terminates after 3 consecutive failures.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 
@@ -697,7 +707,7 @@ What this controls:
   cold-start with no LLM input.
 - Which extra-args env name `_grid_runner` writes
   (`EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS`)
-- Which Marathon KB partition orchestration reads for hints
+- Which KB partition orchestration reads for hints
 
 Mixing frameworks in a single session is not supported; the CLI
 locks `$FRAMEWORK` for the run. Resume re-reads `$FRAMEWORK` from the

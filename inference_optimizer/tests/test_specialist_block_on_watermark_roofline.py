@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Watermark-roofline trigger tests (single path).
 
 After Tasks 1-9 collapsed the legacy composite-on/off bifurcation,

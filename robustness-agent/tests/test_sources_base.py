@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for sources/base.py.
 
 Covers DegradeRouter state machine + SourceData merge semantics.

@@ -1,6 +1,9 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -33,6 +36,7 @@ _HOST_LEAK_VARS = (
     "LOCAL_SETUP_ENV",
     "PRIMUS_CLAW_REPO",
     "INFERENCEX_REPO",
+    "INFERENCEX_REF",
     "TRACELENS_REPO",
     "TRACELENS_REF",
     "OOB_SRC",
@@ -100,6 +104,7 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
         env={
             "PRIMUS_CLAW_REPO": str(primus),
             "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
             "SAFE_API_KEY": secret,
@@ -138,6 +143,7 @@ def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> No
         env={
             "PRIMUS_CLAW_REPO": str(primus),
             "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
             "TRACELENS_INTERNAL_ROOT": str(internal_checkout),
@@ -163,6 +169,7 @@ def test_local_setup_internal_missing_path_falls_back_to_oss_only(tmp_path: Path
         env={
             "PRIMUS_CLAW_REPO": str(primus),
             "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
             "TRACELENS_INTERNAL_ROOT": str(tmp_path / "nope" / "TraceLens-internal"),
@@ -188,6 +195,7 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
         env={
             "OOB_SRC": str(existing_oob),
             "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
         },
@@ -250,7 +258,7 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     assert str(expected_deps / "TraceLens") in result.stdout
     # Open-source-only by default: internal extension is not requested/cloned.
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
-    assert "release/hyperloom_integration_v0.5.0" in result.stdout
+    assert "c35c787ef31f0425fa0028a605ffc8c60a737c2c" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -385,3 +393,68 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
         ["start-A", "end-A", "start-B", "end-B"],
         ["start-B", "end-B", "start-A", "end-A"],
     ), f"flock did not serialize critical sections: {lines}"
+
+
+# ---------------------------------------------------------------------------
+# pin-dependency-shas (feature/xiaofei/pin-dependency-shas):
+#   inference_optimizer/scripts/install.sh must clone Magpie / InferenceX
+#   pinned to a commit SHA via the SHA-aware fetch-checkout dance (mirroring
+#   the GEAK_REF pin in kernel-agent/scripts/install.sh), and the Magpie
+#   in-place patch step must be fail-soft (warn, not die) so a pinned
+#   upstream-atomic Magpie does not abort every install.
+#
+# These are grep/static-level guards on the script text (the established
+# pattern for the install.sh entrypoints — see
+# test_install_scripts_guard_mirror_writes_with_flock). A full DRY_RUN run is
+# intentionally not driven here: it imports inference_optimizer, resolves a
+# ROCm python, and runs the torch gate, which is too heavy/host-coupled for a
+# hermetic unit test (the DRY_RUN log is exercised manually in the PR notes).
+# ---------------------------------------------------------------------------
+
+
+def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
+    # Both deps are pinned to a full 40-char commit SHA and stay operator-
+    # overridable via the ``${VAR:-<sha>}`` form (mirrors GEAK_REF). Pinning a
+    # SHA — not a branch — is what makes a fresh install reproducible and
+    # immune to upstream force-push / HEAD drift (the bugs.md §C #1 root cause).
+    text = IO_INSTALL.read_text(encoding="utf-8")
+    assert re.search(
+        r'^MAGPIE_REF="\$\{MAGPIE_REF:-[0-9a-fA-F]{40}\}"', text, re.M
+    ), "MAGPIE_REF must default to a full 40-char commit SHA and be overridable"
+    assert re.search(
+        r'^INFERENCEX_REF="\$\{INFERENCEX_REF:-[0-9a-fA-F]{40}\}"', text, re.M
+    ), "INFERENCEX_REF must default to a full 40-char commit SHA and be overridable"
+
+
+def test_io_install_uses_sha_aware_fetch_checkout_for_both_deps() -> None:
+    # The clone helper must use the GEAK-style SHA-aware fetch-checkout dance
+    # (a raw SHA cannot be passed to ``git clone --branch``) and must be wired
+    # into BOTH ensure_magpie and ensure_inferencex. The old bare
+    # ``git clone --depth 1 <repo>`` of latest HEAD must be gone.
+    text = IO_INSTALL.read_text(encoding="utf-8")
+    assert "^[0-9a-fA-F]{7,40}$" in text, "missing raw-SHA detection regex"
+    assert 'fetch --depth 1 origin "$ref"' in text, "missing shallow SHA fetch"
+    assert "checkout -q FETCH_HEAD" in text, "missing detached SHA checkout"
+    assert (
+        'git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_DIR" "$MAGPIE_REF" "Magpie"' in text
+    ), "ensure_magpie must clone via the pinned fetch-checkout helper"
+    assert (
+        'git_fetch_pinned "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF" "InferenceX"'
+        in text
+    ), "ensure_inferencex must clone via the pinned fetch-checkout helper"
+    # Regression guard: no unpinned ``clone --depth 1 <repo>`` of latest HEAD.
+    assert 'git clone --depth 1 "$MAGPIE_REPO"' not in text
+    assert 'git clone --depth 1 "$INFERENCEX_REPO"' not in text
+
+
+def test_io_install_magpie_patch_is_fail_soft() -> None:
+    # Defense in depth: with MAGPIE_REF pinned to an upstream-atomic commit the
+    # in-place patcher finds no legacy block and returns False. That must
+    # warn-and-continue (no-op), not die and abort the install. The
+    # PATCH_MAGPIE=0 hard-skip override must be preserved.
+    text = IO_INSTALL.read_text(encoding="utf-8")
+    assert "Magpie atomic-write patch did not apply" in text, "missing fail-soft warn"
+    assert "Magpie #C1 patch OK" in text, "success log must be preserved"
+    assert "PATCH_MAGPIE=0" in text, "PATCH_MAGPIE=0 override must be preserved"
+    # The previous fail-loud ``die`` on patch failure must be gone.
+    assert 'die "Magpie atomic-write patch failed' not in text

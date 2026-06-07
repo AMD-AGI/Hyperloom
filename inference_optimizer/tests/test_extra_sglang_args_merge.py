@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for cumulative extra_sglang_args merge/dedupe."""
 
 from __future__ import annotations

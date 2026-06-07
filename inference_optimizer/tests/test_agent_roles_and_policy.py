@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P0-2 agent role + PolicyGate tests.
 
 Covers:

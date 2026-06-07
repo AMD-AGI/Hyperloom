@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.2 §5.4 / KB_gaps/Gap-05 — SWEEP phase auto-dispatch tests.
 
 KB_gaps/Gap-05 root cause: ``_advance_phase_if_needed`` updated the

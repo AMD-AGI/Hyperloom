@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Recipe-snapshot KB + KnowledgePlane bootstrap for the CLI.
 
 Resolves the local KB root, builds the RecipeKB local-write/remote-read
@@ -169,7 +171,6 @@ def _bootstrap_cortex_kb(
         if merged_meta:
             state.stack_fingerprint_meta = merged_meta
     extra_attrs = {
-        "marathon_dispatch_id": manifest.get("session_id", ""),
         "framework":            state.framework or manifest.get("framework", ""),
         "model_class":          state.model_class or "",
         # Operator traceability — the recipe.extras carry the most-

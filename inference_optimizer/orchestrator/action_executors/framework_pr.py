@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """FrameworkPrExecutor — FRAMEWORK_PR phase per-candidate executor.
 
 Counterpart to :class:`IntegratePatchExecutor` for the FRAMEWORK_PR

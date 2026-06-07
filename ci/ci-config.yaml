@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 claw:
   endpoint: ${SAFE_BASE_URL}/claw-api/v1
   api_key_env: CLAW_API_KEY

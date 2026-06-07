@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the seed-kit assembler + dispatch artefact wiring.
 
 The assembler is exercised against a thin SharedState double so the

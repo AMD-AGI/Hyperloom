@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Specialist sub-agent domain catalogue — v0.8 M5/M6.
 
 Specialists are an *LLM* sub-agent form factor (distinct from the

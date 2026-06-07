@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Explore-grid provenance + GPU-specialist resource policy.
 
 The per-round specialist / dynamic grid-size caps were removed: breadth

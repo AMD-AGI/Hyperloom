@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Intent envelope contract.
 
 This module mirrors the wire shape defined by

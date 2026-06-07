@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Parity tests: gbrain vs cortex recipe-KB backends on the 5-tuple.
 
 Both remote backends (:class:`recipe_kb.RemoteRecipeClient` = cortex

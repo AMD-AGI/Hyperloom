@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ActionRegistry
 
 Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per

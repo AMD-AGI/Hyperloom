@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.5 §10 / M5 — specialist_done bookkeeping (KB_gaps/Gap-03).
 
 KB_gaps/Gap-03 root cause: PolicyGate R3 validates the specialist_done

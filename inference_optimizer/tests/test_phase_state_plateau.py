@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 M7 — plateau pure functions + escalate hints + stop_reason ENUM.
 
 Covers KB_design §3.8 + §3.13 M7:

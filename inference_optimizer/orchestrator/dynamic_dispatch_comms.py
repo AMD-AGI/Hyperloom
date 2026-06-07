@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """File-based communication protocol for dynamically dispatched specialists.
 
 Each agent gets a workspace at <session_dir>/agents/<agent_id>/ with:

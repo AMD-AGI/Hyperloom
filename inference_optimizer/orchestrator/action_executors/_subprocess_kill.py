@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Reliable subprocess-tree teardown for Magpie-launched servers
 (Hyperloom ``bugs.md`` §B).
 

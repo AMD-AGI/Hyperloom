@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Mock Kernel backend — auto-responds to every REQUEST it sees.
 
 Used in P0 main-path tests so Coordinator + Orchestration can exercise the

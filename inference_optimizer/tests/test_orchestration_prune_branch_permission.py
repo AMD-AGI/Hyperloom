@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Orchestration permission widenings for scheduling-police intents.
 
 Two intents are reachable from Orchestration in addition to the

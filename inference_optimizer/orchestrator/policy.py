@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PolicyGate.
 
 Single chokepoint: every parsed Intent passes through ``validate_intent``

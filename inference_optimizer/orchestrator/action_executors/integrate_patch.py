@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """IntegratePatchExecutor — PR-A4 (Arbor-into-Hyperloom).
 
 The serving-lane-locked patch integration step that consumes a

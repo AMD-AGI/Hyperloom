@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 M2 — phase state machine tests (KB_design §3.2 + §3.8 + §3.11 R1).
 
 Covers the additive subset of M2 implemented in this PR:

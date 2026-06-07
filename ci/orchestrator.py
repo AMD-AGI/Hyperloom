@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """CI orchestrator: parse config → create Claw sessions → monitor → report."""
 
 from __future__ import annotations
@@ -148,7 +150,6 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         gpu_type_lc=str(merged["gpu_type"]).lower(),
         target_gpu=merged["target_gpu"],
         inferenceX_data=ifx_text,
-        inferencex_path=merged.get("inferencex_path", ""),
         oob_path=merged.get("oob_path", ""),
         tracelens_root=merged.get("tracelens_root", ""),
         # Multi-node / Hyperloom-skill knobs (defaults match legacy single-node CI).

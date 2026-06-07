@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the robustness-server client + Source adapter."""
 
 from __future__ import annotations

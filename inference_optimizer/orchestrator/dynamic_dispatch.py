@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Dynamic specialist dispatch — CPU-only subprocess lifecycle management.
 
 Provides a free-form dispatch path where the orchestration agent can spawn

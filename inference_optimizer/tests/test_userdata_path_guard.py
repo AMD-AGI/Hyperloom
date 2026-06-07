@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Guard tests for the ``$USER_DATA_PATH`` write-determinism contract.
 
 These lock the make-it-deterministic requirement:

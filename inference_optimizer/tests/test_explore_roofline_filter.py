@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the roofline-categorized advisory annotator.
 
 Loosen plan P2_15 demoted the previously opt-in hard filter to an

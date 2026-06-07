@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """MockBackend — scripted-turn LLM stub for P0 / unit / e2e tests.
 
 Avoids burning tokens during dev, makes tests deterministic and offline.

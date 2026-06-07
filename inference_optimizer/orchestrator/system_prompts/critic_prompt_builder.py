@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Compose the Critic agent's system prompt from typed inputs.
 
 Replaces the hand-maintained action whitelist in ``critic.md``:

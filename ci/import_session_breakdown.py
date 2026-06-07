@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """
 Import session breakdown JSON files into the `perf_runs_dev` PostgreSQL table.
 

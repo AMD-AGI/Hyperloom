@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression: geak_submit must import ``ensure_ray_cluster``.
 
 ``geak_submit.run_geak`` calls ``ensure_ray_cluster(...)`` (around line 266)

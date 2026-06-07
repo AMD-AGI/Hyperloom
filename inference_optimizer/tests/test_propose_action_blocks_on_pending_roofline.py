@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression — the auto-roofline pending deny is gone (loosen P2_12).
 
 The Coordinator used to deny ``specialist`` / ``explore`` /

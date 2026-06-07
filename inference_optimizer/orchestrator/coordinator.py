@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Coordinator main loop and runtime protocol manager.
 
 The Coordinator owns the durable optimizer loop: phase transitions,

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tool definitions and executor for dynamic specialist dispatch.
 
 Provides the orchestration agent with three tools:

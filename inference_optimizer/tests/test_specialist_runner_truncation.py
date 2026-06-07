@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SpecialistRunner._finalize must carry the specialist's ``proposal_set``
 back unmodified.
 

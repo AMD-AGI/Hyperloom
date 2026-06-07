@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``orchestrator.framework_paths``.
 
 Covers the path-resolution helpers that decide where to look for sglang

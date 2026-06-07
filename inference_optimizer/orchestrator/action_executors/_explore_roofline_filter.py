@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-aware advisory annotator for the EXPLORE grid.
 
 Previously this module exposed a hard filter that dropped every variant

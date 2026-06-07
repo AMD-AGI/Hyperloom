@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 name: SaFE Optimize Submit
 
 # Submits SaFE inference optimization tasks via the same API the SaFE script
@@ -80,14 +82,13 @@ on:
         required: false
         default: '60'
       submit_workspaces:
-        # Comma-separated round-robin pool. Empty = use single
-        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret (current behavior =
-        # core42-sandbox only). 'core42-sandbox,core42-hyperloom' spreads
-        # the batch across both workspaces and roughly doubles the
-        # effective GPU pool for the optimization step.
-        description: 'Round-robin submit workspaces (comma-separated). Empty = use SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret only.'
+        # Comma-separated round-robin pool. Default spreads the batch across
+        # hyperloom + sandbox instead of sending every task to sandbox. Set
+        # empty explicitly only when you want to fall back to the single
+        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
+        description: 'Round-robin submit workspaces (comma-separated). Default uses hyperloom+sandbox.'
         required: false
-        default: ''
+        default: 'core42-hyperloom,core42-sandbox'
       isl:
         description: 'Input sequence length'
         required: false
@@ -107,7 +108,7 @@ on:
         required: false
         default: ''
       inferencex_path:
-        description: 'InferenceX checkout path inside the sandbox. Leave empty to use script default (/wekafs/hyperloom/InferenceX for core42).'
+        description: 'Explicit InferenceX checkout path (dev override only). Leave empty (default) so install.sh clones a writable per-session copy instead of pinning a shared read-only mount.'
         required: false
         default: ''
       kernel_opt_backends:
@@ -282,11 +283,10 @@ jobs:
           INPUT_OSL:              ${{ github.event.inputs.osl }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
-          INPUT_INFERENCEX_PATH:  ${{ github.event.inputs.inferencex_path }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event.inputs.submit_workspaces }}
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
@@ -317,9 +317,6 @@ jobs:
           ARGS+=(--mode "${INPUT_MODE:-local}")
           if [ -n "${INPUT_GPU_TYPE:-}" ]; then
             ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
-          fi
-          if [ -n "${INPUT_INFERENCEX_PATH:-}" ]; then
-            ARGS+=(--inferencex-path "${INPUT_INFERENCEX_PATH}")
           fi
           if [ -n "${INPUT_KERNEL_OPT_BACKENDS:-}" ]; then
             ARGS+=(--kernel-opt-backends "${INPUT_KERNEL_OPT_BACKENDS}")

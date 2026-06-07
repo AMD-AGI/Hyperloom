@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Per-role backend construction + robustness option wiring for the CLI.
 
 Builds the orchestration / critic / robustness / kernel backends, the

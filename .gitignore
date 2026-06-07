@@ -32,8 +32,6 @@ optimization_logs/
 optimization_reports/
 optimized_versions/
 benchmarks/
-marathon-runs/
-marathon-sessions/
 kernel-agent/runs/
 inference_optimizer/runs/
 .optimization_strategies.md

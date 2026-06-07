@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Intervention-mix ledger telemetry.
 
 ``SharedState.record_intervention`` maintains a config-vs-code_patch

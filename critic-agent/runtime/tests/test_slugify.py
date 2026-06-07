@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Slugify spec tests against the contract Appendix D.4 golden fixture."""
 
 from __future__ import annotations

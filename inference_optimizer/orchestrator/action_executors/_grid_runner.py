@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared helper for the ``explore`` executor's grid runs.
 
 The job is essentially: take a base Magpie YAML + a list of
@@ -876,6 +878,131 @@ def inject_sglang_watchdog_timeout(
     return merge_server_args(args, f"{_SGLANG_WATCHDOG_FLAG} {timeout}")
 
 
+# ---------------------------------------------------------------------------
+# sglang ``--context-length`` cap injection
+#
+# sglang's ``launch_server`` defaults ``context_length`` to None, which makes
+# it size ``max_total_tokens`` from the model's ``max_position_embeddings``.
+# For a model that advertises a huge native window (e.g. Mistral-Nemo-12B =
+# ``max_position_embeddings=1024000``) sglang sizes ``max_total_tokens`` to
+# ~701062 and the aiter attention backend then allocates a ``workspace_buffer``
+# of >100 GiB -> ``torch.OutOfMemoryError: HIP out of memory`` -> the server
+# exits 1 and the benchmark reports ``baseline_failed`` with throughput 0.
+# InferenceX's ``vllm_*.sh`` scripts already cap their window via
+# ``--max-model-len $MAX_MODEL_LEN`` (default 4096), but ``sglang_*.sh`` passes
+# no ``--context-length`` and never consumes the YAML's ``MAX_MODEL_LEN``, so
+# the asymmetry only hurts sglang. We cap the context to the actual workload
+# (ISL+OSL+headroom, floored to a sane minimum) but NEVER above the model's
+# native window, and NEVER when the operator/YAML already pinned the flag.
+# Routing through ``EXTRA_SGLANG_ARGS`` (appended verbatim after the script's
+# DEFAULT_ARGS) reliably reaches ``python -m sglang.launch_server``.
+# ---------------------------------------------------------------------------
+DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS = 2048
+DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS = 8192
+SGLANG_CONTEXT_HEADROOM_ENV = "SGLANG_CONTEXT_HEADROOM_TOKENS"
+SGLANG_CONTEXT_FLOOR_ENV = "SGLANG_CONTEXT_FLOOR_TOKENS"
+_SGLANG_CONTEXT_LENGTH_FLAG = "--context-length"
+# Matches the flag in space- or equals-separated form so an operator-pinned
+# ``--context-length 6144`` / ``--context-length=6144`` both suppress
+# injection, while a longer flag never false-matches.
+_SGLANG_CONTEXT_LENGTH_RE = re.compile(r"--context-length(?:[=\s]|$)")
+
+
+def _resolve_nonneg_int_env(name: str, default: int) -> int:
+    """Read a non-negative integer env override, else return ``default``.
+
+    A blank/non-integer/negative value logs a warning and falls back to the
+    default rather than crashing the YAML materialization.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        log.warning(
+            "%s=%r is not an integer; using default %d.", name, raw, default,
+        )
+        return default
+    if val < 0:
+        log.warning(
+            "%s=%d is negative; using default %d.", name, val, default,
+        )
+        return default
+    return val
+
+
+def resolve_sglang_context_cap(isl: int, osl: int) -> int:
+    """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
+
+    Returns ``max(isl + osl + headroom, floor)`` where ``headroom`` and
+    ``floor`` come from :data:`DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS` /
+    :data:`DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS`, each operator-tunable via
+    ``$SGLANG_CONTEXT_HEADROOM_TOKENS`` / ``$SGLANG_CONTEXT_FLOOR_TOKENS``.
+    The headroom absorbs the BOS/chat-template tokens and random-dataset
+    length jitter on top of the nominal workload; the floor keeps short smoke
+    workloads from pinning the window absurdly low. The caller clamps the
+    result to the model's native window before injecting.
+    """
+    headroom = _resolve_nonneg_int_env(
+        SGLANG_CONTEXT_HEADROOM_ENV, DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
+    )
+    floor = _resolve_nonneg_int_env(
+        SGLANG_CONTEXT_FLOOR_ENV, DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
+    )
+    return max(int(isl) + int(osl) + headroom, floor)
+
+
+def inject_sglang_context_length(
+    server_args: str | None,
+    framework: str | None,
+    model_path: str | None,
+    isl: int,
+    osl: int,
+) -> str:
+    """Append ``--context-length <N>`` to ``server_args`` for sglang runs.
+
+    Returns ``server_args`` unchanged (coerced to a stripped string) when any
+    guard trips:
+
+    * ``framework`` does not route to ``EXTRA_SGLANG_ARGS`` -- vllm / atom
+      already cap their window via ``--max-model-len $MAX_MODEL_LEN`` in the
+      benchmark scripts, so they are left untouched. Framework detection
+      reuses :func:`server_args_env_name`, so an empty/unknown framework is
+      treated as sglang (the default backend), matching every other
+      arg-routing site in this module.
+    * ``server_args`` already contains ``--context-length`` (in space- or
+      equals-separated form) -- an operator/YAML/``extra_sglang_args`` value
+      wins and is never overridden or doubled.
+    * the model's ``max_position_embeddings`` cannot be read -- fail-safe to
+      today's behaviour (inject nothing) rather than guessing a window.
+
+    Otherwise it appends ``--context-length min(max_pos, cap)`` where ``cap``
+    comes from :func:`resolve_sglang_context_cap`. The clamp to ``max_pos``
+    means we never stretch the context above the model's native window (RoPE
+    extrapolation / learned-absolute-position breakage); the cap means we
+    never let sglang size ``max_total_tokens`` off a huge native window and
+    OOM the aiter ``workspace_buffer``. Only this flag is added.
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args
+    if _SGLANG_CONTEXT_LENGTH_RE.search(args):
+        return args
+    # Imported lazily: cli.py is the heavy top-level module and only imports
+    # this package lazily itself, so a module-level import here would risk a
+    # cycle. The loader handles nested ``text_config`` for multimodal configs.
+    from ...cli import _load_model_max_position_embeddings
+    max_pos = _load_model_max_position_embeddings(str(model_path or ""))
+    if not max_pos:
+        return args
+    cap = resolve_sglang_context_cap(isl, osl)
+    context_length = min(int(max_pos), cap)
+    return merge_server_args(
+        args, f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
+    )
+
+
 def apply_runtime_benchmark_overrides(
     bench: dict[str, Any],
     *,
@@ -1644,7 +1771,7 @@ def pick_winners(
     keep_threshold_pct: float | None = None,
 ) -> list[VariantResult]:
     """Filter variants whose throughput beats ``baseline_tput`` by
-    ``keep_threshold_pct`` percent (marathon §params: > 1% = KEEP).
+    ``keep_threshold_pct`` percent (> 1% = KEEP).
 
     Resolution order for ``keep_threshold_pct``:
 
@@ -1746,6 +1873,7 @@ __all__ = [
     "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
     "apply_runtime_benchmark_overrides",
+    "inject_sglang_context_length",
     "inject_sglang_watchdog_timeout",
     "merge_server_args",
     "pick_winners",

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Post-PR-321 review Finding 1 regression — Coordinator runtime hints
 must not tell the LLM to propose ``profile`` / ``roofline``.
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Placeholder bench body shared by every entry in BENCH_REGISTRY until
 # real probe implementations land. Writes a single marker JSON into
 # $DYNAMIC_BENCH_OUTPUT_DIR so the runner has something to journal.

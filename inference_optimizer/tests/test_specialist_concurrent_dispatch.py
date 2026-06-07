@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-A3 (Arbor-into-Hyperloom): multi-emit concurrent specialist dispatch.
 
 When the Orchestration LLM emits N ``delegate{action_name='specialist'}``

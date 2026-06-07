@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """atom-PolicyGate anti-regression guards.
 
 The ``framework_atom_action_unsupported`` rule scaffold was deleted

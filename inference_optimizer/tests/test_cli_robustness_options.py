@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``inference_optimizer.cli`` robustness backend wiring.
 
 Covers two helpers:

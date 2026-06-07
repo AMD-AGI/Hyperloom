@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Critic-side review primitives for ``dynamic_action``.
 
 The runner already validates the proposal payload before the patch

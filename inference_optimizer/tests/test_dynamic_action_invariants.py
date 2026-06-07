@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Red-line invariant tests for the ``dynamic_action`` channel.
 
 Each test constructs a hostile input and asserts the system blocks
