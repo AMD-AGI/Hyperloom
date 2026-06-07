@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 N6: ClaudeBackend cache hit metric extraction.
 
 Pins the contract N7 (verify + audit scripts) builds on top of:

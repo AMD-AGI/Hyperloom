@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``recover`` ActionRunner — release leaked GPU VRAM.
 
 The recover action is the inference_optimizer counterpart of the

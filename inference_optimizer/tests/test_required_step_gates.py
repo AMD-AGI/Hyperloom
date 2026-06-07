@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Coordinator hard-gate regression tests for the post-classify pipeline.
 
 After the deletion of the in-loop ``setup`` / ``classify`` actions, two

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``sources/cluster_decoder.py`` (M2.5)."""
 
 from __future__ import annotations

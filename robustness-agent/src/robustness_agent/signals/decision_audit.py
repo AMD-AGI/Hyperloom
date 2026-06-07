@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Reverse-audit decision-quality signals (G1-G7).
 
 These rules complement Critic — which only sees *proposals* before they

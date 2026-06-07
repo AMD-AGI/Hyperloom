@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Validate Critic skill fixtures and optional generated outputs."""
 
 from __future__ import annotations

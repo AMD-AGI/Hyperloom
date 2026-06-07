@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ci/optimize_submit.py — Hyperloom CI variant of SaFE optimize_submit.
 
 Submits SaFE inference optimization tasks. Reuses the same SaFE bearer token

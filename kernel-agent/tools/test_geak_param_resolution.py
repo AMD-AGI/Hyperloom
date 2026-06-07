@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """GEAK parameter resolution — TraceLens-first + profiling timeout.
 
 Pins the contract for three latent bugs surfaced on DeepSeek-R1 +

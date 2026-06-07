@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Phase state machine.
 
 The Coordinator owns the run-level phase ("where are we in the optimization

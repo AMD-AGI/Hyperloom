@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared helper for the ``explore`` executor's grid runs.
 
 The job is essentially: take a base Magpie YAML + a list of

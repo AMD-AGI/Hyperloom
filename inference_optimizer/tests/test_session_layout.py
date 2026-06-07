@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Session_dir layout regression tests (N17 per-model/ts default).
 
 Locks the contract:

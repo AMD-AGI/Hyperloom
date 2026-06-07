@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Patch GEAK's bundled ``mini_kernel_strategy_list.yaml`` to remove the
 hard-coded ``task_runner.py performance`` example that misleads the
 sub-agent LLM into searching the filesystem for a non-existent script.

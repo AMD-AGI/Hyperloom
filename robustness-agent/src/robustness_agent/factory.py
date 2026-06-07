@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """High-level builders that turn a :class:`Config` into a running reactor.
 
 Single entry point:

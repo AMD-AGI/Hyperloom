@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-A2 (Arbor-into-Hyperloom): SpecialistRunner subprocess + worktree.
 
 These tests pin the production specialist dispatch shape:

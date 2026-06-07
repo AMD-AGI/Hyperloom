@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the ``param_search`` breakdown renderer.
 
 Hits the empty / populated / winners / synergy branches that the

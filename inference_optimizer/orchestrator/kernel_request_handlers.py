@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Coordinator-side handlers for Kernel-agent REQUEST kinds.
 
  says the Kernel agent is responder-only: it answers

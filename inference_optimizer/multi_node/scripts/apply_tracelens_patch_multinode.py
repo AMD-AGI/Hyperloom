@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-node TraceLens SGLang patch fan-out.
 
 Counterpart to ``kernel_patch_multinode.py``. Submitted via Ray Dashboard

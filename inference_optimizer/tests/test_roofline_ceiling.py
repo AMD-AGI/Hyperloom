@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``orchestrator.roofline_ceiling``.
 
 Pins three contracts:

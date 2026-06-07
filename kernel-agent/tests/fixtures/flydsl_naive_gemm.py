@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Naive GEMM kernel written with FlyDSL.
 #
 # Lifted from the AMD-AGI/kernel_playground `flydsl/naive_gemm_flydsl/`

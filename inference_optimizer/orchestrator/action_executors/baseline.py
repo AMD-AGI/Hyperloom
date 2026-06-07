@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
 
  + §16.1 baseline action.

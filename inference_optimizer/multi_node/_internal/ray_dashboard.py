@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tiny Ray Dashboard REST client.
 
 This module runs INSIDE THE SANDBOX. Per ADDENDUM-02, multi_node
