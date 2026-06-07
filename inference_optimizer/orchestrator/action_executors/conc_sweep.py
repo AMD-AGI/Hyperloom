@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ActionRunner for the ``conc_sweep`` SWEEP-phase action.
 
 Thin shell around ``orchestrator.conc_sweep.run_conc_sweep`` -- the

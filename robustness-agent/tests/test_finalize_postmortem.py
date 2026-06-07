@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the L1 + L2 postmortem finalizer."""
 
 from __future__ import annotations

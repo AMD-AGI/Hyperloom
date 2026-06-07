@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Robustness reactor role layer.
 
 Hosts drive the reactor through the subprocess CLI in

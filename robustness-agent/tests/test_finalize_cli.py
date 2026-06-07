@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the ``finalize`` subcommand of robustness_agent.runtime.cli."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P0-1 protocol-layer tests.
 
 Covers:
@@ -19,7 +21,7 @@ import time
 import pytest
 
 from inference_optimizer.orchestrator.cursor_store import CursorStore
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     EMIT_INTENT_TOOL_SCHEMA,
     IntentType,
     IntentValidationError,

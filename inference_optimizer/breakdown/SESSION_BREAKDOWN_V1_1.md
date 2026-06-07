@@ -18,7 +18,7 @@ collectors intentionally **summarize** search and kernel activity:
 | profiling | traces, TraceLens status JSON, kernel CSV | trace paths in `telemetry`; parsed kernels not exported |
 | baseline | server.log per attempt | final `baseline.invocation` only |
 
-Downstream consumers (KB ingest, marathon post-mortems, arbor-compare) need **per-round
+Downstream consumers (KB ingest, post-mortems, arbor-compare) need **per-round
 decision detail** without re-walking `state.json` + `runs/` by hand.
 
 ## Design principles
@@ -118,7 +118,7 @@ Never inline `.trace.json.gz` blobs.
 | 1 | Schema + collectors + exporter; no Coordinator changes | done |
 | 2 | Coordinator `audit_extras` promotion fields | done |
 | 3 | Report renderers + `--detail-level` CLI | done |
-| 4 | wekafs replay on real marathon sessions | done (2/3 sessions; see below) |
+| 4 | wekafs replay on real sessions | done (2/3 sessions; see below) |
 
 ## Validation criteria
 
@@ -140,7 +140,7 @@ Pass ≠ every optional field populated. Real sessions may lack promotion rules 
 validated gain (no validate_stack), kernel top-k (empty profile summary), or per-variant
 invocation (missing server.log in archive).
 
-Replayed sessions (2026-05-20 marathons):
+Replayed sessions (2026-05-20):
 
 | Claw session | Result |
 |--------------|--------|
@@ -153,7 +153,7 @@ Replayed sessions (2026-05-20 marathons):
 - Deduplicate `params-last` journal row when it overlaps `backend_winners_history`.
 - Resolve `baseline_ref_tput` from round metadata consistently.
 - Improve variant workspace / server.log resolution on wekafs archive paths.
-- Re-replay with a **post-Phase-2** marathon to verify `promotion_rule` end-to-end.
+- Re-replay with a **post-Phase-2** session to verify `promotion_rule` end-to-end.
 
 ## File touch summary
 

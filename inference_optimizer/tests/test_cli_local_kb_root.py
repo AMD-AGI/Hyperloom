@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the recipe-snapshot KB dispatcher bootstrap helpers in cli.
 
 Covers:

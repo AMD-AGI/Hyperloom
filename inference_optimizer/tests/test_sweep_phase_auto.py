@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.2 §5.4 / KB_gaps/Gap-05 — SWEEP phase auto-dispatch tests.
 
 KB_gaps/Gap-05 root cause: ``_advance_phase_if_needed`` updated the
@@ -699,7 +701,7 @@ def test_validate_intent_denies_llm_sweep_delegate_in_active_sweep_phase():
     SWEEP phase fires the singleton rule before
     ``_validate_phase_action`` even runs (orthogonality with
     Inv-11.3: deeper / more diagnostic rules win)."""
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import PolicyDenied
@@ -723,7 +725,7 @@ def test_validate_intent_denies_llm_sweep_delegate_in_active_sweep_phase():
 
 def test_validate_intent_denies_llm_sweep_propose_in_active_sweep_phase():
     """Same shape on propose_action."""
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import PolicyDenied

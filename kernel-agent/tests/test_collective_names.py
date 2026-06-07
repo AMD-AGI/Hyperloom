@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :mod:`kernel-agent.tools._collective_names`.
 
 Locks the r24-regression behaviour: kernel names that imply multi-GPU

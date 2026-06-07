@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # IR-3 — Cortex KB + PR Monitor reachability probe.
 #
 # Soft-degrade: exit 1 only signals "at least one branch unreachable".
@@ -14,7 +16,14 @@ set -u
 
 : "${CORTEX_KB_URL:=}"
 : "${PR_MONITOR_URL:=http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/v1}"
+# Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
+# can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
+# or empty, which is exactly the case the := default below would absorb.
+_user_data_was_set="${USER_DATA_PATH:+1}"
 : "${USER_DATA_PATH:=/workspace/hyperloom}"
+if [ -z "${_user_data_was_set}" ]; then
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+fi
 : "${KB_SERVICE_TOKEN:=}"
 : "${SKIP_KB_PROBE:=}"
 : "${SKIP_PR_PROBE:=}"
@@ -91,7 +100,7 @@ probe_curl() {
 if [ -n "${SKIP_KB_PROBE}" ] || [ -z "${CORTEX_KB_URL}" ]; then
     kb_skipped="true"
 else
-    probe_curl "${CORTEX_KB_URL%/}/health" 2 3 "kb" || true
+    probe_curl "${CORTEX_KB_URL%/}/health" 15 3 "kb" || true
 fi
 
 if [ -n "${SKIP_PR_PROBE}" ]; then

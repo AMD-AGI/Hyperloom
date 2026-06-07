@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Baseline measurement renderer."""
 
 from __future__ import annotations

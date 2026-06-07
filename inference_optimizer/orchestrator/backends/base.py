@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Backend protocol — what the Coordinator needs from any LLM provider.
 
 Concrete implementations (Claude SDK, Codex, multi-CLI bridge, mock)
@@ -14,7 +16,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from ..intent_parser import Intent
+from ...protocol.intent import Intent
 
 log = logging.getLogger(__name__)
 

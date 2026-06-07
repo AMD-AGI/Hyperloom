@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """GEAK + OOB invocation renderer.
 
 Both capabilities share the same shape (attempts list keyed by kernel

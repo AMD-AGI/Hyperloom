@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for direct-gateway auth setup in ``_preflight``.
 
 The failure mode that motivated these tests:
@@ -267,8 +269,7 @@ def _make_args(**overrides) -> argparse.Namespace:
     """Build a minimal Namespace for _validate_and_resolve_claude_model.
 
     Tests historically passed ``critic_mock=True/False`` here; that flag was
-    folded into ``critic_backend`` (one of ``mock`` / ``agent`` /
-    ``codex_bare``) when CriticAgentBackend landed. We translate
+    folded into ``critic_backend`` (``mock`` / ``agent``). We translate
     ``critic_mock`` into the new attribute for back-compat.
     """
     base = dict(
@@ -279,7 +280,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         no_kernel=False,
     )
     if "critic_mock" in overrides:
-        base["critic_backend"] = "mock" if overrides.pop("critic_mock") else "codex_bare"
+        base["critic_backend"] = "mock" if overrides.pop("critic_mock") else "agent"
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -491,7 +492,7 @@ def test_smoke_test_codex_model_skipped_when_unused(monkeypatch, capsys):
 
 
 def test_smoke_test_codex_model_skipped_when_no_kernel(monkeypatch, capsys):
-    """--no-kernel hides kernel_codex; only --critic-real keeps codex live."""
+    """--no-kernel hides kernel_codex; critic-mock avoids Codex entirely."""
     args = _make_args(
         codex_model="gpt-totally-fake",
         critic_mock=True,
