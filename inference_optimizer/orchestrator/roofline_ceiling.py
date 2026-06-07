@@ -157,6 +157,13 @@ class ModelMeta:
     ``ModelMeta`` directly without MoE knowledge; the compute helpers
     treat ``0`` as "fall back to weight_bytes" so dense behaviour is
     preserved. ``load_model_meta`` always sets a concrete value.
+
+    ``hidden_size``, ``intermediate_size``, ``vocab_size``,
+    ``num_attention_heads``: HF config fields consumed by
+    ``compute_roofline_from_perfmodel`` to drive the per-op TraceLens
+    PerfModel breakdown.  Callers that only need the aggregate ceiling
+    can ignore these; ``load_model_meta`` populates them from
+    ``config.json`` when available, falling back to ``0``.
     """
 
     weight_bytes: int
@@ -172,6 +179,11 @@ class ModelMeta:
     num_experts: int = 0
     experts_per_tok: int = 0
     expert_weight_bytes: int = 0
+    # Extra HF config fields for per-op PerfModel breakdown (0 = unavailable).
+    hidden_size: int = 0
+    intermediate_size: int = 0
+    vocab_size: int = 0
+    num_attention_heads: int = 0
 
 
 def _read_total_size(model_path: Path) -> int | None:
@@ -401,6 +413,10 @@ def load_model_meta(
         num_experts=num_experts,
         experts_per_tok=experts_per_tok,
         expert_weight_bytes=total_expert_bytes,
+        hidden_size=int(cfg.get("hidden_size") or 0),
+        intermediate_size=int(cfg.get("intermediate_size") or 0),
+        vocab_size=int(cfg.get("vocab_size") or 0),
+        num_attention_heads=int(cfg.get("num_attention_heads") or 0),
     )
 
 
@@ -476,12 +492,16 @@ def compute_theoretical_peak_output_tok_per_sec(
     kv_seq_len = max(int(isl) + int(osl) // 2, 1)
     # Per-decode-step weight IO. For MoE, the union of experts activated
     # across the ``batch`` tokens saturates toward all of them as batch
-    # grows: at B=1 only ``experts_per_tok/num_experts`` fire (==
-    # active_weight_bytes); by B≈num_experts/experts_per_tok essentially
-    # every expert is read each step (== weight_bytes). Model that with
-    # ``activated_fraction = min(1, B * experts_per_tok / num_experts)``;
-    # using a constant ``active_weight_bytes`` here would over-amortize the
-    # expert weights at high batch and inflate the ceiling. Dense models
+    # grows. Under (near-)uniform routing the EXPECTED fraction of the
+    # ``num_experts`` routed experts hit by at least one of the ``batch``
+    # tokens (each token routes to ``experts_per_tok``) is the occupancy
+    # / coupon-collector form ``1 - (1 - k/n)^B``. The earlier linear
+    # ``min(1, B*k/n)`` is the union BOUND: it ignores collisions and
+    # declares all experts active at B≈n/k (e.g. B=16 for 128/top-8),
+    # over-counting weight IO and dropping the ceiling BELOW measured
+    # throughput at mid batch (within%>100%). ``1-(1-k/n)^B`` agrees with
+    # the bound at B=1 (==k/n) and asymptotes to 1 (dense) at high B, so
+    # it stays a valid upper bound everywhere. Dense models
     # (num_experts==0) keep the full ``weight_bytes`` read each step.
     if (
         num_experts > 0
@@ -489,9 +509,9 @@ def compute_theoretical_peak_output_tok_per_sec(
         and expert_weight_bytes > 0
     ):
         non_expert_bytes = max(int(weight_bytes) - int(expert_weight_bytes), 0)
-        activated_fraction = min(
-            1.0, batch * experts_per_tok / num_experts
-        )
+        activated_fraction = 1.0 - (
+            1.0 - experts_per_tok / num_experts
+        ) ** batch
         effective_weight = (
             non_expert_bytes + activated_fraction * int(expert_weight_bytes)
         )
@@ -714,3 +734,292 @@ def compute_peak_from_state(state: Any) -> float:
     T_cmp / bound_kind alongside the min.
     """
     return compute_roofline_breakdown_from_state(state).peak_tok_per_sec
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: TraceLens PerfModel per-op breakdown (bottom-up).
+# ---------------------------------------------------------------------------
+
+#: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files.
+#: These use the same HBM bandwidth as HW_SPECS but replace vendor-quoted
+#: dense TFLOPS with the empirically-measured maximum throughput used by
+#: the TraceLens team for per-op arithmetic-intensity analysis.
+#:
+#: Sources: TraceLens/AgenticMode/Standalone/utils/arch/MI{300,325,355}X.json
+_MI300X_ACHIEVABLE_TFLOPS: dict[str, float] = {
+    "bf16": 708.0, "bfloat16": 708.0, "fp16": 654.0, "float16": 654.0,
+    "fp8": 1273.0, "float8_e4m3fn": 1273.0, "float8_e5m2": 1273.0,
+    "fp32": 163.0, "float32": 163.0,
+}
+_MI325X_ACHIEVABLE_TFLOPS: dict[str, float] = {
+    "bf16": 843.0, "bfloat16": 843.0, "fp16": 794.0, "float16": 794.0,
+    "fp8": 1519.0, "float8_e4m3fn": 1519.0, "float8_e5m2": 1519.0,
+    "fp32": 194.0, "float32": 194.0,
+}
+_MI355X_ACHIEVABLE_TFLOPS: dict[str, float] = {
+    "bf16": 1686.0, "bfloat16": 1686.0, "fp16": 1686.0, "float16": 1686.0,
+    "fp8": 3567.0, "float8_e4m3fn": 3567.0, "float8_e5m2": 3567.0,
+    "mxfp4": 5663.0, "fp4": 5663.0, "float4": 5663.0,
+    "fp32": 137.0, "float32": 137.0,
+}
+
+HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
+    "mi300x": {
+        "hbm_bw_gbps": 5300.0,
+        "hbm_gb": 192.0,
+        "peak_tflops": _MI300X_ACHIEVABLE_TFLOPS,
+    },
+    "mi325x": {
+        "hbm_bw_gbps": 6000.0,
+        "hbm_gb": 256.0,
+        "peak_tflops": _MI325X_ACHIEVABLE_TFLOPS,
+    },
+    "mi355x": {
+        "hbm_bw_gbps": 8000.0,
+        "hbm_gb": 288.0,
+        "peak_tflops": _MI355X_ACHIEVABLE_TFLOPS,
+    },
+}
+
+
+def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
+    """Max-achievable TFLOPS from ``HW_SPECS_ACHIEVABLE``; 0.0 on miss."""
+    spec = HW_SPECS_ACHIEVABLE.get((gpu_type or "").strip().lower())
+    if spec is None:
+        return 0.0
+    table = spec.get("peak_tflops")
+    if not isinstance(table, dict) or not precision_tag:
+        return 0.0
+    return float(table.get(str(precision_tag).strip().lower(), 0.0))
+
+
+import dataclasses as _dc
+
+
+@_dc.dataclass(frozen=True)
+class OpBreakdown:
+    """Per-operator roofline result from TraceLens PerfModel."""
+    name: str
+    flops: float          # total FLOPs (across all layers)
+    bytes_moved: float    # total bytes (across all layers)
+    ai: float             # arithmetic intensity = flops / bytes_moved
+    time_s: float         # roofline time (seconds, across all layers)
+    bound: str            # "compute" | "memory"
+    pct_time: float       # fraction of total forward time (0–1)
+
+
+@_dc.dataclass(frozen=True)
+class PerfModelBreakdown:
+    """Bottom-up per-op roofline breakdown via TraceLens PerfModel.
+
+    ``decode_tok_per_s`` and ``prefill_tok_per_s`` are derived from the
+    sum of per-op times over one forward pass at the given batch size.
+    Both use **max-achievable** (sustained) TFLOPS from
+    ``HW_SPECS_ACHIEVABLE``, not the vendor-quoted peak in ``HW_SPECS``.
+
+    ``ops`` lists every GEMM / SDPA, one row per logical operator
+    (already summed over the layer repetitions encoded in ``rep``).
+    ``bound_kind`` reflects the decode-forward dominant bound.
+    """
+    decode_tok_per_s: float
+    prefill_tok_per_s: float
+    ops: list[OpBreakdown]
+    bound_kind: str     # "compute" | "memory" | "unknown"
+    hbm_bw_gbps: float
+    peak_achievable_tflops: float
+
+
+def _try_import_traceLens_perfmodel() -> tuple[Any, Any] | None:
+    """Try to import TraceLens GEMM and SDPA; return (GEMM, SDPA) or None."""
+    import os, sys
+    tracelens_root = (
+        os.environ.get("TRACELENS_INTERNAL_ROOT")
+        or os.environ.get("TRACELENS_ROOT")
+        or ""
+    )
+    for candidate in (tracelens_root, "TraceLens-internal", "TraceLens"):
+        if candidate and candidate not in sys.path:
+            sys.path.insert(0, str(candidate))
+    try:
+        from TraceLens.PerfModel.perf_model import GEMM, SDPA  # type: ignore[import]
+        return GEMM, SDPA
+    except Exception:
+        return None
+
+
+def compute_roofline_from_perfmodel(
+    *,
+    meta: "ModelMeta",
+    gpu_type: str,
+    concurrency: int,
+    isl: int,
+    osl: int,
+    num_gpus: int = 1,
+    precision_tag: str = "bf16",
+) -> "PerfModelBreakdown | None":
+    """Bottom-up decode + prefill roofline via TraceLens PerfModel GEMM/SDPA.
+
+    Returns ``None`` when:
+      * TraceLens is not importable (graceful degrade to legacy formula)
+      * Model metadata is incomplete (hidden_size / num_attention_heads == 0)
+      * GPU is not in ``HW_SPECS_ACHIEVABLE``
+
+    The returned ceilings use **max-achievable** TFLOPS (from
+    ``HW_SPECS_ACHIEVABLE`` backed by TraceLens arch JSONs) rather than
+    vendor-quoted peaks, so ``within_roofline_pct`` values will be
+    somewhat higher than with the legacy formula.  Both flavours are
+    upper bounds on real throughput; the achievable variant is the one
+    used by TraceLens analysis reports for consistency.
+    """
+    if meta is None:
+        return None
+    if not meta.hidden_size or not meta.num_attention_heads:
+        return None
+    spec = HW_SPECS_ACHIEVABLE.get((gpu_type or "").strip().lower())
+    if spec is None:
+        return None
+
+    pm = _try_import_traceLens_perfmodel()
+    if pm is None:
+        return None
+    GEMM, SDPA = pm
+
+    bw_gbps = spec["hbm_bw_gbps"] * max(num_gpus, 1)
+    bw_bps = bw_gbps * 1e9
+    tag = (precision_tag or "bf16").strip().lower()
+    f_peak_tflops = _resolve_achievable_tflops(gpu_type, tag) * max(num_gpus, 1)
+    if f_peak_tflops <= 0:
+        return None
+    f_peak = f_peak_tflops * 1e12
+    bpe = float(meta.weight_dtype_bytes or 2.0)
+
+    hidden = meta.hidden_size
+    ffn = meta.intermediate_size
+    vocab = meta.vocab_size
+    n_q_heads = meta.num_attention_heads
+    n_kv_heads = meta.num_kv_heads
+    hd = meta.head_dim or (hidden // n_q_heads if n_q_heads else 0)
+    n_layers = meta.num_layers
+
+    if not all((hidden, n_q_heads, n_kv_heads, hd, n_layers)):
+        return None
+
+    q_out = n_q_heads * hd
+    kv_out = n_kv_heads * hd
+
+    # ---- linear projections per layer ----
+    # (name, K_in, N_out, repeat_per_forward)
+    linears: list[tuple[str, int, int, int]] = [
+        ("q_proj",    hidden, q_out,  n_layers),
+        ("k_proj",    hidden, kv_out, n_layers),
+        ("v_proj",    hidden, kv_out, n_layers),
+        ("o_proj",    q_out,  hidden, n_layers),
+    ]
+    if ffn:
+        linears += [
+            ("gate_proj", hidden, ffn, n_layers),
+            ("up_proj",   hidden, ffn, n_layers),
+            ("down_proj", ffn, hidden, n_layers),
+        ]
+    if vocab:
+        linears.append(("lm_head", hidden, vocab, 1))
+
+    def _roofline_time(fl: float, by: float) -> tuple[float, str]:
+        t_cmp = fl / f_peak if f_peak > 0 else 1e30
+        t_mem = by / bw_bps if bw_bps > 0 else 1e30
+        return (max(t_cmp, t_mem), "compute" if t_cmp >= t_mem else "memory")
+
+    def _forward(batch: int, s_q: int, s_kv: int) -> tuple[float, list[OpBreakdown]]:
+        total_t = 0.0
+        op_rows: list[OpBreakdown] = []
+        M = batch * s_q
+        for name, K, N, rep in linears:
+            fl = GEMM.flops_func(M, N, K, False)
+            by = GEMM.bytes_func(M, N, K, False, bpe, bpe, bpe, bpe)
+            t, side = _roofline_time(fl, by)
+            total_t += t * rep
+            op_rows.append(OpBreakdown(
+                name=name,
+                flops=fl * rep,
+                bytes_moved=by * rep,
+                ai=(fl / by if by else 0.0),
+                time_s=t * rep,
+                bound=side,
+                pct_time=0.0,  # filled after total is known
+            ))
+        # SDPA
+        causal = (s_q == s_kv)
+        fl_s = SDPA.flops_func(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal)
+        by_s = SDPA.bytes_func(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal, bpe)
+        t_s, side_s = _roofline_time(fl_s, by_s)
+        total_t += t_s * n_layers
+        op_rows.append(OpBreakdown(
+            name="sdpa",
+            flops=fl_s * n_layers,
+            bytes_moved=by_s * n_layers,
+            ai=(fl_s / by_s if by_s else 0.0),
+            time_s=t_s * n_layers,
+            bound=side_s,
+            pct_time=0.0,
+        ))
+        # fill pct_time
+        if total_t > 0:
+            op_rows = [
+                _dc.replace(op, pct_time=op.time_s / total_t)
+                for op in op_rows
+            ]
+        return total_t, op_rows
+
+    batch = max(concurrency, 1)
+    kv_seq = max(int(isl) + int(osl) // 2, 1)
+    t_dec, ops_dec = _forward(batch, 1, kv_seq)
+    t_pre, _ = _forward(1, max(int(isl), 1), max(int(isl), 1))
+
+    decode_tok = batch / t_dec if t_dec > 0 else 0.0
+    prefill_tok = max(int(isl), 1) / t_pre if t_pre > 0 else 0.0
+
+    # dominant bound in decode
+    total_mem = sum(op.time_s for op in ops_dec if op.bound == "memory")
+    total_cmp = sum(op.time_s for op in ops_dec if op.bound == "compute")
+    bound_kind = "memory" if total_mem >= total_cmp else "compute"
+    if t_dec <= 0:
+        bound_kind = "unknown"
+
+    return PerfModelBreakdown(
+        decode_tok_per_s=decode_tok,
+        prefill_tok_per_s=prefill_tok,
+        ops=ops_dec,
+        bound_kind=bound_kind,
+        hbm_bw_gbps=bw_gbps,
+        peak_achievable_tflops=f_peak_tflops,
+    )
+
+
+def compute_roofline_breakdown_from_state_v2(state: Any) -> "tuple[RooflineBreakdown, PerfModelBreakdown | None]":
+    """Return both the legacy aggregate breakdown AND the per-op PerfModel breakdown.
+
+    The legacy ``RooflineBreakdown`` preserves full backward compatibility
+    (used by coordinator watermark / within_roofline_pct).  The
+    ``PerfModelBreakdown`` is optional (``None`` when TraceLens is unavailable
+    or model config is incomplete) and provides per-op FLOPs/bytes/time/bound.
+    """
+    legacy = compute_roofline_breakdown_from_state(state)
+    meta = load_model_meta(
+        getattr(state, "model_path", ""),
+        precision_hint=str(getattr(state, "precision", "") or ""),
+    )
+    pm_bd: "PerfModelBreakdown | None" = None
+    if meta is not None:
+        try:
+            pm_bd = compute_roofline_from_perfmodel(
+                meta=meta,
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                concurrency=_resolve_effective_concurrency(state),
+                isl=int(getattr(state, "isl", 0) or 0),
+                osl=int(getattr(state, "osl", 0) or 0),
+                num_gpus=int(getattr(state, "tp", 0) or 0),
+                precision_tag=str(getattr(state, "precision", "") or "bf16") or "bf16",
+            )
+        except Exception:  # noqa: BLE001 — best-effort, never raise
+            pm_bd = None
+    return legacy, pm_bd

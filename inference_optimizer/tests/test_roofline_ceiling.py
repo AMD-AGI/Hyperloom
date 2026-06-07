@@ -752,15 +752,18 @@ class TestMoEBatchSaturation:
     )
 
     def test_saturates_to_dense_at_high_batch(self):
-        # 128 experts, top-8 → activated_fraction = min(1, B*8/128); at
-        # B=16 it hits 1.0, so weight read == full weight_bytes == dense.
+        # 128 experts, top-8 → activated_fraction = 1-(1-8/128)^B (coupon
+        # union). It asymptotes to 1.0 (all experts read == dense) as B
+        # grows; at B=512, (0.9375)^512≈4e-15 so the union is dense to
+        # machine precision. (At mid batch it stays strictly below dense —
+        # see TestMoEUnionUpperBound — which is the bug fix.)
         moe = compute_theoretical_peak_output_tok_per_sec(
-            **self._COMMON, concurrency=64,
+            **self._COMMON, concurrency=512,
             num_experts=128, experts_per_tok=8,
             expert_weight_bytes=53_000_000_000,
         )
         dense = compute_theoretical_peak_output_tok_per_sec(
-            **self._COMMON, concurrency=64,  # no expert fields -> weight_bytes
+            **self._COMMON, concurrency=512,  # no expert fields -> weight_bytes
         )
         assert moe == pytest.approx(dense, rel=1e-6)
 
@@ -793,6 +796,74 @@ class TestMoEBatchSaturation:
             **self._COMMON, concurrency=1, active_weight_bytes=active,
         )
         assert sat == pytest.approx(constant_active, rel=1e-3)
+
+
+class TestMoEUnionUpperBound:
+    """The decode ceiling must stay an upper bound on real throughput at
+    every batch. Anchored to real InferenceX data: Qwen3-30B-A3B on
+    1×MI300X (TP=1, ISL=OSL=1024) measured output_throughput=1754.16 tok/s
+    at conc=16. The linear ``min(1, B*k/n)`` expert-union estimate declares
+    all 128 experts active at B=16 (16*8/128=1.0), inflating the per-token
+    weight read and dropping the ceiling below the measured value
+    (within%>100%). The expected union fraction under uniform routing is
+    ``1-(1-k/n)^B`` (coupon/occupancy), which keeps the ceiling above the
+    measurement."""
+
+    # Real Qwen3-30B-A3B geometry (config.json) + safetensors total_size.
+    _NUM_LAYERS = 48
+    _NUM_KV_HEADS = 4
+    _HEAD_DIM = 128
+    _HIDDEN = 2048
+    _MOE_INTER = 768
+    _NUM_EXPERTS = 128
+    _EXPERTS_PER_TOK = 8
+    _DTYPE_BYTES = 2.0
+    _WEIGHT_BYTES = 61_064_245_248
+    _EXPERT_WEIGHT_BYTES = (
+        _NUM_LAYERS * _NUM_EXPERTS * 3 * _HIDDEN * _MOE_INTER * int(_DTYPE_BYTES)
+    )
+    _MEASURED_CONC16_TOK_S = 1754.16  # InferenceX sweep, real measurement
+
+    def _ceiling(self, concurrency: int) -> float:
+        return compute_theoretical_peak_output_tok_per_sec(
+            gpu_type="mi300x", num_gpus=1,
+            weight_bytes=self._WEIGHT_BYTES,
+            num_experts=self._NUM_EXPERTS,
+            experts_per_tok=self._EXPERTS_PER_TOK,
+            expert_weight_bytes=self._EXPERT_WEIGHT_BYTES,
+            num_layers=self._NUM_LAYERS,
+            num_kv_heads=self._NUM_KV_HEADS,
+            head_dim=self._HEAD_DIM,
+            kv_dtype_bytes=self._DTYPE_BYTES,
+            isl=1024, osl=1024, concurrency=concurrency,
+        )
+
+    def test_ceiling_is_upper_bound_at_mid_batch(self):
+        # conc=16: real 1754 tok/s must not exceed the theoretical ceiling.
+        # Linear union-bound gives ~1336 (<1754) and FAILS; the coupon
+        # union gives ~1980 (>1754) and PASSES.
+        ceiling = self._ceiling(16)
+        assert ceiling >= self._MEASURED_CONC16_TOK_S, (
+            f"ceiling {ceiling:.0f} < measured "
+            f"{self._MEASURED_CONC16_TOK_S} at conc=16 — roofline upper "
+            "bound violated (expert union over-saturated)"
+        )
+
+    def test_union_fraction_below_one_at_mid_batch(self):
+        # At B=16 the union of activated experts is ~64% (coupon), not the
+        # 100% the linear bound assumes; back it out from the ceiling and
+        # check it sits strictly below the dense (all-experts) ceiling.
+        dense = compute_theoretical_peak_output_tok_per_sec(
+            gpu_type="mi300x", num_gpus=1,
+            weight_bytes=self._WEIGHT_BYTES,
+            num_layers=self._NUM_LAYERS,
+            num_kv_heads=self._NUM_KV_HEADS,
+            head_dim=self._HEAD_DIM,
+            kv_dtype_bytes=self._DTYPE_BYTES,
+            isl=1024, osl=1024, concurrency=16,
+        )
+        # Un-saturated union → smaller effective weight → higher ceiling.
+        assert self._ceiling(16) > dense
 
 
 class TestHWSpecsTable:
@@ -1253,3 +1324,114 @@ class TestDeepSeekV3ConfigAliases:
         assert qwen.active_weight_bytes == gptoss.active_weight_bytes
         # And both must be < weight_bytes (MoE shrinks the divisor).
         assert qwen.active_weight_bytes < qwen.weight_bytes
+
+
+# ---------------------------------------------------------------------------
+# PerfModel bottom-up breakdown (Phase 2 / 3).
+# ---------------------------------------------------------------------------
+
+class TestPerfModelBreakdown:
+    """Smoke tests for compute_roofline_from_perfmodel and related helpers."""
+
+    def _make_meta(self) -> "ModelMeta":
+        """Minimal dense Llama-style ModelMeta."""
+        from inference_optimizer.orchestrator.roofline_ceiling import ModelMeta
+        return ModelMeta(
+            weight_bytes=int(13e9),   # ~13 GB weight
+            num_layers=32,
+            num_kv_heads=8,
+            head_dim=128,
+            weight_dtype_bytes=2.0,
+            active_weight_bytes=int(13e9),
+            hidden_size=4096,
+            intermediate_size=11008,
+            vocab_size=32000,
+            num_attention_heads=32,
+        )
+
+    def test_returns_none_for_unknown_gpu(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            compute_roofline_from_perfmodel,
+        )
+        meta = self._make_meta()
+        result = compute_roofline_from_perfmodel(
+            meta=meta, gpu_type="unknown_gpu_xyz",
+            concurrency=8, isl=1024, osl=512,
+        )
+        assert result is None
+
+    def test_returns_none_when_meta_missing_hidden(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            ModelMeta, compute_roofline_from_perfmodel,
+        )
+        meta = ModelMeta(
+            weight_bytes=int(13e9), num_layers=32,
+            num_kv_heads=8, head_dim=128, weight_dtype_bytes=2.0,
+            # hidden_size=0 -> insufficient
+        )
+        result = compute_roofline_from_perfmodel(
+            meta=meta, gpu_type="mi300x",
+            concurrency=8, isl=1024, osl=512,
+        )
+        assert result is None
+
+    def test_hw_specs_achievable_coverage(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            HW_SPECS_ACHIEVABLE, _resolve_achievable_tflops,
+        )
+        for gpu in ("mi300x", "mi325x", "mi355x"):
+            assert gpu in HW_SPECS_ACHIEVABLE
+        # MI300X bf16 achievable must be less than vendor-quoted (708 < 1307)
+        assert _resolve_achievable_tflops("mi300x", "bf16") == 708.0
+        assert _resolve_achievable_tflops("mi355x", "bf16") == 1686.0
+        assert _resolve_achievable_tflops("mi300x", "fp8") == 1273.0
+
+    def test_perfmodel_breakdown_when_traceLens_available(self):
+        """When TraceLens is importable the result is a valid PerfModelBreakdown."""
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            compute_roofline_from_perfmodel,
+            _try_import_traceLens_perfmodel,
+            PerfModelBreakdown,
+        )
+        if _try_import_traceLens_perfmodel() is None:
+            pytest.skip("TraceLens not importable in this environment")
+
+        meta = self._make_meta()
+        result = compute_roofline_from_perfmodel(
+            meta=meta, gpu_type="mi300x",
+            concurrency=16, isl=1024, osl=1024,
+        )
+        assert result is not None
+        assert isinstance(result, PerfModelBreakdown)
+        # Decode ceiling must be positive
+        assert result.decode_tok_per_s > 0
+        # Prefill is compute-bound for S=1024, so also > 0
+        assert result.prefill_tok_per_s > 0
+        # Must have ops (at least q/k/v/o + sdpa)
+        assert len(result.ops) >= 5
+        # Achievable peaks must match MI300X bf16
+        assert result.peak_achievable_tflops == pytest.approx(708.0 * 1)
+        assert result.hbm_bw_gbps == pytest.approx(5300.0)
+        # All ops have non-negative pct_time summing to ~1
+        assert all(0.0 <= op.pct_time <= 1.0 + 1e-6 for op in result.ops)
+        total_pct = sum(op.pct_time for op in result.ops)
+        assert total_pct == pytest.approx(1.0, abs=1e-6)
+        # bound_kind must be one of the valid values
+        assert result.bound_kind in ("memory", "compute", "unknown")
+
+    def test_v2_breakdown_returns_tuple(self):
+        """compute_roofline_breakdown_from_state_v2 returns (legacy, pm_or_None)."""
+        from types import SimpleNamespace
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            compute_roofline_breakdown_from_state_v2,
+            RooflineBreakdown,
+        )
+        state = SimpleNamespace(
+            model_path="", gpu_type="mi300x", tp=1,
+            conc=8, isl=256, osl=256, precision="bf16",
+            last_baseline={},
+        )
+        legacy, pm_bd = compute_roofline_breakdown_from_state_v2(state)
+        assert isinstance(legacy, RooflineBreakdown)
+        # pm_bd is None because model_path is empty (no config.json)
+        assert pm_bd is None
