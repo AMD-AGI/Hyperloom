@@ -919,13 +919,16 @@ def _load_model_config_tags(model_path: str) -> dict:
 # filter and only fail ~5 minutes into the run with a cryptic vLLM
 # ``OSError: Can't load image processor ...``, burning a full session slot.
 # The constants below drive a fail-fast classifier that runs before the
-# (expensive) baseline server boot. Uses a WHITELIST approach: only models
-# whose architecture matches known text-generation patterns are allowed.
+# (expensive) baseline server boot. It first rejects explicit multimodal /
+# vision signals, then uses a WHITELIST approach: only models whose
+# architecture matches known text-generation patterns are allowed.
 
-# Supported text-generation architecture suffixes. Only decoder-only causal LM
+# Supported text-generation architecture markers. Only decoder-only causal LM
 # models are supported. If a model's architecture does NOT match any of these
-# patterns, it is rejected as unsupported.
-_SUPPORTED_ARCH_SUFFIXES = (
+# patterns, it is rejected as unsupported. ``ForCausalLM`` is treated as an
+# infix because some text-generation variants append a suffix
+# (for example ``DeepseekV3ForCausalLMNextN`` / ``LlamaForCausalLMEagle3``).
+_SUPPORTED_ARCH_MARKERS = (
     "ForCausalLM",
     "LMHeadModel",
     "ForCausalLMWithValueHead",
@@ -946,6 +949,52 @@ _SUPPORTED_MODEL_TYPES = frozenset({
     "stablelm", "persimmon",
 })
 
+# Explicit multimodal / vision signals that must win even if an architecture
+# also happens to end with ``ForCausalLM`` (for example Phi3VForCausalLM).
+_UNSUPPORTED_MODEL_TYPES = frozenset({
+    "gemma3",
+    "mllama",
+    "llava",
+    "llava_next",
+    "qwen2_vl",
+    "qwen2_5_vl",
+    "idefics",
+    "idefics2",
+    "idefics3",
+    "paligemma",
+    "pixtral",
+    "internvl_chat",
+    "phi3_v",
+})
+
+_UNSUPPORTED_ARCHITECTURES = frozenset({
+    "Gemma3ForConditionalGeneration",
+    "InternVLChatModel",
+    "Phi3VForCausalLM",
+    "LlavaForConditionalGeneration",
+    "LlavaNextForConditionalGeneration",
+    "MllamaForConditionalGeneration",
+    "PaliGemmaForConditionalGeneration",
+    "Qwen2VLForConditionalGeneration",
+    "Qwen2_5_VLForConditionalGeneration",
+    "Idefics2ForConditionalGeneration",
+    "Idefics3ForConditionalGeneration",
+    "PixtralForConditionalGeneration",
+})
+
+_UNSUPPORTED_CONFIG_KEYS = (
+    "vision_config",
+    "image_token_id",
+    "image_token_index",
+    "mm_config",
+    "multi_modal_config",
+    "vision_tower",
+    "vision_tower_cfg",
+    "image_processor_type",
+    "projector_config",
+    "mm_projector_type",
+)
+
 
 def _arch_is_supported_text_generation(arch: str) -> bool:
     """True when an architecture class name denotes a supported text-generation
@@ -953,14 +1002,15 @@ def _arch_is_supported_text_generation(arch: str) -> bool:
     a = (arch or "").strip()
     if not a:
         return False
-    return any(a.endswith(suffix) for suffix in _SUPPORTED_ARCH_SUFFIXES)
+    return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
 
 
 def _detect_unsupported_model(model_path: str) -> dict | None:
     """Best-effort classification of a model as unsupported (non-text-generation).
 
-    Uses a WHITELIST approach: a model is supported if its architecture ends with
-    a known text-generation suffix (ForCausalLM, LMHeadModel, etc.) OR its
+    Explicit multimodal / vision signals are rejected first. Otherwise, uses a
+    WHITELIST approach: a model is supported if its architecture ends with a
+    known text-generation suffix (ForCausalLM, LMHeadModel, etc.) OR its
     model_type is in the explicit allowlist. Everything else is rejected.
 
     Returns a dict ``{"architecture", "model_type", "signal"}`` describing why
@@ -974,22 +1024,45 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         return None
     architectures = _config_architectures(config)
     model_type = str(config.get("model_type") or "").strip()
+    model_type_l = model_type.lower()
+
+    for arch in architectures:
+        if arch in _UNSUPPORTED_ARCHITECTURES:
+            return {
+                "architecture": arch,
+                "model_type": model_type,
+                "signal": f"unsupported architecture '{arch}'",
+            }
+    if model_type_l in _UNSUPPORTED_MODEL_TYPES:
+        return {
+            "architecture": architectures[0] if architectures else "",
+            "model_type": model_type,
+            "signal": f"unsupported model_type '{model_type}'",
+        }
+    for key in _UNSUPPORTED_CONFIG_KEYS:
+        if key in config:
+            return {
+                "architecture": architectures[0] if architectures else "",
+                "model_type": model_type,
+                "signal": f"unsupported multimodal config key '{key}'",
+            }
+
+    if any(_arch_is_supported_text_generation(a) for a in architectures):
+        return None
+
+    if model_type_l in _SUPPORTED_MODEL_TYPES:
+        return None
 
     if architectures:
-        if any(_arch_is_supported_text_generation(a) for a in architectures):
-            return None
         return {
             "architecture": architectures[0],
             "model_type": model_type,
             "signal": (
                 f"architecture '{architectures[0]}' does not match any "
                 f"supported text-generation pattern "
-                f"({', '.join(_SUPPORTED_ARCH_SUFFIXES)})"
+                f"({', '.join(_SUPPORTED_ARCH_MARKERS)})"
             ),
         }
-
-    if model_type.lower() in _SUPPORTED_MODEL_TYPES:
-        return None
 
     if model_type:
         return {
@@ -1001,7 +1074,11 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
             ),
         }
 
-    return None
+    return {
+        "architecture": "",
+        "model_type": "",
+        "signal": "config.json has neither architectures nor model_type",
+    }
 
 
 # config.json keys that carry the model's max sequence length, priority order.
@@ -1215,8 +1292,8 @@ def _preflight_unsupported_model_arch(
     reason = (
         f"Unsupported model '{name}': architecture '{arch}' (model_type "
         f"'{mt}') is not a supported text-generation model. Hyperloom only "
-        f"supports decoder-only causal LM models (architectures ending with "
-        f"ForCausalLM / LMHeadModel). Rejected because: "
+        f"supports decoder-only causal LM models (architectures containing "
+        f"ForCausalLM or LMHeadModel). Rejected because: "
         f"{hit.get('signal', 'unknown architecture')}. Submit a "
         f"text-generation checkpoint instead."
     )
