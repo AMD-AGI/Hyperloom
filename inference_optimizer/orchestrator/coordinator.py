@@ -1253,6 +1253,19 @@ class Coordinator:
         # request a new batch if the previous one is exhausted.
         next_candidate = self._select_next_framework_pr_candidate()
         if next_candidate is None:
+            # Hold the phase open while authored patches from this batch
+            # are still being benched / critic-reviewed: their gains must
+            # land in ``framework_pr_phase_progress`` before the plateau
+            # judge runs, and the phase must not advance to EXPLORE
+            # mid-flight. Returning early also avoids spending a
+            # ``fa phase-discover`` round while we wait. Gated by the
+            # authoring flag so the diff-only path keeps its original
+            # exit timing (and the pump integration tests stay green).
+            if (
+                getattr(self.shared_state, "framework_pr_authoring_enabled", False)
+                and await self._framework_pr_authoring_inflight()
+            ):
+                return
             # Try to discover a fresh batch. A transient discover
             # failure (timeout / error) does NOT immediately collapse
             # the phase; only ``DISCOVER_FAILURE_RETRY_LIMIT`` consecutive
@@ -1329,6 +1342,152 @@ class Coordinator:
             )
             return
         await self._enqueue_framework_pr_task(next_candidate)
+        # Authoring track (PR-G follow-up): in addition to applying the
+        # candidate's existing diff, hand the same PR to a write-capable
+        # specialist as inspiration so it can author its OWN source patch
+        # (potentially beyond the upstream diff). Best-effort and gated;
+        # the authored patch flows through the existing autosubmit →
+        # Critic → integrate_patch → bench → KEEP/REVERT chain.
+        if getattr(state, "framework_pr_authoring_enabled", False):
+            try:
+                await self._enqueue_framework_pr_authoring_specialist(
+                    next_candidate,
+                )
+            except Exception as exc:  # noqa: BLE001 — never wedge the pump
+                log.warning(
+                    "FRAMEWORK_PR: authoring specialist dispatch failed: %r",
+                    exc,
+                )
+
+    async def _framework_pr_authoring_inflight(self) -> bool:
+        """True while a FRAMEWORK_PR-authored patch is still in flight.
+
+        During the FRAMEWORK_PR phase the only ``specialist`` /
+        ``integrate_patch`` tasks (and the only pending ``integrate_patch``
+        Critic proposals) are the ones the authoring track spawned — the
+        diff track uses the deterministic ``framework_pr`` executor. So
+        any of these in flight means an authored patch has not yet
+        resolved to KEEP/REVERT. The pump consults this before marking
+        the phase done / discovering a new batch so authored gains land
+        in the progress ledger first and the phase never advances
+        mid-bench.
+        """
+        try:
+            queued = await self.tasks.queued()
+            running = await self.tasks.running()
+        except Exception:  # noqa: BLE001 — defensive
+            queued, running = [], []
+        for t in (*queued, *running):
+            if getattr(t, "kind", "") in ("specialist", "integrate_patch"):
+                return True
+        # An authored patch may be sitting in the Critic queue between the
+        # specialist completing and the integrate_patch task being created.
+        try:
+            for p in self.state.pending_proposals.values():
+                if getattr(p, "action_name", "") == "integrate_patch":
+                    return True
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+        return False
+
+    async def _enqueue_framework_pr_authoring_specialist(
+        self, candidate: dict[str, Any],
+    ) -> None:
+        """Dispatch a write-capable specialist seeded with ``candidate``.
+
+        The FRAMEWORK_PR diff track (:class:`FrameworkPrExecutor`) only
+        applies the candidate PR's existing unified diff. This parallel
+        track hands the same PR to a ``serving_specialist`` as
+        *inspiration* and lets it author its own source patch into an
+        isolated worktree. That patch then flows through the existing
+        ``_maybe_autosubmit_specialist_patches`` → Critic →
+        ``integrate_patch`` → bench → KEEP/REVERT chain, exactly like an
+        EXPLORE-phase specialist patch — no new integration channel is
+        introduced (Inv-5.1 preserved).
+        """
+        state = self.shared_state
+        cand_id = str(
+            candidate.get("candidate_id")
+            or candidate.get("pr_url")
+            or candidate.get("ref")
+            or ""
+        )
+        batch_id = str(candidate.get("batch_id") or "")
+        gap_cid = (
+            str(candidate.get("gap_canonical_id") or "").strip()
+            or f"gap.framework_pr.{cand_id}"
+        )
+        title = str(candidate.get("title") or "").strip()
+        pr_url = str(candidate.get("pr_url") or "").strip()
+        diff_url = str(candidate.get("diff_url") or "").strip()
+        notes = "\n".join([
+            "FRAMEWORK_PR AUTHORING TASK.",
+            "",
+            "A candidate upstream PR was discovered as a lead for this gap.",
+            "Study it as INSPIRATION, then author your OWN source patch into",
+            "your worktree. You are NOT limited to copying the PR's diff — go",
+            "beyond it where the live source + profile evidence justify a",
+            "stronger or more targeted change. If, after reading the source,",
+            "the upstream change is already optimal, you may reproduce its",
+            "essential edit, but prefer a patch tailored to this model /",
+            "hardware / workload.",
+            "",
+            f"- PR title: {title or '(none)'}",
+            f"- PR url: {pr_url or '(none)'}",
+            f"- Unified diff: {diff_url or '(none)'}"
+            " (fetch with WebFetch to read the upstream change)",
+            "",
+            "Deliverable: a unified-diff patch file in your worktree, listed in",
+            "``patches_written``. The Coordinator applies + benches it and",
+            "decides KEEP/REVERT; you do not benchmark.",
+        ])
+        params: dict[str, Any] = {
+            "domain": "serving_specialist",
+            "gap_canonical_id": gap_cid,
+            "gap_symptom": (
+                title
+                or f"Author a framework source patch inspired by "
+                f"{pr_url or cand_id}"
+            ),
+            "gap_layer": "framework",
+            "framework": str(
+                candidate.get("framework")
+                or getattr(state, "framework", "") or ""
+            ).strip().lower(),
+            # Provenance markers so the dispatcher-side bridge + any
+            # bookkeeping can recognise an authored FRAMEWORK_PR patch.
+            "framework_pr_authoring": True,
+            "framework_pr_candidate_id": cand_id,
+            "framework_pr_batch_id": batch_id,
+            "source": "coordinator_internal",
+            "readonly": False,
+            "notes": notes,
+        }
+        try:
+            await self._warm_specialist_params(params)
+        except Exception:  # noqa: BLE001 — best-effort warmup
+            log.debug(
+                "FRAMEWORK_PR authoring: warm specialist params failed",
+                exc_info=True,
+            )
+        idem = f"framework_pr_authoring:{batch_id}:{cand_id}"
+        await self.tasks.create_or_return_existing(
+            kind="specialist",
+            params=params,
+            idempotency_key=idem,
+            requires_lanes=["research_lane"],
+            allowed_tools=[
+                "Read", "Grep", "Glob", "Write", "Edit", "Bash",
+                "WebSearch", "WebFetch",
+            ],
+            side_effects=["writes_results", "writes_patches"],
+            lease_ttl_sec=3600,
+        )
+        log.info(
+            "FRAMEWORK_PR: dispatched authoring specialist candidate=%s "
+            "batch=%s gap=%s",
+            cand_id, batch_id, gap_cid,
+        )
 
     def _select_next_framework_pr_candidate(self) -> dict[str, Any] | None:
         """Return the next unprocessed candidate in the latest batch.
@@ -6761,6 +6920,87 @@ class Coordinator:
                 "failed for dyn_id=%s", dyn_id,
             )
 
+    def _record_framework_pr_authored_outcome(
+        self, *, task: "Task", result: Any,
+    ) -> None:
+        """Bridge an authored-patch ``integrate_patch`` outcome into the
+        FRAMEWORK_PR phase progress ledger.
+
+        The plateau judge (``phase_state.compute_plateau_framework_pr``)
+        and the breakdown collector only read
+        ``framework_pr_phase_progress`` + the per-batch
+        ``max_gain_pct_observed_in_batch`` stat. An authored patch lands
+        via the generic ``integrate_patch`` task path (which lifts the
+        optimization stack / cumulative_gain_validated on its own), so
+        without this bridge its gain would be invisible to the FRAMEWORK_PR
+        phase logic. We attribute it to the latest batch — safe because
+        the pump's ``_framework_pr_authoring_inflight`` guard ensures only
+        one batch's authored patches are ever in flight at a time.
+
+        Writes a progress row for terminal ``kept`` / ``reverted`` results
+        only; transient / failed statuses are skipped (mirrors the diff
+        track, which records those via its own executor result path).
+        """
+        res = getattr(result, "result", None)
+        if not isinstance(res, dict):
+            return
+        status = str(res.get("status") or "")
+        if status not in ("kept", "reverted"):
+            return
+        params = getattr(task, "params", None) or {}
+        cand_id = str(
+            params.get("framework_pr_candidate_id")
+            or params.get("specialist_task_id")
+            or getattr(task, "task_id", "")
+            or ""
+        )
+        batch_id = str(params.get("framework_pr_batch_id") or "")
+        if not batch_id:
+            batches = getattr(self.shared_state, "framework_pr_batches", None) or []
+            if isinstance(batches, list) and batches and isinstance(batches[-1], dict):
+                batch_id = str(batches[-1].get("batch_id") or "")
+        delta_pct = res.get("delta_pct")
+        new_tput = res.get("output_throughput")
+        gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
+        progress_entry = {
+            "candidate_id": cand_id,
+            "pr_url":       "",
+            "status":       status,
+            "provenance":   "authored",
+            "pre_tput":     float(
+                getattr(self.shared_state, "baseline_tput", 0.0) or 0.0
+            ),
+            "post_tput":    float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
+            "gain_pct":     gain,
+            "kept":         status == "kept",
+            "batch_id":     batch_id,
+            "ts":           datetime.now(timezone.utc).isoformat(),
+        }
+        if not isinstance(self.shared_state.framework_pr_phase_progress, list):
+            self.shared_state.framework_pr_phase_progress = []
+        self.shared_state.framework_pr_phase_progress.append(progress_entry)
+        # Roll the batch max-gain stat the plateau judge reads.
+        batches = getattr(self.shared_state, "framework_pr_batches", None) or []
+        if isinstance(batches, list) and batch_id:
+            for entry in reversed(batches):
+                if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
+                    prev = float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
+                    if gain > prev:
+                        entry["max_gain_pct_observed_in_batch"] = gain
+                    break
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "FRAMEWORK_PR authored-outcome: save failed for task=%s",
+                getattr(task, "task_id", "?"),
+            )
+        log.info(
+            "FRAMEWORK_PR: authored patch outcome candidate=%s batch=%s "
+            "status=%s gain=%.2f%%",
+            cand_id, batch_id, status, gain,
+        )
+
     def _maybe_update_dynamic_action_after_integrate(
         self,
         *,
@@ -9350,6 +9590,31 @@ class Coordinator:
                         "failed for task=%s",
                         task.task_id,
                     )
+                # FRAMEWORK_PR authoring bridge: while in the FRAMEWORK_PR
+                # phase the only integrate_patch tasks are authored-patch
+                # outcomes from the pump's specialist track. Record their
+                # KEEP/REVERT into framework_pr_phase_progress (+ the batch
+                # max-gain stat) so the plateau judge — which only reads
+                # those structures — sees authored gains. Gated by the
+                # authoring flag so the diff-only path is untouched.
+                if (
+                    getattr(
+                        self.shared_state,
+                        "framework_pr_authoring_enabled",
+                        False,
+                    )
+                    and (self.shared_state.phase or "").strip().upper()
+                    == _phase_state.PHASE_FRAMEWORK_PR
+                ):
+                    try:
+                        self._record_framework_pr_authored_outcome(
+                            task=task, result=result,
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "FRAMEWORK_PR authored-outcome bridge failed "
+                            "for task=%s", task.task_id,
+                        )
             # Auto-promote certain succeeded results into SharedState core
             # fields (Coordinator is the only writer of CORE_STATE_FIELDS;
             # see DESIGN §14.5 / §17.2).

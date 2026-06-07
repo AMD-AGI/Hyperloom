@@ -623,6 +623,16 @@ class SharedState:
     framework_pr_critic_decisions: list[dict[str, Any]] = field(
         default_factory=list,
     )
+    # When True (the default) the FRAMEWORK_PR pump dispatches a
+    # write-capable ``serving_specialist`` per discovered candidate, in
+    # addition to the diff-only FrameworkPrExecutor track. The specialist
+    # studies the candidate PR as inspiration and authors its OWN source
+    # patch into an isolated worktree; the patch then flows through the
+    # existing autosubmit → Critic → integrate_patch → bench → KEEP/REVERT
+    # chain (identical to an EXPLORE-phase patch). This widens the phase
+    # from "apply an existing diff" to "read source + write a new patch".
+    # Set False to restore the diff-only behaviour.
+    framework_pr_authoring_enabled: bool = True
     # When True (the default) the Coordinator's auto-managed analysis
     # action — at PRELUDE bootstrap and on every +10% watermark
     # crossing — is ``roofline`` (composite: profile + trace_analyze +
