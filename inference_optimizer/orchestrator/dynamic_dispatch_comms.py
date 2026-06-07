@@ -31,6 +31,10 @@ class TaskManifest:
     dispatched_at: str = ""
     timeout_minutes: int = 120
     metadata: dict[str, Any] = field(default_factory=dict)
+    # PID of the spawned claude subprocess, persisted so the Coordinator's
+    # per-tick reaper can SIGTERM/SIGKILL the process group of an overdue
+    # or stale agent even across resumes / different event-loop ticks.
+    pid: int | None = None
 
 
 @dataclass
@@ -113,6 +117,19 @@ def append_result(session_dir: str, result: IncrementalResult) -> None:
 
 
 # ─── Read functions ────────────────────────────────────────────────────────────
+
+
+def read_manifest(session_dir: str, agent_id: str) -> TaskManifest | None:
+    """Read the task manifest for an agent (None if missing / unreadable)."""
+    path = Path(session_dir) / "agents" / agent_id / "manifest.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return TaskManifest(**{k: v for k, v in data.items()
+                               if k in TaskManifest.__dataclass_fields__})
+    except (json.JSONDecodeError, TypeError, OSError):
+        return None
 
 
 def read_heartbeat(session_dir: str, agent_id: str) -> AgentHeartbeat | None:

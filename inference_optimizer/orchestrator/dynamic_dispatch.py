@@ -23,6 +23,7 @@ import logging
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -168,6 +169,12 @@ def dispatch_agent(
     handle.priority = priority
     handle.attempt = attempt
     handle.metadata = metadata or {}
+
+    # Persist the spawned pid so the Coordinator reaper can kill an
+    # overdue / stale agent's process group on a later tick.
+    if handle.pid is not None:
+        manifest.pid = handle.pid
+        write_task_manifest(session_dir, manifest)
 
     log.info("Dispatched %s (role=%s, attempt=%d)", agent_id, role, attempt)
     return handle
@@ -456,6 +463,9 @@ def _dispatch_via_cli(
     with open(log_path, "w") as log_f:
         proc = subprocess.Popen(
             cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env, cwd=repo_root,
+            # Own process group so the reaper can kill the whole tree
+            # (claude CLI + child SDK / curl invocations) with killpg.
+            start_new_session=True,
         )
 
     return AgentHandle(
@@ -464,3 +474,38 @@ def _dispatch_via_cli(
         process=proc,
         log_path=log_path,
     )
+
+
+# ─── Liveness reap ─────────────────────────────────────────────────────────────
+
+
+def kill_agent(pid: int | None) -> bool:
+    """Tear down a dynamic specialist subprocess by pid.
+
+    Kills the whole process group (the agent was spawned with
+    ``start_new_session=True``) so child SDK / curl invocations die with
+    it. Sends SIGTERM, waits up to 5s, then SIGKILL. Best-effort: returns
+    True if a signal was delivered, False when there was nothing to kill
+    or the pid was already gone.
+    """
+    if not pid or pid <= 0:
+        return False
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    for _ in range(10):
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, OSError):
+            return True
+        time.sleep(0.5)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    return True

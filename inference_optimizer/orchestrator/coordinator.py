@@ -7497,10 +7497,16 @@ class Coordinator:
     async def _poll_dynamic_specialists(self) -> None:
         """Auto-poll dynamic specialists each tick.
 
-        Surfaces newly completed agents as observations so the
-        orchestration agent sees them without explicitly checking.
+        Reaps overdue / stale subprocesses first (kills the process group
+        and writes a synthetic completion so the run never leaks zombie
+        agents), then surfaces newly completed agents as observations so
+        the orchestration agent sees them without explicitly checking.
         """
         from .dynamic_dispatch_comms import get_agent_status_summary, read_completion
+
+        # Liveness reap runs unconditionally — independent of whether any
+        # agent has produced a done.json — so a hung subprocess is killed.
+        self._reap_dynamic_specialists()
 
         summary = get_agent_status_summary(str(self.session_dir))
         newly_done = summary.get("completed", [])
@@ -7541,6 +7547,102 @@ class Coordinator:
                     "active_ids": active[:10],
                 },
             )
+
+    # Heartbeat / log staleness threshold (seconds) past which an agent
+    # with no done.json is treated as dead and killed. Mirrors the
+    # specialist subprocess dispatcher's 600s default.
+    _DYNAMIC_SPECIALIST_STALE_SEC: float = 600.0
+
+    def _reap_dynamic_specialists(self) -> None:
+        """Kill overdue / stale dynamic specialist subprocesses.
+
+        For each agent without a completion report: if it has exceeded its
+        manifest ``timeout_minutes`` wall-clock budget, or its
+        ``process.log`` has gone stale (no writes for
+        ``_DYNAMIC_SPECIALIST_STALE_SEC``), kill the process group by pid
+        and write a synthetic ``done.json`` so the normal surface path
+        reports it as a timeout / dead agent on this tick.
+        """
+        import time as _time
+        from datetime import datetime, timezone
+
+        from .dynamic_dispatch import kill_agent
+        from .dynamic_dispatch_comms import (
+            CompletionReport,
+            read_completion,
+            read_manifest,
+            write_completion,
+        )
+
+        session_dir = str(self.session_dir)
+        agents_dir = self.session_dir / "agents"
+        if not agents_dir.is_dir():
+            return
+
+        now = _time.time()
+        for agent_dir in agents_dir.iterdir():
+            if not agent_dir.is_dir():
+                continue
+            agent_id = agent_dir.name
+            # Already completed — nothing to reap.
+            if read_completion(session_dir, agent_id) is not None:
+                continue
+            manifest = read_manifest(session_dir, agent_id)
+            if manifest is None:
+                continue
+
+            reason = ""
+            # Wall-clock budget exceeded.
+            try:
+                dispatched = datetime.fromisoformat(manifest.dispatched_at)
+                age_sec = (datetime.now(timezone.utc) - dispatched).total_seconds()
+            except (TypeError, ValueError):
+                age_sec = 0.0
+            timeout_sec = float(manifest.timeout_minutes or 0) * 60.0
+            if timeout_sec > 0 and age_sec > timeout_sec:
+                reason = (
+                    f"exceeded timeout_minutes={manifest.timeout_minutes} "
+                    f"(age={age_sec:.0f}s)"
+                )
+
+            # Log staleness (no output for the stale window).
+            if not reason:
+                log_path = agent_dir / "process.log"
+                if log_path.exists():
+                    try:
+                        stale_for = now - log_path.stat().st_mtime
+                    except OSError:
+                        stale_for = 0.0
+                    if stale_for > self._DYNAMIC_SPECIALIST_STALE_SEC:
+                        reason = (
+                            f"process.log stale for {stale_for:.0f}s "
+                            f"(> {self._DYNAMIC_SPECIALIST_STALE_SEC:.0f}s)"
+                        )
+
+            if not reason:
+                continue
+
+            killed = kill_agent(manifest.pid)
+            log.warning(
+                "reaping dynamic specialist %s: %s (killed=%s pid=%s)",
+                agent_id, reason, killed, manifest.pid,
+            )
+            try:
+                write_completion(
+                    session_dir,
+                    CompletionReport(
+                        agent_id=agent_id,
+                        status="timeout",
+                        summary=f"reaped by coordinator: {reason}",
+                        error=reason,
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.debug(
+                    "failed to write synthetic done.json for reaped agent %s",
+                    agent_id, exc_info=True,
+                )
 
     # ------------------------------------------------------------------
     # specialist_done bookkeeping
