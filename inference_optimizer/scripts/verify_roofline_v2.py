@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 N7: baseline vs exp verification per design §10.5.
 
 Compares two Hyperloom session_dirs (typically a `main` baseline and

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``scripts/roofline_sweep.py``.
 
 Real ``sglang_server`` / ``run_bench`` are mocked so the test suite stays

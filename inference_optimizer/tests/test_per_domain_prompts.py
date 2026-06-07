@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-A6 (Arbor-into-Hyperloom): per-domain specialist prompt templates.
 
 The v0.8 M5 ``specialist_prompt_builder`` shipped one template

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Compose the Orchestration agent's system prompt from typed inputs.
 
 Replaces the previous hand-maintained pair ``orchestration.md`` /

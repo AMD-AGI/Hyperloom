@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for inference_optimizer.tracelens_md shared helpers."""
 
 from __future__ import annotations

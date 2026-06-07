@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """A/B: same Magpie YAML, compare **throughput** without vs with --enable-torch-compile.
 
 For **which GPU kernels appear in the profile** (native vs Inductor), use

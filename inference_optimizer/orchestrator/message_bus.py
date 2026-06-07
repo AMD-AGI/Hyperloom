@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """MessageBus.
 
 The ``events`` table is the source of truth. ``seq`` is the AUTOINCREMENT

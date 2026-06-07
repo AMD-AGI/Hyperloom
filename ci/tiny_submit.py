@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tiny CI — long-running queue controller for the full 3B-12B pool.
 
 A single process keeps up to ``--sandbox-cap`` + ``--hyperloom-cap`` SaFE

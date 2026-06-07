@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-node-only: per-round sglang/vllm restart helper.
 
 Why this exists

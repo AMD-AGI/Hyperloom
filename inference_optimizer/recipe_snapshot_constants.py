@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """recipe-snapshot v2 HTTP wire constants — single source of truth.
 
 Mirrors the contract documented in

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Inference Optimizer installer.
 #
 # Owns the inference_optimizer-side bare-image setup so SKILL.md does

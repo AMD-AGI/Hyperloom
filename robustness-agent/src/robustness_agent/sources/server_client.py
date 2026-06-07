@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """robustness-server client + Source adapter.
 
 The client wraps a small subset of the robustness-server REST API used

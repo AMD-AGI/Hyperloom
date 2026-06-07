@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR Monitor REST client — v0.8 M4.
 
 Stdlib-only (``urllib``) client for the

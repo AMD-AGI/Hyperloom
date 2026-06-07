@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Integration test for ``_pump_framework_pr_phase`` covering the full
 discover → Critic gate → enqueue path.
 

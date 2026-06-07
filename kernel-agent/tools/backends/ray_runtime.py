@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Ray cluster lifecycle helpers for kernel-agent backends.
 
 Conventions:

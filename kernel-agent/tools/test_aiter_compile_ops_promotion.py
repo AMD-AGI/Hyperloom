@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-K — aiter @compile_ops launcher → device source promotion.
 
 Background

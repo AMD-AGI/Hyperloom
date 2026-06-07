@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Focused unit tests for ``SharedState`` helpers / audit trails.
 
 Covers pure-data helpers that only had integration coverage (policy-denial
@@ -425,4 +427,3 @@ def test_save_load_round_trips_failure_log(tmp_path):
     assert len(s2.last_action_failures) == 1
     assert s2.last_action_failures[0]["action"] == "sweep"
     assert s2.last_action_failures[0]["error_class"] == "subprocess_nonzero"
-

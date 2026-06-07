@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Source protocol + DegradeRouter.
 
 The reactor pulls a single :class:`SourceData` snapshot per tick. The

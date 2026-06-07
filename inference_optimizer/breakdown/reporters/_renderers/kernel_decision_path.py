@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Kernel decision-path renderer — per-kid causal chain.
 
 Surfaces ``trace_analyze → kernel_opt(GEAK|OOB) → integrate →

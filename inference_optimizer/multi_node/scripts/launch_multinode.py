@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-node sglang / vllm server launcher.
 
 Runs INSIDE the RayJob head pod, submitted via Ray Dashboard REST by

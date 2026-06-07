@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Best-effort robustness "pulse" used at long-action variant boundaries.
 
 Long actions (backends / params grid runners) execute one Magpie variant

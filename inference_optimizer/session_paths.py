@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Per-session path helpers.
 
 Single source of truth for every path *inside* a session directory. The

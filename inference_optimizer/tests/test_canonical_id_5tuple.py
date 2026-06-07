@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the 5-tuple recipe-snapshot canonical_id derivation.
 
 Covers the contract documented in

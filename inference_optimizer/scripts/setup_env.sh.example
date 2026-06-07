@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Source this at the start of every shell call when your shell does
 # not persist `export`s between invocations. Idempotent.
 

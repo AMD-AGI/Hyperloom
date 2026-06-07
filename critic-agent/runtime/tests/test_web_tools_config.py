@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :mod:`runtime.web_tools.config`.
 
 Covers env normalization, provider chain resolution, and the

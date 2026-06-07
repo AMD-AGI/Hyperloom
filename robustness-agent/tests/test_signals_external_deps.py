@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for J1 / J2 / J3 external-dependency signals."""
 
 from __future__ import annotations

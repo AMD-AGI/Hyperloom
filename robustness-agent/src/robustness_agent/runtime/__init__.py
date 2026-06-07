@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Robustness runtime — subprocess-friendly entry point.
 
 The :mod:`robustness_agent.runtime` namespace mirrors the layout of

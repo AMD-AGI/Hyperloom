@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # IR-3 — Cortex KB + PR Monitor reachability probe.
 #
 # Soft-degrade: exit 1 only signals "at least one branch unreachable".

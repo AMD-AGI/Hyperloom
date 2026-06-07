@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ActionRunner for the ``session_breakdown`` action.
 
 Thin wrapper around :func:`inference_optimizer.breakdown.write_breakdown_json`

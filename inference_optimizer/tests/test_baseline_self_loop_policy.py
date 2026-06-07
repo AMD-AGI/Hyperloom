@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PolicyGate ``baseline_no_param_change`` denial tests.
 
 After a baseline failure the agent must retry with **identical** params.
