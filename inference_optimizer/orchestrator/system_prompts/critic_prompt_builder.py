@@ -2,23 +2,9 @@
 
 """Compose the Critic agent's system prompt from typed inputs.
 
-Replaces the hand-maintained action whitelist in ``critic.md``:
-
-* ``critic.md`` is now only the *rules fragment* (deviation cases,
-  hard rules) — content that does not depend on which actions are
-  enabled for this run.
-
-* This module wraps that fragment with:
-    1. MISSION
-    2. RUN CONTEXT
-    3. KNOWN ACTIONS (from ActionRegistry, filtered by enabled_actions)
-    4. DEFAULT VERDICT
-    5. KERNEL-OWNED CARVE-OUT (when kernel_enabled)
-    6. RULES (critic.md verbatim)
-    7. OUTPUT PROTOCOL
-
-Output is deterministic given the same inputs. The CLI snapshots the
-result to ``agents/critic/system_prompt.snapshot.md`` for resume / audit.
+Wraps the ``critic.md`` rules fragment with generated sections (mission,
+run context, known actions, default verdict, phase review contract, optional
+kernel-owned carve-out, rules, output protocol). Deterministic for given inputs.
 """
 
 from __future__ import annotations
@@ -30,7 +16,7 @@ from ..action_registry import ActionMetadata, ActionRegistry
 from .prompt_builder import KERNEL_OWNED_ACTIONS, _filter_actions
 
 
-# Stable family ordering for the catalogue section.
+# Family ordering for the catalogue section.
 _FAMILY_ORDER: tuple[str, ...] = (
     "prep",
     "analysis",
@@ -88,14 +74,8 @@ def _section_run_context(
 
 
 def _section_phase_review_contract() -> list[str]:
-    """Static phase-aware verdict contract (v0.8 §3.3 §4.3).
-
-    Mirrors the per-phase LLM-proposable map in
-    ``phase_state.PHASE_LLM_PROPOSABLE_ACTIONS`` so the Critic verdict
-    process stays aligned with PolicyGate R1's phase_incompatible
-    rule and only sees what the LLM can actually propose. The dynamic
-    *current* phase is in ``judge_bundle.phase`` each tick.
-    """
+    """Static phase-aware verdict contract (v0.8 §3.3 §4.3); mirrors
+    ``phase_state.PHASE_LLM_PROPOSABLE_ACTIONS`` (PolicyGate R1)."""
     from ..phase_state import (
         PHASE_NAMES,
         is_phase_interleave_enabled,
@@ -277,31 +257,22 @@ def build_critic_prompt(
     max_minutes: int = 0,
     rules_fragment_path: Path | None = None,
 ) -> str:
-    """Compose the Critic system prompt.
+    """Compose the Critic system prompt (deterministic for given inputs).
 
     Parameters
     ----------
     action_registry:
-        Pre-loaded ``ActionRegistry`` (caller should call ``.load()``).
+        Pre-loaded ``ActionRegistry`` (caller calls ``.load()``).
     enabled_actions:
         Action names enabled for this run (same set as orchestration).
     framework:
-        ``sglang`` / ``vllm`` / ``atom`` — printed in RUN CONTEXT
-        verbatim. The value is rendered as-is into the prompt with no
-        framework-specific rule text, so atom candidates are reviewed
-        against the same generic rule set as sglang / vllm.
+        ``sglang`` / ``vllm`` / ``atom`` — printed in RUN CONTEXT verbatim.
     kernel_enabled:
-        When ``None``, derived from whether any KERNEL_OWNED action is
-        in ``enabled_actions``.
+        ``None`` derives from whether any KERNEL_OWNED action is enabled.
     max_minutes:
         Wall-clock budget for the run.
     rules_fragment_path:
         Path to ``critic.md`` rules fragment.
-
-    Returns
-    -------
-    str
-        Full system prompt, deterministic for given inputs.
     """
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:
@@ -318,8 +289,6 @@ def build_critic_prompt(
         ),
         _section_known_actions(actions),
         _section_default_verdict(actions),
-        # phase review contract (per-phase allowlist +
-        # specialist batch verdict shape).
         _section_phase_review_contract(),
     ]
     if kernel_enabled:

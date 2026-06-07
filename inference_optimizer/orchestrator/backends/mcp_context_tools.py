@@ -1,26 +1,10 @@
 """In-process MCP server exposing read-only ``context`` tools.
 
-Plan Step 2 — "context by pull, not push". In the persistent-conversation
-ReAct design the Orchestration agent no longer receives a full
-``SharedState`` dump every tick (that was the stateless-reactor model).
-Instead the per-tick prompt is a thin *delta* and the agent **pulls** the
-context it actually needs via these read-only tools.
-
-Each tool simply re-exposes an existing ``SharedState.to_*_summary``
-projection (the same text the old prompt pushed), so there is no new
-serialization logic to drift — the projections remain the single source
-of truth. A few tools (inbox, analysis.md) read through small callables
-the Coordinator injects because they need the bus / session_dir.
-
-Design mirrors :mod:`.mcp_emit_intent`:
-
-* In-process MCP server (zero extra processes, synchronous lookup).
-* Test seams: ``build_context_tools_server`` accepts factory overrides so
-  tests don't have to import ``claude_agent_sdk``.
-
-Unlike ``emit_intent`` (whose handler only validates + acks because the
-intent is captured from the trajectory), these handlers **return the real
-data** to the model — the return value IS the tool result.
+Plan Step 2 — "context by pull, not push": instead of a full ``SharedState``
+dump each tick, the agent pulls context via these tools, each re-exposing an
+existing ``SharedState.to_*_summary`` projection (the single source of truth).
+Unlike ``emit_intent``, these handlers return the real data as the tool
+result. ``build_context_tools_server`` accepts factory overrides for tests.
 """
 
 from __future__ import annotations
@@ -45,30 +29,19 @@ def _qualified(tool_name: str) -> str:
 class ContextProvider:
     """Read-only accessor over live session context for the pull tools.
 
-    The Coordinator constructs one of these bound to its live
-    ``SharedState`` (and small callables for bus / analysis reads) and
-    passes it to :func:`build_context_tools_server`. Every method returns
-    a plain string (the projection text) so the MCP handlers can hand it
-    straight back to the model.
-
-    All methods are defensive: a projection failure returns a short error
-    string rather than raising, because a context-pull must never crash
-    the reactor turn.
+    Bound by the Coordinator to its live ``SharedState``; every method
+    returns a plain string and is defensive (a projection failure returns a
+    short error string rather than crashing the reactor turn).
     """
 
     shared_state: Any
-    # Optional callables injected by the Coordinator for context that
-    # lives outside SharedState. Each takes no positional args beyond the
-    # documented kwargs and returns a string. ``None`` => feature absent.
+    # Optional callables for context outside SharedState; ``None`` => absent.
     inbox_reader: Callable[[int], str] | None = None
     analysis_reader: Callable[[], str] | None = None
     denial_reader: Callable[[int], str] | None = None
     recent_outcomes_reader: Callable[[int], str] | None = None
-    # A3: run a whitelisted, lane-light action inline and return its
-    # rendered outcome. Unlike the read-only pulls this has a (gated)
-    # side effect, so the Coordinator injects a bridge callable that
-    # marshals execution onto its own event loop. ``None`` => feature
-    # absent (the tool reports it is unavailable).
+    # A3: run a whitelisted lane-light action inline (gated side effect, so
+    # the Coordinator injects a bridge callable). ``None`` => unavailable.
     action_runner: Callable[[str, dict[str, Any]], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
@@ -79,7 +52,7 @@ class ContextProvider:
             return f"(context tool {label} unavailable: {exc!r})"
         return out if isinstance(out, str) and out else f"({label}: empty)"
 
-    # -- projections backed by SharedState.to_*_summary --------------
+    # Projections backed by SharedState.to_*_summary.
     def mission_status(self) -> str:
         return self._safe(self.shared_state.to_mission_summary, "mission_status")
 
@@ -138,10 +111,8 @@ class ContextProvider:
         )
 
 
-# Tool descriptors: (tool_name, description, input_schema, provider-method).
-# input_schema follows the JSON-schema subset the SDK accepts. Methods are
-# resolved by name at server-build time so the descriptor table stays
-# declarative.
+# Tool descriptors: (tool_name, description, input_schema, provider-method);
+# methods resolved by name at server-build time.
 _NO_ARGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {},
@@ -280,8 +251,7 @@ def _resolve_sdk(sdk_module: Any | None) -> Any | None:
 def _make_handler(
     provider: ContextProvider, method_name: str,
 ) -> Callable[[dict[str, Any]], Any]:
-    """Build an async MCP handler that calls the provider method and
-    returns its string result as the tool result content."""
+    """Build an async MCP handler returning the provider method's string."""
 
     async def _handler(args: dict[str, Any]) -> dict[str, Any]:
         method = getattr(provider, method_name)
@@ -305,9 +275,7 @@ def _make_handler(
             }
         if not isinstance(text, str):
             text = json.dumps(text, default=str)
-        # Observability (plan Step 2): make on-demand context pulls visible
-        # so we can confirm the agent actually pulls context instead of
-        # relying on a full state push.
+        # Observability: make on-demand context pulls visible.
         log.info(
             "context_tool pull: %s args=%s -> %d chars",
             method_name, kwargs or {}, len(text),

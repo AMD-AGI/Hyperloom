@@ -2,26 +2,11 @@
 
 """Specialist sub-agent prompt assembler — v0.8 M5.
 
-The Coordinator hands the SpecialistRunner a typed input bundle and
-this module returns the fully-assembled 9-section prompt. The 9 sections
-are fixed; each is independently nullable (renders as ``(none)``
-placeholder) so the prompt structure stays stable regardless of which
-KB / PR / source-tree slots happen to be populated for the current
-specialist + gap.
-
-Output is a tuple ``(system_prompt, user_prompt)`` where:
-
-* ``system_prompt`` carries sections 1 (identity), 8 (output protocol),
-  9 (iron rules) — the immutable specialist contract.
-* ``user_prompt`` carries sections 2 (hardware), 3 (gap), 4 (KB), 5
-  (recipe), 6 (PR), 7 (source hint) — the per-task context.
-
-This split lets the LLM backend cache the system prompt across multiple
-specialists in the same session (identity / iron rules don't change).
-
-Pure function: no IO besides reading the assembled inputs, no env
-access, no logging side effects. The output is snapshotted to
-``runs/specialist/<task_id>/prompt.md`` by SpecialistRunner.
+Returns ``(system_prompt, user_prompt)``: the system prompt carries the
+immutable contract (identity / output protocol / iron rules) so the
+backend can cache it across specialists; the user prompt carries per-task
+context (hardware / gap / KB / recipe / PR / source hint). Each section is
+independently nullable, rendering ``(none)``. Pure function.
 """
 
 from __future__ import annotations
@@ -41,43 +26,20 @@ from ..specialist_domains import (
 _NONE_PLACEHOLDER = "(none)"
 
 
-# Cap on how many entries a specialist may emit in its final
-# ``proposal_set``. Re-exported from ``orchestrator/policy.py`` so the
-# prompt-side soft cap (self-curation instruction in Section 8) and the
-# SpecialistRunner-side hard truncate (write path) stay aligned. The
-# Critic separately rejects any marginal-quality survivors against KB
-# priors. Override per-task via ``SpecialistPromptInputs.max_proposals``
-# (still clamped to this value by the runner).
+# Soft cap on ``proposal_set`` size; re-exported from ``policy.py`` so the
+# prompt-side cap and the runner-side hard truncate stay aligned.
 from inference_optimizer.orchestrator.policy import (
     DEFAULT_SPECIALIST_MAX_PROPOSALS,
 )
 
 
-# ---------------------------------------------------------------------------
-# per-domain focus templates
-#
-# Each entry produces the body that the prompt builder injects into
-# Section 1 under "### Domain focus — <key>". The shape mirrors
-# Arbor's ``agent expertise`` table (launcher/orchestrator.md):
-# - "What you read" (which sub-trees of the KB / which framework
-#   directories to grep first).
-# - "Winning techniques" (concrete patterns the specialist should
-#   sanity-check against the gap before proposing).
-# - "Pitfalls" (anti-patterns that historically reverted on this
-#   domain — sourced from KB lessons + Arbor's lessons table).
-#
-# When a domain key is missing from this map, ``_section_identity``
-# falls back to the generic body (the generic default).
-# ---------------------------------------------------------------------------
+# Per-domain focus templates: each injects a "Domain focus" block into
+# Section 1; a missing key falls back to the generic body.
 
 
 def _is_atom(inp: SpecialistPromptInputs) -> bool:
-    """True when ``_focus_*`` blocks should use atom-flavoured hints.
-
-    ``framework`` may be empty on legacy / test dispatches where the
-    Coordinator did not plumb it; treat that as "use the canonical
-    sglang/vllm hint block" so existing tests keep their semantics.
-    """
+    """True when ``_focus_*`` blocks should use atom-flavoured hints
+    (empty framework falls back to the canonical sglang/vllm block)."""
     return (inp.framework or "").strip().lower() == "atom"
 
 
@@ -428,48 +390,32 @@ class SpecialistPromptInputs:
     task_id: str
     domain: SpecialistDomain
     max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS
-    # Soft cap on ``proposal_set`` size — rendered into Sections 1 + 8
-    # so the specialist self-curates to its top-K picks rather than
-    # padding with marginal candidates.
+    # Soft cap on ``proposal_set`` size (rendered into Sections 1 + 8).
     max_proposals: int = DEFAULT_SPECIALIST_MAX_PROPOSALS
 
-    # Hardware context. ``tp`` defaults to 0
-    # (sentinel for "unspecified"), NOT 1 — a silent default of 1
-    # would make comm_specialist veto its own proposals on
-    # tensor-parallel sessions where the Coordinator forgot to
-    # plumb ``params['tp']`` from SharedState.
+    # Hardware context. ``tp`` defaults to 0 (sentinel for "unspecified"),
+    # NOT 1, so comm_specialist doesn't veto its own TP proposals.
     gpu_type: str = ""
     allocated_gpu_ids: tuple[int, ...] = ()
     tp: int = 0
     hbm_gb: float = 0.0
     peak_tflops: float = 0.0
     arch_notes: str = ""
-    # Advisory competitor target gap block (mirrored from the
-    # Coordinator). Direction hint only; never gates the specialist.
+    # Advisory competitor target gap block; direction hint only.
     target_gap_notes: str = ""
-    # Already-proven warm-recipe optimizations (``{name, source}``) the
-    # research scout should skip re-mining. Empty on cold-start.
+    # Already-proven warm-recipe optimizations the research scout should skip.
     already_proven: list[dict[str, str]] = field(default_factory=list)
-    # Compact advisory research-hint block (source-backed priors collected
-    # this session). Co-equal with RecipeKB warm-start facts; its presence
-    # suppresses the cold-start fallback.
+    # Advisory research-hint block; its presence suppresses cold-start fallback.
     research_hints: str = ""
-    # Workload context (mirrored from SharedState by
-    # Coordinator._warm_specialist_params; renders in section 2 so
-    # the specialist sees the actual benchmark workload instead of
-    # the dataclass default).
+    # Workload context mirrored from SharedState; renders in section 2.
     precision: str = ""
     conc: int = 0
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
-    # runtime fingerprint surfaced into prompts so the
-    # specialist can judge "is this lesson from an old framework still
-    # applicable?". ``framework`` is the active backend (sglang / vllm);
-    # ``framework_version`` is the precise install version (e.g. "0.5.11").
-    # Both empty when SharedState doesn't carry them (legacy SDK
-    # callers / pre-PR sessions); the prompt renderer treats absent
-    # values as "no version annotation".
+    # Runtime fingerprint so the specialist can judge lesson applicability;
+    # ``framework_version`` is the precise install version. Empty => no
+    # version annotation.
     framework: str = ""
     framework_version: str = ""
 
@@ -479,50 +425,31 @@ class SpecialistPromptInputs:
     gap_layer: str = ""
     gap_evidence: dict[str, Any] = field(default_factory=dict)
 
-    # Optional structured KB context. Empty in the current RecipeKB-first path.
+    # Optional structured KB context. Empty in the RecipeKB-first path.
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
 
-    # Roofline / TraceLens evidence.
-    # Filled by ``Coordinator._warm_specialist_params`` from
-    # :attr:`SharedState.last_trace_analyze`. Expected keys:
-    # ``analysis_md_path``, ``roofline_snapshot_id``,
-    # ``executive_summary`` (compute/idle/comm/top_bottleneck percentages),
-    # ``hot_kernels_top15`` (capped at top 8 by the warmer to bound
-    # token cost). Empty dict → section renders empty / placeholder.
+    # Roofline / TraceLens evidence from ``SharedState.last_trace_analyze``;
+    # empty dict renders a placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
 
     # Recipe summary from T0 ``find-recipe``
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    # T0 ``lessons`` query result — positive priors from prior KEEPs
-    # on (model, hardware), sorted by KB-side confidence. Rendered as
-    # § 5b for the specialist (separate from § 5 recipe so the LLM can
-    # reason about each independently).
+    # T0 lessons — positive priors from prior KEEPs; rendered as § 5b.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # PR feed
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
-    # Generic sub_kind passthrough from the dispatch params. Still
-    # routed into the prompt so per-domain ``_focus_*`` helpers can
-    # specialise on it where useful; the legacy ``framework_pr_scout``
-    # branch was retired with the FRAMEWORK_PR phase migration.
+    # Generic sub_kind passthrough so ``_focus_*`` helpers can specialise.
     sub_kind: str = ""
 
-    # Additional knowledge-domain tags carried by a multi-tag dispatch.
-    # Each tag contributes its per-domain focus block to Section 1 (the
-    # primary ``domain`` block renders first). Empty for single-tag
-    # dispatch.
+    # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
-    # Active server framework name (``sglang`` / ``vllm`` / ``atom``).
-    # Mirrored from ``SharedState.framework`` by
-    # ``Coordinator._warm_specialist_params``. Empty string means the
-    # Coordinator didn't plumb it (legacy / test path); per-domain
-    # focus helpers must treat an empty string as "fall back to the
-    # canonical sglang/vllm hint blocks". Used to switch the
-    # "what to read first" bullets to atom-equivalent source paths
-    # when ``framework == 'atom'``.
+    # Active server framework (``sglang`` / ``vllm`` / ``atom``); empty falls
+    # back to the canonical sglang/vllm hint blocks. Switches "what to read
+    # first" bullets to atom paths when ``framework == 'atom'``.
     framework: str = ""
 
     # Local source navigation hint
@@ -536,9 +463,7 @@ class SpecialistPromptInputs:
     notes: str = ""
 
 
-# ---------------------------------------------------------------------------
 # Section 1 — Identity & autonomy
-# ---------------------------------------------------------------------------
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     body: list[str] = [
         "## 1. IDENTITY & AUTONOMY",
@@ -566,10 +491,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "capability boundary is fixed by Section 9 Iron Rules; everything inside",
         "it is yours.",
     ]
-    # per-domain expertise + focus
-    # paragraph. Each domain template emphasises the surface area the
-    # specialist should reason about + the typical winning techniques
-    # (lifted from Arbor's orchestrator.md "agent expertise" table).
+    # Per-domain expertise + focus blocks.
     rendered_focus_keys: set[str] = set()
     focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
     if focus is not None:
@@ -578,9 +500,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.append("")
         body.extend(focus(inp))
         rendered_focus_keys.add(inp.domain.key)
-    # Multi-tag dispatch: append the focus block of each additional
-    # knowledge-domain tag (resolved to a representative specialist
-    # key) so a combined-domain specialist sees every relevant surface.
+    # Multi-tag dispatch: append each extra tag's focus block.
     for tag in inp.extra_focus_tags:
         tag_domain = domain_for_tag(tag)
         if tag_domain is None or tag_domain.key in rendered_focus_keys:
@@ -596,9 +516,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     return body
 
 
-# ---------------------------------------------------------------------------
 # Section 2 — Hardware context
-# ---------------------------------------------------------------------------
 def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     rows: list[str] = ["## 2. HARDWARE CONTEXT", ""]
     if inp.gpu_type:
@@ -622,9 +540,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- HBM per GPU: {inp.hbm_gb:.1f} GB")
     if inp.peak_tflops > 0:
         rows.append(f"- Peak TFLOPs (declared): {inp.peak_tflops:.1f}")
-    # Workload context — surfacing concrete numbers prevents the
-    # specialist from guessing (or assuming defaults) when reasoning
-    # about whether a given knob is reachable for this run.
+    # Workload context — concrete numbers so the specialist doesn't guess.
     workload_rows: list[str] = []
     if inp.precision:
         workload_rows.append(f"- precision: {inp.precision}")
@@ -649,9 +565,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Section 3 — Gap statement
-# ---------------------------------------------------------------------------
 def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 3. GAP STATEMENT", ""]
     if not inp.gap_canonical_id:
@@ -671,23 +585,10 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Section 4 — optional KB context
-# ---------------------------------------------------------------------------
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
-    """Issue-J (Saturday May 2026): all three prior sources are empty.
-
-    When the model is brand new to the KB (HTTP 4xx schema rejects on
-    ``propose_point`` for the recipe canonical_id) AND PR Monitor has
-    no domain-tagged PRs AND ``find-recipe`` returned no recipe, the
-    specialist's ``## 4`` / ``## 5`` / ``## 6`` sections all render
-    ``(none)``. Historically this caused specialists to return
-    ``proposal_set=[]`` (no priors → no anchor → no candidates),
-    which the orchestrator then read as "exhausted" and routed into
-    ``no_more_leverage``. Detecting this condition lets us inject an
-    explicit cold-start directive instead of relying on the model to
-    self-recover.
-    """
+    """Issue-J: all prior sources empty, so inject a cold-start directive
+    instead of letting specialists return an empty proposal_set."""
     return (
         not inp.kb_subgraph
         and not inp.warm_start_recipe
@@ -703,10 +604,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     cold = _is_cold_start(inp)
     if not inp.kb_subgraph:
         if inp.research_hints:
-            # Research hints stand in as an advisory prior when structured
-            # KB context is empty; never a deterministic gate. This keeps
-            # the cold-start fallback from
-            # firing whenever the scout produced fresh source-backed priors.
+            # Research hints stand in as an advisory prior when KB is empty.
             rows.extend([
                 "Structured KB context is empty for this (model, hardware, domain), but "
                 "the research scout collected source-backed priors this "
@@ -720,12 +618,8 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             ])
             return rows
         if cold:
-            # Cold-start directive: replaces the bare "(none)" with a
-            # specific instruction so the specialist proposes
-            # canonical defaults from its domain focus block (Section
-            # 1) rather than emitting an empty proposal_set. The
-            # Critic still gates the final answer; this only ensures
-            # the KB cold-start path doesn't degenerate to silence.
+            # Cold-start directive so the specialist proposes domain-focus
+            # defaults rather than an empty proposal_set.
             rows.extend([
                 "**COLD-START MODE — no priors available.**",
                 "",
@@ -772,33 +666,10 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Section 4a — Roofline / TraceLens evidence
-# ---------------------------------------------------------------------------
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
-    """Render the ROOFLINE EVIDENCE section.
-
-    Sourced from ``Coordinator._warm_specialist_params`` which mirrors
-    :attr:`SharedState.last_trace_analyze`. Expected keys on
-    ``inp.roofline_evidence``:
-
-    * ``analysis_md_path``: absolute path to the TraceLens
-      ``analysis.md`` (specialist Read tool can pull the full report on
-      demand).
-    * ``roofline_snapshot_id``: monotonic counter the orchestration
-      prompt also surfaces.
-    * ``executive_summary``: structured dict with
-      ``compute_pct / idle_pct / comm_pct / top_bottleneck``
-      (extracted via :func:`roofline_snapshot.extract_workload_summary`).
-    * ``hot_kernels_top15``: list of hot-kernel dicts (top 8 already
-      sliced by the warmer to bound token cost).
-    * ``kernel_roofline_top15``: optional per-kernel roofline projection
-      with AI / efficiency / utilization fields.
-
-    Returns an empty section (just the heading + ``(none)`` placeholder)
-    when ``roofline_evidence`` is empty so the specialist still sees the
-    structural slot.
-    """
+    """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
+    empty evidence renders a heading + ``(none)`` placeholder."""
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
     ev = inp.roofline_evidence or {}
     if not isinstance(ev, dict) or not ev:
@@ -925,9 +796,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Section 5 — Recipe summary
-# ---------------------------------------------------------------------------
 def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 5. WARM-START RECIPE SUMMARY", ""]
     if not inp.warm_start_recipe:
@@ -940,21 +809,10 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Section 5b — Related lessons (positive priors from prior KEEPs)
-# ---------------------------------------------------------------------------
 def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=lesson`` points that previous KEEP decisions
-    on this (model, hardware) wrote — the positive counterpart of
-    the § 5 pitfalls block.
-
-    Each lesson is shown compactly: the ``statement`` line (one
-    actionable claim) + the ``measured_impact`` string (the numeric
-    delta from the prior session), with ``applicable_models`` /
-    ``applicable_hardware`` collapsed into a single header so the
-    specialist can scan a dozen lessons at a glance instead of
-    reading JSON dumps.
-    """
+    """Render KB ``kind=lesson`` points from prior KEEPs, compactly
+    (statement + measured_impact)."""
     rows = ["## 5b. RELATED LESSONS (prior KEEPs on this model+hw)", ""]
     if not inp.warm_start_lessons:
         rows.append(_NONE_PLACEHOLDER)
@@ -965,15 +823,12 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         if not statement:
             continue
         impact_str = _render_measured_impact(attrs.get("measured_impact"))
-        # Optional: confidence + source session hint + validator count
-        # for "how transferable is this lesson?".
         conf = point.get("confidence")
         meta_bits: list[str] = []
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        # surface the validated_count first because "5 sessions
-        # confirmed this" is the strongest cross-session signal. Fall
-        # back to the singular ``source_session_id`` for legacy rows.
+        # validated_count first (strongest cross-session signal); legacy
+        # rows fall back to source_session_id.
         vc = attrs.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"validated={vc}")
@@ -985,11 +840,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
             if src_sid:
                 meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        # version mismatch annotation. Surface this AFTER the
-        # statement so the LLM sees ``- **X works on sglang** [from
-        # sglang@0.4.5, you're on 0.5.11]`` and can decide if the
-        # lesson still applies. Client-side ranking already downweighted
-        # the lesson, but the LLM gets the final call.
+        # Version-mismatch annotation; the LLM gets the final call.
         version_note = _format_version_note(inp, attrs)
         rows.append(f"- **{statement}**{meta}{version_note}")
         if impact_str:
@@ -1002,20 +853,9 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
 def _format_version_note(
     inp: SpecialistPromptInputs, lesson_attrs: dict[str, Any],
 ) -> str:
-    """GAP 8 — render a ``[from sglang@X.Y, you're on A.B]`` annotation
-    when the lesson's framework_version differs from the current session.
-
-    Returns an empty string when:
-
-    * The lesson didn't carry a framework_version (legacy / pre-PR row).
-    * The current session doesn't know its own framework_version
-      (legacy SDK caller without manifest stack_fingerprint).
-    * The versions match exactly.
-
-    Format is intentionally compact (single bracket pair) so it
-    doesn't dominate the bullet line; the meaningful action is "LLM
-    still gets to decide".
-    """
+    """GAP 8 — render a ``[from sglang@X.Y, you're on A.B]`` annotation when
+    the lesson's framework_version differs; empty when either side is
+    unknown or they match."""
     lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
     current_fv = (inp.framework_version or "").strip()
     if not lesson_fv or not current_fv:
@@ -1027,15 +867,8 @@ def _format_version_note(
 
 
 def _render_measured_impact(raw: Any) -> str:
-    """Back-compat renderer for ``attrs.measured_impact``.
-
-    Two shapes accepted:
-
-    * Dict (GAP 3 — new shape): formatted as
-      ``+12.3% (tput=678.0, depth=3, 2026-05-26)``.
-    * String (legacy): returned verbatim.
-    * Anything else (None / numbers): returned as ``str(raw)`` or "".
-    """
+    """Back-compat renderer for ``attrs.measured_impact`` (dict, legacy
+    string, or other)."""
     if isinstance(raw, dict):
         parts: list[str] = []
         gain = raw.get("gain_pct")
@@ -1058,23 +891,10 @@ def _render_measured_impact(raw: Any) -> str:
     return str(raw).strip()
 
 
-# ---------------------------------------------------------------------------
 # Section 5c — Known pitfalls (anti-priors from prior REVERTs)
-# ---------------------------------------------------------------------------
 def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=pitfall`` points that previous REVERT / crash /
-    OOM decisions on this (model, hardware) wrote — the negative
-    counterpart of § 5b lessons.
-
-    Same compact rendering as lessons: ``description`` (one actionable
-    anti-pattern) + ``severity`` tag, with optional ``conf`` / ``src``
-    metadata. The "do NOT repeat" framing is critical — the specialist
-    must understand these are *forbidden* paths, not suggestions.
-
-    Replaces the legacy ``raw`` JSON-dump rendering that the old
-    ``traps(symptom=...)`` reader produced (which the LLM couldn't
-    reliably parse).
-    """
+    """Render KB ``kind=pitfall`` points from prior REVERTs (description +
+    severity); framed as forbidden paths, not suggestions."""
     rows = ["## 5c. KNOWN PITFALLS (do NOT repeat — prior REVERTs)", ""]
     if not inp.warm_start_pitfalls:
         rows.append(_NONE_PLACEHOLDER)
@@ -1091,7 +911,6 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
             meta_bits.append(f"severity={severity}")
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        # repeat observations strengthen the "don't try this" signal.
         vc = attrs.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"observed={vc}")
@@ -1110,9 +929,7 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Section 6 — PR feed
-# ---------------------------------------------------------------------------
 def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 6. PR FEED", ""]
     if not inp.pr_monitor_available:
@@ -1133,9 +950,7 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Section 7 — Local source navigation hint
-# ---------------------------------------------------------------------------
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 7. LOCAL SOURCE NAVIGATION HINT", ""]
     if not inp.framework_source_roots and not inp.source_hint_directories:
@@ -1158,9 +973,7 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Section 8 — Output protocol
-# ---------------------------------------------------------------------------
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     workspace = inp.workspace_path or "<workspace>"
     return [
@@ -1253,9 +1066,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-# ---------------------------------------------------------------------------
 # Section 9 — Iron rules
-# ---------------------------------------------------------------------------
 def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     workspace = inp.workspace_path or "<runs/specialist/<task_id>/>"
     if inp.allocated_gpu_ids:
@@ -1315,9 +1126,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-# ---------------------------------------------------------------------------
 # Top-level assembler
-# ---------------------------------------------------------------------------
 def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     """Return ``(system_prompt, user_prompt)`` for one specialist task."""
 

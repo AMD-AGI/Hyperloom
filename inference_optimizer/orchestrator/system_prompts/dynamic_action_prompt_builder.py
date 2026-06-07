@@ -2,11 +2,9 @@
 
 """Multi-turn prompt assembler for the ``dynamic_action`` sub-agent.
 
-Every turn's prompt is composed deterministically from the immutable
-seed kit + the running journal of prior turns + tool results. When
-the journal exceeds ``JOURNAL_TRUNCATE_RATIO * INPUT_TOKEN_CAP`` the
-builder clips the middle (keep first N + last N) — no LLM summary,
-no new tool call. Public surface is :func:`build_turn_prompt`.
+Composes each turn's prompt from the seed kit + journal + tool results,
+clipping the journal middle past ``JOURNAL_TRUNCATE_RATIO * INPUT_TOKEN_CAP``.
+Public surface: :func:`build_turn_prompt`.
 """
 
 from __future__ import annotations
@@ -31,8 +29,7 @@ from ..dynamic_action_tools import (
 INPUT_TOKEN_CAP: int = 32_000
 OUTPUT_TOKEN_CAP: int = 4_000
 
-# Journal section is clipped when it would exceed this fraction of
-# the input cap.
+# Journal clipped when it exceeds this fraction of the input cap.
 JOURNAL_TRUNCATE_RATIO: float = 0.70
 
 # Earliest + latest turns kept when truncating.
@@ -50,9 +47,7 @@ def _estimate_tokens(text: str) -> int:
 
 @dataclass
 class JournalTurn:
-    """One journal row: LLM text + parsed action + the result the
-    runner attached (tool_result for resource tools,
-    proposal_validation for ``emit_proposal``)."""
+    """One journal row: LLM text + parsed action + attached result."""
 
     turn: int
     llm_text: str = ""
@@ -147,8 +142,7 @@ def _render_journal_section(journal: list[JournalTurn]) -> str:
 def _truncate_journal(
     journal: list[JournalTurn],
 ) -> list[JournalTurn]:
-    """Drop middle journal turns when the section would dominate the
-    prompt; keep head + tail and insert an elision marker."""
+    """Drop middle journal turns; keep head + tail with an elision marker."""
     if len(journal) <= JOURNAL_KEEP_HEAD + JOURNAL_KEEP_TAIL:
         return list(journal)
     head = journal[:JOURNAL_KEEP_HEAD]
@@ -165,8 +159,7 @@ def _truncate_journal(
 
 
 def _maybe_truncate(journal: list[JournalTurn], rendered_so_far_tokens: int) -> tuple[list[JournalTurn], bool]:
-    """Return ``(possibly_truncated_journal, did_truncate)`` based on
-    the running prompt token estimate."""
+    """Return ``(possibly_truncated_journal, did_truncate)`` by token estimate."""
     rendered = _render_journal_section(journal)
     if _estimate_tokens(rendered) + rendered_so_far_tokens <= int(
         INPUT_TOKEN_CAP * JOURNAL_TRUNCATE_RATIO,
@@ -221,11 +214,7 @@ def build_system_prompt(turn_cap: int) -> str:
 
 
 def build_turn_prompt(inputs: PromptInputs) -> tuple[str, bool]:
-    """Render one turn's user prompt + whether the journal was clipped.
-
-    The runner sends the returned string as the user-side message and
-    pairs it with the static system prompt from :func:`build_system_prompt`.
-    """
+    """Render one turn's user prompt + whether the journal was clipped."""
     spec = inputs.spec_payload
     header_lines = [
         f"# Dispatch {inputs.dyn_id}",

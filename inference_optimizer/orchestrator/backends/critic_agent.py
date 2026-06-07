@@ -1,39 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""CriticAgentBackend — bridges the standalone ``critic-agent`` skill runtime
-into the ``inference_optimizer`` Coordinator as a real Critic Backend.
+"""CriticAgentBackend — bridges the ``critic-agent`` runtime into the
+Coordinator as a real Critic Backend.
 
-Unlike :class:`CodexBackend` (which just sends a system prompt + inbox to
-Codex and parses a JSON envelope reply), this backend runs the documented
-two-phase loop from ``critic-agent/AGENTS.md``::
-
-    1. python -m runtime.cli prepare-review --request request.json
-       --out judge_bundle.json
-    2. <Codex chat completion produces review.json>
-    3. python -m runtime.cli commit-review  --request request.json
-       --review review.json --out emit.json
-
-That gets us the full Critic feature set the legacy design asks for:
-
-* KB priors lookup with circuit-breaker for unreachable services
-* Per-session memory + idempotent ``reviewed_msg_ids`` (no double-verdict)
-* ``judge_bundle.review_constraints`` (approve_requires checklist,
-  ceiling_importance) injected into the LLM prompt
-* Emergency fallbacks (heartbeat envelope, ``needs_review`` /
-  ``critic_unavailable`` source when context is missing)
-
-The Coordinator + PolicyGate already validate the returned envelope, but
-we re-validate locally so a malformed ``commit-review`` reply surfaces as
-a backend-tagged error in the event log rather than a generic LLM error.
-
-Test seams (mirroring :class:`CodexBackend.client_factory`):
-
-* ``codex_client_factory`` — bypass real OpenAI SDK construction.
-* ``runtime_caller_factory`` — bypass the ``runtime.cli`` subprocess; the
-  factory returns a callable ``(phase, request_path, review_path|None,
-  out_path) -> None`` that writes the desired ``judge_bundle.json`` /
-  ``emit.json`` directly. Used by unit tests so we don't pay for real
-  Python startup × thousands of cases.
+Runs the two-phase loop from ``critic-agent/AGENTS.md`` (prepare-review →
+Codex review.json → commit-review), giving KB priors, per-session memory,
+review_constraints injection, and emergency fallbacks. The returned envelope
+is re-validated locally so malformed replies surface as backend-tagged
+errors. ``codex_client_factory`` / ``runtime_caller_factory`` are test seams.
 """
 
 from __future__ import annotations
@@ -59,29 +33,21 @@ from .base import BackendError, BackendTurnResult
 
 
 if TYPE_CHECKING:  # pragma: no cover
-    # critic-agent's runtime package only resolves once we've added the
-    # critic_agent_root to sys.path in __post_init__. The type-only import
-    # keeps annotations honest without forcing import order at runtime.
+    # Type-only import; runtime.web_tools resolves after sys.path insert
+    # in __post_init__.
     from runtime.web_tools import WebToolClients, WebToolsConfig
 
 
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
 CRITIC_AGENT_MAX_COMPLETION_TOKENS = 2000
 
-# Hard cap on the number of per-turn workdirs kept on disk. Older ones
-# are pruned at the start of each turn so a long run doesn't accumulate
-# thousands of `<turn>/` dirs. Anything more recent stays for debugging.
+# Cap on per-turn workdirs kept on disk; older ones are pruned each turn.
 CRITIC_AGENT_WORKDIR_KEEP_COUNT = 50
 
-# Output instructions appended to the user prompt so the model produces
-# the exact ``review.json`` shape that ``commit-review`` validates against
-# (see critic-agent/actions/review_coordinator_inbox.md).
+# Output instructions for the exact ``review.json`` shape commit-review validates.
 _REVIEW_OUTPUT_INSTRUCTIONS = """
 ==== OUTPUT FORMAT (REQUIRED) ====
 Reply with EXACTLY ONE JSON object that matches this review schema:
@@ -130,19 +96,13 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
 """.strip()
 
 
-# Match a fenced ```json ... ``` block first, falling back to a bare {...}
-# containing "review_verdicts". Compiled once.
+# Fenced ```json``` block first, falling back to bare {...} with "review_verdicts".
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 
-# ---------------------------------------------------------------------------
 def _extract_review_json(text: str) -> dict[str, Any] | None:
-    """Pull the first valid review JSON out of a model reply.
-
-    Returns ``None`` if nothing parseable shows up; callers fall back to an
-    empty review (commit-review will then emit a heartbeat).
-    """
+    """Pull the first valid review JSON out of a model reply, or ``None``."""
     if not text:
         return None
     for m in _FENCED_JSON_RE.finditer(text):
@@ -165,7 +125,6 @@ def _extract_review_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-# ---------------------------------------------------------------------------
 @dataclass
 class RuntimeCall:
     """One ``runtime.cli`` invocation, captured for tests + logging."""
@@ -188,14 +147,8 @@ fake that writes the desired ``judge_bundle.json`` / ``emit.json`` to
 
 
 def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
-    """Re-serialize an OpenAI assistant message that issued tool_calls.
-
-    The Chat Completions API requires every ``role:"tool"`` reply to be
-    preceded by the original assistant message containing the matching
-    ``tool_calls`` array. We reconstruct the minimum dict shape rather
-    than calling ``msg.model_dump()`` so the serializer stays compatible
-    with both pydantic v1 and v2 SDK builds.
-    """
+    """Re-serialize an OpenAI assistant message that issued tool_calls
+    (minimal dict shape, pydantic v1/v2 compatible)."""
     return {
         "role": "assistant",
         "content": getattr(msg, "content", None),
@@ -249,26 +202,17 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
         ) from exc
 
     if proc.returncode != 0:
-        # AGENTS.md §Exit codes:
-        #   0 → success (incl. dead_lettered)
-        #   2 → adapter bug; surface to host so SKILL can produce needs_review
+        # AGENTS.md §Exit codes: 0 success; 2 adapter bug (host → needs_review).
         raise BackendError(
             f"critic-agent runtime.cli {call.phase} exited rc={proc.returncode}: "
             f"stderr={proc.stderr.strip()[:500]!r}"
         )
 
 
-# ---------------------------------------------------------------------------
 # Cross-domain enrichment helper for dynamic_action proposals.
-# ---------------------------------------------------------------------------
 def _proposal_provenance_literal(proposal: dict[str, Any]) -> str:
-    """Read the ``provenance`` literal off a judge_bundle proposal,
-    tolerating both top-level + nested ``params`` placement.
-
-    Comparison is case-sensitive — ``DYNAMIC`` / ``Dynamic`` are not
-    accepted as ``dynamic`` so this layer agrees with the runner
-    validator.
-    """
+    """Read the ``provenance`` literal off a proposal (top-level or nested
+    ``params``); comparison is case-sensitive to match the runner validator."""
     if not isinstance(proposal, dict):
         return ""
     top = proposal.get("provenance")
@@ -283,12 +227,8 @@ def _proposal_provenance_literal(proposal: dict[str, Any]) -> str:
 
 
 def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
-    """Set ``review_constraints.cross_domain = True`` + rule descriptors
-    when any proposal carries ``provenance == "dynamic"``.
-
-    Idempotent: a re-injection on the same bundle leaves the dict
-    unchanged. Specialist-only bundles are no-ops.
-    """
+    """Set ``review_constraints.cross_domain`` + rule descriptors when any
+    proposal carries ``provenance == "dynamic"``. Idempotent."""
     proposals = judge_bundle.get("proposals") or []
     if not isinstance(proposals, list):
         return
@@ -318,7 +258,6 @@ def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None
     ]
 
 
-# ---------------------------------------------------------------------------
 @dataclass
 class CriticAgentBackend:
     """Real Critic backend that drives the critic-agent runtime.
@@ -351,17 +290,9 @@ class CriticAgentBackend:
         Test seam returning a :data:`RuntimeCaller`. Tests override this
         to bypass the real Python subprocess.
     static_context:
-        Optional explicit per-session context (model / framework /
-        gpu_type / workload / precision / ...) injected as
-        ``request.context`` on every ``prepare-review`` call. When ``None``
-        (production path), the backend reads ``manifest.json`` under
-        ``session_dir`` once in ``__post_init__`` and derives the same
-        keys from there. Tests pass this in directly to bypass the
-        manifest read; the empty dict ``{}`` is a valid explicit override
-        that reproduces the legacy "no context" behaviour. Without this,
-        every verdict comes back as ``needs_review`` /
-        ``critic_unavailable`` because the runtime's ``CRITICAL_CONTEXT_KEYS
-        = ("model", "framework")`` check fails on an empty merged context.
+        Optional explicit per-session context injected as
+        ``request.context``. When ``None``, derived from ``manifest.json``
+        under ``session_dir``; ``{}`` is a valid "no context" override.
     name:
         Backend instance name surfaced in the Coordinator startup banner.
     """
@@ -375,32 +306,18 @@ class CriticAgentBackend:
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
     static_context: dict[str, Any] | None = None
     known_actions: tuple[str, ...] = ()
-    # per-action verdict policy map (action_name -> one of "archival" /
-    # "exploration" / "promotion"). When non-empty, the backend enriches
-    # ``judge_bundle.review_constraints.action_verdict_policy`` with this
-    # mapping right after the runtime's ``prepare-review`` returns. The
-    # LLM-critic then uses the lookup as its primary per-proposal rule
-    # (see critic.md), instead of hard-coded carve-out lists. Wire from
-    # CLI by passing
-    # ``{a.name: a.verdict_class for a in ActionRegistry().all()}``.
+    # Per-action verdict policy (action_name -> archival/exploration/promotion)
+    # enriched onto ``review_constraints.action_verdict_policy`` post prepare-review.
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
     name: str = "critic-agent"
-    # ── #170 (May 2026) — optional web tools (web_search / web_fetch) ──
-    # When ``web_tools_config`` is None, configuration is read from env via
-    # ``WebToolsConfig.from_env()`` during ``__post_init__``. When
-    # ``web_tool_clients_factory`` is provided, tests can inject pre-built
-    # clients (with mock providers / mock httpx transports) instead of
-    # going through the default ``build_clients`` path.
+    # #170 — optional web tools (web_search / web_fetch). ``web_tools_config``
+    # None reads from env; ``web_tool_clients_factory`` injects test clients.
     web_tools_config: "WebToolsConfig | None" = None
     web_tool_clients_factory: Callable[["WebToolsConfig"], "WebToolClients"] | None = None
 
-    # Runtime state — populated in __post_init__ and mutated turn-over-turn.
-    # NOTE: ``_runtime_caller`` is intentionally NOT declared as a dataclass
-    # field with ``default=_default_runtime_caller``. Module-level functions
-    # used as class attributes go through Python's descriptor protocol on
-    # instance access and get bound as methods (passing ``self`` as the first
-    # arg). We assign on the instance in ``__post_init__`` instead, so it
-    # stays a plain ``Callable``.
+    # Runtime state. ``_runtime_caller`` is assigned on the instance in
+    # __post_init__ (not as a dataclass field) to avoid descriptor binding
+    # of a module-level function as a method.
     _client: Any = field(default=None, init=False, repr=False)
     _turn_idx: int = field(default=0, init=False, repr=False)
     _skill_preamble: str | None = field(default=None, init=False, repr=False)
@@ -423,13 +340,8 @@ class CriticAgentBackend:
                 f"{self.critic_agent_root!s} — set CRITIC_AGENT_ROOT or "
                 f"check the install"
             )
-        # critic-agent ships its runtime as a top-level ``runtime`` package
-        # that ``pytest.ini`` exposes via ``pythonpath = .``. The same
-        # in-process import is needed for #170's web-tools (web_search /
-        # web_fetch). Inserting once at the front so future imports of
-        # ``runtime.web_tools`` resolve against the configured critic-agent
-        # checkout — and so this never silently picks up a stale install
-        # elsewhere on the path.
+        # Insert critic_agent_root at the front of sys.path so
+        # ``runtime.*`` resolves against the configured checkout, not a stale install.
         critic_root_str = str(self.critic_agent_root)
         if critic_root_str not in sys.path:
             sys.path.insert(0, critic_root_str)
@@ -440,9 +352,7 @@ class CriticAgentBackend:
             )
 
         if self.runtime_caller_factory is not None:
-            # Assign on the instance directly so the callable doesn't go
-            # through the descriptor protocol (which would bind it as a
-            # method).
+            # Assign on the instance to avoid descriptor binding as a method.
             object.__setattr__(
                 self, "_runtime_caller", self.runtime_caller_factory(),
             )
@@ -478,12 +388,8 @@ class CriticAgentBackend:
                 kwargs["base_url"] = base_url
             self._client = AsyncOpenAI(**kwargs)
 
-        # Resolve static per-session context (model / framework / ...) once.
-        # Without this the runtime's prepare-review sees req.context={} and
-        # falls back to needs_review + critic_unavailable for every proposal
-        # because CRITICAL_CONTEXT_KEYS=("model","framework") aren't present
-        # in the merged context. Explicit `static_context={}` is honoured
-        # (legacy / unit-test behaviour).
+        # Resolve static per-session context once; absent model/framework keys
+        # make prepare-review fall back to needs_review + critic_unavailable.
         if self.static_context is not None:
             self._static_context = dict(self.static_context)
         else:
@@ -494,26 +400,14 @@ class CriticAgentBackend:
             sorted(self._static_context.keys()),
         )
 
-        # ── #170 — initialize web tools (no-op by default) ─────────────
+        # #170 — initialize web tools (no-op by default).
         self._init_web_tools()
 
     def _init_web_tools(self) -> None:
-        """Resolve :class:`WebToolsConfig` + build clients + freeze schemas.
-
-        Failure during web-tools setup is logged but never raises: the
-        critic must keep running even if Tavily/Serper are unreachable.
-        ``_web_tool_clients`` stays None and ``_web_tool_schemas`` stays
-        empty so the reasoning loop transparently falls back to a single
-        no-tool ``chat.completions.create`` call.
-        """
-        # PEP 420 makes ``runtime/`` a namespace package as soon as any
-        # directory called ``runtime`` shows up on ``sys.path`` — even
-        # when it lacks ``__init__.py``. If a prior test (or another
-        # CriticAgentBackend instance) inserted a *different*
-        # critic_agent_root first, Python caches that namespace and
-        # ``from runtime.web_tools import ...`` looks only inside the
-        # stale path. Drop the cached entries when they don't cover our
-        # configured root so the import below resolves freshly.
+        """Resolve :class:`WebToolsConfig` + build clients + freeze schemas;
+        never raises (failure falls back to no-tool reasoning)."""
+        # PEP 420 namespace caching can pin ``runtime`` to a stale
+        # critic_agent_root; evict entries that don't cover our root.
         self._evict_stale_runtime_modules()
         try:
             from runtime.web_tools import (
@@ -574,12 +468,8 @@ class CriticAgentBackend:
         )
 
     def _evict_stale_runtime_modules(self) -> None:
-        """Drop cached ``runtime`` / ``runtime.*`` modules that point
-        away from this backend's ``critic_agent_root``.
-
-        See ``_init_web_tools`` for why this exists. No-op when the
-        cached ``runtime.__path__`` already covers our root.
-        """
+        """Drop cached ``runtime`` / ``runtime.*`` modules pointing away from
+        this backend's ``critic_agent_root`` (no-op when already covered)."""
         runtime_mod = sys.modules.get("runtime")
         if runtime_mod is None:
             return
@@ -593,9 +483,7 @@ class CriticAgentBackend:
         for key in [k for k in sys.modules if k == "runtime" or k.startswith("runtime.")]:
             sys.modules.pop(key, None)
 
-    # ------------------------------------------------------------------
     # Public API — Backend.run
-    # ------------------------------------------------------------------
     async def run(
         self,
         prompt: str,
@@ -654,13 +542,7 @@ class CriticAgentBackend:
                 f"{judge_path}: {exc}"
             ) from exc
 
-        # enrich review_constraints with per-action verdict policy so the
-        # LLM-critic can look up each proposal's class (archival /
-        # exploration / promotion) and apply the correct rule, instead of
-        # prompt-hardcoded carve-out lists. Critic runtime owns
-        # ``review_constraints.approve_requires`` /
-        # ``allowed_verdicts`` / etc.; we layer
-        # ``action_verdict_policy`` on top.
+        # Layer per-action verdict policy onto review_constraints.
         if self.action_verdict_policy:
             rc = judge_bundle.setdefault("review_constraints", {})
             if not isinstance(rc, dict):
@@ -668,16 +550,9 @@ class CriticAgentBackend:
                 judge_bundle["review_constraints"] = rc
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
-        # When any proposal carries ``provenance == "dynamic"``, flip
-        # ``review_constraints.cross_domain`` and inject the rule
-        # descriptors so the LLM-critic applies the cross-domain
-        # rules on top of patch_landing.
         _maybe_inject_cross_domain_constraints(judge_bundle)
 
-        # Stage 2 — Codex reasoning. Note we still call the LLM even when
-        # `judge_bundle.proposals` is empty (the runtime returns an empty
-        # list and commit-review will emit a heartbeat) — but we
-        # short-circuit to skip a wasted LLM call.
+        # Stage 2 — Codex reasoning; short-circuit when there are no proposals.
         proposals = judge_bundle.get("proposals") or []
         if not proposals:
             review = {"review_verdicts": []}
@@ -723,7 +598,6 @@ class CriticAgentBackend:
         try:
             intents = validate_envelope(envelope)
         except IntentValidationError as exc:
-            # Tag with our own prefix so the event log shows where it came from.
             raise NoIntentEmitted(
                 f"critic_agent_envelope_invalid: {exc}"
             ) from exc
@@ -768,9 +642,7 @@ class CriticAgentBackend:
             },
         )
 
-    # ------------------------------------------------------------------
     # Helpers
-    # ------------------------------------------------------------------
     def _allocate_workdir(self, turn_idx: int) -> Path:
         root = self.session_dir / "critic-workdir"
         root.mkdir(parents=True, exist_ok=True)
@@ -802,38 +674,17 @@ class CriticAgentBackend:
                         try:
                             child.rmdir()
                         except OSError:
-                            # Best-effort: dir may still contain files or be
-                            # concurrently modified; skip and continue pruning.
                             pass
                 stale.rmdir()
             except OSError:
-                # Best-effort prune — don't fail the turn over a janitor hiccup.
+                # Best-effort prune.
                 continue
 
     def _load_static_context_from_manifest(self) -> dict[str, Any]:
-        """Derive per-session context for ``request.context`` from manifest.json.
-
-        Maps the inference_optimizer manifest schema (``inference_optimizer/
-        manifest.py:build_manifest``) onto the keys the critic-agent runtime
-        merges and treats as critical (``critic-agent/runtime/request_models.py:
-        CRITICAL_CONTEXT_KEYS`` and ``session_memory._MERGEABLE_CONTEXT_KEYS``):
-
-        * ``model``       <- ``manifest["model_name"]``    (CRITICAL)
-        * ``framework``   <- ``manifest["framework"]``     (CRITICAL)
-        * ``gpu_type``    <- ``manifest["gpu_type"]``
-        * ``model_path``  <- ``manifest["model_path"]``
-        * ``tp``          <- ``manifest["tp"]``
-        * ``workload``    <- ``manifest["workload"]``      (mergeable)
-        * ``precision``   <- ``manifest["workload"]["precision"]`` (mergeable)
-
-        Empty / ``"unknown"`` values are dropped so the runtime's
-        ``_is_missing()`` logic doesn't see them.
-
-        On any read error (missing file, bad JSON, permission), we log a
-        WARNING and return ``{}``. The Coordinator stays alive — the only
-        regression is that critic verdicts revert to the legacy
-        ``needs_review`` / ``critic_unavailable`` fallback until the
-        manifest is restored.
+        """Derive per-session context for ``request.context`` from
+        manifest.json (model / framework / gpu_type / model_path / tp /
+        workload / precision); empty values dropped. Any read error logs a
+        WARNING and returns ``{}``.
         """
         path = manifest_path(self.session_dir)
         try:
@@ -861,7 +712,6 @@ class CriticAgentBackend:
             ctx["model"] = manifest["model_name"]
         if manifest.get("framework"):
             ctx["framework"] = manifest["framework"]
-        # Useful-but-non-critical context.
         if manifest.get("gpu_type"):
             ctx["gpu_type"] = manifest["gpu_type"]
         if manifest.get("model_path"):
@@ -880,27 +730,19 @@ class CriticAgentBackend:
 
     def _build_runtime_env(self) -> dict[str, str]:
         env = dict(os.environ)
-        # Co-locate session memory inside the Coordinator session so it's
-        # cleaned up with the session and follows the per-session lifecycle
-        # contract (SQLite per-session, KB centralized).
+        # Co-locate session memory inside the Coordinator session.
         memory_dir = self.session_dir / "critic-session-memory"
         memory_dir.mkdir(parents=True, exist_ok=True)
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
         env["CRITIC_KB_CLIENT_MODE"] = self.kb_mode
 
-        # L4 — let the critic-agent runtime locate the sibling robustness
-        # agent's findings JSONL via ``ROBUSTNESS_AGENT_SESSION_DIR``.
-        # The robustness CLI also setdefault's this var, but its env
-        # never reaches us (siblings spawned by the Coordinator inherit
-        # os.environ at backend-construction time, not at the moment
-        # robustness writes its file). Setting it here closes the L4
-        # learning loop in real deployments.
+        # L4 — point the runtime at the sibling robustness findings JSONL;
+        # set here because the robustness CLI's env never reaches us.
         env.setdefault(
             "ROBUSTNESS_AGENT_SESSION_DIR", str(self.session_dir),
         )
 
-        # Make the dead-letter dir live under the session by default so
-        # operator cron can replay it without cross-session interference.
+        # Dead-letter dir under the session so cron replays don't cross sessions.
         dlq_dir = self.session_dir / "critic-kb-dead-letter"
         env.setdefault("KB_DEAD_LETTER_DIR", str(dlq_dir))
 
@@ -954,8 +796,7 @@ class CriticAgentBackend:
 
         review = _extract_review_json(text)
         if review is None:
-            # commit-review will emit a heartbeat for an empty list — keep
-            # the LLM's text in metadata for debugging but don't raise.
+            # Empty list → commit-review emits a heartbeat; don't raise.
             review = {"review_verdicts": []}
             log.warning(
                 "critic_agent_backend: model reply contained no parseable "
@@ -968,18 +809,10 @@ class CriticAgentBackend:
         self,
         messages: list[dict[str, Any]],
     ) -> tuple[str, str | None]:
-        """Run the Codex chat-completions loop, optionally with web tools.
-
-        When ``self._web_tool_schemas`` is empty the call is a single
-        no-tool round (the original critic-agent behaviour). Otherwise
-        we expose web_search / web_fetch and let the model interleave
-        tool calls up to ``self._web_tool_max_turns`` times before forcing
-        a final text-only response with ``tool_choice='none'``.
-
-        Returns ``(text, finish_reason)`` of the final assistant message.
-        Never raises for tool-execution failures — the failing tool call
-        is reported back to the model as a synthetic ``tool`` message so
-        it can react (mirrors Primus-Claw's behaviour).
+        """Run the Codex chat-completions loop, optionally interleaving
+        web_search / web_fetch up to ``self._web_tool_max_turns`` before a
+        final text-only reply. Returns ``(text, finish_reason)``; tool-exec
+        failures are reported back to the model, never raised.
         """
         tools = self._web_tool_schemas
         max_turns = self._web_tool_max_turns if tools else 0
@@ -1023,8 +856,7 @@ class CriticAgentBackend:
                     "content": tool_result,
                 })
 
-        # Exhausted max_turns mid-tool-use: force one final no-tool reply
-        # so the model emits the review JSON instead of looping forever.
+        # Exhausted max_turns mid-tool-use: force a final no-tool reply.
         try:
             resp = await self._client.chat.completions.create(
                 model=self.codex_model,
@@ -1069,7 +901,6 @@ class CriticAgentBackend:
             try:
                 parts.append(f"==== {rel} ====\n{path.read_text(encoding='utf-8').strip()}")
             except OSError:
-                # Non-fatal: prompt still works, just thinner.
                 continue
         self._skill_preamble = "\n\n".join(parts) if parts else ""
         return self._skill_preamble

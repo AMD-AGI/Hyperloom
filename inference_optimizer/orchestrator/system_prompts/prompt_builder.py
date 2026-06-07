@@ -2,30 +2,10 @@
 
 """Compose the Orchestration agent's system prompt from typed inputs.
 
-Replaces the previous hand-maintained pair ``orchestration.md`` /
-``orchestration.no_kernel.md``:
-
-* ``orchestration.md`` is now only the *rules fragment* (HARD RULES,
-  SESSION_DIR contract, output protocol) — content that doesn't depend
-  on which actions are enabled.
-
-* This module wraps that fragment with:
-    1. MISSION                           (always)
-    2. SESSION CONTEXT                   (objective / framework / max_minutes)
-    3. PIPELINE & TIME BUDGET            (phase ordering + per-phase ETA)
-    4. ACTIONS YOU MAY USE               (filtered by enabled_actions)
-    5. DECISION FRAMEWORK                (always — short, generic)
-    6. KERNEL-OPT REQUEST REFERENCE      (only when "kernel_opt" is enabled)
-    7. RULES FRAGMENT                    (orchestration.md verbatim)
-
-Output is deterministic given the same inputs (sorted action listing,
-fixed section order). The CLI snapshots the output to
-``agents/orchestration/system_prompt.snapshot.md`` for resume / audit.
-
-The builder is a pure function: no IO besides reading the rules
-fragment, no env access, no logging side effects. This makes it
-trivially testable and easy to use as a one-shot CLI introspection
-tool (see ``scripts/print_orchestration_prompt.py`` if added later).
+Wraps the ``orchestration.md`` rules fragment with generated sections
+(mission, session context, pipeline/budget, action catalogue, decision
+framework, optional kernel-opt reference, rules). Deterministic for given
+inputs; the only IO is reading the rules fragment.
 """
 
 from __future__ import annotations
@@ -46,9 +26,7 @@ from ...protocol.action_surfaces import (
 )
 
 
-# Phase ordering for the catalogue section. Any action whose pipeline_phase
-# is not in this tuple is appended at the end (defensive; current registry
-# fully covers the set).
+# Phase ordering for the catalogue; unknown phases appended at the end.
 _PHASE_ORDER: tuple[str, ...] = (
     "prep", "measure", "analysis", "explore", "deep", "validate",
     "finalize", "support",
@@ -65,9 +43,6 @@ _PHASE_HEADERS: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Section builders (each returns a list[str] of lines, no trailing blank)
-# ---------------------------------------------------------------------------
 def _section_mission() -> list[str]:
     return [
         "## 1. MISSION",
@@ -135,17 +110,9 @@ def _section_session_context(
     ]
 
 
-# ---------------------------------------------------------------------------
-# phase semantics injected into the static system prompt
-# ---------------------------------------------------------------------------
 def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
-    """Render the per-phase allowed-action contract.
-
-    The actual *current* phase is injected dynamically by
-    ``Coordinator._compose_prompt``; this section explains what each
-    phase **means** so the LLM has a stable mental model independent
-    of the runtime state.
-    """
+    """Render the per-phase allowed-action contract (current phase injected
+    dynamically by the Coordinator)."""
     from ..phase_state import (
         PHASE_NAMES,
         is_phase_interleave_enabled,
@@ -226,7 +193,7 @@ def _filter_actions(
 
 
 def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, list[str]]]:
-    """Group actions by phase preserving _PHASE_ORDER; return (phase, eta_min_sum, names)."""
+    """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names)."""
     bucket: dict[str, list[ActionMetadata]] = {}
     for a in actions:
         bucket.setdefault(a.pipeline_phase, []).append(a)
@@ -239,8 +206,6 @@ def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, 
         eta = sum(max(0.0, a.typical_runtime_min) for a in items)
         ordered.append((phase, eta, [a.name for a in items]))
         seen.add(phase)
-    # Defensive: any unknown phases at the end (should never happen for the
-    # shipped registry, but keeps the builder robust against future actions).
     for phase, items in bucket.items():
         if phase in seen:
             continue
@@ -308,8 +273,6 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
         )
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
-    # Specialist is an LLM sub-agent delegate. integrate_patch consumes
-    # specialist worktree patches and should be directly delegatable.
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
@@ -330,8 +293,6 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "keep_threshold_pct?=1.0, "
             "accuracy_baseline?={task: {metric: score}}}}"
         )
-    # Mirrors the specialist emit hint shape: payload field table +
-    # key constraints + PolicyGate reason-code surface for self-correction.
     if meta.name == "dynamic_action":
         return (
             "delegate{action_name='dynamic_action', params={"
@@ -349,10 +310,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "dynamic_side_effects_red_line / "
             "dynamic_kernel_only_disallowed."
         )
-    # dynamic_specialist — free-form CPU-only specialist dispatch.
-    # Handled directly by the Coordinator (bypasses SpecialistRunner);
-    # the payload is open (no domain, no required schema). See the
-    # "Dynamic specialist dispatch (free-form)" section in orchestration.md.
+    # dynamic_specialist — free-form CPU-only specialist dispatch (open payload).
     if meta.name == "dynamic_specialist":
         return (
             "delegate{action_name='dynamic_specialist', params={"
@@ -378,7 +336,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
 
 
 def _format_grid_injection_hint(name: str) -> str | None:
-    """Return a per-action one-liner showing the LLM how to override grid."""
+    """Return a per-action one-liner showing how to override grid, or None."""
     if name == "explore":
         return (
             "GRID INPUT (v0.8 M3, REQUIRED): emit "
@@ -715,12 +673,7 @@ def _read_rules_fragment(path: Path | None) -> str:
         return ""
 
 
-# ---------------------------------------------------------------------------
-# Entry declaration for the supplementary cross-domain ReAct channel.
-# Renders only when ``dynamic_action`` is in the enabled action set.
-# No triggering heuristics, examples, or fallback guidance — those
-# would shift the channel from supplementary to default.
-# ---------------------------------------------------------------------------
+# Renders only when ``dynamic_action`` is enabled.
 def _section_dynamic_action(actions: list[ActionMetadata]) -> list[str] | None:
     if not any(a.name == "dynamic_action" for a in actions):
         return None
@@ -756,9 +709,7 @@ def _section_rules(rules_md: str) -> list[str]:
     return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# Public API.
 def build_orchestration_prompt(
     *,
     action_registry: ActionRegistry,
@@ -771,29 +722,17 @@ def build_orchestration_prompt(
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> str:
-    """Compose the Orchestration system prompt.
+    """Compose the Orchestration system prompt (deterministic for given inputs).
 
     Parameters
     ----------
-    action_registry: pre-loaded ``ActionRegistry`` (caller is responsible
-        for ``.load()``).
-    enabled_actions: names that this run's CLI registered executors for
-        (or that the Kernel agent will service via REQUEST). Order is
-        preserved only for missing-action filtering; final ordering is
-        by pipeline_phase.
-    framework: ``sglang`` / ``vllm`` — printed in the SESSION CONTEXT
-        section.
-    kernel_enabled: explicit override; when ``None``, derived from whether
-        any KERNEL_OWNED action is in ``enabled_actions``.
-    objective_kind / objective_value: matches :mod:`objective` strings;
-        printed verbatim (e.g. ``gain_pct=10`` or ``tput=4500``).
+    action_registry: pre-loaded ``ActionRegistry`` (caller calls ``.load()``).
+    enabled_actions: enabled action names; final ordering is by pipeline_phase.
+    framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
+    kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED actions.
+    objective_kind / objective_value: :mod:`objective` strings, printed verbatim.
     max_minutes: wall-clock budget for the run.
-    rules_fragment_path: path to ``orchestration.md`` (the rules-only
-        fragment). When ``None`` or unreadable, a placeholder is emitted.
-
-    Returns
-    -------
-    str: the full system prompt, deterministic for given inputs.
+    rules_fragment_path: path to ``orchestration.md``; placeholder if unreadable.
     """
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:
@@ -815,26 +754,17 @@ def build_orchestration_prompt(
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
-        # phase contract sits between the legacy
-        # PIPELINE & TIME BUDGET (§3, action-runtime view) and the
-        # ACTIONS catalogue (§4) so the LLM sees the *policy* layer
-        # before the *catalogue*.
         _section_phase_semantics(kernel_enabled=kernel_enabled),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
     ]
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
-    # Dynamic action declaration sits after the decision framework so
-    # the LLM sees the supplementary-channel framing after the primary
-    # EXPLORE action catalogue.
     dyn_section = _section_dynamic_action(actions)
     if dyn_section is not None:
         sections.append(dyn_section)
     sections.append(_section_rules(rules_md))
 
-    # Join sections with a blank line between each; ensure single trailing
-    # newline so snapshot files don't accumulate trailing whitespace diffs.
     parts: list[str] = []
     for sect in sections:
         parts.append("\n".join(sect))

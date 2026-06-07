@@ -1,18 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""LLM backend wrappers.
-
-Each backend exposes a uniform :class:`Backend` protocol so the Coordinator
-can swap implementations (real Claude / Codex SDK, mock for tests, future
-multi-CLI bridge) without touching the reactor loop.
-
-Mock backends (P0):
-
-* :class:`MockBackend` — generic scripted-turn playback for any agent.
-* :class:`MockCriticBackend` — always-approve Critic adapter (auto-extracts
-  proposal msg_id from inbox prompt).
-* :class:`MockRobustnessBackend` — heartbeat-only Robustness adapter.
-"""
+"""LLM backend wrappers exposing a uniform :class:`Backend` protocol."""
 
 from .base import Backend, BackendError, BackendTurnResult
 from .claude import ClaudeBackend
