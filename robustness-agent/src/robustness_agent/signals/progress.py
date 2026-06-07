@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Progress-stagnation detectors (B2 / B3).
 
 Two stateful rules live here:

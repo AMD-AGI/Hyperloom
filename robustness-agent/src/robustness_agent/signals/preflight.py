@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pre-launch / pre-action feasibility signals (C1 / C2 / C3).
 
 Three independent detectors live here, each catching a different

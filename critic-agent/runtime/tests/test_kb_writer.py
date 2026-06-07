@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end tests for :class:`runtime.kb_writer.KBWriter`, including
 circuit-breaker behaviour on KB unreachability.
 

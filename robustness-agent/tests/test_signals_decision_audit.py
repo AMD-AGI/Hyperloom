@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the G1-G7 decision-audit signals."""
 
 from __future__ import annotations

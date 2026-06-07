@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the config.json-derived KB architecture tags.
 
 Covers two layers:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Cover the canonical repo-URL mapping that framework-agent owns.
 
 Lives here (not in inference_optimizer/tests) so the test runs even when

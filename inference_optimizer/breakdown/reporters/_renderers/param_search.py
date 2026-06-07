@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Parameter / backend DFS state renderer."""
 
 from __future__ import annotations

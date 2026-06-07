@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Research scout: tag/domain wiring, hint artifacts, and state bookkeeping.
 
 Covers the read-only PRELUDE research collector:

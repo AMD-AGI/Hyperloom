@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P3 bug-fix regression tests.
 
 Locks the three P3 fixes uncovered by the resume3 1h validation

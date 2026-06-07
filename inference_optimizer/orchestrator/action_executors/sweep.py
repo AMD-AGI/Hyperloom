@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``sweep`` ActionRunner sweep action.
 
 Full ISL/OSL/CONC sweep with

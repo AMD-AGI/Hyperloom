@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 name: SaFE Optimize Submit
 
 # Submits SaFE inference optimization tasks via the same API the SaFE script

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Robustness runtime CLI.
 
 Hosts (Coordinator, smoke harness, operator tooling) drive the reactor

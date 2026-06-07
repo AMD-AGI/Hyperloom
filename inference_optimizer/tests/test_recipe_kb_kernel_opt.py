@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests: KEEP'd kernel optimizations (incl. E2E-verified-but-
 no-gain) must be persisted into the recipe row.
 

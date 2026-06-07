@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.runtime.cli.main.
 
 Hermetic - exercises argv-only paths. The ``candidates`` and ``explore``

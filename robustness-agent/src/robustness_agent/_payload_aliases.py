@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Sub-agent-local copy of Hyperloom's payload-rename compat shim.
 
 Mirrors :mod:`inference_optimizer.compat.payload_aliases` from the

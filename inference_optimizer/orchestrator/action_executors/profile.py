@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``profile`` ActionRunner — Magpie SGLang run with torch profiler on.
 
  profile action.

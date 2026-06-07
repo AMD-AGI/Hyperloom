@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``_magpie_patcher.ensure_magpie_atomic_scripts_patch``
 (Hyperloom ``bugs.md`` §C #1 root-cause fix).
 

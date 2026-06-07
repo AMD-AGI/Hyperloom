@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Log tailer — streams application log files and extracts error patterns."""
 
 from __future__ import annotations

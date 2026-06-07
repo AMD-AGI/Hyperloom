@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Launch a fresh vllm/sglang server on the RayJob head pod under nohup.
 #
 # Submitted via Ray Dashboard REST by ``multi_node restart-server`` as

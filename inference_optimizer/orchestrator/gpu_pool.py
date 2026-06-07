@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SQLite-backed GPU pool for specialist sub-agents.
 
 The serving lanes continue to protect benchmark/profile/server lifecycle

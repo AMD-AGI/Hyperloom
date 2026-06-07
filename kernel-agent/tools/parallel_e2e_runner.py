@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end Kernel Agent runner for real model/profile/backend testing.
 
 Flow:

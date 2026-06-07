@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for SafeOptimizeClient.submit_task body construction.
 
 Verifies that the body always includes ``inferencexPath`` — even when

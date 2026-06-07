@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Request and result models for framework PR/ref exploration.
 
 Ported from zhenggong/framework-agent with two fusion-plan additions:

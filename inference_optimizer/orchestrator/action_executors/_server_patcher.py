@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Idempotent run-time patcher for vLLM and SGLang server installs
 (Hyperloom issue #194 §4 / §5).
 

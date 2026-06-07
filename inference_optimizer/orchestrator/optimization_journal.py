@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Per-session optimization journal — structured JSON record of every
 KEEP / REVERT / no_promote decision taken during an
 ``inference_optimizer optimize`` run.
