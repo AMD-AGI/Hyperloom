@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pin the Orchestration system prompt's specialist / integrate_patch visibility.
 
 Empirical evidence from a v0.8 12h DeepSeek-R1-0528 run showed that

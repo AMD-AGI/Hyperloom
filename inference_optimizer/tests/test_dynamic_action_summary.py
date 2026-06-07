@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the ``dynamic_actions`` SharedState aggregate view +
 state machine.
 Auxiliary tests pin the transition table invariants, the prompt

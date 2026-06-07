@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for `_inferencex_patcher.ensure_benchmark_lib_patched`
 (Hyperloom issue #194 §2).
 

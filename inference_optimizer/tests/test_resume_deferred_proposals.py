@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Resume contract for Critic-approved proposals deferred by the
 auto-roofline gate (post-PR-321 review Finding 1, P1).
 

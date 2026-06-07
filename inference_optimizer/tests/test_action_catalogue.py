@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P1-2 full action catalogue tests.
 
 Asserts the v0.6 OptimizationAction catalogue is complete and that

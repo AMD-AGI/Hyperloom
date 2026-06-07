@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Local fallback source.
 
 Wraps a small set of best-effort probes that work on any host: a SQLite

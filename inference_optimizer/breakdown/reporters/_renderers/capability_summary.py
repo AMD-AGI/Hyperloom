@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Capability summary renderer.
 
 Renders the ``capability_summary`` section into:

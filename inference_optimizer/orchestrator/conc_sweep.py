@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Post-optimization concurrency sweep.
 
 Runs the *same* Magpie benchmark machinery used by ``baseline`` /

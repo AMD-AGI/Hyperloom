@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Persistent-agent system prompts.
 
 Two flavours of content live in this package:

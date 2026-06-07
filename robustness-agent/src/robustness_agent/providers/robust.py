@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Primus-Robust-Internal provider — queries robust-analyzer REST API.
 
 Used in cluster deployments where Primus-Robust-Internal is available.

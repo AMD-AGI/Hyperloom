@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline composite ActionRunner — Roofline-v2 N2 (design §8.4).
 
 `roofline` is a macro / pipeline action: its executor orchestrates the

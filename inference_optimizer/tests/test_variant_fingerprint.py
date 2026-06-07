@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Content fingerprint regression tests.
 
 The fingerprint is the cross-action dedup-ledger key (used by

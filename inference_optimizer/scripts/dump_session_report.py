@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Render a markdown session report from a ``session_breakdown.json``.
 
 Usage::

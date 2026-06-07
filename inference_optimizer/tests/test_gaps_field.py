@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 KB_gaps/Gap-09 — structured gaps[] ledger tests.
 
 Covers the four contracts the Gap-09 cheatsheet pins down:

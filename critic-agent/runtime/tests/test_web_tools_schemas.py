@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :func:`runtime.web_tools.tool_schemas.build_tool_schemas`.
 
 Pure-function unit tests; covers gating, name + required fields, and

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Workspace-root resolver for the standalone kernel-agent tools.
 
 The tools in this directory (``kernel_optimization.py``,

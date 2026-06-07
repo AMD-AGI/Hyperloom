@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Integration + unit tests for :class:`TargetAnalysisExecutor`.
 
 Integration tests (full-flow reading the LLM-authored competitor target):

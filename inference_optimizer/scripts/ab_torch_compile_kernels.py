@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """A/B: torch.compile OFF vs ON — **kernel hot-list usage** from profile traces.
 
 Purpose (design alignment): kernel-opt targets **native** sources; traces taken
