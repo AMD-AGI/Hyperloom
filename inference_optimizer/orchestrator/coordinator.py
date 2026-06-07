@@ -18,6 +18,7 @@ import signal
 import time
 import traceback
 import uuid
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,6 +112,102 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 # probes deeper; overridable per session via
 # ``SharedState.framework_pr_max_candidates``.
 DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES: int = 8
+
+
+# Result keys worth surfacing in the structured inbox line for a
+# ``delegated_result``. Executors return free-form dicts, so we probe a
+# small ranked set of common gain / outcome keys defensively. First match
+# wins per group; missing keys are skipped.
+_OUTCOME_GAIN_KEYS: tuple[str, ...] = (
+    "validated_gain_pct", "gain_pct", "predicted_gain_pct", "delta_pct",
+)
+_OUTCOME_TPUT_KEYS: tuple[str, ...] = (
+    "tokens_per_s", "tput", "throughput", "tput_tok_s",
+)
+_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
+
+
+def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
+    """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None."""
+    if not isinstance(d, dict):
+        return None
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return None
+
+
+def _format_inbox_event(m: "Message") -> str:
+    """Render one inbox ``Message`` as a compact, high-signal line.
+
+    Special-cases the high-value topics the Orchestration agent acts on
+    (``delegated_result``, policy denials, ``review_verdict``) so the
+    act->observe feedback is structured instead of an opaque
+    ``payload={...}`` dump (Path A / A1). Falls back to the legacy
+    compact dump for everything else. Used by both the push path
+    (``_compose_prompt`` delta inbox) and the pull path
+    (``_context_inbox_reader`` / ``get_recent_outcomes``) so push and
+    pull render identically.
+    """
+    topic = (m.topic or "").strip()
+    payload = m.payload if isinstance(m.payload, dict) else {}
+    # Preserve the canonical DESIGN §13.1 inbox header ordering
+    # (``seq=.. msg_id=.. from=.. topic=..``) that downstream parsers
+    # (mock + real Critic agents) anchor on. ``msg_id`` is omitted only
+    # when absent (some synthetic/pull rows).
+    if getattr(m, "msg_id", None):
+        head = (
+            f"seq={m.seq} msg_id={m.msg_id} from={m.from_agent} topic={topic}"
+        )
+    else:
+        head = f"seq={m.seq} from={m.from_agent} topic={topic}"
+
+    if topic == "delegated_result":
+        kind = payload.get("kind")
+        state = payload.get("state")
+        error = payload.get("error")
+        result = payload.get("result")
+        parts = [head, f"kind={kind!r}", f"state={state!r}"]
+        if isinstance(result, dict):
+            status = _first_present(result, _OUTCOME_STATUS_KEYS)
+            gain = _first_present(result, _OUTCOME_GAIN_KEYS)
+            tput = _first_present(result, _OUTCOME_TPUT_KEYS)
+            kept = result.get("kept")
+            if status is not None:
+                parts.append(f"status={status!r}")
+            if kept is not None:
+                parts.append(f"kept={kept!r}")
+            if gain is not None:
+                parts.append(f"gain={gain}")
+            if tput is not None:
+                parts.append(f"tput={tput}")
+        if error:
+            parts.append(f"error={str(error)[:200]!r}")
+        return " ".join(parts)
+
+    if topic in ("policy_denial", "denial") or (
+        topic == "observation" and payload.get("kind") == "policy_denial"
+    ):
+        return (
+            f"{head} action={payload.get('action_name')!r} "
+            f"rule={payload.get('rule')!r} "
+            f"hint={str(payload.get('hint') or '')[:140]!r}"
+        )
+
+    if topic == "review_verdict":
+        return (
+            f"{head} target={payload.get('target_proposal_msg_id')!r} "
+            f"verdict={payload.get('verdict')!r} "
+            f"reasoning={str(payload.get('reasoning') or '')[:140]!r}"
+        )
+
+    if topic == "observation":
+        kind = payload.get("kind")
+        if kind is not None:
+            return f"{head} kind={kind!r} payload={payload}"
+
+    return f"{head} payload={payload}"
 
 
 @dataclass
@@ -421,6 +518,23 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive; missing yaml shouldn't kill the run.
             log.exception("Coordinator: failed to load ActionRegistry.")
             self.action_registry = None
+        # Inline fast-action execution (Path A / A3). When on, the
+        # Orchestration turn may run a cheap, lane-light action
+        # synchronously via the ``run_action_now`` context tool and see
+        # its result in-turn instead of waiting for the next-tick delta.
+        # Default ON; set to an explicit off value to disable (rollback
+        # knob). ``_coordinator_loop`` is captured in ``run()`` so the
+        # context-tool handler (running in the backend's own event loop)
+        # can marshal the executor coroutine back onto the Coordinator
+        # loop via ``run_coroutine_threadsafe`` — keeping bus / locks on
+        # their owning loop.
+        _inline_raw = os.environ.get(
+            "INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS", "",
+        ).strip().lower()
+        self._inline_fast_actions_enabled: bool = _inline_raw not in {
+            "0", "false", "no", "off",
+        }
+        self._coordinator_loop: asyncio.AbstractEventLoop | None = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: float | None = None
         self._run_started_monotonic: float | None = None
@@ -655,6 +769,8 @@ class Coordinator:
                 shared_state=self.shared_state,
                 inbox_reader=self._context_inbox_reader,
                 analysis_reader=self._context_analysis_reader,
+                recent_outcomes_reader=self._context_recent_outcomes_reader,
+                action_runner=self._run_action_now_sync,
             )
             setter(provider)
         except Exception:  # noqa: BLE001 — context pull is best-effort
@@ -681,11 +797,234 @@ class Coordinator:
             return "(no inbox events)"
         from .message_bus import Message
         msgs = [Message.from_row(r) for r in rows]
-        lines = [
-            f"seq={m.seq} from={m.from_agent} topic={m.topic} payload={m.payload}"
-            for m in msgs[-40:]
-        ]
+        lines = [_format_inbox_event(m) for m in msgs[-40:]]
         return "\n".join(lines)
+
+    def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
+        """Synchronous projection of recent action outcomes (Path A / A2).
+
+        Returns the last ``top_k`` high-signal feedback events — chiefly
+        ``delegated_result`` (the async result of a prior delegate/request)
+        plus ``review_verdict`` rows — rendered via the shared
+        :func:`_format_inbox_event` formatter so the act->observe loop is
+        closeable on demand inside a single Orchestration turn instead of
+        waiting for the next-tick delta. Reads through the synchronous
+        SQLite path (callable from the backend's MCP event loop, like
+        :meth:`_context_inbox_reader`).
+        """
+        try:
+            k = max(1, min(int(top_k or 8), 50))
+        except (TypeError, ValueError):
+            k = 8
+        try:
+            rows = self.bus.db.fetchall_sync(
+                "SELECT * FROM events WHERE topic IN "
+                "('delegated_result', 'review_verdict') "
+                "ORDER BY seq DESC LIMIT ?",
+                (k,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"(recent outcomes unavailable: {exc!r})"
+        if not rows:
+            return "(no recent outcomes)"
+        from .message_bus import Message
+        # Query is newest-first for the LIMIT; flip to newest-last so it
+        # reads chronologically like the inbox projections.
+        msgs = [Message.from_row(r) for r in rows][::-1]
+        lines = ["=== Recent action outcomes (newest last) ==="]
+        lines.extend(_format_inbox_event(m) for m in msgs)
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Inline fast-action execution (Path A / A3)
+    # ------------------------------------------------------------------
+    # Kinds that are lane-light in the registry but must never run inline:
+    # dynamic_specialist* are handled by bespoke dispatch (not run_task);
+    # report / session_breakdown are CLOSE-phase artifact producers driven
+    # by the closing sequencer, not ad-hoc probes.
+    _INLINE_ACTION_DENY: frozenset[str] = frozenset({
+        "dynamic_specialist", "dynamic_specialist_check",
+        "dynamic_specialist_collect", "report", "session_breakdown",
+        DYNAMIC_ACTION_NAME,
+    })
+
+    def _inline_action_whitelist(self) -> frozenset[str]:
+        """Derive the set of actions safe to run inline (A3).
+
+        Conservative + metadata-driven: an action qualifies only when it
+        is **lane-light** (no ``requires_lanes`` — so ``run_task`` never
+        blocks on a GPU / serving / workspace lease inside the turn), has
+        a **registered executor** (so it actually runs via ``run_task``
+        rather than a bespoke dispatch handler), and is not in
+        :data:`_INLINE_ACTION_DENY`. PolicyGate still independently gates
+        the actual run (phase / role / paths / red-line side effects), so
+        this set is a fast pre-filter, not the security boundary.
+        """
+        reg = getattr(self, "action_registry", None)
+        if reg is None:
+            return frozenset()
+        executors = getattr(self.sub, "executor_registry", {}) or {}
+        names_fn = getattr(reg, "names", None)
+        try:
+            names = list(names_fn()) if callable(names_fn) else []
+        except Exception:  # noqa: BLE001 — defensive
+            names = []
+        allowed: set[str] = set()
+        for name in names:
+            if name in self._INLINE_ACTION_DENY:
+                continue
+            if name not in executors:
+                continue
+            lanes, _ttl = self._registry_lanes_ttl(name)
+            if lanes:
+                continue
+            allowed.add(name)
+        return frozenset(allowed)
+
+    def _run_action_now_sync(
+        self, action_name: str, params: dict[str, Any] | None = None,
+    ) -> str:
+        """Bridge callable for the ``run_action_now`` context tool (A3).
+
+        Runs inside the backend SDK's event loop (the MCP handler's
+        loop), so it marshals the executor coroutine onto the Coordinator
+        loop via :func:`asyncio.run_coroutine_threadsafe` and blocks for
+        the result with a timeout. This keeps the bus / locks / task
+        registry on their owning loop. Returns a rendered text result
+        that the tool hands straight back to the model.
+        """
+        if not self._inline_fast_actions_enabled:
+            return (
+                "(run_action_now disabled: set "
+                "INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS to a non-off value "
+                "to enable; use emit_intent delegate for async execution)"
+            )
+        name = (action_name or "").strip()
+        if not name:
+            return "(run_action_now: action_name required)"
+        whitelist = self._inline_action_whitelist()
+        if name not in whitelist:
+            return (
+                f"(run_action_now: {name!r} is not inline-eligible — only "
+                f"cheap, lane-light actions may run inline: "
+                f"{sorted(whitelist)}. Use emit_intent delegate to run it "
+                f"asynchronously.)"
+            )
+        loop = self._coordinator_loop
+        if loop is None or loop.is_closed():
+            return "(run_action_now unavailable: coordinator loop not running)"
+        coro = self._run_action_now(name, dict(params or {}))
+        # Cap the inline wait well under the backend per-call timeout so a
+        # slow action can't wedge the turn; the agent gets a timeout note
+        # and the action keeps running to completion (its delegated_result
+        # still lands on the bus for the next-tick / get_recent_outcomes).
+        try:
+            timeout_s = float(
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "120",
+                ) or 120
+            )
+        except (TypeError, ValueError):
+            timeout_s = 120.0
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError as exc:
+            return (
+                f"(run_action_now: could not schedule on coordinator loop: "
+                f"{exc!r})"
+            )
+        try:
+            return fut.result(timeout=timeout_s)
+        except FuturesTimeoutError:
+            return (
+                f"(run_action_now: {name!r} still running after "
+                f"{timeout_s:.0f}s; it keeps running asynchronously — check "
+                "get_recent_outcomes or the next-tick inbox for its "
+                "delegated_result)"
+            )
+        except Exception as exc:  # noqa: BLE001 — never crash the turn
+            log.exception("run_action_now: inline run of %r failed", name)
+            return f"(run_action_now: {name!r} errored: {exc!r})"
+
+    async def _run_action_now(
+        self, action_name: str, params: dict[str, Any],
+    ) -> str:
+        """Coordinator-loop coroutine that runs a whitelisted action inline.
+
+        Goes through the same PolicyGate the async delegate path uses
+        (phase / role / paths / red-line), creates a real task so the
+        executor's ``transition`` calls succeed, runs it via
+        ``SubAgentRunner.run_task``, publishes a ``delegated_result`` for
+        audit + inbox parity, and returns a rendered outcome line.
+        """
+        from .message_bus import Message
+        # PolicyGate parity: validate a synthetic delegate intent from the
+        # orchestration role so phase (R1) / role / paths / red-line gates
+        # apply exactly as they would for an emit_intent delegate.
+        intent = Intent(
+            type=IntentType.DELEGATE,
+            payload={"action_name": action_name, "params": dict(params or {})},
+        )
+        try:
+            self.policy.validate_intent("orchestration", intent)
+        except PolicyDenied as denied:
+            await self._record_policy_denied("orchestration", intent, denied)
+            return (
+                f"(run_action_now: {action_name!r} denied by policy: "
+                f"{getattr(denied, 'rule', '')!s} — "
+                f"{str(getattr(denied, 'hint', denied))[:200]})"
+            )
+        seq_denied = self._sequence_denial_for_action(action_name, params)
+        if seq_denied is not None:
+            await self._record_policy_denied(
+                "orchestration", intent, seq_denied, action_name=action_name,
+            )
+            return (
+                f"(run_action_now: {action_name!r} denied: "
+                f"{str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
+            )
+        lanes, ttl = self._registry_lanes_ttl(action_name)
+        content_fp = hashlib.sha1(
+            json.dumps(params or {}, sort_keys=True, default=str).encode()
+        ).hexdigest()[:10]
+        key = (
+            f"inline:orchestration:{action_name}:"
+            f"t{int(self.shared_state.tick or 0)}:{content_fp}"
+        )
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind=action_name,
+            params=dict(params or {}),
+            idempotency_key=key,
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+        )
+        if was_existing and task.state not in (
+            "queued", "succeeded", "failed", "cancelled", "needs_manual_review",
+        ):
+            return (
+                f"(run_action_now: an identical {action_name!r} task is "
+                f"already {task.state!r}; wait for its delegated_result)"
+            )
+        result = await self.sub.run_task(task)
+        result_payload = {
+            "task_id": task.task_id, "kind": task.kind,
+            "state": result.state, "result": result.result,
+            "error": result.error,
+        }
+        try:
+            await self.bus.append_and_seq(Message.new(
+                "coordinator", "*", "delegated_result",
+                {**result_payload, "inline": True},
+            ))
+        except Exception:  # noqa: BLE001 — audit best-effort
+            log.exception(
+                "run_action_now: failed to append delegated_result for %s",
+                task.task_id,
+            )
+        rendered = _format_inbox_event(Message.new(
+            "coordinator", "orchestration", "delegated_result", result_payload,
+        ))
+        return f"inline run complete: {rendered}"
 
     def _context_analysis_reader(self) -> str:
         """Return the latest TraceLens analysis.md snapshot text.
@@ -4203,6 +4542,13 @@ class Coordinator:
         )
         self._run_started_monotonic = time.monotonic()
         self._run_deadline = deadline
+        # Capture the live loop so the inline fast-action context tool
+        # (A3) can marshal executor coroutines back here from the
+        # backend's event loop.
+        try:
+            self._coordinator_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._coordinator_loop = None
         max_minutes_value = max_minutes if max_minutes is not None else 0
         # Persist budget so prompts and Resume can see it.
         if max_minutes is not None:
@@ -4954,10 +5300,11 @@ class Coordinator:
         if msgs:
             sections.append(f"=== Inbox for {agent_name} (newest last) ===")
             for m in msgs[-20:]:
-                sections.append(
-                    f"  seq={m.seq} msg_id={m.msg_id} from={m.from_agent} "
-                    f"topic={m.topic} payload={m.payload}"
-                )
+                # Structured, high-signal rendering for delegated_result /
+                # denial / verdict topics (Path A / A1); legacy compact
+                # dump (preserving the canonical seq/msg_id/from/topic
+                # header that Critic parsers anchor on) otherwise.
+                sections.append(f"  {_format_inbox_event(m)}")
         else:
             sections.append(f"=== Inbox for {agent_name} ===")
             sections.append("(no new messages)")

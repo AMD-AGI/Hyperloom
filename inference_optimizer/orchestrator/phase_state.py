@@ -257,9 +257,16 @@ _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset({
 
 
 def is_phase_interleave_enabled() -> bool:
-    """Return True when the env flag enables EXPLORE↔KERNEL interleave."""
+    """Return True when EXPLORE↔KERNEL interleave is enabled.
+
+    Default is now **ON** (P3_18 18B flipped on by default). The env var
+    is kept as a rollback knob: set ``INFERENCE_OPTIMIZER_PHASE_INTERLEAVE``
+    to an explicit off value (``0`` / ``false`` / ``no`` / ``off``) to
+    restore the strict, single-source monotonic action contract. Any
+    other value (including unset/empty) leaves interleave on.
+    """
     raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return raw not in {"0", "false", "no", "off"}
 
 
 def llm_proposable_actions_for_with_interleave(

@@ -562,9 +562,21 @@ def test_gate_update_state_model_arch_tags_rejected(gate):
 # allowed_tools_for_agent
 # ===========================================================================
 def test_allowed_tools_claude_returns_emit_intent(gate):
-    assert gate.allowed_tools_for_agent("orchestration") == ["emit_intent"]
+    # Kernel / robustness use the bare emit_intent tool surface.
     assert gate.allowed_tools_for_agent("kernel") == ["emit_intent"]
     assert gate.allowed_tools_for_agent("robustness") == ["emit_intent"]
+    # Orchestration additionally gets the read-only context-pull tools
+    # (incl. get_recent_outcomes + run_action_now, Path A) plus Read.
+    from inference_optimizer.orchestrator.backends.mcp_context_tools import (
+        CONTEXT_TOOL_NAMES,
+    )
+    orch = gate.allowed_tools_for_agent("orchestration")
+    assert orch[0] == "emit_intent"
+    assert "Read" in orch
+    for name in CONTEXT_TOOL_NAMES:
+        assert name in orch
+    assert "get_recent_outcomes" in orch
+    assert "run_action_now" in orch
 
 
 def test_allowed_tools_codex_returns_empty(gate):

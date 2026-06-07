@@ -188,18 +188,29 @@ def test_phase_interleave_on_widens_explore_and_kernel():
 
 def test_phase_interleave_env_flag_is_picked_up(monkeypatch):
     """The bare helpers honour the env flag via
-    :func:`is_phase_interleave_enabled`."""
+    :func:`is_phase_interleave_enabled`. Interleave is now ON by default;
+    only an explicit off value disables it (rollback knob)."""
+    # Unset / empty => ON by default.
     monkeypatch.delenv(phase_state.PHASE_INTERLEAVE_ENV, raising=False)
-    assert phase_state.is_phase_interleave_enabled() is False
-    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
+    assert phase_state.is_phase_interleave_enabled() is True
+    assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "kernel_opt", "EXPLORE",
     )
+    # Explicit on values stay on.
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
     assert phase_state.is_phase_interleave_enabled() is True
     assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "kernel_opt", "EXPLORE",
     )
+    # Explicit off values are the rollback knob.
+    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "0")
+    assert phase_state.is_phase_interleave_enabled() is False
+    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "kernel_opt", "EXPLORE",
+    )
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "false")
+    assert phase_state.is_phase_interleave_enabled() is False
+    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "off")
     assert phase_state.is_phase_interleave_enabled() is False
 
 
@@ -468,10 +479,10 @@ def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
 def test_policy_gate_phase_interleave_off_denies_kernel_request_in_explore(
     monkeypatch,
 ):
-    """With interleave off (default) a kernel-owned REQUEST in EXPLORE
-    is denied by R1; the kernel-owned data dependency / role gate
-    never gets a chance to weigh in."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", raising=False)
+    """With interleave explicitly off (rollback knob =0) a kernel-owned
+    REQUEST in EXPLORE is denied by R1; the kernel-owned data dependency
+    / role gate never gets a chance to weigh in."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "0")
     state = SharedState()
     state.record_phase_transition(
         to_phase="EXPLORE", reason="prelude_done", evidence={},

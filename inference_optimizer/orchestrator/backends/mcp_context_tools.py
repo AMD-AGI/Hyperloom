@@ -63,6 +63,13 @@ class ContextProvider:
     inbox_reader: Callable[[int], str] | None = None
     analysis_reader: Callable[[], str] | None = None
     denial_reader: Callable[[int], str] | None = None
+    recent_outcomes_reader: Callable[[int], str] | None = None
+    # A3: run a whitelisted, lane-light action inline and return its
+    # rendered outcome. Unlike the read-only pulls this has a (gated)
+    # side effect, so the Coordinator injects a bridge callable that
+    # marshals execution onto its own event loop. ``None`` => feature
+    # absent (the tool reports it is unavailable).
+    action_runner: Callable[[str, dict[str, Any]], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
         try:
@@ -113,6 +120,23 @@ class ContextProvider:
             return "(inbox reader not wired)"
         return self._safe(lambda: self.inbox_reader(since_seq), "inbox")
 
+    def recent_outcomes(self, top_k: int = 8) -> str:
+        if self.recent_outcomes_reader is None:
+            return "(recent outcomes reader not wired)"
+        return self._safe(
+            lambda: self.recent_outcomes_reader(top_k), "recent_outcomes"
+        )
+
+    def run_action_now(
+        self, action_name: str = "", params: dict[str, Any] | None = None,
+    ) -> str:
+        if self.action_runner is None:
+            return "(run_action_now not wired)"
+        return self._safe(
+            lambda: self.action_runner(action_name, dict(params or {})),
+            "run_action_now",
+        )
+
 
 # Tool descriptors: (tool_name, description, input_schema, provider-method).
 # input_schema follows the JSON-schema subset the SDK accepts. Methods are
@@ -131,6 +155,15 @@ _TOPK_SCHEMA: dict[str, Any] = {
 _SINCE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"since_seq": {"type": "integer", "minimum": 0}},
+    "additionalProperties": False,
+}
+_RUN_ACTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "action_name": {"type": "string"},
+        "params": {"type": "object"},
+    },
+    "required": ["action_name"],
     "additionalProperties": False,
 }
 
@@ -203,6 +236,29 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         _SINCE_SCHEMA,
         "inbox",
     ),
+    (
+        "get_recent_outcomes",
+        "Return the most recent action outcomes — the async results of "
+        "prior delegate/request work (delegated_result: kind / state / "
+        "status / kept / gain / tput / error) plus review verdicts — so "
+        "you can close the act->observe loop within this turn instead of "
+        "waiting for the next-tick delta. Pass top_k to widen the window.",
+        _TOPK_SCHEMA,
+        "recent_outcomes",
+    ),
+    (
+        "run_action_now",
+        "Run a CHEAP, lane-light action synchronously and get its result "
+        "back IN THIS TURN (closes the act->observe loop without waiting "
+        "for the next tick). Only a small whitelist of fast, non-GPU / "
+        "non-serving actions is eligible; anything heavy must still go "
+        "through emit_intent delegate (async). PolicyGate still gates the "
+        "run (phase / role / paths). Args: action_name (str), optional "
+        "params (object). For deep multi-step investigation, delegate to "
+        "the dynamic_action sub-agent instead.",
+        _RUN_ACTION_SCHEMA,
+        "run_action_now",
+    ),
 )
 
 
@@ -235,6 +291,10 @@ def _make_handler(
                 kwargs["top_k"] = int(args["top_k"])
             if "since_seq" in args:
                 kwargs["since_seq"] = int(args["since_seq"])
+            if "action_name" in args:
+                kwargs["action_name"] = str(args["action_name"])
+            if "params" in args and isinstance(args["params"], dict):
+                kwargs["params"] = args["params"]
         try:
             text = method(**kwargs)
         except Exception as exc:  # noqa: BLE001 — never crash a pull

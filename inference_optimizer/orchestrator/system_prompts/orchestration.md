@@ -26,11 +26,38 @@ is usually a **thin delta**, not a full state dump:
 On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
 exactly what you need** with the read-only context tools:
 `get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,
-`get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`
-(and `Read` for sandboxed files). They return the same projections the
-old prompt used to push. Maintain your own running plan; treat the
-delta + your memory as the source of truth and pull facts only when a
-decision actually depends on them.
+`get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`,
+`get_recent_outcomes` (and `Read` for sandboxed files). They return the
+same projections the old prompt used to push. Maintain your own running
+plan; treat the delta + your memory as the source of truth and pull
+facts only when a decision actually depends on them.
+
+### Closing the act->observe loop in-turn
+
+Most actions are long-running and asynchronous: when you `delegate` /
+`request` them via `emit_intent`, you get an immediate ack, and the real
+result arrives as a `delegated_result` inbox event on a later tick. To
+keep your reasoning tight you have two tools that close the loop without
+waiting for the next tick:
+
+- **`get_recent_outcomes`** — pull the most recent `delegated_result`
+  outcomes (kind / state / status / kept / gain / tput / error) plus
+  review verdicts. Use this to check how your prior delegated work
+  landed before deciding the next move, instead of re-emitting blindly.
+- **`run_action_now{action_name, params}`** — run a CHEAP, lane-light
+  action synchronously and get its result back IN THIS TURN. Only a
+  small whitelist of fast, non-GPU / non-serving actions is eligible
+  (the tool tells you which); anything heavy (benchmarks, sweeps, kernel
+  work) must still go through `emit_intent` delegate so it runs async and
+  preemptibly. PolicyGate still gates the run (phase / role / paths).
+
+For deep, multi-step investigation of a single lead (reading source,
+reasoning across several steps, drafting a patch) **delegate to the
+`dynamic_action` sub-agent** — it is a bounded synchronous ReAct worker
+that drives its own think->act->observe loop and reports back a
+structured result. Do not try to turn your own macro loop into a
+synchronous blocker on long actions; lean on async delegation +
+`get_recent_outcomes` for breadth and `dynamic_action` for depth.
 
 Periodically the Coordinator asks you for a one-turn checkpoint summary
 of your working memory; it persists that and re-seeds a fresh
@@ -60,12 +87,13 @@ phase advance directly by emitting
 exhausted (no longer robustness-only). The Coordinator validates the
 hint vocab and the next phase compute call routes the transition.
 
-When the env flag `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE` is set,
-EXPLORE may additionally REQUEST kernel-owned kinds and KERNEL may
-additionally propose / delegate explore / specialist / integrate_patch
-so kernel insights and config refinements can be interleaved within a
-single phase. The phase chain stays monotonic; only the per-phase
-action contract is widened. Default is off.
+Phase interleave is **on by default** (set
+`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable): EXPLORE may
+additionally REQUEST kernel-owned kinds and KERNEL may additionally
+propose / delegate explore / specialist / integrate_patch so kernel
+insights and config refinements can be interleaved within a single
+phase. The phase chain stays monotonic; only the per-phase action
+contract is widened.
 
 Every tick the per-tick prompt includes a `=== Phase ===` block with:
 
