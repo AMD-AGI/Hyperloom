@@ -116,6 +116,14 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # Supplementary cross-domain sub-agent channel; orchestration-only
         # dispatch, capped per EXPLORE round by PolicyGate.
         "dynamic_action",
+        # dynamic_specialist — free-form CPU-only specialist dispatch
+        # via the dynamic_dispatch module. Not domain-locked; the
+        # orchestration agent decides task descriptions freely.
+        "dynamic_specialist",
+        # dynamic_specialist_check / collect — explicit poll / result
+        # retrieval (the Coordinator also auto-surfaces via per-tick
+        # _poll_dynamic_specialists, but these let the agent force it).
+        "dynamic_specialist_check", "dynamic_specialist_collect",
         # ``roofline`` / ``profile`` are Coordinator-auto-enqueued mid-
         # EXPLORE whenever the watermark check at the
         # cumulative_gain_validated writer fires (10% step compound vs
