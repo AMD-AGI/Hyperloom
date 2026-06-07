@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the resume-safe CLI flag helpers in ``cli.py``.
 
 ``_resume_safe_flag`` / ``_resume_safe_numeric`` resolve a CLI option

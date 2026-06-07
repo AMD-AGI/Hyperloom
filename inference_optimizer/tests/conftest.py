@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pytest hooks and shared helpers for the inference_optimizer tests package.
 
 This module hosts two responsibilities:

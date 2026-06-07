@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SpecialistPromptInputs.roofline_evidence + ROOFLINE EVIDENCE
 section tests.
 

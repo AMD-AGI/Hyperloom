@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Backend protocol — what the Coordinator needs from any LLM provider.
 
 Concrete implementations (Claude SDK, Codex, multi-CLI bridge, mock)

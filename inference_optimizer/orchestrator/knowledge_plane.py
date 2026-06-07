@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """KnowledgePlane facade for advisory knowledge inputs.
 
 Single point of contact between the Coordinator and the live external

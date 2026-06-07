@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Subprocess-based specialist dispatcher — PR-A2 (Arbor-into-Hyperloom).
 
 The original v0.8 M5 :class:`SpecialistRunner` invoked an in-process

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the LocalProbe fallback source."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Directed + cross-repo + dedup coverage for the FRAMEWORK_PR discover
 batch builder.
 

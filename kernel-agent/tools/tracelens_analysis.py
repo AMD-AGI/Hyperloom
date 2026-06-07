@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """TraceLens analysis tool for the resident Kernel Agent skill.
 
 This tool is intentionally conservative: it records every step, writes a stable

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Specialist subprocess MCP config generator.
 
 Generates the ``--mcp-config`` JSON file that the ``claude`` subprocess

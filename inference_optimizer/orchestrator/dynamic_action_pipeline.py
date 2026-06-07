@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end pipeline glue for ``dynamic_action`` (pure helpers).
 
 Every dynamic-only piece of logic lives here so the Coordinator

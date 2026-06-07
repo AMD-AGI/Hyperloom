@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Cross-section fact synthesis used by the executive summary + LLM
 prompt.
 

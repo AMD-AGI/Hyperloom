@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.9 — drop scoreboard tests.
 
 Covers KB_design/3.9_drop_scoreboard/README.md:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Detect same-fingerprint action retries (B1 / same_payload_loop).
 
 The upstream ``Coordinator._baseline_self_loop_denial`` already guards

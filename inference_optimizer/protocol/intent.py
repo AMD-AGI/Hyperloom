@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Structured-intent transport schema (protocol layer).
 
 Two transports share the same envelope schema:

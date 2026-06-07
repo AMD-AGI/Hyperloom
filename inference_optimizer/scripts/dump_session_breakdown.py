@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Dump ``session_breakdown.json`` for one hyperloom session directory.
 
 This is the offline / historical / debugging entrypoint. The same

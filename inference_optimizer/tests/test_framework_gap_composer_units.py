@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``orchestrator.action_executors._framework_gap_composer``.
 
 Covers the pure-Python ``compose_gap`` helper plus the kernel-breakdown

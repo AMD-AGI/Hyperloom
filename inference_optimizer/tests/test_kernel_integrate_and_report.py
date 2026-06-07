@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P2-4 tests: integrate kernel-request handler + report runner + e2e."""
 
 from __future__ import annotations

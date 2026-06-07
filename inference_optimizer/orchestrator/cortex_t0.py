@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared T0 (PRELUDE) Cortex anchor — KB warm-start only.
 
 The T0 anchor is the boot-time KB ritual every session runs before

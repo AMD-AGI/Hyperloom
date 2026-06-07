@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SQLite WAL atomic storage backend.
 
 Single ``$SESSION_DIR/storage/coordinator.db`` consolidates these tables:

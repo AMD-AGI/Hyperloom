@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """External-dependency signals (J1 / J2 / J3).
 
 These three signals cover failure modes that **originate outside

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Publish normalized Hyperloom results to the results service."""
 
 from __future__ import annotations

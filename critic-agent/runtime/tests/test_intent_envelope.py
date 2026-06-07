@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Validation + parity tests for :mod:`runtime.intent_envelope`.
 
 The parity assertions mirror the Coordinator-side schema in

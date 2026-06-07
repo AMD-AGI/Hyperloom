@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Parse Coordinator-rendered prompts and inbox.jsonl into ReactorContext.
 
 The Coordinator's ``_compose_prompt`` () emits a

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """CriticAgentBackend — bridges the standalone ``critic-agent`` skill runtime
 into the ``inference_optimizer`` Coordinator as a real Critic Backend.
 

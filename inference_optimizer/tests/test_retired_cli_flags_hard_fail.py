@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Blocker #4 — retired CLI flags must hard-fail with a migration hint.
 
 After the single-path roofline/profile refactor the following flags no

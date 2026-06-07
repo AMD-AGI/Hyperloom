@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pure, self-contained helpers used by the Coordinator.
 
 These functions have no dependency on Coordinator state; they are kept

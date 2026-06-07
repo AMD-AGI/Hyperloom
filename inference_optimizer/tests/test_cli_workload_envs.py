@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """CLI workload-env export regressions."""
 
 from __future__ import annotations

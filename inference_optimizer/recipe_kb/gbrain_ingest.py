@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Bulk-ingest local recipe snapshots into gbrain (the read-side cache).
 
 main's ``recipe_kb`` writes recipes LOCAL-only; the gbrain read remote
