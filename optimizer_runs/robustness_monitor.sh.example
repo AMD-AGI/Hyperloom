@@ -145,7 +145,7 @@ except ImportError:
         "crash_threshold_exceeded", "user_stop_requested",
         "time_exhausted_during_prelude", "cortex_t0_failed",
         "cortex_drain_failed", "cortex_commit_failed",
-        "model_context_window_too_small",
+        "model_context_window_too_small", "unsupported_model_arch",
     })
 
 if stop and stop in STOP_REASON_VOCAB:
