@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Attribution renderer — gain split across optimization sources.
 
 Splits gain among explore / sweep / geak / oob and retained legacy

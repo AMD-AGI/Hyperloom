@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Standalone collectors for *legacy* (pre-``phase_history``) sessions.
 
 v0.6-era hyperloom sessions never wrote ``state.phase_history`` nor the

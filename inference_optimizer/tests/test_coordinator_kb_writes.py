@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for the Coordinator -> recipe-snapshot KB write chain.
 
 Guards the P0 that the retired ``test_kb_facts.py`` used to cover before

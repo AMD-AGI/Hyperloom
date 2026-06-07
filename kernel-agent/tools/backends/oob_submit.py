@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """OOB (claude/codex/cursor) submission via Ray (preferred) or direct CLI fallback.
 
 Self-contained: does not depend on inference-optimization scripts.

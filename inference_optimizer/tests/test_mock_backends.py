@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P0-4 mock Critic + mock Robustness adapter tests.
 
 Covers:

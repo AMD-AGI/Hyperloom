@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SpecialistRunner — v0.8 M5.
 
 The second sub-agent form factor. Whereas the deterministic

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 C3: Orchestration is allowed to emit PRUNE_BRANCH.
 
 These tests pin the permission boundary the ``roofline`` action (C4)

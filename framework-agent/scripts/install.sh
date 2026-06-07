@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # framework-agent installer (P2 PR-D).
 #
 # Idempotent. Used both standalone (developer pod setup) and chained

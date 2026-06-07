@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the subprocess transport CLI.
 
 Exercises both the in-process ``_run_tick`` helper (fast) and the real

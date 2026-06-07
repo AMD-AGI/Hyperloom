@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SubAgentRunner
 
 Receives ``delegate{action_name, params}`` intents (after PolicyGate),

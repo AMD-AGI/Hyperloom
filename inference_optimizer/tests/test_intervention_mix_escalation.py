@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-A8 / D3 (Arbor-into-Hyperloom): intervention-mix escalation.
 
 ``SharedState.record_intervention`` maintains a config-vs-code_patch

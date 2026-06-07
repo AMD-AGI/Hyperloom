@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Cover the P2.b fix — ``fa phase-discover`` retries before
 flipping ``framework_pr_phase_done``.
 

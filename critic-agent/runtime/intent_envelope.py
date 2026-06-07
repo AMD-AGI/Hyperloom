@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Build and validate Coordinator-compatible intent envelopes.
 
 The Coordinator () accepts intent envelopes of the form

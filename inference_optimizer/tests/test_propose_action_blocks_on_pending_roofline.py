@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Blocker #2 (cheap path) — ``_handle_propose_action`` must consult the
 auto-roofline gate before paying for the Critic round-trip.
 

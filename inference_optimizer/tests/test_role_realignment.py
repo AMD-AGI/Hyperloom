@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.3 — Role realignment / phase-aware prompts tests.
 
 Covers the additive prompt + Coordinator changes that ship the phase

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """CodexBackend
 
 Codex roles talk to GPT-style models via the OpenAI SDK; they're

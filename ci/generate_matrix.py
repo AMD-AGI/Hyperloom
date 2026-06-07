@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Generate GitHub Actions matrix JSON from ci-config.yaml."""
 
 import json

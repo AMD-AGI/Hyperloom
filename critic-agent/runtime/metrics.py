@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """In-process metrics shim.
 
 In production the Critic agent will export the metrics enumerated in

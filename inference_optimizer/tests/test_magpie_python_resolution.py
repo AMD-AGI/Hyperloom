@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for `_resolve_magpie_python` robustness.
 
 `kernel-agent/scripts/install.sh` resolves `MAGPIE_PYTHON` BEFORE Magpie is

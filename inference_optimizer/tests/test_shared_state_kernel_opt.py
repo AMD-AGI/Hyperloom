@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for SharedState.record_kernel_opt overwrite invariants + the
 multi-KEEP integrate queue helpers (next_pending_keep_kernel_id,
 pending_keep_kernel_ids, has_keep_pending_integrate).

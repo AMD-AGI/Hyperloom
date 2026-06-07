@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for :class:`LocalRecipeStore`.
 
 Covers the full surface of the on-disk recipe-snapshot store:

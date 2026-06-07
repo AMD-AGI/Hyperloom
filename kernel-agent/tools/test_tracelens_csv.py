@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for the kernel-agent tracelens_analysis filter fixes.
 
 Locks the raw trace filtering fix uncovered by the resume3/resume4 1h

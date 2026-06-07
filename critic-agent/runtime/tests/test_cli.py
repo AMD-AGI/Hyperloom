@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smoke tests for the CLI front door.
 
 We run the parser/dispatch in-process via :func:`runtime.cli.main` so the

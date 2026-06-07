@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for v1.1 decision_journal + kernel_profiling renderers."""
 
 from __future__ import annotations

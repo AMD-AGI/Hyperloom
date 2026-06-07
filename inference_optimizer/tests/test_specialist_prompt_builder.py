@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Specialist prompt hint blocks switch to atom paths when the active
 session framework is ``atom``.
 

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ExploreExecutor — v0.8 M3.
 
 Merges the legacy ``backends`` / ``params`` / ``validate_stack`` actions

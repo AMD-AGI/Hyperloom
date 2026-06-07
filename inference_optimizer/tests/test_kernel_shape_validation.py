@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Kernel-opt dispatch shape / path validation.
 
 A kernel candidate may only be dispatched when it carries a non-empty,

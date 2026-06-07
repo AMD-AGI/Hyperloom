@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Accuracy gate — GSM8K eval integration for inference_optimizer.
 
 This module provides:

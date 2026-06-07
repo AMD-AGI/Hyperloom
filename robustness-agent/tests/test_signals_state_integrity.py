@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for I1-I5 state-integrity signals."""
 
 from __future__ import annotations
