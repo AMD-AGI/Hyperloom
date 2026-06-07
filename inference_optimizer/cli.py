@@ -919,81 +919,52 @@ def _load_model_config_tags(model_path: str) -> dict:
 # filter and only fail ~5 minutes into the run with a cryptic vLLM
 # ``OSError: Can't load image processor ...``, burning a full session slot.
 # The constants below drive a fail-fast classifier that runs before the
-# (expensive) baseline server boot.
+# (expensive) baseline server boot. Uses a WHITELIST approach: only models
+# whose architecture matches known text-generation patterns are allowed.
 
-# config.json ``model_type`` values that denote a multimodal / vision model.
-_MULTIMODAL_MODEL_TYPES = frozenset({
-    "gemma3",
-    "mllama",
-    "llava",
-    "llava_next",
-    "qwen2_vl",
-    "qwen2_5_vl",
-    "idefics",
-    "idefics2",
-    "idefics3",
-    "paligemma",
-    "pixtral",
-    "internvl_chat",
-    "phi3_v",
+# Supported text-generation architecture suffixes. Only decoder-only causal LM
+# models are supported. If a model's architecture does NOT match any of these
+# patterns, it is rejected as unsupported.
+_SUPPORTED_ARCH_SUFFIXES = (
+    "ForCausalLM",
+    "LMHeadModel",
+    "ForCausalLMWithValueHead",
+)
+
+# Explicit allowlist of supported model_type values (fallback when architectures
+# field is empty/missing). Models whose model_type is in this set pass through.
+_SUPPORTED_MODEL_TYPES = frozenset({
+    "llama", "mistral", "mixtral", "qwen2", "qwen2_moe", "qwen3", "qwen3_moe",
+    "gemma", "gemma2", "phi", "phi3", "phimoe",
+    "starcoder2", "codellama", "deepseek_v2", "deepseek_v3",
+    "falcon", "gpt_neox", "gpt2", "opt", "bloom",
+    "internlm", "internlm2", "yi", "baichuan",
+    "chatglm", "glm", "glm4",
+    "command-r", "cohere", "cohere2", "dbrx",
+    "mpt", "olmo", "olmo2", "jamba", "arctic",
+    "exaone", "granite", "granitemoeshared",
+    "stablelm", "persimmon",
 })
 
-# Known multimodal architecture class names whose mere presence is decisive.
-# Most also end with ``ForConditionalGeneration`` (caught by the suffix rule),
-# but a few (``InternVLChatModel``, ``Phi3VForCausalLM``) do not, so they are
-# listed explicitly as a belt-and-suspenders.
-_KNOWN_MULTIMODAL_ARCHITECTURES = frozenset({
-    "Gemma3ForConditionalGeneration",
-    "LlavaForConditionalGeneration",
-    "LlavaNextForConditionalGeneration",
-    "MllamaForConditionalGeneration",
-    "PaliGemmaForConditionalGeneration",
-    "Qwen2VLForConditionalGeneration",
-    "Qwen2_5_VLForConditionalGeneration",
-    "Idefics2ForConditionalGeneration",
-    "Idefics3ForConditionalGeneration",
-    "PixtralForConditionalGeneration",
-    "InternVLChatModel",
-    "Phi3VForCausalLM",
-})
 
-# config.json keys whose mere presence signals a vision / multimodal model.
-_MULTIMODAL_CONFIG_KEYS = ("vision_config", "image_token_id", "image_token_index")
-
-
-def _arch_is_unsupported_multimodal(arch: str) -> bool:
-    """True when an architecture class name denotes a multimodal/vision model.
-
-    Three signals (any matches): an explicit known-multimodal class name; the
-    ``ForConditionalGeneration`` suffix (seq2seq / multimodal generation heads,
-    never a decoder-only causal LM); or a ``Vision`` substring.
-    """
+def _arch_is_supported_text_generation(arch: str) -> bool:
+    """True when an architecture class name denotes a supported text-generation
+    (decoder-only causal LM) model."""
     a = (arch or "").strip()
     if not a:
         return False
-    if a in _KNOWN_MULTIMODAL_ARCHITECTURES:
-        return True
-    if a.endswith("ForConditionalGeneration"):
-        return True
-    if "Vision" in a:
-        return True
-    return False
+    return any(a.endswith(suffix) for suffix in _SUPPORTED_ARCH_SUFFIXES)
 
 
 def _detect_unsupported_model(model_path: str) -> dict | None:
-    """Best-effort classification of a model as unsupported multimodal/vision.
+    """Best-effort classification of a model as unsupported (non-text-generation).
 
-    Reads ``config.json`` (via :func:`_load_model_config_dict`) and flags the
-    model as unsupported when ANY of these hold:
+    Uses a WHITELIST approach: a model is supported if its architecture ends with
+    a known text-generation suffix (ForCausalLM, LMHeadModel, etc.) OR its
+    model_type is in the explicit allowlist. Everything else is rejected.
 
-      * an entry in ``architectures`` is a known multimodal class, ends with
-        ``ForConditionalGeneration``, or contains ``Vision``;
-      * ``model_type`` is in the multimodal blocklist;
-      * a vision marker key (``vision_config`` / ``image_token_id`` /
-        ``image_token_index``) is present.
-
-    Returns a dict ``{"architecture", "model_type", "signal"}`` describing the
-    offending signal when unsupported, else ``None``. ``None`` also covers the
+    Returns a dict ``{"architecture", "model_type", "signal"}`` describing why
+    the model is unsupported, else ``None`` (supported). ``None`` also covers the
     best-effort case where ``config.json`` is missing / unreadable / invalid:
     we deliberately do NOT hard-block on a config we cannot read (the upstream
     submission filter and the downstream model loader still apply).
@@ -1004,26 +975,32 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     architectures = _config_architectures(config)
     model_type = str(config.get("model_type") or "").strip()
 
-    for arch in architectures:
-        if _arch_is_unsupported_multimodal(arch):
-            return {
-                "architecture": arch,
-                "model_type": model_type,
-                "signal": f"architecture '{arch}'",
-            }
-    if model_type.lower() in _MULTIMODAL_MODEL_TYPES:
+    if architectures:
+        if any(_arch_is_supported_text_generation(a) for a in architectures):
+            return None
         return {
-            "architecture": architectures[0] if architectures else "",
+            "architecture": architectures[0],
             "model_type": model_type,
-            "signal": f"model_type '{model_type}'",
+            "signal": (
+                f"architecture '{architectures[0]}' does not match any "
+                f"supported text-generation pattern "
+                f"({', '.join(_SUPPORTED_ARCH_SUFFIXES)})"
+            ),
         }
-    for key in _MULTIMODAL_CONFIG_KEYS:
-        if key in config:
-            return {
-                "architecture": architectures[0] if architectures else "",
-                "model_type": model_type,
-                "signal": f"config key '{key}'",
-            }
+
+    if model_type.lower() in _SUPPORTED_MODEL_TYPES:
+        return None
+
+    if model_type:
+        return {
+            "architecture": "",
+            "model_type": model_type,
+            "signal": (
+                f"model_type '{model_type}' is not in the supported "
+                f"text-generation allowlist"
+            ),
+        }
+
     return None
 
 
@@ -1237,11 +1214,11 @@ def _preflight_unsupported_model_arch(
     mt = hit.get("model_type") or "<unknown>"
     reason = (
         f"Unsupported model '{name}': architecture '{arch}' (model_type "
-        f"'{mt}') is a multimodal/vision model. Hyperloom currently supports "
-        f"text-generation (decoder-only causal LM) models only. Matched on "
-        f"{hit.get('signal', 'a multimodal signal')}. Refusing to run (the "
-        f"baseline server would die minutes in with an image-processor load "
-        f"error). Submit a text-generation checkpoint instead."
+        f"'{mt}') is not a supported text-generation model. Hyperloom only "
+        f"supports decoder-only causal LM models (architectures ending with "
+        f"ForCausalLM / LMHeadModel). Rejected because: "
+        f"{hit.get('signal', 'unknown architecture')}. Submit a "
+        f"text-generation checkpoint instead."
     )
     # Persist the stop reason so CI / the robustness monitor read it from
     # state.json + reports/final.json instead of grepping the run log.
