@@ -1,0 +1,50 @@
+# `family` / `cost_minutes_*` / `expected_gain_pct` / `accuracy_risk` /
+# `crash_risk` / `typical_runtime_min` are prompt-advisory metadata
+# (see action_registry.py docstring); the runtime never gates on them.
+name: dynamic_specialist
+family: creative
+cost_minutes_p50: 30.0
+cost_minutes_p75: 60.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.0
+prerequisites:
+  - baseline
+requires_lanes: []
+allowed_tools:
+  - emit_intent
+side_effects:
+  - workspace_write
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 1
+lease_ttl_sec: 1800
+description: "Dispatch a wave of free-form CPU-only specialist sub-agents with arbitrary natural-language task descriptions. Not domain-locked; the orchestration agent writes the full task. Specialists run as standalone claude CLI subprocesses; results are surfaced to the orchestration prompt each tick. Supplementary EXPLORE channel."
+pipeline_phase: explore
+typical_runtime_min: 30.0
+verdict_class: exploration
+applicable_when:
+  - "phase == 'EXPLORE'"
+# dynamic_specialist — free-form CPU-only dispatch handled directly by
+# the Coordinator (``_handle_dynamic_specialist_dispatch``) via the
+# dynamic_dispatch module. Bypasses SpecialistRunner / TaskRegistry. The
+# payload schema is open by design (no required fields, no source
+# allowlist): the orchestration agent decides task descriptions freely.
+params_schema:
+  tasks:
+    type: list
+    description: |
+      List of {task_description, task_summary, role?, priority?} objects.
+      Each ``task_description`` is the full natural-language task for one
+      specialist; ``task_summary`` is a short status label. Dispatched as
+      a wave; all launch immediately (CPU-only).
+  model:
+    type: string
+    description: |
+      Optional. Advisory only — the Coordinator overrides the dispatch
+      model with the blessed orchestration / specialist model.
+  timeout_minutes:
+    type: integer
+    description: |
+      Optional, default 120. Per-agent wall-clock budget. The Coordinator
+      reaps agents that exceed it (kills the subprocess group).

@@ -347,6 +347,28 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "dynamic_side_effects_red_line / "
             "dynamic_kernel_only_disallowed."
         )
+    # dynamic_specialist — free-form CPU-only specialist dispatch.
+    # Handled directly by the Coordinator (bypasses SpecialistRunner);
+    # the payload is open (no domain, no required schema). See the
+    # "Dynamic specialist dispatch (free-form)" section in orchestration.md.
+    if meta.name == "dynamic_specialist":
+        return (
+            "delegate{action_name='dynamic_specialist', params={"
+            "tasks=[{task_description=<full natural-language task>, "
+            "task_summary=<short label>, role?=<str>, "
+            "priority?=<critical|high|normal|low>}, ...], "
+            "timeout_minutes?=120}}. "
+            "Specialists are CPU-only and launch immediately; the "
+            "Coordinator auto-surfaces dynamic_specialist_completed "
+            "observations each tick."
+        )
+    if meta.name == "dynamic_specialist_check":
+        return "delegate{action_name='dynamic_specialist_check', params={}}"
+    if meta.name == "dynamic_specialist_collect":
+        return (
+            "delegate{action_name='dynamic_specialist_collect', params={"
+            "agent_id=<id from a dispatch / completed observation>}}"
+        )
     return (
         f"propose_action{{action_name='{meta.name}', "
         f"predicted_gain_pct=<your estimate>}}"
