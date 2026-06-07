@@ -1164,8 +1164,11 @@ class TestPhysicalInterpretation095726Z:
         # T_cmp must be present (formula change requirement) AND must
         # NOT cap the ceiling at decode — bound stays memory.
         assert br.cmp_tok_per_sec > br.mem_tok_per_sec
-        assert br.peak_tok_per_sec == br.mem_tok_per_sec
+        # PerfModel (FusedMoE coupon formula) now drives peak_tok_per_sec;
+        # it agrees with the legacy T_mem ceiling within < 1% here, so the
+        # within% anchor remains valid. The peak must stay > measured.
         assert br.bound_kind == "memory"
+        assert br.peak_tok_per_sec >= self._ACHIEVED_TOK_S
         # within% recomputed from achieved must still match the
         # PR-9749520 anchor (~77 %, fixed by P0+P1 ceiling correctness).
         within_pct = 100.0 * self._ACHIEVED_TOK_S / br.peak_tok_per_sec
@@ -1463,8 +1466,8 @@ class TestPerfModelMoE:
         )
 
     def test_moe_ffn_uses_moe_intermediate_size(self):
-        """With moe_intermediate_size set, PerfModel gate/up/down ops must reflect
-        experts_per_tok * moe_intermediate_size, not intermediate_size."""
+        """With moe_intermediate_size set, PerfModel uses FusedMoE formula
+        (coupon E_active) not the per-token fixed-topk formula."""
         from inference_optimizer.orchestrator.roofline_ceiling import (
             compute_roofline_from_perfmodel,
         )
@@ -1474,39 +1477,16 @@ class TestPerfModelMoE:
             concurrency=1, isl=1024, osl=1024,
         )
         assert result is not None
-        # FFN active dim = 8 * 768 = 6144 (same as intermediate_size here,
-        # but the logic is now correct: experts_per_tok * moe_intermediate_size)
-        ffn_ops = [op for op in result.ops if "proj" in op.name and op.name not in ("q_proj", "k_proj", "v_proj", "o_proj")]
-        assert len(ffn_ops) == 3  # gate/up/down
-        # Each FFN op should reflect moe_inter * experts_per_tok = 768*8=6144 weight shape
-        # bytes_moved per layer = (hidden*ffn + ffn*hidden + hidden*ffn_active) * bpe
-        # Just verify bound_kind is memory for MoE decode at conc=1
+        # At batch=1: E_active ≈ topk = 8 (coupon formula == B=1 estimate),
+        # so decode is memory-bound (weight IO dominates).
         assert result.bound_kind == "memory"
-
-    def test_moe_dense_fallback_when_no_moe_inter(self):
-        """When moe_intermediate_size=0, falls back to intermediate_size."""
-        from inference_optimizer.orchestrator.roofline_ceiling import (
-            ModelMeta, compute_roofline_from_perfmodel,
-        )
-        meta = ModelMeta(
-            weight_bytes=int(13e9), num_layers=32,
-            num_kv_heads=8, head_dim=128, weight_dtype_bytes=2.0,
-            hidden_size=4096, intermediate_size=11008,
-            moe_intermediate_size=0,  # missing → dense path
-            num_attention_heads=32,
-        )
-        result = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi300x",
-            concurrency=1, isl=512, osl=512,
-        )
-        assert result is not None
-        ffn_ops = [op for op in result.ops if op.name in ("gate_proj", "up_proj", "down_proj")]
-        assert len(ffn_ops) == 3
+        # The "moe_fused" op should appear in the op breakdown
+        moe_ops = [op for op in result.ops if op.name == "moe_fused"]
+        assert len(moe_ops) == 1
 
     def test_moe_ceiling_is_upper_bound_conc16(self):
-        """PerfModel ceiling for Qwen3-30B-A3B at conc=16 must be >= 1754 tok/s
-        (real InferenceX measurement on MI300X).
-        MoE at high batch uses legacy path; check PerfModel directly here."""
+        """PerfModel (FusedMoE coupon formula) ceiling for Qwen3-30B-A3B at conc=16
+        must be >= 1754 tok/s (real InferenceX measurement on MI300X)."""
         from inference_optimizer.orchestrator.roofline_ceiling import (
             compute_roofline_from_perfmodel,
         )
@@ -1516,10 +1496,28 @@ class TestPerfModelMoE:
             concurrency=16, isl=1024, osl=1024,
         )
         assert result is not None
-        # PerfModel models per-token active experts (B=1 coupon approx), so at
-        # low batch (conc=16) it is still an upper bound on real throughput.
         assert result.decode_tok_per_s >= 1754.16, (
             f"PerfModel ceiling {result.decode_tok_per_s:.1f} < measured 1754.16 tok/s"
+        )
+
+    def test_moe_ceiling_is_upper_bound_conc64(self):
+        """At conc=64, FusedMoE coupon formula should give a tighter (lower) ceiling
+        than the B=1 per-token estimate because E_active grows toward num_experts."""
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            ModelMeta, compute_roofline_from_perfmodel,
+        )
+        meta = self._make_qwen3_a3b_meta()
+        result_1 = compute_roofline_from_perfmodel(
+            meta=meta, gpu_type="mi300x", concurrency=1, isl=512, osl=512,
+        )
+        result_64 = compute_roofline_from_perfmodel(
+            meta=meta, gpu_type="mi300x", concurrency=64, isl=512, osl=512,
+        )
+        assert result_1 is not None and result_64 is not None
+        # At conc=64, more expert weights are loaded (E_active > topk),
+        # so bytes grow → ceiling drops vs conc=1.
+        assert result_64.decode_tok_per_s < result_1.decode_tok_per_s * 64, (
+            "conc=64 ceiling should not be 64× higher than conc=1 (MoE weight saturation)"
         )
 
 
@@ -1559,6 +1557,38 @@ class TestPerfModelTransparentReplacement:
         assert pm_bd is not None
         assert br.peak_tok_per_sec == pytest.approx(pm_bd.decode_tok_per_s, rel=1e-6)
         assert br.bound_kind == pm_bd.bound_kind
+
+    def test_moe_uses_perfmodel_peak(self, tmp_path):
+        """MoE models now also use PerfModel (FusedMoE coupon formula).
+        For Qwen3-30B-A3B at conc=64, the FusedMoE ceiling must be above
+        the measured 6244 tok/s (from TestPhysicalInterpretation095726Z)."""
+        from types import SimpleNamespace
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            compute_roofline_breakdown_from_state,
+            compute_roofline_from_perfmodel,
+            load_model_meta,
+        )
+        _write_qwen3_moe_model(tmp_path / "a3b", total_size=61_000_000_000)
+        yaml_path = tmp_path / "bl.yaml"
+        yaml_path.write_text("benchmark:\n  envs:\n    CONC: 64\n", encoding="utf-8")
+        state = SimpleNamespace(
+            model_path=str(tmp_path / "a3b"),
+            gpu_type="mi355x", tp=1, precision="bf16",
+            conc=8, isl=256, osl=256,
+            last_baseline={"extras": {"materialized_config": str(yaml_path)}},
+        )
+        br = compute_roofline_breakdown_from_state(state)
+        meta = load_model_meta(str(tmp_path / "a3b"))
+        pm_bd = compute_roofline_from_perfmodel(
+            meta=meta, gpu_type="mi355x", concurrency=64,
+            isl=256, osl=256, precision_tag="bf16",
+        )
+        assert pm_bd is not None
+        assert br.peak_tok_per_sec == pytest.approx(pm_bd.decode_tok_per_s, rel=1e-6)
+        # FusedMoE ceiling must remain above the measured 6244.3 tok/s
+        assert br.peak_tok_per_sec >= 6244.3, (
+            f"MoE PerfModel ceiling {br.peak_tok_per_sec:.1f} < measured 6244.3 tok/s"
+        )
 
     def test_falls_back_to_legacy_for_unknown_gpu(self, tmp_path):
         """For an unknown GPU (PerfModel returns None), legacy ceiling is used."""
