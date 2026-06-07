@@ -36,6 +36,7 @@ _HOST_LEAK_VARS = (
     "LOCAL_SETUP_ENV",
     "PRIMUS_CLAW_REPO",
     "INFERENCEX_REPO",
+    "INFERENCEX_REF",
     "TRACELENS_REPO",
     "TRACELENS_REF",
     "OOB_SRC",
@@ -103,6 +104,7 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
         env={
             "PRIMUS_CLAW_REPO": str(primus),
             "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
             "SAFE_API_KEY": secret,
@@ -141,6 +143,7 @@ def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> No
         env={
             "PRIMUS_CLAW_REPO": str(primus),
             "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
             "TRACELENS_INTERNAL_ROOT": str(internal_checkout),
@@ -166,6 +169,7 @@ def test_local_setup_internal_missing_path_falls_back_to_oss_only(tmp_path: Path
         env={
             "PRIMUS_CLAW_REPO": str(primus),
             "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
             "TRACELENS_INTERNAL_ROOT": str(tmp_path / "nope" / "TraceLens-internal"),
@@ -191,6 +195,7 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
         env={
             "OOB_SRC": str(existing_oob),
             "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
             "TRACELENS_REF": "HEAD",
         },
