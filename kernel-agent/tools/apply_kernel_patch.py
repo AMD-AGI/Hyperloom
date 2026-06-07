@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import py_compile
@@ -12,9 +13,10 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip"}
@@ -323,6 +325,1078 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
     return {"status": "ok", "removed": removed}
 
 
+# ---------------------------------------------------------------------------
+# PR-K: aiter JIT cache invalidation around compiled-source rebuilds.
+#
+# aiter ships ``@compile_ops("module_<name>", gen_func=...)`` decorators that
+# JIT-codegen + hipcc-compile per-instance ``.so`` files into
+# ``<aiter>/jit/build/module_<name>_<sig>/``. ``setup.py develop`` rebuilds the
+# python package + statically-compiled ``.so`` but does NOT invalidate the
+# jit/build entries: a patch under ``aiter/csrc/ck_gemm_moe_2stages_codegen/``
+# would rebuild the wheel yet the next ``import aiter.ops.moe_op`` would still
+# pick up the pre-patch ``module_moe_ck2stages_*.so`` from jit/build/, leaving
+# the integrate benchmark to measure unchanged performance and emit REVERT.
+#
+# We move (NOT copy) the entire jit/build/ directory aside before the rebuild
+# step so the post-rebuild first-import re-codegens + re-compiles every module
+# from clean state. ``shutil.move`` is atomic on the same filesystem and zero-
+# copy. Revert moves the backup back, removing any regenerated jit/build/ dir
+# first so the pre-patch state is restored bit-for-bit.
+#
+# Scope: ONLY aiter is affected. sglang's sgl-kernel and vllm have no JIT
+# codegen layer — their ``.so`` are produced by setup.py at install time, so
+# the standard ``setup.py develop`` rebuild + cache_clear is sufficient and
+# this invalidation step is a no-op for those targets.
+# ---------------------------------------------------------------------------
+_AITER_CSRC_MARKER = "/aiter/csrc/"
+
+
+def _target_is_in_aiter_csrc(target_file: Path) -> bool:
+    """Return True iff ``target_file`` resides under any ``aiter/csrc/`` tree.
+
+    Matches both the editable checkout (``/sgl-workspace/aiter/csrc/...``) and
+    the dist-packages layout (``/usr/local/lib/python3.10/dist-packages/aiter/
+    csrc/...``) — in both cases the relative segment ``aiter/csrc/`` appears
+    verbatim in the absolute path.
+    """
+    return _AITER_CSRC_MARKER in str(target_file).replace(os.sep, "/")
+
+
+def _aiter_jit_build_dir() -> Path | None:
+    """Return ``<aiter>/jit/build`` for the importable aiter, or ``None``.
+
+    Resolved via ``importlib.util.find_spec("aiter")`` so editable installs
+    (``/sgl-workspace/aiter/aiter/__init__.py``), wheel installs
+    (``/usr/local/lib/python3.12/dist-packages/aiter/__init__.py``) and any
+    other layout on ``sys.path`` resolve correctly without hardcoding.
+
+    Returns ``None`` when aiter is not importable in the current interpreter
+    (the kernel-agent sandbox container always has aiter available; this
+    fallback exists so unit tests on a host without aiter still pass).
+    """
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    aiter_pkg = Path(list(spec.submodule_search_locations)[0])
+    return aiter_pkg / "jit" / "build"
+
+
+def _invalidate_aiter_jit_build(
+    target_file: Path,
+    backup_dir: Path,
+    *,
+    jit_build_dir_override: Path | None = None,
+) -> dict[str, Any]:
+    """Move aiter ``jit/build/`` aside so a post-rebuild first import re-JITs.
+
+    No-op for targets outside ``aiter/csrc/`` and for sandboxes where the
+    aiter package isn't importable / hasn't populated its jit/build/ yet.
+    Returns one of:
+
+      * ``{"status": "ok", "src": ..., "backup_path": ..., "moved_at": ...}``
+        — backup written; caller must persist this in the manifest before
+        rebuild so revert can find it.
+      * ``{"status": "skipped", "reason": ...}`` — non-aiter target, aiter
+        not importable, or jit/build already absent/empty.
+      * ``{"status": "failed", "error": ...}`` — backup path collision; the
+        caller is expected to abort apply rather than rebuild against an
+        inconsistent jit cache.
+
+    ``jit_build_dir_override`` is a test-only escape hatch so unit tests can
+    point at a synthetic jit/build/ tree without an importable aiter package.
+    """
+    if not _target_is_in_aiter_csrc(target_file):
+        return {"status": "skipped", "reason": "target not under aiter/csrc/"}
+    jit_build = jit_build_dir_override or _aiter_jit_build_dir()
+    if jit_build is None:
+        return {"status": "skipped", "reason": "aiter package not importable"}
+    if not jit_build.exists():
+        return {"status": "skipped", "reason": "aiter jit/build/ does not exist"}
+    try:
+        is_empty = not any(jit_build.iterdir())
+    except OSError as exc:
+        return {
+            "status": "failed",
+            "error": f"failed to scan {jit_build}: {exc}",
+            "src": str(jit_build),
+        }
+    if is_empty:
+        return {"status": "skipped", "reason": "aiter jit/build/ is empty"}
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / "jit_build"
+    if backup_path.exists():
+        return {
+            "status": "failed",
+            "error": f"jit/build backup path already exists: {backup_path}",
+            "src": str(jit_build),
+        }
+    try:
+        shutil.move(str(jit_build), str(backup_path))
+    except (OSError, shutil.Error) as exc:
+        return {
+            "status": "failed",
+            "error": f"shutil.move failed: {exc}",
+            "src": str(jit_build),
+            "backup_path": str(backup_path),
+        }
+    return {
+        "status": "ok",
+        "src": str(jit_build),
+        "backup_path": str(backup_path),
+        "moved_at": _now(),
+    }
+
+
+def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]:
+    """Reverse of :func:`_invalidate_aiter_jit_build`.
+
+    Moves the backup back to its original location. If the post-rebuild first
+    import already regenerated a fresh jit/build/, that fresh dir is removed
+    first so the pre-patch state is restored bit-for-bit (revert semantics).
+    """
+    if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
+        return {"status": "skipped", "reason": "no backup recorded"}
+    src = Path(jit_build_backup.get("src", ""))
+    backup_path = Path(jit_build_backup.get("backup_path", ""))
+    if not src or not backup_path:
+        return {"status": "skipped", "reason": "incomplete backup record"}
+    if not backup_path.exists():
+        return {
+            "status": "skipped",
+            "reason": f"backup path missing: {backup_path}",
+        }
+    if src.exists():
+        try:
+            shutil.rmtree(src)
+        except OSError as exc:
+            return {
+                "status": "failed",
+                "error": f"failed to clear regenerated jit/build/: {exc}",
+                "src": str(src),
+            }
+    try:
+        src.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(backup_path), str(src))
+    except (OSError, shutil.Error) as exc:
+        return {
+            "status": "failed",
+            "error": f"shutil.move failed during restore: {exc}",
+            "src": str(src),
+            "backup_path": str(backup_path),
+        }
+    return {"status": "ok", "restored_to": str(src)}
+
+
+# ---------------------------------------------------------------------------
+# PR-K2: aiter cpp_itfs RUNTIME-compiled cache invalidation.
+#
+# Distinct from the ``@compile_ops`` jit/build cache handled above. aiter's
+# ``csrc/cpp_itfs`` kernels (e.g. paged_attention -> ``pa_ragged``) are NOT
+# produced by ``setup.py develop``; they are runtime-compiled on first call
+# by ``compile_template_op`` (aiter ``csrc/cpp_itfs/utils.py``) into
+# ``$AITER_ROOT_DIR/build/<md_name>_<md5(params)>/lib.so`` (default
+# ``$HOME/.aiter/build``). The cache folder name hashes kernel *parameters*,
+# NOT source content, so the pristine and the patched build of the same
+# kernel collide on the SAME directory. ``compile_template_op`` rebuilds only
+# when ``lib.so`` is missing (``not_built``), so after we patch the ``.cuh``
+# and run the (no-op for this class) ``setup.py develop``, the next server
+# reuses the STALE pristine ``lib.so``; the integrate re-baseline then
+# measures ~0% and a genuinely-good kernel is flagged NEEDS_REVIEW / REVERT
+# (observed -0.17% on a +2.5% paged_attention kernel; see GH #458).
+#
+# ``setup.py develop`` cannot refresh this kernel class, and the jit/build
+# move above never touches ``$HOME/.aiter/build``. So for cpp_itfs targets we
+# ALSO move the affected runtime-cache dirs aside before the rebuild step --
+# scoped to the patched module's ``MD_NAME`` prefix(es) when determinable,
+# else the whole cpp_itfs build root the scheduler uses -- so the re-baseline
+# server runtime-recompiles the patched kernel from clean state.
+# ``shutil.move`` keeps it reversible; :func:`_restore_aiter_cpp_itfs_cache`
+# moves the backup back on revert. ``integrate_handler`` additionally sets
+# ``AITER_REBUILD=1`` on the re-baseline server and gates KEEP on a verified
+# fresh rebuild via :func:`verify_cpp_itfs_rebuilt`.
+#
+# Scope: ONLY aiter cpp_itfs targets. Non-cpp_itfs aiter targets, sglang and
+# vllm keep their current behaviour bit-for-bit (this is a no-op for them).
+# ---------------------------------------------------------------------------
+_AITER_CPP_ITFS_MARKER = "/aiter/csrc/cpp_itfs/"
+_MD_NAME_RE = re.compile(r"""(?m)^\s*MD_NAME\s*=\s*["']([^"']+)["']""")
+
+
+def _target_is_in_aiter_cpp_itfs(target_file: Path) -> bool:
+    """True iff ``target_file`` lives under any ``aiter/csrc/cpp_itfs/`` tree.
+
+    Strict subset of :func:`_target_is_in_aiter_csrc`: these are the
+    runtime-compiled kernels whose served ``.so`` lives in
+    ``$HOME/.aiter/build`` rather than in ``<aiter>/jit/build`` or the
+    statically-linked wheel. Matches both the editable checkout
+    (``/sgl-workspace/aiter/csrc/cpp_itfs/...``) and the dist-packages
+    layout (``.../aiter/csrc/cpp_itfs/...``).
+    """
+    return _AITER_CPP_ITFS_MARKER in str(target_file).replace(os.sep, "/")
+
+
+def _aiter_cpp_itfs_build_dir() -> Path:
+    """Resolve aiter's cpp_itfs runtime ``BUILD_DIR``.
+
+    Mirrors aiter ``csrc/cpp_itfs/utils.py``: ``$AITER_ROOT_DIR/build`` with
+    ``$AITER_ROOT_DIR`` defaulting to ``$HOME/.aiter``. Honouring both env
+    vars keeps non-default deployments + unit tests correct without importing
+    aiter into this standalone tool.
+    """
+    root = os.environ.get("AITER_ROOT_DIR", "").strip()
+    if not root:
+        home = Path(os.environ.get("HOME", "~")).expanduser()
+        root = str(home / ".aiter")
+    return Path(root) / "build"
+
+
+def _cpp_itfs_module_names(target_file: Path) -> list[str]:
+    """Best-effort ``MD_NAME`` prefix(es) for the cpp_itfs module(s) the
+    patched source feeds.
+
+    The cpp_itfs ``.py`` driver next to the patched source declares
+    ``MD_NAME = "pa_ragged"`` (etc.), which becomes the
+    ``<md_name>_<hash>`` runtime-cache folder prefix. A single shared
+    ``.cuh`` (e.g. ``pa_kernels.cuh``) is pulled into several drivers in the
+    same directory, so we collect EVERY ``MD_NAME`` declared in the target's
+    directory. An empty result tells the caller to fall back to clearing the
+    whole cpp_itfs build root.
+    """
+    names: set[str] = set()
+    search_dir = target_file.parent
+    try:
+        py_files = sorted(search_dir.glob("*.py"))
+    except OSError:
+        py_files = []
+    if target_file.suffix.lower() == ".py":
+        py_files = list(dict.fromkeys([target_file, *py_files]))
+    for py in py_files:
+        try:
+            text = py.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for match in _MD_NAME_RE.finditer(text):
+            names.add(match.group(1))
+    return sorted(names)
+
+
+def _invalidate_aiter_cpp_itfs_cache(
+    target_file: Path,
+    backup_dir: Path,
+    *,
+    build_dir_override: Path | None = None,
+) -> dict[str, Any]:
+    """Move aiter cpp_itfs runtime-cache dirs aside so the re-baseline server
+    runtime-recompiles the patched kernel from clean state.
+
+    No-op (``skipped``, ``is_cpp_itfs=False``) for non-cpp_itfs targets. For
+    cpp_itfs targets the affected ``<build_dir>/<md_name>_*`` dirs (scoped by
+    ``MD_NAME`` when determinable, else every child of the build root) are
+    MOVED into ``backup_dir/cpp_itfs_cache/`` so the operation is reversible.
+    The record always carries ``is_cpp_itfs`` + ``build_dir`` +
+    ``module_names`` + ``invalidated_unix`` (even when nothing was cached
+    yet) so integrate can later verify a fresh rebuild actually landed.
+
+    Returns one of ``ok`` / ``skipped`` / ``failed`` mirroring
+    :func:`_invalidate_aiter_jit_build`. ``build_dir_override`` is a
+    test-only hook.
+    """
+    if not _target_is_in_aiter_cpp_itfs(target_file):
+        return {
+            "status": "skipped",
+            "is_cpp_itfs": False,
+            "reason": "target not under aiter/csrc/cpp_itfs/",
+        }
+    build_dir = build_dir_override or _aiter_cpp_itfs_build_dir()
+    module_names = _cpp_itfs_module_names(target_file)
+    scope = "module" if module_names else "build_root"
+    record: dict[str, Any] = {
+        "is_cpp_itfs": True,
+        "build_dir": str(build_dir),
+        "module_names": module_names,
+        "scope": scope,
+        "invalidated_at": _now(),
+        "invalidated_unix": time.time(),
+    }
+    if not build_dir.exists():
+        # Nothing cached yet -> the re-baseline server will build fresh into
+        # this dir on first kernel call. No stale binary to mask.
+        record.update({
+            "status": "skipped",
+            "reason": "cpp_itfs build dir does not exist",
+            "moved": [],
+        })
+        return record
+    try:
+        if module_names:
+            to_move: list[Path] = []
+            for md in module_names:
+                to_move.extend(p for p in build_dir.glob(f"{md}_*") if p.is_dir())
+        else:
+            to_move = [p for p in build_dir.iterdir() if p.is_dir()]
+    except OSError as exc:
+        record.update({"status": "failed", "error": f"failed to scan {build_dir}: {exc}"})
+        return record
+    # De-dup: a shared .cuh can match overlapping MD_NAME globs.
+    to_move = sorted({p.resolve() for p in to_move})
+    if not to_move:
+        record.update({
+            "status": "skipped",
+            "reason": "no matching cpp_itfs cache entries",
+            "moved": [],
+        })
+        return record
+    cache_backup_root = backup_dir / "cpp_itfs_cache"
+    moved: list[dict[str, str]] = []
+    try:
+        cache_backup_root.mkdir(parents=True, exist_ok=True)
+        for src in to_move:
+            dst = cache_backup_root / src.name
+            if dst.exists():
+                record.update({
+                    "status": "failed",
+                    "error": f"cpp_itfs cache backup path already exists: {dst}",
+                    "moved": moved,
+                })
+                return record
+            shutil.move(str(src), str(dst))
+            moved.append({"src": str(src), "backup_path": str(dst)})
+    except (OSError, shutil.Error) as exc:
+        record.update({
+            "status": "failed",
+            "error": f"shutil.move failed: {exc}",
+            "moved": moved,
+        })
+        return record
+    record.update({"status": "ok", "moved": moved})
+    return record
+
+
+def _restore_aiter_cpp_itfs_cache(cache_backup: dict[str, Any]) -> dict[str, Any]:
+    """Reverse :func:`_invalidate_aiter_cpp_itfs_cache` (revert path).
+
+    Moves each backed-up cache dir back to its original location, removing
+    any dir the re-baseline server regenerated there first so the pre-patch
+    runtime cache is restored bit-for-bit.
+    """
+    if not isinstance(cache_backup, dict) or cache_backup.get("status") != "ok":
+        return {"status": "skipped", "reason": "no cpp_itfs cache backup recorded"}
+    moved = cache_backup.get("moved") or []
+    if not moved:
+        return {"status": "skipped", "reason": "nothing was moved"}
+    restored: list[str] = []
+    for entry in moved:
+        src = Path(entry.get("src", ""))  # original cache location
+        backup_path = Path(entry.get("backup_path", ""))
+        if not str(src) or not str(backup_path) or not backup_path.exists():
+            continue
+        if src.exists():
+            try:
+                shutil.rmtree(src)
+            except OSError as exc:
+                return {
+                    "status": "failed",
+                    "error": f"failed to clear regenerated cache dir {src}: {exc}",
+                }
+        try:
+            src.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(backup_path), str(src))
+        except (OSError, shutil.Error) as exc:
+            return {
+                "status": "failed",
+                "error": f"shutil.move failed during restore: {exc}",
+            }
+        restored.append(str(src))
+    return {"status": "ok", "restored": restored}
+
+
+def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
+    """Assert the re-baseline actually runtime-recompiled the patched kernel.
+
+    After :func:`_invalidate_aiter_cpp_itfs_cache` moved the stale cache
+    aside, a faithful re-baseline must repopulate
+    ``<build_dir>/<md_name>_*/lib.so`` (the served binary) with an mtime at
+    or after the invalidation. If no such fresh ``lib.so`` exists, the server
+    dlopened a stale binary (or the kernel was never exercised) and the
+    measured gain is meaningless -- the integrate KEEP/REVERT gate uses this
+    to flag/abort instead of scoring a stale binary (GH #458 point 2).
+
+    Returns ``{"verified": bool, ...}``. ``verified`` is True for
+    non-cpp_itfs targets so the caller's gate is a strict no-op off the
+    cpp_itfs path.
+    """
+    if not isinstance(cache_backup, dict) or not cache_backup.get("is_cpp_itfs"):
+        return {"verified": True, "status": "skipped", "reason": "non-cpp_itfs target"}
+    build_dir = Path(cache_backup.get("build_dir", ""))
+    since = float(cache_backup.get("invalidated_unix") or 0.0)
+    module_names = list(cache_backup.get("module_names") or [])
+    if not str(build_dir) or not build_dir.exists():
+        return {
+            "verified": False,
+            "status": "stale",
+            "reason": f"cpp_itfs build dir absent after re-baseline: {build_dir}",
+        }
+    globs = [f"{md}_*/lib.so" for md in module_names] or ["*/lib.so"]
+    fresh: list[str] = []
+    for pattern in globs:
+        for so in build_dir.glob(pattern):
+            try:
+                mtime = so.stat().st_mtime
+            except OSError:
+                continue
+            # 1s slack absorbs build-dir-create vs lib.so-flush ordering.
+            if mtime + 1.0 >= since:
+                fresh.append(str(so))
+    if fresh:
+        return {"verified": True, "status": "ok", "fresh_lib_so": sorted(set(fresh))[:8]}
+    return {
+        "verified": False,
+        "status": "stale",
+        "reason": (
+            "no freshly-built cpp_itfs lib.so found after re-baseline; "
+            "served binary is stale"
+        ),
+        "build_dir": str(build_dir),
+        "module_names": module_names,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PR-K3: Triton (@triton.jit) kernel cache invalidation.
+#
+# Triton kernels -- e.g. sglang's editable fused_moe at
+# ``python/sglang/srt/layers/moe/fused_moe_triton/fused_moe.py`` or aiter's
+# triton ops -- are NOT built by ``setup.py``; the Triton runtime
+# AOT-compiles each kernel on first launch into ``$TRITON_CACHE_DIR``
+# (default ``~/.triton/cache``) keyed by a hash of the kernel IR + signature,
+# emitting ``*.hsaco`` / ``*.json`` / IR artifacts. A whole-file source patch
+# usually changes that hash so the patched kernel recompiles -- but a
+# config-only retune (e.g. the fused_moe ``64x64x32 -> 128x128x64`` tile
+# change) or an autotune-key collision can re-serve a STALE compiled artifact,
+# so the integrate re-baseline would measure the PRE-patch kernel. We move the
+# Triton cache dir aside before the re-baseline so the server recompiles from
+# clean state; revert moves it back. No-op for non-Triton targets. THIS makes
+# the integrate re-baseline robust for the proven editable Triton fused_moe.
+# ---------------------------------------------------------------------------
+_TRITON_SOURCE_MARKERS = (
+    "@triton.jit", "import triton", "from triton", "triton.jit",
+    "tl.load", "tl.store", "tl.program_id", "tl.arange",
+)
+_TRITON_PATH_MARKERS = ("/triton/", "fused_moe_triton", "triton_kernels", "_triton_kernels")
+
+
+def _target_is_triton(target_file: Path) -> bool:
+    """Best-effort: is ``target_file`` an editable Triton (@triton.jit) kernel?
+
+    Conservative: a ``.py`` file whose text imports/uses triton
+    (``@triton.jit`` / ``import triton`` / ``tl.load`` ...), or a ``.py`` under
+    a well-known Triton path segment. Non-``.py`` targets and plain-python
+    files without triton usage are rejected so the whole-cache move-aside only
+    fires for real Triton kernels.
+    """
+    if target_file.suffix.lower() != ".py":
+        return False
+    s = str(target_file).replace(os.sep, "/")
+    if any(m in s for m in _TRITON_PATH_MARKERS):
+        return True
+    try:
+        text = target_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(m in text for m in _TRITON_SOURCE_MARKERS)
+
+
+def _triton_cache_dir() -> Path:
+    """Resolve the Triton compile cache dir: ``$TRITON_CACHE_DIR`` else
+    ``~/.triton/cache`` (the Triton runtime default)."""
+    cache = os.environ.get("TRITON_CACHE_DIR", "").strip()
+    if cache:
+        return Path(cache)
+    home = Path(os.environ.get("HOME", "~")).expanduser()
+    return home / ".triton" / "cache"
+
+
+# ---------------------------------------------------------------------------
+# PR-K4: torch inductor cache invalidation.
+#
+# ``torch.compile`` / TorchInductor AOT-compiles fused kernels into an on-disk
+# cache (``$TORCHINDUCTOR_CACHE_DIR`` else ``~/.cache/torch/inductor`` and/or
+# ``/tmp/torchinductor_<user>``). Like Triton, a stale entry can be re-served
+# so the integrate re-baseline measures the pre-patch kernel. We move the
+# inductor cache dir(s) aside before the re-baseline so the server recompiles
+# from clean state; revert moves them back. No-op for non-inductor targets.
+# ---------------------------------------------------------------------------
+_INDUCTOR_PATH_MARKERS = ("torchinductor", "/torch/_inductor/", "_inductor_cache")
+_INDUCTOR_SOURCE_MARKERS = ("torch._inductor", "torch.compile", "from torch._inductor")
+
+
+def _target_is_inductor(target_file: Path) -> bool:
+    """Best-effort: is ``target_file`` a torch inductor target?
+
+    Path under a torchinductor cache / ``torch/_inductor`` tree, or a ``.py``
+    file that uses ``torch.compile`` / ``torch._inductor``. Conservative so the
+    cache move-aside only fires for real inductor targets.
+    """
+    s = str(target_file).replace(os.sep, "/")
+    if any(m in s for m in _INDUCTOR_PATH_MARKERS):
+        return True
+    if target_file.suffix.lower() != ".py":
+        return False
+    try:
+        text = target_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(m in text for m in _INDUCTOR_SOURCE_MARKERS)
+
+
+def _inductor_cache_dirs() -> list[Path]:
+    """Resolve torch inductor cache dir(s): ``$TORCHINDUCTOR_CACHE_DIR`` if set,
+    else ``~/.cache/torch/inductor`` plus ``/tmp/torchinductor_<user>``."""
+    dirs: list[Path] = []
+    env = os.environ.get("TORCHINDUCTOR_CACHE_DIR", "").strip()
+    if env:
+        dirs.append(Path(env))
+    else:
+        home = Path(os.environ.get("HOME", "~")).expanduser()
+        dirs.append(home / ".cache" / "torch" / "inductor")
+        user = (os.environ.get("USER") or os.environ.get("LOGNAME") or "").strip()
+        if user:
+            dirs.append(Path("/tmp") / f"torchinductor_{user}")
+    seen: set[str] = set()
+    out: list[Path] = []
+    for d in dirs:
+        if str(d) not in seen:
+            seen.add(str(d))
+            out.append(d)
+    return out
+
+
+def _move_cache_dirs_aside(
+    dirs: Iterable[Path], backup_dir: Path, *, label: str,
+) -> tuple[list[dict[str, str]], str | None]:
+    """Move each existing dir in ``dirs`` into ``backup_dir/<label>/<name>``.
+
+    Returns ``(moved, error)``. ``moved`` is a reversible list of
+    ``{"src", "backup_path"}`` records (empty when nothing existed). ``error``
+    is non-None on the first failure (backup collision / move error) so the
+    caller can bail without scoring against an inconsistent cache.
+    """
+    moved: list[dict[str, str]] = []
+    existing = [d for d in dirs if d.exists()]
+    if not existing:
+        return moved, None
+    dest_root = backup_dir / label
+    try:
+        dest_root.mkdir(parents=True, exist_ok=True)
+        for src in existing:
+            dst = dest_root / src.name
+            if dst.exists():
+                return moved, f"cache backup path already exists: {dst}"
+            shutil.move(str(src), str(dst))
+            moved.append({"src": str(src), "backup_path": str(dst)})
+    except (OSError, shutil.Error) as exc:
+        return moved, f"shutil.move failed: {exc}"
+    return moved, None
+
+
+def _restore_moved_cache(cache_backup: dict[str, Any]) -> dict[str, Any]:
+    """Reverse :func:`_move_cache_dirs_aside` (shared Triton/inductor restore).
+
+    Moves each backed-up dir back to its original location, removing any dir
+    the re-baseline regenerated there first so the pre-patch state is restored
+    bit-for-bit.
+    """
+    if not isinstance(cache_backup, dict) or cache_backup.get("status") != "ok":
+        return {"status": "skipped", "reason": "no cache backup recorded"}
+    moved = cache_backup.get("moved") or []
+    if not moved:
+        return {"status": "skipped", "reason": "nothing was moved"}
+    restored: list[str] = []
+    for entry in moved:
+        src = Path(entry.get("src", ""))
+        backup_path = Path(entry.get("backup_path", ""))
+        if not str(src) or not str(backup_path) or not backup_path.exists():
+            continue
+        if src.exists():
+            try:
+                shutil.rmtree(src)
+            except OSError as exc:
+                return {
+                    "status": "failed",
+                    "error": f"failed to clear regenerated cache dir {src}: {exc}",
+                }
+        try:
+            src.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(backup_path), str(src))
+        except (OSError, shutil.Error) as exc:
+            return {
+                "status": "failed",
+                "error": f"shutil.move failed during restore: {exc}",
+            }
+        restored.append(str(src))
+    return {"status": "ok", "restored": restored}
+
+
+def _verify_moved_cache_rebuilt(
+    cache_backup: dict[str, Any], *, kind_key: str, label: str,
+) -> dict[str, Any]:
+    """Shared fresh-build check for the move-aside toolchains (Triton/inductor).
+
+    ``verified`` is True for non-matching targets and when nothing was moved
+    aside (cache absent/empty at invalidation -> can't conclude staleness, so
+    never false-abort). When a non-empty cache WAS moved aside, requires a
+    file in the recreated cache dir with mtime at/after the invalidation
+    (proof the patched kernel recompiled); otherwise reports ``stale``.
+    """
+    if not isinstance(cache_backup, dict) or not cache_backup.get(kind_key):
+        return {"verified": True, "status": "skipped", "reason": f"non-{label} target"}
+    moved = cache_backup.get("moved") or []
+    if cache_backup.get("status") != "ok" or not moved:
+        return {
+            "verified": True,
+            "status": "skipped",
+            "reason": f"{label} cache was empty/absent at invalidation; nothing to verify",
+        }
+    since = float(cache_backup.get("invalidated_unix") or 0.0)
+    fresh: list[str] = []
+    for m in moved:
+        cache_dir = Path(m.get("src", ""))  # original (now-recreated) location
+        if not cache_dir.exists():
+            continue
+        try:
+            for p in cache_dir.rglob("*"):
+                try:
+                    if p.is_file() and p.stat().st_mtime + 1.0 >= since:
+                        fresh.append(str(p))
+                except OSError:
+                    continue
+                if len(fresh) >= 8:
+                    break
+        except OSError:
+            continue
+        if len(fresh) >= 8:
+            break
+    if fresh:
+        return {"verified": True, "status": "ok", "fresh_artifacts": sorted(set(fresh))[:8]}
+    return {
+        "verified": False,
+        "status": "stale",
+        "reason": (
+            f"no freshly-compiled {label} artifact found after re-baseline; "
+            "served binary may be stale"
+        ),
+    }
+
+
+def _invalidate_triton_cache(
+    target_file: Path,
+    backup_dir: Path,
+    *,
+    cache_dir_override: Path | None = None,
+) -> dict[str, Any]:
+    """Move the Triton compile cache aside so the re-baseline recompiles.
+
+    No-op (``skipped``, ``is_triton=False``) for non-Triton targets.
+    ``cache_dir_override`` is a test-only hook.
+    """
+    if not _target_is_triton(target_file):
+        return {
+            "status": "skipped",
+            "is_triton": False,
+            "reason": "target is not a Triton kernel",
+        }
+    cache_dir = cache_dir_override or _triton_cache_dir()
+    record: dict[str, Any] = {
+        "is_triton": True,
+        "toolchain": "triton",
+        "cache_dirs": [str(cache_dir)],
+        "scope": "triton_cache_dir",
+        "invalidated_at": _now(),
+        "invalidated_unix": time.time(),
+    }
+    moved, error = _move_cache_dirs_aside([cache_dir], backup_dir, label="triton_cache")
+    if error is not None:
+        record.update({"status": "failed", "error": error, "moved": moved})
+        return record
+    if not moved:
+        record.update({
+            "status": "skipped",
+            "reason": "triton cache dir does not exist",
+            "moved": [],
+        })
+        return record
+    record.update({"status": "ok", "moved": moved})
+    return record
+
+
+def _restore_triton_cache(cache_backup: dict[str, Any]) -> dict[str, Any]:
+    """Reverse :func:`_invalidate_triton_cache` (revert path)."""
+    return _restore_moved_cache(cache_backup)
+
+
+def verify_triton_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
+    """Assert the re-baseline freshly recompiled the patched Triton kernel."""
+    return _verify_moved_cache_rebuilt(cache_backup, kind_key="is_triton", label="triton")
+
+
+def _invalidate_torch_inductor_cache(
+    target_file: Path,
+    backup_dir: Path,
+    *,
+    cache_dirs_override: Iterable[Path] | None = None,
+) -> dict[str, Any]:
+    """Move the torch inductor cache dir(s) aside so the re-baseline recompiles.
+
+    No-op (``skipped``, ``is_inductor=False``) for non-inductor targets.
+    ``cache_dirs_override`` is a test-only hook.
+    """
+    if not _target_is_inductor(target_file):
+        return {
+            "status": "skipped",
+            "is_inductor": False,
+            "reason": "target is not a torch inductor kernel",
+        }
+    cache_dirs = list(cache_dirs_override) if cache_dirs_override is not None else _inductor_cache_dirs()
+    record: dict[str, Any] = {
+        "is_inductor": True,
+        "toolchain": "torch_inductor",
+        "cache_dirs": [str(d) for d in cache_dirs],
+        "scope": "inductor_cache_dirs",
+        "invalidated_at": _now(),
+        "invalidated_unix": time.time(),
+    }
+    moved, error = _move_cache_dirs_aside(cache_dirs, backup_dir, label="inductor_cache")
+    if error is not None:
+        record.update({"status": "failed", "error": error, "moved": moved})
+        return record
+    if not moved:
+        record.update({
+            "status": "skipped",
+            "reason": "torch inductor cache dir(s) do not exist",
+            "moved": [],
+        })
+        return record
+    record.update({"status": "ok", "moved": moved})
+    return record
+
+
+def _restore_torch_inductor_cache(cache_backup: dict[str, Any]) -> dict[str, Any]:
+    """Reverse :func:`_invalidate_torch_inductor_cache` (revert path)."""
+    return _restore_moved_cache(cache_backup)
+
+
+def verify_inductor_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
+    """Assert the re-baseline freshly recompiled the patched inductor kernel."""
+    return _verify_moved_cache_rebuilt(cache_backup, kind_key="is_inductor", label="inductor")
+
+
+# ---------------------------------------------------------------------------
+# Cache-invalidation REGISTRY: ONE dispatch keyed by toolchain.
+#
+# Each :class:`ToolchainCacheEntry` declares, for one toolchain, the cache it
+# owns and how to {invalidate (move-aside), restore, verify a fresh build} +
+# the rebuild env the integrate re-baseline must set. ``apply_kernel_patch``
+# drives invalidation through this table, ``revert_kernel_patch`` restores
+# through it, and ``integrate_handler`` reads ``rebuild_env_for_apply_result``
+# / ``verify_rebuilt_for_apply_result`` to set the right env + run the right
+# verification gate. The aiter entries delegate to the pre-existing
+# ``_invalidate_aiter_jit_build`` / ``_invalidate_aiter_cpp_itfs_cache`` (and
+# their restore/verify) so behaviour is byte-for-byte preserved and the
+# GH #458 (#459) public names stay importable + identically-shaped. Every
+# entry self-gates (``invalidate`` returns ``skipped`` off its toolchain) so a
+# target the registry doesn't handle is bit-for-bit unaffected.
+# ---------------------------------------------------------------------------
+class ToolchainCacheEntry:
+    """One toolchain's cache-invalidation policy.
+
+    A plain class (not a ``@dataclass``) on purpose: this module is loaded via
+    ``importlib.util.spec_from_file_location`` (kernel_request_handlers'
+    ``_load_apply_tool`` + the unit tests) WITHOUT being registered in
+    ``sys.modules``, and ``@dataclass`` + ``from __future__ import annotations``
+    introspects ``sys.modules[cls.__module__]`` at class-creation time and
+    crashes when the module isn't registered. The fields below are stored
+    verbatim; callables are kept as plain attributes (never bound as methods,
+    so ``entry.invalidate(target, backup_dir)`` calls the bare function).
+
+    Fields:
+      name                    stable toolchain id
+      manifest_key            where the invalidation record is stored
+      restore_key             where the restore record is stored
+      matches(path)->bool     path-based detection (for classification)
+      invalidate(target, backup_dir)->record
+      restore(record)->result
+      verify(record)->{"verified": bool, ...}
+      engaged(record)->bool   did this toolchain apply to the target?
+      requires_compiled       only run inside the compiled-rebuild path
+      gates_keep              integrate hard-gates KEEP on this entry's verify
+      on_failure_error_class  error_class surfaced when invalidate fails
+      failure_error_prefix    human prefix for the failure error message
+      rebuild_env             env the re-baseline server must set
+      skipped_default         record shape when the entry does not run
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        manifest_key: str,
+        restore_key: str,
+        matches: Callable[[Path], bool],
+        invalidate: Callable[..., dict[str, Any]],
+        restore: Callable[[dict[str, Any]], dict[str, Any]],
+        verify: Callable[[dict[str, Any]], dict[str, Any]],
+        engaged: Callable[[dict[str, Any]], bool],
+        requires_compiled: bool,
+        gates_keep: bool,
+        on_failure_error_class: str,
+        failure_error_prefix: str,
+        rebuild_env: dict[str, str],
+        skipped_default: dict[str, Any],
+    ) -> None:
+        self.name = name
+        self.manifest_key = manifest_key
+        self.restore_key = restore_key
+        self.matches = matches
+        self.invalidate = invalidate
+        self.restore = restore
+        self.verify = verify
+        self.engaged = engaged
+        self.requires_compiled = requires_compiled
+        self.gates_keep = gates_keep
+        self.on_failure_error_class = on_failure_error_class
+        self.failure_error_prefix = failure_error_prefix
+        self.rebuild_env = rebuild_env
+        self.skipped_default = skipped_default
+
+
+CACHE_INVALIDATION_REGISTRY: list[ToolchainCacheEntry] = [
+    ToolchainCacheEntry(
+        name="aiter_compile_ops",
+        manifest_key="jit_build_backup",
+        restore_key="jit_build_restore",
+        matches=_target_is_in_aiter_csrc,
+        invalidate=_invalidate_aiter_jit_build,
+        restore=_restore_aiter_jit_build,
+        verify=lambda rec: {"verified": True, "status": "skipped", "reason": "jit/build not gated"},
+        engaged=lambda rec: rec.get("status") == "ok",
+        requires_compiled=True,
+        gates_keep=False,
+        on_failure_error_class="aiter_jit_invalidation_failed",
+        failure_error_prefix="aiter jit/build/ invalidation failed",
+        rebuild_env={},
+        skipped_default={"status": "skipped", "reason": "rebuild not run"},
+    ),
+    ToolchainCacheEntry(
+        name="aiter_cpp_itfs",
+        manifest_key="cpp_itfs_cache_backup",
+        restore_key="cpp_itfs_cache_restore",
+        matches=_target_is_in_aiter_cpp_itfs,
+        invalidate=_invalidate_aiter_cpp_itfs_cache,
+        restore=_restore_aiter_cpp_itfs_cache,
+        verify=verify_cpp_itfs_rebuilt,
+        engaged=lambda rec: bool(rec.get("is_cpp_itfs")),
+        requires_compiled=True,
+        gates_keep=True,
+        on_failure_error_class="aiter_cpp_itfs_invalidation_failed",
+        failure_error_prefix="aiter cpp_itfs runtime cache invalidation failed",
+        rebuild_env={"AITER_REBUILD": "1"},
+        skipped_default={"status": "skipped", "reason": "rebuild not run", "is_cpp_itfs": False},
+    ),
+    ToolchainCacheEntry(
+        name="triton",
+        manifest_key="triton_cache_backup",
+        restore_key="triton_cache_restore",
+        matches=_target_is_triton,
+        invalidate=_invalidate_triton_cache,
+        restore=_restore_triton_cache,
+        verify=verify_triton_rebuilt,
+        engaged=lambda rec: bool(rec.get("is_triton")),
+        requires_compiled=False,
+        gates_keep=True,
+        on_failure_error_class="triton_cache_invalidation_failed",
+        failure_error_prefix="triton cache invalidation failed",
+        rebuild_env={},
+        skipped_default={"status": "skipped", "reason": "not run", "is_triton": False},
+    ),
+    ToolchainCacheEntry(
+        name="torch_inductor",
+        manifest_key="inductor_cache_backup",
+        restore_key="inductor_cache_restore",
+        matches=_target_is_inductor,
+        invalidate=_invalidate_torch_inductor_cache,
+        restore=_restore_torch_inductor_cache,
+        verify=verify_inductor_rebuilt,
+        engaged=lambda rec: bool(rec.get("is_inductor")),
+        requires_compiled=False,
+        gates_keep=True,
+        on_failure_error_class="torch_inductor_cache_invalidation_failed",
+        failure_error_prefix="torch inductor cache invalidation failed",
+        rebuild_env={},
+        skipped_default={"status": "skipped", "reason": "not run", "is_inductor": False},
+    ),
+]
+
+
+def toolchain_for(target_file: str | Path, strategy: dict[str, Any] | None = None) -> str | None:
+    """Classify ``target_file`` to a single registry toolchain (most-specific
+    first), or ``None`` when no toolchain owns its cache.
+
+    Note this is for observability/classification only; the apply-time
+    invalidation runs EVERY matching entry (a cpp_itfs target is also under
+    aiter/csrc, so both the @compile_ops jit/build and cpp_itfs caches are
+    invalidated, preserving the pre-registry behaviour).
+    """
+    p = Path(target_file)
+    if _target_is_in_aiter_cpp_itfs(p):
+        return "aiter_cpp_itfs"
+    if _target_is_inductor(p):
+        return "torch_inductor"
+    if _target_is_triton(p):
+        return "triton"
+    if _target_is_in_aiter_csrc(p):
+        return "aiter_compile_ops"
+    return None
+
+
+def _invalidate_caches_for_apply(
+    target: Path,
+    backup_dir: Path,
+    *,
+    strategy: dict[str, Any],
+    skip_rebuild: bool,
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    source_backup: dict[str, str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+    """Run the registry's invalidations for ``target`` before re-baseline.
+
+    Returns ``(records, failure)``:
+      * ``records`` maps every entry's ``manifest_key`` -> its record
+        (skipped-default for entries that did not run), preserving the apply
+        return/manifest shape for all callers + the GH #458 tests.
+      * ``failure`` is ``None`` on success, else a ready-to-return failed dict
+        (source + any already-moved caches have already been restored).
+
+    Each successful (``ok``) record is persisted to the manifest immediately so
+    a later rebuild failure can restore the moved-aside cache via
+    :func:`revert_kernel_patch`. Compiled-only entries (aiter jit/build,
+    cpp_itfs) run only inside the compiled-rebuild path -- identical to the
+    pre-registry gating; the source-cache entries (Triton, inductor) run for
+    ``.py`` targets too since their cache is invalidated by relocation, not by
+    ``setup.py``.
+    """
+    records: dict[str, dict[str, Any]] = {
+        e.manifest_key: dict(e.skipped_default) for e in CACHE_INVALIDATION_REGISTRY
+    }
+    if skip_rebuild:
+        return records, None
+    succeeded: list[tuple[ToolchainCacheEntry, dict[str, Any]]] = []
+    for entry in CACHE_INVALIDATION_REGISTRY:
+        if entry.requires_compiled and not strategy.get("compiled"):
+            continue
+        rec = entry.invalidate(target, backup_dir)
+        records[entry.manifest_key] = rec
+        if rec.get("status") == "failed":
+            # Refuse to re-baseline against an inconsistent cache: restore the
+            # source + every already-moved cache (reverse order), then bail.
+            try:
+                shutil.copy2(source_backup["backup_path"], target)
+            except OSError:
+                pass
+            for done_entry, done_rec in reversed(succeeded):
+                done_entry.restore(done_rec)
+            return records, {
+                "status": "failed",
+                "error_class": entry.on_failure_error_class,
+                "error": f"{entry.failure_error_prefix}: {rec.get('error')}",
+                "manifest_path": str(manifest_path),
+                entry.manifest_key: rec,
+            }
+        if rec.get("status") == "ok":
+            succeeded.append((entry, rec))
+            # Persist BEFORE rebuild so a rebuild failure can restore it.
+            manifest[entry.manifest_key] = rec
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+    return records, None
+
+
+def restore_caches_from_manifest(manifest: dict[str, Any]) -> list[str]:
+    """Restore every toolchain cache the manifest records as moved-aside.
+
+    Iterates the registry (aiter jit/build, cpp_itfs, Triton, inductor),
+    restoring each ``ok`` record and writing the restore result under the
+    entry's ``restore_key``. Returns the list of restored paths. No-op for
+    caches that were not moved. Used by :func:`revert_kernel_patch`.
+    """
+    restored: list[str] = []
+    for entry in CACHE_INVALIDATION_REGISTRY:
+        rec = manifest.get(entry.manifest_key) or {}
+        if rec.get("status") != "ok":
+            continue
+        res = entry.restore(rec)
+        manifest[entry.restore_key] = res
+        if res.get("status") == "ok":
+            if res.get("restored_to"):
+                restored.append(str(res["restored_to"]))
+            restored.extend(str(p) for p in (res.get("restored") or []))
+    return restored
+
+
+def rebuild_env_for_apply_result(apply_result: dict[str, Any]) -> dict[str, str]:
+    """Env vars the integrate re-baseline server must set for whatever
+    toolchain caches the apply invalidated.
+
+    Preserves GH #458: a cpp_itfs apply -> ``{"AITER_REBUILD": "1"}``. Empty
+    for toolchains whose move-aside alone forces recompilation (Triton,
+    inductor) and for targets the registry doesn't touch.
+    """
+    env: dict[str, str] = {}
+    if not isinstance(apply_result, dict):
+        return env
+    for entry in CACHE_INVALIDATION_REGISTRY:
+        rec = apply_result.get(entry.manifest_key) or {}
+        if entry.engaged(rec):
+            env.update(entry.rebuild_env)
+    return env
+
+
+def verify_rebuilt_for_apply_result(apply_result: dict[str, Any]) -> dict[str, Any]:
+    """Run the fresh-build verification for every gating toolchain whose cache
+    the apply invalidated; aggregate into one ``{"verified": bool, ...}``.
+
+    A strict no-op (``verified=True``) when no gating cache was invalidated, so
+    integrate's KEEP/REVERT gate is unaffected off the cache-invalidation
+    paths. Generalizes the GH #458 cpp_itfs gate to Triton + inductor.
+    """
+    if not isinstance(apply_result, dict):
+        return {"verified": True, "status": "skipped", "reason": "no apply result"}
+    per: dict[str, Any] = {}
+    verified = True
+    for entry in CACHE_INVALIDATION_REGISTRY:
+        if not entry.gates_keep:
+            continue
+        rec = apply_result.get(entry.manifest_key) or {}
+        if not entry.engaged(rec):
+            continue
+        v = entry.verify(rec)
+        per[entry.name] = v
+        if not v.get("verified", True):
+            verified = False
+    if not per:
+        return {"verified": True, "status": "skipped", "reason": "no gating cache invalidated"}
+    return {
+        "verified": verified,
+        "status": "ok" if verified else "stale",
+        "per_toolchain": per,
+    }
+
+
 def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[str, Any]:
     target = str(target_file)
     lower = target.lower()
@@ -434,6 +1508,16 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             restored.append(str(dst))
             if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
                 manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
+
+    # Registry-driven cache restore: put every toolchain cache the apply
+    # moved aside back (aiter jit/build, aiter cpp_itfs runtime cache, Triton,
+    # torch inductor), removing any dir the re-baseline regenerated first so
+    # the pre-patch state is restored bit-for-bit. Done after source/artifact
+    # restore but before multi-node fan-out so the host-local caches are back
+    # in place even if pod-side revert subsequently fails. No-op for caches
+    # that weren't moved (status != "ok"). Preserves the GH #458 jit/build +
+    # cpp_itfs restore order + restored-path collection.
+    restored.extend(restore_caches_from_manifest(manifest))
 
     # Multi-node: also fan-out a revert to every pod that received the
     # corresponding apply. Best-effort; sandbox revert above already
@@ -605,6 +1689,25 @@ def apply_kernel_patch(
         command = list(strategy["rebuild_command"])
 
     rebuild = {"status": "skipped", "reason": "source-only patch or skip_rebuild=true"}
+    # Registry-driven cache invalidation: ONE dispatch keyed by toolchain
+    # (aiter @compile_ops jit/build, aiter cpp_itfs runtime cache, Triton
+    # cache, torch inductor cache). Each entry self-gates so a target that
+    # doesn't match a toolchain is bit-for-bit unaffected. Moves the right
+    # cache(s) aside BEFORE rebuild/re-baseline so the patched kernel is
+    # (re)compiled from clean state; on invalidation failure the source +
+    # any already-moved caches are restored and we bail rather than score
+    # against an inconsistent cache. The aiter entries delegate to the
+    # GH #458 (#459) functions so cpp_itfs / jit-build behaviour is preserved.
+    cache_records, invalidation_failure = _invalidate_caches_for_apply(
+        target, backup_dir,
+        strategy=strategy, skip_rebuild=skip_rebuild,
+        manifest=manifest, manifest_path=manifest_path, source_backup=source_backup,
+    )
+    if invalidation_failure is not None:
+        return invalidation_failure
+    jit_build_backup = cache_records["jit_build_backup"]
+    cpp_itfs_cache_backup = cache_records["cpp_itfs_cache_backup"]
+
     if strategy["compiled"] and not skip_rebuild:
         cwd = Path(strategy["root"] or target.parent)
         rebuild = _run_rebuild(command, cwd, rebuild_timeout_sec)
@@ -622,6 +1725,12 @@ def apply_kernel_patch(
     manifest["applied_at"] = _now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
+    # Surface every toolchain cache record (incl. skipped reasons) so manifest
+    # readers can audit which caches were invalidated, integrate can verify a
+    # fresh rebuild landed, and revert can restore the moved-aside caches.
+    for _ck, _crec in cache_records.items():
+        if _crec.get("status") in {"ok", "skipped"}:
+            manifest[_ck] = _crec
     # multinode block (when present) is already persisted at fan-out
     # time above; we don't rewrite it here to avoid clobbering the
     # per-host backup map.
@@ -635,6 +1744,8 @@ def apply_kernel_patch(
         "artifact_count": len(artifacts),
         "cache_clear": cache_clear,
         "rebuild": rebuild,
+        "toolchain": toolchain_for(target, strategy),
+        **cache_records,
     }
     # Only attach the multinode key when fan-out actually ran. Keeps
     # single-node callers' return shape bit-for-bit identical to

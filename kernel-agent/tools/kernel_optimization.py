@@ -2412,15 +2412,35 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     ):
         bp_geak = (best.get("backend_paths") or {}).get("geak_final_report", "")
         geak_status = ""
+        geak_verified: float | None = None
         if bp_geak and Path(bp_geak).is_file():
             try:
-                geak_status = str(
-                    json.loads(Path(bp_geak).read_text(encoding="utf-8"))
-                    .get("status") or ""
-                ).lower()
+                _geak_doc = json.loads(Path(bp_geak).read_text(encoding="utf-8"))
+                geak_status = str(_geak_doc.get("status") or "").lower()
+                _gv = _geak_doc.get("verified_speedup")
+                if _gv is None:
+                    _gv = _geak_doc.get("best_speedup_verified")
+                geak_verified = float(_gv) if isinstance(_gv, (int, float)) else None
             except Exception:  # noqa: BLE001
-                geak_status = ""
-        if geak_status in {"complete", "succeeded", "ok"}:
+                geak_status, geak_verified = "", None
+        # GEAK's finalized-success statuses are broader than {complete,
+        # succeeded, ok}: a multi-round run finalizes as
+        # ``incremental_after_round_<N>`` (the common case for --mode full /
+        # mixed), and single-round runs may report ``auto_finalized`` /
+        # ``finalized``. The original whitelist silently missed those, so a
+        # GEAK best with a VERIFIED speedup (e.g. fused_moe 1.53x,
+        # status=incremental_after_round_2) was scored correctness=missing ->
+        # NEEDS_REVIEW and never reached integrate. Treat any non-failure
+        # finalized status -- or a report that carries a verified speedup
+        # >= 1.0 -- as a successful, correct GEAK run (the integrate E2E
+        # benchmark remains the ground-truth functional check).
+        _geak_finalized = (
+            geak_status in {"complete", "completed", "succeeded", "success",
+                            "ok", "auto_finalized", "finalized"}
+            or geak_status.startswith("incremental")
+        )
+        _geak_verified_ok = geak_verified is not None and geak_verified >= 1.0
+        if _geak_finalized or _geak_verified_ok:
             correctness_signal = True
             correctness_source = "geak_assumed_pass"
     if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
@@ -2465,7 +2485,71 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     }
 
 
-def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
+# PART C (DEFER_TO_E2E): "high impact" mirrors SharedState.untried_hot_
+# reusable_kernels' gpu_pct gate (default 3% of GPU time, override via
+# HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT) so the defer lever only fires for kernels
+# whose roofline/time-share makes an expensive E2E re-baseline worthwhile.
+_DEFAULT_HIGH_IMPACT_GPU_PCT = 3.0
+
+
+def _candidate_is_high_impact(candidate: dict[str, Any], *, min_pct: float | None = None) -> bool:
+    """True iff the candidate's TraceLens time-share / roofline impact clears
+    the high-impact threshold (default 3%).
+
+    Reads whichever of ``gpu_pct`` / ``percent_of_total`` / roofline
+    ``impact_*_e2e_pct`` the candidate carries (plus its task_group rows), and
+    compares the max to ``min_pct``. Conservative: no impact field => not
+    high-impact => DEFER_TO_E2E never fires (current behaviour preserved).
+    """
+    if not isinstance(candidate, dict):
+        return False
+    if min_pct is None:
+        try:
+            min_pct = float(os.environ.get(
+                "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", _DEFAULT_HIGH_IMPACT_GPU_PCT,
+            ))
+        except (TypeError, ValueError):
+            min_pct = _DEFAULT_HIGH_IMPACT_GPU_PCT
+    pcts: list[float] = []
+    for key in ("gpu_pct", "percent_of_total", "impact_high_e2e_pct", "impact_low_e2e_pct"):
+        if candidate.get(key) is not None:
+            pcts.append(_safe_float(candidate.get(key)))
+    tg = candidate.get("task_group")
+    if isinstance(tg, dict):
+        for row in (tg.get("rows") or []):
+            if isinstance(row, dict):
+                val = row.get("percent_of_total")
+                if val is None:
+                    val = row.get("gpu_pct")
+                if val is not None:
+                    pcts.append(_safe_float(val))
+    return bool(pcts) and max(pcts) >= float(min_pct)
+
+
+def _defer_to_e2e_proposal(
+    reasons: list[str], *, fallback: str, verification: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a DEFER_TO_E2E proposal.
+
+    Carries ``fallback_decision`` (what the disposition would have been
+    without the defer) so the orchestrator can fall back when the E2E budget
+    is exhausted, and ``defer_to_e2e=True`` + ``micro_speedup`` for observable
+    state/result dicts.
+    """
+    return {
+        "decision": "DEFER_TO_E2E",
+        "reasons": reasons + [
+            "high-impact + correctness-passed kernel with inconclusive/low "
+            "micro-score; deferring KEEP/REVERT to the integrate E2E gain_pct "
+            "(a self-measurement artifact must not silently discard a real win)"
+        ],
+        "fallback_decision": fallback,
+        "defer_to_e2e": True,
+        "micro_speedup": verification.get("micro_speedup"),
+    }
+
+
+def make_proposal(verification: dict[str, Any], *, high_impact: bool = False) -> dict[str, Any]:
     reasons: list[str] = []
     if not verification["compile_passed"]:
         return {"decision": "REVERT", "reasons": ["compile failed"]}
@@ -2473,6 +2557,24 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         reasons.append("correctness evidence missing or failed")
     if not verification.get("artifact_valid"):
         reasons.append("optimized source artifact missing or invalid")
+
+    # PART C (DEFER_TO_E2E): a HIGH-IMPACT, correctness-PASSED, artifact-valid
+    # kernel whose MICRO score is inconclusive/low (~1.0x or below the KEEP
+    # threshold) but is NOT a hard correctness / compile / E2E-regression /
+    # accuracy failure must not be silently discarded on a possibly
+    # artifact-corrupted self-measurement (GEAK's fused_moe self-score read
+    # 1.0x on a real +20.9% E2E win). We route it to integrate so the E2E
+    # gain_pct is the authoritative KEEP/REVERT signal. Defer is OFF by default
+    # (high_impact False) so every non-high-impact / non-correct kernel keeps
+    # its current disposition bit-for-bit; the orchestrator bounds the defer by
+    # the existing max_e2e_attempts ledger and falls back to fallback_decision
+    # when the E2E budget is exhausted.
+    defer_eligible = (
+        high_impact
+        and bool(verification.get("correctness_passed"))
+        and bool(verification.get("artifact_valid"))
+    )
+
     # Distinguish "we have artifacts but didn't measure a speedup" (PARTIAL,
     # human review can salvage) from "we measured and it's a regression"
     # (REVERT). The signal is verification["micro_speedup_source"]:
@@ -2484,8 +2586,15 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         # don't punish as REVERT (regression) and don't lie as KEEP — leave
         # it at PARTIAL so a human reviewer can salvage from the report.
         reasons.append("no measurable speedup found in any backend report")
+        if defer_eligible:
+            return _defer_to_e2e_proposal(reasons, fallback="PARTIAL", verification=verification)
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
+        if defer_eligible:
+            return _defer_to_e2e_proposal(
+                reasons + ["microbench did not improve (micro <= 1.0x)"],
+                fallback="REVERT", verification=verification,
+            )
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
     # Goal threshold: 1.10x lets modest but real shape-specific wins
     # (claude r19 GEMM 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x)
@@ -2508,6 +2617,10 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         reasons.append("accuracy evidence missing")
 
     if reasons:
+        # micro in (1.0, 1.10) but below KEEP, correctness/artifact ok ->
+        # NEEDS_REVIEW, or DEFER_TO_E2E when the kernel is high-impact.
+        if defer_eligible:
+            return _defer_to_e2e_proposal(reasons, fallback="NEEDS_REVIEW", verification=verification)
         return {"decision": "NEEDS_REVIEW", "reasons": reasons}
     if verification["e2e_gain_pct"] is None or verification["accuracy_passed"] is None:
         return {
@@ -2622,6 +2735,11 @@ def main() -> int:
             args.source_file, candidate, args.kernel_id, log_path
         )
         args.source_file = resolved_source
+        # Fix #1: for the autonomously-surfaced fused_moe candidate, route GEAK
+        # at the tile-config SELECTION site with the real gpt-oss-120b MoE shapes
+        # + M>=4096 prefill regime. Reassign resolved_source so result.source_file
+        # (the integrate apply target) matches the file GEAK actually edits.
+        resolved_source = _specialize_fused_moe_target(args, candidate, log_path)
         # Forward the candidate's repo root onto args so build_verification's
         # GEAK-worktree artifact recovery can map ``source_file`` (an
         # absolute path produced by the TraceLens resolver) back to the
@@ -2663,7 +2781,21 @@ def main() -> int:
         correctness = None if args.correctness_passed == "unknown" else args.correctness_passed == "true"
         args.correctness_passed = correctness
         verification = build_verification(args, attempts, benchmark_available)
-        proposal = make_proposal(verification)
+        # PART C: high-impact (roofline/time-share) + correctness-passed kernels
+        # with an inconclusive/low micro-score are routed to integrate as
+        # DEFER_TO_E2E so the E2E gain_pct is authoritative (a self-measurement
+        # artifact must not silently discard a real win). Off for low-impact
+        # kernels -> their disposition is unchanged.
+        high_impact = _candidate_is_high_impact(candidate)
+        proposal = make_proposal(verification, high_impact=high_impact)
+        if proposal.get("decision") == "DEFER_TO_E2E":
+            append_log(
+                log_path,
+                f"disposition=DEFER_TO_E2E high_impact={high_impact} "
+                f"micro_speedup={verification.get('micro_speedup')} "
+                f"fallback={proposal.get('fallback_decision')} "
+                f"-> routing to integrate; E2E gain_pct is authoritative",
+            )
 
         verification_path = run_dir / "verification" / f"{args.kernel_id}.json"
         atomic_write_json(verification_path, verification)
@@ -2682,6 +2814,8 @@ def main() -> int:
             "xs_memory_hits": [],
             "verification": verification,
             "proposal": proposal,
+            "disposition": proposal.get("decision"),
+            "high_impact": high_impact,
             "cli_log_path": str(log_path),
             "status_path": str(status_path),
             "artifact_paths": {

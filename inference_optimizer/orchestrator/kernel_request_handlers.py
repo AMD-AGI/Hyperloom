@@ -1619,6 +1619,30 @@ async def integrate_handler(
     )
     ctx = RunnerContext(task=fake_task, lease=None)
 
+    # GH #458 + cache-invalidation registry: when apply_kernel_patch moved a
+    # toolchain's compiled/runtime cache aside (aiter cpp_itfs, Triton, torch
+    # inductor, ...), the re-baseline server must (re)compile the patched
+    # kernel from clean state -- otherwise it can dlopen/serve the stale
+    # PRE-patch binary and integrate would score the wrong kernel (the observed
+    # -0.17% on a real +2.5% paged_attention win; the same risk for the Triton
+    # fused_moe win). The registry tells us which rebuild env vars to set for
+    # the detected toolchain (e.g. AITER_REBUILD=1 for cpp_itfs; empty when the
+    # move-aside alone forces recompilation, as for Triton/inductor). Scoped to
+    # this integrate and ALWAYS restored, so every target the registry doesn't
+    # touch is byte-for-byte unaffected.
+    apply_tool = _load_apply_tool()
+    rebuild_env = apply_tool.rebuild_env_for_apply_result(apply_result)
+    _prev_rebuild_env = {k: os.environ.get(k) for k in rebuild_env}
+    for _env_k, _env_v in rebuild_env.items():
+        os.environ[_env_k] = _env_v
+
+    def _restore_rebuild_env() -> None:
+        for _env_k, _prev in _prev_rebuild_env.items():
+            if _prev is None:
+                os.environ.pop(_env_k, None)
+            else:
+                os.environ[_env_k] = _prev
+
     # Multi-node: apply_kernel_patch has just fanned the new source
     # files to every pod. sglang must be FULLY restarted (not resume-
     # pathed) so it re-imports the patched modules; otherwise the
@@ -1649,6 +1673,7 @@ async def integrate_handler(
             ctx.extra = {**(getattr(ctx, "extra", None) or {}),
                          "mn_round_restarted": True}
         except ServerRestartFailed as exc:
+            _restore_rebuild_env()
             revert_result = _maybe_revert_kernel_patch(apply_result)
             return {
                 "status": "failed",
@@ -1674,6 +1699,10 @@ async def integrate_handler(
             "apply_result": apply_result,
             "revert_result": revert_result,
         }
+    finally:
+        # Restore the rebuild env on every path once the re-baseline server has
+        # been launched, so the env override never leaks past this integrate.
+        _restore_rebuild_env()
 
     if not is_valid_measurement(bench_result):
         revert_result = _maybe_revert_kernel_patch(apply_result)
@@ -1687,6 +1716,41 @@ async def integrate_handler(
             "apply_result": apply_result,
             "revert_result": revert_result,
         }
+
+    # GH #458 (point 2), generalized by the cache-invalidation registry: don't
+    # score a stale binary. For any toolchain whose cache the apply moved aside
+    # (cpp_itfs runtime lib.so, Triton .hsaco, inductor artifact), a re-baseline
+    # that reused the stale binary would silently measure the PRE-patch kernel
+    # (the observed -0.17% on a real +2.5% paged_attention win; the same risk
+    # for the Triton fused_moe win). Before trusting gain_pct, assert a real
+    # rebuild landed: verify_rebuilt_for_apply_result() runs the detected
+    # toolchain's fresh-build check (a freshly-compiled artifact newer than the
+    # invalidation) and is a strict no-op (verified=True) when no gating cache
+    # was invalidated -- so this gate is byte-for-byte off the cache paths.
+    #
+    # Single-node only: in multi-node the served cache lives on the serving
+    # pod, not this sandbox, so the rebuild env on the pod restart is the
+    # mechanism and the sandbox-local check is skipped to avoid false aborts.
+    rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
+    if not is_multi_node():
+        rebuild_check = apply_tool.verify_rebuilt_for_apply_result(apply_result)
+        if not rebuild_check.get("verified", True):
+            revert_result = _maybe_revert_kernel_patch(apply_result)
+            return {
+                "status": "failed",
+                "error_class": "kernel_cache_rebuild_not_verified",
+                "error": (
+                    "re-baseline did not produce a freshly-built kernel cache "
+                    "artifact; refusing to score a possibly-stale binary"
+                ),
+                "decision": "NEEDS_REVIEW",
+                "kernel_id": kernel_id,
+                "patch_path": patch_path,
+                "target_file": payload.get("target_file") or payload.get("source_file"),
+                "apply_result": apply_result,
+                "revert_result": revert_result,
+                "rebuild_check": rebuild_check,
+            }
 
     new_tput = float(bench_result.get("output_throughput") or 0.0)
     gain_pct = ((new_tput - base_tput) / base_tput * 100.0) if base_tput > 0 else 0.0
@@ -1714,6 +1778,7 @@ async def integrate_handler(
         "extra_sglang_args": extra_args,
         "apply_result": apply_result,
         "revert_result": revert_result,
+        "rebuild_check": rebuild_check,
     }
 
 

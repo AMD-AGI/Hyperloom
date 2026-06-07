@@ -75,6 +75,12 @@ _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
 # a noisy trace with 15 reusable rows, only the top-N by gpu_pct are
 # enforced -- avoids the LLM stalling on dozens of tiny kernels.
 _DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
+# PART C (DEFER_TO_E2E): the integrate E2E budget per kernel. Mirrors
+# ``record_kernel_integrate_result``'s ``max_attempts`` default so a
+# DEFER_TO_E2E candidate is routed to integrate only while the same E2E
+# budget allows; once exhausted it drops out of the integrate queue and
+# falls back to its non-deferred disposition.
+_DEFAULT_MAX_E2E_ATTEMPTS = 3
 
 # Per-action audit history cap. ``<action>_attempts`` lists keep the most
 # recent N entries (full audit trail — both successes and failures) so
@@ -993,9 +999,11 @@ class SharedState:
         entry["attempts"] = int(entry.get("attempts", 0)) + 1
         if decision == "PARTIAL":
             entry["partial_count"] = int(entry.get("partial_count", 0)) + 1
-        elif decision == "KEEP":
-            # A successful attempt resets streaks; a future regression
-            # should not be auto-retired on stale history.
+        elif decision in {"KEEP", "DEFER_TO_E2E"}:
+            # A KEEP -- or a DEFER_TO_E2E (correctness passed, high-impact,
+            # routed to integrate so the E2E gain_pct decides) -- resets the
+            # streaks so a promising kernel is not auto-retired on stale
+            # PARTIAL/failure history.
             entry["partial_count"] = 0
             entry["failure_count"] = 0
         if is_infra_failure:
@@ -1007,21 +1015,29 @@ class SharedState:
         entry["last_source_file"] = source_file
         entry["last_ts"] = ts
         entry["history"] = history
+        # PART C: surface the DEFER_TO_E2E disposition on the ledger entry so
+        # state inspectors / prompt rendering can see a candidate is awaiting
+        # an authoritative E2E verdict (and what it falls back to).
+        if decision == "DEFER_TO_E2E":
+            entry["deferred_to_e2e"] = True
+            entry["defer_fallback_decision"] = str(proposal.get("fallback_decision", ""))
 
         # Overwrite policy for last_kernel_opt:
-        #   * KEEP always wins (highest micro bubbles up).
-        #   * Non-KEEP only writes when there's no pending KEEP to protect.
+        #   * KEEP / DEFER_TO_E2E always win (both route to integrate).
+        #   * A non-promoting result only writes when there's no pending
+        #     KEEP / DEFER_TO_E2E to protect (PART C: a late REVERT/PARTIAL
+        #     sibling must not clobber a pending deferred candidate either).
         prev = self.last_kernel_opt or {}
         prev_decision = str(prev.get("decision", "")).upper()
         prev_kid = str(prev.get("kernel_id", ""))
         integrated_ids = self._kernel_ids_in_optimization_stack()
         prev_pending = (
-            prev_decision == "KEEP"
+            prev_decision in {"KEEP", "DEFER_TO_E2E"}
             and bool(prev_kid)
             and prev_kid not in (self.rejected_kernel_ids or [])
             and prev_kid not in integrated_ids
         )
-        if decision == "KEEP" or not prev_pending:
+        if decision in {"KEEP", "DEFER_TO_E2E"} or not prev_pending:
             self.last_kernel_opt = {
                 "kernel_id": kernel_id,
                 "decision": decision,
@@ -1107,6 +1123,55 @@ class SharedState:
                 sources.add(src)
         return sources
 
+    def _integrate_attempts_for_kernel(self, kernel_id: str) -> int:
+        """Count integrate (E2E) attempts already recorded for ``kernel_id``.
+
+        The ``kernel_integrate_attempts`` ledger is keyed by
+        ``kernel_id|patch_path|extra_args`` (the patch identity), so a kernel
+        can have several patch keys; we take the max attempt_count across the
+        keys that carry this ``kernel_id``. Used to bound the PART C
+        DEFER_TO_E2E routing by the existing max_e2e_attempts budget.
+        """
+        kid = str(kernel_id or "")
+        if not kid:
+            return 0
+        best = 0
+        for entry in (self.kernel_integrate_attempts or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("kernel_id") or "") != kid:
+                continue
+            count = entry.get("attempt_count")
+            if count is None:
+                count = len(entry.get("attempts") or [])
+            try:
+                best = max(best, int(count))
+            except (TypeError, ValueError):
+                continue
+        return best
+
+    def _defer_e2e_budget_exhausted(
+        self, kernel_id: str, *, max_attempts: int | None = None,
+    ) -> bool:
+        """PART C: True iff a DEFER_TO_E2E candidate has already spent its
+        integrate (E2E) budget.
+
+        Bounds the defer by the SAME ledger that ``record_kernel_integrate_
+        result`` enforces (default 3 attempts; override via
+        ``HYPERLOOM_MAX_E2E_ATTEMPTS``) so we never blow up expensive E2E runs;
+        once exhausted the candidate drops out of the integrate queue and falls
+        back to its non-deferred disposition.
+        """
+        if max_attempts is None:
+            try:
+                max_attempts = int(os.environ.get(
+                    "HYPERLOOM_MAX_E2E_ATTEMPTS", _DEFAULT_MAX_E2E_ATTEMPTS,
+                ))
+            except (TypeError, ValueError):
+                max_attempts = _DEFAULT_MAX_E2E_ATTEMPTS
+        max_attempts = max(1, int(max_attempts))
+        return self._integrate_attempts_for_kernel(kernel_id) >= max_attempts
+
     def next_pending_keep_kernel_id(self) -> str:
         """Return next KEEP kernel_id awaiting integrate, or "" if drained.
 
@@ -1130,7 +1195,15 @@ class SharedState:
         for kid, entry in (self.kernel_opt_attempts or {}).items():
             if not isinstance(entry, dict):
                 continue
-            if str(entry.get("last_decision", "")).upper() != "KEEP":
+            # PART C: KEEP *and* DEFER_TO_E2E are routed to integrate. A
+            # DEFER_TO_E2E candidate is bounded by the E2E budget -- once it
+            # has used its max_e2e_attempts integrate runs without a KEEP it
+            # drops out of the queue (the E2E gain_pct was authoritative) and
+            # falls back to its non-deferred disposition.
+            last_decision = str(entry.get("last_decision", "")).upper()
+            if last_decision not in ("KEEP", "DEFER_TO_E2E"):
+                continue
+            if last_decision == "DEFER_TO_E2E" and self._defer_e2e_budget_exhausted(kid):
                 continue
             if kid in integrated_ids or kid in rejected:
                 continue
@@ -1166,7 +1239,12 @@ class SharedState:
         for kid, entry in (self.kernel_opt_attempts or {}).items():
             if not isinstance(entry, dict):
                 continue
-            if str(entry.get("last_decision", "")).upper() != "KEEP":
+            # PART C: include DEFER_TO_E2E alongside KEEP (both route to
+            # integrate), bounded by the per-kernel E2E budget.
+            last_decision = str(entry.get("last_decision", "")).upper()
+            if last_decision not in ("KEEP", "DEFER_TO_E2E"):
+                continue
+            if last_decision == "DEFER_TO_E2E" and self._defer_e2e_budget_exhausted(kid):
                 continue
             if kid in integrated_ids or kid in rejected:
                 continue
