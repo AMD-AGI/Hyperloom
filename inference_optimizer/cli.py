@@ -831,6 +831,52 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
     return data
 
 
+def _load_model_config_dict(model_path: str) -> dict | None:
+    """Best-effort parse of ``<model_path>/config.json`` into a dict.
+
+    Shared soft-degrade reader used by every config.json-derived preflight /
+    KB-tag loader (never blocks launch): returns the parsed mapping, or
+    ``None`` when ``config.json`` is missing / unreadable / invalid-JSON /
+    not a JSON object. Callers decide how to treat ``None`` (the KB-tag loader
+    degrades to ``{}``; the unsupported-model gate degrades to "do not block").
+    """
+    if not model_path:
+        return None
+    cfg_path = Path(model_path) / "config.json"
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logging.warning("model_config_unreadable: %s (%s)", cfg_path, exc)
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logging.warning("model_config_invalid_json: %s (%s)", cfg_path, exc)
+        return None
+    if not isinstance(data, dict):
+        logging.warning(
+            "model_config_not_a_dict: %s (got %s)", cfg_path, type(data).__name__,
+        )
+        return None
+    return data
+
+
+def _config_architectures(config: dict) -> list[str]:
+    """Normalise ``config["architectures"]`` to a list of non-empty strings.
+
+    Tolerates a scalar ``architectures`` by wrapping it in a single-item list;
+    returns ``[]`` when the key is absent or yields no non-empty entries.
+    """
+    arches_raw = config.get("architectures")
+    if isinstance(arches_raw, list):
+        return [str(a).strip() for a in arches_raw if str(a or "").strip()]
+    if isinstance(arches_raw, str) and arches_raw.strip():
+        return [arches_raw.strip()]
+    return []
+
+
 def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture tags from ``config.json``.
 
@@ -852,41 +898,187 @@ def _load_model_config_tags(model_path: str) -> dict:
     its normalised value is empty, so callers can ``.get(key, default)``
     without re-checking for ``[]`` / ``""``.
     """
-    if not model_path:
-        return {}
-    cfg_path = Path(model_path) / "config.json"
-    try:
-        raw = cfg_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}
-    except OSError as exc:
-        logging.warning("model_config_tags_unreadable: %s (%s)", cfg_path, exc)
-        return {}
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
-        logging.warning("model_config_tags_invalid_json: %s (%s)", cfg_path, exc)
-        return {}
-    if not isinstance(data, dict):
-        logging.warning(
-            "model_config_tags_not_a_dict: %s (got %s)",
-            cfg_path,
-            type(data).__name__,
-        )
+    data = _load_model_config_dict(model_path)
+    if data is None:
         return {}
     out: dict = {}
-    arches_raw = data.get("architectures")
-    if isinstance(arches_raw, list):
-        arches = [str(a).strip() for a in arches_raw if str(a or "").strip()]
-        if arches:
-            out["architectures"] = arches
-    elif isinstance(arches_raw, str) and arches_raw.strip():
-        # Tolerate a scalar ``architectures`` by wrapping it in a list.
-        out["architectures"] = [arches_raw.strip()]
+    arches = _config_architectures(data)
+    if arches:
+        out["architectures"] = arches
     model_type = str(data.get("model_type") or "").strip()
     if model_type:
         out["model_type"] = model_type
     return out
+
+
+# ---------------------------------------------------------------------------
+# Unsupported-model (multimodal / vision) preflight gate
+# ---------------------------------------------------------------------------
+# Hyperloom only supports text-generation (decoder-only causal LM) models.
+# Multimodal / vision models occasionally leak past the upstream submission
+# filter and only fail ~5 minutes into the run with a cryptic vLLM
+# ``OSError: Can't load image processor ...``, burning a full session slot.
+# The constants below drive a fail-fast classifier that runs before the
+# (expensive) baseline server boot. It first rejects explicit multimodal /
+# vision signals, then uses a WHITELIST approach: only models whose
+# architecture matches known text-generation patterns are allowed.
+
+# Supported text-generation architecture markers. Only decoder-only causal LM
+# models are supported. If a model's architecture does NOT match any of these
+# patterns, it is rejected as unsupported. ``ForCausalLM`` is treated as an
+# infix because some text-generation variants append a suffix
+# (for example ``DeepseekV3ForCausalLMNextN`` / ``LlamaForCausalLMEagle3``).
+_SUPPORTED_ARCH_MARKERS = (
+    "ForCausalLM",
+    "LMHeadModel",
+    "ForCausalLMWithValueHead",
+)
+
+# Explicit allowlist of supported model_type values (fallback when architectures
+# field is empty/missing). Models whose model_type is in this set pass through.
+_SUPPORTED_MODEL_TYPES = frozenset({
+    "llama", "mistral", "mixtral", "qwen2", "qwen2_moe", "qwen3", "qwen3_moe",
+    "gemma", "gemma2", "phi", "phi3", "phimoe",
+    "starcoder2", "codellama", "deepseek_v2", "deepseek_v3",
+    "falcon", "gpt_neox", "gpt2", "opt", "bloom",
+    "internlm", "internlm2", "yi", "baichuan",
+    "chatglm", "glm", "glm4",
+    "command-r", "cohere", "cohere2", "dbrx",
+    "mpt", "olmo", "olmo2", "jamba", "arctic",
+    "exaone", "granite", "granitemoeshared",
+    "stablelm", "persimmon",
+})
+
+# Explicit multimodal / vision signals that must win even if an architecture
+# also happens to end with ``ForCausalLM`` (for example Phi3VForCausalLM).
+_UNSUPPORTED_MODEL_TYPES = frozenset({
+    "gemma3",
+    "mllama",
+    "llava",
+    "llava_next",
+    "qwen2_vl",
+    "qwen2_5_vl",
+    "idefics",
+    "idefics2",
+    "idefics3",
+    "paligemma",
+    "pixtral",
+    "internvl_chat",
+    "phi3_v",
+})
+
+_UNSUPPORTED_ARCHITECTURES = frozenset({
+    "Gemma3ForConditionalGeneration",
+    "InternVLChatModel",
+    "Phi3VForCausalLM",
+    "LlavaForConditionalGeneration",
+    "LlavaNextForConditionalGeneration",
+    "MllamaForConditionalGeneration",
+    "PaliGemmaForConditionalGeneration",
+    "Qwen2VLForConditionalGeneration",
+    "Qwen2_5_VLForConditionalGeneration",
+    "Idefics2ForConditionalGeneration",
+    "Idefics3ForConditionalGeneration",
+    "PixtralForConditionalGeneration",
+})
+
+_UNSUPPORTED_CONFIG_KEYS = (
+    "vision_config",
+    "image_token_id",
+    "image_token_index",
+    "mm_config",
+    "multi_modal_config",
+    "vision_tower",
+    "vision_tower_cfg",
+    "image_processor_type",
+    "projector_config",
+    "mm_projector_type",
+)
+
+
+def _arch_is_supported_text_generation(arch: str) -> bool:
+    """True when an architecture class name denotes a supported text-generation
+    (decoder-only causal LM) model."""
+    a = (arch or "").strip()
+    if not a:
+        return False
+    return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
+
+
+def _detect_unsupported_model(model_path: str) -> dict | None:
+    """Best-effort classification of a model as unsupported (non-text-generation).
+
+    Explicit multimodal / vision signals are rejected first. Otherwise, uses a
+    WHITELIST approach: a model is supported if its architecture ends with a
+    known text-generation suffix (ForCausalLM, LMHeadModel, etc.) OR its
+    model_type is in the explicit allowlist. Everything else is rejected.
+
+    Returns a dict ``{"architecture", "model_type", "signal"}`` describing why
+    the model is unsupported, else ``None`` (supported). ``None`` also covers the
+    best-effort case where ``config.json`` is missing / unreadable / invalid:
+    we deliberately do NOT hard-block on a config we cannot read (the upstream
+    submission filter and the downstream model loader still apply).
+    """
+    config = _load_model_config_dict(model_path)
+    if config is None:
+        return None
+    architectures = _config_architectures(config)
+    model_type = str(config.get("model_type") or "").strip()
+    model_type_l = model_type.lower()
+
+    for arch in architectures:
+        if arch in _UNSUPPORTED_ARCHITECTURES:
+            return {
+                "architecture": arch,
+                "model_type": model_type,
+                "signal": f"unsupported architecture '{arch}'",
+            }
+    if model_type_l in _UNSUPPORTED_MODEL_TYPES:
+        return {
+            "architecture": architectures[0] if architectures else "",
+            "model_type": model_type,
+            "signal": f"unsupported model_type '{model_type}'",
+        }
+    for key in _UNSUPPORTED_CONFIG_KEYS:
+        if key in config:
+            return {
+                "architecture": architectures[0] if architectures else "",
+                "model_type": model_type,
+                "signal": f"unsupported multimodal config key '{key}'",
+            }
+
+    if any(_arch_is_supported_text_generation(a) for a in architectures):
+        return None
+
+    if model_type_l in _SUPPORTED_MODEL_TYPES:
+        return None
+
+    if architectures:
+        return {
+            "architecture": architectures[0],
+            "model_type": model_type,
+            "signal": (
+                f"architecture '{architectures[0]}' does not match any "
+                f"supported text-generation pattern "
+                f"({', '.join(_SUPPORTED_ARCH_MARKERS)})"
+            ),
+        }
+
+    if model_type:
+        return {
+            "architecture": "",
+            "model_type": model_type,
+            "signal": (
+                f"model_type '{model_type}' is not in the supported "
+                f"text-generation allowlist"
+            ),
+        }
+
+    return {
+        "architecture": "",
+        "model_type": "",
+        "signal": "config.json has neither architectures nor model_type",
+    }
 
 
 # config.json keys that carry the model's max sequence length, priority order.
@@ -1061,6 +1253,92 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         print(
             f"WARNING: failed to write session_breakdown.json on context "
             f"fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
+
+
+def _preflight_unsupported_model_arch(
+    args: argparse.Namespace, session_dir: Path,
+) -> bool:
+    """Fail fast when the model is an unsupported multimodal / vision model.
+
+    Hyperloom only supports text-generation (decoder-only causal LM) models.
+    A multimodal model (e.g. ``Gemma3ForConditionalGeneration``, ``qwen2_vl``)
+    that slips past the upstream submission filter would otherwise boot the
+    baseline server and only die ~5 minutes in with a cryptic vLLM
+    ``OSError: Can't load image processor ...``, wasting a full session slot.
+    We classify the model from its ``config.json`` and, when it is positively
+    identified as multimodal/vision, persist a clear stop reason
+    (state.json + reports/final.{json,md} + session_breakdown.json) and signal
+    the caller to exit non-zero — before any expensive bring-up.
+
+    Best-effort: a missing / unreadable / invalid ``config.json`` is NOT a
+    hard block (the upstream filter + downstream loader still apply); only a
+    positively-identified multimodal model is rejected.
+
+    Returns True when the model is unsupported (caller should exit); False
+    when it is a supported text model or cannot be classified (gate skipped).
+    """
+    model = str(getattr(args, "model", "") or "")
+    hit = _detect_unsupported_model(model)
+    if hit is None:
+        return False
+
+    name = Path(model).name or model
+    arch = hit.get("architecture") or "<unknown>"
+    mt = hit.get("model_type") or "<unknown>"
+    reason = (
+        f"Unsupported model '{name}': architecture '{arch}' (model_type "
+        f"'{mt}') is not a supported text-generation model. Hyperloom only "
+        f"supports decoder-only causal LM models (architectures containing "
+        f"ForCausalLM or LMHeadModel). Rejected because: "
+        f"{hit.get('signal', 'unknown architecture')}. Submit a "
+        f"text-generation checkpoint instead."
+    )
+    # Persist the stop reason so CI / the robustness monitor read it from
+    # state.json + reports/final.json instead of grepping the run log.
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        # Validated writer keeps the vocab-closed invariant: the term is
+        # registered in STOP_REASON_VOCAB, so this neither maps to 'unknown'
+        # (lenient) nor raises (strict), and the robustness monitor's
+        # vocab-based terminal check recognises the fail-fast.
+        state.set_stop_reason("unsupported_model_arch")
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist unsupported-model stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    # Delivery-artifact parity: cli's normal exit writes session_breakdown.json
+    # in coordinator.run()'s finally, but this fail-fast sys.exit(2)s before
+    # that try/finally is ever entered. Emit it here too (best-effort) so CI's
+    # delivery contract sees a clean, documented skip — not "Missing artifacts".
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on unsupported-"
+            f"model fail-fast: {exc!r}",
             file=sys.stderr,
         )
     print(f"ERROR: {reason}", file=sys.stderr)
@@ -3748,6 +4026,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
         )
+        # Unsupported-model preflight: Hyperloom only supports text-generation
+        # (decoder-only causal LM) models. Refuse to run (with a persisted stop
+        # reason) when config.json identifies a multimodal/vision model, which
+        # would otherwise boot the baseline server only to die minutes in with
+        # a cryptic image-processor load error. Runs first (most fundamental
+        # rejection) and, like the context-window gate, after the SharedState
+        # seed but before the heavy Cortex / backend / Coordinator bring-up.
+        if _preflight_unsupported_model_arch(args, session_dir):
+            sys.exit(2)
         # Context-window preflight: refuse to run (with a persisted stop
         # reason) when ISL+OSL+headroom exceeds the model's
         # max_position_embeddings, instead of booting a server that 400s every
