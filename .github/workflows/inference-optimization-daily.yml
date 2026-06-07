@@ -192,7 +192,7 @@ jobs:
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends || 'geak,claude,codex' }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: 'core42-hyperloom,core42-sandbox'
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: 'core42-top8'
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min || '1560' }}
           INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours || '24' }}
           INPUT_DRY_RUN:          ${{ github.event.inputs.dry_run }}
