@@ -1,8 +1,9 @@
 """Tests for the unsupported-model preflight gate (whitelist approach).
 
 Policy: Hyperloom only supports text-generation (decoder-only causal LM)
-models whose architecture ends with ForCausalLM / LMHeadModel. All other
-architectures are rejected BEFORE the expensive baseline server boot.
+models whose architecture contains ForCausalLM / LMHeadModel and has no
+explicit multimodal / vision signals. All other architectures are rejected
+BEFORE the expensive baseline server boot.
 
 Best-effort contract: a missing / unreadable / invalid ``config.json`` does
 NOT hard-block (the upstream filter + downstream loader still apply); only a
@@ -47,7 +48,7 @@ def _seed_state(session_dir: Path, monkeypatch) -> None:
 # 1. classifier — whitelist-based detection
 # ---------------------------------------------------------------------------
 def test_detect_gemma3_conditional_generation_rejected(tmp_path):
-    """Gemma3ForConditionalGeneration does NOT end with ForCausalLM -> rejected."""
+    """Gemma3ForConditionalGeneration is not a causal LM arch -> rejected."""
     m = tmp_path / "gemma3"
     _write_config(m, {
         "architectures": ["Gemma3ForConditionalGeneration"],
@@ -56,11 +57,11 @@ def test_detect_gemma3_conditional_generation_rejected(tmp_path):
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["architecture"] == "Gemma3ForConditionalGeneration"
-    assert "supported text-generation pattern" in hit["signal"]
+    assert "unsupported architecture" in hit["signal"]
 
 
 def test_detect_unknown_arch_rejected(tmp_path):
-    """An unknown architecture not ending in ForCausalLM -> rejected."""
+    """An unknown architecture not matching text-generation markers -> rejected."""
     m = tmp_path / "custom"
     _write_config(m, {"architectures": ["SomeCustomArch"], "model_type": "qwen2_vl"})
     hit = cli._detect_unsupported_model(str(m))
@@ -93,12 +94,38 @@ def test_detect_unknown_model_type_no_arch_rejected(tmp_path):
     assert "allowlist" in hit["signal"]
 
 
+def test_detect_empty_config_rejected(tmp_path):
+    """A readable config without identity tags cannot prove text generation."""
+    m = tmp_path / "empty"
+    _write_config(m, {})
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert "neither architectures nor model_type" in hit["signal"]
+
+
+def test_detect_phi3v_causal_lm_rejected(tmp_path):
+    """Some VLM architectures still end with ForCausalLM and need a denylist."""
+    m = tmp_path / "phi3v"
+    _write_config(m, {"architectures": ["Phi3VForCausalLM"], "model_type": "phi3_v"})
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert "Phi3VForCausalLM" in hit["signal"]
+
+
 def test_detect_causal_lm_allowed(tmp_path):
     """Standard ForCausalLM architectures pass through."""
     for i, arch in enumerate(
         ["MistralForCausalLM", "Qwen2ForCausalLM", "LlamaForCausalLM"]
     ):
         m = tmp_path / f"text{i}"
+        _write_config(m, {"architectures": [arch], "model_type": "llama"})
+        assert cli._detect_unsupported_model(str(m)) is None
+
+
+def test_detect_causal_lm_variant_allowed(tmp_path):
+    """Text-generation variants with suffixes after ForCausalLM pass through."""
+    for i, arch in enumerate(["DeepseekV3ForCausalLMNextN", "LlamaForCausalLMEagle3"]):
+        m = tmp_path / f"variant{i}"
         _write_config(m, {"architectures": [arch], "model_type": "llama"})
         assert cli._detect_unsupported_model(str(m)) is None
 
@@ -117,15 +144,27 @@ def test_detect_known_model_type_no_arch_allowed(tmp_path):
     assert cli._detect_unsupported_model(str(m)) is None
 
 
-def test_detect_causal_lm_with_vision_config_still_allowed(tmp_path):
-    """A ForCausalLM model with extra vision keys is STILL allowed (arch wins)."""
+def test_detect_known_text_model_type_with_nonstandard_arch_allowed(tmp_path):
+    """Known text-generation model_type can allow non-ForCausalLM class names."""
+    m = tmp_path / "chatglm"
+    _write_config(m, {
+        "architectures": ["ChatGLMForConditionalGeneration"],
+        "model_type": "chatglm",
+    })
+    assert cli._detect_unsupported_model(str(m)) is None
+
+
+def test_detect_causal_lm_with_vision_config_rejected(tmp_path):
+    """Explicit vision keys win over a generic ForCausalLM architecture."""
     m = tmp_path / "visioncausal"
     _write_config(m, {
         "architectures": ["LlamaForCausalLM"],
         "model_type": "llama",
         "vision_config": {"hidden_size": 1024},
     })
-    assert cli._detect_unsupported_model(str(m)) is None
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert "vision_config" in hit["signal"]
 
 
 def test_detect_missing_config_returns_none(tmp_path):
