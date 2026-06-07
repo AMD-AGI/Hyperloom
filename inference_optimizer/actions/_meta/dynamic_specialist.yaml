@@ -19,7 +19,7 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 1
 lease_ttl_sec: 1800
-description: "Dispatch a wave of free-form CPU-only specialist sub-agents with arbitrary natural-language task descriptions. Not domain-locked; the orchestration agent writes the full task. Specialists run as standalone claude CLI subprocesses; results are surfaced to the orchestration prompt each tick. Supplementary EXPLORE channel."
+description: "Dispatch a wave of free-form CPU-only specialist sub-agents with arbitrary task descriptions (not domain-locked). Run as standalone claude subprocesses; results surfaced each tick."
 pipeline_phase: explore
 typical_runtime_min: 30.0
 verdict_class: exploration

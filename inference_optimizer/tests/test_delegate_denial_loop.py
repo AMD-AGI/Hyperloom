@@ -298,15 +298,20 @@ def test_phase_explore_allowlist_drops_legacy_actions():
     """The EXPLORE allowlist contains only the canonical action set:
     merged grid runner, specialist dispatch, integrate_patch,
     dynamic_action (dynamic_action.MD P1 supplementary cross-domain
-    channel), the auto-managed analysis kinds (``roofline`` and
-    ``profile``, both Coordinator-enqueued on watermark crossings;
-    mode picked by ``--enable-roofline``), and ``recover``. PolicyGate's
-    R1 ``phase_incompatible`` rule keeps the LLM from delegating either
-    analysis kind directly (they are never LLM-proposable).
+    channel), the PR #461 free-form dynamic specialist dispatch trio
+    (dynamic_specialist / _check / _collect), the auto-managed analysis
+    kinds (``roofline`` and ``profile``, both Coordinator-enqueued on
+    watermark crossings; mode picked by ``--enable-roofline``), and
+    ``recover``. PolicyGate's R1 ``phase_incompatible`` rule keeps the LLM
+    from delegating either analysis kind directly (they are never
+    LLM-proposable).
     """
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
         "explore", "specialist", "integrate_patch",
         "dynamic_action",
+        "dynamic_specialist",
+        "dynamic_specialist_check",
+        "dynamic_specialist_collect",
         "roofline", "profile", "recover",
     })
 

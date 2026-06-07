@@ -70,6 +70,13 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "integrate_patch",
     "framework_pr",
     "dynamic_action",
+    # PR #461 free-form dynamic specialist dispatch. These are handled
+    # directly by the Coordinator (no SubAgentRunner runs/ workspace), but
+    # they carry pipeline_phase=explore so the registry-derived set lists
+    # them; keep the fallback aligned.
+    "dynamic_specialist",
+    "dynamic_specialist_check",
+    "dynamic_specialist_collect",
     "integrate", "kernel_opt", "deep_kernel_analysis", "gemm_tuning",
     "operator_tuning", "vendor_kernel_config",
     "recover",
