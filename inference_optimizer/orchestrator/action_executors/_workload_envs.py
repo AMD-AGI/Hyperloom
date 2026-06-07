@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared workload-env materialization (single source of truth).
 
 The optimizer used to have TWO YAML-rendering paths:
@@ -27,9 +29,9 @@ Callers:
 * ``baseline.py`` — runs first, materializes the contract once and
   surfaces the rendered YAML path in its result so downstream actions
   can reuse it verbatim (no env re-read race).
-* ``params.py`` / ``backends.py`` — fall back to materializing on
-  their own if Coordinator has not yet plumbed the baseline path
-  through ``task.params["config_path"]``.
+* ``explore`` grid runs — fall back to materializing on their own if
+  Coordinator has not yet plumbed the baseline path through
+  ``task.params["config_path"]``.
 * ``sweep.py`` — same fallback; per-variant CONC/ISL/OSL still win
   because ``_build_variant_yaml`` applies ``variant.extra_envs`` last.
 """
@@ -46,7 +48,11 @@ from typing import Any
 import yaml
 
 from ...paths import asset_root
-from ._grid_runner import server_args_env_name
+from ._grid_runner import (
+    inject_sglang_context_length,
+    inject_sglang_watchdog_timeout,
+    server_args_env_name,
+)
 from ._server_patcher import (
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
@@ -294,7 +300,7 @@ def materialize_config_with_envs(
     osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
     conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
 
-    # TraceLens #194: compute steady-state window for profiling configs.
+    # compute steady-state window for profiling configs.
     # Only inject when this is a profile yaml — detected by PROFILE env or
     # `profiler.torch_profiler.enabled: true` in the YAML. The formulas
     # match the TraceLens magpie-benchmark-profiling skill (Option A:
@@ -492,7 +498,7 @@ def materialize_config_with_envs(
     if "NUM_WARMUPS" not in envs:
         envs["NUM_WARMUPS"] = min(conc_val, 8)
     if server_args:
-        # PR-B: merge into the yaml-default EXTRA_SGLANG_ARGS / EXTRA_VLLM_ARGS
+        # merge into the yaml-default EXTRA_SGLANG_ARGS / EXTRA_VLLM_ARGS
         # rather than overwriting. The profile path's
         # ``--enable-profile-cuda-graph`` / ``--enable-shape-discovery-for-
         # cuda-graph-profile`` flags are injected upstream (lines ~295 /
@@ -510,6 +516,36 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
+    # sglang server-arg guards, applied at the FINAL framework env (after the
+    # server_args + extra_envs merges above) so any operator-pinned flag (via
+    # extra_server_args, extra_envs, or the YAML) is honored and never doubled.
+    # Both are no-ops for vllm/atom. This is the single choke point every
+    # benchmark path (baseline / profile / sweep / explore / framework_pr /
+    # conc_sweep) funnels through before the YAML is handed to Magpie, so the
+    # flags reach every sglang launch.
+    #
+    # 1. --context-length cap: sglang defaults context_length=None and sizes
+    #    max_total_tokens off the model's max_position_embeddings; a huge
+    #    native window (e.g. Mistral-Nemo's 1024000) balloons the aiter
+    #    workspace_buffer past GPU memory -> HIP OOM -> baseline_failed. We cap
+    #    to ISL+OSL+headroom (floored, clamped to the native window). vllm
+    #    already passes --max-model-len $MAX_MODEL_LEN, so this only fixes the
+    #    sglang asymmetry; sglang ignores MAX_MODEL_LEN entirely.
+    # 2. MI300X cold-compile guard: ensure sglang's scheduler watchdog is long
+    #    enough to survive the first-request aiter ``mha_batch_prefill`` JIT
+    #    compile. sglang's 300s default fires SIGQUIT mid-warmup on a cold
+    #    aiter cache and the server dies -> baseline_failed / throughput 0.
+    framework_env = server_args_env_name(bench.get("framework"))
+    resolved_server_args = str(envs.get(framework_env, "")).strip()
+    resolved_server_args = inject_sglang_context_length(
+        resolved_server_args, bench.get("framework"),
+        bench.get("model"), isl_val, osl_val,
+    )
+    resolved_server_args = inject_sglang_watchdog_timeout(
+        resolved_server_args, bench.get("framework"),
+    )
+    if resolved_server_args:
+        envs[framework_env] = resolved_server_args
     # Accuracy eval (GSM8K) is OFF by default because Magpie main and
     # InferenceX main currently disagree on the lm-eval CLI shape:
     # Magpie's benchmark scripts call `run_eval ... --concurrent-requests N`,

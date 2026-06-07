@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P1-3 SharedState + Coordinator integration tests.
 
 Covers:
@@ -30,7 +32,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
@@ -91,6 +93,26 @@ def test_save_load_round_trip(tmp_path):
     assert s2.current_best == {"action": "backends", "tput": 2010.0}
 
 
+def test_tick_exception_round_trip(tmp_path):
+    s = SharedState(session_id="abc")
+    entry = s.record_tick_exception(
+        tick=7,
+        stage="tick_body",
+        agent="orchestration",
+        exc_type="RuntimeError",
+        message="boom",
+        traceback_text="Traceback...\nRuntimeError: boom",
+    )
+    s.save(tmp_path)
+
+    s2 = SharedState.load_or_init(tmp_path)
+    assert s2.last_tick_exception == entry
+    assert s2.last_tick_exception["tick"] == 7
+    assert s2.last_tick_exception["stage"] == "tick_body"
+    assert s2.last_tick_exception["agent"] == "orchestration"
+    assert s2.last_tick_exception["type"] == "RuntimeError"
+
+
 def test_load_or_init_returns_blank_when_missing(tmp_path):
     s = SharedState.load_or_init(tmp_path)
     assert s.session_id == ""
@@ -114,6 +136,7 @@ def test_from_dict_drops_unknown_fields():
     s = SharedState.from_dict(raw)
     assert s.session_id == "s"
     assert s.baseline_tput == 100.0
+    assert s.last_tick_exception == {}
     assert not hasattr(s, "unknown_future_field")
 
 

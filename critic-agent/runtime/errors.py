@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Typed errors raised by the Critic runtime adapter.
 
 The errors are deliberately granular so the CLI / SKILL can map them to

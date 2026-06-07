@@ -196,10 +196,17 @@ def _build_sglang_cmd(a: argparse.Namespace, node_rank: int, leader: str) -> lis
         "--tp-size", str(a.tp),
         "--trust-remote-code",
         "--host", "0.0.0.0",
-        "--nnodes", str(a.nnodes),
-        "--node-rank", str(node_rank),
-        "--dist-init-addr", f"{leader}:{a.dist_init_port}",
     ]
+    # Single-node roles: omit --nnodes/--node-rank/--dist-init-addr to mirror the
+    # SaFE native dynamo.sglang launch. Passing them for an nnodes=1 disaggregated
+    # PD role made decode emit 0 output tokens (finish_reason=stop), while the
+    # SaFE deploy (which omits them for single node) generates normally.
+    if int(a.nnodes) > 1:
+        cmd.extend([
+            "--nnodes", str(a.nnodes),
+            "--node-rank", str(node_rank),
+            "--dist-init-addr", f"{leader}:{a.dist_init_port}",
+        ])
     if a.ep and int(a.ep) > 1:
         cmd.extend(["--ep-size", str(a.ep)])
     if a.extra_args:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smoke tests for the ``breakdown.reporters`` compose pipeline.
 
 We feed each renderer a hand-built ``session_breakdown.json`` shape
@@ -67,12 +69,13 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "validated_ts": "2026-05-12T11:54:00Z",
             "stack_changed_after_validation": False,
             "extra_server_args": "",
-            "action_path": ["backends:vllm_kv_fp8"],
+            "action_path": ["explore:vllm_kv_fp8"],
         },
         "phase_timeline": [],
         "capability_summary": {
-            "backends":       {"status": "kept",          "attempts": 1, "keeps": 1},
-            "params":         {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 5},
+            "explore":        {"status": "kept",          "attempts": 1, "keeps": 1},
+            "backends":       {"status": "not_attempted", "attempts": 0, "keeps": 0},
+            "params":         {"status": "not_attempted", "attempts": 0, "keeps": 0},
             "sweep":          {"status": "not_attempted", "attempts": 0, "keeps": 0, "grid_size": 9},
             "geak":           {"status": "not_attempted", "attempts": 0, "keeps": 0},
             "oob":            {"status": "not_attempted", "attempts": 0, "keeps": 0},
@@ -84,6 +87,7 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "optimized": [], "adopted": [], "partial": [], "reverted": [], "rejected": [],
         },
         "param_search": {
+            "explore": {"accepted": ["vllm_kv_fp8"], "tested": {"vllm_kv_fp8": True}},
             "backends": {"accepted": ["vllm_kv_fp8"], "tested": {"vllm_kv_fp8": True}},
             "params":   {"accepted": [], "tested": {}},
             "discovered_flags": {},
@@ -215,7 +219,46 @@ def test_attribution_method_marks_single_source_when_path_len_1() -> None:
     g = r.global_facts
     assert g.attribution_method.startswith("single-source")
     assert g.gain_attribution_lines, "expected at least one attribution line"
-    assert g.gain_attribution_lines[0].startswith("100% via 1 backends KEEP")
+    assert g.gain_attribution_lines[0].startswith("100% via 1 explore KEEP")
+
+
+def test_legacy_backends_action_path_still_attributed() -> None:
+    bd = _fixture_breakdown()
+    bd["final"]["action_path"] = ["backends:vllm_kv_fp8"]
+
+    r = render_session_report(bd)
+
+    assert r.global_facts.gain_attribution_lines[0].startswith(
+        "100% via 1 backends KEEP"
+    )
+
+
+def test_legacy_source_buckets_survive_alongside_explore() -> None:
+    bd = _fixture_breakdown()
+    bd["attribution"] = {
+        "method": "reconstructed",
+        "source_breakdown": {
+            "validated_total_pct": 14.5,
+            "explore_pct_of_total": 10.0,
+            "backends_pct_of_total": 4.5,
+            "params_pct_of_total": 0.0,
+            "geak_pct_of_total": 0.0,
+            "oob_pct_of_total": 0.0,
+            "sweep_pct_of_total": 0.0,
+        },
+        "notes": [],
+    }
+
+    r = render_session_report(bd)
+
+    assert any(
+        line.startswith("explore: 10.00% of total")
+        for line in r.global_facts.gain_attribution_lines
+    )
+    assert any(
+        line.startswith("backends: 4.50% of total")
+        for line in r.global_facts.gain_attribution_lines
+    )
 
 
 def test_attribution_missing_when_no_gain() -> None:
@@ -237,7 +280,7 @@ class _GoodLLM:
         payload = json.loads(user)
         sids = [s["section_id"] for s in payload["sections"] if not s["skipped"]]
         return json.dumps({
-            "executive_summary": "Validated +10.99% via backends KEEP on DeepSeek-R1 MI300X.",
+            "executive_summary": "Validated +10.99% via explore KEEP on DeepSeek-R1 MI300X.",
             "section_narratives": {sid: f"narr-{sid}" for sid in sids},
         })
 
@@ -257,7 +300,7 @@ class _RaisingLLM:
 def test_llm_path_inserts_narratives_for_non_skipped_sections() -> None:
     r = render_session_report(_fixture_breakdown(), llm_client=_GoodLLM())
     assert r.used_llm
-    assert "Validated +10.99% via backends KEEP" in r.markdown
+    assert "Validated +10.99% via explore KEEP" in r.markdown
     # Narratives must appear for non-skipped sections only.
     assert "narr-session" in r.markdown
     assert "narr-capability_summary" in r.markdown
@@ -335,8 +378,9 @@ def test_attribution_method_renders_from_field() -> None:
         "method": "reconstructed",
         "source_breakdown": {
             "validated_total_pct": 14.5,
-            "backends_pct_of_total": 10.0,
-            "params_pct_of_total":   4.5,
+            "explore_pct_of_total":  14.5,
+            "backends_pct_of_total": 0.0,
+            "params_pct_of_total":   0.0,
             "geak_pct_of_total":     0.0,
             "oob_pct_of_total":      0.0,
             "sweep_pct_of_total":    0.0,

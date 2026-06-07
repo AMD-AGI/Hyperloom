@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Run all signal rules and de-duplicate Symptoms.
 
 The classifier is intentionally dumb: it iterates a fixed list of

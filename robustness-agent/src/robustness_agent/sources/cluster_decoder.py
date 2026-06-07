@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Decode robust-api raw responses into LocalProbe-equivalent schemas.
 
 robust-api emits Prometheus-style time-series via

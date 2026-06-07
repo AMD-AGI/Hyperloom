@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Consolidated tests for ``orchestrator.action_executors._grid_runner``.
 
 Combines four previously separate modules:

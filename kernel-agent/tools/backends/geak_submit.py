@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """GEAK submission via Ray (preferred) or direct CLI fallback.
 
 This is a self-contained alternative to inference-optimization's
@@ -17,6 +19,7 @@ import time
 from pathlib import Path
 
 from ray_runtime import (
+    ensure_ray_cluster,
     quiet_ray_init,
 )
 

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-A4 (Arbor-into-Hyperloom): IntegratePatchExecutor tests.
 
 Covers the deterministic patch integration step that consumes a

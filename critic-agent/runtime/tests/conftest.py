@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared pytest fixtures for the Critic runtime tests.
 
 Keeping these tiny and orthogonal makes individual test files readable and

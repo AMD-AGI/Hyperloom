@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.9 — drop scoreboard tests.
 
 Covers KB_design/3.9_drop_scoreboard/README.md:
@@ -279,7 +281,7 @@ def test_kernel_opt_body_has_no_scoreboard_vocab():
     forbidden = (
         "scoreboard",
         "score_mult",
-        "marathon_priors",
+        "legacy_priors",
         "effective_score",
         "eff_score",
         "cooldown_until_tick",

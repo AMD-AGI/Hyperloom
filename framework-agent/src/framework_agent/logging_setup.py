@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Structured logging setup for framework-agent.
 
 Addresses the zhenggong "0-observability" gap noted in the merged design

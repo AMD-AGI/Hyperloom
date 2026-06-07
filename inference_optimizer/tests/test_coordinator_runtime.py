@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P0-3 Coordinator + MockBackend + SubAgentRunner tests.
 
 Covers:
@@ -38,10 +40,9 @@ from inference_optimizer.orchestrator.backends import (
 from inference_optimizer.orchestrator.coordinator import (
     _BASELINE_FINGERPRINT_KEYS,
     _baseline_params_fingerprint,
-    _resolve_silent_ticks_closing_threshold,
     Coordinator,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.sub_agent_runner import (
     SubAgentRunner,
@@ -223,6 +224,25 @@ class _AlwaysFailingBackend(Backend):
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
 
 
+class _AlwaysCrashingBackend(Backend):
+    """Backend that raises an unexpected exception from ``run``."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
+        self.calls += 1
+        raise RuntimeError(f"simulated {self.name} unexpected crash #{self.calls}")
+
+
 @pytest.mark.asyncio
 async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
     session_dir, monkeypatch,
@@ -263,6 +283,28 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         assert promoted["severity"] == "high"
         assert promoted["agent"] == "robustness"
         assert "subprocess backend has failed" in promoted["hint"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_backend_exception_records_last_tick_exception(session_dir):
+    backends = _build_backends({})
+    backends["orchestration"] = _AlwaysCrashingBackend("orchestration")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(1)
+        assert c.shared_state.crash_count == 1
+        assert c.shared_state.last_tick_exception["stage"] == "reactor_pass"
+        assert c.shared_state.last_tick_exception["agent"] == "orchestration"
+        assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
+        assert (
+            "simulated orchestration unexpected crash"
+            in c.shared_state.last_tick_exception["message"]
+        )
+
+        persisted = SharedState.load_or_init(session_dir)
+        assert persisted.last_tick_exception == c.shared_state.last_tick_exception
     finally:
         await c.stop()
 
@@ -996,6 +1038,44 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_failed_initial_roofline_rearms_watermark_from_baseline(
+    session_dir,
+):
+    """A failed initial roofline must not suppress later refresh attempts."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.cumulative_gain_validated = 25.0
+        c.shared_state.last_roofline_tput = 0.0
+        c.shared_state.roofline_failure_streak = 1
+        c.shared_state.auto_roofline_pending_task_id = ""
+
+        assert c._needs_roofline_for_watermark() is True
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_unattempted_initial_roofline_does_not_watermark_rearm(
+    session_dir,
+):
+    """Before any failed/successful roofline, PRELUDE remains the only entry."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.cumulative_gain_validated = 25.0
+        c.shared_state.last_roofline_tput = 0.0
+        c.shared_state.roofline_failure_streak = 0
+        c.shared_state.auto_roofline_pending_task_id = ""
+
+        assert c._needs_roofline_for_watermark() is False
+    finally:
+        await c.stop()
+
+
 # ===========================================================================
 # (formerly test_coordinator_baseline_fingerprint.py)
 # ===========================================================================
@@ -1262,52 +1342,14 @@ def _write_marker_target_baseline(session_dir: Path) -> None:
     )
 
 
-def test_resolve_silent_ticks_closing_threshold_default(monkeypatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", raising=False)
-    assert _resolve_silent_ticks_closing_threshold() == 120
-
-
-def test_resolve_silent_ticks_closing_threshold_override(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "5")
-    assert _resolve_silent_ticks_closing_threshold() == 5
-
-
-def test_resolve_silent_ticks_closing_threshold_disabled(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
-    assert _resolve_silent_ticks_closing_threshold() == 0
-
-
-def test_resolve_silent_ticks_closing_threshold_garbage(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "not-a-number")
-    assert _resolve_silent_ticks_closing_threshold() == 120
-
-
-def test_shared_state_default_consecutive_silent_ticks_is_zero():
-    s = SharedState()
-    assert s.consecutive_silent_ticks == 0
-
-
 @pytest.mark.asyncio
-async def test_silent_ticks_increment_when_run_is_idle(session_dir, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        await c.run(max_ticks=3, tick_interval_sec=0.0)
-        assert c.shared_state.consecutive_silent_ticks >= 3
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_silent_ticks_disabled_by_zero_threshold(
-    session_dir, monkeypatch,
-):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
+async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
+    """An idle run keeps ticking until the wall-clock deadline / max_ticks
+    rather than self-closing on silence (no idle early-close)."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
         assert reason == "max_ticks"
-        assert c.shared_state.consecutive_silent_ticks >= 5
         assert c.shared_state.closing_phase is False
     finally:
         await c.stop()
@@ -1465,5 +1507,38 @@ async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
         assert c.shared_state.stop_reason == "target_reached"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reason(
+    session_dir,
+):
+    """Resuming an already-terminal session can re-enter ``run`` and break
+    out after a tick step raises. The resilience guard records the exception,
+    then the normal stop-condition path must keep the persisted terminal
+    reason instead of downgrading it to ``"unknown"``."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.shared_state.set_stop_reason("target_reached")
+    c.shared_state.save(session_dir)
+
+    # Raise inside the tick body, before any stop-condition check assigns a
+    # new local stop_reason.
+    async def _boom():
+        raise RuntimeError("tick exploded mid-run")
+
+    c._advance_phase_if_needed = _boom  # type: ignore[assignment]
+
+    try:
+        reason = await c.run(max_ticks=5)
+        assert reason == "target_reached"
+        assert c.shared_state.stop_reason == "target_reached"
+        assert c.shared_state.crash_count == 1
+        assert c.shared_state.last_tick_exception["stage"] == "advance_phase"
+        assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
+        persisted = SharedState.load_or_init(session_dir)
+        assert persisted.stop_reason == "target_reached"
+        assert persisted.last_tick_exception["stage"] == "advance_phase"
     finally:
         await c.stop()

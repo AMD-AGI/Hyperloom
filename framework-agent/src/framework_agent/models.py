@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Request and result models for framework PR/ref exploration.
 
 Ported from zhenggong/framework-agent with two fusion-plan additions:
@@ -298,20 +300,19 @@ class ExploreRequest:
     outputs: dict[str, str] = field(default_factory=dict)
     primus_cortex: PrimusCortexConfig | None = None
     pr_filter: PrFilter = field(default_factory=PrFilter)
-    # Fusion-plan additions (not present in zhenggong v0.2)
+    # Fusion-plan additions.
     gap_description: str = ""
     # C: explicit keyword override for the primus_cortex search query +
     # client-side rerank. Non-empty value bypasses extract_keywords() and
     # uses these tokens verbatim. See ``sources._resolve_keywords``.
     keywords: tuple[str, ...] = ()
     search_modes: tuple[str, ...] = ("primus_cortex", "github")
-    # KB integration (PR4); empty string disables the contribute hook.
+    # KB integration; empty string disables the contribute hook.
     kb_domain: str = ""
-    # Merged-design §4.4.1 additions: ranking + cleanup + disk preflight.
+    # Ranking + cleanup + disk preflight additions.
     # When True, ``explore()`` keeps going after the first winner and
     # returns the full list sorted by ``candidate_score`` descending.
-    # When False (default — matches zhenggong v0.2), it short-circuits
-    # on the first winner.
+    # When False (default), it short-circuits on the first winner.
     ranking_mode: bool = False
     # When True, ``explorer`` removes the worktree+venv directories of
     # every non-winner candidate at the end of the run. The
