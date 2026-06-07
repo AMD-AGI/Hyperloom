@@ -149,7 +149,7 @@ def _exec_dispatch(tool_input: dict[str, Any], session_dir: str) -> str:
     global _AGENT_HANDLES
 
     tasks_input = tool_input.get("tasks", [])
-    model = tool_input.get("model", os.environ.get("AGENT_MODEL", "claude-sonnet-4-6"))
+    model = tool_input.get("model", os.environ.get("AGENT_MODEL", "claude-opus-4-7"))
     timeout_minutes = tool_input.get("timeout_minutes", 120)
 
     priority_map = {

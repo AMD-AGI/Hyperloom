@@ -7444,9 +7444,19 @@ class Coordinator:
             )
             return
 
+        # Model resolution is authoritative on the Coordinator side: the
+        # verbatim PR-461 prompt hardcodes ``claude-sonnet-4-6``, which is
+        # not in the blessed orchestration model gate (cli._CLAUDE_ALLOWED_
+        # MODELS). Override with the resolved specialist / orchestration
+        # model wired at CLI boot so dispatches actually find a model.
+        model = (
+            getattr(self, "_dynamic_specialist_model", "")
+            or params.get("model")
+            or "claude-opus-4-7"
+        )
         tool_input = {
             "tasks": tasks,
-            "model": params.get("model", "claude-sonnet-4-6"),
+            "model": model,
             "timeout_minutes": params.get("timeout_minutes", 120),
         }
         result_text = execute_dynamic_dispatch_tool(

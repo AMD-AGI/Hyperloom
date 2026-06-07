@@ -3998,6 +3998,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     except (TypeError, ValueError):
         coordinator.framework_pr_discover_timeout_sec = 0.0
+    # Free-form dynamic specialist dispatch (PR #461): the Coordinator
+    # overrides the per-dispatch model with this blessed value (the
+    # verbatim prompt hardcodes a non-blessed sonnet id). Reuse the
+    # specialist model resolution (``--specialist-model`` falling back to
+    # ``--claude-model``) so the spawned claude subprocess gets a model
+    # that exists in the gateway catalog.
+    coordinator._dynamic_specialist_model = (
+        getattr(args, "specialist_model", None) or args.claude_model
+    ).strip()
     # Build specialist executor when the research_lane capacity is
     # non-zero. ``args.research_lane_capacity`` is already clamped to
     # [0, 32] by ``_seed_shared_state``; a value of 0 means "degrade to
