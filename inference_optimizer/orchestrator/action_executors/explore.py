@@ -488,6 +488,26 @@ class ExploreExecutor:
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         base_extra_envs = dict(params.get("base_extra_envs") or {})
         base_tput = float(params.get("base_tput") or 0.0)
+        # Durable backstop: if no dispatch path stamped a positive
+        # ``base_tput`` into params, recover the comparison anchor from the
+        # live SharedState (threaded via SubAgentRunner into ctx.extra).
+        # Without this every variant's ``_gain_pct`` returns ``None`` and the
+        # KEEP/REVERT ladder marks them all FAILED/no_measurement — silently
+        # discarding real wins (e.g. an explore grid delegated directly,
+        # which historically bypassed the coordinator's base_tput inject).
+        # Prefer the running best (matches _materialize_approved_proposal),
+        # falling back to the original baseline.
+        if base_tput <= 0:
+            ss = extra.get("shared_state") or extra.get("state")
+            if ss is not None:
+                cb = getattr(ss, "current_best", None) or {}
+                cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+                if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                    base_tput = float(cb_tput)
+                else:
+                    base_tput = float(
+                        getattr(ss, "baseline_tput", 0.0) or 0.0
+                    )
         baseline_accuracy = (
             float(params.get("accuracy_baseline") or 0.0)
             or float(params.get("baseline_accuracy") or 0.0)

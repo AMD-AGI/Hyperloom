@@ -64,11 +64,25 @@ class SubAgentRunner:
         *,
         executor_registry: dict[str, ExecutorFn] | None = None,
         session_dir: Path | None = None,
+        shared_state: object | None = None,
     ):
         self.locks = locks
         self.tasks = tasks
         self.executor_registry: dict[str, ExecutorFn] = dict(executor_registry or {})
         self.session_dir = Path(session_dir) if session_dir else None
+        # Live SharedState reference threaded into every in-process
+        # executor's ``ctx.extra["shared_state"]`` (see ``run_task``). This
+        # is the single reliable channel an executor has to recover a
+        # baseline anchor (``baseline_tput`` / ``current_best.tput``) when
+        # the per-dispatch-path ``params['base_tput']`` injection is absent.
+        # Without it, gain-computing executors (explore / framework_pr /
+        # integrate_patch) silently treat every variant as ``base_tput=0``
+        # → ``gain=None`` → discard real wins. The Coordinator wires this
+        # after SharedState is constructed (it is created *after* the
+        # runner in Coordinator.__init__), so the attribute may be set
+        # post-construction; default ``None`` keeps tests that omit it
+        # working unchanged.
+        self.shared_state = shared_state
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
         self.executor_registry[kind] = fn
@@ -186,6 +200,12 @@ class SubAgentRunner:
                 extra["workspace"] = str(workspace)
             if self.session_dir is not None:
                 extra["session_dir"] = str(self.session_dir)
+            # Thread the live SharedState so executors can recover a
+            # baseline anchor when params['base_tput'] is missing. In-process
+            # executors (baseline / explore / sweep / framework_pr /
+            # integrate_patch) read this via ``extra.get("shared_state")``.
+            if self.shared_state is not None:
+                extra["shared_state"] = self.shared_state
             if extra_context:
                 extra.update(dict(extra_context))
             ctx = RunnerContext(task=task, lease=lease, extra=extra)

@@ -255,6 +255,15 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # Thread the live SharedState into the sub-agent runner so every
+        # in-process executor receives it via ``ctx.extra["shared_state"]``.
+        # The runner is constructed above (before SharedState exists), so we
+        # wire it here. This is the durable backstop for the per-dispatch
+        # ``base_tput`` injection: a gain-computing executor (explore /
+        # framework_pr / integrate_patch) can always recover the baseline
+        # anchor from SharedState even if a dispatch path forgot to stamp
+        # ``params['base_tput']``. Covers the injected-runner (test) case too.
+        self.sub.shared_state = self.shared_state
         self.gpu_specialist_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
@@ -5854,6 +5863,20 @@ class Coordinator:
         # explore directly) but still need the same operational knobs.
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
+            # Mirror _materialize_approved_proposal's base_tput injection
+            # (lines ~6087-6091). Config/env explore grids take the direct
+            # delegate path (no Critic pre-review per the comment above),
+            # so without this the ExploreExecutor sees ``base_tput=0``,
+            # ``_gain_pct`` returns ``None`` for every variant, and the
+            # KEEP/REVERT ladder marks every variant FAILED/no_measurement
+            # regardless of how far it beat baseline. Tie to current_best
+            # (or baseline_tput as fallback); explicit operator value still
+            # wins via setdefault.
+            cb = self.shared_state.current_best or {}
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else self.shared_state.baseline_tput
+            params.setdefault("base_tput", float(base or 0.0))
         # Specialist pre-dispatch warmup.
         # When the Orchestration role delegates a specialist task, the
         # Coordinator is the only place with the KnowledgePlane facade

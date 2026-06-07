@@ -685,6 +685,139 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 
 
 @pytest.mark.asyncio
+async def test_explore_executor_recovers_base_tput_from_shared_state(
+    sub_agent_runner, tmp_path,
+):
+    """Durable backstop: when a dispatch path omits ``base_tput`` from
+    params (e.g. an explore grid delegated directly, which historically
+    bypassed the Coordinator's ``base_tput`` injection in
+    ``_handle_delegate``), the executor recovers the comparison anchor
+    from the live SharedState threaded onto ``ctx.extra["shared_state"]``
+    by SubAgentRunner.
+
+    Without the fallback ``base_tput`` defaults to 0.0, ``_gain_pct``
+    returns ``None`` for every variant, and the KEEP/REVERT ladder marks
+    them all FAILED/no_measurement — silently discarding real wins.
+    Regression guard for that exact bug.
+    """
+    sub, tr, _ = sub_agent_runner
+    # Wire a SharedState carrying an established baseline onto the runner,
+    # exactly as Coordinator.__init__ now does.
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-base-tput-recovery"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=840.0)  # +5% vs recovered baseline 800
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    grid = [{
+        "name": "v_keep",
+        "extra_args": "--keep-flag",
+        "extra_envs": {},
+        "provenance": "default_grid",
+    }]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir":  str(output_dir),
+            # NOTE: ``base_tput`` intentionally OMITTED to exercise the
+            # SharedState recovery path.
+            "grid":        grid,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-base-tput-recovery",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert out["status"] == "succeeded"
+    # The win is KEPT — proving base_tput was recovered (840 vs 800 = +5%).
+    # Pre-fix this variant would land in FAILED/no_measurement.
+    assert {w["name"] for w in out["winners"]} == {"v_keep"}
+    fp = canonical_fingerprint("--keep-flag", {})
+    tested = out["explore_search_update"]["tested"][fp]
+    assert tested["outcome"] == "KEEP"
+    assert tested["base_tput"] == 800.0
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
+    sub_agent_runner, tmp_path,
+):
+    """When ``base_tput`` is omitted, the SharedState recovery prefers the
+    running ``current_best.tput`` over the original ``baseline_tput`` —
+    matching the Coordinator's ``_materialize_approved_proposal`` /
+    ``_handle_delegate`` injection semantics. A +5% variant vs the
+    original baseline (800) is BELOW the 1% gate when measured against the
+    current best (900), so it must REVERT rather than KEEP.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.current_best = {"action": "explore", "tput": 900.0}
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-cb-recovery"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=840.0)  # +5% vs baseline, -6.7% vs best
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    grid = [{
+        "name": "v_below_best",
+        "extra_args": "--below-best-flag",
+        "extra_envs": {},
+        "provenance": "default_grid",
+    }]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir":  str(output_dir),
+            "grid":        grid,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-cb-recovery",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert out["status"] == "succeeded"
+    assert out["winners"] == []
+    fp = canonical_fingerprint("--below-best-flag", {})
+    tested = out["explore_search_update"]["tested"][fp]
+    # Anchored on current_best (900), not baseline (800).
+    assert tested["base_tput"] == 900.0
+    assert tested["outcome"] == "REVERT"
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path):
     """A variant whose fingerprint already lives in explore_search.tested is
     not benchmarked again — it lands in ``skipped_dup`` instead."""
