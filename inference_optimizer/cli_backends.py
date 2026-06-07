@@ -3,14 +3,8 @@
 """Per-role backend construction + robustness option wiring for the CLI.
 
 Builds the orchestration / critic / robustness / kernel backends, the
-advisory proposal scorer, and the robustness ``request.options`` overrides
-from parsed CLI args. Extracted from ``cli.py``; imports orchestrator
-packages only and must not import ``cli`` (one-way dependency).
-
-The env-computed defaults (``DEFAULT_CRITIC_BACKEND`` /
-``DEFAULT_ROBUSTNESS_BACKEND``) and their ``_resolve_*_choice`` readers
-stay in ``cli.py`` because a reload-based test relies on recomputing them
-when ``cli`` is reimported.
+advisory proposal scorer, and robustness ``request.options`` overrides from
+parsed CLI args. Imports orchestrator packages only (must not import ``cli``).
 """
 
 from __future__ import annotations
