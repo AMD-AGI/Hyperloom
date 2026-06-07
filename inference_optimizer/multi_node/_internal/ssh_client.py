@@ -122,6 +122,7 @@ def ssh_run_script(
     user: str = "root",
     timeout: int = 600,
     remote_path: str = "/tmp/mn_dynamo_launch",
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Ship ``script_text`` to the pod (base64 over the command line) and run it.
 
@@ -129,11 +130,22 @@ def ssh_run_script(
     base64-encoded so it survives the SSH command line without quoting issues,
     decoded into ``remote_path`` on the pod, then executed with ``interpreter``
     (e.g. ``python3`` / ``bash``) and ``script_args`` appended verbatim.
+
+    ``env`` (optional) is prepended as ``KEY=VAL`` assignments before the
+    interpreter so prompt-driven tuning vars (e.g. mori dispatch tokens) reach
+    the SSH-launched framework child. A bare ``ssh host cmd`` does NOT forward
+    the controller's environment, and these keys are not in the pod's container
+    env, so they must be injected explicitly here.
     """
     enc = base64.b64encode(script_text.encode("utf-8")).decode("ascii")
+    env_prefix = ""
+    if env:
+        env_prefix = "".join(
+            f"{k}={shlex.quote(str(v))} " for k, v in env.items()
+        )
     remote_cmd = (
         f"echo {enc} | base64 -d > {shlex.quote(remote_path)} && "
-        f"{interpreter} {shlex.quote(remote_path)} {script_args}"
+        f"{env_prefix}{interpreter} {shlex.quote(remote_path)} {script_args}"
     )
     return ssh_run(
         host, remote_cmd, key_path=key_path, port=port, user=user, timeout=timeout,
