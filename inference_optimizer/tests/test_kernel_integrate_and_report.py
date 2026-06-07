@@ -749,3 +749,85 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path,
     assert res.state == "succeeded"
     assert res.result["status"] == "failed"
     assert "session_dir" in res.result.get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# after_kernel_opt rocprof: KEEP triggers it, REVERT/NEEDS_REVIEW skips it.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_integrate_keep_calls_after_kernel_opt_rocprof(
+    session_dir, tmp_path, monkeypatch,
+):
+    """On KEEP, _run_after_kernel_opt_rocprof is called exactly once."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    calls: list[dict] = []
+
+    async def _fake_rocprof(*, kernel_id, session_dir, log):
+        calls.append({"kernel_id": kernel_id})
+        return {"status": "skipped", "reason": "stub"}
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=900.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(krh, "_run_after_kernel_opt_rocprof", _fake_rocprof)
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_rocprof_test",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["decision"] == "KEEP"
+    assert len(calls) == 1
+    assert calls[0]["kernel_id"] == "k_rocprof_test"
+    assert "rocprof_after_kernel_opt" in res
+
+
+@pytest.mark.asyncio
+async def test_integrate_revert_skips_after_kernel_opt_rocprof(
+    session_dir, tmp_path, monkeypatch,
+):
+    """On REVERT, _run_after_kernel_opt_rocprof is NOT called."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    calls: list[dict] = []
+
+    async def _fake_rocprof(*, kernel_id, session_dir, log):  # pragma: no cover
+        calls.append({"kernel_id": kernel_id})
+        return {"status": "stub"}
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        # return tput lower than base → REVERT
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=500.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(krh, "_run_after_kernel_opt_rocprof", _fake_rocprof)
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_revert_test",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["decision"] == "REVERT"
+    assert len(calls) == 0
+    assert "rocprof_after_kernel_opt" not in res

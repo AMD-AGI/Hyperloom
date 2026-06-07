@@ -2127,6 +2127,104 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+async def _run_after_kernel_opt_rocprof(
+    *,
+    kernel_id: str,
+    session_dir: Path,
+    log: Any,
+) -> dict[str, Any]:
+    """Best-effort: after an integrate KEEP, run rocprof on the now-patched kernel.
+
+    Resolves ``test_command`` from ``SharedState.kernel_opt_attempts`` or
+    ``last_kernel_opt``, launches ``rocprof_roofline.py`` as a subprocess, and
+    calls ``_update_kernel_roofline_sidecar`` with ``phase='after_kernel_opt'``.
+
+    Always returns a small status dict; never raises.
+    """
+    enrich_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "1").strip().lower()
+    if enrich_env in {"0", "false", "no", "off"}:
+        return {"status": "skipped", "reason": "disabled_by_env"}
+    rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
+    if rocprof_env in {"0", "false", "no", "off"}:
+        return {"status": "skipped", "reason": "disabled_by_env"}
+
+    try:
+        from .shared_state import SharedState
+        state = SharedState.load_or_init(session_dir)
+        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        test_command = str(attempt.get("test_command") or "").strip()
+        if not test_command:
+            lko = state.last_kernel_opt or {}
+            if str(lko.get("kernel_id") or "") == kernel_id:
+                bp = lko.get("backend_paths") or {}
+                test_command = str(bp.get("test_command") or "").strip()
+    except Exception as exc:
+        return {"status": "skipped", "reason": f"state_load_error: {type(exc).__name__}"}
+
+    if not test_command:
+        return {"status": "skipped", "reason": "no_test_command_in_state"}
+
+    try:
+        tool = _kernel_agent_tool_path("rocprof_roofline.py")
+    except Exception:
+        return {"status": "skipped", "reason": "rocprof_roofline_tool_unavailable"}
+
+    out_dir = session_dir / "kernel-agent" / "rocprof_after_kernel_opt" / kernel_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_json = out_dir / "after.json"
+    out_txt = out_dir / "after.txt"
+    timeout_sec = max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800))
+
+    cmd = [
+        "python3", str(tool),
+        "--workdir", str(session_dir),
+        "--cmd", test_command,
+        "--out-json", str(out_json),
+        "--out-txt", str(out_txt),
+        "--timeout-sec", str(timeout_sec),
+    ]
+    log.info("integrate: running after_kernel_opt rocprof for %s", kernel_id)
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec + 30)
+    except Exception as exc:
+        log.warning("integrate: after_kernel_opt rocprof subprocess error: %s", exc)
+        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+
+    status = "ok" if rc == 0 and payload.get("status") == "ok" else payload.get("status", "failed")
+    log.info("integrate: after_kernel_opt rocprof status=%s for %s", status, kernel_id)
+
+    # Mirror into reports/kernel_roofline.json
+    try:
+        ko_tool = _kernel_agent_tool_path("kernel_optimization.py")
+        ko_dir = ko_tool.parent
+        import sys as _sys
+        if str(ko_dir) not in _sys.path:
+            _sys.path.insert(0, str(ko_dir))
+        from kernel_optimization import _update_kernel_roofline_sidecar  # noqa: PLC0415
+        _update_kernel_roofline_sidecar(
+            workspace_path=str(session_dir),
+            kernel_id=kernel_id,
+            rocprof_json_path=str(out_json),
+            rocprof_txt_path=str(out_txt),
+            log_path=None,
+            rocprof_status=status,
+            phase="after_kernel_opt",
+        )
+    except Exception as exc:
+        log.warning("integrate: after_kernel_opt sidecar update failed: %s", exc)
+
+    return {
+        "status": status,
+        "json_path": str(out_json),
+        "txt_path": str(out_txt),
+    }
+
+
 async def integrate_handler(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
@@ -2329,7 +2427,19 @@ async def integrate_handler(
         if decision == "KEEP"
         else _maybe_revert_kernel_patch(apply_result)
     )
-    return {
+
+    # After KEEP (patch is live in source), run rocprof on the optimised kernel
+    # and record the after_kernel_opt snapshot in kernel_roofline.json so the
+    # dashboard can display the before → after efficiency delta.
+    rocprof_after_info: dict[str, Any] = {}
+    if decision == "KEEP" and kernel_id:
+        rocprof_after_info = await _run_after_kernel_opt_rocprof(
+            kernel_id=kernel_id,
+            session_dir=session_dir,
+            log=log,
+        )
+
+    result: dict[str, Any] = {
         "status":      "ok",
         "decision":    decision,
         "kernel_id":   kernel_id,
@@ -2344,6 +2454,9 @@ async def integrate_handler(
         "apply_result": apply_result,
         "revert_result": revert_result,
     }
+    if rocprof_after_info:
+        result["rocprof_after_kernel_opt"] = rocprof_after_info
+    return result
 
 
 # ---------------------------------------------------------------------------
