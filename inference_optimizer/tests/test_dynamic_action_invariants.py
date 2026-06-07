@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Red-line invariant tests for the ``dynamic_action`` channel.
 
 Each test constructs a hostile input and asserts the system blocks
@@ -58,7 +60,7 @@ from inference_optimizer.orchestrator.dynamic_action_tools import (
     BENCH_REGISTRY,
     read_session_artifact,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.policy import (
@@ -68,8 +70,6 @@ from inference_optimizer.orchestrator.policy import (
     DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL,
     DYNAMIC_ACTION_NAME,
     DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES,
-    EXPLORE_PERMISSIVE_PROVENANCE_LITERALS,
-    EXPLORE_PERMISSIVE_PROVENANCE_PREFIXES,
     KERNEL_OWNED_ACTIONS,
     MAX_DYNAMIC_PER_ROUND,
     MAX_DYNAMIC_SOURCED_VARIANTS,
@@ -358,16 +358,6 @@ class TestInvariant_3_ProvenanceLiteral:
     ``dynamic`` at every layer — IR-4 white-list, runner validator,
     critic mechanical check, classifier."""
 
-    def test_inv_ir4_whitelist_contains_dynamic_literal(self):
-        assert "dynamic" in EXPLORE_PERMISSIVE_PROVENANCE_LITERALS
-
-    def test_inv_ir4_whitelist_has_no_dynamic_prefix(self):
-        """No ``dynamic:`` prefix in the allowed set — that would
-        let composite forms slip through IR-4."""
-        for prefix in EXPLORE_PERMISSIVE_PROVENANCE_PREFIXES:
-            assert prefix != "dynamic:"
-            assert not prefix.startswith("dyn")
-
     @pytest.mark.parametrize("bad", [
         "dynamic:kv_cache+scheduler",
         "dynamic:foo",
@@ -410,34 +400,20 @@ class TestInvariant_3_ProvenanceLiteral:
                 f"{fake!r} — multi-layer defence broken"
             )
 
-    def test_inv_explore_provenance_gate_accepts_only_literal(self):
-        """End-to-end: PolicyGate's _validate_explore_provenance
-        accepts ``dynamic`` literal in an explore grid but rejects
-        composite forms via the legacy llm_direct path."""
+    def test_inv_explore_grid_accepts_any_provenance(self):
+        """The explore-provenance gate is retired: a grid carrying the
+        ``dynamic`` literal — or any other provenance — is accepted by
+        PolicyGate (the dynamic literal still drives downstream
+        cross-domain review, validated elsewhere in this file)."""
         gate = _gate()
-        gate.validate_intent("orchestration", Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "explore",
-                "params": {
-                    "grid": [
-                        {"name": "v", "provenance": "dynamic"},
-                    ],
-                    "config_path": "/tmp/baseline.yaml",
-                },
-            },
-        ))
-        # Composite form should be rejected (it falls into the
-        # llm_direct bucket because it's not in the literal /
-        # prefix sets).
-        with pytest.raises(PolicyDenied):
+        for prov in ("dynamic", "dynamic:kv+sched", "llm_direct"):
             gate.validate_intent("orchestration", Intent(
                 type=IntentType.DELEGATE,
                 payload={
                     "action_name": "explore",
                     "params": {
                         "grid": [
-                            {"name": "v", "provenance": "dynamic:kv+sched"},
+                            {"name": "v", "provenance": prov},
                         ],
                         "config_path": "/tmp/baseline.yaml",
                     },

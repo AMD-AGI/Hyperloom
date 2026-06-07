@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """KB client interface + minimal HTTP transport.
 
 The Critic uses only 4 KB endpoints (contract §4):

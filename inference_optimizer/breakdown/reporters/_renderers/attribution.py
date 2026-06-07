@@ -1,6 +1,9 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Attribution renderer — gain split across optimization sources.
 
-Splits gain among backends / params / sweep / geak / oob. Surfaces:
+Splits gain among explore / sweep / geak / oob and retained legacy
+aliases. Surfaces:
 
 * the source_breakdown table (kept from the collector verbatim),
 * explicit "validated vs. reconstructed" call-out so report consumers
@@ -35,8 +38,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     total_v = sb.get("validated_total_pct")
     rows = [
-        # explore subsumes backends+params on sessions;
-        # legacy rows kept for legacy resume reports.
+        # explore subsumes the old backends+params split on current
+        # sessions; legacy rows remain for archived reports.
         ["explore",  sb.get("explore_pct_of_total"),  sb.get("explore_share_pct")],
         ["backends", sb.get("backends_pct_of_total"), sb.get("backends_share_pct")],
         ["params",   sb.get("params_pct_of_total"),   sb.get("params_share_pct")],

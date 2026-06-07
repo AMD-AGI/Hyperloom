@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Agent stall detection — monitors if other agents stop producing events."""
 
 from __future__ import annotations

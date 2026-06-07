@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Generate GitHub Actions matrix JSON from HuggingFace top-N, explicit list,
 or a pre-built candidates file (preferred for batch-driven dispatch).
 
@@ -338,14 +340,14 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 
 
 def _cron_batch_index(pool_size: int, batch_size: int) -> int:
-    """Deterministic production-pool rotation for UTC 00:00/12:00 cron.
+    """Deterministic production-pool rotation for the twice-daily cron.
 
     Manual workflow dispatches increment GitHub's run number, so using
     ``GITHUB_RUN_NUMBER`` for schedule rotation makes the next cron batch depend
-    on ad-hoc smoke runs. Instead, schedule uses the UTC half-day slot:
-    00:00-11:59 => slot 0, 12:00-23:59 => slot 1. The epoch is pinned to the
-    production pool date so every operator can predict the slice before cron
-    fires.
+    on ad-hoc smoke runs. Instead, schedule uses the UTC 12-hour slot:
+    00:00-11:59 => slot 0, 12:00-23:59 => slot 1 (cron fires at 00:00 / 12:00).
+    The epoch is pinned to the production pool date so every operator can
+    predict the slice before cron fires.
     """
     batches = max((pool_size + batch_size - 1) // batch_size, 1)
     epoch = datetime(2026, 5, 25, tzinfo=timezone.utc)
@@ -359,7 +361,7 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
         now_utc = datetime.now(timezone.utc)
     now_utc = now_utc.astimezone(timezone.utc)
     days = (now_utc.date() - epoch.date()).days
-    half_day_slot = 0 if now_utc.hour < 12 else 1
+    half_day_slot = min(now_utc.hour // 12, 1)
     slot = max(days, 0) * 2 + half_day_slot
     batch_index = slot % batches
     print(
@@ -531,6 +533,7 @@ def _matrix_entry(entry: dict | str) -> dict:
             "pool_id", "pool_index", "task_count", "positive_task_count",
             "last_success_at", "framework", "precision", "gpu", "tp",
             "conc", "gain", "task_id", "created_at",
+            "nodes", "rayjob_image",
         ):
             if entry.get(key) is not None:
                 out[key] = entry[key]

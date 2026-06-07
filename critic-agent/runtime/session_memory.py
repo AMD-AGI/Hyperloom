@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Per-session memory store for the Critic agent.
 
 The Critic must keep state inside a single session because the Coordinator

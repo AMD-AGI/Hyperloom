@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Apply an optimized kernel file with source/artifact backup and fast revert."""
 
 from __future__ import annotations

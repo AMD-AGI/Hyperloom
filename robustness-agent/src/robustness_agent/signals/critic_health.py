@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Critic-health signals (E1 / E2 / E4 / E5).
 
 Critic is the reviewer; **no one reviews the reviewer**. When the KB

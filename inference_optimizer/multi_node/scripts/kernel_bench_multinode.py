@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-node-aware kernel micro-benchmark runner.
 
 Counterpart to ``kill_multinode.py`` and ``kernel_patch_multinode.py``.

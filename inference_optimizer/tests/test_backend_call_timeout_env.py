@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Per-backend ``call_timeout_s`` env-var override tests.
 
 ``parse_call_timeout_env`` (orchestrator/backends/base.py) reads

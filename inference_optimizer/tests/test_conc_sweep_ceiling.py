@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the per-concurrency roofline ceiling block in conc_sweep.
 
 Pins the contract for ``orchestrator.conc_sweep._build_roofline_ceiling``:

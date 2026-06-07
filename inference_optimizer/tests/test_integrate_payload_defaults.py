@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """``_fill_integrate_defaults_from_state`` + integrate_handler defaulting.
 
 Pre-existing ``_resolve_integrate_payload`` fills ``patch_path`` and

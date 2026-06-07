@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Primus Cortex PR Monitor client.
 
 Internal-network replacement for the anonymous GitHub Search path. Talks

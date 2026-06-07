@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Robustness runtime CLI.
 
 Hosts (Coordinator, smoke harness, operator tooling) drive the reactor
@@ -138,6 +140,29 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         config.llm_rca_enabled = bool(options["llm_rca_enabled"])
     if "metrics_window_s" in options:
         config.metrics_window_s = int(options["metrics_window_s"])
+    if "disable_local_probe" in options:
+        config.disable_local_probe = bool(options["disable_local_probe"])
+    if "enable_cluster_pod_metrics" in options:
+        config.enable_cluster_pod_metrics = bool(options["enable_cluster_pod_metrics"])
+    if "pod_metrics_categories" in options:
+        raw_cats = options["pod_metrics_categories"]
+        if isinstance(raw_cats, str):
+            cats = tuple(
+                part.strip() for part in raw_cats.split(",") if part.strip()
+            )
+        elif isinstance(raw_cats, (list, tuple)):
+            cats = tuple(str(c).strip() for c in raw_cats if str(c).strip())
+        else:
+            cats = ()
+        if cats:
+            config.pod_metrics_categories = cats
+    if "workload_uid" in options:
+        config.workload_uid = str(options["workload_uid"] or "")
+    if "nodes" in options:
+        try:
+            config.nodes = max(1, int(options["nodes"]))
+        except (TypeError, ValueError):
+            pass
     # Auto-probe knob lets hosts/tests opt out of the default
     # inference-server health probe without having to configure
     # ``health_probe_targets`` from scratch. Useful for the heartbeat

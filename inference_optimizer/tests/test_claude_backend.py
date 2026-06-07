@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P1-5 ClaudeBackend + emit_intent MCP server tests.
 
 All tests use SDK test seams (``sdk_query_factory`` / ``sdk_options_cls``
@@ -36,7 +38,7 @@ from inference_optimizer.orchestrator.backends import (
     validate_emit_intent_input,
 )
 from inference_optimizer.orchestrator.backends.base import BackendError
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
     NoIntentEmitted,

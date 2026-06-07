@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 N6: ClaudeBackend cache hit metric extraction.
 
 Pins the contract N7 (verify + audit scripts) builds on top of:
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.intent_parser import IntentType
+from inference_optimizer.protocol.intent import IntentType
 from inference_optimizer.orchestrator.backends.claude import ClaudeBackend
 
 

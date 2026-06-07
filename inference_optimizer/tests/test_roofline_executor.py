@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 N2b: real RooflineExecutor orchestration tests.
 
 These tests pin the contract N3 (Coordinator sequence_denial) and N5
@@ -427,7 +429,7 @@ from inference_optimizer.orchestrator.coordinator import (
     _AUDIT_ACTIONS as COORDINATOR_AUDIT_ACTIONS,
     Coordinator,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import (
     _AUDIT_ACTIONS as SHARED_STATE_AUDIT_ACTIONS,
     _KEY_METRIC_MAP,

@@ -154,22 +154,26 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
 
 **Fix.**
 
-1. Re-run `install.sh` (it installs TraceLens-internal editable and
-   smokes the CLI):
+1. Re-run `install.sh` (it clones AMD-AGI/TraceLens to
+   `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`, pins it to a fixed
+   SHA, runs `pip install -e`, and smokes the CLI):
    ```bash
    bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
-   manually:
+   manually. By default use the installer-managed clone; only point
+   `TRACELENS_ROOT` at a pre-existing checkout you maintain as an
+   explicit operator override — that skips both the clone and the SHA
+   pin:
    ```bash
-   export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime}/source-mirrors/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
    TraceLens_generate_perf_report_pytorch_inference --help
    ```
-3. Do **not** fall back to the open-source TraceLens clone. The
-   open-source repo does not contain the standalone skills required by
-   `tools/tracelens_analysis.py`.
+3. The optional internal extension is enabled only when
+   `TRACELENS_INTERNAL_ROOT` is set to your own existing checkout
+   (no default path; leave unset for the open-source-only report).
 
 ---
 
@@ -206,7 +210,7 @@ specifics.
 
 **Cause.** `USER_DATA_PATH` points at a different directory than the
 original session, or the session never reached the point of writing
-`manifest.json` (failed in setup).
+`manifest.json` (failed before the session manifest was written).
 
 **Fix.**
 
@@ -221,8 +225,8 @@ original session, or the session never reached the point of writing
    export USER_DATA_PATH=/path/to/your/session
    inference_optimizer optimize --resume
    ```
-3. If `manifest.json` truly never existed (session crashed at setup),
-   resume is not possible — restart with a fresh `--model …` launch.
+3. If `manifest.json` truly never existed, resume is not possible —
+   restart with a fresh `--model …` launch.
 
 ---
 

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Integration test: ``fa explore --execute`` against fake Primus + echo build/bench.
 
 The fake bench command writes a constant ``benchmark.json`` so the

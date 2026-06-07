@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``_server_patcher`` (Hyperloom issue #194 §4 / §5).
 
 Contract recap (see ``_server_patcher.py`` docstring for the long

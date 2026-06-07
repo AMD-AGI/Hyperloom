@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Schema (TypedDict shape) for ``session_breakdown.json``.
 
 This is the single contract between ``inference_optimizer`` (producer)
@@ -22,10 +24,15 @@ from typing import Any, TypedDict
 
 #: breakdown schema version. v2 adds the
 #: ``specialist_runs`` section, ``capability_summary.specialist``
-#: row, ``critic_robustness.kb_writes_summary`` sub-block, and the
-#: top-level ``action_timeline`` / ``explore_search`` v1-reader
-#: aliases. Inv-12.1 guarantees a v0.6 / reader can still
-#: consume the file because v2 only *adds* fields.
+#: row, ``critic_robustness.kb_writes_summary`` sub-block, the
+#: top-level ``action_timeline`` alias, the native ``explore_search``
+#: ledger (with ``param_search`` retained as a v1-reader alias), and
+#: (additively) the ``kernel_optimization_summary`` /
+#: ``conc_sweep_summary`` sections mirrored from
+#: ``reports/kernel_optimization_summary.json`` and
+#: ``reports/conc_sweep_summary.json``. Additive-only: a v1 reader can
+#: still consume v2 because new versions only *add* fields — the version
+#: string does not bump for additive sections.
 SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 
 
@@ -156,6 +163,8 @@ class PhaseEvent(TypedDict, total=False):
     key_metric_kind: str | None
     workspace: str | None
     error_class: str | None
+    phase: str                    # declared phase (journal-sourced events); "" otherwise
+    change: str                   # human-readable change summary (journal) or action key
     extras: dict[str, Any]
 
 
@@ -163,13 +172,15 @@ class PhaseEvent(TypedDict, total=False):
 # §6 Capability summary — Capability cards in UI
 # ---------------------------------------------------------------------------
 class CapabilityEntry(TypedDict, total=False):
-    status: str                   # kept / tried / attempted / not_attempted / not_configured / failed / completed
+    status: str                   # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
     attempts: int
-    keeps: int
+    keeps: int                    # geak/oob: kernels adopted at integrate (NOT micro-only KEEP)
+    reverts: int                  # geak/oob: micro-KEPT kernels reverted at integrate (e2e regressed)
+    e2e_gain_pct: float | None    # geak/oob: best end-to-end integrate gain for this lane's kernel
     tested: int                   # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
     reason: str                   # human readable, e.g. "kernel-claude only this run"
-    # v0.8 M3 explore-specific:
+    # explore-specific:
     keep_unstable_count: int      # KEEP'd variants evicted by inlined stack rebench
     winners_history: int          # cumulative explore_search.winners_history length
     # specialist-row only — per-domain split. Keys are
@@ -186,7 +197,7 @@ class CapabilitySummary(TypedDict, total=False):
     geak: CapabilityEntry
     oob: CapabilityEntry
     # primary explore row; ``backends`` / ``params`` /
-    # ``validate_stack`` are kept as compatibility aliases (§3.12 §4.2).
+    # ``validate_stack`` are kept as compatibility aliases.
     explore: CapabilityEntry
     backends: CapabilityEntry
     params: CapabilityEntry
@@ -248,6 +259,13 @@ class DetectedKernel(TypedDict, total=False):
     source_file: str | None
     detected_from_task: str       # which profile task_id surfaced it
     benchmark_report_path: str
+    # lifecycle stamps (added by _collect_detected_kernels)
+    selected_for_optimization: bool
+    geak: dict[str, Any] | None   # {attempts, best_speedup, decision, last_status}
+    oob: dict[str, Any] | None
+    adopted_by: str | None        # geak / oob / kernel_agent / None
+    final_decision: str           # kept / reverted / rejected / attempted / not_optimized
+    integrate_gain_pct: float | None  # e2e (integrate) gain; negative => regressed -> reverted
 
 
 class RecommendedKernel(TypedDict, total=False):
@@ -534,7 +552,7 @@ class Attribution(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# §16 Phase segments — v0.8 M2 phase state machine
+# §16 Phase segments — phase state machine
 # ---------------------------------------------------------------------------
 class PhaseSegment(TypedDict, total=False):
     phase: str                 # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
@@ -542,47 +560,21 @@ class PhaseSegment(TypedDict, total=False):
     entered_ts: str            # iso UTC of entry
     entered_unix: float | None
     exit_ts: str               # iso UTC of next transition; "" for current segment
-    exit_reason: str           # KB_design §3.2 §6 vocab entry; "" for current segment
+    exit_unix: float | None    # unix epoch of next transition; None for current segment
+    exit_reason: str           # transition reason vocab entry; "" for current segment
     evidence: dict[str, Any]   # entry evidence (snapshot at transition time)
-    actions: list[PhaseEvent]  # events from phase_timeline whose ts ∈ [entered, exit)
+    events: list[dict[str, Any]]  # non-transition sub-events folded into this phase
+    actions: list[PhaseEvent]  # phase_timeline events attributed to this phase
     elapsed_seconds: float | None
 
 
 # ---------------------------------------------------------------------------
-# §15 KB Provenance — Cortex KB integration
+# §15 KB Provenance — RecipeKB / PR Monitor integration
 # ---------------------------------------------------------------------------
-class KBPendingEdge(TypedDict, total=False):
-    proposal_msg_id: str
-    edge_id: str
-    action: str
-    ts: str
-
-
 class KBQueueStats(TypedDict, total=False):
     pending_lines: int             # current depth of .kb_pending.ndjson
     flushed_bookmarks: int         # rows in .kb_flushed.ndjson (drain bookmarks)
     dead_letter_lines: int         # rows in .kb_dead_letter.ndjson
-
-
-class KBCommitSummary(TypedDict, total=False):
-    status: str                    # committed / commit_failed / skip_disabled / ...
-    promoted_edges: list[str]
-    derived_summary_id: str
-
-
-class KBPointCreated(TypedDict, total=False):
-    """One row in ``kb_provenance.points_created``.
-
-    ``kind`` ∈ {workload_node / issue_node / optimization_node /
-    pr_node / attempt_node / ...}. ``pr_node`` rows are the M4
-    contribution; everything else came from M1/M3 path.
-    """
-    canonical_id: str
-    kind: str
-    authority: str
-    source: str
-    status: str
-    ts: str
 
 
 class KBFlusherStatus(TypedDict, total=False):
@@ -628,25 +620,20 @@ class KBProvenance(TypedDict, total=False):
     warm_start_recipe_tier: str
     warm_start_pitfall_count: int
     warm_start_lesson_count: int
-    # GAP 1 — operator-visible warm-replay summary.
+    # operator-visible warm-replay summary.
     warm_replay: WarmReplayOutcome
     warm_replay_attempted: bool
     warm_history_injected: bool
     stack_fingerprint: dict[str, str]
-    pending_edges: list[KBPendingEdge]
     queue: KBQueueStats
     audit_tail_count: int
     audit_status_counts: dict[str, int]
-    # points created during this session.
-    points_created: list[KBPointCreated]
-    points_by_kind: dict[str, int]
-    commit_summary: KBCommitSummary
-    # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle marker.
+    # Cortex KB flusher daemon lifecycle marker.
     flusher_status: KBFlusherStatus
-    # IR-3 soft-degrade audit. Values:
-    # ``None`` (KB / PR Monitor reachable, no degrade), ``"explicit_flag"``
-    # (operator passed ``--degraded-{kb,pr}``), or ``"ir3_auto"`` (IR-3
-    # probe failed and cli auto-enabled the corresponding degrade).
+    # Soft-degrade audit. Values: ``None`` (KB / PR Monitor reachable,
+    # no degrade), ``"explicit_flag"`` (operator passed
+    # ``--degraded-{kb,pr}``), or ``"ir3_auto"`` (preflight probe failed
+    # and cli auto-enabled the corresponding degrade).
     kb_degraded_reason: str
     pr_degraded_reason: str
 
@@ -681,7 +668,11 @@ class SpecialistTranscriptRef(TypedDict, total=False):
 
 class SpecialistRound(TypedDict, total=False):
     """One element of ``specialist_runs``."""
-    round_id: int
+    # ``round_id`` is whatever ``record_specialist_round`` stored: a
+    # numeric round counter, an "explore-NNN" label, or a task-id hash
+    # when one specialist task anchors the round. Coerced numeric when
+    # possible (see ``_coerce_round_id``), otherwise left as a string.
+    round_id: int | str
     dispatched_at: str
     completed_at: str
     domains: list[str]
@@ -690,9 +681,9 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
-    # Retired field — was populated by the T2 hypothesize hook (now
-    # gone). Kept on the schema so claw-stats-service readers that
-    # destructure specialist_runs[] don't break; always empty.
+    # Retired field, kept on the schema (always empty) so
+    # claw-stats-service readers that destructure specialist_runs[]
+    # don't break.
     kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
@@ -937,6 +928,65 @@ class KernelRoofline(TypedDict, total=False):
     kernels: list[KernelRooflineEntry]
 
 
+# ---------------------------------------------------------------------------
+# Kernel Optimization Summary (Breakdown 面板对接文档 A1; PR #399 lishuoshuo)
+# ---------------------------------------------------------------------------
+# Mirror of ``<session_dir>/reports/kernel_optimization_summary.json``
+# (produced deterministically by the ``report`` action via
+# ``orchestrator/kernel_attempt_summary.build_kernel_optimization_summary``).
+# Answers "did each top kernel get optimized by the kernel-agent, and
+# why did it fail" without the dashboard walking the kernel-agent tree.
+# The collector mirrors the report verbatim (light top-level shape
+# guards only) so new producer fields ride through without a schema
+# change; the deeply-nested ``by_kernel[]`` rows therefore stay loose
+# (``dict``) and are documented in roofline优化对接文档.md §A1.4.
+class KernelOptimizationSummary(TypedDict, total=False):
+    schema_version: int                    # producer schema (currently 1; int, unlike conc_sweep's str)
+    session_id: str                        # global id ``{model}_{ts}_{short_uuid}``
+    model_name: str
+    cumulative_gain_validated_pct: float
+    totals: dict[str, int]                 # {top_candidates, attempted, integrated, keep_pending, rejected, in_flight, unattempted}
+    rejection_breakdown: dict[str, int]
+    unattempted_reason_breakdown: dict[str, int]
+    failure_reason_breakdown: dict[str, int]
+    field_glossary: dict[str, str]         # {field_name: explanation} for tooltips
+    top_takeaways: list[str]               # 2-4 deterministic (non-LLM) sentences
+    by_kernel: list[dict[str, Any]]        # one row per top kernel, sorted gpu_pct desc; shape per §A1.4
+    report_path: str                       # rel-to-session path to the mirrored source report
+
+
+# ---------------------------------------------------------------------------
+# Conc Sweep Summary (Breakdown 面板对接文档 A2; PR #399 lishuoshuo)
+# ---------------------------------------------------------------------------
+# Mirror of ``<session_dir>/reports/conc_sweep_summary.json`` (produced
+# by the ``conc_sweep`` action during SWEEP). Extends the single-CONC
+# headline gain into a baseline-vs-current_best curve across a CONC
+# ladder. Absent when conc_sweep never ran (Block hidden). When
+# ``status="skipped"`` the producer omits the baseline/optimized/
+# comparison/summary blocks — read ``status`` before those keys.
+class ConcSweepSummary(TypedDict, total=False):
+    schema_version: str                    # producer schema (currently "1.0"; str, unlike kernel summary's int)
+    status: str                            # succeeded / failed / skipped
+    skip_reason: str                       # only when status="skipped"
+    session_id: str
+    isl: int
+    osl: int
+    tp: int
+    concs_requested: list[int]
+    baseline: dict[str, Any]               # {extra_server_args, extra_envs, points[]}
+    optimized: dict[str, Any]              # {extra_server_args, extra_envs, points[]}
+    comparison: list[dict[str, Any]]       # per-CONC paired rows (feeds the dual curve + speedup bars)
+    summary: dict[str, Any]                # {successful_pairs, failed_pairs, best_conc, best_speedup, median_speedup, mean_speedup}
+    workspace: str
+    elapsed_sec: float
+    total_budget_sec: int                  # None when budget gate disabled
+    budget_exhausted: bool
+    report_json_path: str
+    report_csv_path: str                   # for the "download CSV" button
+    roofline_ceiling: dict[str, Any]       # per-CONC theoretical peak + MBU% (§A2.9); may be absent on old products
+    report_path: str                       # rel-to-session path to the mirrored source report
+
+
 class SessionBreakdown(TypedDict, total=False):
     schema_version: str
     exported_at_utc: str
@@ -946,22 +996,20 @@ class SessionBreakdown(TypedDict, total=False):
     workload: Workload
     baseline: Baseline
     final: Final
-    # ``phase_timeline`` retained for v1-reader
-    # compat as the flat per-action timeline (``action_timeline`` is
-    # the canonical v2 name; see below). ``phase_segments`` carries
-    # the phase-boundary view (M2).
+    # ``phase_timeline`` retained for v1-reader compat as the flat
+    # per-action timeline (``action_timeline`` is the canonical v2 name;
+    # see below). ``phase_segments`` carries the phase-boundary view.
     phase_timeline: list[PhaseEvent]
     phase_segments: list[PhaseSegment]
-    # v0.8 §3.12 §4.2 / §5 — top-level action_timeline alias used by
-    # v0.6 readers that still expect a flat per-action list.
+    # top-level action_timeline alias used by older readers that still
+    # expect a flat per-action list.
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
     geak_invocations: list[Invocation]
     oob_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
-    # ``param_search`` is the v1-reader compat alias
-    # for the merged ``explore_search`` ledger; both fields carry
-    # identical data so an old reader doesn't see a missing key.
+    # ``explore_search`` is the native merged ledger. ``param_search`` is
+    # retained as a v1-reader compatibility alias with identical data.
     param_search: ParamSearch
     explore_search: ParamSearch
     sweep: Sweep
@@ -987,6 +1035,15 @@ class SessionBreakdown(TypedDict, total=False):
     # §1). Mirrors ``<sd>/reports/kernel_roofline.json`` so consumers
     # don't have to walk the kernel-agent output tree themselves.
     kernel_roofline: KernelRoofline
+    # Kernel-agent attempt outcome summary (Breakdown 面板对接文档 §A1).
+    # Mirrors ``<sd>/reports/kernel_optimization_summary.json``. Empty
+    # dict when the report is absent (session predates PR #399 or the
+    # ``report`` action never ran) — the dashboard hides Block 1.
+    kernel_optimization_summary: KernelOptimizationSummary
+    # Post-optimization concurrency sweep (Breakdown 面板对接文档 §A2).
+    # Mirrors ``<sd>/reports/conc_sweep_summary.json``. Empty dict when
+    # conc_sweep never ran — the dashboard hides Block 2.
+    conc_sweep_summary: ConcSweepSummary
     # Per-snapshot roofline comparison list (one entry per
     # ``state.roofline_snapshots`` history pass). Drives the markdown-
     # report ``## Roofline`` section. Each entry has ``source_path /
@@ -1013,6 +1070,7 @@ __all__ = [
     "BenchmarkInvocation",
     "CapabilityEntry",
     "CapabilitySummary",
+    "ConcSweepSummary",
     "CriticIteration",
     "CriticKBWritesSummary",
     "CriticRobustness",
@@ -1028,6 +1086,7 @@ __all__ = [
     "LaneTimelineEntry",
     "KernelLifecycle",
     "KernelMetadata",
+    "KernelOptimizationSummary",
     "OptimizedKernel",
     "ParamSearch",
     "ParamSearchEntry",
