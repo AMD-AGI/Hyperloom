@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 M4 — Knowledge plane + PR Monitor tests.
 
 Covers KB_design §3.6 + §3.13 M4:

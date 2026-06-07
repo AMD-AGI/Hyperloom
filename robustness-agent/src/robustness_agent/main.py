@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Entry point for the standalone Robustness Agent reactor.
 
 The package console script runs the symptom -> intent reactor in standalone

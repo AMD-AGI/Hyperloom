@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Idempotent, atomic-write patcher for Magpie ``_prepare_benchmark_scripts``
 (Hyperloom ``bugs.md`` §C #1 root-cause fix).
 

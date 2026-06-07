@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for KEEP/REVERT recipe sedimentation and the warm-start closure.
 
 Covers:

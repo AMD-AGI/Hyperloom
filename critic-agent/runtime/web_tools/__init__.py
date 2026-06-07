@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Critic-agent web tools — pluggable, off-by-default ``web_search`` and
 ``web_fetch`` capability for the critic LLM reasoning step.
 

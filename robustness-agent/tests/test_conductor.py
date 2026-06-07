@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for Conductor integration — event reading from the SQLite DB."""
 
 from __future__ import annotations

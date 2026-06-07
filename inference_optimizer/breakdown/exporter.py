@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Top-level builder for ``session_breakdown.json``.
 
 Three entrypoints share this builder:

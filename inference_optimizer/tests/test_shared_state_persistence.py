@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P1-3 SharedState + Coordinator integration tests.
 
 Covers:

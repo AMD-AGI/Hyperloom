@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-K — Prompt rendering carries the source-promotion notice.
 
 When :mod:`tracelens_analysis` promotes a candidate from a python

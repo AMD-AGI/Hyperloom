@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PRELUDE-bootstrap analysis-task enqueue test.
 
 The PRELUDE phase ends with an auto-enqueued analysis task driven by

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Lightweight GPU micro-benchmark for the explore --execute e2e path.
 
 Runs sglang's RMSNorm kernel on a fixed (N=4096, H=8192, bf16) input and

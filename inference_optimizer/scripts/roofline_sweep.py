@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline concurrency sweep: baseline vs optimized vs theoretical peak.
 
 After an ``optimize`` session finishes, this driver replays a fixed

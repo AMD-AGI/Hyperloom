@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for direct-gateway auth setup in ``_preflight``.
 
 The failure mode that motivated these tests:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Compose ``gap_description`` + ``keywords`` for the framework_pr arm.
 
 The fa pre-stage hook (legacy, scheduled for removal) took ``--framework-gap``

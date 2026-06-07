@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end smoke test for the breakdown exporter.
 
 Builds a synthetic but realistic session_dir tree (manifest + state +

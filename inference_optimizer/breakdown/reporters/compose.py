@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Top-level composer: run every renderer + (optionally) call the LLM
 + stitch the result into a single markdown document.
 

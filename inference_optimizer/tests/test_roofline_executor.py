@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 N2b: real RooflineExecutor orchestration tests.
 
 These tests pin the contract N3 (Coordinator sequence_denial) and N5

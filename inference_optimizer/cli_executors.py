@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Action-executor wiring for the CLI.
 
 Holds the declarative real-executor table, the specialist / dynamic-action

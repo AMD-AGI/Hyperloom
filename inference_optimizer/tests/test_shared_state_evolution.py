@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.10 — SharedState evolution / migration tests.
 
 Covers KB_design/3.10_shared_state_evolution/README.md acceptance

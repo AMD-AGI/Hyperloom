@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """In-memory KBClient used by tests + dry-run mode.
 
 This implementation honours the four behaviours the contract (§7.3)

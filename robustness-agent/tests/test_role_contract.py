@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Contract test: keep envelope tables aligned with inference_optimizer.
 
 Skipped when ``inference_optimizer`` is not importable (the agent

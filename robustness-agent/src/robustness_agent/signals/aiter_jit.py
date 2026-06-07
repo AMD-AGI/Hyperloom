@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Aiter JIT-cache regression detector (A7).
 
 Hyperloom's baseline cold-start cost is dominated by aiter's JIT

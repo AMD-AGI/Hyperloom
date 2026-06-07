@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Research-hint artifacts collected by the research scout.
 
 The scout produces *advisory*, source-backed priors:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 M3 — ExploreExecutor + explore_search ledger tests.
 
 Mirror of ``test_p2_3_param_executors.py`` for the merged ``explore``

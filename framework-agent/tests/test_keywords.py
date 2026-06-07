@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.keywords.extract_keywords.
 
 Hermetic - pure-Python, no network/GPU/disk.
