@@ -182,6 +182,9 @@ class ModelMeta:
     # Extra HF config fields for per-op PerfModel breakdown (0 = unavailable).
     hidden_size: int = 0
     intermediate_size: int = 0
+    # Per-expert FFN dim for MoE models (e.g. Qwen3-MoE, DeepSeek-V3).
+    # 0 means dense or unknown; PerfModel uses intermediate_size as fallback.
+    moe_intermediate_size: int = 0
     vocab_size: int = 0
     num_attention_heads: int = 0
 
@@ -415,6 +418,7 @@ def load_model_meta(
         expert_weight_bytes=total_expert_bytes,
         hidden_size=int(cfg.get("hidden_size") or 0),
         intermediate_size=int(cfg.get("intermediate_size") or 0),
+        moe_intermediate_size=int(cfg.get("moe_intermediate_size") or 0),
         vocab_size=int(cfg.get("vocab_size") or 0),
         num_attention_heads=int(cfg.get("num_attention_heads") or 0),
     )
@@ -667,9 +671,14 @@ _EMPTY_BREAKDOWN = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
 def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
     """Compute T_mem + T_cmp + min(T_mem, T_cmp) + bound_kind in one shot.
 
-    This is the primary entry point introduced by the two-sided roofline
-    formula change. ``compute_peak_from_state`` is kept as a thin scalar
-    wrapper for callers that only need ``T_peak``.
+    Primary entry point for roofline ceiling. Uses the TraceLens-compatible
+    bottom-up PerfModel (``compute_roofline_from_perfmodel``) as the preferred
+    source when model config is complete; falls back to the legacy top-down
+    formula (T_mem / T_cmp aggregate) when PerfModel metadata is unavailable.
+
+    The legacy ``mem_tok_per_sec`` and ``cmp_tok_per_sec`` fields are always
+    populated from the aggregate formula so dashboards can display them even
+    when PerfModel drives ``peak_tok_per_sec``.
 
     Safe degrade: never raises; returns ``_EMPTY_BREAKDOWN`` on any
     missing-field path so the caller can stamp the result into history
@@ -717,12 +726,41 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
     if cmp <= 0:
         # T_cmp unknown (precision not in HW_SPECS); degrade to T_mem
         # ceiling and mark memory-bound (matches pre-PR behaviour).
-        return RooflineBreakdown(mem, 0.0, mem, "memory")
-    if mem <= 0:
-        return RooflineBreakdown(0.0, cmp, cmp, "compute")
-    if cmp < mem:
-        return RooflineBreakdown(mem, cmp, cmp, "compute")
-    return RooflineBreakdown(mem, cmp, mem, "memory")
+        legacy = RooflineBreakdown(mem, 0.0, mem, "memory")
+    elif mem <= 0:
+        legacy = RooflineBreakdown(0.0, cmp, cmp, "compute")
+    elif cmp < mem:
+        legacy = RooflineBreakdown(mem, cmp, cmp, "compute")
+    else:
+        legacy = RooflineBreakdown(mem, cmp, mem, "memory")
+
+    # Prefer the bottom-up PerfModel peak for dense models.
+    # For MoE (num_experts > 0) the batch-aware coupon expert-saturation
+    # effect is not yet modeled inside PerfModel (TraceLens' moe_perf_model_
+    # extensions.py adds this), so legacy gives a tighter bound at mid-high
+    # batch. Once PerfModel includes the coupon formula, remove the guard.
+    if meta.num_experts == 0:
+        try:
+            pm_bd = compute_roofline_from_perfmodel(
+                meta=meta,
+                gpu_type=gpu_type,
+                concurrency=concurrency,
+                isl=int(getattr(state, "isl", 0) or 0),
+                osl=int(getattr(state, "osl", 0) or 0),
+                num_gpus=num_gpus,
+                precision_tag=precision_tag,
+            )
+            if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
+                return RooflineBreakdown(
+                    mem_tok_per_sec=legacy.mem_tok_per_sec,
+                    cmp_tok_per_sec=legacy.cmp_tok_per_sec,
+                    peak_tok_per_sec=pm_bd.decode_tok_per_s,
+                    bound_kind=pm_bd.bound_kind,
+                )
+        except Exception:  # noqa: BLE001 — PerfModel is best-effort
+            pass
+
+    return legacy
 
 
 def compute_peak_from_state(state: Any) -> float:
@@ -953,7 +991,16 @@ def compute_roofline_from_perfmodel(
         ("v_proj",    hidden, kv_out, n_layers),
         ("o_proj",    q_out,  hidden, n_layers),
     ]
-    if ffn:
+    # MoE: use per-token active FFN size (experts_per_tok × moe_intermediate_size).
+    # Dense: use intermediate_size directly.
+    if meta.num_experts > 0 and meta.moe_intermediate_size > 0:
+        ffn_active = meta.experts_per_tok * meta.moe_intermediate_size
+        linears += [
+            ("gate_proj", hidden, ffn_active, n_layers),
+            ("up_proj",   hidden, ffn_active, n_layers),
+            ("down_proj", ffn_active, hidden, n_layers),
+        ]
+    elif ffn:
         linears += [
             ("gate_proj", hidden, ffn, n_layers),
             ("up_proj",   hidden, ffn, n_layers),
