@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Blocker #1 regression — ``--no-kernel`` boot must still register the
 PRELUDE-initial analysis executors.
 

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``_subprocess_kill.kill_my_spawned_server`` and the
 BaselineExecutor integration that uses it (Hyperloom ``bugs.md`` §B).
 

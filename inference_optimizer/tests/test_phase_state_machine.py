@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 M2 — phase state machine tests (KB_design §3.2 + §3.8 + §3.11 R1).
 
 Covers the additive subset of M2 implemented in this PR:
@@ -23,7 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 from inference_optimizer.orchestrator import phase_state
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     CORE_STATE_FIELDS,
     PolicyDenied,
@@ -97,7 +99,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
     for reason in (
         # v0.6 sentinels
         "target_reached", "time_exhausted", "max_ticks", "policy_loop",
-        "baseline_failed", "emergency",
+        "baseline_failed", "emergency", "coordinator_exception",
         # v0.8 additions
         "crash_threshold_exceeded", "user_stop_requested",
         "cortex_drain_failed", "plateau_explore",
@@ -169,23 +171,6 @@ def test_exit_normal_explore_uses_budget_exhaustion():
     assert out is not None and out[0] == "explore_phase_budget_exhausted"
 
 
-def test_exit_normal_explore_plateau_heuristic():
-    state = SimpleNamespace(
-        phase="EXPLORE",
-        phase_started_unix=0.0,
-        max_minutes=0,  # unlimited
-        phase_budget_pct={},
-        params_no_promote_streak=5,
-        explore_search={},
-        optimization_stack=[{"action": "explore"}],
-    )
-    out = phase_state.exit_normal_explore(state)
-    assert out is not None and out[0] == "plateau_explore"
-    # Without optimization_stack it does NOT fire (would be PRELUDE-ish).
-    state.optimization_stack = []
-    assert phase_state.exit_normal_explore(state) is None
-
-
 def test_compute_next_phase_no_kernel_skips_kernel_phase():
     state = SimpleNamespace(
         phase="EXPLORE",
@@ -193,7 +178,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         max_minutes=0,
         phase_budget_pct={},
         stop_reason="",
-        params_no_promote_streak=5,
+        pending_escalate_hint="skip_to_kernel",
         explore_search={},
         optimization_stack=[{"action": "explore"}],
     )
@@ -220,35 +205,6 @@ def test_compute_next_phase_terminal_overrides_phase():
     assert out is not None
     assert out[0] == "CLOSE" and out[1] == "target_reached"
     assert out[2].get("terminal") is True
-
-
-def test_infer_phase_for_v06_session():
-    # baseline_tput zero → PRELUDE
-    state = SimpleNamespace(baseline_tput=0.0, stop_reason="")
-    assert phase_state.infer_phase_from_state(state)[0] == "PRELUDE"
-    # baseline + optimization stack non-empty → EXPLORE
-    state = SimpleNamespace(
-        baseline_tput=1.0, stop_reason="",
-        last_sweep={}, last_kernel_opt={}, optimization_stack=[{}], kernel_enabled=True,
-    )
-    assert phase_state.infer_phase_from_state(state)[0] == "EXPLORE"
-    # last_kernel_opt seen, kernel enabled → KERNEL
-    state = SimpleNamespace(
-        baseline_tput=1.0, stop_reason="",
-        last_sweep={}, last_kernel_opt={"id": "k1"}, kernel_enabled=True,
-        optimization_stack=[],
-    )
-    assert phase_state.infer_phase_from_state(state)[0] == "KERNEL"
-    # last_sweep present → SWEEP
-    state = SimpleNamespace(
-        baseline_tput=1.0, stop_reason="",
-        last_sweep={"grid_size": 4}, last_kernel_opt={}, kernel_enabled=True,
-        optimization_stack=[],
-    )
-    assert phase_state.infer_phase_from_state(state)[0] == "SWEEP"
-    # stop_reason set → CLOSE
-    state = SimpleNamespace(baseline_tput=1.0, stop_reason="time_exhausted")
-    assert phase_state.infer_phase_from_state(state)[0] == "CLOSE"
 
 
 # ===========================================================================
@@ -527,68 +483,3 @@ def test_collect_phase_segments_empty_when_history_missing():
     from inference_optimizer.breakdown.collectors import collect_phase_segments
     assert collect_phase_segments({}, [], warnings=[]) == []
     assert collect_phase_segments({"phase_history": []}, [], warnings=[]) == []
-
-
-def test_collect_phase_segments_emits_proxy_provisional_warning():
-    """KB_gaps/Gap-15 / R-09 — when a phase_history row carries the
-    legacy ``m2_proxy`` evidence (or the canonical ``r09_provisional``
-    flag), the collector pushes a single ``plateau_proxy_provisional``
-    marker into the session-level warnings list."""
-    from inference_optimizer.breakdown.collectors import collect_phase_segments
-    state = {
-        "phase_history": [
-            {
-                "from_phase": "",
-                "to_phase":   "EXPLORE",
-                "reason":     "prelude_done",
-                "evidence":   {"baseline_tput": 100.0},
-                "ts":         "2026-05-19T00:00:00+00:00",
-                "ts_unix":    1.0,
-            },
-            {
-                "from_phase": "EXPLORE",
-                "to_phase":   "KERNEL",
-                "reason":     "plateau_explore",
-                "evidence":   {
-                    "evidence":         "m2_proxy",
-                    "r09_provisional":  True,
-                    "params_no_promote_streak": 5,
-                },
-                "ts":         "2026-05-19T00:30:00+00:00",
-                "ts_unix":    1801.0,
-            },
-        ],
-    }
-    warnings: list[str] = []
-    segments = collect_phase_segments(state, [], warnings=warnings)
-    assert len(segments) == 2
-    assert any("plateau_proxy_provisional" in w for w in warnings)
-    # Only one marker even if multiple proxy segments existed.
-    assert sum("plateau_proxy_provisional" in w for w in warnings) == 1
-
-
-def test_collect_phase_segments_no_proxy_warning_for_clean_session():
-    from inference_optimizer.breakdown.collectors import collect_phase_segments
-    state = {
-        "phase_history": [
-            {
-                "from_phase": "",
-                "to_phase":   "EXPLORE",
-                "reason":     "prelude_done",
-                "evidence":   {"baseline_tput": 100.0},
-                "ts":         "2026-05-19T00:00:00+00:00",
-                "ts_unix":    1.0,
-            },
-            {
-                "from_phase": "EXPLORE",
-                "to_phase":   "KERNEL",
-                "reason":     "plateau_explore",
-                "evidence":   {"evidence": "plateau_judgment"},
-                "ts":         "2026-05-19T00:30:00+00:00",
-                "ts_unix":    1801.0,
-            },
-        ],
-    }
-    warnings: list[str] = []
-    collect_phase_segments(state, [], warnings=warnings)
-    assert not any("plateau_proxy_provisional" in w for w in warnings)

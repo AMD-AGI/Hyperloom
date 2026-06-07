@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Append-only JSONL sink for ladder findings.
 
 File layout::

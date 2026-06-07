@@ -1,15 +1,11 @@
-"""Entry point for the Robustness Agent daemon.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Two run modes:
+"""Entry point for the standalone Robustness Agent reactor.
 
-* ``--mode reactor`` (default, M1): runs the new symptom -> intent
-  pipeline in standalone form, polling sources every
-  ``standalone_tick_interval_s`` seconds and writing findings to disk.
-  This is mainly used for dev / smoke testing; production hosts (the
-  Coordinator) drive the reactor via :mod:`robustness_agent.runtime.cli`
-  in a subprocess instead.
-* ``--mode legacy``: keeps the previous RobustnessAgent loop available
-  for environments that still depend on direct conductor.db writes.
+The package console script runs the symptom -> intent reactor in standalone
+form, polling sources every ``standalone_tick_interval_s`` seconds and
+writing findings to disk. Production hosts drive the same reactor via
+:mod:`robustness_agent.runtime.cli` in a subprocess instead.
 """
 
 from __future__ import annotations
@@ -87,45 +83,15 @@ async def _run_reactor_mode(config: Config) -> None:
         await bundle.aclose()
 
 
-async def _run_legacy_mode(config: Config) -> None:
-    """Original event-driven RobustnessAgent loop, kept for compatibility."""
-    from .agent import RobustnessAgent
-
-    log = logging.getLogger("robustness_agent")
-    agent = RobustnessAgent(config)
-    loop = asyncio.get_running_loop()
-
-    def _shutdown(sig: signal.Signals) -> None:
-        log.info("Received %s, shutting down", sig.name)
-        loop.create_task(agent.stop())
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _shutdown, sig)
-        except NotImplementedError:
-            pass
-
-    await agent.run_forever()
-
-
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="robustness-agent")
-    parser.add_argument(
-        "--mode",
-        choices=("reactor", "legacy"),
-        default="reactor",
-        help="reactor: M1 standalone loop (default); legacy: previous agent.py loop",
-    )
     return parser.parse_args(argv)
 
 
 async def _async_main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     config = await Config.discover()
-    if args.mode == "reactor":
-        await _run_reactor_mode(config)
-    else:
-        await _run_legacy_mode(config)
+    await _run_reactor_mode(config)
 
 
 def main() -> None:

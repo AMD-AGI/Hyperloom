@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-K — per-source attempts ledger unlocks device retry post-promotion.
 
 Background

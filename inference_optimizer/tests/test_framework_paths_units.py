@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``orchestrator.framework_paths``.
 
 Covers the path-resolution helpers that decide where to look for sglang
@@ -10,12 +12,26 @@ control-flow without the real container layout.
 from __future__ import annotations
 
 import importlib.util
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from inference_optimizer.orchestrator import framework_paths as fp
+from inference_optimizer.orchestrator.action_registry import ActionRegistry
+from inference_optimizer.orchestrator.framework_paths import (
+    probe_framework_source_roots_for_env,
+    resolve_sglang_server_args_path,
+    resolve_source_file_allowlist,
+    resolve_vllm_arg_utils_path,
+)
+from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+    FULL_ENABLED_ACTIONS,
+    build_orchestration_prompt,
+)
+from inference_optimizer.paths import asset_system_prompts_dir
 
 
 @pytest.fixture(autouse=True)
@@ -551,3 +567,105 @@ class TestAtomPathPresentInAllThreeLocations:
             f"atom subsets diverged — orch={sorted(orch_atom)!r} "
             f"ka={sorted(ka_atom)!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Source-root resolution + prompt injection (was test_framework_source_roots.py)
+# ---------------------------------------------------------------------------
+def test_resolve_source_file_allowlist_unions_env_override(monkeypatch):
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
+        "/custom/vllm/:/extra/pkg/",
+    )
+    roots = resolve_source_file_allowlist()
+    assert "/sgl-workspace/vllm/" in roots
+    assert "/custom/vllm/" in roots
+    assert "/extra/pkg/" in roots
+
+
+def test_find_spec_fallback_returns_note_when_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS", "")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_VLLM_ARG_UTILS", "")
+    path, note = resolve_sglang_server_args_path()
+    assert path.name == "server_args.py"
+    assert "not found" in note.lower() or str(path) in note
+    vpath, vnote = resolve_vllm_arg_utils_path()
+    assert vpath.name == "arg_utils.py"
+    assert vnote
+
+
+def test_prompt_renders_framework_source_roots(registry=None):
+    registry = registry or ActionRegistry().load()
+    custom = ("/custom/sglang/", "/opt/venv/lib/python3.12/site-packages/vllm/")
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=FULL_ENABLED_ACTIONS,
+        framework="sglang",
+        max_minutes=60,
+        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        framework_source_roots=custom,
+    )
+    assert "framework_source_roots:" in text
+    assert "/custom/sglang/" in text
+    assert "site-packages/vllm/" in text
+
+
+def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
+    ws = tmp_path / "sgl-workspace" / "sglang"
+    ws.mkdir(parents=True)
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.framework_paths._DEFAULT_SOURCE_ROOTS",
+        (str(ws) + "/",),
+    )
+    out = probe_framework_source_roots_for_env()
+    assert str(ws) in out or (str(ws) + "/") in out
+
+
+# ---------------------------------------------------------------------------
+# apply_kernel_patch known-target roots (was test_apply_kernel_patch_roots.py)
+# ---------------------------------------------------------------------------
+_APPLY_TOOL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "kernel-agent"
+    / "tools"
+    / "apply_kernel_patch.py"
+)
+
+
+@pytest.fixture(scope="module")
+def apply_tool() -> types.ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "_apply_kernel_patch_roots_test", _APPLY_TOOL_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_known_target_roots_includes_dist_packages_vllm(
+    apply_tool, monkeypatch,
+) -> None:
+    monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (
+        "/usr/local/lib/python3.12/dist-packages/vllm/",
+    ))
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", raising=False)
+    apply_tool._CACHED_KNOWN_TARGET_ROOTS = None
+    roots = apply_tool.known_target_roots()
+    assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
+
+
+def test_detect_strategy_accepts_dist_packages_vllm_py(
+    apply_tool, monkeypatch,
+) -> None:
+    target = Path(
+        "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py",
+    )
+    monkeypatch.setattr(
+        apply_tool,
+        "known_target_roots",
+        lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",),
+    )
+    strat = apply_tool._detect_strategy(target, allow_unknown_target=False)
+    assert strat["compiled"] is False

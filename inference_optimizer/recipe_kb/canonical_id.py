@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Canonical id helpers for the local recipe-snapshot KB store.
 
 Re-exports the 5-tuple builder + auto-detect helper from

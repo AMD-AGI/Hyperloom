@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for :class:`LlmRcaEngine` and :class:`RcaThrottle`."""
 
 from __future__ import annotations

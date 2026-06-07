@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Local fallback source.
 
 Wraps a small set of best-effort probes that work on any host: a SQLite
@@ -940,10 +942,29 @@ def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
             "returncode": None,
         }
     if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        # A broken `ray status` CLI entrypoint (e.g. click/import error in
+        # ray's own scripts) is NOT evidence the head is down: the library
+        # imports fine, only the CLI shim crashes. Treat such self-crashes
+        # as inconclusive (silent) so we do not falsely emit ray_head_dead
+        # and prune the kernel_opt branch.
+        cli_self_crash = "Traceback (most recent call last)" in stderr and (
+            "ray/scripts/scripts.py" in stderr
+            or "add_command_alias" in stderr
+            or "ImportError" in stderr
+            or "ModuleNotFoundError" in stderr
+        )
+        if cli_self_crash:
+            log.warning(
+                "local_probe: `ray status` CLI is broken (self-crash, not "
+                "head-dead); skipping ray_head_dead. stderr=%s",
+                stderr[:200],
+            )
+            return {}
         return {
             "healthy": False,
             "reason": f"ray status exit={proc.returncode}",
-            "stderr": (proc.stderr or "").strip()[:400],
+            "stderr": stderr[:400],
             "returncode": proc.returncode,
         }
     stdout = proc.stdout or ""
@@ -1737,8 +1758,18 @@ async def _probe_gateway_health(
 
 # Default mount paths probed by J2. Each is read from the env at probe
 # time so an operator can move them without rebuilding the agent.
+# All entries default to "" (no in-process fallback): we only probe what
+# the operator/env actually points at. TRACELENS_ROOT is no longer
+# expected to be an external /wekafs mount — install.sh now clones the
+# public repo into $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens (a
+# session-local path), so the J2 probe should only flag it as a degraded
+# external mount when the operator has explicitly overridden TRACELENS_ROOT
+# to point at one (e.g. a shared cluster checkout).
 _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
-    ("TRACELENS_ROOT", "/wekafs/hyperloom/TraceLens-internal"),
+    ("TRACELENS_ROOT", ""),
+    # Internal extension is optional: no default path, so an open-source-only
+    # setup (TRACELENS_INTERNAL_ROOT unset) is not flagged as a degraded mount.
+    ("TRACELENS_INTERNAL_ROOT", ""),
     ("INFERENCEX_PATH", ""),
     ("OOB_SRC", ""),
 )
@@ -1778,7 +1809,7 @@ def _probe_external_mounts(
     return out
 
 
-# Both TraceLens CLI names ship from the same internal repo; the
+# Both TraceLens CLI names ship from the public repo; the
 # ``_inference`` variant is the canonical one for vLLM/SGLang traces
 # per SKILL.md but the legacy name remains valid for older builds.
 _TRACELENS_CLI_NAMES: tuple[str, ...] = (

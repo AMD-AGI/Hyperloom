@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """E1 / E2 / E4 / E5 critic-health signal tests."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the advisory specialist-proposal scorer (ProposalScorer).
 
 Covers:

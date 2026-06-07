@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Mock Robustness backend — heartbeat-only, non-intervening.
 
 Used in P0 main-path tests. Real Robustness (§7.4 / §19) implements
@@ -16,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..intent_parser import Intent, IntentType
+from ...protocol.intent import Intent, IntentType
 from .base import BackendTurnResult
 
 

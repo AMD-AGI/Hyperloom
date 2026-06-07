@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Integration test: ``fa explore`` (plan mode) end-to-end against fake Primus.
 
 Runs the actual ``framework-agent`` CLI as a subprocess so the test

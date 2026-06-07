@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Thin LLM client adapters for the report narrative pass.
 
 We intentionally do NOT reuse :class:`ClaudeBackend` from
