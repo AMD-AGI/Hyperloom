@@ -128,6 +128,42 @@ The close path must be idempotent because sessions can end through a
 normal phase transition, a wall-clock deadline, an operator interrupt, or
 a resumed run.
 
+## Orchestration Conversation Model
+
+The Orchestration role runs as a **single persistent multi-turn
+conversation** that continues across ticks, rather than a fresh
+stateless call each tick. The agent's plan and reasoning live in the
+conversation, so reasoning continuity is preserved between ticks.
+
+- **Delta prompts.** The first turn of a (re)started conversation gets a
+  full state seed; later turns get only a delta (current phase, mission
+  progress, time budget, and new inbox events). The agent pulls anything
+  else it needs on demand via read-only context tools
+  (`get_shared_state`, `get_gaps`, `get_warm_start`,
+  `get_proposal_scores`, `get_intervention_mix`, `why_denied`,
+  `show_analysis_md`, `get_inbox`) instead of receiving a full state
+  dump every tick.
+- **Checkpoint / compaction.** Periodically (phase boundaries and a
+  tick/time/size cadence) the Coordinator asks the agent to summarise its
+  working memory, persists it to `state.json`
+  (`orchestration_memory`), then resets and re-seeds the conversation
+  from that compacted memory so context stays bounded on long runs.
+- **Resume.** On resume the conversation is rebuilt from
+  `orchestration_memory` plus the authoritative `SharedState` facts —
+  not by replaying a non-deterministic transcript.
+- **Write path unchanged.** All write actions still flow through
+  `emit_intent` → the Coordinator's intent handler, so Critic review,
+  the accuracy gate, Robustness escalation, and PolicyGate's real
+  invariants (path sandbox, resource leases, phase ordering, data
+  dependencies, single-writer rules) apply exactly as before. Only the
+  compensatory anti-amnesia guards (e.g. the baseline same-fingerprint
+  self-loop deny) were removed, since a conversational agent remembers
+  its own prior attempts. Robustness additionally surfaces a
+  conversation no-progress signal as an external circuit-breaker.
+
+The other three roles (Kernel, Critic, Robustness) remain reactive and
+stateless per tick.
+
 ## Feedback Loops
 
 The loop adapts through facts, not through retired score tables:

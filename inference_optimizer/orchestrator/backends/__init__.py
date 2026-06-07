@@ -18,6 +18,12 @@ from .codex import CodexBackend
 from .critic_agent import CriticAgentBackend, RuntimeCall, RuntimeCaller
 from .critic_mock import MockCriticBackend
 from .kernel_mock import MockKernelBackend
+from .mcp_context_tools import (
+    CONTEXT_TOOL_NAMES,
+    CONTEXT_TOOL_QUALIFIED_NAMES,
+    ContextProvider,
+    build_context_tools_server,
+)
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
@@ -33,8 +39,11 @@ __all__ = [
     "Backend",
     "BackendError",
     "BackendTurnResult",
+    "CONTEXT_TOOL_NAMES",
+    "CONTEXT_TOOL_QUALIFIED_NAMES",
     "ClaudeBackend",
     "CodexBackend",
+    "ContextProvider",
     "CriticAgentBackend",
     "EMIT_INTENT_TOOL_NAME",
     "EMIT_INTENT_TOOL_QUALIFIED",
@@ -48,6 +57,7 @@ __all__ = [
     "RuntimeCall",
     "RuntimeCaller",
     "ScriptedPlan",
+    "build_context_tools_server",
     "build_emit_intent_server",
     "validate_emit_intent_input",
 ]

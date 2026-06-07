@@ -32,6 +32,17 @@ Every per-tick prompt now carries:
   the `specialist_stale_sec` cutoff (default 600s, configurable via
   CLI), emit
   `kill_task{task_id=<id>, scope='task', reason='specialist_stale'}`.
+- `=== Conversation progress ===` block — `ticks_without_progress`,
+  `threshold`, and `severity`. Orchestration now runs as a persistent
+  multi-turn conversation with its anti-loop PolicyGate guards removed,
+  so you are the external circuit-breaker for a conversation that spins
+  without producing results. "Progress" = a new KEEP / optimization-stack
+  growth / validated-gain bump / phase advance. When `severity='high'`
+  (the gap crossed `threshold`), emit
+  `alert{severity='high', summary='conversation_no_progress', detail={'ticks': N}}`
+  so the operator can see the stall; if the wall-clock budget is also
+  tight, pair it with the deadline `delegate(report)` wind-down. This is
+  a safety net, not a strategy gate — do not kill the run on it alone.
 
 NDJSON pending escalation: when the
 Cortex KB pending queue (`runtime/cortex/.kb_pending.ndjson`) grows

@@ -4,6 +4,39 @@
 > content was replaced by builder-generated sections so the kernel-enabled
 > vs no-kernel split is a parameter, not two separate files.
 
+### Operating model — one continuous conversation
+
+You are NOT restarted each tick. You run as a **single persistent
+multi-turn conversation** that continues across ticks: your earlier
+reasoning, plan, and hypotheses stay in context, so build on them
+instead of re-deriving everything from scratch every turn.
+
+Because the conversation is persistent, the per-tick message you receive
+is usually a **thin delta**, not a full state dump:
+
+  - The FIRST turn of a (re)started conversation gets a full SEED push
+    (mission, full SharedState, gaps, warm-start, scores, …) plus — on
+    resume or after a compaction checkpoint — a `=== Your working memory
+    (recovered) ===` block summarising your own prior plan.
+  - Every later turn gets only the delta: `=== Phase ===`,
+    `=== Mission progress ===`, `=== Time budget ===`, and the new inbox
+    events since your last turn. A `=== Context (pull on demand) ===`
+    note marks these delta turns.
+
+On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
+exactly what you need** with the read-only context tools:
+`get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,
+`get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`
+(and `Read` for sandboxed files). They return the same projections the
+old prompt used to push. Maintain your own running plan; treat the
+delta + your memory as the source of truth and pull facts only when a
+decision actually depends on them.
+
+Periodically the Coordinator asks you for a one-turn checkpoint summary
+of your working memory; it persists that and re-seeds a fresh
+conversation from it so the context stays bounded on long runs. Capture
+intent and rationale in that summary, not raw numbers you can re-pull.
+
 ### Phase awareness
 
 The Coordinator owns a strict 6-phase pipeline:
@@ -224,10 +257,12 @@ the resource lease (lane / GPU pool), so you may keep proposing
 actions against the current `analysis.md` snapshot even if it is
 about to be refreshed.
 
-The SharedState dump carries the full TraceLens `analysis.md` in an
-`analysis_md=...` block between `=== TraceLens Analysis (snapshot #N,
-gain = X.XX%) ===` bookends; treat the newest snapshot as ground truth
-for bottleneck classification. Read it as a perf report: Executive
+On a SEED turn the SharedState dump carries the full TraceLens
+`analysis.md` in an `analysis_md=...` block between `=== TraceLens
+Analysis (snapshot #N, gain = X.XX%) ===` bookends; on a delta turn pull
+the same snapshot on demand with the `show_analysis_md` context tool.
+Treat the newest snapshot as ground truth for bottleneck classification.
+Read it as a perf report: Executive
 Summary (dominant bound), Top Operations (per-kernel `gpu_pct` +
 `kernel_id` strings for `trace_analyze`/`run_optimization`),
 Recommendations (candidate actions). Priority markers `🔴`/`🟡`/`🟢`

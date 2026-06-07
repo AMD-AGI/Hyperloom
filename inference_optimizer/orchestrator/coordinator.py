@@ -283,6 +283,15 @@ class Coordinator:
             session_dir=self.session_dir,
             shared_state=self.shared_state,
         )
+        # Attach the read-only context-pull MCP server to the
+        # conversational Orchestration backend (plan Step 2). In the
+        # persistent ReAct design the per-tick prompt is a thin delta and
+        # the agent pulls mission status / gaps / analysis.md / inbox on
+        # demand via these tools instead of receiving a full state dump
+        # every tick. Best-effort: backends without a
+        # ``set_context_provider`` hook (mocks, kernel/critic/robustness)
+        # are skipped.
+        self._attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write;
         # otherwise a fresh session that only inferred model_class would look
         # like a resume (state_path.exists() → is_resume=True).
@@ -301,6 +310,62 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
+        # Conversational Orchestration prompt mode (plan Step 3). The
+        # FIRST orchestration turn of a (re)started conversation gets a
+        # full state SEED push; subsequent turns get a thin DELTA (phase +
+        # compact mission + time budget + new inbox + a pull hint) and the
+        # agent pulls the rest via context tools. Reset to False by a
+        # checkpoint/compaction or resume rebuild (plan Step 4) so the
+        # next turn re-seeds. Only consulted when the orchestration
+        # backend runs in conversational mode; stateless backends always
+        # get the full push (seed every tick) for backward-compatible
+        # behavior.
+        self._orchestration_seeded: bool = False
+        # Orchestration working-memory checkpoint policy + tracker (plan
+        # Step 4). The policy decides when to compact the conversation
+        # into ``shared_state.orchestration_memory``; the tracker carries
+        # the since-last deltas it reads. Only active in conversational
+        # mode. ``_orchestration_seed_memory`` is rendered into the next
+        # SEED push so a re-seeded / resumed conversation recovers its
+        # plan. Populated from persisted memory at construction (resume).
+        from . import orchestration_memory as _orch_mem
+        self._checkpoint_policy = _orch_mem.CheckpointPolicy()
+        self._checkpoint_tracker = _orch_mem.CheckpointTracker(
+            last_phase=str(getattr(self.shared_state, "phase", "") or ""),
+        )
+        # Disable checkpointing entirely via env (e.g. deterministic tests
+        # that don't want the extra summary turn).
+        self._checkpoint_enabled: bool = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT", "",
+            ).strip().lower() not in {"1", "true", "yes", "on"}
+        )
+        # Seed memory rendered into the next full SEED push. On resume the
+        # persisted memory is the recovery source; on a fresh session it
+        # stays empty until the first checkpoint.
+        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(
+            dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
+        )
+        # Conversation no-progress circuit-breaker telemetry (plan Step 6).
+        # With the anti-amnesia PolicyGate guards removed (plan Step 5),
+        # Robustness becomes the external safety net: the Coordinator
+        # tracks how many ticks have elapsed without observable progress
+        # (no new KEEP / no stack growth / no validated-gain bump / no
+        # phase advance) and surfaces it to the Robustness prompt so it
+        # can escalate (deadline-style wind-down) if the persistent
+        # conversation spins without producing results. ``_progress_marker``
+        # is the last observed progress snapshot; ``_no_progress_threshold``
+        # is the tick count at which the signal turns high-severity.
+        self._progress_marker: dict[str, Any] = {}
+        try:
+            self._no_progress_threshold: int = max(
+                1,
+                int(os.environ.get(
+                    "INFERENCE_OPTIMIZER_NO_PROGRESS_TICKS", "15",
+                )),
+            )
+        except ValueError:
+            self._no_progress_threshold = 15
 
         # Per-agent consecutive ``BackendError`` streak. Successful turns
         # reset the counter for that agent; a streak crossing
@@ -369,6 +434,279 @@ class Coordinator:
         # warning + leaves warm_start empty on Cortex failure rather
         # than crashing the long-running reactor.
         self._ensure_cortex_t0_anchored()
+
+    # ==================================================================
+    # Context-pull tools (plan Step 2)
+    # ==================================================================
+    def _orchestration_conversational(self) -> bool:
+        """True when the orchestration backend runs in persistent-conversation
+        mode (plan Step 1). Drives the delta-vs-seed prompt gating."""
+        backend = self.backends.get("orchestration")
+        return bool(getattr(backend, "conversational", False))
+
+    def _reset_orchestration_conversation(self) -> None:
+        """Force the next orchestration turn to re-seed a fresh conversation.
+
+        Called after a checkpoint/compaction or resume rebuild (plan
+        Step 4): drops the backend's captured SDK session and clears the
+        seed flag so the next ``_compose_prompt`` emits a full SEED push
+        into a brand-new session.
+        """
+        backend = self.backends.get("orchestration")
+        reset = getattr(backend, "reset_conversation", None)
+        if callable(reset):
+            try:
+                reset()
+            except Exception:  # noqa: BLE001
+                log.exception("Coordinator: orchestration reset_conversation failed")
+        self._orchestration_seeded = False
+
+    def _conversation_progress_signal(self) -> dict[str, Any]:
+        """Compute the no-progress circuit-breaker signal (plan Step 6).
+
+        Observable progress = any of: optimization-stack grew, validated
+        cumulative gain increased, current_best changed, or the phase
+        advanced since the last observation. Each call updates the stored
+        marker and returns ``{ticks_without_progress, threshold, severity,
+        last_progress_tick}``. ``severity='high'`` once the gap crosses
+        the threshold so Robustness can escalate. Called once per tick
+        from the Robustness prompt-compose branch (Robustness is the only
+        consumer), so the per-tick clock is exact.
+        """
+        state = self.shared_state
+        cur_tick = int(getattr(state, "tick", 0) or 0)
+        try:
+            stack_len = len(state.optimization_stack or [])
+        except Exception:  # noqa: BLE001
+            stack_len = 0
+        validated_gain = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+        cb = getattr(state, "current_best", None)
+        try:
+            current_best_sig = json.dumps(cb, sort_keys=True, default=str) if cb else ""
+        except Exception:  # noqa: BLE001
+            current_best_sig = str(cb)
+        phase = str(getattr(state, "phase", "") or "")
+
+        marker = self._progress_marker
+        if not marker:
+            # First observation: seed the marker, no gap yet.
+            self._progress_marker = {
+                "stack_len": stack_len,
+                "validated_gain": validated_gain,
+                "current_best_sig": current_best_sig,
+                "phase": phase,
+                "last_progress_tick": cur_tick,
+            }
+            return {
+                "ticks_without_progress": 0,
+                "threshold": self._no_progress_threshold,
+                "severity": "ok",
+                "last_progress_tick": cur_tick,
+            }
+
+        progressed = (
+            stack_len > int(marker.get("stack_len", 0))
+            or validated_gain > float(marker.get("validated_gain", 0.0)) + 1e-9
+            or current_best_sig != marker.get("current_best_sig", "")
+            or phase != marker.get("phase", "")
+        )
+        if progressed:
+            marker["last_progress_tick"] = cur_tick
+        marker["stack_len"] = stack_len
+        marker["validated_gain"] = validated_gain
+        marker["current_best_sig"] = current_best_sig
+        marker["phase"] = phase
+
+        gap = max(0, cur_tick - int(marker.get("last_progress_tick", cur_tick)))
+        severity = "high" if gap >= self._no_progress_threshold else "ok"
+        return {
+            "ticks_without_progress": gap,
+            "threshold": self._no_progress_threshold,
+            "severity": severity,
+            "last_progress_tick": int(marker.get("last_progress_tick", cur_tick)),
+        }
+
+    async def _maybe_checkpoint_orchestration(
+        self, *, tick: int, phase_changed: bool = False,
+    ) -> bool:
+        """Compact the orchestration conversation into durable memory.
+
+        Plan Step 4. When the checkpoint policy fires, ask the agent to
+        summarise its working memory (an in-band summary turn — no tools),
+        persist the result on ``shared_state.orchestration_memory``, then
+        reset the conversation so the next turn re-seeds from the compacted
+        memory (bounding token growth). Returns True when a checkpoint was
+        taken. Best-effort: any failure is logged and the loop continues
+        on the existing (un-reset) conversation.
+        """
+        if not self._checkpoint_enabled:
+            return False
+        if not self._orchestration_conversational():
+            return False
+        backend = self.backends.get("orchestration")
+        if backend is None or not getattr(backend, "conversational", False):
+            return False
+        # Nothing to compact before the first real turn seeded the session.
+        if not self._orchestration_seeded:
+            return False
+
+        from . import orchestration_memory as _orch_mem
+
+        now_min = 0.0
+        if self._run_started_monotonic is not None:
+            now_min = (time.monotonic() - self._run_started_monotonic) / 60.0
+        tracker = self._checkpoint_tracker
+        ticks_since = max(0, tick - tracker.last_tick)
+        minutes_since = max(0.0, now_min - tracker.last_minute_mark)
+        # Approximate conversation growth from the backend's recorded
+        # prompt char counts since last reset (tracker.chars_since_last is
+        # maintained in _reactor_pass).
+        if not self._checkpoint_policy.should_checkpoint(
+            ticks_since_last=ticks_since,
+            minutes_since_last=minutes_since,
+            chars_since_last=tracker.chars_since_last,
+            phase_changed=phase_changed,
+        ):
+            return False
+
+        try:
+            sys_prompt = await self._load_system_prompt("orchestration")
+            result = await backend.run(
+                prompt=_orch_mem.CHECKPOINT_REQUEST_PROMPT,
+                system_prompt=sys_prompt,
+                tools=[],
+                max_turns=0,
+                # Checkpoint summary is a plain-text JSON reply, NOT an
+                # emit_intent tool call — relax the no-intent guard so the
+                # turn doesn't raise NoIntentEmitted (plan Step 4).
+                allow_no_intent=True,
+            )
+            raw_text = getattr(result, "raw_text", "") or ""
+            parsed = _orch_mem.parse_checkpoint_reply(raw_text)
+            seq = 0
+            try:
+                row = self.bus.db.fetchone_sync(
+                    "SELECT COALESCE(MAX(seq), 0) AS s FROM events"
+                )
+                seq = int(row["s"]) if row else 0
+            except Exception:  # noqa: BLE001
+                seq = 0
+            record = _orch_mem.build_memory_record(
+                parsed,
+                seq=seq,
+                tick=tick,
+                previous=dict(
+                    getattr(self.shared_state, "orchestration_memory", {}) or {}
+                ),
+            )
+            self.shared_state.orchestration_memory = record
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.exception("Coordinator: failed to persist orchestration_memory")
+            # Reset the conversation + re-seed flag so the next turn opens
+            # a fresh session seeded from the compacted memory.
+            self._orchestration_seed_memory = _orch_mem.render_memory_for_seed(
+                record
+            )
+            self._reset_orchestration_conversation()
+            tracker.reset(
+                tick=tick,
+                minute_mark=now_min,
+                phase=str(getattr(self.shared_state, "phase", "") or ""),
+            )
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind": "orchestration_checkpoint",
+                    "tick": tick,
+                    "seq": seq,
+                    "checkpoint_count": record.get("checkpoint_count", 0),
+                    "phase_changed": bool(phase_changed),
+                },
+            )
+            return True
+        except Exception:  # noqa: BLE001 — never let a checkpoint kill the loop
+            log.exception("Coordinator: orchestration checkpoint failed")
+            return False
+
+    def _attach_orchestration_context_tools(self) -> None:
+        """Bind a read-only ContextProvider to the orchestration backend.
+
+        No-op when the backend doesn't support context tools (mock /
+        non-conversational backends lack ``set_context_provider``).
+        """
+        backend = self.backends.get("orchestration")
+        setter = getattr(backend, "set_context_provider", None)
+        if setter is None:
+            return
+        try:
+            from .backends.mcp_context_tools import ContextProvider
+            provider = ContextProvider(
+                shared_state=self.shared_state,
+                inbox_reader=self._context_inbox_reader,
+                analysis_reader=self._context_analysis_reader,
+            )
+            setter(provider)
+        except Exception:  # noqa: BLE001 — context pull is best-effort
+            log.exception("Coordinator: failed to attach orchestration context tools")
+
+    def _context_inbox_reader(self, since_seq: int = 0) -> str:
+        """Synchronous projection of the orchestration inbox tail.
+
+        Reused by the ``get_inbox`` context tool. Reads through the
+        synchronous SQLite path so it stays callable from the MCP handler
+        (which runs inside the backend's own event loop, not the
+        Coordinator's). Returns a compact text block matching the inbox
+        format the prompt used to push.
+        """
+        try:
+            rows = self.bus.db.fetchall_sync(
+                "SELECT * FROM events WHERE seq > ? AND "
+                "(to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
+                (int(since_seq or 0), "orchestration"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"(inbox unavailable: {exc!r})"
+        if not rows:
+            return "(no inbox events)"
+        from .message_bus import Message
+        msgs = [Message.from_row(r) for r in rows]
+        lines = [
+            f"seq={m.seq} from={m.from_agent} topic={m.topic} payload={m.payload}"
+            for m in msgs[-40:]
+        ]
+        return "\n".join(lines)
+
+    def _context_analysis_reader(self) -> str:
+        """Return the latest TraceLens analysis.md snapshot text.
+
+        The canonical analysis lives in
+        ``shared_state.last_trace_analyze['analysis_md_text']`` (written by
+        the roofline/trace_analyze pipeline), NOT in the top-level
+        ``analysis_md_text`` field. Reuse ``_format_analysis_md_full`` so
+        the ``show_analysis_md`` pull tool returns exactly the verbatim,
+        bookended analysis.md block the full-state push
+        (``get_shared_state`` / ``to_prompt_summary``) renders — including
+        the helpful "no snapshot yet" hint when the pipeline hasn't
+        produced one.
+        """
+        try:
+            blob = self.shared_state._format_analysis_md_full()
+            if blob and blob.strip():
+                return blob
+        except Exception:  # noqa: BLE001 — fall through to path read
+            log.exception("Coordinator: _format_analysis_md_full failed")
+        # Fallback: read the path recorded on last_trace_analyze.
+        lta = getattr(self.shared_state, "last_trace_analyze", {}) or {}
+        path = str(lta.get("analysis_md_path") or "")
+        if path:
+            try:
+                from pathlib import Path as _Path
+                return _Path(path).read_text(encoding="utf-8")
+            except OSError as exc:
+                return f"(analysis.md unreadable at {path}: {exc!r})"
+        return "(no analysis.md snapshot yet)"
 
     # ==================================================================
     # Resume
@@ -801,6 +1139,19 @@ class Coordinator:
         Hook additions for new phases should slot into this
         dispatcher table.
         """
+        # Orchestration conversation checkpoint at the phase seam (plan
+        # Step 4): a phase boundary is a natural place to compact, and it
+        # lets the next phase start from a fresh, plan-anchored
+        # conversation. Best-effort; runs before the per-phase side
+        # effects so the compacted memory reflects the phase just left.
+        try:
+            await self._maybe_checkpoint_orchestration(
+                tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                phase_changed=True,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("Coordinator: phase-boundary checkpoint failed")
+
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_PR:
             await self._on_enter_framework_pr(from_phase=from_phase)
@@ -3720,6 +4071,20 @@ class Coordinator:
                             if self._stop.is_set():
                                 break
                             await self._reactor_pass(name)
+                        # Orchestration conversation checkpoint /
+                        # compaction (plan Step 4). Cadence-based; phase
+                        # boundaries are handled separately in
+                        # _on_phase_entered. No-op outside conversational
+                        # mode.
+                        if not self._stop.is_set():
+                            try:
+                                await self._maybe_checkpoint_orchestration(
+                                    tick=tick_n,
+                                )
+                            except Exception:  # noqa: BLE001
+                                log.exception(
+                                    "Coordinator.run: orchestration checkpoint raised"
+                                )
                     if not self._stop.is_set():
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_PR phase pump: see ``tick()`` for rationale.
@@ -3928,6 +4293,14 @@ class Coordinator:
     async def _reactor_pass(self, agent_name: str) -> None:
         backend = self.backends[agent_name]
         prompt = await self._compose_prompt(agent_name)
+        # Accumulate the orchestration prompt size as a proxy for
+        # conversation growth so the checkpoint policy can compact before
+        # the context window balloons (plan Step 4).
+        if agent_name == "orchestration" and self._orchestration_conversational():
+            try:
+                self._checkpoint_tracker.chars_add(len(prompt))
+            except Exception:  # noqa: BLE001
+                pass
         sys_prompt = await self._load_system_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # max_turns=0 → backend uses its own default. ClaudeBackend needs
@@ -3977,6 +4350,12 @@ class Coordinator:
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
+        # A completed orchestration turn means the SEED push (if this was
+        # the first turn of the conversation) has been delivered; flip the
+        # flag so subsequent turns send a thin DELTA (plan Step 3). Reset
+        # back to False only by a checkpoint/compaction or resume rebuild.
+        if agent_name == "orchestration":
+            self._orchestration_seeded = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
 
@@ -4107,6 +4486,38 @@ class Coordinator:
         # vs budget, optimization-stack rebench freshness) shown before
         # the verbose SharedState dump so the LLM cannot miss the
         # ``stack rebench required`` signal.
+        # Conversational delta gating (plan Step 3). When the orchestration
+        # backend runs as a persistent conversation, only the FIRST turn
+        # of a (re)started session gets the full state SEED push; later
+        # turns get a thin DELTA and the agent pulls the rest via context
+        # tools. Stateless backends (mocks / non-conversational) always
+        # push full so existing behavior is unchanged.
+        push_full = True
+        if agent_name == "orchestration":
+            push_full = (
+                not self._orchestration_conversational()
+                or not self._orchestration_seeded
+            )
+            if self._orchestration_conversational():
+                log.info(
+                    "orchestration prompt mode=%s seeded=%s tick=%s",
+                    "SEED" if push_full else "DELTA",
+                    self._orchestration_seeded,
+                    getattr(self.shared_state, "tick", 0),
+                )
+
+        # On a full SEED push for a conversational orchestration turn,
+        # inject the recovered working memory (plan Step 4) right at the
+        # top so the agent re-anchors its plan before reading the facts.
+        # Empty on a fresh session with no checkpoint yet.
+        if (
+            agent_name == "orchestration"
+            and push_full
+            and self._orchestration_conversational()
+            and self._orchestration_seed_memory
+        ):
+            sections.append(self._orchestration_seed_memory)
+
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
@@ -4155,9 +4566,12 @@ class Coordinator:
             )
 
         # 1. Shared session state — gives the agent goal + progress context
-        # even on tick 1 when the inbox is empty.
-        sections.append("=== Shared session state ===")
-        sections.append(self.shared_state.to_prompt_summary())
+        # even on tick 1 when the inbox is empty. On orchestration DELTA
+        # turns this verbose dump is omitted; the agent pulls it on demand
+        # via the ``get_shared_state`` context tool.
+        if push_full:
+            sections.append("=== Shared session state ===")
+            sections.append(self.shared_state.to_prompt_summary())
         if agent_name == "orchestration":
             # ``target_gap_pct`` is a *fact* (how much gain is still
             # needed for ``--target-gain``). Refresh so the prompt's
@@ -4172,15 +4586,22 @@ class Coordinator:
                 )
             else:
                 self.shared_state.target_gap_pct = 0.0
-            denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
-            if denial_summary:
-                sections.append(denial_summary)
-            # Compact projection of the most recent ``dynamic_action``
-            # summaries so orchestration sees its own dispatch outcomes
-            # without paying the token cost of the full ledger.
-            dyn_section = self.shared_state.to_dynamic_actions_prompt_section()
-            if dyn_section:
-                sections.append(dyn_section)
+            # The advisory / ledger blocks below are part of the full SEED
+            # push. On a conversational DELTA turn they are omitted; the
+            # agent pulls them on demand via context tools (why_denied,
+            # get_gaps, get_warm_start, get_proposal_scores,
+            # get_intervention_mix). The target_gap_pct refresh above
+            # always runs because it is a cheap fact mutation, not a push.
+            if push_full:
+                denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
+                if denial_summary:
+                    sections.append(denial_summary)
+                # Compact projection of the most recent ``dynamic_action``
+                # summaries so orchestration sees its own dispatch outcomes
+                # without paying the token cost of the full ledger.
+                dyn_section = self.shared_state.to_dynamic_actions_prompt_section()
+                if dyn_section:
+                    sections.append(dyn_section)
 
         # Cortex T0 warm-start snapshot + structured
         # gaps[] ledger injected into the Orchestration
@@ -4188,7 +4609,7 @@ class Coordinator:
         # befbd1381814 — removed the hardcoded marathon path), so this
         # block is the replacement: a structured per-session
         # snapshot the DECISION FRAMEWORK consumes directly.
-        if agent_name == "orchestration":
+        if agent_name == "orchestration" and push_full:
             try:
                 warm_block = self.shared_state.to_warm_start_summary()
             except Exception:  # noqa: BLE001 — defensive
@@ -4269,6 +4690,24 @@ class Coordinator:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
 
+        # Conversational DELTA turn: tell the agent the verbose state was
+        # NOT re-pushed and how to pull what it needs. The agent keeps its
+        # plan / reasoning in the persistent conversation, so it only
+        # needs to pull the facts that changed since last turn.
+        if agent_name == "orchestration" and not push_full:
+            sections.append("=== Context (pull on demand) ===")
+            sections.append(
+                "This is a continuation of our ongoing conversation; the "
+                "full session state was NOT re-pasted. The Phase, Mission "
+                "progress, Time budget, and new inbox events above are the "
+                "delta since your last turn. Pull anything else you need "
+                "with the read-only context tools: get_shared_state, "
+                "get_gaps, get_warm_start, get_proposal_scores, "
+                "get_intervention_mix, why_denied, show_analysis_md, "
+                "get_inbox. Reason from your own running plan; do not "
+                "re-derive it from scratch."
+            )
+
         # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
         # alerts described in the role prompt.
@@ -4305,6 +4744,34 @@ class Coordinator:
             if stale_lines:
                 sections.append("stale specialists (consider kill_task):")
                 sections.extend(stale_lines)
+
+            # Conversation no-progress circuit-breaker (plan Step 6). With
+            # the anti-amnesia PolicyGate guards removed, Robustness is the
+            # external safety net for a persistent conversation that spins
+            # without producing results.
+            try:
+                progress = self._conversation_progress_signal()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: conversation progress signal failed")
+                progress = {}
+            if progress:
+                sections.append("=== Conversation progress ===")
+                sections.append(
+                    f"ticks_without_progress={progress.get('ticks_without_progress', 0)} "
+                    f"threshold={progress.get('threshold', 0)} "
+                    f"severity={progress.get('severity', 'ok')} "
+                    f"last_progress_tick={progress.get('last_progress_tick', 0)}"
+                )
+                if progress.get("severity") == "high":
+                    sections.append(
+                        "WARNING: no observable progress (no new KEEP / stack "
+                        "growth / validated-gain bump / phase advance) for "
+                        f">= {progress.get('threshold', 0)} ticks. The "
+                        "Orchestration conversation may be stuck. Consider "
+                        "escalating: signal a wind-down (delegate `report`) or "
+                        "raise a high-severity no_progress observation so the "
+                        "operator can intervene."
+                    )
 
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
@@ -4374,79 +4841,6 @@ class Coordinator:
         """
         return self.shared_state.next_pending_keep_kernel_id()
 
-    def _baseline_self_loop_denial(
-        self, proposed_params: dict[str, Any] | None,
-    ) -> PolicyDenied | None:
-        """Reject a fresh baseline proposal that just replays the last failure.
-
-        The Orchestration prompt's FAILURE RECOVERY section instructs the
-        LLM to introduce a new ``benchmark_script`` / ``result_dir`` /
-        ``extra_server_args`` override after a baseline failure. This
-        method is the PolicyGate stop-loss that fires when the LLM
-        ignores that instruction.
-
-        Fires only when ALL of these hold:
-
-        * Two or more consecutive baseline failures have landed on
-          ``shared_state.baseline_attempts`` (any decision tail that
-          isn't ``status=succeeded`` counts).
-        * Those last two failures both carry a
-          ``fingerprint`` in their ``extras`` and the fingerprints
-          match each other.
-        * The current proposal's fingerprint matches the failed-streak
-          fingerprint.
-
-        When all three match, return :class:`PolicyDenied` with a
-        ``baseline_self_loop`` rule and a hint pointing at the next
-        override surface so the prompt sees a deterministic recovery
-        path. Returns ``None`` otherwise — the regular execution-order
-        rules still apply.
-        """
-        attempts = list(self.shared_state.baseline_attempts or [])
-        # Walk the tail backwards collecting *consecutive* failures.
-        tail_failures: list[dict[str, Any]] = []
-        for entry in reversed(attempts):
-            if not isinstance(entry, dict):
-                break
-            if entry.get("status") == "succeeded":
-                break
-            tail_failures.append(entry)
-        if len(tail_failures) < _BASELINE_SELF_LOOP_THRESHOLD:
-            return None
-        recent = tail_failures[: _BASELINE_SELF_LOOP_THRESHOLD]
-        prints: list[Any] = []
-        for entry in recent:
-            extras = entry.get("extras") or {}
-            if not isinstance(extras, dict):
-                return None
-            fp = extras.get("fingerprint")
-            if fp is None:
-                return None
-            prints.append(fp)
-        first = prints[0]
-        if any(p != first for p in prints[1:]):
-            return None
-        proposed_fp = _baseline_params_fingerprint(proposed_params)
-        if proposed_fp != first:
-            return None
-        error_class = recent[0].get("error_class") or "unknown"
-        hint = (
-            "the last "
-            f"{_BASELINE_SELF_LOOP_THRESHOLD} `baseline` attempts failed "
-            f"with the SAME params fingerprint (error_class={error_class!r}). "
-            "Re-proposing the same params will fail the same way. Change at "
-            "least one of: params.benchmark_script (sanitized *.sh name, "
-            "e.g. \"sglang_mi300x.sh\" to bypass dsr1_fp8_mi300x.sh's "
-            "hardcoded --result-dir), params.result_dir (sanitized path; "
-            "Coordinator already defaults RESULT_DIR=<workspace>), or "
-            "extra_server_args / extra_envs."
-        )
-        return PolicyDenied(
-            "action='baseline' denied: same-fingerprint failure streak",
-            rule="baseline_self_loop",
-            hint=hint,
-        )
-
     def _sequence_denial_for_action(
         self,
         action_name: str,
@@ -4455,20 +4849,24 @@ class Coordinator:
         """Reject orchestration action/delegate attempts that run before
         baseline.
 
-        Only two invariants remain here: nothing runs before
-        ``baseline`` produces a positive ``baseline_tput`` (no baseline,
-        no meaning), and the baseline self-loop guard (dedup / anti-loop,
-        delegated to :meth:`_baseline_self_loop_denial`). The former
-        sequencing denials (target_analysis-first, profile-required,
+        Only ONE invariant remains here: nothing runs before ``baseline``
+        produces a positive ``baseline_tput`` (no baseline, no meaning) —
+        a true data-dependency, NOT a strategy gate. The former sequencing
+        denials (target_analysis-first, profile-required,
         KEEP-forces-integrate, hot-kernel report gate, stack-rebench) were
         strategy gates and are removed — those next-step calls are the
-        LLM's. Report honesty for unvalidated KEEPs / untried hot kernels
-        is now carried by the report's completeness annotations and the
-        per-entry ``validated`` flag in the breakdown, not by a deny.
+        LLM's. The baseline same-fingerprint self-loop guard was an
+        anti-amnesia stop-loss (it patched the stateless reactor
+        re-proposing an identical failed baseline); with the persistent
+        ReAct conversation (plan Steps 1-4) the agent remembers its own
+        prior attempts, so that guard is removed too. Report honesty for
+        unvalidated KEEPs / untried hot kernels is carried by the report's
+        completeness annotations and the per-entry ``validated`` flag in
+        the breakdown, not by a deny.
 
-        ``proposed_params`` is the ``intent.payload["params"]`` dict
-        (propose_action / delegate path), consumed by the baseline
-        self-loop guard.
+        ``proposed_params`` is retained for signature compatibility with
+        the call sites (propose_action / delegate path); it is no longer
+        consumed now that the self-loop guard is gone.
         """
         action = str(action_name or "").strip()
         sequence_actions = {
@@ -4489,10 +4887,6 @@ class Coordinator:
                 rule="execution_order",
                 hint="propose/delegate `baseline` until baseline_tput > 0",
             )
-        if action == "baseline":
-            self_loop = self._baseline_self_loop_denial(proposed_params)
-            if self_loop is not None:
-                return self_loop
         return None
 
     def _sequence_denial_for_request(

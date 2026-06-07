@@ -641,6 +641,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # against an arbitrary update_state that would inject fake gaps
     # to bias specialist domain selection (single writer).
     "gaps",
+    # Orchestration working-memory checkpoint (plan Step 4). Coordinator
+    # is the sole writer (it summarises the conversation into this field);
+    # the LLM must not self-author its own durable memory via UPDATE_STATE.
+    "orchestration_memory",
     # Coordinator-only writes on the dynamic_action aggregate view +
     # round counter so the LLM cannot self-narrate its dispatch
     # outcomes via UPDATE_STATE.
@@ -817,13 +821,25 @@ class PolicyGate:
         Codex roles → ``[]`` (no-tools). Claude roles → ``["emit_intent"]``
         in the legacy release; per-action Read/Bash/Edit injection happens in
         SubAgentRunner (P0-3) and via :meth:`allowed_tools_for_action`.
+
+        Orchestration additionally gets the read-only context-pull tools
+        (plan Step 2) plus the built-in ``Read`` tool. In the persistent
+        ReAct design the per-tick prompt is a thin delta and the agent
+        pulls the context it needs on demand via these tools instead of
+        receiving a full state dump every tick. ``Read`` stays bounded by
+        the PolicyGate path sandbox.
         """
         role = self.role_registry.get(agent_name)
         if role is None:
             return []
         if role.no_tools:
             return []
-        return ["emit_intent"]
+        tools = ["emit_intent"]
+        if agent_name == "orchestration":
+            from .backends.mcp_context_tools import CONTEXT_TOOL_NAMES
+            tools.extend(CONTEXT_TOOL_NAMES)
+            tools.append("Read")
+        return tools
 
     def allowed_tools_for_action(self, action_name: str) -> list[str]:
         """Per-action tool intersection used by SubAgentRunner.

@@ -1057,6 +1057,39 @@ class SharedState:
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
     # ------------------------------------------------------------------
+    # Orchestration working memory (plan Step 4 — checkpoint / compaction).
+    # In the persistent-conversation ReAct design the Orchestration agent's
+    # plan / hypotheses live in the live Claude conversation, NOT in
+    # state.json. This field is the durable *compacted* snapshot of that
+    # reasoning: the Coordinator periodically asks the agent to summarise
+    # its working memory (current plan, hypotheses, what it tried and why,
+    # pending threads, learnings) and stores the result here. It serves two
+    # purposes:
+    #   1. Compaction — after a checkpoint the conversation is reset and
+    #      re-seeded from this memory, bounding token growth on long runs.
+    #   2. Resume — on crash recovery the conversation is rebuilt from this
+    #      memory + the current (authoritative) SharedState facts, instead
+    #      of replaying a non-deterministic full transcript.
+    # This is reasoning state, not a fact contract: it is intentionally NOT
+    # consumed by session_breakdown.json (the downstream contract still
+    # reads only the authoritative fact fields). Coordinator is the sole
+    # writer; LLM agents never update_state it.
+    #
+    # Schema:
+    #   {
+    #     "current_plan":  str,          # the agent's running plan
+    #     "hypotheses":    list[str],    # open hypotheses to test
+    #     "tried_and_why": list[str],    # what was tried + outcome/rationale
+    #     "pending":       list[str],    # threads not yet closed
+    #     "learnings":     list[str],    # durable lessons this session
+    #     "last_checkpoint_seq":  int,   # bus seq at last checkpoint
+    #     "last_checkpoint_tick": int,   # tick at last checkpoint
+    #     "last_checkpoint_ts":   iso,
+    #     "checkpoint_count":     int,
+    #   }
+    orchestration_memory: dict[str, Any] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
     @classmethod

@@ -105,7 +105,16 @@ def _build_backends(
         )
 
     backends: dict[str, Any] = {
-        "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
+        # Orchestration runs as a persistent ReAct conversation (plan
+        # Step 1): the same Claude session is resumed across ticks so the
+        # model's plan / chain-of-thought persists instead of being
+        # re-derived from a full state dump each turn. The conversational
+        # floors (max_turns / call_timeout) are applied inside
+        # ClaudeBackend.__post_init__. kernel / critic / robustness keep
+        # the stateless per-tick reactor mode.
+        "orchestration": ClaudeBackend(
+            model=claude_model, max_turns_default=4, conversational=True,
+        ),
         "critic":        critic_backend,
         "robustness":    robustness_backend,
     }

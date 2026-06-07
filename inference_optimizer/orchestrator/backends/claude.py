@@ -35,6 +35,12 @@ from ...protocol.intent import (
     validate_envelope,
 )
 from .base import BackendError, BackendTurnResult, parse_call_timeout_env
+from .mcp_context_tools import (
+    CONTEXT_TOOL_QUALIFIED_NAMES,
+    MCP_SERVER_NAME as CONTEXT_MCP_SERVER_NAME,
+    ContextProvider,
+    build_context_tools_server,
+)
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
@@ -68,6 +74,14 @@ If you have nothing to say, call once with intent_type=send_message and
 payload={{"topic":"heartbeat","body_md":"ok"}}.
 ==== END OUTPUT FORMAT ====
 """.strip()
+
+
+# Conversational-mode floors (plan Step 1). A persistent ReAct turn may
+# pull several read-only context tools before it emits an intent, so it
+# needs more agentic turns and a longer wall-clock budget than a single
+# stateless propose-and-go turn.
+_CONVERSATIONAL_MIN_MAX_TURNS: int = 12
+_CONVERSATIONAL_DEFAULT_TIMEOUT_SEC: float = 300.0
 
 
 # Claude Code built-in tools disallowed in raw_completion mode so the
@@ -119,7 +133,23 @@ class ClaudeBackend:
     # Default of 4 covers the typical reactor-tick sequence:
     # tool_use → tool_result → final assistant text (3 messages).
     # Larger = more retries on validation failure but more tokens.
+    #
+    # Conversational mode (see ``conversational`` below) raises this floor:
+    # a persistent ReAct turn can call several read-only context tools
+    # before emitting an intent, so it needs more headroom than a single
+    # stateless propose-and-go turn.
     max_turns_default: int = 4
+    # Persistent-conversation mode for the Orchestration reactor (plan
+    # Step 1). When True, ``run()`` continues the SAME Claude session
+    # across ticks via the SDK ``resume=<session_id>`` option instead of
+    # starting a fresh stateless conversation each turn. The per-tick
+    # prompt is then a *delta* (new inbox events + phase line) appended as
+    # the next user turn, and the model's chain-of-thought / plan persists
+    # in the conversation history rather than being re-derived from a full
+    # state dump every tick. ``session_id`` is captured from the SDK
+    # message stream and fed back on the next call. kernel / critic /
+    # robustness keep the default stateless mode.
+    conversational: bool = False
     enable_mcp_emit_intent: bool = True
     # Raw single-shot completion mode for callers that drive their own
     # loop + parse the model's plain text themselves (e.g. the
@@ -158,6 +188,20 @@ class ClaudeBackend:
     calls: list[dict[str, Any]] = field(default_factory=list)
     mcp_server_config: Any | None = field(default=None, init=False)
     mcp_tool_name: str | None = field(default=None, init=False)
+    # Conversational-mode runtime state (plan Step 1).
+    # ``_session_id`` is the SDK session token captured from the last
+    # turn; when set and ``conversational`` is True, the next ``run()``
+    # passes ``resume=<session_id>`` so the model continues the same
+    # conversation. ``reset_conversation()`` clears it so the Coordinator
+    # can start a fresh session after a checkpoint/compaction (plan
+    # Step 4) or on resume rebuild.
+    _session_id: str | None = field(default=None, init=False)
+    # Read-only context-pull MCP server config (plan Step 2). Built when
+    # the Coordinator calls ``set_context_provider``; merged into the SDK
+    # options alongside the emit_intent server so a conversational turn
+    # can pull mission status / gaps / analysis.md / etc. on demand
+    # instead of receiving a full state dump every tick.
+    _context_server_config: Any | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.sdk_query_factory is None or self.sdk_options_cls is None:
@@ -176,6 +220,22 @@ class ClaudeBackend:
                     self.sdk_module = mod
         if not os.environ.get(self.api_key_env):
             self.calls.append({"warn": f"{self.api_key_env} not set in env"})
+        if self.conversational:
+            # A persistent ReAct turn may call several read-only context
+            # tools (plan Step 2) before emitting an intent, so give the
+            # in-tick agentic loop more turns and a longer wall-clock
+            # budget than the stateless default. Operators can still
+            # override the timeout via the env var below.
+            if self.max_turns_default < _CONVERSATIONAL_MIN_MAX_TURNS:
+                self.max_turns_default = _CONVERSATIONAL_MIN_MAX_TURNS
+            if os.environ.get(
+                "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC", "",
+            ).strip() == "":
+                # No explicit operator override -> raise the floor so the
+                # extra tool round-trips don't trip the 120s wall.
+                self.call_timeout_s = max(
+                    self.call_timeout_s, _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC,
+                )
         if self.raw_completion:
             self.enable_mcp_emit_intent = False
         if self.enable_mcp_emit_intent:
@@ -206,7 +266,13 @@ class ClaudeBackend:
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         max_turns: int = 1,
+        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
+        # ``allow_no_intent`` (plan Step 4): a conversational summary /
+        # checkpoint turn deliberately asks the model for a plain-text
+        # (JSON) reply rather than an ``emit_intent`` tool call, so the
+        # usual "no emit_intent ⇒ NoIntentEmitted" guard must be relaxed
+        # for those turns. Normal reactor turns leave it False.
         full_prompt = self._compose_prompt(prompt)
         max_turns_use = max_turns or self.max_turns_default
         if self.raw_completion:
@@ -216,16 +282,23 @@ class ClaudeBackend:
             # tools are disallowed in raw mode, so the model cannot
             # loop — generous headroom guarantees the text turn returns.
             max_turns_use = max(max_turns_use, 8)
+        # Conversational mode: continue the same SDK session across ticks
+        # by resuming the captured session_id. The first turn (no captured
+        # id yet) starts a fresh session and we capture its id below.
+        resume_session = self._session_id if self.conversational else None
         options = self._build_options(
             tools=tools or [],
             max_turns=max_turns_use,
             system_prompt=system_prompt,
+            resume_session_id=resume_session,
         )
-        # Cache-metric extraction (4-tuple from _invoke_and_collect)
+        # Cache-metric extraction (5-tuple from _invoke_and_collect)
         # plus a timeout guard: wrap the SDK call in asyncio.wait_for so
         # an upstream proxy stall doesn't park the reactor indefinitely.
         try:
-            intents, raw_text, tool_block_count, usage = await asyncio.wait_for(
+            (
+                intents, raw_text, tool_block_count, usage, session_id,
+            ) = await asyncio.wait_for(
                 self._invoke_and_collect(full_prompt, options),
                 timeout=self.call_timeout_s,
             )
@@ -243,6 +316,29 @@ class ClaudeBackend:
         # Stash the per-tick cache metric on backend.calls so the audit
         # scripts can compute session-level cache_hit_rate without
         # needing a separate Coordinator wiring path.
+        # Capture the SDK session token so the next conversational turn
+        # resumes the same conversation. Only update when we actually got
+        # an id back; a missing id leaves the previous one intact so a
+        # transient stream without a terminal ResultMessage doesn't drop
+        # the conversation thread.
+        if self.conversational:
+            # Observability for the persistent-conversation design (plan
+            # Steps 1-3): make resume continuity + on-demand tool usage
+            # visible in the run log. ``resumed`` True means this turn
+            # continued the prior SDK session; a changing session_id while
+            # resumed=False would indicate resume is NOT working.
+            log.info(
+                "claude[conv] turn: resumed=%s prev_session=%s "
+                "new_session=%s tool_blocks=%d intents=%d prompt_chars=%d",
+                bool(resume_session),
+                (resume_session or "")[-12:],
+                (session_id or "")[-12:],
+                tool_block_count,
+                len(intents),
+                len(full_prompt),
+            )
+            if session_id:
+                self._session_id = session_id
         cache_creation = self._safe_int(
             usage.get("cache_creation_input_tokens") if usage else None
         )
@@ -261,7 +357,7 @@ class ClaudeBackend:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         })
-        if not intents and not self.raw_completion:
+        if not intents and not self.raw_completion and not allow_no_intent:
             raise NoIntentEmitted(
                 f"claude reply contained no parseable emit_intent tool_use "
                 f"blocks (raw_text_len={len(raw_text)}, tool_blocks={tool_block_count})"
@@ -296,18 +392,69 @@ class ClaudeBackend:
             return prompt
         return f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
 
+    def set_context_provider(self, provider: ContextProvider | None) -> None:
+        """Attach (or clear) the read-only context-pull MCP server.
+
+        The Coordinator calls this once after construction with a
+        :class:`ContextProvider` bound to its live ``SharedState`` so the
+        conversational Orchestration turn can pull context on demand
+        (plan Step 2). Passing ``None`` detaches the server. Best-effort:
+        a build failure is recorded as a soft warning and leaves the
+        backend usable without the pull tools.
+        """
+        if provider is None:
+            self._context_server_config = None
+            return
+        try:
+            self._context_server_config = build_context_tools_server(
+                provider,
+                sdk_module=self.sdk_module,
+                tool_factory=self.mcp_tool_factory,
+                server_factory=self.mcp_server_factory,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
+            self._context_server_config = None
+
+    @property
+    def has_context_tools(self) -> bool:
+        return self._context_server_config is not None
+
+    def reset_conversation(self) -> None:
+        """Drop the captured session so the next ``run`` starts fresh.
+
+        Used by the Coordinator after a checkpoint/compaction (plan
+        Step 4) or when rebuilding the conversation on resume: the next
+        conversational turn re-seeds a new SDK session with the compacted
+        memory instead of resuming an unbounded transcript.
+        """
+        self._session_id = None
+
+    @property
+    def conversation_session_id(self) -> str | None:
+        """Current SDK session token (conversational mode), or None."""
+        return self._session_id if self.conversational else None
+
     def _build_options(
         self,
         *,
         tools: list[str],
         max_turns: int,
         system_prompt: str | None,
+        resume_session_id: str | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {"max_turns": max_turns}
         if self.model:
             kwargs["model"] = self.model
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
+        if resume_session_id:
+            # SDK ClaudeAgentOptions.resume continues an existing session
+            # by id (claude-agent-sdk >= 0.2). Falls back gracefully when
+            # the options class doesn't accept it (older SDK) — see
+            # _build_options caller, which only sets this in conversational
+            # mode after a session_id was captured.
+            kwargs["resume"] = resume_session_id
         if self.raw_completion:
             # Single text turn: no MCP tools, and every Claude Code
             # built-in tool disallowed. The caller parses the model's
@@ -325,14 +472,50 @@ class ClaudeBackend:
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
         if self.mcp_tool_name and self.mcp_tool_name not in allowed:
             allowed.append(self.mcp_tool_name)
+        # Read-only context-pull tools (plan Step 2). When the context
+        # server is attached, allow-list its qualified tool names so the
+        # conversational turn can call them. The bare names are already
+        # allow-listed via PolicyGate.allowed_tools_for_agent, but the SDK
+        # needs the MCP-qualified form to wire into the tool registry.
+        if self._context_server_config is not None:
+            for qname in CONTEXT_TOOL_QUALIFIED_NAMES:
+                if qname not in allowed:
+                    allowed.append(qname)
         if allowed:
             kwargs["allowed_tools"] = allowed
+        mcp_servers: dict[str, Any] = {}
         if self.mcp_server_config is not None:
-            kwargs["mcp_servers"] = {MCP_SERVER_NAME: self.mcp_server_config}
+            mcp_servers[MCP_SERVER_NAME] = self.mcp_server_config
+        if self._context_server_config is not None:
+            mcp_servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
+        if mcp_servers:
+            kwargs["mcp_servers"] = mcp_servers
         # Capture CLI stderr so failures are diagnosable instead of opaque
         # "Command failed with exit code 1".
         kwargs["stderr"] = self._stderr_sink
-        return self.sdk_options_cls(**kwargs)
+        return self._instantiate_options(kwargs)
+
+    def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
+        """Build options, dropping ``resume`` if the SDK can't accept it.
+
+        Older ``claude-agent-sdk`` builds may not expose ``resume`` on
+        ``ClaudeAgentOptions``. Rather than crash the reactor, fall back
+        to a stateless turn (no resume) and record a one-time warning so
+        the operator knows conversational continuity degraded.
+        """
+        try:
+            return self.sdk_options_cls(**kwargs)
+        except TypeError as exc:
+            if "resume" in kwargs:
+                kwargs.pop("resume", None)
+                self.calls.append({
+                    "warn": (
+                        "SDK ClaudeAgentOptions rejected resume= "
+                        f"({exc!r}); falling back to stateless turn"
+                    ),
+                })
+                return self.sdk_options_cls(**kwargs)
+            raise
 
     def _stderr_sink(self, line: str) -> None:
         """Default stderr handler — append to ``self.calls`` for postmortems."""
@@ -342,9 +525,10 @@ class ClaudeBackend:
 
     async def _invoke_and_collect(
         self, prompt: str, options: Any
-    ) -> tuple[list[Intent], str, int, dict[str, Any]]:
+    ) -> tuple[list[Intent], str, int, dict[str, Any], str | None]:
         """Stream messages from the SDK, collect intents + raw text +
-        tool counts + the most recent `ResultMessage.usage` dict.
+        tool counts + the most recent `ResultMessage.usage` dict + the
+        SDK ``session_id`` (for conversational resume, plan Step 1).
 
         Roofline-v2 N6: extract `usage` so the Coordinator (or audit
         scripts via `backend.calls`) can read
@@ -363,8 +547,15 @@ class ClaudeBackend:
         result_chunks: list[str] = []
         tool_block_count = 0
         last_usage: dict[str, Any] = {}
+        session_id: str | None = None
         try:
             async for message in self.sdk_query_factory(prompt=prompt, options=options):
+                # Capture the session token from any message that carries
+                # it (AssistantMessage / ResultMessage both expose it on
+                # claude-agent-sdk >= 0.2). The last seen wins.
+                msg_session = getattr(message, "session_id", None)
+                if isinstance(msg_session, str) and msg_session:
+                    session_id = msg_session
                 for block in self._iter_blocks(message):
                     if self._is_tool_use_for_emit_intent(block):
                         tool_block_count += 1
@@ -416,7 +607,7 @@ class ClaudeBackend:
         # Prefer the consolidated ResultMessage text; fall back to the
         # streamed TextBlocks only when no result was emitted.
         raw_text = "".join(result_chunks) or "".join(text_chunks)
-        return intents, raw_text, tool_block_count, last_usage
+        return intents, raw_text, tool_block_count, last_usage, session_id
 
     @staticmethod
     def _iter_blocks(message: Any):
