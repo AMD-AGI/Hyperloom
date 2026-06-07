@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``orchestrator.action_executors.session_breakdown``.
 
 This thin wrapper around ``breakdown.write_breakdown_json`` only had

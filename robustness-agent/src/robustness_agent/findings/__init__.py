@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Persistent findings sink.
 
 The reactor hands :class:`~robustness_agent.decision.action_ladder.Finding`

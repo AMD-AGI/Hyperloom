@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Schema validation for :mod:`critic-agent.runtime.request_models`.
 
 The test set is intentionally exhaustive on edge cases because the rest

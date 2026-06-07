@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``optimizer_runs/robustness_monitor.sh.example`` session-dir
 resolution.
 

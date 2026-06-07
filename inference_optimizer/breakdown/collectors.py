@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Deterministic collectors for ``session_breakdown.json``.
 
 Each ``collect_<section>`` is a pure function: it reads only from

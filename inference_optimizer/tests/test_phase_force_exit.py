@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """IR-6 — EXPLORE HARD force-exit gate tests.
 
 Covers ``phase_state.should_force_exit_explore`` and its integration via

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Mirror ``session_breakdown.json`` into the claw-synced subtree.
 
 Hyperloom's canonical write lands in ``<session_dir>/`` which under the

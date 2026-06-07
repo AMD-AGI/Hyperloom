@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Local-first recipe-snapshot KB for the inference optimizer.
 
 This package owns the Commit-2 cutover described in the design doc

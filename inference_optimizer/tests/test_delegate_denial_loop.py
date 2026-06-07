@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Delegate idempotency + policy-denial ladder tests."""
 
 from __future__ import annotations

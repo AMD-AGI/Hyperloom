@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """``inference_optimizer.multi_node`` — single-entry CLI used by the agent
 inside the Claw sandbox to manage one session-scoped RayJob for the whole
 optimization session.

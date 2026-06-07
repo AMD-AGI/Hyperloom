@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Baseline parameter override tests.
 
 Pins the executor-boundary contract for the two Magpie leak-path

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smoke tests for the robustness-agent payload-aliases compat shim.
 
 Mirrors the contract surface of

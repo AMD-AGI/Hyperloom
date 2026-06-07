@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.sources.primus_cortex.
 
 Hermetic - monkeypatches urllib.request.urlopen to return canned

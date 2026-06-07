@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Local Mode bootstrap for a fresh Hyperloom checkout.
 
 set -euo pipefail

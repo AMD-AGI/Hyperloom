@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smoke tests for the dynamic_action CLI knobs:
 ``--dynamic-action-model`` / ``--dynamic-action-turn-cap`` /
 ``--dynamic-action-wall-clock-sec``.

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 name: Inference Optimization Daily (fixed models)
 
 # Daily inference-optimization run over a SMALL FIXED model corpus

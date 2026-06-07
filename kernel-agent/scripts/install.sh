@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Kernel Agent installer.
 #
 # Base install is intentionally small and deterministic:
