@@ -49,14 +49,10 @@ PHASE_ALLOWLIST_BYPASS_ACTIONS: frozenset[str] = frozenset({
 })
 
 
-# Actions that only the Robustness agent may drive, via its
-# ``delegate`` action-ladder. They stay in phase_state.PHASE_ALLOWED_ACTIONS
-# (so the robustness delegate passes the R1 phase check) but are
-# intentionally excluded from PHASE_LLM_PROPOSABLE_ACTIONS and from the
-# Orchestration prompt catalogue, so Orchestration can neither propose nor
-# delegate them. ``recover`` walks SIGTERM/SIGKILL against inference-server
-# owners and is reserved for the robustness ``gpu_memory_leaked`` ladder;
-# Orchestration must emit an ALERT and let robustness escalate instead.
+# Robustness-only actions (driven via its action-ladder): in
+# PHASE_ALLOWED_ACTIONS but excluded from PHASE_LLM_PROPOSABLE_ACTIONS + the
+# prompt catalogue, so Orchestration must ALERT instead. ``recover`` walks
+# SIGTERM/SIGKILL against server owners (robustness gpu_memory_leaked ladder).
 ROBUSTNESS_DELEGATE_ONLY_ACTIONS: frozenset[str] = frozenset({
     "recover",
 })
