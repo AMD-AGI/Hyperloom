@@ -264,6 +264,13 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     # the model's max_position_embeddings cannot hold ISL+OSL+headroom, so we
     # fail fast before booting a server that would 400 every request.
     "model_context_window_too_small",
+    # Pre-run model-architecture preflight
+    # (``cli._preflight_unsupported_model_arch``): the model is a
+    # multimodal/vision model (e.g. Gemma3ForConditionalGeneration, qwen2_vl)
+    # but Hyperloom only supports text-generation (decoder-only causal LM)
+    # models, so we fail fast before booting a server that would die ~5min in
+    # with a cryptic image-processor load error.
+    "unsupported_model_arch",
 })
 
 
