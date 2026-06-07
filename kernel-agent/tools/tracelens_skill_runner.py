@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Run TraceLens analysis-orchestrator skill through Claude SDK.
 
 This is the LLM-backed path for issue #124. It deliberately lives outside

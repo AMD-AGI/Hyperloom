@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # IR-3 — Cortex KB + PR Monitor reachability probe.
 #
 # Soft-degrade: exit 1 only signals "at least one branch unreachable".
@@ -98,7 +100,7 @@ probe_curl() {
 if [ -n "${SKIP_KB_PROBE}" ] || [ -z "${CORTEX_KB_URL}" ]; then
     kb_skipped="true"
 else
-    probe_curl "${CORTEX_KB_URL%/}/health" 2 3 "kb" || true
+    probe_curl "${CORTEX_KB_URL%/}/health" 15 3 "kb" || true
 fi
 
 if [ -n "${SKIP_PR_PROBE}" ]; then

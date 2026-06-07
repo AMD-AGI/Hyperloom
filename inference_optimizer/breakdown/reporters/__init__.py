@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Section renderer + LLM compose layer that turns a
 ``session_breakdown.json`` dict into a user-facing markdown report.
 

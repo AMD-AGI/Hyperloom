@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """TraceLens analysis tool for the resident Kernel Agent skill.
 
 This tool is intentionally conservative: it records every step, writes a stable
@@ -460,8 +462,13 @@ RUNTIME_API_NAMES = {
     "cudadevicesynchronize",
     "cudastreamsynchronize",
 }
-DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
-# Internal extension is opt-in: no default path. It is used only when
+# TraceLens public root has no in-process default: install.sh exports
+# TRACELENS_ROOT (default $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens,
+# clone of AMD-AGI/TraceLens pinned to a fixed SHA) into
+# kernel-agent.env.sh, and callers either inherit it from env or pass
+# --tracelens-root. If neither is provided we fail loudly rather than
+# silently fall back to a hard-coded /wekafs path that may not exist.
+# Internal extension is opt-in: no default path either. It is used only when
 # TRACELENS_INTERNAL_ROOT (env) or --tracelens-internal-root is set; an empty
 # value keeps Hyperloom on the open-source-only report.
 DEFAULT_TRACELENS_INTERNAL_ROOT = ""
@@ -2601,7 +2608,11 @@ def main() -> int:
             "for legacy launchers, then to /workspace/hyperloom."
         ),
     )
-    parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
+    parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", ""),
+                        help="TraceLens public checkout (TRACELENS_ROOT). Required: "
+                             "kernel-agent/scripts/install.sh exports it from "
+                             "kernel-agent.env.sh; pass --tracelens-root only when "
+                             "running outside the installer-managed env.")
     parser.add_argument("--tracelens-internal-root",
                         default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
                         help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
@@ -2796,7 +2807,14 @@ def main() -> int:
             update_status(status_path, state="running", current_step="install_tracelens",
                           log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                           started_at=started_at)
-            tl_root = Path(args.tracelens_root)
+            tl_root_arg = (args.tracelens_root or "").strip()
+            if not tl_root_arg:
+                raise SystemExit(
+                    "TraceLens root not provided: set TRACELENS_ROOT in env "
+                    "(kernel-agent/scripts/install.sh writes it to "
+                    "kernel-agent.env.sh) or pass --tracelens-root."
+                )
+            tl_root = Path(tl_root_arg)
             # Internal extension is opt-in: used only when a non-empty
             # --tracelens-internal-root / TRACELENS_INTERNAL_ROOT is provided.
             internal_root_arg = (args.tracelens_internal_root or "").strip()

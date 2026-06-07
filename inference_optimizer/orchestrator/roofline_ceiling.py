@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Theoretical peak ``output_throughput`` ceiling (decode memory roofline).
 
 Hardware ceiling for the ``output_throughput`` (tok/s) field that
@@ -196,14 +198,31 @@ def _read_total_size(model_path: Path) -> int | None:
     quantization (FP8/FP4/INT4 weights produce a smaller value).
     """
     idx = model_path / "model.safetensors.index.json"
-    if not idx.is_file():
-        return None
+    if idx.is_file():
+        try:
+            meta = json.loads(idx.read_text(encoding="utf-8")).get("metadata") or {}
+            size = meta.get("total_size")
+            if size:
+                return int(size)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+    return (
+        _sum_weight_file_sizes(model_path, "*.safetensors")
+        or _sum_weight_file_sizes(model_path, "*.bin")
+    )
+
+
+def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
+    """Fallback weight size from local weight shards matching ``pattern``."""
     try:
-        meta = json.loads(idx.read_text(encoding="utf-8")).get("metadata") or {}
-        size = meta.get("total_size")
-        return int(size) if size else None
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        total = sum(
+            p.stat().st_size
+            for p in model_path.glob(pattern)
+            if p.is_file()
+        )
+    except OSError:
         return None
+    return int(total) if total > 0 else None
 
 
 def _read_hf_config(model_path: Path) -> dict[str, Any] | None:

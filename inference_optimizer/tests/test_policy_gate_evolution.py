@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.11 — PolicyGate evolution tests.
 
 Covers KB_design/3.11_policy_gate_evolution/README.md:

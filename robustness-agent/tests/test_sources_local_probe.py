@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the LocalProbe fallback source."""
 
 from __future__ import annotations
@@ -1239,6 +1241,24 @@ def test_probe_external_mounts_records_latency(monkeypatch, tmp_path):
     assert by_env["TRACELENS_INTERNAL_ROOT"]["ok"] is True
     assert "INFERENCEX_PATH" in by_env
     assert by_env["INFERENCEX_PATH"]["ok"] is False
+    assert "OOB_SRC" not in by_env
+
+
+def test_probe_external_mounts_skips_tracelens_root_when_unset(monkeypatch):
+    """install.sh now clones AMD-AGI/TraceLens into
+    $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens (a session-local
+    path), so unset TRACELENS_ROOT must not be probed as a degraded
+    external mount. Only operator-set TRACELENS_ROOT (e.g. an explicit
+    /wekafs override) should appear in the probe output."""
+    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    monkeypatch.delenv("TRACELENS_INTERNAL_ROOT", raising=False)
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("OOB_SRC", raising=False)
+    out = _probe_external_mounts(timeout_s=5.0)
+    by_env = {row["env_name"]: row for row in out}
+    assert "TRACELENS_ROOT" not in by_env
+    assert "TRACELENS_INTERNAL_ROOT" not in by_env
+    assert "INFERENCEX_PATH" not in by_env
     assert "OOB_SRC" not in by_env
 
 

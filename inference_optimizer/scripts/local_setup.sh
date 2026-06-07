@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Local Mode bootstrap for a fresh Hyperloom checkout.
 
 set -euo pipefail
@@ -28,7 +30,7 @@ LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}
 PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
-TRACELENS_REF="${TRACELENS_REF:-release/hyperloom_integration_v0.5.0}"
+TRACELENS_REF="${TRACELENS_REF:-c35c787ef31f0425fa0028a605ffc8c60a737c2c}"
 # Preferred container-local checkout for the public repo when operators install
 # TraceLens manually. The internal extension is private: Hyperloom keeps NO
 # repo URL, ref, or default path for it. It is used only when an operator

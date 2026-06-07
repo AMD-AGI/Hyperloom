@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the sweep grid builder's max-model-len filter.
 
 A sweep variant whose ``ISL + OSL`` exceeds the server's

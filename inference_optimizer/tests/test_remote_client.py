@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Read-only tests for :class:`RemoteRecipeClient`.
 
 The remote client is the read half of the recipe-snapshot KB

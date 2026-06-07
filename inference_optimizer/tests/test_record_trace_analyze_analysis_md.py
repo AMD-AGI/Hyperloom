@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 C1: ``record_trace_analyze`` caches TraceLens analysis.md.
 
 These tests pin the contract the downstream ``roofline`` action (C4) and

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the local-health signal rule (server/log/gpu/disk/shm/fd/ray
 + D1 log-pattern extensions)."""
 

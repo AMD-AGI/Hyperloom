@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for the baseline cold-start "warmup artifact".
 
 Root cause (see hyperloom_models_jun1.csv rows tagged ``warmup``):

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Generate CI summary reports from optimization results."""
 
 from __future__ import annotations

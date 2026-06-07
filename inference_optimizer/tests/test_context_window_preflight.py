@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the context-window preflight.
 
 Policy: do NOT stretch a small model context with --context-length (RoPE

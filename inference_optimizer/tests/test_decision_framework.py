@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P5 decision-framework regression tests.
 
 The v0.6 ``backends`` / ``params`` promote-threshold tests were

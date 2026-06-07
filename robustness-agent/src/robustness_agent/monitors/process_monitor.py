@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Process-level monitor — detects server/benchmark process anomalies."""
 
 from __future__ import annotations

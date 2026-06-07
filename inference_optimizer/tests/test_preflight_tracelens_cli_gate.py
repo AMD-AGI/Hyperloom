@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for ``_check_tracelens_cli`` hard-gate.
 
 Pins SKILL Step 2 step 8.5 contract:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Conductor integration — read events from the Conductor SQLite DB.
 
 This module bridges the Robustness agent with the Conductor's SQLite database.

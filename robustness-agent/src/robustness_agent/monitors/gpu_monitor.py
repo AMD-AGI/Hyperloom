@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """GPU monitor — detects VRAM leaks, temperature spikes, ECC errors, utilization drops."""
 
 from __future__ import annotations

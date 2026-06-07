@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``_magpie_patcher.ensure_magpie_atomic_scripts_patch``
 (Hyperloom ``bugs.md`` §C #1 root-cause fix).
 
@@ -451,3 +453,144 @@ class TestEnsurePatch:
         target = magpie_dir / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
         # Only one copy of the sentinel — the patch ran exactly once.
         assert target.read_text().count(mp._PATCH_SENTINEL) == 1
+
+
+# ===========================================================================
+# Read-only / shared InferenceX/benchmarks deployment
+# (bugs.md §C #1 follow-up).
+#
+# The atomic-write patch put its temp file in the TARGET dir
+# (mkstemp(dir=target_dir)). When InferenceX/benchmarks is a shared
+# read-only mount (e.g. /wekafs/hyperloom/InferenceX), that mkstemp raised
+# `OSError: [Errno 30] Read-only file system` and took down EVERY model's
+# first benchmark session — regardless of model or framework.
+#
+# Contract after the fix:
+#   * target script already byte-identical -> no-op (pre-staged on a
+#     read-only shared deployment is fine);
+#   * target dir writable -> atomic os.replace (unchanged: still closes the
+#     §C #1 torn-read race);
+#   * target dir read-only AND script missing/stale -> a clear, actionable
+#     error naming the script + the read-only dir, NOT a bare [Errno 30].
+# ===========================================================================
+def _exec_patched_benchmarker(fake_magpie: Path):
+    """Apply the patch, then exec the patched benchmarker.py and return its
+    ``_FakeBenchmarker`` class (same technique as the atomic-copy smoke
+    test above)."""
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    namespace: dict = {"__name__": "_patched_benchmarker_ro"}
+    exec(compile(bench_py.read_text("utf-8"), str(bench_py), "exec"), namespace)
+    return namespace["_FakeBenchmarker"]
+
+
+def _simulate_readonly_dir(monkeypatch, readonly_dir: Path) -> None:
+    """Make ``tempfile.mkstemp`` raise EROFS when targeting ``readonly_dir``.
+
+    Tests run as root, where a ``chmod 0o555`` is bypassed by DAC, so we
+    cannot model a read-only mount with permissions. Patching ``mkstemp``
+    for the one target directory reproduces the exact production failure
+    (mkstemp into a read-only InferenceX/benchmarks) deterministically.
+    """
+    import errno
+    import tempfile as _tempfile
+
+    real_mkstemp = _tempfile.mkstemp
+
+    def _ro_mkstemp(*args, **kwargs):
+        if str(kwargs.get("dir", "")) == str(readonly_dir):
+            raise OSError(errno.EROFS, "Read-only file system")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(_tempfile, "mkstemp", _ro_mkstemp)
+
+
+def test_readonly_target_with_uptodate_scripts_is_noop(
+    fake_magpie: Path, tmp_path: Path, monkeypatch,
+):
+    """Read-only target whose scripts are ALREADY identical to Magpie
+    source must be a no-op, not an OSError. This is the exact failure that
+    killed all 8 models' first sessions."""
+    import shutil as _shutil
+
+    cls = _exec_patched_benchmarker(fake_magpie)
+
+    src_dir = tmp_path / "magpie_scripts"
+    src_dir.mkdir()
+    body = "#!/usr/bin/env bash\necho hi\n"
+    (src_dir / "sglang_mi300x.sh").write_text(body, encoding="utf-8")
+
+    # Shared deployment already has the identical script staged.
+    dst_dir = tmp_path / "InferenceX_benchmarks"
+    dst_dir.mkdir()
+    _shutil.copy2(src_dir / "sglang_mi300x.sh", dst_dir / "sglang_mi300x.sh")
+
+    # Now any temp write into dst_dir behaves read-only.
+    _simulate_readonly_dir(monkeypatch, dst_dir)
+
+    inst = cls(src_dir, dst_dir)
+    # Must NOT raise — the script is already up to date, so no temp write.
+    inst._prepare_benchmark_scripts()
+
+    assert (dst_dir / "sglang_mi300x.sh").read_text(encoding="utf-8") == body
+
+
+def test_readonly_target_with_stale_script_raises_clear_error(
+    fake_magpie: Path, tmp_path: Path, monkeypatch,
+):
+    """Read-only target whose script is stale/missing must raise a clear,
+    actionable error (naming the script + read-only dir), not a bare
+    [Errno 30]."""
+    cls = _exec_patched_benchmarker(fake_magpie)
+
+    src_dir = tmp_path / "magpie_scripts"
+    src_dir.mkdir()
+    (src_dir / "sglang_mi300x.sh").write_text(
+        "#!/usr/bin/env bash\necho new\n", encoding="utf-8",
+    )
+
+    dst_dir = tmp_path / "InferenceX_benchmarks"
+    dst_dir.mkdir()
+    # Stale (different) content already present -> needs a rewrite.
+    (dst_dir / "sglang_mi300x.sh").write_text(
+        "#!/usr/bin/env bash\necho stale\n", encoding="utf-8",
+    )
+
+    _simulate_readonly_dir(monkeypatch, dst_dir)
+
+    inst = cls(src_dir, dst_dir)
+    with pytest.raises(OSError) as exc:
+        inst._prepare_benchmark_scripts()
+    msg = str(exc.value)
+    assert "sglang_mi300x.sh" in msg
+    assert "read-only" in msg.lower()
+
+
+def test_writable_target_rewrites_stale_script(fake_magpie: Path, tmp_path: Path):
+    """Regression: a writable target with a stale staged script is still
+    atomically rewritten to match source (exec bit preserved)."""
+    cls = _exec_patched_benchmarker(fake_magpie)
+
+    src_dir = tmp_path / "magpie_scripts"
+    src_dir.mkdir()
+    new_body = "#!/usr/bin/env bash\necho new\n"
+    (src_dir / "vllm_mi300x.sh").write_text(new_body, encoding="utf-8")
+
+    dst_dir = tmp_path / "InferenceX_benchmarks"
+    dst_dir.mkdir()
+    (dst_dir / "vllm_mi300x.sh").write_text(
+        "#!/usr/bin/env bash\necho old\n", encoding="utf-8",
+    )
+
+    inst = cls(src_dir, dst_dir)
+    inst._prepare_benchmark_scripts()
+
+    assert (dst_dir / "vllm_mi300x.sh").read_text(encoding="utf-8") == new_body
+    assert (dst_dir / "vllm_mi300x.sh").stat().st_mode & 0o111
+
+
+def test_patched_block_skips_identical_target():
+    """The patched block must contain the idempotent content check so a
+    read-only shared deployment with pre-staged scripts is a no-op rather
+    than a mkstemp OSError."""
+    assert "_hyperloom_filecmp" in _PATCHED_BLOCK

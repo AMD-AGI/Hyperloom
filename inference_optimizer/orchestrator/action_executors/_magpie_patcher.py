@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Idempotent, atomic-write patcher for Magpie ``_prepare_benchmark_scripts``
 (Hyperloom ``bugs.md`` §C #1 root-cause fix).
 
@@ -67,16 +69,29 @@ executable bit and the source mtime/perms (``shutil.copy2`` does both):
 .. code-block:: python
 
             # Hyperloom #C1 patch: atomic write so a concurrent bash
-            # `source` cannot see a half-truncated file.
+            # `source` cannot see a half-truncated file. Skip the write
+            # entirely when the target is already byte-identical.
             import os as _hyperloom_os
+            import shutil as _hyperloom_shutil
             import tempfile as _hyperloom_tempfile
-            _tmp_fd, _tmp_name = _hyperloom_tempfile.mkstemp(
-                prefix=f".{script.name}.hyperloom_", dir=str(target_dir),
-            )
-            _hyperloom_os.close(_tmp_fd)
-            shutil.copy2(script, _tmp_name)
-            _hyperloom_os.chmod(_tmp_name, 0o755)
-            _hyperloom_os.replace(_tmp_name, target_file)
+            import filecmp as _hyperloom_filecmp
+            if target_file.exists() and _hyperloom_filecmp.cmp(
+                str(script), str(target_file), shallow=False
+            ):
+                pass
+            else:
+                try:
+                    _tmp_fd, _tmp_name = _hyperloom_tempfile.mkstemp(
+                        prefix=f".{script.name}.hyperloom_", dir=str(target_dir),
+                    )
+                except OSError as _hyperloom_err:
+                    raise OSError(  # names script + read-only dir + the fix
+                        ...
+                    ) from _hyperloom_err
+                _hyperloom_os.close(_tmp_fd)
+                _hyperloom_shutil.copy2(script, _tmp_name)
+                _hyperloom_os.chmod(_tmp_name, 0o755)
+                _hyperloom_os.replace(_tmp_name, target_file)
 
 ``os.replace`` is a single ``rename(2)`` syscall. POSIX guarantees that
 any reader that already has a file descriptor on the old inode keeps
@@ -84,11 +99,23 @@ seeing the old (consistent) bytes; any reader that ``open()`` s the path
 after the rename sees the new (consistent) bytes. There is no observable
 intermediate state.
 
+Two refinements over a naive atomic copy (``bugs.md`` §C #1 follow-up —
+the read-only-mount regression):
+
+* **Idempotent skip.** When ``target_file`` already byte-matches ``script``
+  we do nothing — a shared, read-only ``InferenceX/benchmarks`` deployment
+  with scripts pre-staged is a no-op instead of failing in
+  ``mkstemp(dir=target_dir)`` with ``[Errno 30] Read-only file system``
+  (the failure that killed every model's first benchmark session).
+* **Actionable read-only error.** If the dir really is read-only AND the
+  script is missing/stale, we raise a clear error naming the script and
+  directory (and the per-install-clone fix), never a bare ``[Errno 30]``.
+
 The replacement uses fully-qualified ``_hyperloom_*`` aliases so we don't
-collide with any names already in upstream scope (``os`` and ``tempfile``
-happen to already be imported at the top of ``benchmarker.py``, but we
-do not rely on that — defence in depth keeps the patch self-contained
-and immune to upstream import-reordering).
+collide with any names already in upstream scope (``os`` / ``shutil`` /
+``tempfile`` / ``filecmp`` happen to already be importable, but we do not
+rely on that — defence in depth keeps the patch self-contained and immune
+to upstream import-reordering).
 
 Lifecycle
 ---------
@@ -135,16 +162,36 @@ _LEGACY_BLOCK = (
 # to upstream import-reorderings).
 _PATCHED_BLOCK = (
     "            # Hyperloom #C1 patch: atomic write so a concurrent bash\n"
-    "            # `source` cannot see a half-truncated file.\n"
+    "            # `source` cannot see a half-truncated file. Skip the write\n"
+    "            # entirely when the target is already byte-identical, so a\n"
+    "            # read-only / shared InferenceX/benchmarks deployment (scripts\n"
+    "            # pre-staged, dir not writable) is a no-op instead of\n"
+    "            # OSError: [Errno 30] Read-only file system.\n"
     "            import os as _hyperloom_os\n"
+    "            import shutil as _hyperloom_shutil\n"
     "            import tempfile as _hyperloom_tempfile\n"
-    "            _tmp_fd, _tmp_name = _hyperloom_tempfile.mkstemp(\n"
-    "                prefix=f\".{script.name}.hyperloom_\", dir=str(target_dir),\n"
-    "            )\n"
-    "            _hyperloom_os.close(_tmp_fd)\n"
-    "            shutil.copy2(script, _tmp_name)\n"
-    "            _hyperloom_os.chmod(_tmp_name, 0o755)\n"
-    "            _hyperloom_os.replace(_tmp_name, target_file)\n"
+    "            import filecmp as _hyperloom_filecmp\n"
+    "            if target_file.exists() and _hyperloom_filecmp.cmp(\n"
+    "                str(script), str(target_file), shallow=False\n"
+    "            ):\n"
+    "                pass\n"
+    "            else:\n"
+    "                try:\n"
+    "                    _tmp_fd, _tmp_name = _hyperloom_tempfile.mkstemp(\n"
+    "                        prefix=f\".{script.name}.hyperloom_\", dir=str(target_dir),\n"
+    "                    )\n"
+    "                except OSError as _hyperloom_err:\n"
+    "                    raise OSError(\n"
+    "                        f\"Hyperloom #C1: cannot stage benchmark script \"\n"
+    "                        f\"{script.name} into read-only {target_dir}: \"\n"
+    "                        f\"{_hyperloom_err}. Use a writable per-install \"\n"
+    "                        f\"InferenceX clone (unset INFERENCEX_PATH so \"\n"
+    "                        f\"install.sh clones a per-session copy).\"\n"
+    "                    ) from _hyperloom_err\n"
+    "                _hyperloom_os.close(_tmp_fd)\n"
+    "                _hyperloom_shutil.copy2(script, _tmp_name)\n"
+    "                _hyperloom_os.chmod(_tmp_name, 0o755)\n"
+    "                _hyperloom_os.replace(_tmp_name, target_file)\n"
 )
 
 # Substring uniquely present after patching; used as the "already

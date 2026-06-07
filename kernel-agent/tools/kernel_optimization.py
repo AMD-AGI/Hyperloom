@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Kernel optimization tool for the resident Kernel Agent skill."""
 
 from __future__ import annotations

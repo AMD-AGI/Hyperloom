@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for :class:`CriticAgentBackend`.
 
 The backend drives a 3-step loop: prepare-review (subprocess) → Codex

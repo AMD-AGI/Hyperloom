@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Back-compat coverage for the ``extra_sglang_args`` ->
 ``extra_server_args`` rename.
 

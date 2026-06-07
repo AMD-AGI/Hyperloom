@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``inference_optimizer.manifest`` helpers.
 
 Existing tests round-trip the manifest writer at a high level; we

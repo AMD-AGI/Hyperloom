@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Mock end-to-end Coordinator loop tests.
 
 Covers the main path with all 4 agents wired to mock backends:
@@ -204,4 +206,3 @@ async def test_e2e_robustness_heartbeats_throughout(session_dir):
         assert len(robustness_beats) == 4
     finally:
         await c.stop()
-

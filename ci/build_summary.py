@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Aggregate per-task ci_metrics.json into the final summary table.
 
 Inputs:

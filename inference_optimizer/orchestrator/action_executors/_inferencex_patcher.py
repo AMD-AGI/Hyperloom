@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Idempotent, backward-compatible patcher for InferenceX
 ``benchmarks/benchmark_lib.sh`` (Hyperloom issue #194 §2).
 

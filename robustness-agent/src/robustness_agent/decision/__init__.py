@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Decision layer.
 
 * :mod:`policy_aware` — local mirror of upstream PolicyGate payload

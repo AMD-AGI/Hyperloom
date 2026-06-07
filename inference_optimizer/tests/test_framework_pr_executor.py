@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """FrameworkPrExecutor — Stage 2d coverage.
 
 Mirrors :file:`test_integrate_patch_executor.py`. The framework_pr

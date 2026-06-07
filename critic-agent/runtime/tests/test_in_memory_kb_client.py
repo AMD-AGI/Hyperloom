@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :class:`runtime.in_memory_kb_client.InMemoryKBClient`.
 
 The contract (§7.3) lists 4 promises this mock must keep; one test per
