@@ -2,34 +2,9 @@
 
 """Phase state machine.
 
-The Coordinator owns the run-level phase ("where are we in the optimization
-lifecycle") so that LLM-side decisions stay scoped to one phase at a time
-and action attempts carry phase provenance.
-
-This module is **pure**: every public function takes a frozen SharedState
-view (a ``Any`` typed shim — we deliberately avoid importing SharedState
-to keep this module side-effect free and trivially testable) and returns
-either a string sentinel / dict, never mutating its inputs. The
-Coordinator is the only writer of SharedState; this module just decides
-*what* to write.
-
-The six phases form a strictly monotonic chain:
-
-::
-
-    PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
-                ↘ (--no-framework) ↗
-                              ↘ (no_kernel) ↗
-                              ↘──── any phase ────→ CLOSE  (terminal / abort)
-
-``recover`` is *phase-orthogonal* and not modeled as a transition.
-
-Vocabularies are closed enums; PolicyGate cross-checks any write of
-``stop_reason`` or any ``phase_history.reason`` against them.
-
-EXPLORE uses the merged ``explore`` action plus specialist and dynamic
-sub-agent channels. Retired ``backends`` / ``params`` /
-``validate_stack`` actions are not phase-allowed.
+Pure functions over a frozen SharedState; Coordinator is the only writer.
+Monotonic chain PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
+(any phase → CLOSE on terminal/abort); ``recover`` is phase-orthogonal.
 """
 
 from __future__ import annotations
@@ -44,9 +19,7 @@ from ..protocol.action_surfaces import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Phase identifiers + ordering (monotonic chain)
-# ---------------------------------------------------------------------------
 PHASE_PRELUDE      = "PRELUDE"
 PHASE_FRAMEWORK_PR = "FRAMEWORK_PR"
 PHASE_EXPLORE      = "EXPLORE"
@@ -66,78 +39,31 @@ PHASE_INDEX: dict[str, int] = {name: i for i, name in enumerate(PHASE_NAMES)}
 
 
 def phase_index(phase: str) -> int:
-    """Return monotonic index of ``phase`` (used by Inv-2.1 check).
-
-    Unknown phases return ``-1`` so legacy data fails the
-    monotonicity check cleanly instead of pretending to advance.
-    """
+    """Return monotonic index of ``phase`` (Inv-2.1 check); unknown → -1."""
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
-# ---------------------------------------------------------------------------
-# Phase ↔ allowed action set
-# ---------------------------------------------------------------------------
-#
-# * EXPLORE allowlist contains the merged ``explore`` action and the
-#   ``specialist`` LLM sub-agent.
-# * ``recover`` stays in every phase — phase-orthogonal — but is a
-#   ROBUSTNESS_DELEGATE_ONLY action: it is subtracted from
-#   ``PHASE_LLM_PROPOSABLE_ACTIONS`` below so Orchestration can neither
-#   propose nor delegate it. Only the robustness ``gpu_memory_leaked``
-#   ladder may delegate it (see PolicyGate ``_validate_phase_action``).
-# * ``session_breakdown`` is a CLOSE action (it materializes the
-#   report bundle). The per-KEEP stack rebench is inlined into
-#   ``explore``.
+# Phase ↔ allowed action set: ALLOWED passes R1 phase_incompatible but
+# Coordinator-auto actions stay out of PROPOSABLE so LLM proposals are denied.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset({
-        # ``roofline`` / ``profile`` are Coordinator-auto-enqueued at
-        # PRELUDE after baseline lands so the EXPLORE-phase first
-        # specialist sees a populated trace (and, when roofline is on,
-        # an ``analysis.md`` snapshot). The Coordinator picks the kind
-        # via ``shared_state.enable_roofline`` — both names sit in the
-        # ALLOWED set so the internal-enqueue passes R1
-        # ``phase_incompatible``, but they are absent from
-        # ``PHASE_LLM_PROPOSABLE_ACTIONS``, so any LLM-side
-        # propose_action / delegate is rejected by the same R1 rule.
         "target_analysis", "baseline", "roofline", "profile", "recover",
     }),
     PHASE_FRAMEWORK_PR: frozenset({
-        # Coordinator-internal phase between PRELUDE and EXPLORE.
-        # ``framework_pr`` is enqueued per candidate; the executor uses
-        # the same single-variant ``run_grid`` path as ``integrate_patch``
-        # so the latter stays in the allowlist as the consume side of
-        # the Critic-gated patch flow. ``roofline`` / ``profile`` are
-        # auto-enqueued on watermark crossings here too (KEEP path
-        # writes ``cumulative_gain_validated`` via the same single-
-        # writer hook). ``framework_pr`` is absent from
-        # ``PHASE_LLM_PROPOSABLE_ACTIONS``, so any LLM-side proposal
-        # is denied by R1 ``phase_incompatible``.
+        # Coordinator-internal; integrate_patch is the Critic-gated consume side.
         "framework_pr", "integrate_patch", "roofline", "profile", "recover",
     }),
     PHASE_EXPLORE: frozenset({
         # merged grid runner + LLM specialist dispatch.
         "explore", "specialist",
-        # Specialist-authored source patches are applied only through
-        # integrate_patch, which holds the serving lane and benchmarks the
-        # result.
+        # Specialist source patches apply only through integrate_patch.
         "integrate_patch",
-        # Supplementary cross-domain sub-agent channel; orchestration-only
-        # dispatch, capped per EXPLORE round by PolicyGate.
+        # Cross-domain sub-agent channel; orchestration-only, capped per round.
         "dynamic_action",
-        # dynamic_specialist — free-form CPU-only specialist dispatch
-        # via the dynamic_dispatch module. Not domain-locked; the
-        # orchestration agent decides task descriptions freely.
+        # Free-form CPU-only specialist dispatch (not domain-locked).
         "dynamic_specialist",
-        # dynamic_specialist_check / collect — explicit poll / result
-        # retrieval (the Coordinator also auto-surfaces via per-tick
-        # _poll_dynamic_specialists, but these let the agent force it).
         "dynamic_specialist_check", "dynamic_specialist_collect",
-        # ``roofline`` / ``profile`` are Coordinator-auto-enqueued mid-
-        # EXPLORE whenever the watermark check at the
-        # cumulative_gain_validated writer fires (10% step compound vs
-        # ``last_roofline_tput``). The Coordinator picks the kind via
-        # ``enable_roofline``; the auto_roofline_pending_task_id
-        # blocker holds dispatches until either kind lands.
+        # roofline/profile auto-enqueued on cumulative_gain_validated watermark.
         "roofline", "profile",
         "recover",
     }),
@@ -145,22 +71,11 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
         "operator_tuning", "vendor_kernel_config", "gemm_tuning",
-        # ``roofline`` / ``profile`` are auto-enqueued on watermark
-        # crossing here too — kernel integrate KEEPs flow through the
-        # same single-writer hook as explore/specialist KEEPs; mode is
-        # picked via ``enable_roofline``.
         "roofline", "profile",
         "recover",
     }),
     PHASE_SWEEP: frozenset({
-        # ``conc_sweep`` is a Coordinator-internal post-sweep action
-        # (PHASE_SWEEP only, on by default; disable via
-        # ``--no-enable-conc-sweep``) that benchmarks both baseline
-        # and ``current_best`` across a CONC ladder. Like ``sweep``
-        # it is discovery-only and never
-        # promotes; PolicyGate denies LLM-proposed
-        # ``delegate{action_name='conc_sweep'}`` because the auto-enqueue
-        # at sweep-task completion is the sole legitimate entry point.
+        # conc_sweep: Coordinator-internal post-sweep CONC-ladder benchmark; discovery-only.
         "sweep", "conc_sweep", "recover",
     }),
     PHASE_CLOSE: frozenset({
@@ -171,11 +86,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 
 
 def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is in the phase allowlist.
-
-    Used by PolicyGate R1 phase_incompatible. Unknown phase defaults to
-    *deny* so a corrupted state.json doesn't silently let anything pass.
-    """
+    """Return True iff ``action_name`` is in the phase allowlist (R1; unknown phase → deny)."""
     allowed = PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper())
     if allowed is None:
         return False
@@ -183,29 +94,12 @@ def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
-    """Return ``PHASE_ALLOWED_ACTIONS[phase]`` as a sorted tuple.
-
-    Stable order so prompt rendering / R1 hints are deterministic.
-    """
+    """Return ``PHASE_ALLOWED_ACTIONS[phase]`` as a sorted tuple (deterministic)."""
     return tuple(sorted(PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())))
 
 
-# ---------------------------------------------------------------------------
-# Phase ↔ LLM-proposable action set
-# ---------------------------------------------------------------------------
-#
-# The subset of each phase allowlist that the LLM may actually emit through
-# propose_action / delegate / request. Two families are subtracted:
-#   * Coordinator-managed actions (``roofline`` / ``profile`` /
-#     ``replay_warm_recipe`` analysis snapshots and the ``framework_pr``
-#     pump) — auto-driven and never proposable.
-#   * Robustness-delegate-only actions (``recover``) — driven solely by the
-#     robustness ``gpu_memory_leaked`` action-ladder; Orchestration must
-#     emit an ALERT instead of proposing/delegating them.
-# Both families stay in ``PHASE_ALLOWED_ACTIONS`` so the internal enqueue /
-# robustness delegate passes R1. Rendering this set keeps "what the prompt
-# advertises" identical to "what PolicyGate accepts for Orchestration" so the
-# model never proposes into a guaranteed denial.
+# Phase ↔ LLM-proposable set: allowlist minus Coordinator-managed and
+# robustness-delegate-only actions, matching what PolicyGate accepts for Orchestration.
 PHASE_LLM_PROPOSABLE_ACTIONS: dict[str, frozenset[str]] = {
     phase: actions - COORDINATOR_INTERNAL_ACTIONS - ROBUSTNESS_DELEGATE_ONLY_ACTIONS
     for phase, actions in PHASE_ALLOWED_ACTIONS.items()
@@ -213,11 +107,7 @@ PHASE_LLM_PROPOSABLE_ACTIONS: dict[str, frozenset[str]] = {
 
 
 def is_action_llm_proposable_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is LLM-proposable in ``phase``.
-
-    Mirror of :func:`is_action_allowed_in_phase` over the LLM-proposable
-    subset. Unknown phase defaults to *deny*.
-    """
+    """Return True iff ``action_name`` is LLM-proposable in ``phase`` (unknown → deny)."""
     proposable = PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper())
     if proposable is None:
         return False
@@ -225,48 +115,26 @@ def is_action_llm_proposable_in_phase(action_name: str, phase: str) -> bool:
 
 
 def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
-    """Return ``PHASE_LLM_PROPOSABLE_ACTIONS[phase]`` as a sorted tuple.
-
-    Stable order so prompt rendering / R1 hints are deterministic.
-    """
+    """Return ``PHASE_LLM_PROPOSABLE_ACTIONS[phase]`` sorted (deterministic)."""
     return tuple(sorted(
         PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper(), frozenset())
     ))
 
 
-# ---------------------------------------------------------------------------
-# Interleave mode (env-flagged): widen EXPLORE / KERNEL proposable sets
-# ---------------------------------------------------------------------------
-#
-# When ``INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is truthy, EXPLORE may
-# emit kernel-owned REQUEST kinds and KERNEL may propose / delegate the
-# explore-shaped actions. The phase chain itself stays monotonic — only
-# the per-phase action contract is widened.
+# Interleave mode (env-flagged): widen EXPLORE/KERNEL proposable sets; chain stays monotonic.
 PHASE_INTERLEAVE_ENV: str = "INFERENCE_OPTIMIZER_PHASE_INTERLEAVE"
 
-# EXPLORE in interleave mode keeps its native action set and adds the
-# KERNEL_OWNED_ACTIONS so REQUEST(target_agent='kernel', kind=...) and
-# the matching action names pass R1.
+# EXPLORE interleave adds KERNEL_OWNED_ACTIONS so kernel REQUESTs pass R1.
 _INTERLEAVE_EXPLORE_EXTRAS: frozenset[str] = KERNEL_OWNED_ACTIONS
 
-# KERNEL in interleave mode adds the explore-side proposable triple so
-# the LLM can keep refining configs / specialists / patches mid-kernel
-# work. The grid runner + specialist + integrate_patch carry their own
-# dependency / Critic gates.
+# KERNEL interleave adds the explore-side proposable triple.
 _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset({
     "explore", "specialist", "integrate_patch",
 })
 
 
 def is_phase_interleave_enabled() -> bool:
-    """Return True when EXPLORE↔KERNEL interleave is enabled.
-
-    Default is now **ON** (P3_18 18B flipped on by default). The env var
-    is kept as a rollback knob: set ``INFERENCE_OPTIMIZER_PHASE_INTERLEAVE``
-    to an explicit off value (``0`` / ``false`` / ``no`` / ``off``) to
-    restore the strict, single-source monotonic action contract. Any
-    other value (including unset/empty) leaves interleave on.
-    """
+    """Return True when EXPLORE↔KERNEL interleave is enabled (default ON, P3_18; env is rollback knob)."""
     raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
@@ -274,12 +142,7 @@ def is_phase_interleave_enabled() -> bool:
 def llm_proposable_actions_for_with_interleave(
     phase: str, *, interleave: bool | None = None,
 ) -> frozenset[str]:
-    """Return the active LLM-proposable set for ``phase``.
-
-    ``interleave`` defaults to :func:`is_phase_interleave_enabled`. When
-    on, EXPLORE adds kernel-owned action names and KERNEL adds the
-    explore-shaped triple. Other phases are unchanged.
-    """
+    """Return the active LLM-proposable set for ``phase`` (when interleave on, EXPLORE adds kernel-owned names, KERNEL adds the explore triple)."""
     key = (phase or "").strip().upper()
     base = PHASE_LLM_PROPOSABLE_ACTIONS.get(key, frozenset())
     if interleave is None:
@@ -304,9 +167,7 @@ def is_action_llm_proposable_in_phase_with_interleave(
     return (action_name or "").strip() in proposable
 
 
-# ---------------------------------------------------------------------------
 # phase_exit_reasons vocab
-# ---------------------------------------------------------------------------
 PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     # Normal exits
     "prelude_done",
@@ -319,8 +180,8 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "sweep_budget_exhausted",
     "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
-    "explore_force_exit_low_budget",    # EXPLORE → next phase when total remaining or phase remaining drops below operator-configured thresholds
-    "no_more_leverage",                 # EXPLORE/KERNEL → SWEEP (non-terminal): steward stop_session via the skip_to_sweep hint. (The Coordinator's automatic no-more-leverage safety net was removed for long-run continuity.) Reclassified from a terminal stop_reason — it now winds the session down through SWEEP → CLOSE instead of aborting.
+    "explore_force_exit_low_budget",    # EXPLORE → next phase below operator force-exit thresholds
+    "no_more_leverage",                 # EXPLORE/KERNEL → SWEEP (non-terminal) via steward skip_to_sweep; winds down through SWEEP → CLOSE
     # FRAMEWORK_PR phase transitions.
     "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
     "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
@@ -344,17 +205,12 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "max_ticks",
     "signal",
 
-    # Construction sentinel — the first entry written when a fresh
-    # session enters PRELUDE.  Not a transition reason proper, but
-    # surfacing it in the same vocab keeps phase_history homogeneous
-    # for breakdown collection.
+    # Construction sentinel — first phase_history entry on fresh session.
     "phase_entered",
 })
 
 
-# ---------------------------------------------------------------------------
 # stop_reason vocab
-# ---------------------------------------------------------------------------
 STOP_REASON_VOCAB: frozenset[str] = frozenset({
     # Legacy sentinels — kept for backward compat (resume from old sessions).
     "target_reached",
@@ -389,16 +245,9 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "framework_pr_plateau",
     "framework_pr_force_exit_low_budget",
 
-    # Pre-run context-window preflight (``cli._preflight_context_window``):
-    # the model's max_position_embeddings cannot hold ISL+OSL+headroom, so we
-    # fail fast before booting a server that would 400 every request.
+    # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
     "model_context_window_too_small",
-    # Pre-run model-architecture preflight
-    # (``cli._preflight_unsupported_model_arch``): the model is a
-    # multimodal/vision model (e.g. Gemma3ForConditionalGeneration, qwen2_vl)
-    # but Hyperloom only supports text-generation (decoder-only causal LM)
-    # models, so we fail fast before booting a server that would die ~5min in
-    # with a cryptic image-processor load error.
+    # Model-arch preflight: multimodal/vision model unsupported.
     "unsupported_model_arch",
 })
 
@@ -411,23 +260,8 @@ def is_valid_phase_exit_reason(value: str) -> bool:
     return (value or "").strip() in PHASE_EXIT_REASONS
 
 
-# ---------------------------------------------------------------------------
-# Default phase budgets (% of total wall-clock)
-# ---------------------------------------------------------------------------
+# Default phase budgets (% of wall-clock); P3_22 rebalance. IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK_PR uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
-    # Loosen-plan P3_22 rebalance: now that plateau judgments are
-    # advisory and the LLM owns phase-advance hints, the Coordinator no
-    # longer auto-cuts EXPLORE / KERNEL early on soft signals — the LLM
-    # is expected to use more of each phase to explore deeper. Shift
-    # weight off SWEEP (discovery-only; conc_sweep stays inside) and
-    # PRELUDE (cold-start is short) into EXPLORE + KERNEL where the
-    # search and optimisation actually happen. IR-6 force-exit is
-    # still the hard backstop on EXPLORE; CLOSE stays at 2% (archival).
-    #
-    # FRAMEWORK_PR is *not* given a phase budget pct — the time wall is
-    # ``force_exit_hours_remaining_ratio * max_hours`` instead (default
-    # 0.6), matching the design's "leave at least 60% for the rest of
-    # the session" intent.
     PHASE_PRELUDE: 0.03,
     PHASE_EXPLORE: 0.45,
     PHASE_KERNEL:  0.38,
@@ -436,12 +270,7 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Plateau judgment defaults
-# ---------------------------------------------------------------------------
-# Default thresholds the CLI exposes via --plateau-* flags. Kept here
-# (not in cli.py) so pure-function callers + tests can introspect the
-# canonical default set without importing argparse.
+# Plateau judgment defaults (CLI --plateau-* flags); kept here for pure callers + tests.
 DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT:    float = 0.5
 DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK:     int   = 3
 DEFAULT_PLATEAU_EXPLORE_LOOKBACK:         int   = 5
@@ -449,51 +278,18 @@ DEFAULT_PLATEAU_KERNEL_REVERT_STREAK:     int   = 3
 DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT:     float = 0.5
 DEFAULT_PLATEAU_KERNEL_LOOKBACK:          int   = 5
 
-# EXPLORE hard force-exit thresholds (HARD time gate; overrides
-# plateau + steward). The Coordinator may exit EXPLORE the moment EITHER
-# of the following holds:
-#
-# * total wall-clock remaining (``state.remaining_minutes()``) is below
-#   ``DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING`` hours, OR
-# * the EXPLORE phase's own remaining budget fraction is below
-#   ``DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT`` of its allocated slice.
-#
-# The defaults match the report iter 19 lesson: leave at least 3h or
-# 20% of EXPLORE budget for the downstream KERNEL/SWEEP/CLOSE phases so
-# the session can produce a clean report + recipe write-back instead of
-# burning the whole budget on diminishing-returns explore variants.
-# Operators tune via ``--explore-force-exit-hours-remaining`` /
-# ``--explore-force-exit-budget-pct`` (locked at session start into
-# ``SharedState.plateau_overrides`` under
-# ``force_exit_hours_remaining`` / ``force_exit_budget_pct``).
+# EXPLORE hard force-exit thresholds (IR-6 HARD time gate; overrides plateau).
+# Fires when remaining wall-clock < HOURS_REMAINING OR EXPLORE budget fraction < BUDGET_PCT.
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
 
-# FRAMEWORK_PR plateau / force-exit knobs.
-#
-# * ``DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK`` — number of consecutive
-#   ``fa phase-discover`` batches we look back at when deciding the
-#   plateau condition (default 3).
-# * ``DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT`` — minimum per-batch
-#   ``max_gain_pct_observed_in_batch`` that counts as "non-flat" (default
-#   1.0%). The plateau fires when every one of the last
-#   ``lookback`` batches sits below this threshold.
-# * ``DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO`` — when
-#   ``remaining_minutes()/60 < ratio * max_hours`` we hard-exit
-#   FRAMEWORK_PR so EXPLORE/KERNEL/SWEEP/CLOSE still have room to run
-#   (default 0.6 → leave 60% of the original budget for downstream).
+# FRAMEWORK_PR plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
 DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK:                 int   = 3
 DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT:            float = 1.0
 DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
 
 
-# ---------------------------------------------------------------------------
-# escalate_strategy_change hint vocabulary
-# ---------------------------------------------------------------------------
-# Closed enum so the Coordinator + phase_state agree on which hints can
-# influence phase transitions / budgets. Unknown hints are logged but
-# do NOT change phase (defensive — prevents an arbitrary
-# robustness-emitted string from steering the state machine).
+# escalate_strategy_change hint vocabulary. Closed enum; unknown hints logged, never change phase.
 ESCALATE_HINT_SKIP_TO_KERNEL:      str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP:       str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE:       str = "skip_to_close"
@@ -501,13 +297,8 @@ ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET:  str = "extend_kernel_budget"
 ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 
-# ``skip_to_sweep`` is the non-terminal "no more leverage" signal: it
-# winds EXPLORE (or KERNEL) down to SWEEP → CLOSE *without* terminating
-# the optimization. Unlike ``skip_to_close`` (which is terminal via
-# ``_global_terminal`` → ``robustness_escalated``), ``skip_to_sweep``
-# still runs the SWEEP validation pass and produces a clean report.
-# It is set by the steward's ``stop_session`` verdict (the automatic
-# no-more-leverage safety net was removed for long-run continuity).
+# ``skip_to_sweep`` is the non-terminal "no more leverage" signal (winds down
+# to SWEEP → CLOSE), unlike terminal ``skip_to_close``.
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -516,17 +307,11 @@ ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
     ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
 })
 
-# Cap that ``extend_*_budget`` hints can lift the per-phase budget to
-# (relative ratio, not absolute). 0.80 means: EXPLORE budget can grow to
-# at most 80% of total wall-clock budget, no matter how many
-# ``extend_explore_budget`` hints fire (hard cap at 80%).
+# ``extend_*_budget`` hints raise a phase budget by DELTA up to CAP.
 ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05   # +5 percentage points per hint
 ESCALATE_HINT_BUDGET_BUMP_CAP:   float = 0.80   # absolute ceiling
 
-# Whether a hint string is structurally a pause-specialist directive.
-# ``pause_specialist_kernel_switch_specialist`` etc.; the suffix is the domain
-# key (specialist_domains.SPECIALIST_DOMAIN_KEYS membership is checked
-# by the Coordinator handler, not here, so this module stays pure).
+# True when a hint string is structurally a pause-specialist directive.
 def is_pause_specialist_hint(hint: str) -> bool:
     h = (hint or "").strip()
     return h.startswith(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX) and len(h) > len(
@@ -535,11 +320,7 @@ def is_pause_specialist_hint(hint: str) -> bool:
 
 
 def is_valid_escalate_hint(hint: str) -> bool:
-    """Return True for any hint Coordinator should act on.
-
-    The closed vocab + the ``pause_specialist_<domain>`` family form
-    the full surface. Anything else is dropped to log.
-    """
+    """Return True for any hint Coordinator should act on (closed vocab + ``pause_specialist_<domain>``)."""
     return (hint or "").strip() in ESCALATE_HINT_VOCAB or is_pause_specialist_hint(hint)
 
 
@@ -550,15 +331,7 @@ def apply_escalate_budget_bump(
     delta: float = ESCALATE_HINT_BUDGET_BUMP_DELTA,
     cap: float = ESCALATE_HINT_BUDGET_BUMP_CAP,
 ) -> dict[str, float]:
-    """Return a budget map with ``phase`` raised by ``delta`` (capped).
-
-    Pure helper that the Coordinator can call when it pops an
-    ``extend_explore_budget`` / ``extend_kernel_budget`` hint. The
-    resulting dict is suitable for assigning back into
-    :attr:`SharedState.phase_budget_pct`.
-
-    "Cap at 80% (absolute)".
-    """
+    """Return a budget map with ``phase`` raised by ``delta`` (capped at 80%)."""
     phase_key = (phase or "").strip().upper()
     if phase_key not in PHASE_NAMES:
         return dict(current_budget_pct or {})
@@ -572,12 +345,7 @@ def apply_escalate_budget_bump(
 def normalize_budget_pct(
     budget: dict[str, float] | None,
 ) -> dict[str, float]:
-    """Return a sanitized ``phase -> pct`` mapping.
-
-    Missing phases fall back to defaults; obviously bad values (negative
-    or > 1.0) get clamped to the default. The total is *not* renormalized
-    to 1.0 — phase budgets are *upper bounds*, not a probability dist.
-    """
+    """Return a sanitized ``phase -> pct`` mapping (budgets are upper bounds, not renormalized to 1.0)."""
     out = dict(DEFAULT_PHASE_BUDGET_PCT)
     if not budget:
         return out
@@ -595,12 +363,9 @@ def normalize_budget_pct(
     return out
 
 
-# ---------------------------------------------------------------------------
 # Pure judgment helpers (used by Coordinator at each tick end)
-# ---------------------------------------------------------------------------
 def _now_unix(state: Any) -> float:
-    """Resolve the "now" timestamp; tests can inject a stub via
-    ``state._now_unix`` for determinism."""
+    """Resolve the "now" timestamp; tests can inject ``state._now_unix``."""
     if hasattr(state, "_now_unix") and callable(state._now_unix):
         return float(state._now_unix())  # type: ignore[attr-defined]
     import time as _time
@@ -616,17 +381,7 @@ def _phase_started_unix(state: Any) -> float:
 
 
 def _pending_escalate_hint(state: Any) -> str:
-    """Return a pending escalate hint to act on this tick.
-
-    Coordinator's ``_handle_escalate_strategy_change`` writes the
-    incoming ``next_action_hint`` into ``SharedState.pending_escalate_hint``;
-    phase_state checks the field here when computing the exit
-    decision. The Coordinator clears it once the phase write lands.
-
-    Unknown hints are surfaced as empty so the state machine ignores
-    them (defensive — prevents arbitrary robustness payloads from
-    steering phases).
-    """
+    """Return a pending escalate hint to act on this tick (unknown hints → empty)."""
     raw = str(getattr(state, "pending_escalate_hint", "") or "").strip()
     if not raw:
         return ""
@@ -657,11 +412,7 @@ def phase_budget_remaining_seconds(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> float | None:
-    """Return seconds remaining in the current phase's budget.
-
-    Returns ``None`` when ``max_minutes`` is 0 (unlimited run) — caller
-    interprets that as "budget never exhausted".
-    """
+    """Return seconds remaining in the current phase's budget (``None`` when ``max_minutes`` 0 = unlimited)."""
     mm = _max_minutes(state)
     if mm <= 0:
         return None
@@ -673,17 +424,11 @@ def phase_budget_remaining_seconds(
     return max(0.0, budget_seconds - phase_elapsed_seconds(state, now_unix=now_unix))
 
 
-# ----------------------- EXPLORE hard force-exit (HARD time gate) -----------
+# EXPLORE hard force-exit (HARD time gate)
 def session_remaining_seconds(
     state: Any, *, now_unix: float | None = None,
 ) -> float | None:
-    """Total wall-clock seconds remaining for the session.
-
-    Returns ``None`` when ``max_minutes`` is 0 (unlimited run) or
-    ``start_ts`` is unparseable. Mirrors
-    :meth:`SharedState.remaining_minutes` without taking a datetime
-    dependency so phase_state stays pure.
-    """
+    """Total wall-clock seconds remaining for the session (``None`` when ``max_minutes`` 0 or ``start_ts`` unparseable)."""
     mm = _max_minutes(state)
     if mm <= 0:
         return None
@@ -710,27 +455,10 @@ def should_force_exit_explore(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires.
+    """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires (IR-6).
 
-    The gate fires when EITHER of:
-
-    * ``session_remaining_seconds(state) <= hours_remaining_threshold * 3600``
-      — total wall-clock budget about to run out; downstream phases need
-      buffer for report + recipe write-back (report iter 19 lesson).
-    * ``phase_budget_remaining_pct <= budget_pct_threshold`` — the EXPLORE
-      slice is almost exhausted; don't squeeze a final variant in only
-      to lose it to a half-finished benchmark.
-
-    Either gate alone is sufficient. Both fields land in ``evidence``
-    so the audit trail captures which condition fired. The Coordinator
-    routes EXPLORE→KERNEL (or →SWEEP when ``kernel_enabled=False``)
-    via the existing ``compute_next_phase`` plumbing — the new exit
-    reason ``explore_force_exit_low_budget`` reuses the same target
-    selection logic.
-
-    Returns ``(False, evidence)`` when neither condition holds; evidence
-    is still populated for diagnostics so callers can render
-    ``force_exit_remaining_sec`` into the Orchestration prompt.
+    Fires when session remaining ≤ hours_threshold*3600 OR phase remaining
+    pct ≤ budget_pct_threshold; ``evidence`` records which fired.
     """
     evidence: dict[str, Any] = {
         "hours_remaining_threshold":  float(hours_remaining_threshold),
@@ -739,10 +467,7 @@ def should_force_exit_explore(
     fired = False
     fired_reasons: list[str] = []
 
-    # Non-positive threshold = disabled. Lets callers opt out of either
-    # sub-gate (e.g. tests that want to isolate budget_exhausted, or an
-    # operator who wants only the phase-pct backstop). Both thresholds
-    # disabled effectively turns the HARD force-exit off for this call.
+    # Non-positive threshold = disabled; both disabled turns force-exit off.
     hours_threshold_enabled = float(hours_remaining_threshold) > 0.0
     pct_threshold_enabled = float(budget_pct_threshold) > 0.0
 
@@ -758,8 +483,7 @@ def should_force_exit_explore(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )
     if phase_remaining is not None:
-        # Compute the phase's *total* allotted budget so we can express
-        # remaining as a fraction.
+        # Express remaining as a fraction of the phase's total budget.
         mm = _max_minutes(state)
         budget = normalize_budget_pct(
             budget_pct or getattr(state, "phase_budget_pct", None)
@@ -783,7 +507,7 @@ def should_force_exit_explore(
     return fired, evidence
 
 
-# ----------------------- plateau pure functions --------
+# plateau pure functions
 def compute_plateau_explore(
     state: Any,
     *,
@@ -791,29 +515,10 @@ def compute_plateau_explore(
     keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
 ) -> tuple[bool, dict[str, Any]]:
-    """Real plateau_explore.
+    """Real plateau_explore → ``(triggered, evidence)``.
 
-    Returns ``(triggered, evidence)``. ``evidence`` always contains the
-    decision inputs so phase_history can audit the call (even when
-    ``triggered=False``).
-
-    Inputs (all read from :class:`SharedState`, pure):
-
-    * ``explore_search.winners_history``: last K KEEP'd variants
-; ``gain_pct`` per row drives the
-      "recent_keep_gain" sum.
-    * ``specialist_rounds``: last K specialist rounds;
-      ``proposals_total`` + ``proposals_kept`` per row drive the
-      empty-round detection.
-
-    Trigger (AND of two signals, KB_design §3.8 §5.1):
-
-        recent_keep_gain    < ``keep_gain_threshold_pct``  AND
-        recent_empty_streak >= ``empty_streak_threshold``
-
-    The AND semantics intentionally avoid false positives — "we tried
-    but it didn't help" alone or "specialist returned empty" alone is
-    not enough; both must hold.
+    Trigger (AND, KB_design §3.8 §5.1): recent_keep_gain < threshold AND
+    recent_empty_streak >= empty_streak_threshold.
     """
     if lookback <= 0:
         return False, {"reason": "lookback_disabled"}
@@ -844,9 +549,7 @@ def compute_plateau_explore(
     def _round_is_empty(row: Any) -> bool:
         if not isinstance(row, dict):
             return False
-        # Designed shape: ``proposals_total`` /
-        # ``proposals_kept``; fall back to ``proposal_count``
-        # for forward-compat with older round summaries.
+        # Fall back to proposal_count for older round summaries.
         try:
             proposals = int(
                 row.get("proposals_total")
@@ -895,23 +598,10 @@ def compute_plateau_kernel(
     revert_streak_threshold: int = DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
     keep_gain_threshold_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
 ) -> tuple[bool, dict[str, Any]]:
-    """Real plateau_kernel.
+    """Real plateau_kernel → ``(triggered, evidence)``.
 
-    Returns ``(triggered, evidence)``. Inputs (all SharedState):
-
-    * ``kernel_opt_attempts``: per-kernel_id history dicts (KB_design
-      §3.10 §4.2). Each entry typically carries
-      ``{attempts, partial_count, last_decision, last_ts, history}``.
-    * ``kernel_integrate_attempts``: per-(kernel_id+patch) integrate
-      attempts; each entry carries an ``attempts`` list of
-      ``{decision, ts}``.
-    * ``rejected_kernel_ids``: cross-session retired kernels.
-
-    Trigger (OR — KB_design §3.8 §5.2 deliberately weaker than the
-    explore AND because kernel attempts are expensive):
-
-        recent_revert_streak >= ``revert_streak_threshold``
-        OR recent_keep_gain  <  ``keep_gain_threshold_pct``
+    Trigger (OR, KB_design §3.8 §5.2 — weaker than explore's AND): revert_streak
+    >= threshold OR recent_keep_gain < keep_gain_threshold_pct.
     """
     lookback = int(lookback or 0)
     revert_streak_threshold = int(revert_streak_threshold or 0)
@@ -923,8 +613,8 @@ def compute_plateau_kernel(
     if not isinstance(integ_attempts, dict):
         integ_attempts = {}
 
-    # Flatten the integrate attempt log into a single time-ordered list
-    # (relying on the embedded ts), then take the last ``lookback`` rows.
+    # Flatten the integrate attempt log into a time-ordered list, take the
+    # last ``lookback`` rows.
     flat: list[tuple[str, str, float]] = []   # (decision, ts, gain_pct)
     for ent in integ_attempts.values():
         if not isinstance(ent, dict):
@@ -945,17 +635,7 @@ def compute_plateau_kernel(
     flat.sort(key=lambda r: r[1])
     recent = flat[-lookback:]
 
-    # Empty-data guard: an empty ledger (KERNEL just entered, or every
-    # prior session-kernel attempt was dropped during resume cleanup)
-    # must NOT auto-trigger plateau via the
-    # ``recent_keep_gain (=0.0) < keep_gain_threshold_pct (=0.5)`` arm.
-    # That degenerate trigger used to flip plateau true the moment KERNEL
-    # started with zero attempts on record — coupled with EXPLORE that
-    # produced no KEEPs (e.g. force-exit on low budget), the session went
-    # EXPLORE→KERNEL→SWEEP without ever spawning a single
-    # ``trace_analyze`` / ``run_optimization`` request. Returning False
-    # here lets the LLM (and the in-loop scheduling-police) actually
-    # exercise the kernel phase before plateau is reconsidered.
+    # Empty-data guard: empty ledger (KERNEL just entered) must NOT auto-trigger plateau (would skip kernel phase).
     if not recent:
         return False, {
             "reason":                   "no_kernel_attempts_yet",
@@ -989,21 +669,11 @@ def compute_plateau_kernel(
     }
 
 
-# ----------------------- terminal / abort (global) -------------------------
+# terminal / abort (global)
 def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """Return ``(stop_reason, evidence)`` if a phase-orthogonal stop has
-    fired.  Caller routes this to CLOSE regardless of current phase.
+    """Return ``(stop_reason, evidence)`` for a phase-orthogonal stop.
 
-    Priority order:
-
-    1. ``escalate_strategy_change`` hint of ``skip_to_close`` →
-       ``robustness_escalated``.
-    2. Coordinator-set ``stop_reason`` (any phase, any reason).
-
-    Note: ``time_exhausted`` is signalled by the existing Coordinator
-    closing-phase mechanism (`run()` writes ``stop_reason`` on
-    deadline); we read SharedState to detect it here so phase_history
-    has a final row.
+    Priority: 1. ``skip_to_close`` → ``robustness_escalated``; 2. Coordinator ``stop_reason``.
     """
     hint = _pending_escalate_hint(state)
     if hint == ESCALATE_HINT_SKIP_TO_CLOSE:
@@ -1015,22 +685,15 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     if sr:
         # Coordinator-set stop_reason takes precedence over phase exits.
         if not is_valid_stop_reason(sr):
-            # PolicyGate enforces vocab; unknown values reaching here
-            # are tolerated for resume parity but flagged via evidence.
+            # Unknown values tolerated for resume parity.
             return sr, {"reason_origin": "shared_state.stop_reason", "vocab": "unknown"}
         return sr, {"reason_origin": "shared_state.stop_reason"}
     return None
 
 
-# ----------------------- per-phase judgments -------------------------------
+# per-phase judgments
 def warm_replay_in_flight(state: Any) -> bool:
-    """True while the PRELUDE warm-recipe replay task has not finished.
-
-    The Coordinator stamps ``warm_replay_outcome.status='in_flight'`` at
-    enqueue time and clears it in ``_promote_warm_replay``. PRELUDE must
-    not exit (and the initial roofline must not enqueue) until this
-    returns False — both paths launch Magpie/sglang on the same GPU.
-    """
+    """True while the PRELUDE warm-recipe replay task has not finished (PRELUDE must not exit until False — GPU contention)."""
     outcome = getattr(state, "warm_replay_outcome", None) or {}
     if not isinstance(outcome, dict):
         return False
@@ -1038,15 +701,7 @@ def warm_replay_in_flight(state: Any) -> bool:
 
 
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """``baseline_tput > 0`` and warm-replay settled → ``prelude_done``.
-
-    Returns ``(reason, evidence)`` when ready to transition, ``None``
-    otherwise. Evidence is later spliced into ``phase_history``.
-
-    Warm-replay blocks the exit while ``warm_replay_in_flight`` so
-    FRAMEWORK_PR / auto-roofline cannot start a second Magpie job on
-    the GPU before the KB config replay finishes.
-    """
+    """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``)."""
     if warm_replay_in_flight(state):
         return None
     try:
@@ -1066,9 +721,8 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
 
 
 def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    # Cortex T0 failure already wrote stop_reason; treat
-    # cortex_t0_failed / time_exhausted_during_prelude as PRELUDE abort
-    # so phase_history captures the boundary.
+    # Treat cortex_t0_failed / time_exhausted_during_prelude etc. as a PRELUDE
+    # abort so phase_history captures the boundary.
     sr = (getattr(state, "stop_reason", "") or "").strip()
     if sr in ("cortex_t0_failed", "time_exhausted_during_prelude",
               "prelude_policy_loop", "user_stop_requested"):
@@ -1086,24 +740,9 @@ def exit_normal_explore(
 ) -> tuple[str, dict[str, Any]] | None:
     """EXPLORE normal exit.
 
-    Priority order:
-
-    0. HARD force-exit (:func:`should_force_exit_explore`) — overrides
-       every other gate. Fires when total session remaining wall-clock
-       drops below ``force_exit_hours_remaining`` hours OR when this
-       phase's remaining budget pct drops below ``force_exit_budget_pct``.
-       Iron Rule IR-6: the plateau judge / LLM proposals do not get to
-       argue with this gate.
-    1. Explicit ``skip_to_kernel`` hint (robustness escalation or LLM
-       phase-advance request) → ``plateau_explore`` with
-       ``evidence='llm_escalation'``.
-    2. Explicit ``skip_to_sweep`` hint → ``no_more_leverage`` (winds
-       EXPLORE → SWEEP → CLOSE non-terminally).
-    3. Phase budget exhausted.
-
-    The plateau judgment (:func:`compute_plateau_explore`) is computed
-    elsewhere as a pure advisory signal injected into the orchestration
-    prompt; it never drives this exit.
+    Priority: 0. HARD force-exit (IR-6, overrides plateau); 1. ``skip_to_kernel``
+    → ``plateau_explore``; 2. ``skip_to_sweep`` → ``no_more_leverage`` (non-terminal);
+    3. phase budget exhausted.
     """
     forced, force_ev = should_force_exit_explore(
         state,
@@ -1147,20 +786,8 @@ def exit_normal_kernel(
 ) -> tuple[str, dict[str, Any]] | None:
     """KERNEL normal exit.
 
-    Priority:
-
-    1. ``escalate_strategy_change`` hint of ``skip_to_close`` →
-       defer to the global terminal handler (caller writes
-       ``stop_reason=robustness_escalated``). Returns ``None`` here so
-       the global path wins.
-    2. ``skip_to_sweep`` hint (non-terminal "no more leverage" from the
-       LLM / robustness) → ``no_more_leverage``; KERNEL already exits
-       to SWEEP so this just forces the wind-down now.
-    3. Phase budget exhausted.
-
-    The plateau judgment (:func:`compute_plateau_kernel`) is computed
-    elsewhere as a pure advisory signal injected into the orchestration
-    prompt; it never drives this exit.
+    Priority: 1. ``skip_to_close`` defers to global terminal; 2. ``skip_to_sweep``
+    → ``no_more_leverage``; 3. phase budget exhausted.
     """
     if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
         return "no_more_leverage", {
@@ -1186,12 +813,9 @@ def exit_normal_sweep(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """SWEEP normal exit. sweep_done OR conc_sweep_done OR budget exhausted.
+    """SWEEP normal exit: sweep_done OR conc_sweep_done OR budget exhausted.
 
-    Bug #12 fix: previously only sweep_done / budget_exhausted were
-    honoured. When sweep was singleton-blocked but conc_sweep ran to
-    completion, the phase had no exit signal and idled until budget
-    exhaustion (wasting hours of GPU on repeated conc_sweep proposals).
+    Bug #12: conc_sweep completion emits an exit so a singleton-blocked sweep doesn't idle.
     """
     last_sweep = getattr(state, "last_sweep", None) or {}
     if isinstance(last_sweep, dict):
@@ -1213,17 +837,10 @@ def exit_normal_sweep(
     return None
 
 
-# ---------------------------------------------------------------------------
 # Transition decision (the only function the Coordinator calls each tick)
-# ---------------------------------------------------------------------------
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
-    """Pull operator-tuned plateau thresholds off SharedState.
-
-    CLI flags lock plateau thresholds at
-    session start; phase_state reads them on every tick via
-    :attr:`SharedState.plateau_overrides`. Empty / missing → library
-    defaults.
-    """
+    """Pull operator-tuned plateau thresholds off
+    :attr:`SharedState.plateau_overrides` (empty → library defaults)."""
     overrides = getattr(state, "plateau_overrides", None) or {}
     return dict(overrides) if isinstance(overrides, dict) else {}
 
@@ -1232,17 +849,7 @@ def _framework_pr_batch_is_complete(
     batch: dict[str, Any],
     progress_by_batch: dict[str, int],
 ) -> bool:
-    """A FRAMEWORK_PR batch is "complete" iff every candidate it carries
-    has a matching row in ``framework_pr_phase_progress`` (any terminal
-    status — KEEP / REVERT / apply_failed / enqueue_failed / critic_denied).
-
-    Used by the plateau judge so that a freshly-discovered batch whose
-    first candidate just got enqueued cannot cause an early exit. Without
-    this guard, ``max_gain_pct_observed_in_batch`` defaults to 0.0 on
-    creation, making the brand-new batch look like another "no gain"
-    data point and tripping plateau the moment ``lookback`` such 0.0
-    entries appear in the tail.
-    """
+    """A FRAMEWORK_PR batch is complete iff every candidate has a terminal-status row in ``framework_pr_phase_progress`` (guards the plateau judge)."""
     candidates = batch.get("candidates") or []
     if not isinstance(candidates, list) or not candidates:
         return True
@@ -1260,15 +867,10 @@ def compute_plateau_framework_pr(
     lookback: int = DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
     keep_gain_threshold_pct: float = DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
 ) -> tuple[bool, dict[str, Any]]:
-    """Pure plateau judgment for FRAMEWORK_PR.
+    """Pure plateau judgment for FRAMEWORK_PR → ``(triggered, evidence)``.
 
-    Returns ``(triggered, evidence)``. Triggers when the most recent
-    ``lookback`` *fully-processed* batches in
-    ``state.framework_pr_batches`` each carry
-    ``max_gain_pct_observed_in_batch < keep_gain_threshold_pct``.
-    Mirrors the legacy :func:`exit_normal_framework_pr` plateau gate
-    but never drives a phase exit; the result is rendered as advisory
-    in the orchestration prompt.
+    Triggers when the last ``lookback`` fully-processed batches each carry
+    ``max_gain_pct_observed_in_batch < keep_gain_threshold_pct``. Advisory-only.
     """
     batches = getattr(state, "framework_pr_batches", None) or []
     lookback_int = int(lookback or 0)
@@ -1318,9 +920,7 @@ def compute_plateau_framework_pr(
 
 
 def _framework_pr_pending_candidate_count(state: Any) -> int:
-    """Count candidates discovered into a batch but missing a progress
-    row. Surfaced in force-exit evidence so operators see how many
-    candidates were skipped by the wall-clock guard."""
+    """Count candidates discovered into a batch but missing a progress row."""
     batches = getattr(state, "framework_pr_batches", None) or []
     if not isinstance(batches, list) or not batches:
         return 0
@@ -1355,23 +955,8 @@ def exit_normal_framework_pr(
 ) -> tuple[str, dict[str, Any]] | None:
     """FRAMEWORK_PR normal exit.
 
-    Priority order:
-
-    0. HARD force-exit — fires when the session's remaining wall-clock
-       drops below ``force_exit_hours_remaining_ratio * max_hours``.
-       Reason: ``framework_pr_force_exit_low_budget``. Matches the
-       design's "leave the rest of the session breathing room" intent.
-       Evidence carries ``pending_candidate_count`` so operators see how
-       much was skipped.
-    1. Normal completion — fires when the Coordinator marked the phase
-       done by setting ``state.framework_pr_phase_done = True`` (no
-       more candidates to enqueue / ``fa phase-discover`` returned 0).
-       Reason: ``framework_pr_phase_done``.
-
-    Returns ``None`` when none of the above apply (the Coordinator
-    stays in FRAMEWORK_PR and enqueues the next batch). The plateau
-    signal across recent batches is exposed as a pure advisory in the
-    orchestration prompt; it never drives this exit.
+    Priority: 0. HARD force-exit when remaining < ratio*max_hours →
+    ``framework_pr_force_exit_low_budget``; 1. ``framework_pr_phase_done``; else ``None``.
     """
     if max_hours and max_hours > 0:
         remaining_min_fn = getattr(state, "remaining_minutes", None)
@@ -1406,13 +991,8 @@ def exit_normal_framework_pr(
 
 
 def _post_prelude_target(*, explore_enabled: bool, kernel_enabled: bool) -> str:
-    """First active phase after PRELUDE / FRAMEWORK_PR.
-
-    EXPLORE when enabled; otherwise KERNEL when enabled; otherwise SWEEP.
-    Mirrors the EXPLORE-exit fallthrough (kernel disabled → SWEEP) so the
-    ``--no-explore`` opt-out collapses the chain the same way
-    ``--no-kernel`` does at the EXPLORE→ boundary.
-    """
+    """First active phase after PRELUDE / FRAMEWORK_PR: EXPLORE, else KERNEL,
+    else SWEEP (``--no-explore`` / ``--no-kernel`` collapse the chain)."""
     if explore_enabled:
         return PHASE_EXPLORE
     if kernel_enabled:
@@ -1432,11 +1012,7 @@ def compute_next_phase(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
-    The Coordinator calls this at the end of each tick. When it returns
-    non-None, the Coordinator writes the transition to phase_history,
-    updates ``state.phase`` + ``phase_started_*`` and persists. Priority
-    order (Inv-8.2 + §3.8 §7.1): ``abort > exit_terminal > exit_normal``.
-    Any global terminal stop_reason fires first regardless of phase.
+    Priority (Inv-8.2 + §3.8 §7.1): global terminal first, then abort > exit_terminal > exit_normal.
     """
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
     overrides = _resolve_plateau_overrides(state)
@@ -1458,13 +1034,8 @@ def compute_next_phase(
         if norm is not None:
             if framework_phase_enabled:
                 return PHASE_FRAMEWORK_PR, norm[0], norm[1]
-            # Framework phase off → straight through to the first active
-            # phase with the historical ``prelude_done`` reason. Neither
-            # FRAMEWORK_PR nor EXPLORE has a dedicated "skipped" reason:
-            # --no-framework / --no-explore simply collapse the chain and
-            # the routing record stays backward-compatible with
-            # pre-FRAMEWORK_PR sessions. ``explore_skipped`` evidence is
-            # stamped when EXPLORE is bypassed (--no-explore).
+            # Framework off → first active phase; ``explore_skipped`` stamped
+            # when EXPLORE is bypassed.
             target = _post_prelude_target(
                 explore_enabled=explore_enabled, kernel_enabled=kernel_enabled,
             )
@@ -1485,8 +1056,7 @@ def compute_next_phase(
             )),
         )
         if norm is not None:
-            # FRAMEWORK_PR → EXPLORE normally; --no-explore collapses
-            # straight to KERNEL (or SWEEP when --no-kernel too).
+            # FRAMEWORK_PR → EXPLORE (or KERNEL/SWEEP when collapsed).
             target = _post_prelude_target(
                 explore_enabled=explore_enabled, kernel_enabled=kernel_enabled,
             )
@@ -1512,8 +1082,7 @@ def compute_next_phase(
         )
         if norm is not None:
             # Non-terminal "no more leverage" → wind down to SWEEP,
-            # skipping the KERNEL hop (the steward / safety net judged
-            # there is no leverage left to chase). SWEEP → CLOSE follows.
+            # skipping the KERNEL hop.
             if norm[0] == "no_more_leverage":
                 return PHASE_SWEEP, norm[0], norm[1]
             if kernel_enabled:
@@ -1543,9 +1112,7 @@ def compute_next_phase(
     return None
 
 
-# ---------------------------------------------------------------------------
 # phase_history helper (shape used by SharedState.record_phase_transition)
-# ---------------------------------------------------------------------------
 def make_history_row(
     *,
     from_phase: str,
@@ -1555,14 +1122,7 @@ def make_history_row(
     ts: str,
     ts_unix: float,
 ) -> dict[str, Any]:
-    """Construct a canonical phase_history row.
-
-    PolicyGate / breakdown collectors share this exact shape (Inv-2.2 +
-    KB_design §3.2 §6). ``reason`` is *not* validated here — callers
-    that want the strict check go through
-    :func:`is_valid_phase_exit_reason` first; we keep the constructor
-    lenient so resume tools can emit synthetic rows during recovery.
-    """
+    """Construct a canonical phase_history row (Inv-2.2 + KB_design §3.2 §6); ``reason`` unvalidated for resume tools."""
     return {
         "from_phase": (from_phase or "").strip().upper(),
         "to_phase":   (to_phase or "").strip().upper(),

@@ -2,15 +2,9 @@
 
 """File-based communication protocol for dynamically dispatched specialists.
 
-Each agent gets a workspace at <session_dir>/agents/<agent_id>/ with:
-  manifest.json   - task manifest (written by orchestrator at dispatch)
-  heartbeat.json  - periodic liveness signal (written by agent)
-  results.jsonl   - incremental results (appended by agent)
-  done.json       - completion report (written by agent on exit)
-  patches/        - generated patches (written by agent)
-  new_knowledge.md - lessons learned (optional, written by agent)
-
-The orchestrator polls heartbeat.json and done.json to track lifecycle.
+Each agent gets a workspace at <session_dir>/agents/<agent_id>/ holding
+manifest.json, heartbeat.json, results.jsonl, done.json, patches/, and
+new_knowledge.md, polled by the orchestrator to track lifecycle.
 """
 
 from __future__ import annotations
@@ -33,9 +27,7 @@ class TaskManifest:
     dispatched_at: str = ""
     timeout_minutes: int = 120
     metadata: dict[str, Any] = field(default_factory=dict)
-    # PID of the spawned claude subprocess, persisted so the Coordinator's
-    # per-tick reaper can SIGTERM/SIGKILL the process group of an overdue
-    # or stale agent even across resumes / different event-loop ticks.
+    # PID of the spawned claude subprocess, persisted so the reaper can signal its process group.
     pid: int | None = None
 
 
@@ -81,9 +73,7 @@ class IncrementalResult:
             self.timestamp = time.time()
 
 
-# ─── Write functions ───────────────────────────────────────────────────────────
-
-
+# Write functions
 def write_task_manifest(session_dir: str, manifest: TaskManifest) -> Path:
     """Write task manifest at dispatch time."""
     agent_dir = Path(session_dir) / "agents" / manifest.agent_id
@@ -118,9 +108,7 @@ def append_result(session_dir: str, result: IncrementalResult) -> None:
         f.write(json.dumps(asdict(result), default=str) + "\n")
 
 
-# ─── Read functions ────────────────────────────────────────────────────────────
-
-
+# Read functions
 def read_manifest(session_dir: str, agent_id: str) -> TaskManifest | None:
     """Read the task manifest for an agent (None if missing / unreadable)."""
     path = Path(session_dir) / "agents" / agent_id / "manifest.json"
@@ -233,9 +221,7 @@ def collect_patches(session_dir: str, agent_id: str) -> list[Path]:
     return sorted(patches_dir.glob("*.patch")) + sorted(patches_dir.glob("*.diff"))
 
 
-# ─── Internal ──────────────────────────────────────────────────────────────────
-
-
+# Internal
 def _atomic_write(path: Path, data: Any) -> None:
     """Atomically write JSON data."""
     path.parent.mkdir(parents=True, exist_ok=True)

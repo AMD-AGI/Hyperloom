@@ -4,20 +4,8 @@
 ``agents/orchestration/dynamic_actions/<dyn_id>/dispatch_history.jsonl``
 plus the per-``dyn_id`` ``telemetry.json`` rollup.
 
-One module owns the canonical event vocabulary and the field
-contract for every audit row. Writes carrying an unknown field — or
-missing a required field — fail fast so a buggy hook cannot silently
-corrupt the audit trail.
-
-Lifecycle coverage (Coordinator hook → event):
-
-* ``_prepare_dynamic_action_dispatch``           → ``DISPATCHED``
-* ``_handle_dynamic_action_runner_result``       → ``SUB_AGENT_DONE``
-                                                    / ``SUB_AGENT_TERMINATED``
-* ``_mirror_critic_verdict_to_dynamic_action``   → ``CRITIC_VERDICT``
-* ``_maybe_update_dynamic_action_after_integrate``
-                                                 → ``INTEGRATE_RESULT``
-* ``resume_abandon_dynamic_actions``             → ``ABANDONED_ON_RESUME``
+Writes with an unknown or missing field fail fast so a buggy hook cannot
+silently corrupt the audit trail.
 """
 
 from __future__ import annotations
@@ -67,8 +55,8 @@ DISPATCHED_FIELDS: frozenset[str] = _COMMON_FIELDS | {
 }
 
 
-# SUB_AGENT_DONE and SUB_AGENT_TERMINATED share the same payload shape
-# (the event label carries the success / non-success distinction).
+# SUB_AGENT_DONE and SUB_AGENT_TERMINATED share the payload shape; the
+# event label carries the success / non-success distinction.
 SUB_AGENT_DONE_FIELDS: frozenset[str] = _COMMON_FIELDS | {
     "terminal_state",
     "reason",
@@ -141,10 +129,9 @@ def append_dispatch_history_row(
 ) -> None:
     """Append one row to ``dispatch_history.jsonl`` after schema check.
 
-    ``payload`` MUST carry every non-header field for the event and no
-    extras. ``event`` + ``ts`` are filled in by the writer; OSError on
-    disk is logged + swallowed so audit-write failures never break the
-    lifecycle.
+    ``payload`` MUST carry every non-header field and no extras (``event`` +
+    ``ts`` filled by the writer). OSError is swallowed so audit-write failures
+    never break the lifecycle.
     """
     event_enum = (
         event if isinstance(event, DispatchHistoryEvent)
@@ -183,9 +170,7 @@ def append_dispatch_history_row(
         )
 
 
-# ---------------------------------------------------------------------------
-# telemetry.json — per-dyn_id terminal-state rollup
-# ---------------------------------------------------------------------------
+# telemetry.json: per-dyn_id terminal-state rollup
 TELEMETRY_FIELDS: frozenset[str] = frozenset({
     "dyn_id",
     "rolled_up_at",
@@ -202,7 +187,7 @@ TELEMETRY_FIELDS: frozenset[str] = frozenset({
     "round_index",
 })
 
-# Map of lifecycle terminal → one-of-eight counter field set to 1.
+# Lifecycle terminal → the one counter field set to 1.
 _TELEMETRY_COUNTER_FOR: dict[DynamicActionStatus, str] = {
     DynamicActionStatus.KEPT: "kept",
     DynamicActionStatus.REVERTED: "reverted",
@@ -227,12 +212,10 @@ def write_dynamic_action_telemetry(
     gain_pct: float | None = None,
     round_index: int | None = None,
 ) -> None:
-    """Overwrite ``telemetry.json`` for one dyn_id on terminal transition.
+    """Overwrite ``telemetry.json`` for one dyn_id on terminal transition (idempotent).
 
-    Idempotent: a later write replaces an earlier one (the resume
-    abandoned sweep is the canonical second-pass writer). Raises
-    :class:`TelemetryRowError` when ``lifecycle`` is non-terminal or
-    the payload violates :data:`TELEMETRY_FIELDS`.
+    Raises :class:`TelemetryRowError` when ``lifecycle`` is non-terminal or the
+    payload violates :data:`TELEMETRY_FIELDS`.
     """
     lifecycle_enum = (
         lifecycle if isinstance(lifecycle, DynamicActionStatus)

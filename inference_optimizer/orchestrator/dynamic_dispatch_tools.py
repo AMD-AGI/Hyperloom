@@ -2,14 +2,8 @@
 
 """Tool definitions and executor for dynamic specialist dispatch.
 
-Provides the orchestration agent with three tools:
-  - dispatch_specialists: Launch specialist agents with free-form tasks
-  - check_specialists: Poll status of all dispatched specialists
-  - collect_specialist_results: Retrieve results from a completed specialist
-
-These tools are registered alongside the existing orchestration tool surface
-so the agent can use both the structured domain path (via delegate intents)
-and the dynamic free-form path (via these tools).
+Provides three tools (dispatch_specialists, check_specialists,
+collect_specialist_results), registered alongside the structured domain path.
 """
 
 from __future__ import annotations

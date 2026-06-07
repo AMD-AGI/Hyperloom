@@ -1,37 +1,14 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""ProposalScorer — advisory multi-model scorer for specialist proposals.
+"""ProposalScorer — purely advisory multi-model scorer for specialist proposals.
 
-This component is **purely advisory**. It scores each variant in a
-specialist's ``proposal_set`` with one or more LLM models on the AMD
-gateway, then hands the scores to the Coordinator which surfaces them
-to Orchestration as *one reference among many* (parallel to gaps / KB /
-``analysis.md`` priority markers). It NEVER:
-
-* touches the Critic (no ``verdict`` / ``verdict_map``),
-* touches PolicyGate / the phase machine / the intent schema,
-* sorts, ranks, or auto-selects proposals.
-
-Design parallels :class:`CodexBackend`: every model is just a ``model=``
-string on the *same* OpenAI-style gateway client (``OPENAI_BASE_URL`` +
-``ANTHROPIC_AUTH_TOKEN`` / ``OPENAI_API_KEY``). Adding a model = adding
-a slug to ``models``. Each model is scored independently and concurrently
-via ``asyncio.gather`` so one model's failure / missing-slug / timeout
-never blocks the others.
+Scores each variant with one or more LLM models (advisory only; never
+sorts/ranks/auto-selects, never touches Critic/PolicyGate). Each model scored
+independently via ``asyncio.gather``.
 
 Output schema (``score`` return value)::
 
-    {
-        "scale": "0-10",
-        "models": {
-            "<model_slug>": {
-                "<proposal_name>": {"score": <float 0-10>, "reason": "<str>"},
-                ...
-            },
-            ...
-        },
-        "errors": {"<model_slug>": "<reason>", ...},
-    }
+    {"scale": "0-10", "models": {"<slug>": {"<name>": {"score": <0-10>, "reason": "<str>"}}}, "errors": {...}}
 
 Test seam: pass ``client_factory`` to bypass real client construction.
 """
@@ -54,21 +31,12 @@ log = logging.getLogger(__name__)
 DEFAULT_SCORER_MODELS: tuple[str, ...] = (
     "claude-opus-4-8",
     "gpt-5.5",
-    # Kimi K2.6 and Gemini 3.1 Pro are reasoning models: they spend
-    # completion tokens on internal reasoning before emitting the JSON,
-    # so they need the larger ``max_completion_tokens`` default below
-    # (4096) — at 1200 Kimi returns finish_reason=length with empty
-    # content. Gemini MUST carry the ``gemini/`` provider prefix: the
-    # bare ``gemini-3.1-pro-preview`` slug routes to a broken Vertex ADC
-    # path on the gateway (APIConnectionError), while ``gemini/…`` routes
-    # to a working backend.
+    # Kimi K2.6 / Gemini 3.1 Pro are reasoning models needing the larger 4096 token cap; Gemini MUST carry the ``gemini/`` prefix (bare slug routes to a broken Vertex ADC path).
     "dvue-aoai-005-Kimi-K2.6",
     "gemini/gemini-3.1-pro-preview",
 )
 
-# Soft cap on what we feed each model so a pathological proposal_set
-# can't blow up the scoring prompt. Advisory display only — scoring does
-# not gate dispatch, so this just bounds the rendered set.
+# Soft cap on proposals fed to each model so a pathological set can't blow up the prompt.
 _MAX_PROPOSALS_SCORED: int = 16
 _MAX_FIELD_CHARS: int = 600
 
@@ -93,8 +61,7 @@ Rules:
 """.strip()
 
 
-# Match a fenced ```json ... ``` block (preferred) then a bare top-level
-# object containing "scores". Mirrors CodexBackend._extract_envelope.
+# Match a fenced ```json``` block (preferred) then a bare top-level "scores" object.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_JSON_RE = re.compile(r"(\{.*?\"scores\".*\})", re.DOTALL)
 
@@ -142,12 +109,7 @@ def _coerce_score(raw: Any) -> float | None:
 def _normalise_model_scores(
     parsed: dict[str, Any], *, proposal_names: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """Project a model's parsed ``{"scores": {...}}`` onto known names.
-
-    Drops unknown names, clamps scores to [0, 10], truncates reasons.
-    Proposals the model omitted simply don't appear (the renderer shows
-    a placeholder).
-    """
+    """Project parsed ``{"scores": {...}}`` onto known names (drop unknowns, clamp [0,10], truncate reasons)."""
     out: dict[str, dict[str, Any]] = {}
     scores = parsed.get("scores")
     if not isinstance(scores, dict):
@@ -174,9 +136,7 @@ class ProposalScorer:
     models: tuple[str, ...] = DEFAULT_SCORER_MODELS
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
     base_url_env: str = "OPENAI_BASE_URL"
-    # 4096 (not 1200) so reasoning raters (e.g. Kimi K2.6) have room to
-    # finish their internal reasoning AND still emit the scores JSON;
-    # non-reasoning models stop early and never approach the cap.
+    # 4096 so reasoning raters (e.g. Kimi K2.6) can finish reasoning and still emit the scores JSON.
     max_completion_tokens: int = 4096
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
@@ -197,9 +157,7 @@ class ProposalScorer:
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
-        # Lazy: construct the gateway client on first use so an
-        # unconfigured environment fails per-call (degrade) rather than
-        # at Coordinator boot. Mirrors CodexBackend env resolution.
+        # Lazy: construct on first use so an unconfigured env degrades per-call, not at boot.
         self._client = None
 
     def _ensure_client(self) -> Any:
@@ -269,9 +227,7 @@ class ProposalScorer:
     async def _score_one_model(
         self, model: str, prompt: str, proposal_names: list[str],
     ) -> dict[str, dict[str, Any]]:
-        """Score every proposal with a single model. Raises on failure;
-        the caller (``score``) catches and records the error per-model.
-        """
+        """Score every proposal with a single model (raises on failure; caller records the per-model error)."""
         client = self._ensure_client()
         full_prompt = f"{prompt}\n\n{_SCORING_INSTRUCTIONS}"
         messages = [{"role": "user", "content": full_prompt}]
@@ -299,13 +255,7 @@ class ProposalScorer:
     async def score(
         self, *, gap: dict[str, Any], proposals: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Score ``proposals`` against ``gap`` with every configured model.
-
-        Returns the advisory envelope (see module docstring). Never
-        raises for per-model failures — they land in ``errors``. Returns
-        an empty ``models`` dict (with ``errors``) if everything failed,
-        so the caller can still attach it (and the renderer omits it).
-        """
+        """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised)."""
         proposals = [p for p in (proposals or []) if isinstance(p, dict)]
         if not proposals or not self.models:
             return {"scale": "0-10", "models": {}, "errors": {}}

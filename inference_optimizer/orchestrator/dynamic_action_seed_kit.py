@@ -2,24 +2,7 @@
 
 """Seed-kit assembler for the ``dynamic_action`` sub-agent.
 
-The sub-agent's whole input surface is what this module returns.
-Closed field set, deterministic selection rules, hard token cap.
-
-Public surface:
-
-* :data:`SEED_KIT_FIELDS` — frozenset of allowed top-level keys; any
-  other key in the output is rejected.
-* :data:`MAX_SEED_KIT_TOKENS` / per-section caps — token budget.
-* :class:`SeedKitAssemblyError` — raised on token overflow or schema
-  mismatch; the Coordinator treats this as a non-retryable dispatch
-  failure.
-* :func:`assemble_seed_kit(state, payload)` — side-effect-free; returns
-  the dict that will be JSON-dumped into ``seed_kit.json``.
-* :func:`estimate_tokens(text)` — char-based estimator (~4 chars per
-  token).
-
-Selection is deterministic (no LLM scoring, no randomness). A new
-selection signal requires extending :data:`SEED_KIT_FIELDS`.
+Closed field set, deterministic selection (no LLM scoring), hard token cap.
 """
 
 from __future__ import annotations
@@ -50,8 +33,7 @@ MAX_KEPT_PATCHES: int = 40
 MAX_REVERTED_PATCHES: int = 20
 MAX_KB_PITFALLS: int = 20
 
-# Per-section char budgets (≈ 4 chars per token), kept well below
-# ``MAX_SEED_KIT_TOKENS`` so all sections combined stay within budget.
+# Per-section char budgets (≈ 4 chars per token), kept below MAX_SEED_KIT_TOKENS.
 _MAX_MOTIVATION_CHARS: int = 8_000
 _MAX_ROOFLINE_CHARS: int = 8_000
 _MAX_PITFALL_CHARS_EACH: int = 600
@@ -61,9 +43,7 @@ _CHARS_PER_TOKEN: float = 4.0
 
 
 class SeedKitAssemblyError(RuntimeError):
-    """Token overflow or schema violation during seed-kit assembly.
-
-    The Coordinator catches this and rolls back the dispatch."""
+    """Token overflow or schema violation during seed-kit assembly."""
 
 
 @dataclass(frozen=True)
@@ -90,21 +70,13 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 def _is_kernel_only_entry(entry: dict[str, Any]) -> bool:
-    """True for patches whose action is kernel-only. Carried into the
-    seed kit with a ``kernel_only`` advisory tag (not dropped) so the
-    sub-agent sees the full history; PolicyGate still rejects kernel-only
-    scope at dispatch."""
+    """True for kernel-only patches; tagged (not dropped) so the sub-agent sees full history."""
     action = str(entry.get("action") or "").strip().lower()
     return action.startswith("kernel_") or action == "integrate"
 
 
-# ---------------------------------------------------------------------------
-# Section assemblers
-# ---------------------------------------------------------------------------
 def _roofline_summary(state: Any) -> str:
-    """One-paragraph roofline digest from
-    ``last_trace_analyze.analysis_md_text``; empty when the cache is
-    cold."""
+    """One-paragraph roofline digest from ``last_trace_analyze.analysis_md_text``."""
     snap = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(snap, dict):
         return ""
@@ -113,9 +85,7 @@ def _roofline_summary(state: Any) -> str:
 
 
 def _profile_keyslices(state: Any, scope_domains: list[str]) -> list[dict[str, Any]]:
-    """Top-N hot kernels from ``last_trace_analyze.hot_kernels_top15``,
-    sorted by ``gpu_pct`` descending. ``scope_domains`` is reserved
-    for future domain-affinity filtering."""
+    """Top-N hot kernels from ``last_trace_analyze.hot_kernels_top15``, sorted by ``gpu_pct`` desc."""
     snap = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(snap, dict):
         return []
@@ -138,9 +108,7 @@ def _profile_keyslices(state: Any, scope_domains: list[str]) -> list[dict[str, A
 
 
 def _kept_patches(state: Any) -> list[dict[str, Any]]:
-    """Most recent KEEP'd variants from ``explore_search.accepted``;
-    falls back to ``optimization_stack`` when ``explore_search`` is
-    absent."""
+    """Most recent KEEP'd variants from ``explore_search.accepted`` (falls back to ``optimization_stack``)."""
     accepted = []
     search = getattr(state, "explore_search", None) or {}
     if isinstance(search, dict):
@@ -189,11 +157,7 @@ def _reverted_patches(state: Any) -> list[dict[str, Any]]:
 def _kb_pitfalls(
     state: Any, scope_domains: list[str], motivation: str,
 ) -> list[dict[str, Any]]:
-    """Filter ``warm_start_pitfalls`` by substring overlap with
-    ``scope_domains`` ∪ keywords extracted from ``motivation``.
-
-    Substring containment only (no LLM scoring). Top-K returned in
-    source order; the warm cache is already ranked by relevance."""
+    """Filter ``warm_start_pitfalls`` by substring overlap with ``scope_domains`` ∪ ``motivation`` keywords; top-K in source order."""
     raw = getattr(state, "warm_start_pitfalls", None) or []
     if not isinstance(raw, list) or not raw:
         return []
@@ -226,31 +190,18 @@ def _kb_pitfalls(
 
 
 def _source_root_hints() -> list[str]:
-    """Resolved framework source roots; empty when the env var is
-    unset."""
+    """Resolved framework source roots; empty when the env var is unset."""
     return list(resolve_source_file_allowlist())
 
 
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
 def assemble_seed_kit(
     state: Any, payload: dict[str, Any],
 ) -> SeedKitResult:
     """Compose the closed seed-kit dict for one dispatch.
 
-    ``state`` is a SharedState snapshot; only ``last_trace_analyze``
-    / ``explore_search`` / ``optimization_stack`` /
-    ``warm_start_pitfalls`` are consulted (thin doubles tolerated).
-
-    ``payload`` is the validated dispatch payload; PolicyGate has
-    already enforced the non-empty ``motivation_gap_text`` + ≥ 2
-    ``scope_domains`` invariants.
-
-    Returns a :class:`SeedKitResult` with ``degraded=True`` when one
-    or more best-effort sources came back empty. Raises
-    :class:`SeedKitAssemblyError` on token overflow or schema
-    violation; the Coordinator rolls back the dispatch.
+    Returns a :class:`SeedKitResult` (``degraded=True`` when a best-effort
+    source was empty); raises :class:`SeedKitAssemblyError` on token overflow
+    or schema violation.
     """
     motivation_raw = str(payload.get("motivation_gap_text") or "").strip()
     if not motivation_raw:

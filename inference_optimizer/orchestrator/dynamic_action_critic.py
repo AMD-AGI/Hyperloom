@@ -2,30 +2,9 @@
 
 """Critic-side review primitives for ``dynamic_action``.
 
-The runner already validates the proposal payload before the patch
-reaches the Critic. This module is the safety-invariant second defence
-layer (provenance literal, forbidden quantitative fields, numeric-claim
-regex inside the qualitative argument) so a regression upstream cannot
-smuggle a forged proposal past the Critic boundary. Strategy-level
-cross-domain quality (rationale completeness, coupling/side-effect
-articulation, motivation gap) is the LLM Critic's call and is offered
-to it as advisory descriptors via ``CROSS_DOMAIN_RULES``; the
-mechanical layer no longer enforces those rules.
-
-Public surface:
-
-* :data:`CROSS_DOMAIN_RULES` — advisory rule descriptors injected into
-  the Critic prompt (LLM judgement guide, not mechanically enforced);
-* :data:`CRITIC_VERDICT_FIELDS` — closed envelope for
-  ``critic_verdict.json``;
-* :class:`CrossDomainPreverdict` — safety-invariant check result;
-* :func:`classify_proposal_for_critic` — maps a proposal to
-  ``(bundle_action_class, review_constraints)``;
-* :func:`run_mechanical_cross_domain_checks` — fail-fast provenance +
-  forbidden-field + numeric-claim guards (safety invariants only);
-* :func:`build_critic_verdict_envelope` — assembles the on-disk shape;
-* :func:`write_critic_verdict` — persists the envelope under the
-  dispatch artefact dir.
+Safety-invariant second defence layer (provenance literal, forbidden
+quantitative fields, numeric-claim regex). Strategy-level cross-domain
+quality is the LLM Critic's call, offered via ``CROSS_DOMAIN_RULES``.
 """
 
 from __future__ import annotations
@@ -47,9 +26,6 @@ from .dynamic_action_proposal import (
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Rule catalogue
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class CrossDomainRule:
     """One review rule injected into the Critic prompt when
@@ -98,9 +74,6 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Closed verdict envelope
-# ---------------------------------------------------------------------------
 CRITIC_VERDICT_FIELDS: frozenset[str] = frozenset({
     "dyn_id",
     "verdict",
@@ -115,11 +88,7 @@ ALLOWED_VERDICTS: frozenset[str] = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
-# Mechanical-check primitives (safety invariants only)
-# ---------------------------------------------------------------------------
-# Mirrors the runner's numeric-claim regex so the Critic boundary
-# still rejects smuggled numbers if the runner is bypassed.
+# Mirrors the runner's numeric-claim regex so the Critic still rejects smuggled numbers.
 _NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b\d+(?:\.\d+)?\s*%"),
     re.compile(r"\b\d+(?:\.\d+)?\s*x\b", re.I),
@@ -136,22 +105,12 @@ def _numeric_hits(text: str) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Pre-verdict envelope (mechanical checks)
-# ---------------------------------------------------------------------------
 @dataclass
 class CrossDomainPreverdict:
     """Pre-LLM verdict produced by the safety-invariant checks.
 
-    When ``verdict == "approve"`` the LLM-critic runs and is the sole
-    authority on the strategy verdict (approve / revise / reject). The
-    mechanical layer only short-circuits on a clear safety-invariant
-    violation (forged provenance, forbidden field, smuggled numeric
-    claim) — in that case it sets ``verdict == "reject"`` and the
-    Critic call is skipped. ``revise`` is no longer emitted from this
-    layer; it was previously raised by strategy keyword checks that
-    have been delegated to the LLM Critic, but ``is_blocking`` still
-    treats it as blocking for any caller that hand-builds a preverdict.
+    On ``approve`` the LLM-critic is sole authority; the mechanical layer only
+    short-circuits to ``reject`` on a safety-invariant violation.
     """
 
     verdict: str
@@ -164,24 +123,14 @@ class CrossDomainPreverdict:
         return self.verdict in {"reject", "revise"}
 
 
-# ---------------------------------------------------------------------------
-# Classifier
-# ---------------------------------------------------------------------------
 def classify_proposal_for_critic(
     proposal_payload: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     """Decide how the Critic should treat one proposal.
 
-    Returns ``(bundle_action_class, review_constraints)``:
-
-    * ``bundle_action_class`` is always ``"patch_landing"`` (never
-      branches by source).
-    * ``review_constraints`` carries ``cross_domain=True`` plus the
-      rule descriptors when ``provenance == "dynamic"``; otherwise
-      the dict is empty (specialist patches are unaffected).
-
-    The ``provenance`` match is strict + case-sensitive so a forged
-    ``DYNAMIC`` / ``Dynamic`` cannot slip past this layer.
+    Returns ``(bundle_action_class, review_constraints)``; the latter carries
+    ``cross_domain=True`` + rules when ``provenance == "dynamic"`` (strict,
+    case-sensitive so a forged ``DYNAMIC`` cannot slip past), else empty.
     """
     provenance = str(
         (proposal_payload or {}).get("provenance") or "",
@@ -210,9 +159,6 @@ def is_cross_domain_proposal(proposal_payload: dict[str, Any]) -> bool:
     return bool(rc.get("cross_domain"))
 
 
-# ---------------------------------------------------------------------------
-# Mechanical checks
-# ---------------------------------------------------------------------------
 def run_mechanical_cross_domain_checks(
     proposal_payload: dict[str, Any],
     *,
@@ -220,20 +166,9 @@ def run_mechanical_cross_domain_checks(
 ) -> CrossDomainPreverdict:
     """Apply the fail-fast safety guards (provenance + schema).
 
-    Only safety invariants block here: the proposal MUST declare
-    ``provenance == 'dynamic'``, MUST NOT carry any field in
-    :data:`FORBIDDEN_PROPOSAL_FIELDS`, and the qualitative argument
-    MUST NOT smuggle quantitative claims (numeric-claim regex). Every
-    other ("strategy") quality dimension — per-domain rationale
-    coverage, coupling articulation, side-effect mention, grid-combo
-    motivation — is the LLM Critic's call now; the mechanical layer no
-    longer rewrites or downgrades those.
-
-    ``applied_rules`` records the safety-guard id list for audit so
-    downstream readers can still tell which checks ran.
-    ``spec_scope_domains`` is accepted for backward compatibility with
-    callers that pass it through; the safety-invariant checks do not
-    consult it.
+    Only safety invariants block: ``provenance == 'dynamic'``, no
+    :data:`FORBIDDEN_PROPOSAL_FIELDS`, no numeric claim in the qualitative
+    argument. ``spec_scope_domains`` is accepted for compat but not consulted.
     """
     del spec_scope_domains  # safety guards do not consult scope
     pre = CrossDomainPreverdict(verdict="approve", cross_domain_flag=True)
@@ -281,9 +216,6 @@ def run_mechanical_cross_domain_checks(
     return pre
 
 
-# ---------------------------------------------------------------------------
-# Verdict envelope writer
-# ---------------------------------------------------------------------------
 def build_critic_verdict_envelope(
     *,
     dyn_id: str,
@@ -328,11 +260,7 @@ def write_critic_verdict(
     dyn_id: str,
     envelope: dict[str, Any],
 ) -> Path:
-    """Persist ``critic_verdict.json`` under the dyn_id artefact dir.
-
-    Caller is expected to have validated the envelope via
-    :func:`build_critic_verdict_envelope`. Returns the path written.
-    """
+    """Persist ``critic_verdict.json`` under the dyn_id artefact dir; returns the path."""
     target = dynamic_action_critic_verdict_path(session_dir, dyn_id)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(

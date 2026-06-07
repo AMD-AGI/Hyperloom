@@ -1,19 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""MessageBus.
-
-The ``events`` table is the source of truth. ``seq`` is the AUTOINCREMENT
-primary key, so we never have to coordinate sequence allocation in
-application code; SQLite gives us a globally monotonic id for free.
-
-Topics + priorities are validated against an allowlist (DESIGN §13.2)
-before insert. v0.6 changes:
-
-* Removed ``objection`` / ``vote`` / ``vote_request`` / ``parliament_open``
-  (parliament gone — ADR-38).
-* Added ``review_verdict`` (Critic Review Protocol).
-* ``kill`` mirror topic stays; emitted by Robustness via Coordinator.
-"""
+"""MessageBus — the ``events`` table is the source of truth; ``seq`` (AUTOINCREMENT) gives a monotonic id. Topics + priorities validated against an allowlist (DESIGN §13.2)."""
 
 from __future__ import annotations
 
@@ -38,13 +25,11 @@ TOPIC_ALLOWLIST = frozenset({
     "delegated_result", "intent_emitted", "rca_done",
     # Storage-layer events
     "lease_expired", "lease_acquire_failed",
-    # Agent-to-agent RPC topics carrying REQUEST / RESPONSE intents.
-    # Coordinator mirrors request/response payloads onto these topics so the
-    # target agent's inbox picks them up (kernel agent contract).
+    # Agent-to-agent RPC (REQUEST / RESPONSE intents).
     "request", "response",
-    # Critic Review Protocol — verdict broadcast topic.
+    # Critic Review Protocol verdict broadcast.
     "review_verdict", "advice", "strategy_change",
-    # Robustness handle / scheduling-police mirror topics for audit trail.
+    # Robustness scheduling-police mirror (audit trail).
     "kill",
 })
 

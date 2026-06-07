@@ -2,19 +2,10 @@
 
 """Dynamic specialist dispatch — CPU-only subprocess lifecycle management.
 
-Provides a free-form dispatch path where the orchestration agent can spawn
-specialist sub-agents with any natural-language task description, without
-being locked to the predefined specialist domain catalogue.
-
-All dynamic specialists are CPU-only (research, code analysis, KB search,
-patch generation). They launch immediately with no GPU allocation or
-queuing. GPU-bound work (profiling, kernel compilation, microbenchmarks)
-should use the existing structured SpecialistRunner path.
-
-Dispatch backend: Claude CLI.
-  - Full tool access: Bash, Read, Write, Edit, Grep, Glob, Task, WebSearch
-  - Stream-json output for structured logging
-  - --add-dir for scoped codebase access
+Free-form path where the orchestration agent spawns specialist sub-agents
+with any natural-language task. All dynamic specialists are CPU-only and
+launch immediately; GPU-bound work uses the structured SpecialistRunner
+path. Dispatch backend is the Claude CLI.
 """
 
 from __future__ import annotations
@@ -47,9 +38,7 @@ from .dynamic_dispatch_comms import (
 log = logging.getLogger(__name__)
 
 
-# ─── Enums ─────────────────────────────────────────────────────────────────────
-
-
+# Enums
 class FailureType(enum.Enum):
     SUCCESS = "success"
     CRASH = "crash"
@@ -66,9 +55,7 @@ class TaskPriority(enum.Enum):
     LOW = 3
 
 
-# ─── Data classes ──────────────────────────────────────────────────────────────
-
-
+# Data classes
 @dataclass
 class AgentHandle:
     """Handle to a dispatched specialist with lifecycle tracking."""
@@ -129,18 +116,14 @@ class DispatchResult:
     errors: list[str]
 
 
-# ─── Agent ID generation ───────────────────────────────────────────────────────
-
-
+# Agent ID generation
 def generate_agent_id(role: str = "agent") -> str:
     ts = int(time.time())
     suffix = "".join(choices(ascii_lowercase, k=4))
     return f"{role}-{ts}-{suffix}"
 
 
-# ─── Core dispatch ─────────────────────────────────────────────────────────────
-
-
+# Core dispatch
 def dispatch_agent(
     prompt: str,
     session_dir: str,
@@ -172,8 +155,7 @@ def dispatch_agent(
     handle.attempt = attempt
     handle.metadata = metadata or {}
 
-    # Persist the spawned pid so the Coordinator reaper can kill an
-    # overdue / stale agent's process group on a later tick.
+    # Persist the pid so the reaper can killpg the process group later.
     if handle.pid is not None:
         manifest.pid = handle.pid
         write_task_manifest(session_dir, manifest)
@@ -210,9 +192,7 @@ def dispatch_batch(
     return DispatchResult(launched=launched, errors=errors)
 
 
-# ─── Lifecycle management ──────────────────────────────────────────────────────
-
-
+# Lifecycle management
 def reap_completed(
     handles: list[AgentHandle],
     session_dir: str,
@@ -241,9 +221,7 @@ def reap_completed(
     return still_running, newly_completed
 
 
-# ─── Failure classification ────────────────────────────────────────────────────
-
-
+# Failure classification
 _CRASH_MARKERS = [
     "ImportError", "ModuleNotFoundError", "RuntimeError",
     "Traceback", "Killed", "Segmentation fault",
@@ -351,9 +329,7 @@ def classify_failure(
     )
 
 
-# ─── Retry with escalation ────────────────────────────────────────────────────
-
-
+# Retry with escalation
 def build_retry_prompt(
     original_task: TaskSpec,
     failure_info: FailureInfo,
@@ -408,9 +384,7 @@ def build_retry_task(
     )
 
 
-# ─── CLI dispatch ─────────────────────────────────────────────────────────────
-
-
+# CLI dispatch
 def _dispatch_via_cli(
     prompt: str,
     session_dir: str,
@@ -465,8 +439,7 @@ def _dispatch_via_cli(
     with open(log_path, "w") as log_f:
         proc = subprocess.Popen(
             cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env, cwd=repo_root,
-            # Own process group so the reaper can kill the whole tree
-            # (claude CLI + child SDK / curl invocations) with killpg.
+            # Own process group so the reaper can killpg the whole tree.
             start_new_session=True,
         )
 
@@ -478,17 +451,12 @@ def _dispatch_via_cli(
     )
 
 
-# ─── Liveness reap ─────────────────────────────────────────────────────────────
-
-
+# Liveness reap
 def kill_agent(pid: int | None) -> bool:
     """Tear down a dynamic specialist subprocess by pid.
 
-    Kills the whole process group (the agent was spawned with
-    ``start_new_session=True``) so child SDK / curl invocations die with
-    it. Sends SIGTERM, waits up to 5s, then SIGKILL. Best-effort: returns
-    True if a signal was delivered, False when there was nothing to kill
-    or the pid was already gone.
+    Kills the whole process group: SIGTERM, wait, then SIGKILL. Returns True if
+    a signal was delivered, False when there was nothing to kill.
     """
     if not pid or pid <= 0:
         return False

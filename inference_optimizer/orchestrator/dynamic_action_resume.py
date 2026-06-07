@@ -2,17 +2,8 @@
 
 """Resume-time abandoned sweep for ``dynamic_action``.
 
-Coordinator startup hook that:
-
-* transitions every non-terminal ``dyn_id`` to ``ABANDONED``;
-* appends an ``abandoned_on_resume`` row to dispatch_history.jsonl;
-* writes a terminal telemetry rollup;
-* tears down the residual worktree + git branch (best-effort, log on
-  failure).
-
-Side-effects are bounded to the per-dyn_id artefact dir + git
-plumbing; the bus, task registry, and sub-agent runners are not
-touched (the Coordinator's own resume path has already reset them).
+Coordinator startup hook that transitions every non-terminal ``dyn_id`` to
+``ABANDONED``, records history + telemetry, and tears down the residual worktree.
 """
 
 from __future__ import annotations
@@ -49,8 +40,7 @@ from .dynamic_action_proposal import (
 log = logging.getLogger(__name__)
 
 
-# Backwards-compatible alias for the canonical schema in
-# :mod:`dynamic_action_history`.
+# Backwards-compatible alias for the canonical schema in dynamic_action_history.
 ABANDONED_HISTORY_FIELDS: frozenset[str] = _ABANDONED_FIELDS_CANONICAL
 
 # Cleanup outcomes surfaced on the abandoned_on_resume row.
@@ -84,9 +74,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-# ---------------------------------------------------------------------------
-# git helpers — best-effort cleanup of the per-dyn_id worktree + branch
-# ---------------------------------------------------------------------------
+# git helpers: best-effort cleanup of the per-dyn_id worktree + branch
 def _branch_name_for(dyn_id: str) -> str:
     """Branch name created by ``DynamicActionRunner._setup_worktree``."""
     return f"dynamic-{dyn_id}"
@@ -100,10 +88,7 @@ def _resolve_dynamic_worktree(session_dir: Path, dyn_id: str) -> Path:
 
 
 def _pick_worktree_base(framework_source_roots: tuple[str, ...]) -> Path | None:
-    """First ``framework_source_root`` that is a git checkout.
-
-    Inlined to keep this module free of orchestrator imports.
-    """
+    """First ``framework_source_root`` that is a git checkout."""
     for r in framework_source_roots:
         p = Path(r)
         if not p.is_dir():
@@ -129,8 +114,7 @@ def _delete_branch(base: Path, branch: str) -> bool:
         return False
     if cp.returncode == 0:
         return True
-    # ``not found`` exits non-zero but is the no-op success case
-    # we treat as cleanly handled.
+    # "not found" exits non-zero but is a no-op success.
     stderr = (cp.stderr or "").lower()
     if "not found" in stderr:
         return True
@@ -193,9 +177,7 @@ def _cleanup_worktree_and_branch(
     return outcome
 
 
-# ---------------------------------------------------------------------------
 # dispatch_history.jsonl writer
-# ---------------------------------------------------------------------------
 def _append_abandoned_history(
     *,
     session_dir: Path,
@@ -224,9 +206,7 @@ def _append_abandoned_history(
     )
 
 
-# ---------------------------------------------------------------------------
 # Spec.json reader (used to backfill a missing summary row)
-# ---------------------------------------------------------------------------
 def _load_spec_for_recovery(
     session_dir: Path, dyn_id: str,
 ) -> dict[str, Any] | None:
@@ -250,8 +230,7 @@ def _seed_recovery_summary(
     spec: dict[str, Any],
 ) -> None:
     """Synthesise a ``DISPATCHED`` summary row from ``spec.json`` so a
-    subsequent ``DISPATCHED → ABANDONED`` write is accepted by the
-    transition validator."""
+    subsequent ``DISPATCHED → ABANDONED`` write is accepted."""
     payload = spec.get("payload") or {}
     motivation = str(payload.get("motivation_gap_text") or "")
     if len(motivation) > MOTIVATION_GAP_SHORT_MAX_CHARS:
@@ -277,9 +256,7 @@ def _seed_recovery_summary(
     )
 
 
-# ---------------------------------------------------------------------------
 # Public entry point
-# ---------------------------------------------------------------------------
 def resume_abandon_dynamic_actions(
     *,
     session_dir: Path,
@@ -348,9 +325,7 @@ def _process_one(
         if isinstance(summary, dict) else ""
     )
 
-    # Artefact present but summary missing: rebuild a synthetic
-    # DISPATCHED row so the transition validator accepts the
-    # subsequent ABANDONED write.
+    # Artefact present but summary missing: rebuild a synthetic DISPATCHED row.
     if artefact_present and not isinstance(summary, dict):
         spec = _load_spec_for_recovery(session_dir, dyn_id)
         if spec is not None:
@@ -370,9 +345,7 @@ def _process_one(
     try:
         previous_status = DynamicActionStatus(previous_status_raw)
     except ValueError:
-        # Empty/unknown status: skip silently when there is nothing
-        # to recover, otherwise treat as ``DISPATCHED`` so the sweep
-        # can still transition.
+        # Empty/unknown status: skip when nothing to recover, else treat as DISPATCHED.
         if not artefact_present and not isinstance(summary, dict):
             return
         previous_status = DynamicActionStatus.DISPATCHED
@@ -421,8 +394,7 @@ def _process_one(
                 "for dyn_id=%s",
                 dyn_id,
             )
-        # ABANDONED counts toward the per-dyn_id terminal-state
-        # telemetry tally.
+        # ABANDONED counts toward the terminal-state telemetry tally.
         try:
             write_dynamic_action_telemetry(
                 session_dir=session_dir,

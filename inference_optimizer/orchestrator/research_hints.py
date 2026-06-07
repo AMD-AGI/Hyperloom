@@ -1,19 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Research-hint artifacts collected by the research scout.
+"""Research-hint artifacts collected by the research scout (advisory, source-backed priors).
 
-The scout produces *advisory*, source-backed priors:
-
-* ``research_hints.md`` + ``research_hints.json`` — an append-only list of
-  ``{what, expected_impact, accuracy_risk, source, domain_tags[], status}``
-  hints. ``source`` is mandatory; sourceless hints are dropped.
-* ``competitor_target.json`` — LLM-authored target numbers where every
-  per-concurrency datapoint carries its own ``source``; entries missing a
-  source are discarded.
-
-All reads/writes are fail-soft: a missing or malformed file yields an empty
-result rather than raising, so the main loop never aborts on a degraded
-research artifact.
+Produces ``research_hints.{md,json}`` and ``competitor_target.json``
+(sourceless entries dropped). All reads/writes are fail-soft.
 """
 
 from __future__ import annotations
@@ -58,8 +48,7 @@ def _coerce_hint(raw: Any) -> dict[str, Any] | None:
 
 
 def _hint_key(hint: dict[str, Any]) -> str:
-    """Dedup key for append-merge: a hint is the same if its claim and
-    source match (case-insensitive)."""
+    """Dedup key for append-merge: claim + source (case-insensitive)."""
     return f"{hint['what'].lower()}::{hint['source'].lower()}"
 
 
@@ -114,11 +103,7 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def write_hints_skeleton(session_dir: Path) -> None:
-    """Ensure both hint artifacts exist even before the scout returns.
-
-    Guarantees the PRELUDE invariant "research_hints.md is always present"
-    without clobbering hints a prior run already appended.
-    """
+    """Ensure both hint artifacts exist before the scout returns (PRELUDE invariant; preserves prior hints)."""
     md_path = session_paths.research_hints_md(session_dir)
     if md_path.exists():
         return
@@ -142,12 +127,7 @@ def _persist(session_dir: Path, hints: list[dict[str, Any]]) -> None:
 def append_hints(
     session_dir: Path, incoming: list[Any],
 ) -> tuple[int, int]:
-    """Append-merge ``incoming`` scout hints into the artifacts.
-
-    Returns ``(added, dropped)`` where ``dropped`` counts entries rejected
-    for a missing source. Existing hints are preserved; duplicates (same
-    claim + source) are not re-added.
-    """
+    """Append-merge ``incoming`` scout hints; returns ``(added, dropped)`` (dropped = missing-source rejects; duplicates not re-added)."""
     existing = load_hints(session_dir)
     seen = {_hint_key(h) for h in existing}
     added = 0
@@ -183,11 +163,7 @@ def _coerce_per_conc(raw: Any) -> dict[str, Any] | None:
 def write_competitor_target(
     session_dir: Path, target: Any,
 ) -> bool:
-    """Persist ``competitor_target.json`` after dropping sourceless rows.
-
-    Returns ``True`` when a target with at least one sourced per-conc row
-    was written, else ``False`` (nothing written).
-    """
+    """Persist ``competitor_target.json`` after dropping sourceless rows; ``True`` when ≥1 sourced row was written."""
     if not isinstance(target, dict):
         return False
     per_conc_in = target.get("per_conc") or []
@@ -216,11 +192,7 @@ def write_competitor_target(
 
 
 def load_competitor_target(session_dir: Path) -> dict[str, Any] | None:
-    """Read ``competitor_target.json`` keeping only sourced per-conc rows.
-
-    Returns ``None`` when the file is absent, malformed, or contains no
-    per-concurrency datapoint with a ``source``. Fail-soft: never raises.
-    """
+    """Read ``competitor_target.json`` keeping only sourced per-conc rows; ``None`` when absent/malformed/sourceless. Fail-soft."""
     path = session_paths.competitor_target_json(session_dir)
     try:
         if not path.exists():
@@ -250,10 +222,7 @@ def load_competitor_target(session_dir: Path) -> dict[str, Any] | None:
 def _match_target_row(
     target: dict[str, Any], conc: int | None,
 ) -> dict[str, Any] | None:
-    """Pick the per-conc target row nearest the given concurrency.
-
-    Falls back to the highest-throughput row when concurrency is unknown.
-    """
+    """Pick the per-conc target row nearest ``conc`` (highest-throughput row when conc unknown)."""
     rows = target.get("per_conc") or []
     if not rows:
         return None
@@ -277,13 +246,7 @@ def gap_analysis(
     our_tpot_ms: float | None,
     conc: int | None = None,
 ) -> dict[str, Any] | None:
-    """Compute advisory throughput/latency gaps against a competitor row.
-
-    Returns ``{throughput_gap_pct, tpot_ratio, interactivity_gap_pct,
-    primary_gap, target_conc, source}`` or ``None`` when there is no
-    comparable competitor row. ``primary_gap`` is ``"latency"`` when the
-    TPOT ratio outweighs the throughput gap, else ``"throughput"``.
-    """
+    """Compute advisory throughput/latency gaps against a competitor row; ``None`` when no comparable row. ``primary_gap`` is "latency" when TPOT ratio outweighs throughput gap."""
     if not target:
         return None
     row = _match_target_row(target, conc)
@@ -328,11 +291,7 @@ def full_gap_summary(
     *,
     tpot_ratio_threshold: float = 1.3,
 ) -> str:
-    """Render an advisory "External target gap" block for prompts.
-
-    Empty string when no gap is available so the section is skipped.
-    Advisory only — never gates Objective/scoring.
-    """
+    """Render an advisory "External target gap" block (empty when no gap; advisory only, never gates)."""
     if not gap:
         return ""
     lines = ["External target gap (advisory) — competitor numbers are "
@@ -364,9 +323,7 @@ def _to_num(value: Any) -> float | None:
         return None
 
 
-# Direction keywords associated with cutting per-output-token latency.
-# Used to flag variants that align with a dominant TPOT gap so they
-# surface earlier as an advisory prior (never a gate).
+# Direction keywords for cutting per-output-token latency (flag variants aligning with a dominant TPOT gap; advisory).
 _LATENCY_DIRECTION_KEYWORDS: tuple[str, ...] = (
     "mtp", "speculative", "eagle", "medusa", "decode", "comm", "overlap",
     "allreduce", "all_reduce", "quantized_allreduce", "cuda_graph",
@@ -395,19 +352,7 @@ def match_variants_to_priors(
     *,
     primary_gap: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Annotate which variants align with proven priors (advisory only).
-
-    For each variant ``{name, ...}`` returns a ``{name: {hints: [...],
-    latency_aligned: bool}}`` entry ONLY when it matches at least one
-    research hint (token overlap on the hint's ``what`` / ``domain_tags``)
-    or aligns with a dominant latency gap (``primary_gap == 'latency'``
-    and the variant carries a latency-direction keyword).
-
-    Matching is keyword-based and intentionally loose: it informs
-    prompt ordering, never gating/scoring. Returns an empty dict when
-    there is nothing to surface (caller skips the section). Fail-soft on
-    malformed rows.
-    """
+    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap."""
     out: dict[str, dict[str, Any]] = {}
     latency_dominant = str(primary_gap or "").strip().lower() == "latency"
     hint_tokens: list[tuple[str, set[str]]] = []
@@ -458,11 +403,7 @@ def priors_match_summary(
     primary_gap: str | None = None,
     max_rows: int = 12,
 ) -> str:
-    """Render an advisory block flagging variants that match priors.
-
-    Empty string when nothing matches so the section is skipped.
-    Advisory only — affects prompt ordering, never Objective/scoring/gate.
-    """
+    """Render an advisory block flagging variants that match priors (empty when none; advisory ordering only)."""
     matches = match_variants_to_priors(
         variants, hints, primary_gap=primary_gap,
     )
@@ -488,11 +429,7 @@ def priors_match_summary(
 def summarise_for_prompt(
     session_dir: Path, *, max_entries: int = 8,
 ) -> str:
-    """Compact advisory block of proven priors for the orchestration prompt.
-
-    Returns an empty string when no hints exist (section is skipped).
-    Advisory only — these are priors to try earlier, not a directive.
-    """
+    """Compact advisory block of proven priors for the orchestration prompt (empty when none; advisory only)."""
     hints = load_hints(session_dir)
     if not hints:
         return ""

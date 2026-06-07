@@ -5,16 +5,9 @@
 Receives ``delegate{action_name, params}`` intents (after PolicyGate),
 materializes them into ``tasks`` rows, and dispatches the work.
 
-v0.6 §15.2 distinguishes two sub-agent forms:
-
-* **ActionRunner** (Python class, no LLM) — fast, deterministic shell
-  wrappers (``BaselineExecutor`` / ``BenchRunnerExecutor`` / ...). Looked
-  up via ``EXECUTOR_REGISTRY[task.kind]``.
-* **OOB sub-agent** (LLM) — fallback path: spawn a fresh ``backend.run()``.
-
-P0-3 ships only the routing skeleton: enqueue + run hook + a stub
-"echo" runner that tests can plug in. Real shell-out executors land
-in P0-6+.
+v0.6 §15.2 distinguishes two sub-agent forms: deterministic Python
+``ActionRunner`` executors (looked up via ``EXECUTOR_REGISTRY[task.kind]``)
+and the LLM OOB sub-agent fallback (``backend.run()``).
 """
 
 from __future__ import annotations
@@ -54,9 +47,8 @@ class SubAgentResult:
 class SubAgentRunner:
     """Routes ``delegate`` work to the matching ActionRunner + holds leases.
 
-    ``executor_registry`` maps ``task.kind`` → :data:`ExecutorFn`. Tests
-    register stubs here. Production registers shell-wrapping executors
-    from ``inference_optimizer.orchestrator.action_executors`` (P0-6).
+    ``executor_registry`` maps ``task.kind`` → :data:`ExecutorFn` (tests
+    register stubs; production registers shell-wrapping executors, P0-6).
     """
 
     def __init__(
@@ -72,18 +64,9 @@ class SubAgentRunner:
         self.tasks = tasks
         self.executor_registry: dict[str, ExecutorFn] = dict(executor_registry or {})
         self.session_dir = Path(session_dir) if session_dir else None
-        # Live SharedState reference threaded into every in-process
-        # executor's ``ctx.extra["shared_state"]`` (see ``run_task``). This
-        # is the single reliable channel an executor has to recover a
-        # baseline anchor (``baseline_tput`` / ``current_best.tput``) when
-        # the per-dispatch-path ``params['base_tput']`` injection is absent.
-        # Without it, gain-computing executors (explore / framework_pr /
-        # integrate_patch) silently treat every variant as ``base_tput=0``
-        # → ``gain=None`` → discard real wins. The Coordinator wires this
-        # after SharedState is constructed (it is created *after* the
-        # runner in Coordinator.__init__), so the attribute may be set
-        # post-construction; default ``None`` keeps tests that omit it
-        # working unchanged.
+        # Live SharedState threaded into each executor's ctx.extra so
+        # gain-computing executors can recover a baseline anchor when
+        # params['base_tput'] is absent.
         self.shared_state = shared_state
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
@@ -92,10 +75,8 @@ class SubAgentRunner:
     def _pre_mkdir_workspace(self, task: Task) -> Path | None:
         """Pre-create ``runs/<action>/<task_id>/`` for actions that have one.
 
-        Returns the path so the caller can stash it on ``RunnerContext.extra``.
-        Returns None when the task kind is not one of the known runs/
-        actions (e.g. kernel-owned actions which use their own
-        kernel-agent-workspace tree).
+        Returns the path (stashed on ``RunnerContext.extra``) or None when
+        the task kind is not a known runs/ action.
         """
         if self.session_dir is None:
             return None
@@ -116,18 +97,9 @@ class SubAgentRunner:
     ) -> bool:
         """Transition a task to ``new_state`` but tolerate ``TaskNotFound``.
 
-        Bug-fix (N34, May 2026): empirically the ``tasks`` row for a
-        long-running grid task can disappear from the SQLite registry
-        between the moment the dispatcher pulls it out of
-        ``tasks.queued()`` and the moment the executor's terminal
-        transition runs. The transition then raises ``TaskNotFound``,
-        the dispatcher's ``except Exception ... continue`` drops the
-        executor's result on the floor, and downstream gates never
-        fire — the whole optimization loop silently stalls. Treat
-        ``TaskNotFound`` on a terminal transition as a warning so the
-        rest of the dispatcher pipeline (bus event + promotion to
-        SharedState) still runs. Returns ``True`` on a successful
-        transition, ``False`` on the swallowed-TaskNotFound branch.
+        Bug-fix N34: a long-running task's row can vanish before its terminal
+        transition; swallowing TaskNotFound keeps the pipeline running.
+        Returns True on success, False on the swallowed-TaskNotFound branch.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
@@ -151,22 +123,11 @@ class SubAgentRunner:
     ) -> SubAgentResult:
         """Acquire required lanes, transition queued→running, execute, transition out.
 
-        Note: task state machine only allows ``queued → running`` then
-        ``running → failed/succeeded/...``, so we always transition to
-        ``running`` first — even on the "no runner" failure path —
-        otherwise IllegalTransition fires.
-
-        v0.8 M6: when the Coordinator's concurrent
-        dispatcher pre-acquires the lease via ``try_acquire_many``
-        (non-blocking), it passes the resulting :class:`Lease` via
-        ``prebound_lease`` and the runner skips its own acquire step.
-        The runner still owns the release in its finally block — so
-        the dispatcher doesn't have to thread the release path.
+        Always transitions to ``running`` first (state machine constraint).
+        With ``prebound_lease`` the runner skips its own acquire but still
+        owns the release in its finally block.
         """
-        # queued → running first (state machine constraint). Use the
-        # resilient variant so a missing row doesn't kill the runner
-        # before the executor has even started -- see
-        # _transition_resilient for the rationale.
+        # queued → running first (state machine constraint).
         await self._transition_resilient(
             task.task_id, "running", context="enter_running",
         )
@@ -202,10 +163,6 @@ class SubAgentRunner:
                 extra["workspace"] = str(workspace)
             if self.session_dir is not None:
                 extra["session_dir"] = str(self.session_dir)
-            # Thread the live SharedState so executors can recover a
-            # baseline anchor when params['base_tput'] is missing. In-process
-            # executors (baseline / explore / sweep / framework_pr /
-            # integrate_patch) read this via ``extra.get("shared_state")``.
             if self.shared_state is not None:
                 extra["shared_state"] = self.shared_state
             if extra_context:
@@ -232,9 +189,8 @@ class SubAgentRunner:
                 task_id=task.task_id, state="succeeded", result=result_payload,
             )
         finally:
-            # Always release whoever acquired the lease — pre-bound or
-            # owned. The dispatcher passes the lease in but trusts the
-            # runner's finally to release it (atomic release).
+            # Always release whoever acquired the lease — pre-bound or owned
+            # (atomic release).
             if lease is not None:
                 await self.locks.release(lease)
 

@@ -1,27 +1,9 @@
 """Orchestration working-memory checkpoint / compaction (plan Step 4).
 
-In the persistent-conversation ReAct design (plan Steps 1-3) the
-Orchestration agent's plan / reasoning lives in the live Claude
-conversation rather than in ``state.json``. That buys reasoning
-continuity but two problems follow:
-
-1. **Unbounded growth.** A multi-hour run would let the conversation
-   transcript grow without bound, eventually blowing the context window
-   and the per-call cost/latency.
-2. **Resume.** A crash loses the in-memory conversation; replaying the
-   full transcript is non-deterministic (it contains benchmark numbers
-   that won't reproduce bit-for-bit).
-
-The fix is a *checkpoint*: periodically ask the agent to compress its own
-working memory into a compact structured snapshot, persist it on
-``SharedState.orchestration_memory``, then **reset** the conversation and
-re-seed it from that snapshot. The snapshot also drives crash recovery —
-on resume we rebuild the conversation from ``orchestration_memory`` plus
-the authoritative ``SharedState`` facts instead of replaying a transcript.
-
-This module is pure helpers (prompt text + parsing + trigger policy); the
-Coordinator owns the IO (running the summary turn, writing state, resetting
-the backend).
+Compresses the live ReAct conversation into a compact structured snapshot
+on ``SharedState.orchestration_memory``, then resets + re-seeds from it.
+Bounds context growth and drives crash recovery. Pure helpers; the
+Coordinator owns the IO.
 """
 
 from __future__ import annotations
@@ -33,14 +15,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-# Default checkpoint cadence. Operators can override via the Coordinator
-# constructor / env (wired in coordinator.py). A checkpoint fires when ANY
-# trigger crosses its threshold; the cheapest is the per-tick counter.
+# Default checkpoint cadence. A checkpoint fires when ANY trigger crosses its
+# threshold.
 DEFAULT_CHECKPOINT_EVERY_TICKS: int = 20
 DEFAULT_CHECKPOINT_EVERY_MINUTES: float = 30.0
-# Rough char budget over which we force a checkpoint regardless of cadence
-# (a proxy for "conversation is getting large"). The Coordinator feeds the
-# cumulative prompt-char estimate from backend.calls.
+# Char budget over which we force a checkpoint regardless of cadence.
 DEFAULT_CHECKPOINT_CHAR_BUDGET: int = 400_000
 
 
@@ -111,10 +90,9 @@ re-pull from the context tools.
 def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
     """Parse the agent's checkpoint reply into the memory schema.
 
-    Tolerant: accepts a fenced ```json block or a bare object; missing
-    keys default to empty. Never raises — a malformed reply yields a
-    best-effort dict (possibly with a ``parse_error`` marker) so the
-    checkpoint still advances rather than wedging the loop.
+    Tolerant: accepts a fenced ```json block or bare object; missing keys
+    default to empty. Never raises — malformed replies yield a best-effort
+    dict (with a ``parse_error`` marker).
     """
     obj = _extract_json_object(raw_text)
     if obj is None:
@@ -169,9 +147,8 @@ def build_memory_record(
 ) -> dict[str, Any]:
     """Build the persisted ``orchestration_memory`` record.
 
-    Carries the parsed fields plus checkpoint provenance. ``learnings``
-    accumulate across checkpoints (deduped, capped) so durable lessons
-    are not lost when a later checkpoint forgets to repeat them.
+    ``learnings`` accumulate across checkpoints (deduped, capped) so durable
+    lessons survive a later checkpoint that forgets to repeat them.
     """
     prev = previous or {}
     learnings = list(prev.get("learnings") or [])
@@ -196,9 +173,8 @@ def build_memory_record(
 def render_memory_for_seed(memory: dict[str, Any]) -> str:
     """Render an ``orchestration_memory`` record into prompt text.
 
-    Used both for compaction re-seed and resume rebuild: this is what the
-    agent reads to recover its plan into a fresh conversation. Returns ""
-    when memory is empty (fresh session — nothing to recover).
+    Used for compaction re-seed and resume rebuild. Returns "" when memory
+    is empty (fresh session).
     """
     if not memory:
         return ""
@@ -227,8 +203,7 @@ def render_memory_for_seed(memory: dict[str, Any]) -> str:
 class CheckpointTracker:
     """Mutable bookkeeping of progress since the last checkpoint.
 
-    Lives on the Coordinator. ``note_*`` methods accumulate the deltas the
-    policy needs; ``reset`` is called after a checkpoint lands.
+    Lives on the Coordinator; ``reset`` is called after a checkpoint lands.
     """
 
     last_tick: int = 0

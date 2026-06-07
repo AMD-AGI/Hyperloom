@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Multi-turn ReAct sub-agent runner for ``dynamic_action`` dispatches.
-
-Sibling to :class:`SpecialistRunner`: shared infrastructure
-(TaskRegistry, worktree helpers, lane lease) is reused; prompt loop,
-journal shape, tool whitelist, budget, and recovery rules are owned
-here. One instance is reusable across many dispatches; each
-``run`` call carries its own :class:`RunnerContext`.
-"""
+"""Multi-turn ReAct sub-agent runner for ``dynamic_action`` dispatches."""
 
 from __future__ import annotations
 
@@ -67,16 +60,12 @@ from .system_prompts.dynamic_action_prompt_builder import (
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Budget defaults
-# ---------------------------------------------------------------------------
 DEFAULT_WALL_CLOCK_BUDGET_SEC: float = 25 * 60.0
 DEFAULT_TURN_CAP: int = 20
 
 
-# ---------------------------------------------------------------------------
-# Action parsing — exactly one fenced JSON block per turn
-# ---------------------------------------------------------------------------
+# Exactly one fenced JSON block per turn
 _ACTION_BLOCK_RE: re.Pattern[str] = re.compile(
     r"```(?:json)?\s*(\{.*?\})\s*```", re.S,
 )
@@ -94,11 +83,7 @@ class _UnparsableAction(RuntimeError):
 
 
 def parse_llm_action(text: str) -> ParsedAction:
-    """Extract the single ``{"tool": ..., "args": ...}`` JSON block.
-
-    Falls back to parsing the whole text as JSON when no fenced block
-    is present.
-    """
+    """Extract the single ``{"tool": ..., "args": ...}`` JSON block."""
     candidates: list[str] = [m.group(1) for m in _ACTION_BLOCK_RE.finditer(text or "")]
     if not candidates:
         stripped = (text or "").strip()
@@ -123,9 +108,6 @@ def parse_llm_action(text: str) -> ParsedAction:
     return ParsedAction(tool=tool, args=args, raw_block=candidates[0])
 
 
-# ---------------------------------------------------------------------------
-# Result envelope
-# ---------------------------------------------------------------------------
 @dataclass
 class DynamicRunResult:
     """Outcome of one ``DynamicActionRunner.run`` invocation."""
@@ -156,16 +138,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
 class DynamicActionRunner:
     """ReAct loop driver for one ``delegate{action='dynamic_action'}``.
 
-    Construction is cheap; one instance per CLI session is the usual
-    pattern (the runner caches no per-dispatch state). The Coordinator
-    invokes :meth:`run` via the SubAgentRunner executor adapter
-    registered for ``kind='dynamic_action'``.
+    One instance per CLI session; the runner caches no per-dispatch state.
     """
 
     def __init__(
@@ -181,9 +157,6 @@ class DynamicActionRunner:
         self.turn_cap = int(turn_cap)
         self.framework_source_roots = tuple(framework_source_roots)
 
-    # ------------------------------------------------------------------
-    # Public entry — one dispatch
-    # ------------------------------------------------------------------
     async def run(self, ctx: RunnerContext) -> DynamicRunResult:
         dyn_id = str(ctx.task.params.get("dyn_id") or ctx.task.task_id)
         session_dir = self._session_dir(ctx)
@@ -265,8 +238,6 @@ class DynamicActionRunner:
                         parsed_action={"tool": "<unparsable>", "args": {}},
                         tool_result={"ok": False, "reason": str(exc)},
                     ))
-                    # Log and let the ReAct loop self-correct; the turn /
-                    # wall-clock caps bound the run.
                     continue
 
                 if action.tool == TOOL_EMIT_PROPOSAL:
@@ -285,9 +256,7 @@ class DynamicActionRunner:
                             "emit_empty", None,
                         )
                         break
-                    # Require the emitted ``patch_text`` to match the
-                    # worktree's ``git diff HEAD`` when uncommitted
-                    # changes exist; a clean worktree skips the check.
+                    # patch_text must match worktree's git diff HEAD; clean worktree skips the check.
                     cumulative_diff = (
                         capture_worktree_cumulative_diff(worktree)
                         if worktree is not None else None
@@ -306,8 +275,6 @@ class DynamicActionRunner:
                             parsed_action={"tool": action.tool, "args": action.args},
                             proposal_validation=verdict.to_journal_dict(),
                         ))
-                        # Log the rejection and let the sub-agent retry;
-                        # the turn / wall-clock caps bound the run.
                         continue
                     journal.append(JournalTurn(
                         turn=turn,
@@ -335,8 +302,6 @@ class DynamicActionRunner:
                             "tool": action.tool,
                         },
                     ))
-                    # Log and continue; the turn / wall-clock caps bound
-                    # the run.
                     continue
 
                 tool_result = await self._dispatch_tool(
@@ -355,10 +320,7 @@ class DynamicActionRunner:
                     "turn_cap_exhausted", None,
                 )
         except asyncio.CancelledError:
-            # Persist the ABANDONED terminal (journal + empty
-            # proposal_set + worktree teardown) before propagating, so
-            # the cancel is auditable immediately instead of relying on
-            # the next resume sweep.
+            # Persist ABANDONED before propagating so the cancel is auditable immediately.
             self._finalise(
                 dyn_id=dyn_id,
                 state=DynamicRunnerTerminalState.ABANDONED,
@@ -395,9 +357,6 @@ class DynamicActionRunner:
             turns_used=len([j for j in journal if j.turn > 0]),
         )
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
     def _session_dir(self, ctx: RunnerContext) -> Path | None:
         sd = ctx.extra.get("session_dir")
         return Path(sd) if sd else None
@@ -405,8 +364,7 @@ class DynamicActionRunner:
     def _load_dispatch_inputs(
         self, ctx: RunnerContext, artefact_dir: Path,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Load ``spec.payload`` + ``seed_kit`` JSON; return
-        ``(None, None)`` on any I/O or parse failure."""
+        """Load ``spec.payload`` + ``seed_kit`` JSON; ``(None, None)`` on failure."""
         spec_path = ctx.task.params.get("spec_path")
         seed_kit_path = ctx.task.params.get("seed_kit_path")
         if not spec_path:
@@ -446,10 +404,7 @@ class DynamicActionRunner:
         self, session_dir: Path, dyn_id: str,
     ) -> tuple[Path | None, Path | None, str]:
         """Create ``runs/dynamic/<dyn_id>/worktree/`` over the first
-        available ``framework_source_root``. Returns
-        ``(worktree, base, note)``; ``note`` is non-empty when no
-        isolated worktree could be set up (runner still proceeds but
-        ``apply_patch_in_worktree`` will fail)."""
+        available ``framework_source_root``; returns ``(worktree, base, note)``."""
         base = _pick_worktree_base(self.framework_source_roots)
         if base is None:
             return None, None, (
@@ -461,9 +416,7 @@ class DynamicActionRunner:
             runs_root(session_dir) / "dynamic" / dyn_id / "worktree"
         )
         branch = f"dynamic-{dyn_id}"
-        # Drop any leftover worktree + branch from a crashed / abandoned
-        # prior dispatch so ``git worktree add`` does not fail with
-        # "branch already exists".
+        # Drop leftover worktree + branch so git worktree add does not fail with "branch already exists".
         self._prune_stale_worktree(base, worktree, branch)
         wt, err = _setup_worktree(base, worktree, branch=branch)
         if wt is None:
@@ -556,11 +509,10 @@ class DynamicActionRunner:
         error: str = "",
         turns_used: int = 0,
     ) -> DynamicRunResult:
-        """Write ``proposal_set.json`` + ``sub_agent_journal.md`` and
-        tear down the worktree. Only these two files are recovered;
-        every other in-worktree artefact is destroyed."""
-        # Every terminal state gets a journal on disk for audit, even
-        # FAILED with zero turns.
+        """Write ``proposal_set.json`` + ``sub_agent_journal.md`` and tear down the worktree.
+
+        Only these two files are recovered; every other in-worktree artefact is destroyed.
+        """
         try:
             Path(journal_path).write_text(
                 _render_journal_markdown(dyn_id, state, reason, journal),

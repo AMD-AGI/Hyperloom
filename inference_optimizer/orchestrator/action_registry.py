@@ -3,41 +3,12 @@
 """ActionRegistry
 
 Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per
-action). The corresponding markdown body at ``actions/<name>.md`` is
-the agent-facing playbook (loaded lazily by SubAgentRunner / Coordinator
-when composing a sub-agent prompt).
+action); the markdown body at ``actions/<name>.md`` is loaded lazily.
 
-Field consumers split cleanly into two categories:
-
-Operational (these fields gate execution / dispatch — invariants):
-
-* ``allowed_tools`` — read by PolicyGate / SubAgentRunner to bound the
-  tool surface a sub-agent may call.
-* ``requires_lanes`` — read by the resource-lock / lane lease system.
-* ``lease_ttl_sec`` — read by SubAgentRunner / TaskRegistry.
-* ``preferred_backend`` / ``preferred_model`` — backend selection.
-* ``max_turns`` — bound for sub-agent reactor budgets.
-* ``side_effects`` — Coordinator routing of writes.
-
-Prompt-advisory metadata (these fields are RENDERED INTO PROMPTS so
-the LLM has a stable mental model; nothing in the runtime sorts /
-filters / cools-down / picks an action based on them):
-
-* ``family`` — prompt grouping label only (no scheduler).
-* ``pipeline_phase`` — prompt grouping for the catalogue ETA section.
-* ``cost_minutes_p50`` / ``cost_minutes_p75`` / ``typical_runtime_min``
-  — display-only "typical wall-clock" hints.
-* ``expected_gain_pct`` — display-only prior gain range; not a
-  measurement and not a sort key.
-* ``accuracy_risk`` / ``crash_risk`` — Critic-prompt advisory only;
-  the post-P3_20 Critic rejects only on safety carve-outs (mismatched
-  benchmark, accuracy fail, missing rollback, robustness conflict,
-  payload / provenance violations), not on these per-action priors.
-* ``description`` / ``applicable_when`` — prompt blurbs.
-
-There is no scoreboard, no per-action priority, no automatic
-``sort by expected_gain`` or ``cooldown by family`` anywhere in the
-runtime. KB_design §3.9 Inv-9.1 is enforced by construction here.
+Operational fields gate execution/dispatch (``allowed_tools``,
+``requires_lanes``, ``lease_ttl_sec``, ``preferred_backend`` /
+``preferred_model``, ``max_turns``, ``side_effects``); all other fields are
+prompt-advisory only (KB_design §3.9 Inv-9.1 enforced by construction here).
 
 Schema (DESIGN §16.2)::
 
@@ -77,10 +48,7 @@ from typing import Any
 from ..paths import asset_actions_dir
 
 
-# ``family`` is a prompt grouping label only. Nothing in the runtime
-# sorts, filters, cools-down, or prioritises actions by family. The
-# enum stays small so the prompt's "actions by family" section stays
-# legible.
+# ``family`` is a prompt grouping label only; no runtime scheduler uses it.
 VALID_FAMILIES: frozenset[str] = frozenset({
     "prep", "analysis", "shallow", "deep_kernel",
     "long", "creative", "resilience",
@@ -88,11 +56,8 @@ VALID_FAMILIES: frozenset[str] = frozenset({
 
 VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
 
-# Coarse-grained pipeline phase used by prompt_builder to group actions
-# inside the Orchestration system prompt (e.g. "Run prep actions first,
-# then move to explore..."). Prompt-advisory only; the actual phase
-# state machine lives in :mod:`phase_state` and is not driven by this
-# enum. Kept intentionally small to match the catalogue ETA section.
+# Coarse-grained pipeline phase for prompt_builder grouping; prompt-advisory
+# only (the real state machine lives in :mod:`phase_state`).
 VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "prep",        # target_analysis / baseline / warm replay
     "measure",     # baseline (gates explore)
@@ -104,47 +69,14 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "support",     # recover (the rest were retired)
 })
 
-# Per-action verdict policy class. Drives the Critic's primary
-# per-proposal rule via the ``action_verdict_policy`` entry in
-# ``judge_bundle.review_constraints`` (built by CriticAgentBackend from
-# this registry), instead of hard-coded carve-out lists in
-# ``critic.md``.
-#
-# This dimension only affects WHICH set of prompt rules the Critic
-# applies; it does not introduce a hidden hard gate of its own.
-# Critic safety carve-outs (mismatched benchmark, accuracy fail,
-# missing rollback, robustness conflict, payload / provenance
-# violations) are the only ``reject`` triggers; everything else
-# surfaces as ``advise`` (loosen P3_20).
-#
-# * ``archival`` — transcribes existing state to disk; introduces
-#   NO new measurements. Always approve: refusing forces the run
-#   to idle until the wall-clock deadline auto-enqueues the same
-#   action. (Examples: report / session_breakdown / target_analysis.)
-# * ``exploration`` — runs benchmarks / variants to GENERATE the
-#   before/after data the gate would otherwise demand as input.
-#   Approve when the proposal is the natural next TODO per
-#   orchestration's sequencing rules. The measurement IS the
-#   evidence. (Examples: baseline / profile / roofline / explore /
-#   sweep / kernel_opt / ...)
-# * ``promotion`` — MUTATES ``optimization_stack`` by appending a
-#   KEEP'd entry with an E2E gain claim. Genuinely requires
-#   before/after benchmark + accuracy gate + rollback evidence to
-#   approve. Currently the sole member is ``integrate``.
+# Per-action verdict policy class — selects which Critic prompt rule set
+# applies; never a hidden hard gate (loosen P3_20).
 VALID_VERDICT_CLASSES: frozenset[str] = frozenset({
     "archival", "exploration", "promotion",
 })
 
-# Default classifier — exhaustive map for every action shipped today.
-# A yaml file may override its action's class by setting the
-# ``verdict_class`` field; otherwise the loader looks up the action
-# name in this table. Unknown names fall back to ``"exploration"``
-# (the safest non-deadlocking default: it only blocks the rare
-# integrate-shaped action that genuinely needs evidence).
-# Only live actions (those with an ``actions/_meta/<name>.yaml``) are
-# listed here. Retired names are intentionally absent — the loader only
-# consults this table for an action it is already loading from yaml, and
-# any unlisted name falls through to ``_DEFAULT_VERDICT_CLASS_FALLBACK``.
+# Default classifier for live actions; yaml ``verdict_class`` overrides.
+# Unknown names fall back to ``"exploration"`` (safest non-deadlocking default).
 _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     # archival — transcribe state, no new measurement
     "report":                  "archival",
@@ -152,8 +84,7 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "target_analysis":         "archival",
     # promotion — mutate optimization_stack + claim gain
     "integrate":               "promotion",
-    # exploration — everything else (run benchmarks / variants /
-    # diagnostics to GENERATE data)
+    # exploration — everything else (run benchmarks to generate data)
     "baseline":                "exploration",
     "roofline":                "exploration",
     "sweep":                   "exploration",
@@ -164,20 +95,14 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "vendor_kernel_config":    "exploration",
     "deep_kernel_analysis":    "exploration",
     "recover":                 "exploration",
-    # dynamic_action — multi-turn ReAct sub-agent that explores a
-    # cross-domain patch combination (dynamic_action.MD P1).
+    # dynamic_action — multi-turn ReAct sub-agent (dynamic_action.MD P1).
     "dynamic_action":          "exploration",
 }
 _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
 
 
 def default_verdict_class_for(action_name: str) -> str:
-    """Look up the default ``verdict_class`` for ``action_name``.
-
-    Returns the registered class if known, else falls back to
-    ``"exploration"`` (safe default: only ``integrate`` semantics
-    deadlock when treated as exploration; everything else is fine).
-    """
+    """Look up the default ``verdict_class``; falls back to ``"exploration"``."""
     return _DEFAULT_VERDICT_CLASS.get(
         action_name, _DEFAULT_VERDICT_CLASS_FALLBACK,
     )
@@ -197,13 +122,8 @@ class ActionRegistryError(RuntimeError):
 class ActionMetadata:
     """Mirrors ``actions/_meta/<name>.yaml`` (DESIGN §16.2).
 
-    Operational fields (``allowed_tools`` / ``requires_lanes`` /
-    ``preferred_backend`` / ``preferred_model`` / ``max_turns`` /
-    ``lease_ttl_sec`` / ``side_effects``) gate execution. Every other
-    field is prompt-advisory only — the runtime never sorts, filters,
-    cools-down, or prioritises actions by ``family`` /
-    ``expected_gain_pct`` / ``cost_minutes_p*`` / ``typical_runtime_min``
-    / ``accuracy_risk`` / ``crash_risk``. See module docstring.
+    Operational fields gate execution; every other field is prompt-advisory
+    only. See module docstring.
     """
 
     name: str
@@ -225,10 +145,7 @@ class ActionMetadata:
     description: str = ""
     pipeline_phase: str = "explore"
     typical_runtime_min: float = 0.0
-    # Drives Critic's ``action_verdict_policy`` rule set (archival /
-    # exploration / promotion). Routes prompt rules only — never a
-    # hidden hard gate (loosen P3_20). Defaults inferred from
-    # :func:`default_verdict_class_for` when the yaml omits the field.
+    # Routes Critic prompt rules only, never a hidden hard gate (loosen P3_20).
     verdict_class: str = ""
 
     @classmethod
@@ -265,9 +182,7 @@ class ActionMetadata:
                 f"action {expected_name!r}: preferred_backend={backend!r} not in "
                 f"{sorted(VALID_BACKENDS)!r}"
             )
-        # prompt-builder fields. All optional; missing values fall back
-        # to safe defaults so old yaml files keep parsing while new ones can
-        # opt into richer prompts.
+        # prompt-builder fields — all optional with safe defaults.
         cost_p50 = float(data["cost_minutes_p50"])
         description = str(data.get("description", "")).strip()
         pipeline_phase = str(data.get("pipeline_phase", "explore")).strip() or "explore"
@@ -293,11 +208,7 @@ class ActionMetadata:
                 f"action {expected_name!r}: typical_runtime_min must be >= 0, "
                 f"got {typical_runtime_min}"
             )
-        # verdict_class — explicit yaml override wins; otherwise
-        # the loader fills in the default from the table. Validate
-        # whichever resolved value against the allowlist so a typo in
-        # the yaml fails loudly at boot rather than silently producing
-        # an unknown class the critic doesn't know how to interpret.
+        # verdict_class — yaml override wins, else table default; validated against allowlist.
         verdict_class = str(
             data.get("verdict_class") or "",
         ).strip().lower()
@@ -335,8 +246,7 @@ class ActionMetadata:
 class ActionRegistry:
     """In-memory registry of loaded action metadata.
 
-    Construction is cheap; call :meth:`load` once at boot. ``load()``
-    is idempotent and re-scans the meta directory each call.
+    Call :meth:`load` once at boot; it is idempotent and re-scans each call.
     """
 
     def __init__(self, actions_dir: Path | None = None) -> None:

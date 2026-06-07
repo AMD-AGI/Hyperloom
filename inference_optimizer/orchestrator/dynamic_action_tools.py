@@ -2,18 +2,12 @@
 
 """Tool whitelist for the dynamic_action sub-agent.
 
-* ``read_source``             — files inside ``framework_source_roots``
-                                 (capped by ``MAX_READ_SOURCE_CHARS``).
-* ``read_session_artifact``   — paths under prefix whitelist with deny
+* ``read_source``             — files inside ``framework_source_roots``.
+* ``read_session_artifact``   — prefix-whitelisted paths with deny
                                  segments + cross-``dyn_id`` isolation.
-* ``apply_patch_in_worktree`` — ``git apply`` inside the per-dispatch
-                                 worktree only.
-* ``emit_proposal``           — terminal signal; validated by
-                                 :mod:`dynamic_action_proposal`.
-* ``run_bench``               — gated by :data:`BENCH_TOOL_ENABLED_V1`;
-                                 excluded from :data:`ALL_DYNAMIC_TOOLS`
-                                 and returns ``bench_tool_disabled_v1``
-                                 while the registry is empty.
+* ``apply_patch_in_worktree`` — ``git apply`` inside the worktree.
+* ``emit_proposal``           — terminal signal.
+* ``run_bench``               — gated by :data:`BENCH_TOOL_ENABLED_V1`.
 
 Each tool returns a JSON-serialisable dict.
 """
@@ -37,9 +31,6 @@ from .framework_paths import resolve_source_file_allowlist
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Tool ids and hard limits
-# ---------------------------------------------------------------------------
 TOOL_READ_SOURCE: str = "read_source"
 TOOL_READ_SESSION_ARTIFACT: str = "read_session_artifact"
 TOOL_RUN_BENCH: str = "run_bench"
@@ -80,9 +71,6 @@ SESSION_ARTIFACT_DENY_SEGMENTS: tuple[str, ...] = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Bench registry
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class BenchSpec:
     """One entry in the bench whitelist; ``script_path`` is resolved
@@ -102,9 +90,6 @@ BENCH_REGISTRY: dict[str, BenchSpec] = {}
 MAX_BENCH_WALL_CLOCK_SEC: float = 60.0
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _error(reason: str, **extra: Any) -> dict[str, Any]:
     """Standard tool error envelope: ``{ok: False, reason, ...}``."""
     return {"ok": False, "reason": reason, **extra}
@@ -118,12 +103,7 @@ def _ok(payload: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _effective_read_limit(max_bytes: int | None) -> int:
-    """Resolve a caller-supplied ``max_bytes`` against the hard cap.
-
-    ``None`` / non-positive falls back to ``MAX_READ_SOURCE_CHARS``;
-    any positive value is clamped down to it so a sub-agent can ask
-    for a smaller targeted read but never exceed the ceiling.
-    """
+    """Resolve ``max_bytes`` against ``MAX_READ_SOURCE_CHARS`` (clamp / fallback)."""
     try:
         n = int(max_bytes) if max_bytes is not None else 0
     except (TypeError, ValueError):
@@ -141,17 +121,10 @@ def _path_under(child: Path, parent: Path) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# read_source
-# ---------------------------------------------------------------------------
 def read_source(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     """Read a file under ``framework_source_roots``.
 
-    ``max_bytes`` lets the sub-agent request a smaller targeted read;
-    it is clamped to ``MAX_READ_SOURCE_CHARS`` and defaults to it.
-    Failures (path outside roots, missing file, etc.) are returned as
-    ``_error`` envelopes so the sub-agent can self-correct without
-    aborting the turn loop.
+    Failures are returned as ``_error`` envelopes so the sub-agent can self-correct.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -163,8 +136,7 @@ def read_source(path: str, max_bytes: int | None = None) -> dict[str, Any]:
         return _error("path_must_be_absolute", path=raw)
     if ".." in target.parts:
         return _error("path_traversal_denied", path=raw)
-    # Containment is checked on the resolved path so symlinks + ``..``
-    # cannot escape the framework source roots.
+    # Containment checked on resolved path so symlinks + .. cannot escape roots.
     roots = resolve_source_file_allowlist()
     if not any(_path_under(target, Path(root)) for root in roots):
         return _error("path_outside_framework_source_roots", path=raw)
@@ -188,18 +160,13 @@ def read_source(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     })
 
 
-# ---------------------------------------------------------------------------
-# read_session_artifact
-# ---------------------------------------------------------------------------
 def read_session_artifact(
     session_dir: Path, relative_path: str, *, dyn_id: str,
     max_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Read a whitelisted artefact under ``session_dir``.
 
-    ``dyn_id`` is the current dispatch's id; reads addressed at any
-    *other* ``dynamic_actions/<other_id>/`` directory are denied.
-    ``max_bytes`` is clamped to ``MAX_READ_SOURCE_CHARS``.
+    Reads addressed at any *other* ``dynamic_actions/<other_id>/`` are denied.
     """
     raw = str(relative_path or "").strip()
     if not raw:
@@ -213,8 +180,7 @@ def read_session_artifact(
     for seg in SESSION_ARTIFACT_DENY_SEGMENTS:
         if seg in raw:
             return _error("path_in_deny_list", path=raw, segment=seg)
-    # Cross-dyn_id isolation covers both the per-dispatch artefact dir
-    # and the per-dispatch worktree under runs/dynamic/.
+    # Cross-dyn_id isolation covers both the artefact dir and runs/dynamic/.
     for prefix in (
         "agents/orchestration/dynamic_actions/",
         "runs/dynamic/",
@@ -252,9 +218,6 @@ def read_session_artifact(
     })
 
 
-# ---------------------------------------------------------------------------
-# run_bench
-# ---------------------------------------------------------------------------
 async def run_bench(
     bench_id: str,
     *,
@@ -265,9 +228,8 @@ async def run_bench(
 ) -> dict[str, Any]:
     """Execute a registered micro-bench inside the worktree.
 
-    Output lands under ``worktree/scratch/bench/<bench_id>/<call_id>/``
-    and is destroyed with the worktree (never surfaces in artefacts).
-    ``bench_dir_root`` overrides the script discovery root for tests.
+    Output lands under ``worktree/scratch/bench/<bench_id>/<call_id>/`` and is
+    destroyed with the worktree. ``bench_dir_root`` overrides script discovery for tests.
     """
     if not BENCH_TOOL_ENABLED_V1:
         return _error(
@@ -337,17 +299,13 @@ async def run_bench(
     })
 
 
-# ---------------------------------------------------------------------------
-# apply_patch_in_worktree
-# ---------------------------------------------------------------------------
 _PATCH_PATH_RE = re.compile(r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$", re.M)
 
 
 def apply_patch_in_worktree(
     worktree: Path, patch_text: str,
 ) -> dict[str, Any]:
-    """Try ``git apply`` inside the worktree (self-check). The patch is
-    not committed; the runner resets the worktree on terminate."""
+    """Try ``git apply`` inside the worktree (self-check); not committed."""
     if not patch_text or not patch_text.strip():
         return _error("empty_patch")
     worktree = Path(worktree)

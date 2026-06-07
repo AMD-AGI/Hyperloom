@@ -26,12 +26,8 @@ v0.6 roster — 4 persistent reactors, no mode gating::
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
 
-The roster is exactly these four roles. Earlier designs are gone:
-the ``sage`` role merged into Critic, the ``triage`` role was renamed
-to ``robustness`` (the active 4th role above), and parliament-era
-``OBJECTION`` / ``VOTE`` intents were removed. There is no separate
-framework role: framework PR work runs as the Coordinator-owned
-FRAMEWORK_PR phase, not an agent role.
+The roster is exactly these four roles. Framework PR work runs as the
+Coordinator-owned FRAMEWORK_PR phase, not an agent role.
 """
 
 from __future__ import annotations
@@ -52,9 +48,7 @@ class BackendType(str, Enum):
     CODEX = "codex"     # no-tools, validated_json_output only (KB Bash exception)
 
 
-# --------------------------------------------------------------------------
 # Built-in default model + API key env table
-# --------------------------------------------------------------------------
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-7"
 DEFAULT_CODEX_MODEL = "gpt-5.4"  # litellm support pending for 5.5
 
@@ -62,9 +56,7 @@ DEFAULT_CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
 DEFAULT_CODEX_API_KEY_ENV = "OPENAI_API_KEY"
 
 
-# --------------------------------------------------------------------------
 # Role permission catalogue (DESIGN §7.6)
-# --------------------------------------------------------------------------
 _BASE_INTENTS: frozenset[IntentType] = frozenset({
     IntentType.SEND_MESSAGE,
     IntentType.ASK_QUESTION,
@@ -74,17 +66,7 @@ _BASE_INTENTS: frozenset[IntentType] = frozenset({
 })
 
 
-# Orchestration — proposes / delegates / requests Kernel; the only role with
-# REQUEST authority (target_agent="kernel" enforced by PolicyGate).
-#
-# Orchestration also holds two scheduling-police intents:
-#   * PRUNE_BRANCH so it can forward roofline-driven structural advice
-#     (Roofline-v2 C3 path).
-#   * ESCALATE_STRATEGY_CHANGE so it can directly request a phase
-#     advance / wind-down (skip_to_kernel / skip_to_sweep / skip_to_close)
-#     instead of routing through robustness.
-# FORCE_DISPATCH stays robustness-only: it is a recovery-shaped intent
-# that bypasses normal task accounting.
+# Orchestration — only role with REQUEST authority; holds PRUNE_BRANCH (Roofline-v2 C3) + ESCALATE_STRATEGY_CHANGE. FORCE_DISPATCH stays robustness-only.
 _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.PROPOSE_ACTION,
     IntentType.DELEGATE,
@@ -102,15 +84,13 @@ _KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
 })
 
 
-# Critic — review verdicts only (no propose_action / delegate / request).
-# Devil's advocate: send_message(topic="advice"), no parliament intents.
+# Critic — review verdicts only; devil's advocate via send_message(topic="advice").
 _CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.REVIEW_VERDICT,
 })
 
 
-# Robustness — always-on health monitoring + RCA + recovery. Holds the entire
-# scheduling-police intent set + KILL_TASK exclusively.
+# Robustness — always-on health monitoring + RCA + recovery; holds the scheduling-police set + KILL_TASK exclusively.
 _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.UPDATE_STATE,  # crash_count / current_action only
     IntentType.DELEGATE,      # only handle actions: accuracy_gate / recover / server_lifecycle
@@ -121,9 +101,7 @@ _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
 })
 
 
-# --------------------------------------------------------------------------
 # AgentRole dataclass
-# --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class AgentRole:
     """Static role record. Backend instances are created elsewhere.
@@ -150,9 +128,7 @@ class AgentRole:
         return self.system_prompt_path.read_text(encoding="utf-8")
 
 
-# --------------------------------------------------------------------------
 # Default registry
-# --------------------------------------------------------------------------
 def default_role_registry() -> dict[str, AgentRole]:
     """Return the canonical v0.6 4-agent registry (PascalCase capable)."""
     return {

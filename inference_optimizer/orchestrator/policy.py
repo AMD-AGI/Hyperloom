@@ -1,24 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PolicyGate.
-
-Single chokepoint: every parsed Intent passes through ``validate_intent``
-before the Coordinator commits side-effects. PolicyGate converges:
-
-    * Role permission   — does this agent's role allow this intent type?
-    * Source allowlist  — REVIEW_VERDICT is critic-only;
-                          KILL_TASK / FORCE_DISPATCH / PRUNE_BRANCH /
-                          ESCALATE_STRATEGY_CHANGE are robustness-only
-    * REQUEST routing   — only orchestration→kernel is allowed
-    * Kernel ownership  — kernel-owned actions can NOT be `delegate`d;
-                          orchestration must REQUEST(target_agent="kernel")
-    * Core state guard  — only the Coordinator can mutate
-                          CORE_STATE_FIELDS (current_best, etc.)
-
-PolicyGate stays *pure* — it does not touch the bus or the DB. The
-Coordinator catches :class:`PolicyDenied` and emits a ``policy_denied``
-observation event so the LLM can self-correct on its next replay turn.
-"""
+"""PolicyGate — single chokepoint: every parsed Intent passes through ``validate_intent`` before side-effects."""
 
 from __future__ import annotations
 
@@ -54,13 +36,8 @@ if TYPE_CHECKING:  # pragma: no cover — type-only
     from .agent_role import AgentRole
 
 
-# ---------------------------------------------------------------------------
 def _value_is_present(value: Any) -> bool:
-    """Treat a value as present iff it is a non-empty string OR a
-    non-empty container (dict/list/tuple/set). ``None`` and whitespace-
-    only strings count as absent. Used by the delegate required-payload
-    check, where ``reason`` is a short string and ``evidence`` is a dict
-    (per-GPU snapshot, consecutive_hits, ...)."""
+    """Present iff a non-empty string OR non-empty container; ``None`` / whitespace count as absent."""
     if value is None:
         return False
     if isinstance(value, str):
@@ -71,16 +48,7 @@ def _value_is_present(value: Any) -> bool:
 
 
 def _delegate_field_present(payload: dict[str, Any], field_name: str) -> bool:
-    """Return True iff ``field_name`` is present (per :func:`_value_is_present`)
-    at the top of ``payload`` OR nested under ``payload["params"]``.
-
-    Robustness builds delegate envelopes with the action knobs (``reason``,
-    ``evidence``, ``force_gpu_cleanup``) under ``payload["params"]`` so the
-    downstream executor reads them via ``ctx.task.params``. We accept either
-    location so PolicyGate is the chokepoint regardless of the producer's
-    payload-shape choice — see ``robustness_agent/role/envelope.py``
-    ``build_delegate`` and ``recover_executor.__call__``.
-    """
+    """True iff ``field_name`` is present at the top of ``payload`` OR nested under ``payload["params"]`` (robustness uses params)."""
     if _value_is_present(payload.get(field_name)):
         return True
     nested = payload.get("params")
@@ -93,12 +61,8 @@ class PolicyDenied(RuntimeError):
     """Intent rejected by PolicyGate.
 
     Attributes:
-        rule: short identifier of the rule that fired (``role``, ``payload``,
-              ``kernel_owned_by_kernel_agent``, ``request_target``,
-              ``kill_task_source``, ``review_verdict_source``,
-              ``robustness_only_source``, ``state_field``, ...)
-        hint: optional one-line agent-actionable suggestion describing the
-              canonical fix.
+        rule: short identifier of the rule that fired.
+        hint: optional one-line agent-actionable suggestion.
     """
 
     def __init__(self, reason: str, *, rule: str | None = None,
@@ -114,83 +78,38 @@ FP8_ONLY_ACTIONS: frozenset[str] = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
-# Per-action delegate source allowlist (action_name → set of source roles).
-#
-# This is the action-name analogue of ROBUSTNESS_ONLY_SOURCE_ALLOWLIST
-# (which gates IntentType, not action_name). Some actions have side
-# effects narrow enough that even roles with ``can_delegate_side_effects``
-# must NOT initiate them — e.g. ``recover`` walks SIGTERM/SIGKILL against
-# matching processes and is env-gated to optionally invoke
-# ``rocm-smi --gpureset``. Letting Orchestration drive it bypasses the
-# robustness escalation path (symptom → ActionLadder → delegate), so we
-# limit the source to the robustness agent only.
-#
-# Actions not listed here fall through to the general delegate rules
-# (kernel-owned guard + ActionRegistry lookup).
-# ---------------------------------------------------------------------------
+# Per-action delegate source allowlist (action_name → source roles); unlisted actions fall through to the general delegate rules.
 DELEGATE_ACTION_SOURCE_ALLOWLIST: dict[str, frozenset[str]] = {
     "recover": frozenset({"robustness"}),
 }
 
 
-# ---------------------------------------------------------------------------
-# Per-action delegate required payload fields. The values are stringified
-# and stripped; empty / missing fields raise PolicyDenied. This is the
-# minimum evidence we require alongside a side-effecting delegate so the
-# downstream executor + result.json audit have something to anchor on.
-# ---------------------------------------------------------------------------
+# Per-action delegate required payload fields (minimum evidence for the audit trail; missing/empty raise PolicyDenied).
 DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
     "recover": ("reason", "evidence"),
 }
 
 
-# ---------------------------------------------------------------------------
-# Specialist dispatch is registry-backed but still parameterized by tags
-# and domain-specific payload. PolicyGate keeps the action name central so
-# R2 sub-rules can enforce the specialist dispatch contract uniformly.
-# ---------------------------------------------------------------------------
+# Specialist dispatch action name (central so R2 sub-rules enforce the contract uniformly).
 SPECIALIST_ACTION_NAME: str = "specialist"
 
-# The orchestrator-side patch integration step. Lives in the EXPLORE
-# phase, gated by a Critic verdict before bench (single-tenant GPU
-# preserved).
+# Orchestrator-side patch integration step (EXPLORE phase, gated by a Critic verdict).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
-# Merged explore action — kept as a named constant alongside
-# SPECIALIST_ACTION_NAME so explore-grid caps have a single source of truth.
+# Merged explore action.
 EXPLORE_ACTION_NAME: str = "explore"
 
-# the sweep action; named constant so the
-# ``sweep_phase_singleton`` rule (deny LLM-emitted sweep when
-# Coordinator's auto-enqueue already landed one in SWEEP phase) has
-# a single source of truth.  See _validate_sweep_singleton.
+# Sweep actions; named constants so the ``*_phase_singleton`` rules have a single source of truth.
 SWEEP_ACTION_NAME: str = "sweep"
 CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 
-# Specialist / Explore parallelism caps — single source of truth
-# imported by cli.py, specialist_runner.py, specialist_prompt_builder.py,
-# and prompt_builder.py so the limits never drift between layers.
-#   * concurrent CPU/research-lane specialists scale with the visible
-#     GPU count (``2 × GPU``), detected at runtime; a conservative
-#     default applies when detection fails.
-#   * ``DEFAULT_SPECIALIST_MAX_PROPOSALS`` — per-specialist proposal_set
-#     self-curation target rendered into the specialist prompt. Advisory
-#     only: the SpecialistRunner does not truncate the returned set.
-
-# Conservative research-lane ceiling used when the GPU count cannot be
-# probed (keeps the loop alive on CPU-only boxes / sandboxes).
+# Specialist / Explore parallelism caps — single source of truth across layers.
+# Research-lane ceiling fallback used when the GPU count cannot be probed.
 RESEARCH_LANE_CEILING_FALLBACK: int = 2
 
 
 def detect_gpu_count() -> int:
-    """Best-effort visible-GPU count.
-
-    Reads ``HIP_VISIBLE_DEVICES`` / ``CUDA_VISIBLE_DEVICES`` first
-    (cheapest, honours the operator's masking), then falls back to
-    ``rocm-smi``. Returns 0 when nothing can be probed so callers can
-    apply their conservative default.
-    """
+    """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed."""
     for env_name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         raw = os.environ.get(env_name)
         if raw is None:
@@ -225,11 +144,7 @@ def detect_gpu_count() -> int:
 
 
 def research_lane_ceiling() -> int:
-    """Dynamic ceiling on concurrent CPU/research-lane specialists.
-
-    ``2 × visible GPU count``; falls back to
-    :data:`RESEARCH_LANE_CEILING_FALLBACK` when no GPU can be probed.
-    """
+    """Dynamic ceiling on concurrent research-lane specialists (``2 × GPU``; falls back to :data:`RESEARCH_LANE_CEILING_FALLBACK`)."""
     gpus = detect_gpu_count()
     if gpus > 0:
         return 2 * gpus
@@ -237,11 +152,7 @@ def research_lane_ceiling() -> int:
 
 
 def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
-    """Configured GPU specialist capacity for this session.
-
-    The GPU specialist pool is intentionally separate from serving lanes.
-    A value of 0 disables ``needs_gpu=true`` specialist dispatch.
-    """
+    """Configured GPU specialist capacity (separate from serving lanes; 0 disables ``needs_gpu=true`` dispatch)."""
     if shared_state is not None:
         try:
             return max(0, int(
@@ -258,51 +169,34 @@ def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
         return 0
 
 
-# Snapshot the ceiling at import for callers that need a plain int
-# (CLI clamp, schema). Recomputed lazily by :func:`research_lane_ceiling`
-# wherever a fresh probe is preferable.
+# Ceiling snapshot at import for callers needing a plain int; recomputed lazily by :func:`research_lane_ceiling`.
 MAX_RESEARCH_LANE_CAPACITY: int = research_lane_ceiling()
 
-# Canonical name of the LLM-sub-agent resource lane shared by
-# specialists + dynamic_action; kept in lockstep with
-# :data:`resource_lock.LANE_PRIORITY`.
+# Canonical name of the LLM-sub-agent resource lane shared by specialists + dynamic_action.
 RESEARCH_LANE_NAME: str = "research_lane"
 DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
 
-# Verdicts that allow ``integrate_patch`` to proceed without an
-# explicit operator override. ``advise`` is treated as a soft
-# approval (Critic provided guidance but didn't block); ``approve``
-# is the canonical green light.
+# Verdicts that allow ``integrate_patch`` without an operator override (``advise`` = soft approval, ``approve`` = green light).
 INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset({
     "approve", "advise",
 })
 
-# Source roles allowed to dispatch a specialist via
-# ``delegate{action='specialist'}``.
+# Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
 SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
 
-# Prefix the SubAgentRunner stamps on every emit-intent originating
-# from a specialist task. ``from_agent='specialist:<task_id>'``.
+# Prefix the SubAgentRunner stamps on specialist emit-intents (``from_agent='specialist:<task_id>'``).
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 
 
-# ---------------------------------------------------------------------------
-# dynamic_action — supplementary cross-domain ReAct sub-agent channel.
-# Shares the research_lane with specialists; independent round caps so
-# the two pools never starve each other. Red-line checks live in
-# :meth:`PolicyGate._validate_dynamic_action_dispatch`.
-# ---------------------------------------------------------------------------
+# dynamic_action — supplementary cross-domain ReAct sub-agent channel (shares research_lane; red-lines in ``_validate_dynamic_action_dispatch``).
 DYNAMIC_ACTION_NAME: str = "dynamic_action"
 
-# Roles allowed to dispatch a ``dynamic_action`` (sub-agents may not
-# recursively spawn one).
+# Roles allowed to dispatch a ``dynamic_action`` (no recursive spawn).
 DYNAMIC_ACTION_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({
     "orchestration",
 })
 
-# Floor on the ``scope_domains`` list length. Single-domain deep dives
-# are allowed; the red-line checks (kernel-only / side-effects) carry the
-# safety contract.
+# Floor on the ``scope_domains`` list length.
 DYNAMIC_ACTION_MIN_SCOPE_DOMAINS: int = 1
 
 # Allowed values of the optional ``budget_hint`` field.
@@ -310,9 +204,7 @@ DYNAMIC_ACTION_BUDGET_HINTS: frozenset[str] = frozenset({
     "low", "medium", "high",
 })
 
-# Side-effect categories ``dynamic_action`` may never declare; mirrors
-# the dispatch red lines (no own metric / accuracy gate / server /
-# Magpie process).
+# Side-effect categories ``dynamic_action`` may never declare (mirror the dispatch red lines).
 DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES: frozenset[str] = frozenset({
     "metric",
     "accuracy_gate",
@@ -320,32 +212,18 @@ DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES: frozenset[str] = frozenset({
     "magpie",
 })
 
-# A ``scope_domains`` list consisting only of this literal collapses
-# the dispatch to a kernel-only patch; rejected at dispatch.
+# A ``scope_domains`` list consisting only of this literal is a kernel-only patch in disguise; rejected.
 DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL: str = "kernel"
 
 
-# ---------------------------------------------------------------------------
-# R4 / R5 — external tool whitelist registry
-#
-# Tool names live here (the *policy* layer) so PolicyGate AND the
-# SpecialistRunner share a single source of truth. The runner builds
-# its per-task tool list from the role-whitelist table below; PolicyGate
-# uses these constants for the intent-level R4 + R5 second pass
-#.
-#
-# Naming convention follows the Claude / Cursor tool surface.
-# ---------------------------------------------------------------------------
+# R4 / R5 — external tool whitelist registry (single source of truth for PolicyGate + SpecialistRunner).
 
-#: KB *write* surfaces. R4 ``kb_write_unauthorized`` denies any
-#: intent that tries to invoke one — directly or via an action_name /
-#: request.kind collision.
+#: KB *write* surfaces. R4 ``kb_write_unauthorized`` denies any intent invoking one.
 KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp__cortex_kb__propose_point",
 })
 
-#: KB *readonly* surfaces. R5 ``tool_whitelist_role`` requires the
-#: caller to be a specialist sub-agent.
+#: KB *readonly* surfaces. R5 ``tool_whitelist_role`` requires a specialist sub-agent caller.
 CORTEX_KB_READ_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp__cortex_kb__traverse",
     "mcp__cortex_kb__find_recipe",
@@ -368,33 +246,24 @@ PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp__pr_monitor__pr_search",
 })
 
-#: Web tools. R5 — specialist-only. Other roles get
-#: ``tool_whitelist_role``; usable in any phase.
+#: Web tools. R5 — specialist-only (other roles get ``tool_whitelist_role``); usable in any phase.
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
 
-#: Role-→-allowed-toolset map (R5). The default agents (orchestration /
-#: kernel / critic / robustness) never touch external knowledge tools;
-#: only the specialist sub-agent does. Keep this map flat and explicit
-#: so PolicyGate can do an O(1) membership check.
+#: Role→allowed-toolset map (R5). Only the specialist sub-agent touches external knowledge tools.
 TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
     "specialist": (
         WEB_TOOL_NAMES
         | PR_MONITOR_TOOL_NAMES
         | CORTEX_KB_READ_TOOL_NAMES
     ),
-    # Empty sets — listing the roles explicitly so a typo
-    # (``"orchestrator"`` vs ``"orchestration"``) becomes a key
-    # error instead of a silent allow.
+    # Empty sets listed explicitly so a role-name typo is a key error, not a silent allow.
     "orchestration": frozenset(),
     "kernel": frozenset(),
     "critic": frozenset(),
     "robustness": frozenset(),
 }
 
-#: Convenience superset — every tool name PolicyGate knows about
-#: (read or write). Useful for the R4 collision check on
-#: ``propose_action.action_name`` so an LLM can't smuggle a tool
-#: invocation through the action registry.
+#: Convenience superset of every known external tool name (R4 collision check).
 ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = (
     KB_WRITE_TOOL_NAMES
     | CORTEX_KB_READ_TOOL_NAMES
@@ -403,10 +272,7 @@ ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = (
 )
 
 
-# Synthetic dataclass-ish stub used as ``role`` argument when validating
-# path containment for specialist intents. We only need ``name`` for the
-# error messages; specialist intents go through ``_validate_specialist_*``
-# directly so the conventional role.allowed_intents matrix doesn't fire.
+# Synthetic stub used as ``role`` for specialist path-containment checks (only ``name`` is needed).
 class _SpecialistPseudoRole:
     name = "specialist"
 
@@ -414,20 +280,13 @@ class _SpecialistPseudoRole:
 _SPECIALIST_PSEUDO_ROLE = _SpecialistPseudoRole()
 
 
-# ---------------------------------------------------------------------------
-# REQUEST/RESPONSE routing matrix (DESIGN §7.6 / §13.4)
-#
-# Maps source role → set of allowed target_agent names. Currently
-# only orchestration→kernel is allowed.
-# ---------------------------------------------------------------------------
+# REQUEST/RESPONSE routing matrix (DESIGN §7.6 / §13.4): source role → allowed target_agents (only orchestration→kernel).
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
     "orchestration": frozenset({"kernel"}),
 }
 
 
-# ---------------------------------------------------------------------------
 # Critic-only: REVIEW_VERDICT (DESIGN §18.2)
-# ---------------------------------------------------------------------------
 REVIEW_VERDICT_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"critic"})
 
 # Verdict vocabulary for review_verdict (DESIGN §18.2)
@@ -436,9 +295,7 @@ REVIEW_VERDICTS: frozenset[str] = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
 # Robustness-only: kill_task + scheduling-police intents (DESIGN §7.4 / §19.3)
-# ---------------------------------------------------------------------------
 KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
@@ -449,22 +306,7 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset({
 })
 ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
-# Per-intent source allowlist override. Some scheduling-police intents
-# legitimately need a non-robustness source:
-#   * PRUNE_BRANCH widens to ``orchestration`` so it can forward the
-#     ``roofline`` action's structured ``suggested_prunes`` advice
-#     (Roofline-v2 C3 path).
-#   * ESCALATE_STRATEGY_CHANGE widens to ``orchestration`` so the main
-#     LLM can directly request phase advance / wind-down hints
-#     (``skip_to_kernel`` / ``skip_to_sweep`` / ``skip_to_close``) once
-#     it judges the current phase exhausted, instead of having to bounce
-#     the request through robustness.
-# FORCE_DISPATCH stays robustness-only — it is a recovery-shaped intent
-# that bypasses normal task accounting.
-#
-# Lookups fall through to ROBUSTNESS_ONLY_SOURCE_ALLOWLIST when an intent is
-# not listed here, so adding a new ROBUSTNESS_ONLY_INTENTS entry remains
-# robustness-only by default.
+# Per-intent source override: PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE widen to orchestration; FORCE_DISPATCH stays robustness-only.
 _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
     IntentType.PRUNE_BRANCH: frozenset({"robustness", "orchestration"}),
     IntentType.ESCALATE_STRATEGY_CHANGE: frozenset({
@@ -473,17 +315,7 @@ _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# SESSION_DIR path containment.
-#
-# Any payload field listed in _PATH_LIKE_FIELDS must point either
-# (a) inside the active session_dir, OR
-# (b) under one of the framework source allowlists below (so kernel-agent
-#     can reference aiter/sglang/vllm source trees without violation).
-#
-# The check is applied recursively to dict values; nested dicts (e.g.
-# request.params.trace_input) are walked.
-# ---------------------------------------------------------------------------
+# SESSION_DIR path containment: PATH_LIKE_FIELDS must point inside session_dir or a framework source allowlist (checked recursively).
 PATH_LIKE_FIELDS: frozenset[str] = frozenset({
     "trace_input",
     "candidates_path",
@@ -503,44 +335,18 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset({
     "manifest_path",
 })
 
-# `source_file` is a special case — kernel agents reference framework
-# source trees that legitimately live outside session_dir. We allowlist
-# the well-known parents here; anything else falls through to the
-# session_dir containment check.
-# Field name-only allowlist: when the payload key is `source_file`, the
-# value may match :func:`resolve_source_file_allowlist` instead of being
-# session-rooted. Resolved at check time so importlib/glob discovery and
-# env overrides apply without a process restart.
+# `source_file` is special: may match :func:`resolve_source_file_allowlist` (framework trees outside session_dir, resolved at check time).
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
 
 
-# Multi-node profile trace shared dirs. In multi-node runs, server pods
-# write torch traces to a shared-FS path that the sandbox also mounts;
-# that path lives outside session_dir but must be referenceable by
-# trace_dir / main_trace_path / trace_input so kernel-agent input flows
-# work. The allowlist intentionally only covers prefixes mkdir'd by the
-# sandbox CLI under our namespace; arbitrary writes remain blocked.
-#
-# Runtime-resolved (via :func:`_trace_path_allowlist`) so the allowlist
-# follows ``$USER_DATA_PATH`` instead of hard-coding a cluster mount
-# point. See :func:`inference_optimizer.paths.mn_profile_trace_root`.
+# Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
 def _trace_path_allowlist() -> tuple[str, ...]:
-    """Multi-node profile trace path-prefix allowlist (runtime-resolved).
-
-    Returns the set of path prefixes (each terminated by ``/``) that
-    PolicyGate accepts for ``TRACE_PATH_LIKE_FIELDS`` values escaping
-    ``session_dir``. The trailing ``/`` is load-bearing — without it a
-    ``str.startswith`` check would match a sibling dir whose name shares
-    the prefix as a substring.
-    """
+    """Multi-node profile trace path-prefix allowlist (runtime-resolved; trailing ``/`` is load-bearing for the startswith check)."""
     from ..paths import mn_profile_trace_root
     root = str(mn_profile_trace_root()).rstrip("/") + "/"
     return (root,)
 
-# Subset of PATH_LIKE_FIELDS for which :func:`_trace_path_allowlist`
-# is also accepted (in addition to session_dir containment). Other path
-# fields such as workspace, output_dir, report_path remain strictly
-# session-rooted to preserve sandbox-isolation guarantees.
+# Subset of PATH_LIKE_FIELDS that also accept :func:`_trace_path_allowlist` (others stay strictly session-rooted).
 TRACE_PATH_LIKE_FIELDS: frozenset[str] = frozenset({
     "trace_dir",
     "main_trace_path",
@@ -548,9 +354,7 @@ TRACE_PATH_LIKE_FIELDS: frozenset[str] = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
 # Core SharedState fields that only the Coordinator may mutate.
-# ---------------------------------------------------------------------------
 CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "current_best",
     "stop_reason",
@@ -567,132 +371,70 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "model_class",
     "start_ts",
     "max_minutes",
-    # the fact-layer KEEP ledger. Coordinator is the
-    # sole writer; LLM update_state can never
-    # rewrite the stack, even though the LLM proposes the entries that
-    # land in it via emit_intent → execute → promote flows.
+    # fact-layer KEEP ledger; Coordinator is the sole writer.
     "optimization_stack",
     "gain_per_stack_entry",
-    # schema_version is a migration breadcrumb; an
-    # LLM update_state must not be able to roll the state.json back to
-    # a reader by setting ``schema_version=1``.
+    # schema_version migration breadcrumb; LLM must not roll state.json back.
     "schema_version",
-    # Cortex KB integration fields. Coordinator-only writes; LLM
-    # agents reading is fine.
+    # Cortex KB integration fields (Coordinator-only writes; LLM read is fine).
     "cortex_session_id",
     "cortex_session_summary",
     "warm_start_recipe",
     "warm_start_pitfalls",
     "warm_start_lessons",
     "warm_start_ts",
-    # KB tag completeness — populated by Coordinator from
-    # manifest + baseline materialized config. LLM agents can read
-    # them via prompt sections, but only Coordinator writes.
+    # KB tag completeness (Coordinator-populated from manifest + baseline config).
     "stack_fingerprint_meta",
     "baseline_workload_extra",
-    # warm-recipe replay — one-shot guard + outcome record.
-    # Coordinator-only writes; LLM cannot edit them via update_state
-    # (would let a misbehaving LLM bypass the replay budget).
+    # warm-recipe replay one-shot guard + outcome; LLM cannot edit (bypasses replay budget).
     "warm_replay_attempted",
     "warm_replay_outcome",
     "warm_history_injected",
-    # phase state machine fields. All managed by
-    # ``Coordinator._advance_phase_if_needed``;
-    # LLM update_state never reaches these.
+    # phase state machine fields (managed by ``Coordinator._advance_phase_if_needed``).
     "phase",
     "phase_started_ts",
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
-    # specialist sub-agent ledger. Coordinator-only writes; LLM cannot inject
-    # arbitrary entries via update_state (specialist_done carries
-    # proposals through the dedicated R3 path instead).
+    # specialist sub-agent ledger; LLM cannot inject entries (proposals go via the R3 path).
     "specialist_rounds",
     "specialist_domain_empty_streak",
     "last_specialist",
-    # research_lane capacity is set once at CLI/manifest time
-    # and mirrored into SharedState. Locking it as CORE prevents an LLM
-    # from raising capacity mid-flight.
+    # research_lane / GPU capacity set once at CLI/manifest time; locked so the LLM can't raise it mid-flight.
     "research_lane_capacity",
     "gpu_specialist_capacity",
-    # phase-machine escalation plumbing. Coordinator's
-    # ``_handle_escalate_strategy_change``
-    # writes ``pending_escalate_hint`` via the validated
-    # ``SharedState.set_pending_escalate_hint`` helper; LLM
-    # ``update_state`` is blocked here as a defense-in-depth measure
-    # so an arbitrary intent can't drop the phase machine into
-    # ``skip_to_close``.
+    # phase-machine escalation plumbing; LLM blocked (defense in depth) so it can't force ``skip_to_close``.
     "pending_escalate_hint",
     "last_consumed_escalate_hint",
     "last_consumed_escalate_hint_ts",
     "plateau_overrides",
-    # CLOSE phase sequencer flag.
-    # Set by Coordinator at the end of the 5-step sequencer so
-    # ``cli.finally`` can short-circuit its emergency breakdown
-    # write. LLM update_state must not be able to toggle this and
-    # trick the cli into skipping its safety net.
+    # CLOSE-phase sequencer flag; LLM must not toggle it (would skip cli.finally's safety net).
     "close_sequence_done",
-    # explore search ledger.
-    # Coordinator's ``apply_explore_search_update`` / ``record_explore_accepted``
-    # are the sole writers; LLM ``update_state`` must not rewrite the ledger
-    # directly (would bypass dedup-by-fingerprint + single writer).
+    # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
     "explore_search",
-    # structured gaps ledger. Coordinator's ``_refresh_gaps`` is the sole
-    # writer; LLM agents read via prompt injection. Locking the field
-    # closes the proxy gap (last_action_failures + winners_history)
-    # against an arbitrary update_state that would inject fake gaps
-    # to bias specialist domain selection (single writer).
+    # structured gaps ledger; single writer (``_refresh_gaps``) so the LLM can't inject fake gaps.
     "gaps",
-    # Orchestration working-memory checkpoint (plan Step 4). Coordinator
-    # is the sole writer (it summarises the conversation into this field);
-    # the LLM must not self-author its own durable memory via UPDATE_STATE.
+    # Orchestration working-memory checkpoint; Coordinator-authored (LLM must not self-author durable memory).
     "orchestration_memory",
-    # Coordinator-only writes on the dynamic_action aggregate view +
-    # round counter so the LLM cannot self-narrate its dispatch
-    # outcomes via UPDATE_STATE.
+    # dynamic_action aggregate view + round counter; Coordinator-only (no self-narration).
     "dynamic_actions",
     "dynamic_action_round_count",
-    # FRAMEWORK_PR per-repo discovery budget. Coordinator-controlled
-    # search depth knob (mirrors research_lane_capacity's "set once,
-    # don't let the LLM raise mid-flight" intent); locking it stops a
-    # non-core role from inflating the per-batch search / bench queue
-    # via update_state.
+    # FRAMEWORK_PR per-repo discovery budget; set once, locked against LLM inflation.
     "framework_pr_max_candidates",
-    # Advisory model-architecture profile. Produced pre-launch by the
-    # SKILL launcher into state.json; drives no deterministic gating but
-    # is injected into specialist prompts, so lock it to keep the
-    # launcher / state.json as the sole source of truth (an LLM
-    # update_state must not pollute the specialist prompt context).
+    # Advisory model-architecture profile from the SKILL launcher; locked as the sole source of truth.
     "model_arch",
-    # Architecture-identity tags lifted from the model weights' config.json
-    # (carried on SharedState by ``cli._load_model_config_tags``). Fact-layer
-    # data fanned into the recipe-snapshot ``extras`` by the T0 anchor /
-    # ``_kb_amend_recipe`` writes, so lock them — an LLM update_state must
-    # not pollute the KB recipe tags that drive cross-session reuse.
+    # Architecture-identity tags from config.json fanned into recipe-snapshot extras; locked against pollution.
     "model_architectures",
     "model_type",
 })
 
 
-# ---------------------------------------------------------------------------
 @dataclass
 class PolicyGate:
     """Validate every intent emitted by an agent reactor.
 
-    Attributes:
-        role_registry:   name → AgentRole lookup
-        action_registry: optional name → ActionMetadata lookup; v0.6 fallback
-                         accepts any action name not on KERNEL_OWNED_ACTIONS
-                         (no mode gating; single full mode per ADR-34).
-        session_dir:     active session root for path-containment checks.
-                         When None, the path check is skipped.
-        strict_paths:    when True (production), payload field values that
-                         match :data:`PATH_LIKE_FIELDS` MUST resolve under
-                         ``session_dir`` (or the source-file allowlist for
-                         ``source_file``). Production CLI flips this on;
-                         legacy tests with ``/tmp/<fixture>.json`` fixtures
-                         keep it False. ``$INFERENCE_OPTIMIZER_STRICT_PATHS=1``
-                         in env also enables it for in-process callers.
+    ``strict_paths`` (or ``$INFERENCE_OPTIMIZER_STRICT_PATHS=1``) requires
+    PATH_LIKE_FIELDS to resolve under session_dir / the source-file allowlist.
     """
 
     role_registry: dict[str, "AgentRole"]
@@ -700,16 +442,11 @@ class PolicyGate:
     session_dir: Path | None = None
     strict_paths: bool = False
     shared_state: Any | None = None
-    # phase-incompatible R1 enforcement mode.  When False
-    # (default) the rule only emits a warning entry into the audit log;
-    # production CLI flips this on via ``INFERENCE_OPTIMIZER_STRICT_PHASE=1``
-    # to fail-closed (two-stage rollout: warn first, then enforce).
+    # R1 phase enforcement: False (default) warns only; ``INFERENCE_OPTIMIZER_STRICT_PHASE=1`` fails closed.
     strict_phase: bool = False
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
-        # Allow env to enable strict mode without threading a constructor
-        # arg through every Coordinator caller (tests use a monkeypatched
-        # env to opt in).
+        # Allow env to enable strict mode without threading a constructor arg through every caller.
         import os as _os
         if not self.strict_paths and _os.environ.get(
             "INFERENCE_OPTIMIZER_STRICT_PATHS", ""
@@ -720,26 +457,10 @@ class PolicyGate:
         ).strip() in ("1", "true", "yes"):
             self.strict_phase = True
 
-    # ------------------------------------------------------------------
     # Public API
-    # ------------------------------------------------------------------
     def validate_intent(self, from_agent: str, intent: Intent) -> None:
-        """Raise :class:`PolicyDenied` if the intent is not allowed.
-
-        Order of checks (cheapest first):
-
-            1. Agent must be a known role (or a ``specialist:<task_id>``
-               ephemeral identity)
-            2. ``intent.type`` must be in ``role.allowed_intents``
-            3. Per-intent type structural rules
-            4. Cross-source allowlists (review_verdict / kill_task /
-               robustness-only)
-        """
-        # specialist sub-agents emit intents under an ephemeral
-        # ``specialist:<task_id>`` identity. They get
-        # routed to a synthetic role with a tightly-scoped intent set
-        # (specialist_done + base inbox intents) and the R3 from-agent
-        # contract is enforced against the task_id suffix.
+        """Raise :class:`PolicyDenied` if the intent is not allowed (cheapest checks first: role → allowed_intents → structural → cross-source)."""
+        # specialist sub-agents emit under an ephemeral ``specialist:<task_id>`` identity routed to a synthetic role.
         if from_agent.startswith(SPECIALIST_FROM_AGENT_PREFIX):
             self._validate_specialist_intent(from_agent, intent)
             self._validate_payload_paths(
@@ -782,18 +503,15 @@ class PolicyGate:
             self._validate_kill_task(role, payload)
         elif intent.type in ROBUSTNESS_ONLY_INTENTS:
             self._validate_robustness_only(role, intent.type, payload)
-        # ANSWER / ASK_QUESTION / UPDATE_PERSONA / ALERT carry no
-        # extra side-effect checks beyond the role gate.
+        # ANSWER / ASK_QUESTION / UPDATE_PERSONA / ALERT carry no extra checks beyond the role gate.
 
-        # Path-containment guard — every payload that travels through
-        # the bus is scanned for `_PATH_LIKE_FIELDS`; offending paths
-        # raise PolicyDenied(rule="path_outside_session_dir").
+        # Path-containment guard for PATH_LIKE_FIELDS in the payload.
         self._validate_payload_paths(role, intent.type, payload)
 
     def _closing_phase_denial(
         self, source: str, intent: Intent,
     ) -> PolicyDenied | None:
-        """During closing phase, only harmless intents and ``report`` proposals."""
+        """During closing phase, allow only harmless intents and ``report`` proposals."""
         state = self.shared_state
         if state is None or not getattr(state, "closing_phase", False):
             return None
@@ -818,19 +536,7 @@ class PolicyGate:
         )
 
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
-        """Return the Claude tool list a reactor may use.
-
-        Codex roles → ``[]`` (no-tools). Claude roles → ``["emit_intent"]``
-        in the legacy release; per-action Read/Bash/Edit injection happens in
-        SubAgentRunner (P0-3) and via :meth:`allowed_tools_for_action`.
-
-        Orchestration additionally gets the read-only context-pull tools
-        (plan Step 2) plus the built-in ``Read`` tool. In the persistent
-        ReAct design the per-tick prompt is a thin delta and the agent
-        pulls the context it needs on demand via these tools instead of
-        receiving a full state dump every tick. ``Read`` stays bounded by
-        the PolicyGate path sandbox.
-        """
+        """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read)."""
         role = self.role_registry.get(agent_name)
         if role is None:
             return []
@@ -844,12 +550,7 @@ class PolicyGate:
         return tools
 
     def allowed_tools_for_action(self, action_name: str) -> list[str]:
-        """Per-action tool intersection used by SubAgentRunner.
-
-        Returns the action's declared ``allowed_tools`` from metadata, or
-        the conservative default ``["emit_intent"]`` when no
-        ActionRegistry is wired or the action is unknown.
-        """
+        """Per-action tool intersection; action's declared ``allowed_tools`` or the default ``["emit_intent"]``."""
         if self.action_registry is None:
             return ["emit_intent"]
         meta = self.action_registry.get(action_name)
@@ -857,9 +558,7 @@ class PolicyGate:
             return ["emit_intent"]
         return list(meta.allowed_tools)
 
-    # ------------------------------------------------------------------
     # Per-intent validators
-    # ------------------------------------------------------------------
     def _validate_delegate(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
@@ -877,50 +576,26 @@ class PolicyGate:
                 f"of delegate(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
-        # R2 ``specialist`` is a synthetic action that bypasses
-        # ActionRegistry. The
-        # per-payload contract (domain / gap / max_turns) is enforced by
-        # ``_validate_specialist_dispatch`` instead of the generic
-        # registry path.
+        # R2 ``specialist`` bypasses ActionRegistry; its contract is enforced by ``_validate_specialist_dispatch``.
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
             self._validate_phase_action(role, action_name, intent_kind="delegate")
             return
-        # dynamic_action — phase, source, payload, and red-line checks
-        # live in ``_validate_dynamic_action_dispatch``. The dedicated
-        # validator runs before the generic phase check so a wrong-phase
-        # emit surfaces ``dynamic_phase_violation`` (not the generic
-        # ``phase_incompatible``).
+        # dynamic_action checks live in ``_validate_dynamic_action_dispatch`` (runs before the generic phase check for a specific reason code).
         if action_name == DYNAMIC_ACTION_NAME:
             self._validate_dynamic_action_dispatch(role, payload)
             return
-        # ``integrate_patch`` requires a non-reject Critic verdict on
-        # the specialist's patches before
-        # the orchestrator can apply them to framework_source_roots.
-        # See SharedState.specialist_patch_verdicts /
-        # record_specialist_patch_verdict; ``bypass_critic=True`` lets
-        # an operator override the gate (rare, audit-trail visible
-        # via the policy_denied → bypass override pattern).
+        # ``integrate_patch`` requires a non-reject Critic verdict (``bypass_critic=True`` overrides, audit-visible).
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
-            # Continue into the standard registry + phase checks below.
-        # EXPLORE grids carry an advisory ``provenance`` field for the
-        # audit trail; grid breadth is bounded by the research_lane /
-        # GPU pool leases at dispatch time, not by a grid-size gate.
-        # sweep_phase_singleton: deny LLM-emitted
-        # sweep when the Coordinator's SWEEP-entry hook already
-        # auto-enqueued one. Two concurrent sweep tasks crash both
-        # vllm engines on init; see _validate_sweep_singleton.
+        # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed (concurrent sweeps crash both vllm engines).
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # conc_sweep_phase_singleton (Bug #11): block duplicate
-        # conc_sweep proposals once Coordinator's post-sweep hook
-        # already dispatched one; see _validate_conc_sweep_singleton.
+        # conc_sweep_phase_singleton (Bug #11): block duplicate conc_sweep proposals.
         if action_name == CONC_SWEEP_ACTION_NAME:
             self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
         self._validate_fp8_only_action(action_name, intent_kind="delegate")
-        # If an ActionRegistry is wired, refuse delegate for unknown action names.
-        # No registry → fall through (P0 / dev-mode where registry isn't loaded).
+        # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
             raise PolicyDenied(
                 f"unknown action_name={action_name!r} (not in ActionRegistry)",
@@ -940,10 +615,7 @@ class PolicyGate:
                     "escalate via its action-ladder instead"
                 ),
             )
-        # Per-action required-payload guard (e.g. ``recover`` must carry
-        # ``reason`` + ``evidence`` so the audit trail captures the symptom).
-        # Fields are accepted at the top of the payload OR nested under
-        # ``payload["params"]`` (the structure robustness emits).
+        # Per-action required-payload guard (e.g. ``recover`` must carry ``reason`` + ``evidence``); top-level or under ``params``.
         required = DELEGATE_ACTION_REQUIRED_PAYLOAD.get(action_name)
         if required:
             missing = [
@@ -963,12 +635,9 @@ class PolicyGate:
                         "'evidence': {...}})"
                     ),
                 )
-        # R1 phase_incompatible. Runs **after** the role +
-        # kernel-ownership + unknown_action checks so the cheaper /
-        # structural denials win when both apply (orthogonality).
+        # R1 phase_incompatible. Runs after the structural checks so cheaper denials win.
         self._validate_phase_action(role, action_name, intent_kind="delegate")
-        # R4 / R5 — block any ``delegate`` whose action_name
-        # tries to invoke an external tool via the intent channel.
+        # R4 / R5 — block a delegate whose action_name invokes an external tool.
         self._validate_no_kb_write_collision(
             action_name, intent_kind="delegate",
         )
@@ -980,9 +649,7 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        # Soft check — propose is advisory; only reject if registry is wired
-        # AND the name is unknown AND it's not a kernel-owned action (which
-        # are listed in metadata under their canonical names).
+        # Soft check — reject only if registry is wired AND name is unknown AND not kernel-owned.
         if (
             self.action_registry is not None
             and action_name not in KERNEL_OWNED_ACTIONS
@@ -993,9 +660,7 @@ class PolicyGate:
                 f"(not in ActionRegistry)",
                 rule="unknown_action",
             )
-        # sweep_phase_singleton (defense in depth on
-        # the propose_action channel; same shape as the delegate
-        # validator). See _validate_sweep_singleton.
+        # sweep_phase_singleton (defense in depth on the propose_action channel).
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(
                 payload, intent_kind="propose_action",
@@ -1005,12 +670,7 @@ class PolicyGate:
             self._validate_conc_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
-        # Per-action source allowlist (e.g. ``recover`` is robustness-only).
-        # Mirrors the delegate-path guard so Orchestration cannot reach a
-        # robustness-delegate-only action through the propose_action channel
-        # either. This is a phase-independent hard denial; the proposable-set
-        # subtraction in PHASE_LLM_PROPOSABLE_ACTIONS handles the phase-aware
-        # path and keeps the prompt from advertising the action.
+        # Per-action source allowlist (e.g. ``recover`` is robustness-only); mirrors the delegate-path guard.
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
         if allowed_sources is not None and role.name not in allowed_sources:
             raise PolicyDenied(
@@ -1054,9 +714,7 @@ class PolicyGate:
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyDenied("send_message missing topic", rule="payload")
-        # Unknown topics are soft-degraded by the Coordinator to "observation"
-        # (DESIGN §13.2). PolicyGate doesn't reject them outright so agents
-        # can still surface unstructured observations.
+        # Unknown topics are soft-degraded by the Coordinator to "observation" (DESIGN §13.2); not rejected here.
 
     def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         targets = REQUEST_ROUTING.get(role.name)
@@ -1077,20 +735,13 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # R1 phase_incompatible. For orchestration → kernel REQUEST we
-        # treat the request *kind* as the action name (kernel-owned
-        # actions named identically to their REQUEST kind: kernel_opt /
-        # integrate / etc.). Coordinator-managed kinds (roofline /
-        # profile / replay_warm_recipe / framework_pr) are denied as
-        # never-proposable; other request kinds (e.g. trace_analyze) are
-        # not action names and skip the phase contract.
+        # R1 phase_incompatible: treat REQUEST kind as the action name for kernel-owned + coordinator-internal kinds.
         if (
             target == "kernel" and kind in KERNEL_OWNED_ACTIONS
         ) or kind in COORDINATOR_INTERNAL_ACTIONS:
             self._validate_phase_action(role, kind, intent_kind="request")
         self._validate_fp8_only_action(kind, intent_kind="request")
-        # R4 / R5 — defense in depth: a REQUEST.kind cannot
-        # smuggle a KB write / external tool invocation either.
+        # R4 / R5 — a REQUEST.kind cannot smuggle a KB write / external tool either.
         self._validate_no_kb_write_collision(kind, intent_kind="request")
         self._validate_tool_whitelist_collision(
             role.name, kind, intent_kind="request",
@@ -1116,17 +767,12 @@ class PolicyGate:
             raise PolicyDenied(
                 "review_verdict missing target_proposal_msg_id", rule="payload",
             )
-        # Accept either the legacy single ``verdict`` field or the
-        # per-variant ``verdict_map``. The protocol-layer validator
-        # (protocol/intent) already enforced mutual exclusion +
-        # structural shape; here we validate the *content* (verdict
-        # strings must be in the closed REVIEW_VERDICTS vocab).
+        # Accept the legacy single ``verdict`` or the per-variant ``verdict_map``; here we validate verdict strings against REVIEW_VERDICTS.
         has_single = "verdict" in payload
         verdict_map = payload.get("verdict_map")
         has_map = isinstance(verdict_map, dict) and bool(verdict_map)
         if has_single == has_map:
-            # Both or neither — defense in depth (the protocol-layer
-            # validator should have caught this already).
+            # Both or neither — defense in depth.
             raise PolicyDenied(
                 "review_verdict: exactly one of 'verdict' or "
                 "'verdict_map' must be present",
@@ -1148,9 +794,7 @@ class PolicyGate:
                     hint="use one of approve/reject/redirect/advise/needs_review",
                 )
             return
-        # verdict_map path — every entry's verdict string must be in
-        # the same closed vocab. The envelope still accepts this shape;
-        # the Coordinator collapses it to a single summary verdict.
+        # verdict_map path — every entry's verdict must be in the closed vocab.
         for vname, entry in verdict_map.items():
             v = str((entry or {}).get("verdict") or "").strip()
             if v not in REVIEW_VERDICTS:
@@ -1165,23 +809,10 @@ class PolicyGate:
                     ),
                 )
 
-    # ------------------------------------------------------------------
-    # NOTE: no ``framework_atom_action_unsupported`` rule exists. atom
-    # has no action that needs framework-specific denial at the
-    # PolicyGate layer — multi-node is guarded at the CLI level, and
-    # ``framework_pr`` is still caught for all frameworks by R1
-    # ``phase_incompatible`` (it is Coordinator-managed and never sits
-    # in any phase's LLM-proposable set, so LLMs cannot propose it
-    # regardless of framework; the Coordinator drives it directly).
-    #
-    # Anti-regression guards live in
-    # ``inference_optimizer/tests/test_policy_atom_invariants.py``
-    # (asserts the constant + helper symbols stay absent) so a future
-    # reintroduction has to be intentional.
+    # NOTE: no ``framework_atom_action_unsupported`` rule exists; the guards
+    # that enforce this live in ``tests/test_policy_atom_invariants.py``.
 
-    # ------------------------------------------------------------------
     # R1 phase_incompatible
-    # ------------------------------------------------------------------
     def _validate_phase_action(
         self,
         role: "AgentRole",
@@ -1189,29 +820,7 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject an action the LLM cannot propose in the current phase.
-
-        Single rejection source for the per-phase action contract over
-        :data:`phase_state.PHASE_LLM_PROPOSABLE_ACTIONS` — the set the
-        prompt advertises is exactly the set this rule accepts.
-
-        Behaviour matrix:
-
-        * Coordinator-managed actions (``roofline`` / ``profile`` /
-          ``replay_warm_recipe`` / ``framework_pr``) are auto-driven and
-          never sit in any phase's LLM-proposable set, so they are
-          denied structurally (phase- and ``strict_phase``-independent).
-        * Otherwise the phase contract flips via ``strict_phase``:
-          ``True`` (production) raises ``rule='phase_incompatible'`` so
-          the LLM self-corrects via the inbox ``policy_denied`` event;
-          ``False`` (legacy / tests) swallows the denial but bumps
-          :attr:`policy_denial_streak` for the audit trail.
-
-        Cheap path: when SharedState is missing / phase isn't
-        initialised, the phase contract is a no-op (Inv-2.1 doesn't
-        apply to a run that hasn't entered the machine yet — Coordinator
-        sets phase before the first reactor tick anyway).
-        """
+        """Reject an action the LLM cannot propose in the current phase (``strict_phase`` True raises, False warns; no-op when phase missing)."""
         if action_name in COORDINATOR_INTERNAL_ACTIONS:
             raise PolicyDenied(
                 f"action {action_name!r} is Coordinator-managed and not "
@@ -1231,13 +840,7 @@ class PolicyGate:
         phase = (getattr(state, "phase", "") or "").strip().upper()
         if not phase or phase not in PHASE_NAMES:
             return
-        # Robustness-delegate-only actions (e.g. ``recover``) are absent
-        # from PHASE_LLM_PROPOSABLE_ACTIONS so Orchestration can neither
-        # propose nor delegate them, but the robustness ``gpu_memory_leaked``
-        # ladder still delegates them. The DELEGATE_ACTION_SOURCE_ALLOWLIST
-        # check in ``_validate_delegate`` already guarantees only robustness
-        # reaches this point on the delegate path, so accept the delegate as
-        # long as the action is phase-allowed.
+        # Robustness-delegate-only actions (e.g. ``recover``) are absent from the LLM-proposable set but still delegatable by robustness; accept if phase-allowed.
         if (
             intent_kind == "delegate"
             and action_name in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
@@ -1259,8 +862,7 @@ class PolicyGate:
             f"action contract."
         )
         if not self.strict_phase:
-            # Warn-only: keep the run flowing for legacy tests but make
-            # the audit trail visible via policy_denial_streak.
+            # Warn-only: keep the run flowing but record the denial in the audit trail.
             try:
                 state.record_policy_denial(
                     action_name=action_name,
@@ -1279,23 +881,14 @@ class PolicyGate:
             hint=hint,
         )
 
-    # ------------------------------------------------------------------
     # FP8-only actions
-    # ------------------------------------------------------------------
     def _validate_fp8_only_action(
         self,
         action_name: str,
         *,
         intent_kind: str,
     ) -> None:
-        """Reject GEMM tuning for non-FP8 sessions.
-
-        ``gemm_tuning`` drives aiter A8W8 block-scale FP8 GEMM CSV
-        dispatch. Running it on BF16 / non-quantized workloads wastes the
-        serving lane and may patch the wrong framework path, so enforce the
-        precision contract at the intent boundary. The handler repeats the
-        same check as defense in depth for programmatic callers.
-        """
+        """Reject GEMM tuning for non-FP8 sessions (it drives FP8 block-scale GEMM dispatch; the handler repeats the check)."""
         if not action_name or action_name not in FP8_ONLY_ACTIONS:
             return
         state = self.shared_state
@@ -1315,26 +908,14 @@ class PolicyGate:
             ),
         )
 
-    # ------------------------------------------------------------------
     # R4 — kb_write_unauthorized
-    # ------------------------------------------------------------------
     def _validate_no_kb_write_collision(
         self,
         action_name: str,
         *,
         intent_kind: str,
     ) -> None:
-        """Reject any intent whose ``action_name`` / ``request.kind``
-        equals a Cortex KB *write* tool name.
-
-        Defense in depth — none of the canonical actions in
-        ``ActionRegistry`` ever collide with these names, so a real
-        v0.8 run will never reach this branch via a valid registry
-        entry. The rule fires when an LLM tries to smuggle a KB write
-        via the propose / delegate / request channels (or an
-        operator extension accidentally registers an action with a
-        cortex_kb name). KB_design §3.11 §4.4 / Inv-11.3.
-        """
+        """Reject any intent whose ``action_name`` / ``request.kind`` equals a Cortex KB write tool name (defense in depth; KB_design §3.11 §4.4 / Inv-11.3)."""
         if not action_name:
             return
         if action_name not in KB_WRITE_TOOL_NAMES:
@@ -1352,10 +933,7 @@ class PolicyGate:
             ),
         )
 
-    # ------------------------------------------------------------------
     # R5 — tool_whitelist_role
-    #
-    # ------------------------------------------------------------------
     def _validate_tool_whitelist_collision(
         self,
         role_name: str,
@@ -1363,21 +941,10 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject any intent whose ``action_name`` / ``request.kind``
-        equals an external tool name not on the caller's role
-        whitelist.
-
-        Read-only Cortex KB / PR Monitor / Web tools are specialist-
-        only; the four primary agents (orchestration / kernel /
-        critic / robustness) never reach for them through an intent.
-        KB_design §3.11 §4.5.
-        """
+        """Reject an external tool name not on the caller's role whitelist (KB/PR/Web tools are specialist-only; KB_design §3.11 §4.5)."""
         if not action_name:
             return
-        # Only externally-known tool names trigger R5. The R4 check
-        # already covers KB write names — keep them out of this
-        # branch so a write attempt produces ``kb_write_unauthorized``
-        # (R4) rather than a less-specific ``tool_whitelist_role`` (R5).
+        # Skip KB write names (R4 owns them) so a write attempt yields ``kb_write_unauthorized``, not the less-specific R5 code.
         if action_name in KB_WRITE_TOOL_NAMES:
             return
         if action_name not in ALL_KNOWN_EXTERNAL_TOOL_NAMES:
@@ -1397,10 +964,7 @@ class PolicyGate:
             ),
         )
 
-    # ------------------------------------------------------------------
-    # R4 / R5 public helper — pure validator usable by the
-    # SpecialistRunner per-task tool-list builder.
-    # ------------------------------------------------------------------
+    # R4 / R5 public helper — pure validator for the SpecialistRunner tool-list builder.
     def validate_tool_invocation(
         self,
         tool_name: str,
@@ -1408,17 +972,7 @@ class PolicyGate:
         source_role: str,
         phase: str | None = None,
     ) -> None:
-        """Raise :class:`PolicyDenied` if ``tool_name`` is not
-        allowed for ``source_role``.
-
-        Pure function — Inv-11.1. Returns ``None`` when the tool is
-        allowed. Intended for tool-list builders that need a single
-        source of truth: the SpecialistRunner can call this on each
-        candidate tool before passing the list to the LLM backend.
-
-        ``phase`` is accepted for call-site compatibility but no longer
-        gates any tool — research/Web tools are usable in any phase.
-        """
+        """Raise :class:`PolicyDenied` if ``tool_name`` is not allowed for ``source_role`` (pure, Inv-11.1; ``phase`` no longer gates)."""
         tool_name = (tool_name or "").strip()
         if not tool_name:
             raise PolicyDenied(
@@ -1452,58 +1006,13 @@ class PolicyGate:
                         f"sub-agents. KB_design §3.11 §4.5."
                     ),
                 )
-        # Anything else is implicitly allowed — PolicyGate doesn't
-        # try to enumerate every internal tool (Read / Grep / Glob /
-        # emit_intent / Bash). The SpecialistRunner still filters
-        # against its own ``SPECIALIST_TOOL_DENYLIST`` for the local
-        # tools that don't pass through PolicyGate.
+        # Anything else is implicitly allowed; internal tools are filtered by the SpecialistRunner's own denylist.
 
-    # ------------------------------------------------------------------
     # ``sweep_phase_singleton``
-    # ------------------------------------------------------------------
     def _validate_sweep_singleton(
         self, payload: dict[str, Any], *, intent_kind: str,
     ) -> None:
-        """Enforce one sweep per SWEEP phase.
-
-        ``Coordinator._on_enter_sweep`` (KB_design §3.2 §5.4 +
-        KB_gaps/Gap-05) auto-enqueues a single internal sweep task on
-        SWEEP entry, stamping
-        ``state.phase_history[-1].evidence.auto_sweep_task_id`` with
-        the resulting task id. The Coordinator's own enqueue bypasses
-        PolicyGate (it calls TaskRegistry.create_or_return_existing
-        directly), so this rule is dormant for the auto-path.
-
-        For agent-emitted intents (``delegate{action_name='sweep'}``
-        and ``propose_action{action_name='sweep'}``), this rule
-        denies any sweep proposal once the auto-enqueue has committed
-        within the active SWEEP phase. Concrete signal: latest
-        phase_history row has ``to_phase='SWEEP'`` (cheaper to read
-        than ``state.phase`` and immune to stale-phase reads after a
-        crash) AND ``evidence.auto_sweep_task_id`` is non-empty.
-
-        Why this is the right shape:
-
-        * Two concurrent sweep tasks make every variant fail engine
-          init: both ``vllm serve`` instances race for the same 8
-          GPUs and the same TCP port. ``HSA_STATUS_ERROR_OUT_OF_
-          RESOURCES`` for both, all sweep variants written as
-          ``success=false``, the report's workload-curve section is
-          empty.
-        * The auto-enqueue already covers the SKILL.md default grid
-          + the Cortex ``recipe.sweep_grid`` field, which together
-          are the entirety of the documented sweep contract — there
-          is no remaining workload the LLM could legitimately add.
-        * The rule self-clears at SWEEP→CLOSE: phase_history[-1]
-          becomes the new CLOSE row, ``evidence.auto_sweep_task_id``
-          is no longer present, the gate goes back to inert.
-
-        Operator escape hatch: ``params.bypass_sweep_singleton=True``
-        is honoured so a debug session can intentionally run a
-        second sweep with a custom grid (e.g. ``CONC=128``). The
-        denial-then-bypass pattern keeps the override on the audit
-        trail (Inv-9.4).
-        """
+        """Enforce one sweep per SWEEP phase (Inv-9.4): deny agent sweeps once the auto-enqueued sweep landed (concurrent sweeps crash both vllm engines). Escape: ``params.bypass_sweep_singleton=True``."""
         params = payload.get("params") or {}
         if isinstance(params, dict) and params.get("bypass_sweep_singleton"):
             return
@@ -1543,25 +1052,11 @@ class PolicyGate:
             ),
         )
 
-    # ------------------------------------------------------------------
     # ``conc_sweep_phase_singleton`` (Bug #11)
-    # ------------------------------------------------------------------
     def _validate_conc_sweep_singleton(
         self, payload: dict[str, Any], *, intent_kind: str,
     ) -> None:
-        """Enforce one conc_sweep per SWEEP phase.
-
-        Mirrors :meth:`_validate_sweep_singleton`. Coordinator's post-
-        sweep hook (or SWEEP-entry hook when sweep is already covered)
-        stamps ``evidence.auto_conc_sweep_task_id``. Re-proposals here
-        are denied: every conc_sweep runs the same baseline + current_
-        best ladder, so a second run yields no new data but burns
-        another 30–150 minutes of GPU. Without this rule orchestration
-        loops re-proposing conc_sweep (the only non-sweep, non-recover
-        action allowed in SWEEP) until budget exhausts.
-
-        Operator escape hatch: ``params.bypass_conc_sweep_singleton=True``.
-        """
+        """Enforce one conc_sweep per SWEEP phase (Bug #11); re-proposals burn GPU for no new data. Escape: ``params.bypass_conc_sweep_singleton=True``."""
         params = payload.get("params") or {}
         if isinstance(params, dict) and params.get("bypass_conc_sweep_singleton"):
             return
@@ -1601,23 +1096,7 @@ class PolicyGate:
     def _validate_integrate_patch_critic_gate(
         self, payload: dict[str, Any],
     ) -> None:
-        """PR-A7: enforce ``integrate_patch_requires_critic_verdict``.
-
-        Reject when:
-
-        * ``params.specialist_task_id`` is missing (cannot identify the
-          patch source).
-        * SharedState has no recorded critic verdict for the task and
-          ``params.bypass_critic`` is not truthy.
-        * The recorded verdict is ``reject`` (Critic asked to abort).
-        * The recorded verdict is ``needs_review`` / ``redirect`` and
-          ``params.bypass_critic`` is not set (the operator must
-          consciously override these terminal states).
-
-        ``params.bypass_critic=True`` always wins so the operator can
-        force-integrate (the policy_denial event will still surface
-        the override on the next tick for audit).
-        """
+        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict, unless ``params.bypass_critic=True``)."""
         params = payload.get("params") or {}
         if not isinstance(params, dict):
             raise PolicyDenied(
@@ -1642,17 +1121,13 @@ class PolicyGate:
         bypass = bool(params.get("bypass_critic"))
         if bypass:
             return
-        # SharedState lookup — every PolicyGate instance carries a
-        # reference; defensive None check covers tests that build
-        # PolicyGate without a SharedState.
         ss = getattr(self, "shared_state", None)
         verdict = ""
         if ss is not None:
             try:
                 verdict = ss.get_specialist_patch_verdict(sid)
             except AttributeError:
-                # Older SharedState (no integrate-verdict field). Treat
-                # as no verdict on record.
+                # Older SharedState without the field → no verdict on record.
                 verdict = ""
         if not verdict:
             raise PolicyDenied(
@@ -1688,18 +1163,7 @@ class PolicyGate:
     def _validate_specialist_dispatch(
         self, role: "AgentRole", payload: dict[str, Any],
     ) -> None:
-        """Enforce the specialist-delegate contract.
-
-        Single rule ``specialist_dispatch_source`` with several sub-rules
-        surfaced in the ``hint`` so the LLM gets actionable feedback
-        (Inv-11.2). Order matches §3.5 §11 / §3.13 M5 §4.
-
-        - source role must be Orchestration (R2 main).
-        - each ``params.tags`` entry ∈ knowledge-domain vocabulary
-          (``params.domain`` accepted as a single-tag alias).
-        - ``params.gap_canonical_id`` non-empty.
-        - ``params.max_turns`` (if set) ≤ SPECIALIST_MAX_TURNS_HARD_CAP.
-        """
+        """Enforce the specialist-delegate contract (Inv-11.2): orchestration-only, tags ∈ vocab, gap_canonical_id required, max_turns ≤ cap."""
         if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
             raise PolicyDenied(
                 f"role={role.name!r} cannot dispatch specialists "
@@ -1721,10 +1185,7 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
 
-        # Resolve the dispatch tag list. ``params.tags`` is the canonical
-        # form (one or more knowledge-domain tags); a single
-        # ``params.domain`` is honoured as a backward-compatible alias
-        # and mapped to its knowledge-domain anchor.
+        # ``params.tags`` is canonical; a single ``params.domain`` is a backward-compatible alias.
         tags = normalize_dispatch_tags(params)
         if not tags:
             raise PolicyDenied(
@@ -1736,9 +1197,7 @@ class PolicyGate:
                     f"{sorted(KNOWLEDGE_DOMAIN_TAG_SET)!r}"
                 ),
             )
-        # Each tag must belong to the controlled knowledge-domain
-        # vocabulary. Specialist keys resolve to their anchor inside
-        # ``normalize_dispatch_tags`` so both forms are accepted.
+        # Each tag must belong to the controlled knowledge-domain vocabulary.
         unknown_tags = [t for t in tags if t not in KNOWLEDGE_DOMAIN_TAG_SET]
         if unknown_tags:
             raise PolicyDenied(
@@ -1751,10 +1210,7 @@ class PolicyGate:
                 ),
             )
 
-        # ``sub_kind`` is a free-form prompt selector. The domain tag set
-        # above is the controlled vocabulary; sub_kind is not constrained
-        # to a per-domain catalogue (the specialist runs the default
-        # per-domain prompt when sub_kind is empty).
+        # ``sub_kind`` is a free-form prompt selector (not constrained to a catalogue).
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         if not gap:
             raise PolicyDenied(
@@ -1833,27 +1289,11 @@ class PolicyGate:
                     ),
                 )
 
-    # ------------------------------------------------------------------
     # dynamic_action dispatch validation
-    # ------------------------------------------------------------------
     def _validate_dynamic_action_dispatch(
         self, role: "AgentRole", payload: dict[str, Any],
     ) -> None:
-        """Reject every dispatch that would cross a ``dynamic_action``
-        red line.
-
-        Four check groups:
-
-        - **A** phase (EXPLORE only) + source role (orchestration only)
-        - **B** payload schema completeness
-        - **C** ``side_effects_declared`` red-line boundary
-        - **D** round-cap accounting
-
-        Each failure raises :class:`PolicyDenied` with a distinct
-        ``rule=dynamic_*`` code. Group D + the IR-4 sourced cap depend
-        on SharedState; the method falls open when ``shared_state`` is
-        absent, keeping legacy unit-test paths stable.
-        """
+        """Reject every dispatch crossing a ``dynamic_action`` red line (EXPLORE-only, orchestration-only, schema + side-effect red lines); each failure has a distinct ``rule=dynamic_*``."""
         state = self.shared_state
         phase = ""
         if state is not None:
@@ -1914,14 +1354,11 @@ class PolicyGate:
                 f"domain keys",
                 rule="dynamic_payload_schema",
             )
-        # Dedup (order-preserving) so a repeated entry cannot inflate a
-        # single-domain dispatch into a fake cross-domain one.
+        # Dedup (order-preserving) so a repeated entry can't fake a cross-domain dispatch.
         scope_domains = list(dict.fromkeys(
             d for d in (str(d or "").strip() for d in scope_domains_raw) if d
         ))
-        # All-kernel scope is a kernel-only patch in disguise — checked
-        # before the min-length rule so it keeps its dedicated reason
-        # code even after dedup collapses a repeated kernel literal.
+        # All-kernel scope is a kernel-only patch in disguise; checked before the min-length rule for its dedicated reason code.
         if scope_domains and all(
             d.lower() == DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL
             for d in scope_domains
@@ -2024,27 +1461,16 @@ class PolicyGate:
                     "independent server lifecycle."
                 ),
             )
-        # Registry-backed phase allowlist as a final defense. Per-round
-        # dispatch count is bounded by the research_lane / GPU pool
-        # leases at dispatch time, not by a policy cap.
+        # Registry-backed phase allowlist as a final defense (round count bounded by lane/GPU leases, not a policy cap).
         self._validate_phase_action(
             role, DYNAMIC_ACTION_NAME, intent_kind="delegate",
         )
 
-    # ------------------------------------------------------------------
     # R3 ``specialist_done_source``
-    # ------------------------------------------------------------------
     def _validate_specialist_intent(
         self, from_agent: str, intent: Intent,
     ) -> None:
-        """Validate any intent emitted under a ``specialist:<task_id>`` identity.
-
-        Specialists are tightly scoped (Inv-5.2): they may emit
-        SEND_MESSAGE (heartbeat / advice), ALERT, and exactly one
-        SPECIALIST_DONE. Anything else fires R3
-        ``specialist_done_source`` (the rule label covers the whole
-        specialist intent surface — sub-rule reported in hint).
-        """
+        """Validate any intent emitted under a ``specialist:<task_id>`` identity (Inv-5.2: only SEND_MESSAGE, ALERT, and one SPECIALIST_DONE)."""
         task_id = from_agent.removeprefix(SPECIALIST_FROM_AGENT_PREFIX).strip()
         if not task_id:
             raise PolicyDenied(
@@ -2080,25 +1506,7 @@ class PolicyGate:
     def _validate_specialist_done_payload(
         self, task_id: str, payload: dict[str, Any],
     ) -> None:
-        """Per-field R3 checks for the ``specialist_done`` payload.
-
-        Schema:
-
-        * gap_canonical_id: str (matches dispatch task_id's gap)
-        * domain: str ∈ SPECIALIST_DOMAIN_KEYS
-        * proposal_set: list of variant dicts (may be empty when empty=true)
-        * empty: bool (true → proposal_set must be []; reason required)
-        * summary: str (≤ 500 chars per design; we cap at 4096 defensively)
-        * confidence?: float ∈ [0, 1]
-        * new_findings?: list
-        * residual_questions?: list
-
-        The dispatch-side gap/domain match (R3
-        ``specialist_done_gap_mismatch`` / ``_domain_mismatch``) is
-        delegated to the SharedState-aware caller path; PolicyGate
-        here checks the structural shape so a malformed envelope
-        never reaches the Coordinator dispatcher.
-        """
+        """Per-field R3 structural checks for the ``specialist_done`` payload (gap_canonical_id, domain ∈ keys, proposal_set, empty+reason, summary ≤4096, confidence ∈ [0,1])."""
         gap = str(payload.get("gap_canonical_id") or "").strip()
         if not gap:
             raise PolicyDenied(
@@ -2233,26 +1641,14 @@ class PolicyGate:
         return any(s.startswith(p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
-        """Match a value against runtime-resolved trace path prefixes.
-
-        Used only for trace-input-style fields in multi-node mode where
-        the shared profile dir lives outside session_dir (on a cluster-
-        shared filesystem anchored on ``$USER_DATA_PATH``; see
-        :func:`_trace_path_allowlist`).
-        """
+        """Match a value against runtime-resolved trace path prefixes (multi-node shared profile dir outside session_dir)."""
         s = str(value)
         return any(s.startswith(p) for p in _trace_path_allowlist())
 
     def _validate_payload_paths(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any],
     ) -> None:
-        """Walk payload dict; reject path-like values escaping session_dir.
-
-        Recursive: nested dicts (request.params, response.result, ...)
-        are scanned. Lists of strings are also scanned. The check is
-        a no-op when either ``self.session_dir`` is None OR
-        ``self.strict_paths`` is False (P0 / legacy paths).
-        """
+        """Walk payload (recursively); reject path-like values escaping session_dir. No-op when session_dir is None or strict_paths is False."""
         if self.session_dir is None or not self.strict_paths:
             return
 
@@ -2282,10 +1678,7 @@ class PolicyGate:
             if key not in PATH_LIKE_FIELDS:
                 return
             if not self._path_under_session(node):
-                # Multi-node profile traces live on a shared-FS path
-                # outside session_dir by design; allow only the specific
-                # trace-input fields, only against the runtime-resolved
-                # trace path allowlist (anchored on $USER_DATA_PATH).
+                # Multi-node profile traces live outside session_dir; allow only the trace-input fields against the trace allowlist.
                 if (
                     key in TRACE_PATH_LIKE_FIELDS
                     and self._path_in_trace_allowlist(node)
@@ -2306,10 +1699,7 @@ class PolicyGate:
     def _validate_robustness_only(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any]
     ) -> None:
-        # Per-intent source allowlist takes precedence; the generic
-        # ROBUSTNESS_ONLY_SOURCE_ALLOWLIST remains the default so any
-        # newly-added ROBUSTNESS_ONLY_INTENTS member starts off
-        # robustness-only by construction.
+        # Per-intent source override takes precedence; default is robustness-only.
         allowed_sources = _ROBUSTNESS_ONLY_INTENT_SOURCES.get(
             intent_type, ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
         )

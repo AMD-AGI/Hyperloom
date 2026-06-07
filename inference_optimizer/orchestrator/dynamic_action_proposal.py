@@ -1,15 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Proposal validator + lifecycle / terminal-state enums.
-
-The runner calls :func:`validate_proposal` on every ``emit_proposal``
-tool call; only validated payloads land in ``proposal_set.json``.
-
-Terminal-state and lifecycle enums anchor the canonical labels read
-by the state machine. Reject reasons are stable strings — the runner
-echoes them into the journal so the sub-agent can iterate; the turn /
-wall-clock caps bound the run.
-"""
+"""Proposal validator + lifecycle / terminal-state enums."""
 
 from __future__ import annotations
 
@@ -19,9 +10,6 @@ from enum import Enum
 from typing import Any, Iterable
 
 
-# ---------------------------------------------------------------------------
-# Runner terminal states
-# ---------------------------------------------------------------------------
 class DynamicRunnerTerminalState(str, Enum):
     """Final outcome label written to the per-dispatch summary."""
 
@@ -50,18 +38,10 @@ TERMINAL_REASONS: dict[DynamicRunnerTerminalState, frozenset[str]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Lifecycle states
-# ---------------------------------------------------------------------------
 class DynamicActionStatus(str, Enum):
     """``SharedState.dynamic_actions[dyn_id].status`` vocabulary.
 
-    * Non-terminal: ``DISPATCHED`` → ``SUB_AGENT_RUNNING`` →
-      ``SUB_AGENT_DONE`` → ``AWAITING_CRITIC`` → ``INTEGRATING``;
-    * Terminal: ``COMPLETED_EMPTY`` / ``TIMED_OUT`` / ``FAILED`` /
-      ``CRITIC_REJECTED`` / ``INTEGRATE_FAILED`` / ``KEPT`` /
-      ``REVERTED``;
-    * Special terminal: ``ABANDONED`` set by the resume sweep.
+    ``ABANDONED`` is the special terminal set by the resume sweep.
     """
 
     DISPATCHED = "DISPATCHED"
@@ -79,9 +59,7 @@ class DynamicActionStatus(str, Enum):
     ABANDONED = "ABANDONED"
 
 
-# Map runner terminal state → initial lifecycle status. COMPLETED
-# goes straight to ``AWAITING_CRITIC`` because the runner-done →
-# critic-bound step is synchronous.
+# COMPLETED maps straight to AWAITING_CRITIC (runner-done → critic-bound is sync).
 RUNNER_STATE_TO_STATUS: dict[DynamicRunnerTerminalState, DynamicActionStatus] = {
     DynamicRunnerTerminalState.COMPLETED: DynamicActionStatus.AWAITING_CRITIC,
     DynamicRunnerTerminalState.COMPLETED_EMPTY: DynamicActionStatus.COMPLETED_EMPTY,
@@ -103,9 +81,7 @@ TERMINAL_LIFECYCLE_STATUSES: frozenset[DynamicActionStatus] = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
-# Transition table — Coordinator-only writes; terminal states are sinks.
-# ---------------------------------------------------------------------------
+# Transition table; Coordinator-only writes, terminal states are sinks.
 ALLOWED_TRANSITIONS: dict[DynamicActionStatus, frozenset[DynamicActionStatus]] = {
     DynamicActionStatus.DISPATCHED: frozenset({
         DynamicActionStatus.SUB_AGENT_RUNNING,
@@ -148,9 +124,7 @@ def can_transition(
 ) -> bool:
     """Return True iff ``from_state → to_state`` is permitted.
 
-    Missing source (no prior summary) is treated as creation; only
-    ``DISPATCHED`` is a legal first state. Same-status re-writes are
-    idempotent.
+    Missing source is creation (only ``DISPATCHED`` legal first); same-status is idempotent.
     """
     target = (
         to_state if isinstance(to_state, DynamicActionStatus)
@@ -168,9 +142,7 @@ def can_transition(
     return target in allowed
 
 
-# ---------------------------------------------------------------------------
-# Prompt-friendly flattened ``last_outcome`` label per status.
-# ---------------------------------------------------------------------------
+# Flattened ``last_outcome`` label per status.
 LAST_OUTCOME_BY_STATUS: dict[DynamicActionStatus, str] = {
     DynamicActionStatus.DISPATCHED: "running",
     DynamicActionStatus.SUB_AGENT_RUNNING: "running",
@@ -188,15 +160,7 @@ LAST_OUTCOME_BY_STATUS: dict[DynamicActionStatus, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Closed field set the orchestration prompt's dynamic_action section
-# renders. On-disk summaries may carry extra audit fields; only the
-# names below leak into the prompt projection.
-#
-# ``cumulative_gain`` currently holds the single integrate
-# ``delta_pct`` (one-shot dispatch); the name reserves space for a
-# multi-run total if sub-agent re-dispatch lands later.
-# ---------------------------------------------------------------------------
+# Closed field set the orchestration prompt's dynamic_action section renders.
 SUMMARY_PROMPT_FIELDS: frozenset[str] = frozenset({
     "dyn_id",
     "status",
@@ -215,9 +179,6 @@ SUMMARY_PROMPT_FIELDS: frozenset[str] = frozenset({
 MOTIVATION_GAP_SHORT_MAX_CHARS: int = 600
 
 
-# ---------------------------------------------------------------------------
-# Proposal schema
-# ---------------------------------------------------------------------------
 ALLOWED_PROPOSAL_FIELDS: frozenset[str] = frozenset({
     "name",
     "provenance",
@@ -250,17 +211,13 @@ FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset({
 # Provenance is a strict literal, no composite form.
 EXPECTED_PROVENANCE: str = "dynamic"
 
-# Upper bound on ``name`` length; keeps the synthesised patch filename
-# (``001_<name>.patch``) well under the filesystem limit.
+# Keeps the synthesised patch filename (``001_<name>.patch``) under the FS limit.
 MAX_PROPOSAL_NAME_CHARS: int = 80
 
-# integrate contract: the runner accepts exactly one proposal per
-# dispatch (one patch → one integrate_patch). This is an invariant, not
-# a breadth cap.
+# Invariant: exactly one proposal per dispatch (one patch → one integrate_patch).
 MAX_PROPOSAL_SET_LEN: int = 1
 
-# Catches obvious numeric speedup claims smuggled into the qualitative
-# argument (``X%`` / ``X.Yx`` / ``X.Y ms`` / ``speedup of X``).
+# Catches numeric speedup claims smuggled into the qualitative argument.
 _NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b\d+(?:\.\d+)?\s*%"),
     re.compile(r"\b\d+(?:\.\d+)?\s*x\b", re.I),
@@ -268,14 +225,12 @@ _NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bspeedup\s*(?:of|=)?\s*\d", re.I),
 )
 
-# Unified diff sanity: must contain at least one ``@@`` hunk header.
+# Unified diff sanity: must contain at least one @@ hunk header.
 _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
     r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.M,
 )
 
-# Git emits these metadata lines on every diff; hand-crafted patches
-# typically do not. Stripping them keeps the cumulative-diff check on
-# hunk semantics, not metadata.
+# Strip git-only metadata so the cumulative-diff check compares hunk semantics.
 _DIFF_NORMALISE_DROP_LINES: tuple[re.Pattern[str], ...] = (
     re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?$", re.M),
     re.compile(r"^diff --git a/.* b/.*$", re.M),
@@ -286,8 +241,7 @@ _DIFF_NORMALISE_DROP_LINES: tuple[re.Pattern[str], ...] = (
 
 
 def _normalise_diff_for_compare(text: str) -> str:
-    """Strip git-only metadata + trailing whitespace, return the
-    canonical form for byte comparison."""
+    """Strip git-only metadata + trailing whitespace for byte comparison."""
     body = text or ""
     for pat in _DIFF_NORMALISE_DROP_LINES:
         body = pat.sub("", body)
@@ -296,9 +250,6 @@ def _normalise_diff_for_compare(text: str) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Result envelopes
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ProposalValidationResult:
     """Outcome of validating one ``emit_proposal`` payload."""
@@ -307,8 +258,7 @@ class ProposalValidationResult:
     normalised: dict[str, Any] | None = None
     reason: str = ""
     detail: str = ""
-    # Non-blocking advisory notes (e.g. unverified numeric claims). The
-    # Critic judges these; they do not gate acceptance.
+    # Non-blocking advisory notes the Critic judges; they do not gate acceptance.
     warnings: tuple[str, ...] = ()
 
     def to_journal_dict(self) -> dict[str, Any]:
@@ -338,9 +288,6 @@ def _coerce_string_list(value: Any) -> list[str]:
     return []
 
 
-# ---------------------------------------------------------------------------
-# Public validator
-# ---------------------------------------------------------------------------
 def validate_proposal(
     proposal: dict[str, Any],
     *,
@@ -349,17 +296,10 @@ def validate_proposal(
 ) -> ProposalValidationResult:
     """Apply the closed-schema checks to one proposal payload.
 
-    ``spec_scope_domains`` is the truth set from the dispatch
-    ``spec.json``; the proposal's own list must be a subset.
-
-    ``worktree_cumulative_diff`` is ``git diff HEAD`` from the
-    sub-agent's worktree captured at ``emit_proposal`` time. When
-    non-empty the proposal's ``patch_text`` MUST match it (after
-    git-metadata + whitespace normalisation). ``None`` disables the
-    check (no worktree / git failure / test fixture).
-
-    Empty ``patch_text`` is handled upstream as the ``COMPLETED_EMPTY``
-    signal and is not reached here.
+    ``spec_scope_domains`` is the truth set from ``spec.json`` (proposal's
+    list must be a subset). ``worktree_cumulative_diff`` is ``git diff HEAD``
+    at ``emit_proposal`` time; non-empty means ``patch_text`` must match it
+    (normalised), ``None`` disables the check.
     """
     if not isinstance(proposal, dict):
         return ProposalValidationResult(
@@ -453,9 +393,7 @@ def validate_proposal(
             ok=False, reason="expected_qualitative_argument_empty",
         )
 
-    # Unverified numeric speedup claims are surfaced as an advisory the
-    # Critic judges, not a hard reject. The forbidden-field check above
-    # still blocks fabricated quantitative fields (anti-gaming).
+    # Unverified numeric claims are advisory, not a hard reject.
     warnings: list[str] = []
     numeric_hits = _numeric_claims(qualitative)
     if numeric_hits:
@@ -482,8 +420,8 @@ def build_proposal_set_payload(
 ) -> dict[str, Any]:
     """Build the ``proposal_set.json`` body.
 
-    ``normalised_proposal=None`` represents the ``COMPLETED_EMPTY``
-    signal (sub-agent declared no feasible cross-domain combo)."""
+    ``normalised_proposal=None`` represents the ``COMPLETED_EMPTY`` signal.
+    """
     if normalised_proposal is None:
         return {
             "dyn_id": str(dyn_id),
