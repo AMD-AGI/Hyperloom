@@ -4030,6 +4030,13 @@ class Coordinator:
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
+            # Dynamic specialist lifecycle: poll for completions and
+            # surface results as observations so the orchestration agent
+            # sees them in the next tick without needing to explicitly check.
+            try:
+                await self._poll_dynamic_specialists()
+            except Exception:  # noqa: BLE001 — defensive
+                log.debug("dynamic specialist poll failed", exc_info=True)
             # FRAMEWORK_PR phase pump: enqueue next candidate / fetch
             # next batch when no framework_pr task is in flight. Best-
             # effort; failures degrade to phase_done so we never wedge.
@@ -6381,6 +6388,33 @@ class Coordinator:
         # supply values; we only fill the gaps.
         if action_name == "specialist":
             await self._warm_specialist_params(params)
+        # dynamic_specialist — free-form CPU-only dispatch via the
+        # dynamic_dispatch module. Bypasses SpecialistRunner and
+        # TaskRegistry; agents run as standalone claude CLI subprocesses
+        # with full tool access. Results are polled via the comms protocol.
+        if action_name == "dynamic_specialist":
+            await self._handle_dynamic_specialist_dispatch(source, intent, params)
+            return
+        # dynamic_specialist_check — poll status of running specialists.
+        # The Coordinator also auto-surfaces status in the per-tick prompt
+        # via _poll_dynamic_specialists(), but the agent can force a check.
+        if action_name == "dynamic_specialist_check":
+            status = await self._handle_dynamic_specialist_check(source)
+            await self._record_observation(
+                source, "dynamic_specialist_status", status,
+            )
+            return
+        # dynamic_specialist_collect — read results from a completed agent.
+        if action_name == "dynamic_specialist_collect":
+            agent_id = params.get("agent_id", "")
+            if agent_id:
+                results = await self._handle_dynamic_specialist_collect(
+                    source, agent_id,
+                )
+                await self._record_observation(
+                    source, "dynamic_specialist_results", results,
+                )
+            return
         # For dynamic_action: generate the dyn_id, mkdir the artefact
         # dir, and write spec.json + seed_kit.json before the task is
         # enqueued. PolicyGate has already validated payload + cap;
@@ -8084,6 +8118,117 @@ class Coordinator:
                 "outcome": str(outcome.get("outcome") or "").upper(),
                 "gain_pct": outcome.get("gain_pct"),
             })
+
+    # ------------------------------------------------------------------
+    # Dynamic specialist dispatch (free-form CPU-only agents)
+    # ------------------------------------------------------------------
+    async def _handle_dynamic_specialist_dispatch(
+        self, source: str, intent: Intent, params: dict[str, Any],
+    ) -> None:
+        """Handle delegate{action_name='dynamic_specialist'}.
+
+        Dispatches free-form CPU-only specialists via the dynamic_dispatch
+        module. Bypasses the structured SpecialistRunner / domain catalogue.
+        Results are surfaced to the orchestration agent via the per-tick
+        prompt's SharedState observations.
+        """
+        from .dynamic_dispatch_tools import execute_dynamic_dispatch_tool
+
+        tasks = params.get("tasks", [])
+        if not tasks:
+            await self._record_observation(
+                source, "dynamic_specialist_error",
+                {"error": "No tasks provided in dynamic_specialist params"},
+            )
+            return
+
+        tool_input = {
+            "tasks": tasks,
+            "model": params.get("model", "claude-sonnet-4-6"),
+            "timeout_minutes": params.get("timeout_minutes", 120),
+        }
+        result_text = execute_dynamic_dispatch_tool(
+            "dispatch_specialists", tool_input, str(self.session_dir),
+        )
+        await self._record_observation(
+            source, "dynamic_specialist_dispatched",
+            {"result": result_text, "task_count": len(tasks)},
+        )
+        log.info(
+            "dynamic_specialist dispatch: %d tasks from %s",
+            len(tasks), source,
+        )
+
+    async def _handle_dynamic_specialist_check(
+        self, source: str,
+    ) -> dict[str, Any]:
+        """Poll status of all dynamically dispatched specialists."""
+        from .dynamic_dispatch_tools import execute_dynamic_dispatch_tool
+
+        result_text = execute_dynamic_dispatch_tool(
+            "check_specialists", {}, str(self.session_dir),
+        )
+        return {"status_report": result_text}
+
+    async def _handle_dynamic_specialist_collect(
+        self, source: str, agent_id: str,
+    ) -> dict[str, Any]:
+        """Collect results from a completed dynamic specialist."""
+        from .dynamic_dispatch_tools import execute_dynamic_dispatch_tool
+
+        result_text = execute_dynamic_dispatch_tool(
+            "collect_specialist_results", {"agent_id": agent_id},
+            str(self.session_dir),
+        )
+        return {"results": result_text}
+
+    async def _poll_dynamic_specialists(self) -> None:
+        """Auto-poll dynamic specialists each tick.
+
+        Surfaces newly completed agents as observations so the
+        orchestration agent sees them without explicitly checking.
+        """
+        from .dynamic_dispatch_comms import get_agent_status_summary, read_completion
+
+        summary = get_agent_status_summary(str(self.session_dir))
+        newly_done = summary.get("completed", [])
+        if not newly_done:
+            return
+
+        collected_key = "_dynamic_specialist_collected"
+        if not hasattr(self, collected_key):
+            setattr(self, collected_key, set())
+        already_collected: set = getattr(self, collected_key)
+
+        for agent_id in newly_done:
+            if agent_id in already_collected:
+                continue
+            already_collected.add(agent_id)
+            report = read_completion(str(self.session_dir), agent_id)
+            if report:
+                await self._record_observation(
+                    "coordinator", "dynamic_specialist_completed",
+                    {
+                        "agent_id": agent_id,
+                        "status": report.status,
+                        "summary": report.summary[:500],
+                        "patches": report.patches_written or [],
+                        "config_changes": report.config_changes or {},
+                    },
+                )
+
+        active = summary.get("active", [])
+        dead = summary.get("dead", [])
+        if active or dead:
+            await self._record_observation(
+                "coordinator", "dynamic_specialist_status",
+                {
+                    "active_count": len(active),
+                    "completed_count": len(newly_done),
+                    "dead_count": len(dead),
+                    "active_ids": active[:10],
+                },
+            )
 
     # ------------------------------------------------------------------
     # specialist_done bookkeeping
