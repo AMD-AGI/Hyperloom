@@ -63,8 +63,11 @@ def list_candidate_physical_gpus() -> list[int]:
         try:
             if torch.cuda.is_available():
                 return list(range(int(torch.cuda.device_count())))
-        except Exception:
-            pass
+        except Exception as exc:
+            print(
+                f"[tracelens_arch_benchmark] Failed to query CUDA devices via torch: {exc}",
+                file=sys.stderr,
+            )
     return []
 
 
