@@ -94,7 +94,7 @@ def test_attempts_history_caps_at_default():
     assert len(history) == _DEFAULT_ATTEMPTS_HISTORY
     # newest survives, oldest dropped
     assert history[-1]["task_id"] == f"t-{_DEFAULT_ATTEMPTS_HISTORY + 4}"
-    assert history[0]["task_id"] == f"t-5"
+    assert history[0]["task_id"] == "t-5"
 
 
 def test_record_action_attempt_skips_non_audit_kinds():

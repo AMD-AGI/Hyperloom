@@ -2478,7 +2478,6 @@ async def integrate_handler(
     """
     from .action_executors.baseline import BaselineExecutor
     from .action_executors.benchmark_result import is_valid_measurement
-    from .shared_state import SharedState
     from .sub_agent_runner import RunnerContext
     from .task_registry import Task
 

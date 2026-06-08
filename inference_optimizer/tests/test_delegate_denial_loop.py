@@ -219,7 +219,6 @@ from inference_optimizer.orchestrator.policy import (
 )
 from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
-    NO_KERNEL_ENABLED_ACTIONS,
 )
 
 

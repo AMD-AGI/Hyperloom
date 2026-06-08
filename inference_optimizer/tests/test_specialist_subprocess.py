@@ -101,7 +101,7 @@ def _make_fake_claude(
     # Always parse args to find --add-dir paths so we know where to
     # write the done file. The first --add-dir is the worktree
     # (matches the dispatcher's order); the second is the workspace.
-    body = f"""#!/usr/bin/env bash
+    body = """#!/usr/bin/env bash
 set -e
 # Parse --add-dir paths (first is worktree, second is workspace).
 ADD_DIRS=()
@@ -111,8 +111,8 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
-WORKTREE="${{ADD_DIRS[0]:-}}"
-WORKSPACE="${{ADD_DIRS[1]:-${{ADD_DIRS[0]:-}}}}"
+WORKTREE="${ADD_DIRS[0]:-}"
+WORKSPACE="${ADD_DIRS[1]:-${ADD_DIRS[0]:-}}"
 """
     if behavior == "done_only":
         body += f"""

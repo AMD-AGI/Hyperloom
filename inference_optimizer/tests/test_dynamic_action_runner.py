@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,7 +28,6 @@ from inference_optimizer.orchestrator.dynamic_action_proposal import (
     MAX_PROPOSAL_REJECTS,
 )
 from inference_optimizer.orchestrator.dynamic_action_runner import (
-    DEFAULT_TURN_CAP,
     DynamicActionRunner,
     parse_llm_action,
 )

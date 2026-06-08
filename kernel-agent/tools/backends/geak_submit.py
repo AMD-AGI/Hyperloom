@@ -164,7 +164,10 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
         """
         # Self-contained: do NOT import kernel-agent modules here, Ray workers
         # don't share the driver's sys.path patches.
-        import os as _os, shutil as _shutil, subprocess as _sp, time as _t
+        import os as _os
+        import shutil as _shutil
+        import subprocess as _sp
+        import time as _t
         import re as _re
         from pathlib import Path as _Path
         # GPU visibility on AMD/ROCm + Ray:
@@ -259,7 +262,7 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
                 "elapsed_s": round(_t.time() - started, 2),
                 "cmd": cmd,
             }
-        except _sp.TimeoutExpired as exc:
+        except _sp.TimeoutExpired:
             return {
                 "returncode": 124,
                 "stdout_tail": "",
