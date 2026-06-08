@@ -3989,14 +3989,39 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
       * On a failed/blocked quantization the process exits with code 3 —
         we must not silently fall through and optimize the un-quantized
         source model when the user explicitly asked for quantization.
+      * On a scheme/GPU mismatch (e.g. an MI355X-only scheme on an mi300x
+        target), the structured ``--quantize-scheme`` path reports the error
+        and *skips* quantization, then continues optimizing the un-quantized
+        model. The mismatch is a config error caught before any Quark work
+        runs, not a mid-run failure, so the run proceeds rather than aborting.
     """
     # Free-text --quantize wins; otherwise resolve the structured
     # --quantize-scheme enum (the UI/backend path) to a prompt.
     prompt = getattr(args, "quantize", None)
     if not prompt:
-        from .orchestrator.quantization_schemes import resolve_scheme_prompt
+        from .orchestrator.quantization_schemes import (
+            SchemeNotSupportedError,
+            resolve_scheme_prompt,
+            validate_scheme,
+        )
 
-        prompt = resolve_scheme_prompt(getattr(args, "quantize_scheme", None))
+        scheme = getattr(args, "quantize_scheme", None)
+        # Constrain the scheme by the target GPU. The real GPU is probed later;
+        # use the --gpu-type / $GPU_TYPE hint here (empty => no enforcement).
+        gpu_hint = (
+            getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")
+        ).strip().lower()
+        try:
+            validate_scheme(scheme, gpu_hint)
+        except SchemeNotSupportedError as exc:
+            print(
+                f"ERROR: {exc}\n"
+                "Quantization skipped; continuing optimization on the "
+                "un-quantized model.",
+                file=sys.stderr,
+            )
+            return
+        prompt = resolve_scheme_prompt(scheme)
     if not prompt:
         return
     if getattr(args, "resume", False):
