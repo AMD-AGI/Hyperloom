@@ -833,3 +833,65 @@ async def test_integrate_revert_skips_after_kernel_opt_rocprof(
     assert res["decision"] == "REVERT"
     assert len(calls) == 0
     assert "rocprof_after_kernel_opt" not in res
+
+
+@pytest.mark.asyncio
+async def test_after_kernel_opt_rocprof_uses_profile_mode_and_safe_timeout(
+    session_dir, tmp_path, monkeypatch,
+):
+    """After-opt rocprof must be best-effort and profile the same workload as before."""
+    state = SharedState.load_or_init(session_dir)
+    source_file = tmp_path / "kernel.cu"
+    source_file.write_text("// kernel\n", encoding="utf-8")
+    state.kernel_opt_attempts = {
+        "k_after": {
+            "test_command": "python /tmp/run/unittest/harness_moe.py --correctness",
+            "last_source_file": str(source_file),
+        }
+    }
+    state.save(session_dir)
+    sidecar = session_dir / "reports" / "kernel_roofline.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps({
+        "kernels": [{
+            "kernel_id": "k_after",
+            "name": "aiter::moe_kernel",
+            "rocprof_roofline": {
+                "before_kernel_opt": {"status": "matched"},
+                "after_kernel_opt": None,
+            },
+        }]
+    }), encoding="utf-8")
+    captured: dict[str, list[str]] = {}
+
+    async def _fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = cmd
+        captured["timeout_sec"] = timeout_sec
+        out_json = Path(cmd[cmd.index("--out-json") + 1])
+        out_json.write_text(json.dumps({
+            "status": "ok",
+            "target_kernel": "aiter::moe_kernel",
+            "results": [{
+                "name": "aiter::moe_kernel",
+                "matched_kernel_name": "aiter::moe_kernel",
+                "status": "matched",
+                "rocprof_roofline": {"bound_type": "memory"},
+            }],
+        }), encoding="utf-8")
+        return 0, "ok", ""
+
+    monkeypatch.setenv("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "abc")
+    monkeypatch.setattr(krh, "_run_subprocess", _fake_run_subprocess)
+
+    res = await krh._run_after_kernel_opt_rocprof(
+        kernel_id="k_after",
+        session_dir=session_dir,
+        log=krh.log,
+    )
+
+    cmd = captured["cmd"]
+    assert res["status"] == "ok"
+    assert cmd[cmd.index("--cmd") + 1].endswith("harness_moe.py --profile")
+    assert cmd[cmd.index("--timeout-sec") + 1] == "1800"
+    assert captured["timeout_sec"] == 1830
+    assert cmd[cmd.index("--target-kernel") + 1] == "aiter::moe_kernel"

@@ -2178,6 +2178,21 @@ def _record_after_kernel_opt_rocprof_status(
             log.warning("integrate: after_kernel_opt sidecar status update failed: %s", exc)
 
 
+def _rocprof_timeout_sec() -> int:
+    try:
+        return max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800")))
+    except (TypeError, ValueError):
+        return 1800
+
+
+def _rocprof_profile_command(test_command: str) -> str:
+    if "--correctness" not in test_command:
+        return test_command
+    if "/unittest/harness_" not in test_command and " harness_" not in test_command:
+        return test_command
+    return test_command.replace("--correctness", "--profile", 1)
+
+
 async def _run_after_kernel_opt_rocprof(
     *,
     kernel_id: str,
@@ -2260,12 +2275,13 @@ async def _run_after_kernel_opt_rocprof(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_json = out_dir / "after.json"
     out_txt = out_dir / "after.txt"
-    timeout_sec = max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800))
+    timeout_sec = _rocprof_timeout_sec()
+    profiling_command = _rocprof_profile_command(test_command)
 
     cmd = [
         "python3", str(tool),
         "--workdir", str(run_workdir),
-        "--cmd", test_command,
+        "--cmd", profiling_command,
         "--out-json", str(out_json),
         "--out-txt", str(out_txt),
         "--timeout-sec", str(timeout_sec),
@@ -2305,7 +2321,7 @@ async def _run_after_kernel_opt_rocprof(
         import sys as _sys
         if str(ko_dir) not in _sys.path:
             _sys.path.insert(0, str(ko_dir))
-        from kernel_optimization import _update_kernel_roofline_sidecar  # noqa: PLC0415
+        from kernel_optimization import _update_kernel_roofline_sidecar  # type: ignore[import-not-found] # noqa: PLC0415
         _update_kernel_roofline_sidecar(
             workspace_path=str(session_dir),
             kernel_id=kernel_id,

@@ -2484,14 +2484,10 @@ def write_reports(
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
 
-    # Best-effort: per-kernel rocprof-compute enrichment so dashboards
-    # show ``roofline_efficiency_pct`` for every reusable hot kernel
-    # without waiting for GEAK/kernel_opt to dispatch each one.
-    # Toggle off via ``HYPERLOOM_ROCPROF_ROOFLINE_ENRICH=0`` (matches
-    # the existing ``HYPERLOOM_ROCPROF_ROOFLINE`` knob in
-    # kernel_optimization.invoke_backend).
-    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "1").strip().lower()
-    if enrich_value not in {"0", "false", "no", "off"}:
+    # Batch rocprof-compute enrichment is opt-in because it can profile many kernels.
+    # Kernel-opt still profiles the selected kernel on demand.
+    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
+    if enrich_value in {"1", "true", "yes", "on"}:
         try:
             tools_dir = str(Path(__file__).resolve().parent)
             if tools_dir not in sys.path:
