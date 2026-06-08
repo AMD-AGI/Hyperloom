@@ -1,17 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Cover the P1.b fix — Critic gate before FRAMEWORK_PR apply.
-
-The gate lives in Coordinator._critic_review_framework_pr_candidate
-and is consulted from _pump_framework_pr_phase right before
-``_enqueue_framework_pr_task``. ``approve`` (or the degraded
-``abstain`` returned when no Critic is wired) falls through to enqueue;
-``reject`` short-circuits with a ``critic_denied`` progress row so the
-candidate is never applied.
-
-Tests bind the Coordinator method directly to a minimal stub so we
-exercise the gate without spinning up the full DB/bus/backends stack.
-"""
+"""P1.b — Critic gate before FRAMEWORK_PR apply: approve/abstain enqueue, reject writes ``critic_denied``."""
 
 from __future__ import annotations
 
@@ -42,13 +31,7 @@ class _StateStub:
 
 
 class _CoordinatorStub:
-    """Holds just enough state for the gate helper to run.
-
-    Class-level binding of ``_collect_framework_pr_priors`` so that
-    ``self._collect_framework_pr_priors()`` resolves to the real
-    Coordinator implementation when the gate is called with the stub
-    as ``self``.
-    """
+    """Holds just enough state for the gate helper to run (real ``_collect_framework_pr_priors`` bound)."""
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
@@ -70,13 +53,9 @@ def _call_gate(stub: _CoordinatorStub, candidate: dict[str, Any]) -> dict[str, s
     )
 
 
-# ---------------------------------------------------------------------------
 # Approve / reject / abstain mapping
-
-
 def test_gate_returns_approve_for_mock_critic(tmp_path: Path) -> None:
-    """MockCriticBackend auto-approves every proposal it sees, so the
-    gate maps that to ``approve`` and caches the decision."""
+    """MockCriticBackend auto-approves, so the gate maps to ``approve`` and caches the decision."""
     stub = _CoordinatorStub(tmp_path, MockCriticBackend())
     candidate = {
         "candidate_id":     "https://github.com/sgl-project/sglang/pull/9999",

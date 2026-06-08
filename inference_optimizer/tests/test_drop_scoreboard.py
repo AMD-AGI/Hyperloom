@@ -1,23 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.9 — drop scoreboard tests.
-
-Covers KB_design/3.9_drop_scoreboard/README.md:
-
-* SharedState no longer carries ``action_scores`` (Inv-9.1).
-* Legacy ``action_scores`` / ``cooldown_until_tick`` / ``score_violation``
-  / ``locked_reason`` payloads in a resumed state.json are silently
-  dropped (default ``--legacy-action-scores=drop``) or logged
-  (``--legacy-action-scores=warn``).
-* ``params_no_promote_streak`` is preserved as a *fact* (LLM reads
-  it; the system no longer derives a *priority* from it).
-* ``orchestrator.scoring`` module is gone.
-* ``Coordinator`` no longer carries any ``_score_action_*`` /
-  ``_apply_action_score_update`` / ``_ensure_action_scores_seeded`` stubs
-  (KB_gaps/Dead-B): both the methods and their call sites are deleted.
-* The Orchestration prompt no longer carries ``Action scores`` block.
-* PolicyGate ``family_pruned`` denial hint never mentions "Action scores".
-"""
+"""v0.8 §3.9 — drop scoreboard tests."""
 
 from __future__ import annotations
 
@@ -31,9 +14,7 @@ import pytest
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
-# ===========================================================================
 # 1. SharedState dataclass surface
-# ===========================================================================
 def test_shared_state_has_no_action_scores_field():
     """KB_design §3.9 §4.1: ``action_scores`` dropped from the dataclass."""
     s = SharedState()
@@ -44,8 +25,7 @@ def test_shared_state_has_no_action_scores_field():
 
 
 def test_shared_state_has_no_scoring_helpers():
-    """``get_action_score`` / ``put_action_score`` / ``all_action_scores``
-    / ``to_action_scores_summary`` were retired with the scoreboard."""
+    """Scoring helpers were retired with the scoreboard."""
     s = SharedState()
     for name in (
         "get_action_score", "put_action_score", "all_action_scores",
@@ -57,21 +37,14 @@ def test_shared_state_has_no_scoring_helpers():
 
 
 def test_shared_state_keeps_params_no_promote_streak_as_fact():
-    """v0.8 §3.9 keeps the streak field — it's a *fact*, not a priority.
-
-    Inv-9.1 only forbids system-side *priority values*. KEEP/REVERT
-    counts and streak counters are allowed because the LLM reads
-    them as evidence, not as ordering.
-    """
+    """v0.8 §3.9 keeps the streak field — it's a *fact*, not a priority."""
     s = SharedState()
     assert s.params_no_promote_streak == 0
     assert "params_no_promote_streak" in s.to_prompt_summary()
 
 
 def test_shared_state_keeps_tick_and_target_gap_pct():
-    """``tick`` is a monotonic counter (plateau / phase math). The
-    ``target_gap_pct`` is a *fact* (how much gain is still needed)
-    not a multiplier. Both stay."""
+    """``tick`` (counter) and ``target_gap_pct`` (fact) both stay."""
     s = SharedState()
     s.increment_tick()
     s.increment_tick()
@@ -80,19 +53,14 @@ def test_shared_state_keeps_tick_and_target_gap_pct():
 
 
 def test_shared_state_all_top_actions_policy_locked_removed():
-    """KB_gaps/Dead-B — the scoreboard-based "everything's locked" stub
-    is deleted (plateau judges took over). The attribute must not exist
-    on ``SharedState`` at all."""
+    """KB_gaps/Dead-B — the "everything's locked" stub is deleted from SharedState."""
     s = SharedState()
     assert not hasattr(s, "all_top_actions_policy_locked")
 
 
-# ===========================================================================
 # 2. Legacy migration — drop / warn modes
-# ===========================================================================
 def _legacy_state_payload() -> dict:
-    """A v0.6-shaped state.json snapshot loaded with action_scores +
-    a couple of related legacy fields."""
+    """A v0.6-shaped state.json snapshot with action_scores + legacy fields."""
     return {
         "session_id": "legacy-sid",
         "baseline_tput": 1234.0,
@@ -154,8 +122,7 @@ def test_from_dict_no_legacy_fields_means_no_log(monkeypatch, caplog):
 
 
 def test_load_or_init_roundtrips_through_drop(tmp_path, monkeypatch):
-    """Full filesystem path: write a v0.6 state.json with action_scores,
-    load it, save it back, confirm the field is gone."""
+    """Write a v0.6 state.json with action_scores, load + save, confirm field gone."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", raising=False)
     sd = tmp_path / "session"
     sd.mkdir()
@@ -167,20 +134,15 @@ def test_load_or_init_roundtrips_through_drop(tmp_path, monkeypatch):
     assert "action_scores" not in written
 
 
-# ===========================================================================
 # 3. orchestrator.scoring module is gone
-# ===========================================================================
 def test_scoring_module_was_retired():
     with pytest.raises(ImportError):
         importlib.import_module("inference_optimizer.orchestrator.scoring")
 
 
-# ===========================================================================
 # 4. Coordinator scoring surface fully removed (KB_gaps/Dead-B)
-# ===========================================================================
 def test_coordinator_has_no_scoring_methods():
-    """KB_gaps/Dead-B — every v0.6 scoreboard hook on Coordinator is
-    physically removed (methods + their callers)."""
+    """KB_gaps/Dead-B — every v0.6 scoreboard hook on Coordinator is removed."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     for name in (
@@ -214,14 +176,7 @@ def test_coordinator_source_has_no_scoreboard_callers():
 
 
 def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
-    """KB_gaps/Dead-B §B.4 — the pruned-family advisory observation
-    string must not mention "Action scores" any more.
-
-    Loosen P3_19 demoted the prune dispatch from a hard PolicyDenied to
-    an advisory observation so the LLM may still pick the family if it
-    judges the prune speculative; the scoreboard-vocab guard simply
-    moved to the advisory hint string.
-    """
+    """KB_gaps/Dead-B §B.4 — the pruned-family advisory string must not mention "Action scores"."""
     from inference_optimizer.orchestrator import coordinator as _c
 
     src = Path(_c.__file__).read_text(encoding="utf-8")
@@ -232,17 +187,9 @@ def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
     assert "phase-allowed action" in window
 
 
-# ===========================================================================
 # 5. Orchestration prompt has no Action scores top-12 block
-# ===========================================================================
 def test_orchestration_prompt_has_no_scoreboard_block():
-    """KB_design §3.9 §8 — DECISION FRAMEWORK section must not steer
-    the LLM toward ``eff_score`` / ``cooldown`` / ``score_mult``.
-
-    The only allowed mentions of "Action scores" are historical
-    callouts that explain ``v0.8 retired ...`` so the LLM knows the
-    surface is gone.
-    """
+    """KB_design §3.9 §8 — DECISION FRAMEWORK must not steer toward live scoring vocab."""
     from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
         FULL_ENABLED_ACTIONS,
         build_orchestration_prompt,

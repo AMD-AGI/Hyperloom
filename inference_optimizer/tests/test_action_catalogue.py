@@ -44,11 +44,8 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "conc_sweep":           "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
-    # creative (4) — PR #461: dynamic specialist dispatch + poll/collect.
+    # creative (1) — unified specialist dispatch (scope: domain/domains/freeform).
     "specialist":           "creative",
-    "dynamic_specialist":         "creative",
-    "dynamic_specialist_check":   "creative",
-    "dynamic_specialist_collect": "creative",
     # deep_kernel (6)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",
@@ -199,8 +196,7 @@ def test_every_action_has_emit_intent_tool(registry):
 
 
 def test_actions_with_workspace_lane_have_edit_tool(registry):
-    """Anything that mutates the workspace must declare Edit (or otherwise
-    document that it goes through a sub-agent)."""
+    """Anything that mutates the workspace must declare Edit."""
     for m in registry.all():
         if "workspace_mutation" in m.requires_lanes:
             assert "Edit" in m.allowed_tools, (
@@ -338,13 +334,11 @@ def test_explore_action_metadata(registry):
 
 
 def test_kernel_owned_actions_in_deep_pipeline_phase(registry):
-    """Kernel-owned actions must declare pipeline_phase=='deep' so the
-    builder groups them under the kernel section."""
+    """Kernel-owned actions must declare pipeline_phase=='deep'."""
     for name in KERNEL_OWNED_ACTIONS:
         m = registry.get(name)
         assert m is not None
         if name == "deep_kernel_analysis":
-            # Analysis-only step that PRECEDES kernel_opt.
             assert m.pipeline_phase == "analysis"
         else:
             assert m.pipeline_phase == "deep", (

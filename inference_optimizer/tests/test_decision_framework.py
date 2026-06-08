@@ -2,15 +2,8 @@
 
 """P5 decision-framework regression tests.
 
-The v0.6 ``backends`` / ``params`` promote-threshold tests were
-retired alongside their executors (KB_design §3.4 / KB_gaps/Dead-A);
-the v0.8 ``explore`` action makes its own per-variant KEEP/REVERT
-decision inside the executor (see :file:`test_v08_m3_explore.py`).
-This file now only covers:
-
-C. ``_handle_request`` for ``run_optimization`` mirrors the handler's
-   result into ``shared_state.last_kernel_opt`` so subsequent Orch
-   turns see decision/speedup and don't re-dispatch the same kernel_id.
+Covers that ``_handle_request`` for ``run_optimization`` mirrors the
+handler result into ``shared_state.last_kernel_opt``.
 """
 
 from __future__ import annotations
@@ -30,7 +23,6 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
 
-# ---------------------------------------------------------------------------
 def _heartbeat() -> Intent:
     return Intent(type=IntentType.SEND_MESSAGE,
                   payload={"topic": "heartbeat", "body_md": "ok"})
@@ -49,17 +41,10 @@ def _silent_backends() -> dict[str, object]:
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    # Pin HYPERLOOM_KERNEL_AGENT_ROOT so kernel-request handlers that need
-    # to resolve apply_kernel_patch.py / kernel_optimization.py from disk
-    # work even when the host env var is unset.
+    # Pin HYPERLOOM_KERNEL_AGENT_ROOT so kernel-request handlers resolve from disk even when the host env is unset.
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
-    # Keep the unit test hermetic: stub the interpreter resolver so it never
-    # spawns a real ``python3 -c "import Magpie"`` probe. (Setting
-    # MAGPIE_PYTHON alone no longer short-circuits the probe — the resolver
-    # validates the env value via run_with_session_kill since the
-    # stale-interpreter self-heal landed.) The mocked Magpie launch only ever
-    # sees this fixed interpreter as ``cmd[0]``.
+    # Stub the interpreter resolver so the unit test never spawns a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from inference_optimizer.orchestrator.action_executors import _grid_runner
     monkeypatch.setattr(
@@ -68,9 +53,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return make_session_dir()
 
 
-# ===========================================================================
 # C — kernel-opt response recorded to SharedState
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_run_optimization_response_records_to_shared_state(
     session_dir, monkeypatch,
@@ -194,12 +177,7 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
 
 @pytest.mark.asyncio
 async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
-    """The gemm-before-run_optimization sequence deny was removed.
-
-    The auto-run inside ``_on_enter_kernel`` still drives FP8 SGLang
-    sessions through GEMM tuning first (covered by the entry test
-    below); the request-layer pre-deny no longer fires, so an LLM that
-    chooses to skip ``run_gemm_tuning`` is not bounced by policy."""
+    """The gemm-before-run_optimization sequence deny was removed; the request-layer pre-deny no longer fires."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.precision = "fp8"
@@ -310,9 +288,7 @@ async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
         await c.stop()
 
 
-# ===========================================================================
 # D — native-only guard for kernel optimization handler
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_run_optimization_handler_rejects_compile_generated_source(session_dir):
     from inference_optimizer.orchestrator.kernel_request_handlers import (
@@ -441,12 +417,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 ):
     from inference_optimizer.orchestrator import kernel_request_handlers as krh
 
-    # PR-I (M4 main merge): ``_batch_kernel_candidates`` defaults
-    # ``min_gpu_pct`` to 3.0 to mirror the SharedState gate. The test
-    # candidates intentionally omit ``gpu_pct`` (the focus is the
-    # backend-fallback ladder, not the gpu_pct gate), so disable the
-    # gate via the documented env knob to keep the test focused on
-    # batch dispatch / backend ladder semantics.
+    # PR-I (M4 main merge): disable the default min_gpu_pct gate so the test focuses on the backend-fallback ladder.
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0")
     candidates = tmp_path / "kernel_candidates.json"
     candidates.write_text(
@@ -477,9 +448,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
         kernel_id = payload["kernel_id"]
         backend = payload["backends"]
         calls.append((kernel_id, backend))
-        # k006 wins on Claude (second slot in the GEAK-first ladder), which
-        # exercises the short-circuit-after-KEEP behaviour without skipping
-        # GEAK. k003 keeps producing PARTIAL so it exhausts the full ladder.
+        # k006 wins on Claude (short-circuit-after-KEEP); k003 stays PARTIAL to exhaust the ladder.
         keep = kernel_id == "k006" and backend == "claude"
         speedup = 1.31 if keep else 1.0
         return {
@@ -523,12 +492,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     assert by_kernel["k006"] == ["geak", "claude"]
 
 
-# ===========================================================================
-# E — record_kernel_opt retires kernels stuck in PARTIAL
-# (regression for the r24 custom_allreduce inner-GEAK 401 retry-loop where
-# every `kernel_opt` returned PARTIAL and Orch re-dispatched the same
-# kernel_id every tick because the prior policy only retired on REVERT)
-# ===========================================================================
+# E — record_kernel_opt retires kernels stuck in PARTIAL (regression for the r24 custom_allreduce GEAK retry-loop that only retired on REVERT).
 def _partial_kernel_opt_result(kernel_id: str,
                                 decision: str = "PARTIAL") -> dict[str, Any]:
     return {

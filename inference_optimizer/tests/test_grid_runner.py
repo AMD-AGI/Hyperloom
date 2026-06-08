@@ -1,16 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Consolidated tests for ``orchestrator.action_executors._grid_runner``.
-
-Combines four previously separate modules:
-
-* abort marker (``_write_variant_abort_marker`` + ``VariantResult.error_class``)
-* helper-level units (skip-spec parsing, MN/SN invalid-variant filters,
-  ``apply_user_skip_list``, ``VariantResult.to_dict``, sanitisers)
-* per-variant mtime gating for Magpie leak-path salvage (regression for
-  stale ``inferencex_result.json`` adoption)
-* parameter override + ``RESULT_DIR`` plumbing
-"""
+"""Consolidated tests for ``orchestrator.action_executors._grid_runner``."""
 
 from __future__ import annotations
 
@@ -42,9 +32,7 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
 )
 
 
-# ==============================================================================
 # Section 1: _write_variant_abort_marker (formerly test_grid_runner_abort_marker.py)
-# ==============================================================================
 
 
 def _read_marker(slot):
@@ -172,9 +160,7 @@ def test_variant_result_carries_error_class_field():
     assert vr_ok.to_dict()["error_class"] == ""
 
 
-# ==============================================================================
 # Section 2: helper-level units (formerly test_grid_runner_helpers_units.py)
-# ==============================================================================
 
 
 class TestResolveSkipSpec:
@@ -400,30 +386,18 @@ class TestCoerceExtraEnvs:
         assert isinstance(v.fingerprint, str) and len(v.fingerprint) > 0
 
 
-# ==============================================================================
 # Section 3: per-variant mtime gating + param overrides
-# (formerly test_grid_runner_mtime_gating.py + test_grid_runner_param_overrides.py)
-#
-# Both source modules used an autouse fixture pinning
-# INFERENCE_OPTIMIZER_LEAK_ROOTS to an empty sandbox so the runner's
-# always-on artifact harvest doesn't scrape the host's real /workspace
-# during the test run. Hoisted to module-level here so it applies to both
-# subsections.
-# ==============================================================================
+# The autouse fixture below pins INFERENCE_OPTIMIZER_LEAK_ROOTS to an empty sandbox so the harvest doesn't scrape the host's /workspace.
 
 
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(request, tmp_path_factory, monkeypatch):
-    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox for the
-    grid-runner subprocess tests below. Applied unconditionally: the
-    helper-level tests (sections 1/2) never spin up ``run_grid`` so the
-    extra env var is harmless there.
-    """
+    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox for the grid-runner subprocess tests."""
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
-# ---- mtime gating subsection helpers ----------------------------------------
+# mtime gating subsection helpers
 
 
 def _write_baseline_yaml_mtime(path: Path) -> None:
@@ -549,7 +523,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     )
 
 
-# ---- param overrides subsection helpers -------------------------------------
+# param overrides subsection helpers
 
 
 def _write_baseline_yaml_overrides(path: Path) -> None:
@@ -610,16 +584,7 @@ def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
 
 
 def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
-    """Regression: on resume, a stale ``state.tp`` re-exported as
-    ``os.environ['TP']`` must NOT silently downgrade a YAML-pinned TP.
-
-    Reproduces the 2026-06-02 conc_sweep bug where the baseline session
-    ran with TP=2 (baseline_config.with_envs.yaml ``envs.TP: 2``) but
-    ``state.tp`` was 1 (never synced from yaml). Resume re-exported
-    ``TP=1`` to os.environ, and apply_runtime_benchmark_overrides used
-    it to overwrite the yaml TP=2 → sglang launched with TP=1,
-    making conc_sweep curves incomparable to the original baseline.
-    """
+    """Regression (2026-06-02 conc_sweep bug): a stale ``state.tp`` re-exported as ``os.environ['TP']`` on resume must NOT downgrade a YAML-pinned TP."""
     monkeypatch.setenv("TP", "1")
     bench = {
         "framework": "sglang",
@@ -638,9 +603,7 @@ def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
 
 
 def test_apply_runtime_overrides_env_tp_used_when_yaml_silent(monkeypatch):
-    """Companion: when yaml has no TP, env TP is still applied
-    (the original behaviour). Guards against an over-broad fix that
-    would lock TP from being set at all."""
+    """Companion: when yaml has no TP, env TP is still applied (guards against an over-broad fix)."""
     monkeypatch.setenv("TP", "4")
     bench = {"framework": "sglang", "envs": {}}
     apply_runtime_benchmark_overrides(bench, gpu_type="mi355x")
@@ -804,15 +767,12 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
     assert len({rd for _, rd in captured_envs}) == 2
 
 
-# ==============================================================================
 # Framework-aware help-text probe (atom + multi-framework cache)
-# ==============================================================================
 
 
 @pytest.fixture(autouse=False)
 def _reset_help_cache():
-    """Clear the framework-keyed help-text cache before/after each test
-    so per-test mocks don't leak across the class."""
+    """Clear the framework-keyed help-text cache before/after each test."""
     _grid_runner._HELP_TEXT_CACHE.clear()
     yield
     _grid_runner._HELP_TEXT_CACHE.clear()
@@ -821,10 +781,7 @@ def _reset_help_cache():
 def test_probe_server_help_text_atom_returns_help_when_importable(
     _reset_help_cache, monkeypatch,
 ):
-    """The atom branch invokes
-    ``atom.model_engine.arg_utils:EngineArgs.add_cli_args``. We mock
-    subprocess.run to return a synthetic atom-help payload; the probe
-    must return it verbatim and cache it for the second call."""
+    """The atom probe returns the mocked help verbatim and caches it for the second call."""
     call_count = {"n": 0}
     synthetic_help = (
         "usage: atom-engine [-h] [--tensor-parallel-size INT] "
@@ -851,9 +808,7 @@ def test_probe_server_help_text_atom_returns_help_when_importable(
 def test_probe_server_help_text_atom_returns_empty_on_failure(
     _reset_help_cache, monkeypatch,
 ):
-    """Subprocess failures must surface as ``""`` and NOT be cached —
-    a transient failure (e.g. unrelated test-time mock) must not
-    poison the slot for the rest of the session."""
+    """Subprocess failures surface as ``""`` and are NOT cached (transient failures must not poison the slot)."""
     raised = {"n": 0}
 
     def fake_run(*args, **kwargs):
@@ -862,8 +817,7 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert _grid_runner._probe_server_help_text("atom") == ""
-    # Re-probe — must invoke subprocess again rather than serving an
-    # empty cached value (so transient failures recover automatically).
+    # Re-probe invokes subprocess again rather than serving an empty cached value.
     assert _grid_runner._probe_server_help_text("atom") == ""
     assert raised["n"] == 2
 
@@ -871,8 +825,7 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
 def test_probe_server_help_text_cache_keyed_by_framework(
     _reset_help_cache, monkeypatch,
 ):
-    """Cache slots must be per-framework so a sglang-default test box
-    doesn't leak its help text into the vllm or atom slot."""
+    """Cache slots must be per-framework so sglang's help text doesn't leak into the vllm/atom slot."""
     payload_map = {
         "sglang": "USAGE_SGLANG --enable-flashinfer-mla",
         "atom": "USAGE_ATOM --torch-profiler-dir",
@@ -902,9 +855,7 @@ def test_probe_server_help_text_cache_keyed_by_framework(
 def test_probe_server_help_text_supports_all_three_frameworks(
     _reset_help_cache, monkeypatch,
 ):
-    """Cross-cutting guard: every first-class framework must have a
-    registered probe command and the helper must return a ``str`` for
-    each (success or failure path, doesn't matter)."""
+    """Cross-cutting guard: every first-class framework has a registered probe command and returns a ``str``."""
     monkeypatch.setattr(
         subprocess, "run",
         lambda cmd, *a, **kw: subprocess.CompletedProcess(
@@ -923,9 +874,7 @@ def test_probe_server_help_text_supports_all_three_frameworks(
 def test_probe_server_help_text_unknown_framework_returns_empty(
     _reset_help_cache,
 ):
-    """Unregistered framework names short-circuit to ``""`` without
-    invoking subprocess. Same conservative shape as the existing
-    failure path."""
+    """Unregistered framework names short-circuit to ``""`` without invoking subprocess."""
     assert _grid_runner._probe_server_help_text("tensorrt") == ""
     assert _grid_runner._probe_server_help_text("") == ""
 

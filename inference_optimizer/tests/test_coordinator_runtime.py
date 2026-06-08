@@ -1,22 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P0-3 Coordinator + MockBackend + SubAgentRunner tests.
-
-Covers:
-
-* MockBackend playback: scripted turns + exhaustion fallback heartbeat
-* SubAgentRunner: lease acquired → task run → released; missing runner
-  fails the task; exception in runner transitions to failed
-* Coordinator.tick() exercises 4-agent reactor + dispatcher in single process
-* PROPOSE_ACTION → bus 'proposal' + pending_proposals tracked
-* REVIEW_VERDICT(approve) → task materialized; (reject) → no task
-* DELEGATE → task queued + dispatcher runs registered runner
-* REQUEST(orchestration→kernel) → bus 'request' to_agent=kernel
-* RESPONSE → routed back to original requester
-* KILL_TASK by Robustness cancels queued task
-* PRUNE_BRANCH cancels queued family + future proposals soft-rejected
-* PolicyDenied surfaces as 'observation' with rule= populated
-"""
+"""P0-3 Coordinator + MockBackend + SubAgentRunner tests."""
 
 from __future__ import annotations
 
@@ -57,15 +41,11 @@ from inference_optimizer.session_paths import target_baseline_json
 from inference_optimizer.storage import SqliteConnection
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
-    # Satisfy the unconditional target_analysis hard gate; these tests
-    # exercise downstream behaviour and don't care about the prep step.
     from .conftest import seed_target_analysis_marker
     seed_target_analysis_marker(sd)
     return sd
@@ -88,9 +68,7 @@ def _build_backends(scripts: dict[str, ScriptedPlan]) -> dict[str, Backend]:
     return backends
 
 
-# ===========================================================================
 # MockBackend
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_mock_backend_plays_scripted_turns():
     plan = ScriptedPlan(turns=[
@@ -121,9 +99,7 @@ async def test_mock_backend_records_calls():
     assert backend.calls[0]["tools"] == ["emit_intent"]
 
 
-# ===========================================================================
 # SubAgentRunner (standalone)
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_sub_agent_runner_succeeds(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
@@ -177,35 +153,27 @@ async def test_sub_agent_runner_acquires_lane(tmp_path):
     res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert "benchmark_lane" in seen_lease["lanes"]
-    # Lease released after run
     assert "benchmark_lane" not in await locks.active_lanes()
     db.close()
 
 
-# ===========================================================================
 # Coordinator — bounded ticks
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_coordinator_starts_with_silent_backends(session_dir):
     backends = _build_backends({})
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
-        # 4 agents × 2 ticks × 1 heartbeat each = 8 send_message events
+        # 4 agents × 2 ticks × 1 heartbeat = 8 send_message events
         msgs = await c.bus.tail(n=20, topic="heartbeat")
         assert len(msgs) == 8
     finally:
         await c.stop()
 
 
-# ---------------------------------------------------------------------------
 # Backend-error streak (K4 — robustness/critic subprocess health)
-# ---------------------------------------------------------------------------
-
 class _AlwaysFailingBackend(Backend):
-    """Backend that always raises BackendError. Used to exercise the
-    Coordinator's consecutive-error counter without spinning up real
-    subprocess transports."""
+    """Backend that always raises BackendError."""
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -247,20 +215,15 @@ class _AlwaysCrashingBackend(Backend):
 async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
     session_dir, monkeypatch,
 ):
-    """5 consecutive BackendErrors on the robustness backend should
-    promote the per-call ``backend_error`` events into a single
-    structured ``backend_unhealthy`` observation. Subsequent ticks must
-    NOT re-fire the alarm until a successful turn re-arms it."""
+    """A consecutive BackendError streak promotes per-call ``backend_error``
+    events into a single ``backend_unhealthy`` observation, fired once."""
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", "3",
     )
     backends = _build_backends({})
-    # Swap robustness with a broken backend; leave the other three silent.
     backends["robustness"] = _AlwaysFailingBackend("robustness")
     c = Coordinator(session_dir, backends=backends)
     try:
-        # 4 ticks: streak grows to 4 → alarm fires once at tick 3 (the
-        # threshold crossing) and stays silent at tick 4.
         await c.tick(4)
         observations = await c.bus.tail(n=50, topic="observation")
         backend_errors = [
@@ -273,9 +236,7 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
             if (o.payload or {}).get("kind") == "backend_unhealthy"
             and (o.payload or {}).get("agent") == "robustness"
         ]
-        # Per-call backend_error event recorded every tick.
         assert len(backend_errors) == 4
-        # Streak alarm fires once — exactly when the counter crossed 3.
         assert len(backend_unhealthy) == 1
         promoted = backend_unhealthy[0].payload
         assert promoted["consecutive_errors"] == 3
@@ -313,13 +274,11 @@ async def test_unexpected_backend_exception_records_last_tick_exception(session_
 async def test_backend_error_streak_resets_after_successful_turn(
     session_dir, monkeypatch,
 ):
-    """A successful turn must reset the streak counter AND re-arm the
-    alarm so a future streak can fire again."""
+    """A successful turn resets the streak counter and re-arms the alarm."""
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", "2",
     )
     backends = _build_backends({})
-    # Start with a failing backend, swap it after the alarm fires.
     failing = _AlwaysFailingBackend("robustness")
     backends["robustness"] = failing
     c = Coordinator(session_dir, backends=backends)
@@ -328,15 +287,14 @@ async def test_backend_error_streak_resets_after_successful_turn(
         assert c._backend_error_streak["robustness"] == 2
         assert c._backend_error_alarm_armed["robustness"] is False
 
-        # Swap in a healthy backend → next reactor pass succeeds → reset.
+        # Healthy backend → reset.
         backends_silent = _build_backends({})
         c.backends["robustness"] = backends_silent["robustness"]
         await c.tick(1)
         assert c._backend_error_streak["robustness"] == 0
         assert c._backend_error_alarm_armed["robustness"] is True
 
-        # Re-arm: swap failing backend back in for >= threshold ticks →
-        # alarm fires again with consecutive_errors==2.
+        # Re-arm: failing backend back in → alarm fires again.
         c.backends["robustness"] = failing
         await c.tick(2)
         observations = await c.bus.tail(n=50, topic="observation")
@@ -374,14 +332,12 @@ async def test_coordinator_review_verdict_approve_creates_task(session_dir):
     })
     plans = {
         "orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])]),
-        # Critic will see proposal next tick, then approve
     }
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
         await c.tick(1)
         proposal_id = next(iter(c.state.pending_proposals.keys()))
 
-        # Inject Critic approval directly via _handle_intent
         verdict = Intent(type=IntentType.REVIEW_VERDICT, payload={
             "target_proposal_msg_id": proposal_id,
             "verdict": "approve",
@@ -391,7 +347,6 @@ async def test_coordinator_review_verdict_approve_creates_task(session_dir):
 
         approved = c.state.pending_proposals[proposal_id]
         assert approved.decided and approved.verdict == "approve"
-        # task materialized
         decisions = await c.bus.tail(topic="decision")
         assert any(m.payload.get("kind") == "approved_proposal" for m in decisions)
     finally:
@@ -417,7 +372,6 @@ async def test_coordinator_review_verdict_reject_no_task(session_dir):
         ))
         decisions = await c.bus.tail(topic="decision")
         assert not any(m.payload.get("kind") == "approved_proposal" for m in decisions)
-        # Verdict mirror message exists
         verdicts = await c.bus.tail(topic="review_verdict")
         assert any(m.payload.get("verdict") == "reject" for m in verdicts)
     finally:
@@ -433,11 +387,9 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
 
     c = Coordinator(session_dir, backends=_build_backends(plans))
-    # Register on Coordinator's built-in SubAgentRunner — sharing its db handle.
     c.sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
     try:
         await c.tick(1)
-        # The dispatcher inside tick() should have run the queued task
         dones = await c.bus.tail(topic="delegated_result")
         assert any(m.payload.get("state") == "succeeded" for m in dones)
     finally:
@@ -446,18 +398,8 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
 
 @pytest.mark.asyncio
 async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
-    """LLM sometimes puts idempotency_key under params.
-
-    Coordinator must treat that as the delegate key, remove it from executor
-    params, and avoid reusing the auto-generated source:action:N key.
-
-    Uses ``explore`` because v0.8 M3 / KB_gaps/Gap-10 merged the legacy
-    ``backends`` / ``params`` / ``validate_stack`` actions into it; the
-    nested-key plumbing the test guards is identical across kinds.
-
-    The nested-idempotency-key plumbing we guard here lives on the
-    direct-delegate path that explore grids take (no Critic re-route).
-    """
+    """LLM sometimes puts idempotency_key under params; Coordinator must
+    treat it as the delegate key and remove it from executor params."""
     delegate = Intent(type=IntentType.DELEGATE, payload={
         "action_name": "explore",
         "params": {
@@ -527,12 +469,10 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
         c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
         c.shared_state.save(session_dir)
         await c.tick(1)
-        # Find the request msg_id Coordinator inserted
         kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
         assert kernel_inbox, "no request mirrored to kernel"
         request_msg_id = kernel_inbox[0].msg_id
 
-        # Kernel emits a response in-reply-to that id
         await c._handle_intent("kernel", Intent(
             type=IntentType.RESPONSE, payload={
                 "in_reply_to": request_msg_id,
@@ -550,10 +490,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
 
 @pytest.mark.asyncio
 async def test_explore_not_denied_before_profile(session_dir):
-    """The profile-required sequence deny was removed (P2_10): after
-    baseline, ``explore`` is no longer blocked on an empty
-    ``last_profile_trace``. Analysis is auto-managed; the LLM decides
-    when to proceed."""
+    """P2_10: after baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "explore", "predicted_gain_pct": 5.0,
     })
@@ -566,7 +503,6 @@ async def test_explore_not_denied_before_profile(session_dir):
 
         await c.tick(1)
 
-        # No execution-order/profile denial should fire.
         obs = await c.bus.tail(to_agent="orchestration", topic="observation")
         for m in obs:
             if m.payload.get("kind") != "policy_denied":
@@ -582,11 +518,8 @@ async def test_explore_not_denied_before_profile(session_dir):
 async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     session_dir,
 ):
-    """Reverse regression: the action-layer ``trace_analyze`` hard-gate
-    has been removed. ``params`` / ``backends`` / ``sweep`` / ``report``
-    must NOT be denied when ``last_trace_analyze`` is empty / stale.
-    The trace_analyze prerequisite is now enforced ONLY at the REQUEST
-    layer for ``run_optimization`` (see test_required_step_gates.py)."""
+    """Reverse regression: the action-layer ``trace_analyze`` hard-gate was
+    removed; actions must NOT be denied when ``last_trace_analyze`` is stale."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "params", "predicted_gain_pct": 3.0,
     })
@@ -600,9 +533,6 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
 
         await c.tick(1)
 
-        # Proposal should now be accepted into pending_proposals (gate
-        # removed); no `policy_denied{trace_analyze...}` observation
-        # should be emitted.
         obs = await c.bus.tail(to_agent="orchestration", topic="observation")
         for m in obs:
             if m.payload.get("kind") != "policy_denied":
@@ -619,8 +549,7 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
 
 @pytest.mark.asyncio
 async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
-    """The Coordinator no longer injects an enforced next-step checklist;
-    the LLM derives the next action from SharedState facts directly."""
+    """The Coordinator no longer injects an enforced next-step checklist."""
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
         c.shared_state.baseline_tput = 100.0
@@ -648,7 +577,6 @@ async def test_coordinator_kill_task_by_robustness(session_dir):
         all_tasks = await c.tasks.by_state("failed")
         assert all_tasks  # no runner → failed
 
-        # Re-create a queued one for kill test (use a different idem key)
         new_task = await c.tasks.create(
             kind="long_running", params={}, idempotency_key="k-long-2",
         )
@@ -675,15 +603,12 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         ))
         a_after = await c.tasks.get(a.task_id)
         b_after = await c.tasks.get(b.task_id)
-        # Active queue still gets cancelled — the prune kills work in
-        # flight even when the dispatch denial was relaxed to advisory.
+        # Active queue still gets cancelled — the prune kills work in flight.
         assert a_after.state == "cancelled"
         assert b_after.state == "cancelled"
         assert "deep_kernel_analysis" in c.shared_state.pruned_families
 
-        # Future propose_action carries an advisory observation but is
-        # NOT silently dropped — Orchestration may still pick it up
-        # (loosen P3_19).
+        # Future propose_action carries an advisory observation but is not dropped.
         await c._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,
             payload={"action_name": "deep_kernel_analysis", "predicted_gain_pct": 5.0},
@@ -699,7 +624,6 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
 
 @pytest.mark.asyncio
 async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
-    # Critic tries to delegate (forbidden by role).
     bad = Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
     plans = {"critic": ScriptedPlan(turns=[MockTurn(intents=[bad])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
@@ -713,12 +637,7 @@ async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
         await c.stop()
 
 
-# ===========================================================================
-# (formerly test_coordinator_audit_wiring.py)
-# ===========================================================================
-"""End-to-end Coordinator wiring tests for the audit trail."""
-
-
+# (formerly test_coordinator_audit_wiring.py) — Coordinator audit-trail wiring.
 def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
@@ -730,9 +649,7 @@ def _silent_backends() -> dict[str, object]:
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
-    """v0.8 §3.9 — scoreboard retired (KB_design §3.9 Inv-9.1). The
-    old helper used to clear the seeded ``action_scores`` map; the
-    map no longer exists so this is a no-op kept for back-compat."""
+    """v0.8 §3.9 Inv-9.1 — scoreboard retired; no-op kept for back-compat."""
     return None
 
 
@@ -975,25 +892,15 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
 async def test_handle_unpromotable_roofline_increments_failure_streak(
     session_dir, caplog,
 ):
-    """Repro: watermark-roofline failure must increment roofline_failure_streak,
-    eagerly clear auto_roofline_pending_task_id, and emit an Auto-roofline warning.
-
-    Real-world trigger: session Qwen-Qwen3-30B-A3B-Base/20260529T104050Z, task
-    42922ce4 — RooflineExecutor returned {status:failed, error_class:profile_failed}
-    (profile sub-step found no .trace.json.gz files). The result correctly landed
-    in roofline_attempts with decision='no_promote', but roofline_failure_streak
-    stayed at 0 and no warning was logged because _handle_unpromotable_result has
-    no roofline-specific branch — the streak/warning code in
-    _promote_to_shared_state's task_kind=='roofline' else clause is unreachable
-    from the unpromotable path.
-    """
+    """Repro (session 20260529T104050Z task 42922ce4): watermark-roofline
+    failure must increment roofline_failure_streak, eagerly clear
+    auto_roofline_pending_task_id, and emit an Auto-roofline warning."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
         task_id = "t-roofline-fail-42922ce4"
         c.shared_state.auto_roofline_pending_task_id = task_id
         streak_before = c.shared_state.roofline_failure_streak
-        # Mirror RooflineExecutor._failed("profile", ...) exactly.
         result = {
             "status": "failed",
             "error_class": "profile_failed",
@@ -1007,22 +914,22 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
             await c._handle_unpromotable_result(
                 _mk_task("roofline", task_id), result,
             )
-        # (a) audit entry exists (this part already works pre-fix).
+        # (a) audit entry exists.
         assert len(c.shared_state.roofline_attempts) == 1
         attempt = c.shared_state.roofline_attempts[-1]
         assert attempt["status"] == "failed"
         assert attempt["decision"] == "no_promote"
-        # (b) failure streak should be +1 so prompt + plateau judge can see it.
+        # (b) failure streak should be +1.
         assert c.shared_state.roofline_failure_streak == streak_before + 1, (
             "roofline_failure_streak silently stays at 0; LLM + operators have "
             "no way to know the watermark-driven analysis refresh failed."
         )
-        # (c) pending gate should be cleared eagerly (mirror promote path 7530/7628).
+        # (c) pending gate should be cleared eagerly.
         assert c.shared_state.auto_roofline_pending_task_id == "", (
             "auto_roofline_pending_task_id still points at the failed task; "
             "subsequent dispatches stay blocked until denial-time lazy clear."
         )
-        # (d) operator-visible warning must be logged (mirror promote path 7606).
+        # (d) operator-visible warning must be logged.
         assert any(
             "Auto-roofline" in r.message and "failed" in r.message
             for r in caplog.records
@@ -1069,12 +976,7 @@ async def test_unattempted_initial_roofline_does_not_watermark_rearm(
         await c.stop()
 
 
-# ===========================================================================
-# (formerly test_coordinator_baseline_fingerprint.py)
-# ===========================================================================
-"""Baseline-params fingerprint capture in the Coordinator audit trail."""
-
-
+# (formerly test_coordinator_baseline_fingerprint.py) — baseline-params fingerprint capture.
 def _mk_baseline_task(params: dict, *, task_id: str = "t-fp-1") -> Task:
     return Task(
         task_id=task_id,
@@ -1201,12 +1103,7 @@ async def test_handle_unpromotable_non_baseline_omits_fingerprint(session_dir):
         await c.stop()
 
 
-# ===========================================================================
-# (formerly test_coordinator_failed_variants_audit.py)
-# ===========================================================================
-"""Regression tests for ``_summarize_failed_variants`` + PR-3 timeout."""
-
-
+# (formerly test_coordinator_failed_variants_audit.py) — ``_summarize_failed_variants`` + PR-3 timeout.
 def test_summarize_failed_variants_returns_empty_when_input_not_list():
     assert coordinator._summarize_failed_variants(None) == []
     assert coordinator._summarize_failed_variants("not a list") == []
@@ -1314,14 +1211,8 @@ def test_default_health_timeout_is_900s_not_1800s():
     assert _multi_node_server_lifecycle.DEFAULT_HEALTH_TIMEOUT_S == 900
 
 
-# ===========================================================================
-# (formerly test_n33_idle_closing_and_critic_archival.py)
-# ===========================================================================
-"""N33: critic auto-approve archival actions + Coordinator silent-tick
-early-closing.
-"""
-
-
+# (formerly test_n33_idle_closing_and_critic_archival.py) — N33: critic auto-approve
+# archival actions + Coordinator silent-tick early-closing.
 def _write_marker_target_baseline(session_dir: Path) -> None:
     path = target_baseline_json(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1337,8 +1228,7 @@ def _write_marker_target_baseline(session_dir: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
-    """An idle run keeps ticking until the wall-clock deadline / max_ticks
-    rather than self-closing on silence (no idle early-close)."""
+    """An idle run keeps ticking until max_ticks rather than self-closing on silence."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
@@ -1361,14 +1251,8 @@ def test_critic_md_carves_out_archival_actions():
     assert "Always `approve` archival actions" in text
 
 
-# ===========================================================================
-# (formerly test_n34_dispatcher_resilience_and_report_stop.py)
-# ===========================================================================
-"""N34: dispatcher resilience to disappearing ``tasks`` rows +
-report-task triggers run-loop exit.
-"""
-
-
+# (formerly test_n34_dispatcher_resilience_and_report_stop.py) — N34: dispatcher
+# resilience to disappearing ``tasks`` rows + report-task run-loop exit.
 @pytest.mark.asyncio
 async def test_sub_agent_runner_swallows_tasknotfound_on_final_transition(
     tmp_path,
@@ -1459,10 +1343,7 @@ async def _async_return(value: Any) -> Any:
 
 @pytest.mark.asyncio
 async def test_report_success_does_not_stop_run(session_dir):
-    """Long-run continuity: a successful mid-run ``report`` task no
-    longer sets ``stop_reason='report_emitted'``. The LLM may emit a
-    report snapshot and keep exploring; the run continues until the
-    wall-clock deadline (or another stop_reason) fires."""
+    """A successful mid-run ``report`` task no longer sets ``stop_reason``; the run continues."""
     _write_marker_target_baseline(session_dir)
     c = Coordinator(session_dir, backends=_silent_backends())
     c.sub.register_executor("report", report_executor)
@@ -1508,16 +1389,12 @@ async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
 async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reason(
     session_dir,
 ):
-    """Resuming an already-terminal session can re-enter ``run`` and break
-    out after a tick step raises. The resilience guard records the exception,
-    then the normal stop-condition path must keep the persisted terminal
-    reason instead of downgrading it to ``"unknown"``."""
+    """After a tick raises, the stop-condition path keeps the persisted terminal reason."""
     c = Coordinator(session_dir, backends=_silent_backends())
     c.shared_state.set_stop_reason("target_reached")
     c.shared_state.save(session_dir)
 
-    # Raise inside the tick body, before any stop-condition check assigns a
-    # new local stop_reason.
+    # Raise inside the tick body before any stop-condition check.
     async def _boom():
         raise RuntimeError("tick exploded mid-run")
 

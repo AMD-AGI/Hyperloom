@@ -197,7 +197,7 @@ async def test_inline_whitelist_picks_lane_light_registered_actions(session_dir)
         assert "kernel_opt" not in wl
         # Deny-listed kinds are excluded even if lane-light.
         assert "report" not in wl
-        assert "dynamic_specialist" not in wl
+        assert "session_breakdown" not in wl
     finally:
         await c.stop()
 

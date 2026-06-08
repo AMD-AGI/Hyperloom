@@ -2,11 +2,9 @@
 
 """Explore-grid provenance + GPU-specialist resource policy.
 
-The per-round specialist / dynamic grid-size caps were removed: breadth
-is bounded by the research_lane / GPU pool leases at dispatch time, not
-by a grid-size gate. These tests pin that grids of any provenance mix are
-accepted by PolicyGate, and that the GPU specialist pool resource
-invariant still holds."""
+Grid-size caps were removed; grids of any provenance mix pass PolicyGate,
+and the GPU specialist pool resource invariant still holds.
+"""
 
 from __future__ import annotations
 
@@ -21,9 +19,7 @@ from inference_optimizer.orchestrator.policy import (
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 def _gate(research_lane_capacity: int = 1) -> PolicyGate:
     s = SharedState()
     s.phase = "EXPLORE"
@@ -64,9 +60,7 @@ def _specialist_delegate(params: dict) -> Intent:
     })
 
 
-# ---------------------------------------------------------------------------
 # Explore grids: any provenance mix is accepted (no grid-size cap)
-# ---------------------------------------------------------------------------
 def test_allows_many_specialist_variants():
     gate = _gate()
     gate.validate_intent("orchestration", _delegate(_specialist_variants(5)))
@@ -101,9 +95,7 @@ def test_allows_three_default_grid_variants():
 
 
 def test_empty_grid_skips_size_check():
-    """An empty / omitted grid falls through to the executor's
-    ``empty_grid`` surfacing — PolicyGate must not preempt with
-    a size error."""
+    """An empty/omitted grid falls through to the executor's ``empty_grid`` surfacing; PolicyGate must not preempt."""
     gate = _gate()
     intent = Intent(type=IntentType.DELEGATE, payload={
         "action_name": "explore",
@@ -126,9 +118,7 @@ def test_propose_allows_all_llm_direct_grid():
     gate.validate_intent("orchestration", intent)  # no raise
 
 
-# ---------------------------------------------------------------------------
 # GPU specialist request policy (resource invariant, retained)
-# ---------------------------------------------------------------------------
 def test_gpu_specialist_denied_when_pool_disabled():
     gate = _gate()
     with pytest.raises(PolicyDenied) as exc:

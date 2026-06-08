@@ -1,30 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 KB_design §3.5 §5 / M5 §5 step 5 / KB_gaps/Gap-11 — Critic
-per-variant ``verdict_map`` tests.
-
-KB_gaps/Gap-11 root cause: REVIEW_VERDICT was a v0.6 single-verdict
-protocol — a multi-variant ``explore`` proposal could only be approved
-or rejected as a whole, so partial-success rounds (3 KEEP + 2 REVERT)
-collapsed into "all KEEP" or "all REVERT".
-
-This file exercises the v0.8 upgrade across the four layers it touches:
-
-* :mod:`intent_parser` — the envelope schema accepts either
-  ``verdict`` (legacy) or ``verdict_map`` (v0.8 batch); both fields
-  are mutually exclusive and the per-variant entries are structurally
-  validated.
-* :mod:`policy` — ``_validate_review_verdict`` enforces the same
-  mutual-exclusion rule and validates every per-variant verdict string
-  against ``REVIEW_VERDICTS``.
-* :class:`Coordinator._handle_review_verdict` — every proposal is now
-  decided by a single verdict; an incoming ``verdict_map`` is collapsed
-  to a summary verdict (explore grids run their variants directly, so
-  there is no per-variant Critic pre-review). The envelope + PolicyGate
-  schema still accept ``verdict_map`` for forward-compat / resume.
-* :func:`build_critic_prompt` — the OUTPUT PROTOCOL section documents
-  the single-verdict shape.
-"""
+"""v0.8 KB_design §3.5 §5 / M5 §5 step 5 / KB_gaps/Gap-11 — Critic per-variant ``verdict_map`` tests."""
 
 from __future__ import annotations
 
@@ -57,9 +33,7 @@ from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder impor
 )
 
 
-# ===========================================================================
 # 1. intent_parser — envelope schema accepts verdict OR verdict_map
-# ===========================================================================
 def _envelope(**payload: Any) -> dict[str, Any]:
     return {
         "intents": [{
@@ -132,9 +106,7 @@ def test_intent_parser_rejects_non_dict_verdict_map_entry():
         ))
 
 
-# ===========================================================================
 # 2. PolicyGate — verdict_map content validation
-# ===========================================================================
 @pytest.fixture
 def gate() -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry())
@@ -145,7 +117,6 @@ def _critic_intent(**payload: Any) -> Intent:
 
 
 def test_policy_gate_accepts_legacy_single_verdict(gate):
-    # No exception — single-verdict path stays valid.
     gate.validate_intent("critic", _critic_intent(
         target_proposal_msg_id="msg-1", verdict="approve",
     ))
@@ -169,18 +140,13 @@ def test_policy_gate_rejects_when_both_present(gate):
             verdict_map={"v_a": {"verdict": "approve"}},
         ))
     assert exc.value.rule == "payload"
-    # PolicyGate phrases the denial as "exactly one of ... must be
-    # present"; intent_parser uses "mutually exclusive". Either
-    # phrasing satisfies the contract (both gates enforce the same
-    # rule, intent_parser fires first in production).
+    # PolicyGate says "exactly one ..."; intent_parser says "mutually exclusive". Either is valid.
     msg = str(exc.value) + " " + (exc.value.hint or "")
     assert "exactly one" in msg or "mutually exclusive" in msg
 
 
 def test_policy_gate_rejects_when_neither_present(gate):
-    """Defense in depth — intent_parser should have caught this,
-    but PolicyGate still rejects to keep both gates' contracts
-    independent."""
+    """Defense in depth — PolicyGate still rejects even though intent_parser fires first."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("critic", _critic_intent(
             target_proposal_msg_id="msg-1",
@@ -202,26 +168,19 @@ def test_policy_gate_rejects_unknown_per_variant_verdict(gate):
 
 
 def test_policy_gate_review_verdicts_vocab_contains_canonical_set():
-    """Sanity for the verdict_map content gate — REVIEW_VERDICTS
-    must still cover the five canonical strings the Critic prompt
-    documents in §7."""
+    """REVIEW_VERDICTS must cover the five canonical strings the Critic prompt documents in §7."""
     for v in ("approve", "reject", "redirect", "advise", "needs_review"):
         assert v in REVIEW_VERDICTS
 
 
-# ===========================================================================
 # 3. Coordinator helpers — _handle_review_verdict dispatch
-# ===========================================================================
 @dataclass
 class _BareSharedState:
-    """SharedState double exposing the few fields the review-verdict
-    handler touches (audit hint + roofline gate)."""
+    """SharedState double exposing the fields the review-verdict handler touches."""
 
     cortex_session_id: str = "sid-test"
     save_count: int = 0
-    # ``_materialize_approved_proposal`` reads this field to gate
-    # dispatch on a pending auto-roofline task; empty string means
-    # "nothing in flight" and the gate is a no-op.
+    # Empty string means "nothing in flight" and the auto-roofline dispatch gate is a no-op.
     auto_roofline_pending_task_id: str = ""
 
     def save(self, _session_dir: Path | None) -> None:
@@ -246,7 +205,6 @@ class _StubBus:
         self.messages: list[_BusMessage] = []
 
     async def append_and_seq(self, msg: Any) -> Any:  # noqa: ANN401
-        # msg is a Message dataclass; we copy the salient bits.
         self.messages.append(_BusMessage(
             from_agent=getattr(msg, "from_agent", ""),
             to_agent=getattr(msg, "to_agent", ""),
@@ -271,20 +229,14 @@ class _StubCortexKB:
 
 @pytest.fixture
 def coord(tmp_path: Path):
-    """Coordinator-shaped object with just enough plumbing for
-    ``_handle_review_verdict`` / ``_materialize_approved_proposal`` to
-    run end-to-end."""
+    """Coordinator-shaped object with just enough plumbing for the review-verdict path."""
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _BareSharedState()
     c.state = CoordinatorState()
     c.cortex_kb = _StubCortexKB()
     c.bus = _StubBus()
-    # _record_observation just pushes to the bus + handles persistence
-    # in production; the stub keeps the test footprint tight.
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
-    # Tasks are not actually created in these unit tests — we stub
-    # the registry so the materialise path can return a fake task.
     materialise_calls: list[tuple[PendingProposal, set[str] | None]] = []
     c._materialise_calls = materialise_calls  # type: ignore[attr-defined]
 
@@ -320,12 +272,10 @@ def _seed_explore_proposal(
     return pending
 
 
-# --- routing ---------------------------------------------------------------
+# routing
 @pytest.mark.asyncio
 async def test_legacy_single_verdict_still_materialises_whole_proposal(coord):
-    """Non-grid actions (kernel_opt / integrate / ...) keep the v0.6
-    single-verdict path: an ``approve`` materialises the whole
-    proposal, NO ``approved_variant_names`` filter is passed."""
+    """Non-grid actions keep the v0.6 single-verdict path: approve materialises the whole proposal."""
     pending = PendingProposal(
         proposal_msg_id="msg-kernel",
         from_agent="orchestration",
@@ -339,12 +289,10 @@ async def test_legacy_single_verdict_still_materialises_whole_proposal(coord):
         payload={"target_proposal_msg_id": "msg-kernel", "verdict": "approve"},
     )
     await coord._handle_review_verdict("critic", intent)
-    # Bus mirror — single review_verdict event.
     bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
     assert len(bus_msgs) == 1
     assert bus_msgs[0].payload["verdict"] == "approve"
     assert "verdict_map" not in bus_msgs[0].payload
-    # Materialise called with no variant filter.
     assert len(coord._materialise_calls) == 1
     assert coord._materialise_calls[0][1] is None
     assert pending.decided is True
@@ -353,10 +301,7 @@ async def test_legacy_single_verdict_still_materialises_whole_proposal(coord):
 
 @pytest.mark.asyncio
 async def test_verdict_map_collapses_to_summary_single_verdict(coord):
-    """A ``verdict_map`` (accepted by the schema for forward-compat) is
-    collapsed to a summary verdict — ``approve`` when any variant is
-    approved — and materialises the whole proposal with no per-variant
-    filter (explore grids are no longer pre-reviewed)."""
+    """A ``verdict_map`` collapses to a summary verdict (approve if any variant approved); whole proposal materialised."""
     pending = _seed_explore_proposal(coord)
     intent = Intent(
         type=IntentType.REVIEW_VERDICT,
@@ -373,10 +318,8 @@ async def test_verdict_map_collapses_to_summary_single_verdict(coord):
     await coord._handle_review_verdict("critic", intent)
     assert pending.decided is True
     assert pending.verdict == "approve"  # any approve → summary approve
-    # Whole proposal materialised — no per-variant subset filter.
     assert len(coord._materialise_calls) == 1
     assert coord._materialise_calls[0][1] is None
-    # Bus mirror carries the single summary verdict.
     bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
     assert len(bus_msgs) == 1
     assert bus_msgs[0].payload["verdict"] == "approve"
@@ -417,9 +360,7 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
     assert coord._materialise_calls == []
 
 
-# ===========================================================================
 # 4. Critic prompt — OUTPUT PROTOCOL documents the single-verdict shape
-# ===========================================================================
 def _critic_prompt_text() -> str:
     from inference_optimizer.orchestrator.action_registry import ActionRegistry
     registry = ActionRegistry()
@@ -435,34 +376,20 @@ def _critic_prompt_text() -> str:
 
 def test_critic_prompt_documents_single_verdict_shape():
     text = _critic_prompt_text()
-    # Single-proposal path is documented for every proposal.
     assert "single-proposal" in text.lower()
     assert "verdict:" in text.lower() or "'verdict'" in text.lower()
 
 
 def test_critic_prompt_does_not_advertise_per_variant_verdict_map():
-    """Explore grids bench directly, so the Critic is no longer told to
-    emit a per-variant ``verdict_map``."""
+    """Explore grids bench directly, so the Critic no longer emits a per-variant ``verdict_map``."""
     text = _critic_prompt_text()
     assert "verdict_map" not in text
 
 
-# ===========================================================================
 # 5. _materialize_approved_proposal — filter semantics (unit)
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
-    """Direct unit test for the new ``approved_variant_names`` filter.
-
-    Bypasses the verdict_map handler so we can pin the
-    ``_materialize_approved_proposal`` filter contract independently —
-    important because Gap-11's correctness rides on the executor
-    only ever seeing the approved subset, even if the handler logic
-    above changes shape later.
-    """
-    # Restore the real method on the stub coord (the verdict_map
-    # fixture overrode it with a capture). We use a fresh Coordinator
-    # stub here with a stub TaskRegistry + bus instead.
+    """Pin the ``approved_variant_names`` filter contract independently (Gap-11 correctness)."""
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = _BareSharedState()
@@ -493,8 +420,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
         coord,
         variants=["v_a", "v_b", "v_c", "v_d"],
     )
-    # Make sure shared_state has the minimum surface
-    # ``_materialize_approved_proposal`` needs.
+
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
@@ -511,14 +437,12 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     grid = create_calls[0]["params"]["grid"]
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_c"]
-    # critic_filtered_count records 4 - 2 = 2 dropped.
     assert create_calls[0]["params"]["critic_filtered_count"] == 2
 
 
 @pytest.mark.asyncio
 async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
-    """Legacy v0.6 single-verdict path: ``approved_variant_names=None``
-    leaves the grid untouched."""
+    """Legacy v0.6 path: ``approved_variant_names=None`` leaves the grid untouched."""
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.state = CoordinatorState()
@@ -570,22 +494,9 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     assert "critic_filtered_count" not in create_calls[0]["params"]
 
 
-# ===========================================================================
 # 6. _handle_delegate — explore grid runs directly (no Critic pre-review)
-# ===========================================================================
-#
-# ``delegate{action_name='explore', params={grid}}`` creates an explore
-# task directly via ``tasks.create_or_return_existing``: the variants are
-# benchmarked and judged by the KEEP threshold. There is no silent
-# re-route to ``_handle_propose_action`` / per-variant Critic verdict_map.
 def _delegate_coord(tmp_path: Path):
-    """Coordinator double exposing just the surface ``_handle_delegate``
-    needs to reach the direct explore-task creation path.
-
-    Stubs out ``is_pruned`` / ``_sequence_denial_for_action`` /
-    ``_registry_lanes_ttl`` so we never reach the per-test-irrelevant
-    sub-systems.
-    """
+    """Coordinator double reaching the direct explore-task creation path."""
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
 
@@ -613,9 +524,7 @@ def _delegate_coord(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
-    """A delegate explore with a non-empty grid creates an explore task
-    directly (no ``pending_proposals``, no Critic pre-review); the grid
-    is forwarded to the executor verbatim."""
+    """A delegate explore with a non-empty grid creates an explore task directly, grid forwarded verbatim."""
     coord = _delegate_coord(tmp_path)
     create_calls: list[dict[str, Any]] = []
 
@@ -650,16 +559,13 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
         },
     )
     await coord._handle_delegate("orchestration", intent)
-    # Direct task creation — never lands in the Critic pending queue.
     assert coord.state.pending_proposals == {}
     assert len(create_calls) == 1
     assert create_calls[0]["kind"] == "explore"
     assert create_calls[0]["params"]["grid"] == grid
 
 
-# ===========================================================================
 # 7. Specialist prompt — max_proposals self-curation contract (Section 1 + 8)
-# ===========================================================================
 def _build_specialist_prompt_text(max_proposals: int) -> str:
     from inference_optimizer.orchestrator.specialist_domains import get_domain
     from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
@@ -679,9 +585,7 @@ def _build_specialist_prompt_text(max_proposals: int) -> str:
 
 
 def test_default_specialist_max_proposals_is_twelve():
-    """Single-source-of-truth check: policy.py owns the self-curation
-    target (=12) and specialist_prompt_builder re-exports it. Both must
-    agree."""
+    """Single-source-of-truth: policy.py owns the self-curation target (=12) and the builder re-exports it."""
     from inference_optimizer.orchestrator.policy import (
         DEFAULT_SPECIALIST_MAX_PROPOSALS,
     )
@@ -695,12 +599,9 @@ def test_default_specialist_max_proposals_is_twelve():
 def test_specialist_prompt_renders_max_proposals_5():
     """Caller can shrink the prompt-side self-curation target."""
     text = _build_specialist_prompt_text(max_proposals=5)
-    # Section 8 self-curation target line.
     assert "AT MOST **5** entries" in text
-    # Section 1 autonomy paragraph mentions the target once.
     assert "top-5" in text
-    # The Critic-feedback warning is present so the specialist knows
-    # marginal candidates have a cost.
+    # Critic-feedback warning present so the specialist knows marginal candidates cost.
     assert "reviews each surviving variant" in text
 
 
@@ -708,15 +609,10 @@ def test_specialist_prompt_renders_default_top_12_target():
     text = _build_specialist_prompt_text(max_proposals=12)
     assert "AT MOST **12** entries" in text
     assert "top-12" in text
-    # A smaller value must not leak into the default-target rendering.
     assert "AT MOST **5** entries" not in text
 
 
-# ==============================================================================
 # critic prompt builder (formerly test_critic_prompt_builder.py)
-# ==============================================================================
-
-
 class TestCriticPromptBuilder:
     """Tests for :mod:`critic_prompt_builder`."""
 
@@ -833,17 +729,9 @@ class TestCriticPromptBuilder:
             )
 
 
-# ==============================================================================
-# critic_robustness breakdown renderer
-# (formerly test_critic_robustness_renderer_units.py)
-# ==============================================================================
-
-
+# critic_robustness breakdown renderer (formerly test_critic_robustness_renderer_units.py)
 class TestCriticRobustnessRenderer:
-    """Exercises the four observable shapes of the collector input: empty,
-    prompt-only V1 payloads, V2 dicts with empty fields, and fully-populated
-    entries with a truncated rationale.
-    """
+    """Exercises the four observable shapes of the collector input."""
 
     @staticmethod
     def _render(payload):
@@ -908,19 +796,9 @@ class TestCriticRobustnessRenderer:
         assert "Showing first" in out.markdown_block
 
 
-# ==============================================================================
-# N38 — per-action verdict_class metadata
-# (formerly test_n38_action_verdict_class.py)
-# ==============================================================================
-
-
+# N38 — per-action verdict_class metadata (formerly test_n38_action_verdict_class.py)
 class TestN38ActionVerdictClass:
-    """N38 (May 2026) — structural fix: per-action ``verdict_class``
-    metadata so newly added actions don't reintroduce the N33/N35/N37
-    deadlocks. Pins the ActionMetadata field, the default classifier
-    bucket mapping, the CriticAgentBackend constructor wiring, and the
-    critic.md primary lookup.
-    """
+    """N38 (May 2026): per-action ``verdict_class`` metadata so new actions don't reintroduce N33/N35/N37 deadlocks."""
 
     def test_action_metadata_has_verdict_class_field(self):
         from inference_optimizer.orchestrator.action_registry import (

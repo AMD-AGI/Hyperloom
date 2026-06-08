@@ -1,17 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""End-to-end smoke test for the breakdown exporter.
-
-Builds a synthetic but realistic session_dir tree (manifest + state +
-runs/ + kernel-agent-workspace + critic/robustness workdirs) and asserts
-that:
-
-1. ``build()`` returns a dict matching the top-level envelope.
-2. ``write_breakdown_json()`` writes valid JSON that round-trips.
-3. Per-attempt KEEP stamping correctly assigns the kernel-level decision
-   to only the BEST attempt for each kernel (not every attempt).
-4. Each of the 14 sections has the expected key facts.
-"""
+"""End-to-end smoke test for the breakdown exporter."""
 
 from __future__ import annotations
 
@@ -28,9 +17,7 @@ from inference_optimizer.breakdown import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Fixture builder
-# ---------------------------------------------------------------------------
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -272,9 +259,7 @@ def _build_fixture(sd: Path) -> None:
     (sd / "patches/k001" / "0001.patch").write_text("--- a\n+++ b\n", encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
 # Tests
-# ---------------------------------------------------------------------------
 @pytest.fixture
 def fixture_session(tmp_path: Path) -> Path:
     sd = tmp_path / "session"
@@ -318,10 +303,8 @@ def test_session_metadata(fixture_session: Path) -> None:
 def test_session_stop_reason_falls_back_to_close_phase(tmp_path: Path) -> None:
     """Legacy states may close via phase_history without top-level stop_reason.
 
-    Regression: production artifacts had ``close_sequence_done=true`` and a
-    final ``to_phase=CLOSE`` row with ``reason=sweep_budget_exhausted``, while
-    ``state.stop_reason`` stayed blank. The breakdown session metadata should
-    still surface the terminal reason and close timestamp.
+    Regression: ``close_sequence_done=true`` + final ``to_phase=CLOSE`` row
+    while ``state.stop_reason`` stayed blank; the terminal reason must still surface.
     """
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {
@@ -509,10 +492,7 @@ def test_no_kernel_agent_runs_returns_empty_invocations(tmp_path: Path) -> None:
 
 
 def test_baseline_resolves_container_workspace_path(tmp_path: Path) -> None:
-    """``last_baseline.workspace`` written as a container path
-    (``/workspace/runs/baseline/<sub>/``) must still resolve under the
-    on-disk ``session_dir`` so ``ttft_mean_ms`` is read from the
-    benchmark report rather than dropped to ``None``.
+    """A container-path ``last_baseline.workspace`` must still resolve under the on-disk ``session_dir``.
 
     Regression for handoff doc §8 TODO #2.
     """
@@ -583,9 +563,7 @@ def test_baseline_resolves_measure_round_benchmark_workspace(tmp_path: Path) -> 
 
 
 def test_baseline_unresolvable_workspace_emits_warning(tmp_path: Path) -> None:
-    """When the recorded workspace can't be re-rooted under ``session_dir``
-    (e.g. wrong session_dir), the collector must surface a warning rather
-    than silently fall back to ``None``."""
+    """An unresolvable recorded workspace must surface a warning rather than silently fall back to ``None``."""
     sd = tmp_path / "session"
     sd.mkdir(parents=True)
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "miss"})
@@ -603,9 +581,7 @@ def test_baseline_unresolvable_workspace_emits_warning(tmp_path: Path) -> None:
 
 
 def test_source_files_drops_empty_kernel_attempts(tmp_path: Path) -> None:
-    """``source_files.kernel_attempts`` must not appear when the session
-    has no kernel-agent runs (instead of rendering a ``count=0,
-    first_values=—`` placeholder row downstream).
+    """``source_files.kernel_attempts`` must not appear when the session has no kernel-agent runs.
 
     Regression for handoff doc §8 TODO #6.
     """
@@ -623,16 +599,13 @@ def test_source_files_drops_empty_kernel_attempts(tmp_path: Path) -> None:
 
 
 def test_source_files_keeps_non_empty_kernel_attempts(fixture_session: Path) -> None:
-    """Sanity: when the session DOES have kernel-agent activity, the
-    populated list must still be emitted by the collector."""
+    """Sanity: a session with kernel-agent activity emits the populated list."""
     sf = build(fixture_session)["source_files"]
     assert sf.get("kernel_attempts"), sf
     assert any("optimization_attempts.jsonl" in p for p in sf["kernel_attempts"])
 
 
-# ---------------------------------------------------------------------------
 # Attribution method (A1)
-# ---------------------------------------------------------------------------
 def _attribution_fixture(tmp_path: Path, state: dict) -> Path:
     """Minimal session_dir whose only content drives ``collect_attribution``."""
     sd = tmp_path / "session"
@@ -644,8 +617,7 @@ def _attribution_fixture(tmp_path: Path, state: dict) -> Path:
 
 
 def test_attribution_method_validated(tmp_path: Path) -> None:
-    """``state.gain_per_stack_entry`` written by Coordinator with every
-    entry's ``delta_pct`` set → ``method == "validated"``."""
+    """Every stack entry's ``delta_pct`` set → ``method == "validated"``."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 30.0,
         "optimization_stack": [
@@ -683,8 +655,7 @@ def test_attribution_method_single_source(tmp_path: Path) -> None:
 
 
 def test_attribution_method_reconstructed(tmp_path: Path) -> None:
-    """Multi-entry stack with no Coordinator ledger and at least one
-    placeholder ``delta_pct=None`` → ``method == "reconstructed"``."""
+    """Multi-entry stack, no ledger, a placeholder ``delta_pct=None`` → ``method == "reconstructed"``."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 25.0,
         "optimization_stack": [
@@ -704,20 +675,13 @@ def test_attribution_method_missing(tmp_path: Path) -> None:
     assert attr["method"] == "missing"
 
 
-# ---------------------------------------------------------------------------
 # A1.0a: framework_pr surfaces in source_breakdown + phase_breakdown
-# ---------------------------------------------------------------------------
-# FRAMEWORK_PR is a phase between PRELUDE and
-# EXPLORE that bakes in upstream PRs. Before this PR landed,
-# framework_pr KEEPs fell into the legacy ``other`` family bucket and
-# silently disappeared from ``source_breakdown`` — manifesting as
-# leaderboard rows where Params + Backends + Kernel summed to far
-# below ``validated_total_pct``. These tests pin the new behaviour.
+# Regression: framework_pr KEEPs used to fall into the legacy ``other`` bucket
+# and disappear from ``source_breakdown``; these tests pin the new behaviour.
 def test_attribution_framework_pr_surfaces_in_source_breakdown(
     tmp_path: Path,
 ) -> None:
-    """A KEEP with ``action == "framework_pr"`` contributes to the new
-    ``framework_pr_pct_of_total`` field instead of being lost."""
+    """A ``framework_pr`` KEEP contributes to ``framework_pr_pct_of_total`` instead of being lost."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 22.85,
         "optimization_stack": [
@@ -740,9 +704,7 @@ def test_attribution_framework_pr_surfaces_in_source_breakdown(
     sb = build(sd)["attribution"]["source_breakdown"]
     assert sb["framework_pr_pct_of_total"] == pytest.approx(22.32)
     assert sb["explore_pct_of_total"] == pytest.approx(0.53)
-    # Reconciliation: kernel + explore + sweep + framework_pr
-    # ≈ validated_total. The legacy "other" bucket no longer eats
-    # framework_pr gain.
+    # Per-source rows reconcile to validated_total (no "other" black-hole).
     summed = (
         sb["geak_pct_of_total"]
         + sb["oob_pct_of_total"]
@@ -756,8 +718,7 @@ def test_attribution_framework_pr_surfaces_in_source_breakdown(
 def test_attribution_framework_pr_pct_emitted_even_when_zero(
     tmp_path: Path,
 ) -> None:
-    """``framework_pr_pct_of_total`` is always emitted (defaults to 0.0)
-    so the dashboard can iterate the catalogue without hasattr checks."""
+    """``framework_pr_pct_of_total`` is always emitted (defaults to 0.0)."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 5.0,
         "optimization_stack": [
@@ -779,9 +740,7 @@ def test_attribution_framework_pr_pct_emitted_even_when_zero(
 def test_attribution_phase_breakdown_framework_pr_by_pr(
     tmp_path: Path,
 ) -> None:
-    """``phase_breakdown.framework_pr.by_pr`` aggregates per-PR gain.
-    Each entry's ``variant_name`` is the PR label (``PR:<num>`` or
-    ``PR:<repo>#<num>``); the bucket key is the variant_name verbatim."""
+    """``phase_breakdown.framework_pr.by_pr`` aggregates per-PR gain keyed by variant_name verbatim."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 30.0,
         "phase_history": [
@@ -816,9 +775,7 @@ def test_attribution_phase_breakdown_framework_pr_by_pr(
 def test_attribution_framework_pr_phase_fallback_when_no_phase_history(
     tmp_path: Path,
 ) -> None:
-    """Without ``phase_history`` the collector falls back to action
-    family. ``framework_pr`` actions land in the framework_pr phase
-    bucket (not ``unattributed``) so the gain is still surfaced."""
+    """Without ``phase_history`` the collector falls back to action family; ``framework_pr`` lands in its phase bucket, not ``unattributed``."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 10.0,
         "optimization_stack": [
@@ -836,23 +793,16 @@ def test_attribution_framework_pr_phase_fallback_when_no_phase_history(
     pb = build(sd)["attribution"]["phase_breakdown"]
     assert pb["framework_pr"]["total_gain_pct"] == pytest.approx(10.0)
     assert pb["framework_pr"]["by_pr"]["PR:42"] == pytest.approx(10.0)
-    # Nothing should leak into ``unattributed``.
     assert "unattributed" not in pb or pb["unattributed"]["total_gain_pct"] == 0.0
 
 
-# ---------------------------------------------------------------------------
 # A1.0d: gemm_tuning surfaces in source_breakdown + phase_breakdown
-# ---------------------------------------------------------------------------
-# FP8 GEMM tuning runs at KERNEL entry; ``coordinator`` promotes a
-# successful tune (best_speedup > 1.0) into ``optimization_stack`` with
-# ``action="gemm_tuning"``. Before this fix landed it fell into
-# ``"other"`` and silently disappeared from the dashboard's per-source
-# totals — same shape of bug as framework_pr.
+# Regression: gemm_tuning KEEPs used to fall into ``"other"`` and disappear
+# from per-source totals (same shape of bug as framework_pr).
 def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
     tmp_path: Path,
 ) -> None:
-    """A KEEP with ``action == "gemm_tuning"`` contributes to the new
-    ``gemm_tuning_pct_of_total`` field instead of being lost to ``other``."""
+    """A ``gemm_tuning`` KEEP contributes to ``gemm_tuning_pct_of_total`` instead of being lost to ``other``."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 12.0,
         "optimization_stack": [
@@ -873,8 +823,7 @@ def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
     })
     sb = build(sd)["attribution"]["source_breakdown"]
     assert sb["gemm_tuning_pct_of_total"] == pytest.approx(12.0)
-    # Reconciliation: per-source rows sum to ``validated_total_pct``
-    # within rounding (no more black-hole ``other`` for gemm_tuning).
+    # Per-source rows reconcile to validated_total (no "other" black-hole).
     summed = (
         sb["geak_pct_of_total"] + sb["oob_pct_of_total"]
         + sb["explore_pct_of_total"]
@@ -888,8 +837,7 @@ def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
 def test_attribution_gemm_tuning_pct_emitted_even_when_zero(
     tmp_path: Path,
 ) -> None:
-    """Always emit ``gemm_tuning_pct_of_total`` (default 0.0). The
-    dashboard iterates the catalogue without presence checks."""
+    """Always emit ``gemm_tuning_pct_of_total`` (default 0.0)."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 5.0,
         "optimization_stack": [
@@ -911,10 +859,7 @@ def test_attribution_gemm_tuning_pct_emitted_even_when_zero(
 def test_attribution_phase_breakdown_gemm_tuning_by_tuned_file(
     tmp_path: Path,
 ) -> None:
-    """``phase_breakdown.gemm_tuning.by_tuned_file`` aggregates per
-    adopted CSV. Two distinct tuned files surface as two keys, each
-    with their own delta (covers the unlikely but supported case of
-    multiple GEMM tunes per session)."""
+    """``phase_breakdown.gemm_tuning.by_tuned_file`` aggregates per adopted CSV (two files → two keys)."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 18.0,
         "phase_history": [
@@ -954,10 +899,7 @@ def test_attribution_phase_breakdown_gemm_tuning_by_tuned_file(
 def test_attribution_gemm_tuning_phase_fallback_when_no_phase_history(
     tmp_path: Path,
 ) -> None:
-    """Without ``phase_history`` the collector falls back to action
-    family. ``gemm_tuning`` lands in its own bucket — not
-    ``unattributed`` and not ``kernel`` — so the gain is attributed
-    to the deterministic tuner specifically."""
+    """Without ``phase_history`` the action falls back to its own ``gemm_tuning`` bucket, not ``unattributed`` or ``kernel``."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 8.0,
         "optimization_stack": [
@@ -979,7 +921,6 @@ def test_attribution_gemm_tuning_phase_fallback_when_no_phase_history(
     pb = build(sd)["attribution"]["phase_breakdown"]
     assert pb["gemm_tuning"]["total_gain_pct"] == pytest.approx(8.0)
     assert pb["gemm_tuning"]["by_tuned_file"]["/tmp/csv.csv"] == pytest.approx(8.0)
-    # No bleed into kernel / unattributed.
     assert pb.get("kernel", {}).get("total_gain_pct", 0.0) == 0.0
     assert (
         "unattributed" not in pb
@@ -990,15 +931,13 @@ def test_attribution_gemm_tuning_phase_fallback_when_no_phase_history(
 def test_attribution_gemm_tuning_falls_back_to_variant_name_then_question_mark(
     tmp_path: Path,
 ) -> None:
-    """When ``tuned_file`` is missing the bucket key falls back to
-    ``variant_name``; if that is also empty, ``"?"``. The bucket key
-    is always a string (no None / empty key)."""
+    """Bucket key falls back to ``variant_name`` then ``"?"`` when ``tuned_file`` is missing (always a string)."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 4.0,
         "optimization_stack": [
             {"action": "gemm_tuning",
              "variant_name": "a8w8_blockscale_tuned_gemm"},
-            {"action": "gemm_tuning"},  # both missing
+            {"action": "gemm_tuning"},
         ],
         "gain_per_stack_entry": [
             {"action": "gemm_tuning",
@@ -1019,15 +958,9 @@ def test_attribution_gemm_tuning_falls_back_to_variant_name_then_question_mark(
     assert by_tuned["?"] == pytest.approx(1.0)
 
 
-# ---------------------------------------------------------------------------
 # A1.0b: phase_breakdown.explore.by_domain key normalization
-# ---------------------------------------------------------------------------
-# Pre-PR-B the orchestrator's raw ``provenance`` strings landed in
-# ``by_domain`` verbatim — keys looked like ``"specialist:serving_specialist"``
-# / ``"legacy:backends"`` / ``"default_grid"``. Consumers had to splice
-# the prefix every time they iterated. The collector now strips
-# ``specialist:`` and folds ``legacy:*`` into ``legacy_*``; this section
-# pins that contract.
+# Pre-PR-B raw ``provenance`` strings landed in ``by_domain`` verbatim; the
+# collector now strips ``specialist:`` and folds ``legacy:*`` into ``legacy_*``.
 def test_phase_breakdown_explore_by_domain_strips_specialist_prefix(
     tmp_path: Path,
 ) -> None:
@@ -1069,7 +1002,6 @@ def test_phase_breakdown_explore_by_domain_strips_specialist_prefix(
     by_domain = pb["explore"]["by_domain"]
     assert by_domain["serving_specialist"] == pytest.approx(7.0)
     assert by_domain["kernel_switch_specialist"] == pytest.approx(5.0)
-    # Raw prefix must not leak.
     assert "specialist:serving_specialist" not in by_domain
     assert "specialist:kernel_switch_specialist" not in by_domain
 
@@ -1077,10 +1009,7 @@ def test_phase_breakdown_explore_by_domain_strips_specialist_prefix(
 def test_phase_breakdown_legacy_provenance_folded_to_legacy_prefix(
     tmp_path: Path,
 ) -> None:
-    """``provenance = 'legacy:backends'`` (resume of a pre-v0.8 session)
-    becomes ``legacy_backends`` so it sits next to specialist keys
-    without masquerading as one — the dashboard can group / hide
-    legacy buckets explicitly."""
+    """``provenance = 'legacy:backends'`` becomes ``legacy_backends`` without masquerading as a specialist key."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 5.0,
         "phase_history": [
@@ -1104,17 +1033,14 @@ def test_phase_breakdown_legacy_provenance_folded_to_legacy_prefix(
     })
     by_domain = build(sd)["attribution"]["phase_breakdown"]["explore"]["by_domain"]
     assert by_domain["legacy_backends"] == pytest.approx(5.0)
-    # Raw colon-form must not surface.
     assert "legacy:backends" not in by_domain
-    # And it must NOT collide with the specialist namespace.
     assert "backends" not in by_domain
 
 
 def test_phase_breakdown_default_grid_and_llm_direct_pass_through(
     tmp_path: Path,
 ) -> None:
-    """Non-specialist provenance (``default_grid`` / ``llm_direct``)
-    passes through verbatim — they're already valid stable keys."""
+    """Non-specialist provenance (``default_grid`` / ``llm_direct``) passes through verbatim."""
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 4.0,
         "phase_history": [
@@ -1148,15 +1074,11 @@ def test_phase_breakdown_default_grid_and_llm_direct_pass_through(
     assert by_domain["llm_direct"] == pytest.approx(3.0)
 
 
-# ---------------------------------------------------------------------------
 # A1.0c: capability_summary.specialist.by_specialist per-domain split
-# ---------------------------------------------------------------------------
 def test_capability_summary_specialist_by_specialist_from_domain_breakdown(
     tmp_path: Path,
 ) -> None:
-    """``domain_breakdown`` is the authoritative source. Each round's
-    per-domain dict is folded into the headline ``by_specialist``
-    counters; status is derived per-domain."""
+    """``domain_breakdown`` is folded into headline ``by_specialist`` counters; status is derived per-domain."""
     sd = tmp_path / "session"
     sd.mkdir()
     _write_state(sd, _basic_state(specialist_rounds=[
@@ -1189,22 +1111,18 @@ def test_capability_summary_specialist_by_specialist_from_domain_breakdown(
     ]))
     spec = build(sd)["capability_summary"]["specialist"]
     bs = spec["by_specialist"]
-    # serving_specialist: dispatched once, 2 keeps → kept.
     assert bs["serving_specialist"]["status"] == "kept"
     assert bs["serving_specialist"]["attempts"] == 1
     assert bs["serving_specialist"]["tested"] == 3
     assert bs["serving_specialist"]["keeps"] == 2
-    # kernel_switch_specialist: tested but no keep → tried.
     assert bs["kernel_switch_specialist"]["status"] == "tried"
     assert bs["kernel_switch_specialist"]["tested"] == 3
-    # Untouched domains remain not_attempted.
     for d in (
         "compiler_specialist", "system_specialist",
         "pr_intel_specialist", "research_scout_specialist",
     ):
         assert bs[d]["status"] == "not_attempted"
         assert bs[d]["attempts"] == 0
-    # Headline row still aggregates everything.
     assert spec["attempts"] == 2
     assert spec["tested"] == 8
     assert spec["keeps"] == 2
@@ -1213,14 +1131,10 @@ def test_capability_summary_specialist_by_specialist_from_domain_breakdown(
 def test_capability_summary_specialist_by_specialist_falls_back_to_domains_list(
     tmp_path: Path,
 ) -> None:
-    """Legacy round predates ``domain_breakdown``: collector imputes
-    even share across the listed ``domains`` so the per-domain
-    counters add up to the parent row."""
+    """Legacy round predates ``domain_breakdown``: collector imputes an even share across listed ``domains``."""
     sd = tmp_path / "session"
     sd.mkdir()
     _write_state(sd, _basic_state(specialist_rounds=[
-        # No domain_breakdown — the helper-built fixture sets one by
-        # default, so override it explicitly to {}.
         _specialist_round(
             round_id=1,
             domains=["serving_specialist", "compiler_specialist"],
@@ -1230,7 +1144,6 @@ def test_capability_summary_specialist_by_specialist_falls_back_to_domains_list(
     ]))
     spec = build(sd)["capability_summary"]["specialist"]
     bs = spec["by_specialist"]
-    # 4 tested split evenly = 2 each; 2 kept split evenly = 1 each.
     assert bs["serving_specialist"]["attempts"] == 1
     assert bs["serving_specialist"]["tested"] == 2
     assert bs["serving_specialist"]["keeps"] == 1
@@ -1240,14 +1153,9 @@ def test_capability_summary_specialist_by_specialist_falls_back_to_domains_list(
     assert bs["compiler_specialist"]["keeps"] == 1
 
 
-# ---------------------------------------------------------------------------
 # A1.1: kernel_roofline (Dashboard-Roofline integration spec §1)
-# ---------------------------------------------------------------------------
-# The collector mirrors ``<sd>/reports/kernel_roofline.json`` so the
-# dashboard's hot-kernel table is fed directly from sbd. The on-disk
-# file is produced by the kernel-agent's tracelens roofline pipeline;
-# every field is optional from the breakdown's POV — collectors must
-# not raise when the file is missing or malformed.
+# Collector mirrors ``<sd>/reports/kernel_roofline.json``; every field is
+# optional and collectors must not raise when it is missing or malformed.
 def _kernel_roofline_progress_fixture(tmp_path: Path, payload: dict | None) -> Path:
     """Build a session_dir with optional reports/kernel_roofline.json."""
     sd = tmp_path / "session"
@@ -1259,9 +1167,7 @@ def _kernel_roofline_progress_fixture(tmp_path: Path, payload: dict | None) -> P
 
 
 def test_kernel_roofline_missing_file_returns_empty_dict(tmp_path: Path) -> None:
-    """No ``reports/kernel_roofline.json`` → empty dict, no warning.
-    Most sessions never run the roofline pipeline; a warning would
-    spam every breakdown."""
+    """No ``reports/kernel_roofline.json`` → empty dict, no warning."""
     sd = _kernel_roofline_progress_fixture(tmp_path, payload=None)
     bd = build(sd)
     assert bd["kernel_roofline"] == {}
@@ -1269,9 +1175,7 @@ def test_kernel_roofline_missing_file_returns_empty_dict(tmp_path: Path) -> None
 
 
 def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
-    """Happy path: every field arrives as documented in
-    Dashboard-Roofline integration spec §1, types are preserved, and the
-    kernels list keeps its on-disk order (dashboard sorts client-side)."""
+    """Happy path: every field round-trips with types preserved and on-disk kernel order kept."""
     payload = {
         "schema_version": 1,
         "source": "tracelens_analysis",
@@ -1313,16 +1217,13 @@ def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
     sd = _kernel_roofline_progress_fixture(tmp_path, payload=payload)
     kr = build(sd)["kernel_roofline"]
 
-    # Envelope
     assert kr["schema_version"] == 1
     assert kr["source"] == "tracelens_analysis"
     assert kr["analysis_md_path"] == "/abs/analysis.md"
     assert kr["trace_input_type"] == "capture_dir"
 
-    # Order preserved (dashboard sorts client-side; we don't pre-sort).
     assert [k["kernel_id"] for k in kr["kernels"]] == ["k001", "k002"]
 
-    # Field-by-field type fidelity on the first kernel.
     k1 = kr["kernels"][0]
     assert k1["kernel_category"] == "MoE"
     assert k1["bound_type"] == "memory-bound"
@@ -1331,18 +1232,15 @@ def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
     assert k1["call_count"] == 48
     assert k1["duration_us"] == pytest.approx(6874.0)
     assert k1["reusable_native_kernel"] is True
-    # Compute-bound entry preserves False explicitly.
     assert kr["kernels"][1]["reusable_native_kernel"] is False
 
 
 def test_kernel_roofline_malformed_kernels_drops_to_empty_list(tmp_path: Path) -> None:
-    """``kernels`` arriving as something other than a list (e.g. a
-    pre-aggregation dict) is replaced with ``[]`` and a warning is
-    emitted; envelope fields still round-trip."""
+    """Non-list ``kernels`` is replaced with ``[]`` + warning; envelope fields still round-trip."""
     payload = {
         "schema_version": 1,
         "source": "tracelens_analysis",
-        "kernels": {"k001": {"name": "broken"}},  # wrong shape
+        "kernels": {"k001": {"name": "broken"}},
     }
     sd = _kernel_roofline_progress_fixture(tmp_path, payload=payload)
     bd = build(sd)
@@ -1354,8 +1252,7 @@ def test_kernel_roofline_malformed_kernels_drops_to_empty_list(tmp_path: Path) -
 
 
 def test_kernel_roofline_non_dict_blob_returns_empty(tmp_path: Path) -> None:
-    """Top-level JSON value is not an object (e.g. a stray array
-    written by an older tool) → empty dict + warning, never raise."""
+    """Top-level JSON is not an object → empty dict + warning, never raise."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "kr"})
     _write_json(sd / "state.json", {"session_id": "kr"})
@@ -1369,8 +1266,7 @@ def test_kernel_roofline_non_dict_blob_returns_empty(tmp_path: Path) -> None:
 
 
 def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
-    """``kernels: []`` is a legitimate state (pipeline ran but found no
-    hot kernels above threshold). Envelope passes through; no warning."""
+    """``kernels: []`` is legitimate (no hot kernels above threshold); envelope passes through, no warning."""
     payload = {
         "schema_version": 1,
         "source": "tracelens_analysis",
@@ -1382,13 +1278,9 @@ def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
     assert not any("kernel_roofline" in w for w in bd["warnings"])
 
 
-# ---------------------------------------------------------------------------
 # kernel_optimization_summary (Breakdown panel integration spec §A1; PR #399)
-# ---------------------------------------------------------------------------
-# The collector mirrors ``<sd>/reports/kernel_optimization_summary.json``
-# verbatim (light shape guards only) so the dashboard reads sbd alone.
-# Written by the report action at CLOSE step 1, before sbd export at
-# step 2 — so a normally-closed session always has it on disk.
+# Collector mirrors ``<sd>/reports/kernel_optimization_summary.json`` verbatim
+# (light shape guards only) so the dashboard reads sbd alone.
 def _report_fixture(tmp_path: Path, rel_path: str, payload: dict | None) -> Path:
     """Session_dir with an optional ``reports/<file>.json``."""
     sd = tmp_path / "session"
@@ -1461,7 +1353,6 @@ def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
     sd = _report_fixture(tmp_path, "reports/kernel_optimization_summary.json", payload)
     ks = build(sd)["kernel_optimization_summary"]
 
-    # Envelope (note int schema_version, unlike conc_sweep's str).
     assert ks["schema_version"] == 1
     assert ks["model_name"] == "Qwen-Qwen3-30B-A3B-Base"
     assert ks["cumulative_gain_validated_pct"] == pytest.approx(1.01)
@@ -1469,7 +1360,6 @@ def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
     assert ks["failure_reason_breakdown"]["ladder_all_failed"] == 3
     assert ks["top_takeaways"][0].startswith("1 of 6 attempted")
 
-    # by_kernel verbatim passthrough incl. nested structures + order.
     assert [k["kernel_id"] for k in ks["by_kernel"]] == ["k001", "k002"]
     k1 = ks["by_kernel"][0]
     assert k1["category"] == "ATTEMPTED_REJECTED"
@@ -1478,14 +1368,11 @@ def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
     assert k1["backend_ladder"][1]["error_class"] == "timeout"
     assert ks["by_kernel"][1]["unattempted_reason"] == "no_source_file"
 
-    # Added rel link to the source report.
     assert ks["report_path"] == "reports/kernel_optimization_summary.json"
 
 
 def test_kernel_opt_summary_all_zero_totals_is_valid(tmp_path: Path) -> None:
-    """Report action always writes a summary even when no kernel was
-    attempted (all-zero totals + empty by_kernel) — that's a valid,
-    warning-free Block-1-empty state, not a malformed file."""
+    """All-zero totals + empty by_kernel is a valid, warning-free Block-1-empty state, not a malformed file."""
     payload = {
         "schema_version": 1, "session_id": "s", "model_name": "m",
         "cumulative_gain_validated_pct": 0.0,
@@ -1502,8 +1389,7 @@ def test_kernel_opt_summary_all_zero_totals_is_valid(tmp_path: Path) -> None:
 
 
 def test_kernel_opt_summary_by_kernel_not_a_list_drops_to_empty(tmp_path: Path) -> None:
-    """``by_kernel`` arriving as a non-list is replaced with [] + warning;
-    envelope still round-trips (collector never raises)."""
+    """Non-list ``by_kernel`` is replaced with [] + warning; envelope still round-trips."""
     payload = {"schema_version": 1, "totals": {"top_candidates": 1},
                "by_kernel": {"k001": {"name": "broken"}}}
     sd = _report_fixture(tmp_path, "reports/kernel_optimization_summary.json", payload)
@@ -1529,12 +1415,9 @@ def test_kernel_opt_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
                for w in bd["warnings"])
 
 
-# ---------------------------------------------------------------------------
 # conc_sweep_summary (Breakdown panel integration spec §A2; PR #399)
-# ---------------------------------------------------------------------------
 def test_conc_sweep_summary_missing_file_returns_empty_dict(tmp_path: Path) -> None:
-    """No report → empty dict, no warning (conc_sweep often disabled;
-    dashboard hides Block 2)."""
+    """No report → empty dict, no warning."""
     sd = _report_fixture(tmp_path, "reports/conc_sweep_summary.json", None)
     bd = build(sd)
     assert bd["conc_sweep_summary"] == {}
@@ -1542,8 +1425,7 @@ def test_conc_sweep_summary_missing_file_returns_empty_dict(tmp_path: Path) -> N
 
 
 def test_conc_sweep_summary_full_payload_passes_through(tmp_path: Path) -> None:
-    """Happy path: comparison rows, summary KPIs and the optional
-    roofline_ceiling block all round-trip verbatim; report_path added."""
+    """Happy path: comparison rows, summary KPIs and optional roofline_ceiling round-trip verbatim; report_path added."""
     payload = {
         "schema_version": "1.0", "status": "succeeded", "session_id": "s",
         "isl": 1024, "osl": 1024, "tp": 8, "concs_requested": [1, 2, 4, 8],
@@ -1571,22 +1453,18 @@ def test_conc_sweep_summary_full_payload_passes_through(tmp_path: Path) -> None:
     sd = _report_fixture(tmp_path, "reports/conc_sweep_summary.json", payload)
     cs = build(sd)["conc_sweep_summary"]
 
-    # Envelope (note str schema_version, unlike kernel summary's int).
     assert cs["schema_version"] == "1.0"
     assert cs["status"] == "succeeded"
     assert cs["optimized"]["extra_server_args"] == "--num-continuous-decode-steps 4"
     assert cs["comparison"][0]["speedup"] == pytest.approx(1.0101)
     assert cs["summary"]["best_conc"] == 16
-    # Optional roofline_ceiling rides through verbatim.
     assert cs["roofline_ceiling"]["rows"][0]["t_peak_tok_s"] == pytest.approx(4032.76)
-    assert cs["roofline_ceiling"]["schema_version"] == 1  # int, distinct from top-level "1.0"
+    assert cs["roofline_ceiling"]["schema_version"] == 1
     assert cs["report_path"] == "reports/conc_sweep_summary.json"
 
 
 def test_conc_sweep_summary_skipped_preserves_sparse_shape(tmp_path: Path) -> None:
-    """status="skipped" → producer omits baseline/optimized/comparison/
-    summary; collector must pass that sparse shape through verbatim (do
-    NOT fabricate the missing blocks)."""
+    """status="skipped" → collector passes the sparse shape through verbatim without fabricating blocks."""
     payload = {"schema_version": "1.0", "status": "skipped",
                "skip_reason": "no_optimization_to_compare", "session_id": "s",
                "isl": 1024, "osl": 1024, "tp": 8, "concs_requested": [1, 2, 4]}
@@ -1616,23 +1494,16 @@ def test_conc_sweep_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
                for w in bd["warnings"])
 
 
-# ---------------------------------------------------------------------------
 # A1.2: roofline_progress (Dashboard-Roofline integration spec §2)
-# ---------------------------------------------------------------------------
-# The optimization-progress chart consumer. Inputs are entirely
-# in-memory state + manifest; collector never re-runs benchmarks.
-# Note: this section used to be exported under the top-level key
-# ``roofline``, but was renamed to ``roofline_progress`` to coexist
-# with the existing list-shaped ``roofline`` consumed by the markdown-
-# report renderer (see ``collect_roofline`` for that one).
+# Renamed from the top-level ``roofline`` key to coexist with the list-shaped
+# ``roofline`` consumed by the markdown-report renderer.
 def _roofline_progress_fixture(
     tmp_path: Path,
     *,
     state: dict,
     manifest: dict | None = None,
 ) -> Path:
-    """Session fixture for ``collect_roofline_progress``; ``manifest``
-    defaults to a minimal stub with ``created_at_utc``."""
+    """Session fixture for ``collect_roofline_progress``; ``manifest`` defaults to a minimal stub."""
     sd = tmp_path / "session"
     _write_json(
         sd / "manifest.json",
@@ -1649,10 +1520,7 @@ def _roofline_progress_fixture(
 
 
 def test_roofline_progress_full_payload_baseline_plus_one_keep(tmp_path: Path) -> None:
-    """Real-shape payload from the live ``Qwen3-30B-A3B-Base`` session
-    used as the dashboard reference fixture — baseline + 1 KEEP +
-    1 snapshot. Verifies trajectory ordering, gain math, ceiling /
-    target derivation, and the percent-of-* convenience numbers."""
+    """Real-shape ``Qwen3-30B-A3B-Base`` payload: verifies trajectory ordering, gain math, and ceiling/target derivation."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 1300.34,
         "cumulative_gain": 1.0146,
@@ -1693,7 +1561,6 @@ def test_roofline_progress_full_payload_baseline_plus_one_keep(tmp_path: Path) -
     })
     rl = build(sd)["roofline_progress"]
 
-    # Trajectory: baseline + 1 KEEP, both have ts.
     assert len(rl["trajectory"]) == 2
     assert rl["trajectory"][0]["label"] == "baseline"
     assert rl["trajectory"][0]["action"] == "baseline"
@@ -1703,28 +1570,21 @@ def test_roofline_progress_full_payload_baseline_plus_one_keep(tmp_path: Path) -
     assert rl["trajectory"][1]["label"] == "continuous_decode_steps_4"
     assert rl["trajectory"][1]["tput"] == pytest.approx(1313.5356953711394)
     assert rl["trajectory"][1]["flags"] == "--num-continuous-decode-steps 4 --scheduler-recv-interval 4"
-    # gain at point 1 = (1313.54 - 1300.34) / 1300.34 * 100 ≈ 1.015%
     assert rl["trajectory"][1]["gain_pct"] == pytest.approx(1.015, abs=0.01)
 
-    # Reference lines (target = ceiling × 0.70).
     assert rl["ceiling_available"] is True
     assert rl["ceiling_tok_per_sec"] == pytest.approx(1976.82, abs=0.01)
     assert rl["target_tok_per_sec"] == pytest.approx(1976.82 * 0.70, abs=0.01)
     assert rl["ceiling_ratio_target"] == pytest.approx(0.70)
 
-    # Headline numbers.
     assert rl["baseline_tput"] == pytest.approx(1300.34)
     assert rl["current_best_tput"] == pytest.approx(1313.5356953711394)
-    # 1313.54 / 1976.82 ≈ 66.45%
     assert rl["current_best_pct_of_ceiling"] == pytest.approx(66.45, abs=0.05)
-    # 1313.54 / (1976.82 * 0.70) ≈ 94.93%
     assert rl["current_best_pct_of_target"] == pytest.approx(94.93, abs=0.05)
 
-    # Tooltip carryover.
     assert rl["snapshot_top_bottleneck"] == "MoE_unfused"
     assert rl["snapshot_within_roofline_pct"] == pytest.approx(65.78)
 
-    # Snapshots list passthrough.
     assert len(rl["snapshots"]) == 1
     assert rl["snapshots"][0]["theoretical_peak_tok_per_sec"] == pytest.approx(
         1976.8214052878614,
@@ -1732,11 +1592,7 @@ def test_roofline_progress_full_payload_baseline_plus_one_keep(tmp_path: Path) -
 
 
 def test_roofline_progress_no_snapshot_means_no_ceiling(tmp_path: Path) -> None:
-    """Sessions that never ran the watermark roofline pipeline have
-    no ``roofline_snapshots``. The trajectory is still drawn (baseline
-    + KEEPs), but ceiling/target/percent-of-* are explicitly None and
-    ``ceiling_available`` is False so the dashboard hides the
-    reference lines."""
+    """Without ``roofline_snapshots`` the trajectory is still drawn but ceiling/target are None and ``ceiling_available`` is False."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 100.0,
         "cumulative_gain": 5.0,
@@ -1753,14 +1609,12 @@ def test_roofline_progress_no_snapshot_means_no_ceiling(tmp_path: Path) -> None:
     assert rl["target_tok_per_sec"] is None
     assert rl["current_best_pct_of_ceiling"] is None
     assert rl["current_best_pct_of_target"] is None
-    # Trajectory still present.
     assert len(rl["trajectory"]) == 2
     assert rl["snapshots"] == []
 
 
 def test_roofline_progress_no_keep_yet_baseline_only(tmp_path: Path) -> None:
-    """Mid-session before any KEEP: trajectory holds only the baseline
-    point; current_best == baseline; cumulative_gain == 0."""
+    """Mid-session before any KEEP: trajectory holds only the baseline point; cumulative_gain == 0."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 200.0,
         "cumulative_gain": 0.0,
@@ -1776,9 +1630,7 @@ def test_roofline_progress_no_keep_yet_baseline_only(tmp_path: Path) -> None:
 
 
 def test_roofline_progress_baseline_failed_empty_trajectory(tmp_path: Path) -> None:
-    """When ``baseline_tput`` is 0 (baseline never finished), the
-    trajectory is empty — the dashboard surfaces "no data" instead
-    of plotting against zero."""
+    """When ``baseline_tput`` is 0 the trajectory is empty instead of plotting against zero."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 0.0,
         "cumulative_gain": 0.0,
@@ -1792,9 +1644,7 @@ def test_roofline_progress_baseline_failed_empty_trajectory(tmp_path: Path) -> N
 
 
 def test_roofline_progress_uses_latest_snapshot_for_ceiling(tmp_path: Path) -> None:
-    """Multiple ``roofline_snapshots`` exist (the watermark pipeline
-    refines the peak across reruns). The ceiling is read from the
-    LATEST snapshot, not snapshots[0]."""
+    """With multiple ``roofline_snapshots`` the ceiling is read from the LATEST snapshot, not snapshots[0]."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 1000.0,
         "cumulative_gain": 0.0,
@@ -1809,7 +1659,6 @@ def test_roofline_progress_uses_latest_snapshot_for_ceiling(tmp_path: Path) -> N
         ],
     })
     rl = build(sd)["roofline_progress"]
-    # Ceiling pulled from snapshot[-1] not [0].
     assert rl["ceiling_tok_per_sec"] == pytest.approx(1700.0)
     assert rl["snapshot_top_bottleneck"] == "kv_cache"
     assert len(rl["snapshots"]) == 2
@@ -1818,14 +1667,11 @@ def test_roofline_progress_uses_latest_snapshot_for_ceiling(tmp_path: Path) -> N
 def test_roofline_progress_trajectory_diverges_from_current_best_emits_warning(
     tmp_path: Path,
 ) -> None:
-    """If the trajectory tail's tput doesn't agree with
-    ``state.current_best.tput`` (resume mid-promotion bug), the
-    collector surfaces the divergence as a warning instead of hiding
-    it."""
+    """A trajectory tail tput diverging from ``state.current_best.tput`` surfaces as a warning."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 100.0,
         "cumulative_gain": 5.0,
-        "current_best": {"tput": 110.0},      # mismatched
+        "current_best": {"tput": 110.0},
         "optimization_stack": [
             {"action": "explore", "tput": 105.0, "variant_name": "v1",
              "ts": "2026-05-29T11:00:00+00:00"},
@@ -1839,9 +1685,7 @@ def test_roofline_progress_trajectory_diverges_from_current_best_emits_warning(
 
 
 def test_roofline_progress_failure_streak_passes_through(tmp_path: Path) -> None:
-    """``roofline_failure_streak`` is consumed by the dashboard to
-    show a "stale" badge on the ceiling reference line when the
-    watermark pipeline has failed repeatedly."""
+    """``roofline_failure_streak`` passes through for the dashboard's stale-ceiling badge."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 100.0,
         "current_best": {"tput": 100.0},
@@ -1852,24 +1696,13 @@ def test_roofline_progress_failure_streak_passes_through(tmp_path: Path) -> None
     assert rl["roofline_failure_streak"] == 3
 
 
-# ---------------------------------------------------------------------------
 # A1.3: roofline + roofline_progress coexist (post name-clash fix)
-# ---------------------------------------------------------------------------
-# Before this fix the breakdown shipped two collectors both registered as
-# ``collect_roofline`` (one written for the markdown-report renderer, one
-# written for the dashboard chart). Python silently kept the second
-# definition and the first surface (the markdown-report list) was
-# evaluating to empty for every session — manifesting as the
-# `## Roofline` section disappearing from the report. These tests pin
-# that both surfaces now coexist as separate top-level keys.
+# Regression: two collectors were both registered as ``collect_roofline`` and
+# the markdown-report list silently evaluated to empty; both surfaces now coexist.
 def test_roofline_and_roofline_progress_coexist_independently(
     tmp_path: Path,
 ) -> None:
-    """Sessions with at least one trace_analyze snapshot populate BOTH
-    surfaces: ``roofline`` (list, for the markdown renderer) and
-    ``roofline_progress`` (dict, for the dashboard chart). The two
-    are derived independently; populating one MUST NOT zero out the
-    other."""
+    """A trace_analyze snapshot populates both ``roofline`` (list) and ``roofline_progress`` (dict) independently."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 1300.0,
         "current_best": {"tput": 1313.0},
@@ -1892,23 +1725,18 @@ def test_roofline_and_roofline_progress_coexist_independently(
         ],
     })
     bd = build(sd)
-    # Markdown-renderer surface: list of comparison entries.
     assert isinstance(bd["roofline"], list)
     assert len(bd["roofline"]) >= 1
     entry = bd["roofline"][0]
     assert "source_path" in entry
     assert entry.get("baseline") or entry.get("latest")
-    # Dashboard surface: dict with trajectory + ceiling.
     assert isinstance(bd["roofline_progress"], dict)
     assert bd["roofline_progress"]["ceiling_available"] is True
     assert len(bd["roofline_progress"]["trajectory"]) == 2
 
 
 def test_roofline_list_empty_when_no_snapshots(tmp_path: Path) -> None:
-    """Without any ``state.roofline_snapshots`` history the markdown-
-    renderer surface degrades to ``[]`` (the renderer hides the
-    section). The dashboard surface still populates from
-    ``optimization_stack`` so the trajectory chart is unaffected."""
+    """Without ``state.roofline_snapshots`` the markdown surface degrades to ``[]`` while the dashboard trajectory is unaffected."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 1300.0,
         "current_best": {"tput": 1313.0},
@@ -1924,18 +1752,11 @@ def test_roofline_list_empty_when_no_snapshots(tmp_path: Path) -> None:
     assert len(bd["roofline_progress"]["trajectory"]) == 2
 
 
-# ---------------------------------------------------------------------------
 # A1.4: optimization_stack passthrough (raw KEEP ledger)
-# ---------------------------------------------------------------------------
-# Mirrors ``state.optimization_stack[]`` to sbd top level so downstream
-# tooling can read the full per-entry evidence without round-tripping
-# back to state.json. Other "stack-derived" sections summarise this
-# list for specific consumers but drop the per-entry metadata
-# (workspace / tuned_file / etc.) that GEMM-tuning visualisation and
-# audit trails need.
+# Mirrors ``state.optimization_stack[]`` to the sbd top level so downstream
+# tooling reads full per-entry evidence without round-tripping to state.json.
 def test_optimization_stack_empty_when_state_has_no_stack(tmp_path: Path) -> None:
-    """Pre-baseline / fresh session: ``state.optimization_stack`` is
-    absent or empty → top-level field is ``[]``, no warning."""
+    """Fresh session: absent/empty ``state.optimization_stack`` → top-level field is ``[]``, no warning."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 0.0,
         "cumulative_gain": 0.0,
@@ -1945,9 +1766,7 @@ def test_optimization_stack_empty_when_state_has_no_stack(tmp_path: Path) -> Non
 
 
 def test_optimization_stack_full_field_passthrough(tmp_path: Path) -> None:
-    """Standard explore KEEP: the full known field set surfaces with
-    coerced types. ``extra_envs`` is a real dict, ``tput`` a float,
-    ``workspace`` survives null."""
+    """Standard explore KEEP: the full field set surfaces with coerced types; ``workspace`` survives null."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 1300.0,
         "current_best": {"tput": 1313.0},
@@ -2020,7 +1839,6 @@ def test_optimization_stack_passes_through_gemm_tuning_evidence(
     assert e["final_report_path"] == "/abs/path/final_report.json"
     assert e["source"] == "kernel_entry_auto"
     assert e["gain_pct"] == pytest.approx(10.0)
-    # extra_envs preserves the AITER override that gemm_tuning sets.
     assert e["extra_envs"]["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"].endswith(
         "a8w8_blockscale_tuned_gemm.csv"
     )
@@ -2029,10 +1847,7 @@ def test_optimization_stack_passes_through_gemm_tuning_evidence(
 def test_optimization_stack_preserves_promotion_order(
     tmp_path: Path,
 ) -> None:
-    """Multi-step session: stack order is preserved verbatim (the
-    Coordinator writes in promotion order; the passthrough must NOT
-    re-sort or de-dupe). Critical for dashboard timelines that bind
-    each step to its predecessor."""
+    """Multi-step session: stack order is preserved verbatim (no re-sort or de-dupe)."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 100.0,
         "current_best": {"tput": 130.0},
@@ -2055,8 +1870,7 @@ def test_optimization_stack_preserves_promotion_order(
 
 
 def test_optimization_stack_drops_non_dict_entries(tmp_path: Path) -> None:
-    """Defensive: malformed entries (e.g. a stray string) are dropped
-    rather than crashing the whole export."""
+    """Defensive: malformed entries are dropped rather than crashing the export."""
     sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 100.0,
         "current_best": {"tput": 110.0},
@@ -2074,15 +1888,9 @@ def test_optimization_stack_drops_non_dict_entries(tmp_path: Path) -> None:
     assert stack[0]["action"] == "params"
 
 
-# ---------------------------------------------------------------------------
 # A2: final.ttft_mean_ms reconstruction
-# ---------------------------------------------------------------------------
 def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:
-    """When ``current_best.ttft_mean_ms`` is not recorded but a
-    ``runs/validate_stack/<h>/benchmark_*/benchmark_report.json`` is on
-    disk, the collector must read the latency from the report, set
-    ``ttft_e2el_source = "validate_stack_disk"``, and append a
-    reconstruction warning."""
+    """Missing ``current_best.ttft_mean_ms`` is read from a disk validate_stack report (``ttft_e2el_source = "validate_stack_disk"``) with a reconstruction warning."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "rec"})
     _write_json(sd / "state.json", {
@@ -2115,9 +1923,7 @@ def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:
 def test_final_ttft_reconstructed_from_current_best_benchmark_dir(
     tmp_path: Path,
 ) -> None:
-    """``current_best.workspace`` can point directly at a double-run
-    ``measure_round/benchmark_*`` directory while latency remains only on
-    disk. Final reconstruction must read that report."""
+    """Final reconstruction reads the report when ``current_best.workspace`` points at a ``measure_round/benchmark_*`` dir."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "cbdir"})
     bdir = sd / (
@@ -2154,9 +1960,7 @@ def test_final_ttft_reconstructed_from_current_best_benchmark_dir(
 def test_final_ttft_reconstructed_from_warm_replay_measure_round(
     tmp_path: Path,
 ) -> None:
-    """Warm-replay stack entries may have ``workspace = None``. Match the
-    report under ``runs/replay_warm_recipe`` by action/tput and recover
-    final latency from the hot measure round."""
+    """Warm-replay entries with ``workspace = None`` are matched by action/tput to recover final latency."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "wr"})
     bdir = sd / (
@@ -2193,14 +1997,9 @@ def test_final_ttft_reconstructed_from_warm_replay_measure_round(
     assert final["ttft_e2el_source"] == "stack_top_disk"
 
 
-# ---------------------------------------------------------------------------
 # A3: baseline.attempts_history reconstruction
-# ---------------------------------------------------------------------------
 def test_baseline_attempts_history_reconstructed_from_disk(tmp_path: Path) -> None:
-    """When ``state.baseline_attempts == []`` but two
-    ``runs/baseline/<hash>/benchmark_*/`` directories exist, the
-    collector must reconstruct two summary rows tagged
-    ``status="reconstructed"`` and append the reconstruction warning."""
+    """Empty ``state.baseline_attempts`` + on-disk baseline dirs reconstructs ``status="reconstructed"`` rows with a warning."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "rebh"})
     _write_json(sd / "state.json", {
@@ -2231,8 +2030,7 @@ def test_baseline_attempts_history_reconstructed_from_disk(tmp_path: Path) -> No
 def test_baseline_attempts_history_state_recorded_takes_precedence(
     tmp_path: Path,
 ) -> None:
-    """When ``state.baseline_attempts`` IS non-empty, the disk fallback
-    must NOT also fire (no duplication, no reconstruction warning)."""
+    """Non-empty ``state.baseline_attempts`` suppresses the disk fallback (no duplication or warning)."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "stat"})
     _write_json(sd / "state.json", {
@@ -2259,13 +2057,9 @@ def test_baseline_attempts_history_state_recorded_takes_precedence(
     )
 
 
-# ---------------------------------------------------------------------------
 # B3: invocation populated from baseline_config + server.log
-# ---------------------------------------------------------------------------
 def test_baseline_invocation_populated(tmp_path: Path) -> None:
-    """``baseline.invocation`` must read framework_args from server.log,
-    extra_envs from the YAML benchmark.envs block (allowlisted), and
-    keep secret-shaped keys (``OPENAI_API_KEY``) out of the output."""
+    """``baseline.invocation`` reads framework_args from server.log and allowlisted envs, keeping secret-shaped keys out."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "inv"})
     bdir = sd / "runs/baseline/h1/benchmark_001"
@@ -2306,13 +2100,9 @@ def test_baseline_invocation_populated(tmp_path: Path) -> None:
     assert "server.log" in inv["server_log_path"]
 
 
-# ---------------------------------------------------------------------------
 # B1 / B3: image detection
-# ---------------------------------------------------------------------------
 def test_session_image_from_env(tmp_path: Path, monkeypatch) -> None:
-    """``HYPERLOOM_IMAGE`` env var must populate ``session.image`` when
-    the manifest lacks the field (V1 manifests). Absent of all sources
-    the field is ``None`` and a single warning is appended — no crash."""
+    """``HYPERLOOM_IMAGE`` populates ``session.image`` when the manifest lacks it; absent all sources it is ``None`` + one warning."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "img"})
     _write_json(sd / "state.json", {"session_id": "img", "baseline_tput": 100.0})
@@ -2336,8 +2126,7 @@ def test_session_image_from_env(tmp_path: Path, monkeypatch) -> None:
 def test_session_image_from_manifest_takes_precedence(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """``manifest.image`` (written at session start) wins over runtime
-    env vars — captures the spawn-time image even if env later drifts."""
+    """``manifest.image`` wins over runtime env vars, capturing the spawn-time image."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {
         "schema_version": 2, "session_id": "img2",
@@ -2350,20 +2139,13 @@ def test_session_image_from_manifest_takes_precedence(
     assert b["session"]["image"] == "registry.example/hyperloom:from-manifest"
 
 
-# ---------------------------------------------------------------------------
 # C1: baseline.ttft_mean_ms disk-walk fallback
-# ---------------------------------------------------------------------------
 def test_baseline_ttft_disk_walk_fallback(tmp_path: Path) -> None:
-    """When ``state.last_baseline.workspace`` does not resolve to a
-    readable benchmark report, but ``runs/baseline/<hash>/benchmark_*/
-    benchmark_report.json`` exists on disk, the collector must walk
-    that directory and surface the latency from the most recent
-    report (mirrors the A2 final.ttft validate_stack disk walk).
+    """When ``state.last_baseline.workspace`` doesn't resolve, the collector walks ``runs/baseline/`` for the latest report.
 
-    Production parallel: zgong's V2 session
-    ``deepseek-ai-DeepSeek-R1_20260512T102109Z_0dc064c4`` had a valid
-    benchmark_report.json on wekafs but state's recorded workspace
-    didn't resolve."""
+    Production parallel: a valid benchmark_report.json existed on wekafs but
+    state's recorded workspace didn't resolve.
+    """
     sd = tmp_path / "session"
     sd.mkdir(parents=True)
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "diskwalk"})
@@ -2377,8 +2159,6 @@ def test_baseline_ttft_disk_walk_fallback(tmp_path: Path) -> None:
     _write_json(sd / "state.json", {
         "session_id": "diskwalk",
         "baseline_tput": 421.5,
-        # Recorded workspace doesn't resolve under session_dir on wekafs
-        # — exactly the production failure mode we're guarding against.
         "last_baseline": {"workspace": "/workspace/runs/baseline/different-hash"},
     })
 
@@ -2394,8 +2174,7 @@ def test_baseline_ttft_disk_walk_fallback(tmp_path: Path) -> None:
 
 
 def test_baseline_ttft_disk_walk_fallback_measure_round(tmp_path: Path) -> None:
-    """Disk-walk fallback must include double-run ``measure_round``
-    reports, not just legacy ``runs/baseline/<hash>/benchmark_*``."""
+    """Disk-walk fallback includes double-run ``measure_round`` reports, not just legacy ones."""
     sd = tmp_path / "session"
     sd.mkdir(parents=True)
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "mrdw"})
@@ -2423,16 +2202,13 @@ def test_baseline_ttft_disk_walk_fallback_measure_round(tmp_path: Path) -> None:
     assert "measure_round" in baseline["benchmark_report_path"]
 
 
-# ---------------------------------------------------------------------------
 # C2: framework_args extraction lineage
-# ---------------------------------------------------------------------------
 def _make_invocation_fixture(
     sd: Path,
     server_log_text: str | None,
     yaml_text: str | None,
 ) -> None:
-    """Minimal fixture: state pointing at runs/baseline/h1, optional
-    server.log + baseline_config.with_envs.yaml beside the report."""
+    """Minimal fixture: state pointing at runs/baseline/h1 with optional server.log + yaml."""
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "fa"})
     bdir = sd / "runs/baseline/h1/benchmark_001"
     _write_json(bdir / "benchmark_report.json", {
@@ -2455,8 +2231,7 @@ def _make_invocation_fixture(
 
 
 def test_framework_args_from_server_arguments_line(tmp_path: Path) -> None:
-    """``Server arguments: ...`` header in server.log → source =
-    ``log_args_line``; the captured args (not the header) get echoed."""
+    """``Server arguments: ...`` header in server.log → source ``log_args_line``."""
     sd = tmp_path / "session"
     _make_invocation_fixture(
         sd,
@@ -2475,9 +2250,7 @@ def test_framework_args_from_server_arguments_line(tmp_path: Path) -> None:
 
 
 def test_framework_args_from_python_cmd_line(tmp_path: Path) -> None:
-    """A literal ``python -m vllm.entrypoints...`` line surrounded by
-    INFO log noise → source = ``log_python_cmd``; the python command
-    line is what gets surfaced (Pass-2 fallback)."""
+    """A literal ``python -m vllm.entrypoints...`` line → source ``log_python_cmd`` (Pass-2 fallback)."""
     sd = tmp_path / "session"
     _make_invocation_fixture(
         sd,
@@ -2495,8 +2268,7 @@ def test_framework_args_from_python_cmd_line(tmp_path: Path) -> None:
 
 
 def test_framework_args_from_yaml_cmd_fallback(tmp_path: Path) -> None:
-    """server.log has only INFO noise (no header, no python prefix);
-    yaml has a ``cmd: ...`` field → source = ``yaml_cmd``."""
+    """INFO-only server.log + yaml ``cmd: ...`` field → source ``yaml_cmd``."""
     sd = tmp_path / "session"
     _make_invocation_fixture(
         sd,
@@ -2517,9 +2289,7 @@ def test_framework_args_from_yaml_cmd_fallback(tmp_path: Path) -> None:
 
 
 def test_framework_args_unknown_with_warning(tmp_path: Path) -> None:
-    """server.log has only INFO noise + yaml has no ``cmd``/``command``/
-    ``launch`` field → source = ``unknown``, framework_args is empty,
-    and a ``framework_args extraction failed`` warning is appended."""
+    """No usable server.log or yaml cmd → source ``unknown``, empty framework_args, ``framework_args extraction failed`` warning."""
     sd = tmp_path / "session"
     _make_invocation_fixture(
         sd,
@@ -2543,11 +2313,7 @@ def test_framework_args_unknown_with_warning(tmp_path: Path) -> None:
 
 
 def test_framework_args_from_non_default_args_vllm(tmp_path: Path) -> None:
-    """vllm prints ``non-default args: {parsed-dict}`` right after argv
-    parsing. The extractor picks this up first (Pass 0) because it
-    captures the *resolved* values the framework actually used — beats
-    any other heuristic. Output must be sorted-by-key + repr() values
-    so the string is stable across runs."""
+    """vllm's ``non-default args: {...}`` line is picked up first (Pass 0); output is sorted-by-key for stability."""
     sd = tmp_path / "session"
     _make_invocation_fixture(
         sd,
@@ -2566,19 +2332,14 @@ def test_framework_args_from_non_default_args_vllm(tmp_path: Path) -> None:
     assert "tensor_parallel_size=8" in inv["framework_args"]
     assert "model=" in inv["framework_args"]
     assert "/wekafs/models/deepseek-ai-DeepSeek-R1" in inv["framework_args"]
-    # Deterministic ordering: keys sorted alphabetically. So
-    # ``gpu_memory_utilization`` (g) must precede ``model`` (m) which
-    # must precede ``tensor_parallel_size`` (t) in the emitted string.
+    # Keys sorted alphabetically: gpu_memory_utilization < model < tensor_parallel_size.
     s = inv["framework_args"]
     assert s.index("gpu_memory_utilization=") < s.index("model="), s
     assert s.index("model=") < s.index("tensor_parallel_size="), s
 
 
 def test_framework_args_pass0_takes_priority_over_python_cmd(tmp_path: Path) -> None:
-    """When server.log contains BOTH a ``non-default args: {...}`` line
-    AND a literal ``python -m vllm.entrypoints...`` line, Pass 0 must
-    win — the parsed-arg dict is more authoritative than the raw
-    cmdline (which might contain unresolved env-var placeholders)."""
+    """With both a ``non-default args: {...}`` line and a python cmdline, Pass 0 wins."""
     sd = tmp_path / "session"
     _make_invocation_fixture(
         sd,
@@ -2594,17 +2355,12 @@ def test_framework_args_pass0_takes_priority_over_python_cmd(tmp_path: Path) -> 
     )
     inv = build(sd)["baseline"]["invocation"]
     assert inv["framework_args_source"] == "log_non_default_args"
-    # And the chosen string is the formatted dict, not the python line.
     assert "python -m vllm.entrypoints" not in inv["framework_args"]
     assert "tensor_parallel_size=8" in inv["framework_args"]
 
 
 def test_framework_args_from_yaml_benchmark_synthesis(tmp_path: Path) -> None:
-    """server.log has only INFO noise; yaml is magpie-style with no
-    ``cmd:`` field but a populated ``benchmark.*`` block →
-    Pass 4 synthesizes a readable string from the structured fields and
-    labels the source ``yaml_benchmark`` so consumers know it's not a
-    literal cmdline."""
+    """A yaml ``benchmark.*`` block with no ``cmd:`` → Pass 4 synthesizes a string, source ``yaml_benchmark``."""
     sd = tmp_path / "session"
     _make_invocation_fixture(
         sd,
@@ -2631,26 +2387,9 @@ def test_framework_args_from_yaml_benchmark_synthesis(tmp_path: Path) -> None:
     assert "envs=[VLLM_FLASH_ATTN=1]" in s, s
 
 
-# ============================================================================
 # Merged from test_v08_observability.py
-# ============================================================================
 
-"""v0.8 §3.12 — observability / breakdown schema v2 tests.
-
-Covers KB_design/3.12_observability/README.md acceptance criteria:
-
-* §5 / §6 — top-level ``schema_version`` says ``hyperloom.session_breakdown.v2``.
-* §4.3 — ``specialist_runs`` section is populated from
-  ``SharedState.specialist_rounds`` + ``runs/specialist/`` transcripts.
-* §4.2 — ``capability_summary.specialist`` row exists and the counts
-  agree with ``specialist_runs`` (Inv-12.2 single source of truth).
-* §4.4 — ``critic_robustness.kb_writes_summary`` summarises the
-  critic-agent commit-review verdicts.
-* §5 — top-level ``action_timeline`` and ``explore_search`` aliases
-  guarantee a v0.6/v0.7 reader sees its old fields (Inv-12.1).
-* §7 step 5 — ``--breakdown-include-transcripts`` CLI flag controls
-  whether transcript bodies are inlined or referenced by path.
-"""
+"""v0.8 §3.12 — observability / breakdown schema v2 tests (KB_design §3.12, Inv-12.1/12.2)."""
 
 
 import json
@@ -2662,9 +2401,7 @@ from inference_optimizer.breakdown.exporter import build
 from inference_optimizer.breakdown.schema import SCHEMA_VERSION
 
 
-# ===========================================================================
 # Test fixtures
-# ===========================================================================
 def _write_state(session_dir: Path, state: dict) -> None:
     (session_dir / "state.json").write_text(json.dumps(state))
     if not (session_dir / "manifest.json").exists():
@@ -2711,38 +2448,27 @@ def _specialist_round(round_id: int = 1, **extras) -> dict:
     return base
 
 
-# ===========================================================================
 # 1. Schema version + v1 compat aliases
-# ===========================================================================
 def test_schema_version_is_v2():
     assert SCHEMA_VERSION == "hyperloom.session_breakdown.v2"
 
 
 def test_build_writes_schema_v2_with_v1_aliases(tmp_path):
-    """KB_design §3.12 §5 — v2 file MUST carry the v1-reader aliases
-    so existing dashboards keep functioning (Inv-12.1)."""
+    """KB_design §3.12 §5 — the v2 file carries v1-reader aliases (Inv-12.1)."""
     sd = tmp_path / "session"
     sd.mkdir()
     _write_state(sd, _basic_state())
     b = build(sd)
     assert b["schema_version"] == "hyperloom.session_breakdown.v2"
-    # v1 reader compat — these aliases MUST be present:
     assert "action_timeline" in b
     assert "explore_search" in b
     assert "param_search" in b
-    # Aliases are pointer-equivalent (same identity isn't required, but
-    # the content must match so a reader sees one source of truth).
     assert b["explore_search"] == b["param_search"]
     assert b["action_timeline"] == b["phase_timeline"]
 
 
 def test_v1_reader_does_not_crash_on_v2_payload(tmp_path):
-    """KB_design §3.12 §9 — a v1 reader that knows only the v1 keys
-    MUST be able to consume a v2 payload without raising.
-
-    Simulate a v1 reader by extracting the v1 key subset and asserting
-    we can still locate every required field.
-    """
+    """KB_design §3.12 §9 — a v1 reader consumes a v2 payload without raising."""
     sd = tmp_path / "session"
     sd.mkdir()
     _write_state(sd, _basic_state(specialist_rounds=[_specialist_round()]))
@@ -2755,15 +2481,10 @@ def test_v1_reader_does_not_crash_on_v2_payload(tmp_path):
     }
     for key in v1_keys:
         assert key in b, f"v1 reader expects {key!r} to exist"
-    # The legacy ``param_search`` row carries the same data as v2's
-    # ``explore_search`` — so a v1 reader sees the merged ledger
-    # transparently (KB_design §3.12 §5).
     assert b["param_search"] == b["explore_search"]
 
 
-# ===========================================================================
 # 2. specialist_runs section
-# ===========================================================================
 def test_specialist_runs_empty_when_no_rounds(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
@@ -2779,7 +2500,6 @@ def test_specialist_runs_populated_from_state(tmp_path):
     b = build(sd)
     assert len(b["specialist_runs"]) == 1
     entry = b["specialist_runs"][0]
-    # Required schema fields.
     for k in (
         "round_id", "dispatched_at", "completed_at", "domains",
         "parallelism", "proposals_total", "proposals_kept",
@@ -2787,10 +2507,7 @@ def test_specialist_runs_populated_from_state(tmp_path):
         "confidence_avg", "domain_breakdown", "transcripts", "notes",
     ):
         assert k in entry, f"specialist_runs row missing field {k!r}"
-    # No transcripts on disk → empty list (the runner artifact was not
-    # written; the round-merge still runs).
     assert entry["transcripts"] == []
-    # Domain breakdown round-trips with int normalisation.
     breakdown_ks = entry["domain_breakdown"]["kernel_switch_specialist"]
     assert breakdown_ks == {
         "dispatched": 1, "proposals_total": 3,
@@ -2799,9 +2516,7 @@ def test_specialist_runs_populated_from_state(tmp_path):
 
 
 def test_specialist_runs_attaches_transcript_path_when_present(tmp_path):
-    """KB_design §3.12 §4.3 — when ``runs/specialist/<task_id>/specialist_done.json``
-    exists, the breakdown captures the path (default) or the body
-    (when ``include_transcripts=True``)."""
+    """KB_design §3.12 §4.3 — captures the transcript path (default) or body (``include_transcripts=True``)."""
     sd = tmp_path / "session"
     sd.mkdir()
     transcript_dir = sd / "runs" / "specialist" / "t-abc"
@@ -2810,7 +2525,6 @@ def test_specialist_runs_attaches_transcript_path_when_present(tmp_path):
     (transcript_dir / "specialist_done.json").write_text(body_text)
     _write_state(sd, _basic_state(specialist_rounds=[_specialist_round()]))
 
-    # Path-only mode (default).
     b = build(sd)
     refs = b["specialist_runs"][0]["transcripts"]
     assert len(refs) == 1
@@ -2819,16 +2533,13 @@ def test_specialist_runs_attaches_transcript_path_when_present(tmp_path):
     assert refs[0]["path"].endswith("specialist_done.json")
     assert "body" not in refs[0]
 
-    # Inline mode.
     b2 = build(sd, include_transcripts=True)
     ref2 = b2["specialist_runs"][0]["transcripts"][0]
     assert ref2.get("body") == body_text
 
 
 def test_build_respects_env_var_for_transcripts(tmp_path, monkeypatch):
-    """KB_design §3.12 §7 step 5 — when the caller doesn't pass
-    ``include_transcripts`` explicitly, the env var (set by CLI)
-    drives the decision."""
+    """KB_design §3.12 §7 step 5 — the CLI env var drives transcripts when ``include_transcripts`` isn't passed."""
     sd = tmp_path / "session"
     sd.mkdir()
     transcript_dir = sd / "runs" / "specialist" / "t-abc"
@@ -2840,22 +2551,17 @@ def test_build_respects_env_var_for_transcripts(tmp_path, monkeypatch):
     assert b["specialist_runs"][0]["transcripts"][0].get("body") == '{"x":1}'
 
 
-# ===========================================================================
 # 3. capability_summary.specialist row (Inv-12.2 single source)
-# ===========================================================================
 def test_capability_summary_specialist_row_when_no_rounds(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
     _write_state(sd, _basic_state())
     b = build(sd)
     spec = b["capability_summary"]["specialist"]
-    # Headline counters
     assert spec["status"] == "not_attempted"
     assert spec["attempts"] == 0
     assert spec["keeps"] == 0
     assert spec["tested"] == 0
-    # Stable shape: every catalogue specialist seeded at zero so the
-    # dashboard can iterate without presence checks.
     for d in (
         "serving_specialist", "kernel_switch_specialist",
         "comm_specialist", "compiler_specialist", "system_specialist",
@@ -2906,9 +2612,7 @@ def test_capability_summary_specialist_status_attempted_when_empty_proposals(tmp
     assert b["capability_summary"]["specialist"]["status"] == "attempted"
 
 
-# ===========================================================================
 # 4. critic_robustness.kb_writes_summary
-# ===========================================================================
 def test_critic_kb_writes_summary_empty_by_default(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
@@ -2922,7 +2626,6 @@ def test_critic_kb_writes_summary_aggregates_by_verdict(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
     _write_state(sd, _basic_state())
-    # Synthesize three critic iteration outputs with different verdicts.
     critic_root = sd / "critic-workdir"
     for n, verdict in enumerate(("KEEP", "KEEP", "REVERT"), start=1):
         iter_dir = critic_root / f"{n:03d}"
@@ -2939,9 +2642,7 @@ def test_critic_kb_writes_summary_aggregates_by_verdict(tmp_path):
     assert summary["by_verdict"] == {"KEEP": 2, "REVERT": 1}
 
 
-# ===========================================================================
 # 5. action_timeline alias mirrors phase_timeline
-# ===========================================================================
 def test_action_timeline_mirrors_phase_timeline(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
@@ -2984,9 +2685,7 @@ def test_roofline_attempts_are_in_phase_timeline(tmp_path):
     assert row["error_class"] == "trace_analyze_failed"
 
 
-# ===========================================================================
 # 6. CLI flag wiring
-# ===========================================================================
 def test_cli_exposes_breakdown_include_transcripts_flag():
     from inference_optimizer.cli import _build_parser
     parser = _build_parser()
