@@ -60,7 +60,7 @@ _GAP_NARRATIVE_EPSILON = 1e-4  # gaps smaller than this are "clean success"
 class Assessment:
     """Public summary of a (possibly multi-attempt) quantize call.
 
-    Mirrors ``docs/DESIGN.zh-CN.md §3.2``:
+    Fields:
 
     * ``final`` — primary verdict. ``None`` = clean success; otherwise an
       ``OutcomeId``.

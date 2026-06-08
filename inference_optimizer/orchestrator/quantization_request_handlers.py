@@ -4,7 +4,7 @@ Thin shim between ``cli._run_quantization_prelude`` and the standalone
 ``quantization_agent`` package. It builds an effective prompt (source model
 path + export dir + the user's ``--quantize`` text), runs
 ``quantize_via_prompt`` once, and maps its ``QuantSkillRunResult.status`` to a
-concrete decision per ``quantization_agent/docs/DESIGN.md §5.3``:
+concrete decision:
 
   * ``success``                    -> return ``quantized_model_dir``
   * ``partial`` (model usable)     -> warn, then return ``quantized_model_dir``

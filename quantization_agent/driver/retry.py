@@ -1,7 +1,7 @@
 """Multi-attempt orchestration: ``quantize_via_prompt`` public entry.
 
 Wraps :func:`_runner.run_one_attempt` with the diagnose-fix-retry protocol
-from ``docs/DESIGN.zh-CN.md §A.10``:
+(the per-attempt contract lives in ``SKILL.md``):
 
   * Each attempt → classifier → outcome.
   * ``None`` / ``eval_gap_accepted``                → done, build assessment.
@@ -67,7 +67,7 @@ DEFAULT_QUARK_GIT_URL = ""
 class QuantSkillRunResult:
     """Public return shape of :func:`quantize_via_prompt`.
 
-    Mirrors ``docs/DESIGN.zh-CN.md §3.2``. Exactly three fields by design;
+    Exactly three fields by design;
     legacy ``intent_digest`` / ``artifact_paths`` / ``sdk_error`` are folded
     into ``assessment`` (`final` / `attempts` / `recovered` / `eval_gap` +
     `notes`) so caller code never has to negotiate a sprawling result dict.
