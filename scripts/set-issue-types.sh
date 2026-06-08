@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 #
 # Set Issue Types on existing issues based on their labels.
 # Prerequisites: gh CLI authenticated with repo access

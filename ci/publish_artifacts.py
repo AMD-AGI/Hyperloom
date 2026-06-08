@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Normalize and publish a Hyperloom result directory.
 
 This is the one-shot end-of-run helper used by Web/skill flows:
@@ -101,7 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
         output, model, service URL, token, timeout, and ``--strict`` options.
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task-dir", default=os.environ.get("HYPERLOOM_RESULT_DIR", "/workspace/hyperloom"))
+    parser.add_argument("--task-dir", default=os.environ.get("HYPERLOOM_RESULT_DIR") or os.environ.get("USER_DATA_PATH") or "/workspace/hyperloom")
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--display-name", default="")

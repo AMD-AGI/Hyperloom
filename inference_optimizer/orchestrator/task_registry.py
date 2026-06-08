@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """TaskRegistry
 
 DelegatedTask state machine, persisted in the ``tasks`` table.

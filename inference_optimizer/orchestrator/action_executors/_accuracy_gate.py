@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Accuracy gate — GSM8K eval integration for inference_optimizer.
 
 This module provides:
@@ -12,7 +14,7 @@ The accuracy gate protocol:
 - Threshold: baseline_accuracy - new_accuracy <= 0.05 (5% tolerance)
 - REVERT if accuracy drops more than 5%
 
-High-risk parameters (accuracy_risk > 0, derived from marathon KB + DESIGN v2):
+High-risk parameters (accuracy_risk > 0, derived from KB + DESIGN v2):
 - Any flag that changes numeric precision (fp8, fp4, quantization)
 - Any flag that changes attention/compute implementation (aiter, triton rope)
 - Kernel patches / integrate (handled separately by kernel-agent)

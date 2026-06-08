@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR candidate source dispatcher.
 
 Routes :class:`ExploreRequest` to one or more backends based on

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """``§ 5b. RELATED LESSONS`` specialist prompt section + ``warm_start_lessons``
 plumbing tests.
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-node kernel patch fan-out (apply / revert).
 
 Counterpart to ``kill_multinode.py`` and ``launch_multinode.py``. Submitted

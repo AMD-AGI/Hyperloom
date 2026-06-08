@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Data shapes for the external baseline comparison layer.
 
 These types live in their own module so:

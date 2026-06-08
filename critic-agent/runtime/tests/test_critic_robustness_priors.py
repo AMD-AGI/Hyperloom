@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """L4: Critic injects recent Robustness findings as priors.
 
 Covers :func:`runtime.decision_reviewer._discover_robustness_findings_path`

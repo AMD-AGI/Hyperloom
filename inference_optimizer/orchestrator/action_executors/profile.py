@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``profile`` ActionRunner — Magpie SGLang run with torch profiler on.
 
  profile action.
@@ -173,7 +175,7 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
 
 def _validate_trace_structure(
     trace_dir: Path, framework: str, expected_pieces: int = 1,
-) -> None:
+) -> dict[str, Any]:
     """Post-profile sanity check (#210 / Deval's ``check_torch_trace.py``).
 
     Logs *warnings* — never raises — when the trace folder structure
@@ -200,17 +202,23 @@ def _validate_trace_structure(
     check's failure produces an independent warning so partial
     signals stay actionable.
 
-    Args:
-        trace_dir (Path): Directory holding the profile run's traces.
-        framework (str): Framework name (only ``sglang`` triggers
-            check 5).
-        expected_pieces (int): Reserved expected split count. Defaults
-            to ``1``.
+    Returns a structured ``trace_health`` dict (issue #431) so callers can
+    route on it instead of grepping logs:
 
-    Returns:
-        None: This function only logs warnings; it never returns a value.
+    * ``per_kernel_attribution_degraded`` — True when the main trace carries
+      no ``execute_*`` / ``user_annotation`` events (Check 3). Under
+      CUDA/HIP graphs the per-kernel device activity is folded into
+      ``hipGraphLaunch`` wrappers, so ``trace_analyze`` cannot attribute
+      per-kernel time and emits 0 hot kernels. This is the signal the
+      kernel pipeline uses to trigger an eager-mode re-profile fallback.
+    * ``capture_traces_present`` — True when ``capture_traces/`` has files
+      (Check 1); the graph-capture traces a future capture-fold fallback
+      could mine for per-kernel attribution.
+    * ``issues`` — the same human-readable warning strings that get logged.
     """
     issues: list[str] = []
+    per_kernel_attribution_degraded = False
+    capture_traces_present = False
 
     # --- Check 1: capture_traces/ presence ---
     capture = trace_dir / "capture_traces"
@@ -223,6 +231,7 @@ def _validate_trace_structure(
         )
     else:
         capture_files = sorted(p for p in capture.iterdir() if p.is_file())
+        capture_traces_present = bool(capture_files)
         if not capture_files:
             issues.append(
                 "[1] capture_traces/ exists but is empty — graph capture "
@@ -311,6 +320,7 @@ def _validate_trace_structure(
                     )
                 )
                 if confirmed_absent:
+                    per_kernel_attribution_degraded = True
                     issues.append(
                         f"[3] main trace {main_traces[0].name} has no "
                         "execute_* / user_annotation events — InferenceX "
@@ -388,6 +398,11 @@ def _validate_trace_structure(
             "downstream analysis may be degraded. See per-issue messages "
             "above for the actionable check.", len(issues),
         )
+    return {
+        "issues": issues,
+        "per_kernel_attribution_degraded": per_kernel_attribution_degraded,
+        "capture_traces_present": capture_traces_present,
+    }
 
 
 # Legacy constant kept pointing at the sglang profile yaml for fixture use.
@@ -698,23 +713,7 @@ class ProfileExecutor(BaselineExecutor):
         return None
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        """Run the profile action and augment the result with trace info.
-
-        Delegates the benchmark shell-out to ``BaselineExecutor`` and then
-        locates the produced torch traces (single-node workspace dirs or
-        the shared multi-node trace root), surfacing ``trace_dir`` and
-        related fields for downstream TraceLens analysis.
-
-        Args:
-            ctx: The action runner context carrying the task and params.
-
-        Returns:
-            dict[str, Any]: The benchmark result dict, augmented with
-            trace discovery fields (or a failure dict on error).
-        """
-        # IR-8 (atom): the historical short-circuit returned status="skipped"
-        # here because atom_mi*x.sh accepted PROFILE=1 but silently no-op'd.
-        # The Magpie atom wrapper now bridges PROFILE=1 to atom's
+        # atom: the Magpie atom wrapper bridges PROFILE=1 to atom's
         # --torch-profiler-dir CLI flag (see atom_mi*x.sh PROFILER_ARGS),
         # the atom OpenAI server exposes /start_profile and /stop_profile,
         # and the InferenceX benchmark client auto-POSTs both around the
@@ -729,7 +728,7 @@ class ProfileExecutor(BaselineExecutor):
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
         params = ctx.task.params or {}
-        # PR-B: Watermark refresh inheritance of current_best.extra_sglang_args.
+        # Watermark refresh inheritance of current_best.extra_sglang_args.
         # Coordinator._enqueue_internal_analysis_task stamps
         # ``current_best.extra_sglang_args`` into params["base_extra_args"]
         # so the profile run captures a trace that reflects the optimized
@@ -918,7 +917,9 @@ class ProfileExecutor(BaselineExecutor):
                         or (extra.get("framework") if isinstance(extra, dict) else "")
                         or ""
                     )
-                    _validate_trace_structure(selected_trace_dir, framework)
+                    health = _validate_trace_structure(selected_trace_dir, framework)
+                    if isinstance(health, dict):
+                        result["trace_health"] = health
                 except Exception as e:  # noqa: BLE001 - validator is best-effort
                     log.debug(
                         "profile_executor: trace structure validator failed: %s", e,

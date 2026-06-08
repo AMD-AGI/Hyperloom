@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """GPU memory leak detector.
 
 Fires when **every** visible GPU reports near-100% memory utilization (or
@@ -100,8 +102,8 @@ class GpuLeakDetector:
         """
         self._config = config or GpuLeakConfig()
         self._state_view = state_view
-        # Disk-backed counter — survives subprocess-per-tick (M1
-        # default transport). Persists `consecutive_hits` so a leak
+        # Disk-backed counter — survives the subprocess-per-tick
+        # transport. Persists `consecutive_hits` so a leak
         # crossing the 2-tick threshold is detected even when the
         # reactor is rebuilt every tick.
         loaded = state_view.load() if state_view is not None else {}

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :class:`runtime.web_tools.providers.TavilyProvider` and
 :class:`runtime.web_tools.providers.SerperProvider`.
 

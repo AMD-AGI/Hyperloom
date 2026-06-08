@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Arbor-aligned data shapes for the local recipe-snapshot KB.
 
 The on-disk JSON layout for ``recipe.json`` follows the arbor

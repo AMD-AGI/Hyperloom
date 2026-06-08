@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Event-driven check — reacts to specific event patterns from Conductor."""
 
 from __future__ import annotations

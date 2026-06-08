@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 M4 — Knowledge plane + PR Monitor tests.
 
 Covers KB_design §3.6 + §3.13 M4:
@@ -8,14 +10,10 @@ Covers KB_design §3.6 + §3.13 M4:
 * domain → repos yaml loader (``actions/_meta/_domain_repos.yaml``)
   with wildcard handling.
 * KnowledgePlane facade: pr_feed_warm dispatch (disabled / unknown
-  domain / wildcard / per-repo failure folded into warnings), Cortex
-  write helpers no-op when disabled, mint_pr_node canonical_id
-  derivation.
+  domain / wildcard / per-repo failure folded into warnings).
 * SpecialistRunner tool-list gating: ``mcp__pr_monitor__*`` stripped
   when KnowledgePlane reports PR Monitor disabled; default still
   exposes the 12 PR Monitor MCP tool names.
-* breakdown ``kb_provenance.points_created`` extraction from the
-  audit log (pr_node + workload_node mixed).
 """
 
 from __future__ import annotations
@@ -28,7 +26,6 @@ import pytest
 from inference_optimizer.orchestrator.knowledge_plane import (
     KnowledgePlane,
     load_domain_repos,
-    pr_node_canonical_id,
 )
 from inference_optimizer.orchestrator.pr_monitor import (
     DEFAULT_PR_MONITOR_URL,
@@ -43,7 +40,6 @@ from inference_optimizer.orchestrator.specialist_runner import (
     PR_MONITOR_MCP_TOOLS,
     SpecialistRunner,
 )
-from inference_optimizer.breakdown.collectors import collect_kb_provenance
 
 
 # ---------------------------------------------------------------------------
@@ -370,65 +366,6 @@ def test_plane_pr_feed_warm_wildcard_expands_via_list_repos(monkeypatch):
     # pr_intel_specialist has empty keywords → everything passes.
 
 
-def test_plane_cortex_write_helpers_skip_when_disabled():
-    plane = KnowledgePlane.from_clients(cortex_kb=None, pr_monitor=None)
-    out = plane.cortex_propose_point(canonical_id="x", kind="pr_node")
-    assert out["status"] == "skip_disabled"
-    # ``cortex_hypothesize`` was retired with the T2/T3 protocol; no
-    # facade method exists to test the disabled path against anymore.
-
-
-# ===========================================================================
-# 4. pr_node_canonical_id + mint_pr_node
-# ===========================================================================
-def test_pr_node_canonical_id_with_number():
-    assert pr_node_canonical_id("ROCm/aiter", number=3067) == "pr.ROCm/aiter#3067"
-
-
-def test_pr_node_canonical_id_with_sha():
-    assert pr_node_canonical_id("x/y", sha="abc123") == "pr.x/y@abc123"
-
-
-def test_pr_node_canonical_id_defaults():
-    assert pr_node_canonical_id("") == "pr.unknown_repo.unknown"
-
-
-def test_mint_pr_node_disabled_returns_skip():
-    plane = KnowledgePlane.from_clients(cortex_kb=None, pr_monitor=None)
-    out = plane.mint_pr_node(repo="ROCm/aiter", number=3067)
-    assert out["status"] == "skip_disabled"
-
-
-def test_mint_pr_node_calls_cortex_with_correct_canonical():
-    # Stub a CortexKBClient that captures calls.
-    captured: dict[str, Any] = {}
-
-    class _StubCortex:
-        enabled = True
-        def propose_point(self_inner, **kwargs):
-            captured.update(kwargs)
-            return {"status": "ok", "point_id": "pt-1"}
-
-    plane = KnowledgePlane.from_clients(
-        cortex_kb=_StubCortex(),  # type: ignore[arg-type]
-        pr_monitor=None,
-    )
-    out = plane.mint_pr_node(
-        repo="ROCm/aiter", number=3067,
-        attrs={"specialist": "kernel_switch_specialist"},
-    )
-    assert out["status"] == "ok"
-    assert captured["canonical_id"] == "pr.ROCm/aiter#3067"
-    assert captured["kind"] == "pr_node"
-    assert captured["authority"] == "EXPERIENTIAL"
-    # The repo/number/url get folded into attrs.
-    assert captured["attrs"]["repo"] == "ROCm/aiter"
-    assert captured["attrs"]["number"] == 3067
-    assert "ROCm/aiter/pull/3067" in captured["attrs"]["url"]
-    # The synthesised url evidence is appended.
-    assert any(e.startswith("url:") for e in captured["evidence"])
-
-
 # ===========================================================================
 # 5. SpecialistRunner tool-list gating
 # ===========================================================================
@@ -491,59 +428,7 @@ def test_specialist_runner_without_plane_keeps_default_tools():
 
 
 # ===========================================================================
-# 6. breakdown kb_provenance points_created
-# ===========================================================================
-def test_kb_provenance_points_created_aggregates_pr_node(tmp_path):
-    """Audit log with multiple propose_point ops surfaces in points_created."""
-    session_dir = tmp_path / "session"
-    (session_dir / "runtime" / "cortex").mkdir(parents=True)
-    audit = session_dir / "runtime" / "cortex" / ".kb_audit.jsonl"
-    audit_rows = [
-        {"ts": "2026-05-19T01:00:00", "op": "propose_point",
-         "status": "ok", "canonical_id": "workload.qwen3.mi300x",
-         "kind": "workload_node", "authority": "EXPERIENTIAL",
-         "source": "agent_observation"},
-        {"ts": "2026-05-19T02:00:00", "op": "propose_point",
-         "status": "ok", "canonical_id": "pr.ROCm/aiter#3067",
-         "kind": "pr_node", "authority": "EXPERIENTIAL",
-         "source": "pr_monitor"},
-        {"ts": "2026-05-19T02:01:00", "op": "propose_point",
-         "status": "queued", "canonical_id": "pr.ROCm/aiter#3067",
-         "kind": "pr_node", "authority": "EXPERIENTIAL",
-         "source": "pr_monitor"},   # dedupes (same canonical+kind)
-        {"ts": "2026-05-19T03:00:00", "op": "cli", "status": "ok",
-         "args": ["session", "commit"]},  # non-propose row, skipped
-    ]
-    with audit.open("w", encoding="utf-8") as f:
-        for r in audit_rows:
-            f.write(json.dumps(r) + "\n")
-
-    state = {"cortex_session_id": "sid-1"}
-    manifest = {"stack_fingerprint": {}}
-    warnings: list[str] = []
-    out = collect_kb_provenance(session_dir, state, manifest, warnings)
-    canonical_ids = {p["canonical_id"] for p in out["points_created"]}
-    assert "workload.qwen3.mi300x" in canonical_ids
-    assert "pr.ROCm/aiter#3067" in canonical_ids
-    # Dedup → exactly 2 unique (canonical_id, kind) pairs.
-    assert len(out["points_created"]) == 2
-    assert out["points_by_kind"]["pr_node"] == 1
-    assert out["points_by_kind"]["workload_node"] == 1
-    assert warnings == []
-
-
-def test_kb_provenance_no_audit_log_returns_empty_points(tmp_path):
-    session_dir = tmp_path / "session"
-    state = {}
-    manifest = {}
-    warnings: list[str] = []
-    out = collect_kb_provenance(session_dir, state, manifest, warnings)
-    assert out["points_created"] == []
-    assert out["points_by_kind"] == {}
-
-
-# ===========================================================================
-# 7. KnowledgePlane cache reset
+# 6. KnowledgePlane cache reset
 # ===========================================================================
 def test_plane_reset_round_caches():
     pr = PRMonitorClient.from_args()

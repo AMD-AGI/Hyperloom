@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """
 Push session_breakdown.json files to the production perf-leaderboard API.
 

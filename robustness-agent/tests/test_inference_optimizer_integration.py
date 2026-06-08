@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end integration with inference_optimizer.
 
 Round-trip: build a Coordinator-style prompt, drive it through the
@@ -31,7 +33,7 @@ def _try_import_upstream():
             break
     try:
         from inference_optimizer.orchestrator.agent_role import default_role_registry
-        from inference_optimizer.orchestrator.intent_parser import (
+        from inference_optimizer.protocol.intent import (
             Intent as UpstreamIntent,
             IntentType as UpstreamIntentType,
         )

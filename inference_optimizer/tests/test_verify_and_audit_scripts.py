@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 N7: verify + audit script smoke tests.
 
 These scripts (`scripts.verify_roofline_v2` /

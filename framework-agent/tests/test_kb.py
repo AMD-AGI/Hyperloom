@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.kb and the `fa kb <op>` CLI surface.
 
 Hermetic - all tests redirect KB_ROOT via FRAMEWORK_AGENT_KB_DIR env so

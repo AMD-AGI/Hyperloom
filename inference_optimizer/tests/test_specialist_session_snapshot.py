@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """``§ 5d. SESSION SNAPSHOT`` plumbing tests for the ``session_steward``
 specialist.
 

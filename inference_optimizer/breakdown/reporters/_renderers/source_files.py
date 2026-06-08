@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Source-files manifest renderer — what files this breakdown was
 built from. Helps operators replay or audit a session.
 """

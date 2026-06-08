@@ -1,0 +1,32 @@
+name: dynamic_specialist
+family: creative
+cost_minutes_p50: 8.0
+cost_minutes_p75: 15.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.0
+prerequisites:
+  - baseline
+requires_lanes:
+  - research_lane
+allowed_tools:
+  - emit_intent
+side_effects:
+  - workspace_write
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 12
+lease_ttl_sec: 1800
+description: "Dispatch a wave of free-form CPU-only specialist agents through the dynamic dispatch module. EXPLORE-only supplementary channel."
+pipeline_phase: explore
+typical_runtime_min: 8.0
+verdict_class: exploration
+applicable_when:
+  - "phase == 'EXPLORE'"
+params_schema:
+  tasks:
+    type: list
+    description: |
+      Required. List of free-form specialist tasks. Each item should include
+      ``task_description`` and may include ``task_summary`` for compact status
+      display.

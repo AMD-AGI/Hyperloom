@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Claw API client for CI/CD orchestration."""
 
 from __future__ import annotations
