@@ -1,0 +1,41 @@
+{
+  "schema_version": "hyperloom.production_corpus.v1",
+  "pool_id": "kimi-tp8-probe",
+  "source": "manual",
+  "_readme": [
+    "TEMPORARY probe (core42-top8): re-run Kimi K2.6 at the FIXED tp8 config",
+    "with the verified baseline work-around injected in code.",
+    "",
+    "Root cause of the prior tp8 baseline_failed: 64 attention heads / tp8 =",
+    "8 heads/GPU takes sglang's ROCm fused-decode-MLA path, whose RoPE kernel",
+    "SIGABRTs during CUDA-graph capture (forward_mla_fused_rope_rocm.py:",
+    "'cannot unpack non-iterable ForwardMetadata').",
+    "",
+    "Fix: SGLANG_ROCM_FUSED_DECODE_MLA=0 disables the fused decode pipeline",
+    "and keeps the configured tp8 + the clean aiter MLA path. Verified on a",
+    "manual MI300X server run (capture passes, decode correct). Unlike the",
+    "earlier tp4 probe, this preserves the fixed-config tp8 so throughput is",
+    "comparable to the leaderboard.",
+    "",
+    "The env is injected per-model by inference_optimizer's",
+    "materialize_config_with_envs choke point (candidates schema has no env",
+    "field, and the daily workflow has no prompt/env dispatch input). Delete",
+    "this probe file after dispatch; keep the code-level fix if the run",
+    "succeeds."
+  ],
+  "policy": {"rotation": "none", "refresh_mode": "manual"},
+  "candidates": [
+    {
+      "pool_id": "kimi-tp8-probe",
+      "pool_index": 0,
+      "label": "Kimi K2.6",
+      "repo_id": "moonshotai/Kimi-K2.6",
+      "framework": "sglang",
+      "precision": "INT4",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "note": "tp8 (per fixed config) + SGLANG_ROCM_FUSED_DECODE_MLA=0 work-around (injected in _workload_envs.py). INT4 compressed-tensors native; ~554G weights -> ~69G/GPU at tp8."
+    }
+  ]
+}
