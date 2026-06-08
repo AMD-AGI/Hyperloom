@@ -1928,7 +1928,7 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "roofline_name": candidate.get("roofline_name"),
         "recommended_actions": list(candidate.get("recommended_actions") or []),
         "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
-    }
+        "rocprof_roofline": candidate.get("rocprof_roofline"),    }
 
 
 def build_kernel_roofline_payload(
@@ -2483,6 +2483,34 @@ def write_reports(
         candidates=candidates,
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
+
+    # Batch rocprof-compute enrichment is opt-in because it can profile many kernels.
+    # Kernel-opt still profiles the selected kernel on demand.
+    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
+    if enrich_value in {"1", "true", "yes", "on"}:
+        try:
+            tools_dir = str(Path(__file__).resolve().parent)
+            if tools_dir not in sys.path:
+                sys.path.insert(0, tools_dir)
+            from rocprof_roofline import enrich_kernel_roofline_sidecar  # noqa: WPS433
+            enrich_summary = enrich_kernel_roofline_sidecar(
+                sidecar_path=str(kernel_roofline_path),
+                candidates_path=str(kernel_candidates_path),
+                workdir=str(run_dir),
+                timeout_sec_per_kernel=int(
+                    os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800
+                ),
+                log_fn=None,
+            )
+            print(
+                "[rocprof_enrich] "
+                f"matched={enrich_summary.get('matched', 0)} "
+                f"skipped={enrich_summary.get('skipped', 0)} "
+                f"failed={enrich_summary.get('failed', 0)} "
+                f"rows={enrich_summary.get('rows', 0)}"
+            )
+        except Exception as exc:  # pragma: no cover - guard against import cycles
+            print(f"[rocprof_enrich] skipped: {type(exc).__name__}: {exc}")
 
     artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
