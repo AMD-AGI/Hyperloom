@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Seed-kit assembler for the ``dynamic_action`` sub-agent.
 
 The sub-agent's whole input surface is what this module returns.

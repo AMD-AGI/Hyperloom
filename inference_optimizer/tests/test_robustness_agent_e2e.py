@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end test: real robustness-agent runtime + Coordinator.
 
 Mirrors :mod:`test_p2_critic_agent_e2e` for the robustness role: actually
@@ -39,7 +41,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 

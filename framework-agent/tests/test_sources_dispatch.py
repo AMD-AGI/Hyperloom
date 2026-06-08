@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.sources.enumerate_candidates dispatch.
 
 Hermetic - monkeypatches the backend functions directly.

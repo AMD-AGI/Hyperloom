@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Render the optimization-loop flow diagram slide figure.
 
 Draws the phased pipeline (classify, baseline, profile, build) feeding into the

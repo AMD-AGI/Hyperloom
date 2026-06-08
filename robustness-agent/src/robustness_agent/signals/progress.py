@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Progress-stagnation detectors (B2 / B3).
 
 Two stateful rules live here:
@@ -83,8 +85,8 @@ class ProgressDetector:
         # Disk-backed rolling history — B2 ``gain_plateau`` requires
         # ``gain_window_ticks`` samples (default 6) and B3
         # ``no_levers_found`` cross-references ``last_tick``. Without
-        # persistence neither rule can ever fire under M1 subprocess
-        # transport.
+        # persistence neither rule can ever fire under the
+        # subprocess-per-tick transport.
         loaded = state_view.load() if state_view is not None else {}
         raw_history = loaded.get("gain_history") or []
         if isinstance(raw_history, list):

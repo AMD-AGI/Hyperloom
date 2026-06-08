@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Cross-subprocess persistence integration tests.
 
 These tests simulate the M1 transport's "fresh subprocess per tick"

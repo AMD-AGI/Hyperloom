@@ -1,8 +1,10 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Detect same-fingerprint action retries (B1 / same_payload_loop).
 
 The upstream ``Coordinator._baseline_self_loop_denial`` already guards
-the ``baseline`` action against same-fingerprint retries (PolicyGate
-``rule="baseline_self_loop"``), but the same trap can fire for any
+the ``baseline`` action against param changes after failure (PolicyGate
+``rule="baseline_no_param_change"``), but the same trap can fire for any
 action the orchestration LLM proposes — most famously the 2026-05
 ``validate_stack`` 11-retry loop where every attempt OOMed on a leaked
 GPU but the Coordinator viewed each as a fresh task because the

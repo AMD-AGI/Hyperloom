@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """WebFetchClient — single-URL fetcher with SSRF guard, HTML→Markdown
 conversion, redirect handling and a TTL+LRU cache.
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """TraceLens analysis tool for the resident Kernel Agent skill.
 
 This tool is intentionally conservative: it records every step, writes a stable
@@ -31,6 +33,12 @@ from tracelens_skill_runner import (
     parse_analysis_md,
     run_tracelens_skill,
 )
+
+# Standalone-tool workspace-root resolver (cannot import
+# inference_optimizer.paths; see _paths.py docstring). Used only for the
+# final fallback in _default_workspace_path() so the "USER_DATA_PATH unset"
+# warning fires instead of a silent /workspace/hyperloom default.
+from _paths import workspace_root
 
 
 HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 80.0
@@ -311,16 +319,14 @@ def _check_selected_chunk_has_gpu_events(
 
 
 # ---------------------------------------------------------------------------
-# N36 — chunk-quality gate (busy_ratio threshold + alternate-mode lookup)
+# chunk-quality gate (busy_ratio threshold + alternate-mode lookup)
 # ---------------------------------------------------------------------------
-# Background: N25 deliberately stays a STRUCTURAL gate (num_gpu_events>0 AND
-# gpu_busy_duration>0). The DSR1-0528 (671B FP8 MoE) TP=8 10k/1k production
-# run on 2026-05-21 exposed a gap: TraceLens' splitter happily produced a
-# ``mixed_steady_state`` chunk with 160 events / 2053us busy out of 3.26s
-# (0.063% busy) -- structurally non-empty so N25 passed -- but
-# substantively garbage. Downstream analysis.md reported "Compute %=0.09%
-# / Idle %=99.90%" with ``reusable_native_kernel_ids=[]`` and the LLM
-# was left with nothing to feed GEAK with.
+# The structural gate (num_gpu_events>0 AND gpu_busy_duration>0) is not
+# enough: TraceLens' splitter can produce a ``mixed_steady_state`` chunk
+# that is structurally non-empty but substantively garbage (e.g. 160
+# events / 2053us busy out of 3.26s = 0.063% busy), yielding an
+# analysis.md with ~0% compute and empty ``reusable_native_kernel_ids``
+# so the LLM has nothing to feed GEAK.
 #
 # Root cause: the profile window calibration in ``_workload_envs``
 # computes ``delay_iters = OSL * (R+1) * 3 - max_iters/2`` -- it only
@@ -329,13 +335,13 @@ def _check_selected_chunk_has_gpu_events(
 # 6016 every batch has finished its single prefill iter and the
 # profiler captures only decode iters where the 8x MI300X is sparse.
 #
-# N36 closes that gap: this helper checks busy_ratio AND looks for an
-# alternate mode with materially higher busy_ratio. When such an
-# alternate exists we emit ``steady_state_chunk_low_quality`` (in the
-# N26 retry allowlist) so the coordinator re-issues trace_analyze
-# automatically. When NO mode is better we return ``None`` -- emitting
-# a retry-warning would spin the same bad trace forever; the
-# ``roofline_failure_streak`` path handles that case (N27 fallback).
+# This helper checks busy_ratio AND looks for an alternate mode with
+# materially higher busy_ratio. When such an alternate exists we emit
+# ``steady_state_chunk_low_quality`` (in the retry allowlist) so the
+# coordinator re-issues trace_analyze automatically. When NO mode is
+# better we return ``None`` -- emitting a retry-warning would spin the
+# same bad trace forever; the ``roofline_failure_streak`` path handles
+# that case.
 _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
 # Alternate mode must beat the requested mode by at least this margin
 # for the auto-retry to be worth it. Otherwise we'd thrash between
@@ -480,8 +486,8 @@ def _check_selected_chunk_has_gpu_events_quality(
     sel_events, sel_busy, sel_dur = _stats(selected_row)
     sel_ratio = _busy_ratio(sel_events, sel_busy, sel_dur)
     if sel_ratio is None:
-        # Can't measure ratio; N25 already covers the structural empty
-        # case. Defer.
+        # Can't measure ratio; the structural empty case is already
+        # covered. Defer.
         return None
     threshold = _resolve_min_busy_ratio()
     if sel_ratio >= threshold:
@@ -564,7 +570,16 @@ RUNTIME_API_NAMES = {
     "cudadevicesynchronize",
     "cudastreamsynchronize",
 }
-DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
+# TraceLens public root has no in-process default: install.sh exports
+# TRACELENS_ROOT (default $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens,
+# clone of AMD-AGI/TraceLens pinned to a fixed SHA) into
+# kernel-agent.env.sh, and callers either inherit it from env or pass
+# --tracelens-root. If neither is provided we fail loudly rather than
+# silently fall back to a hard-coded /wekafs path that may not exist.
+# Internal extension is opt-in: no default path either. It is used only when
+# TRACELENS_INTERNAL_ROOT (env) or --tracelens-internal-root is set; an empty
+# value keeps Hyperloom on the open-source-only report.
+DEFAULT_TRACELENS_INTERNAL_ROOT = ""
 
 
 def utc_now() -> str:
@@ -766,6 +781,8 @@ def _trace_input_sort_key(path: Path) -> tuple[int, str]:
         return (0, name)
     if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
         return (2, name)
+    if name.startswith("bs_") or name.startswith("graph_capture"):
+        return (3, name)
     return (1, name)
 
 
@@ -1089,6 +1106,48 @@ _NON_PATCHABLE_NAME_MARKERS: tuple[str, ...] = (
     "aten::copy",
 )
 
+# Vendor BLAS / closed-source compute backends. A candidate whose runtime
+# implementation is one of these has *no rewritable source* regardless of
+# which Python file the symbol resolves to: the device body lives in a
+# precompiled vendor binary (Tensile/hipBLASLt/rocBLAS/CK kernels), and the
+# attributed ``source_file`` is only the framework dispatch site. Matched
+# against the candidate's ``library`` field (case-insensitive).
+_VENDOR_BACKEND_LIBRARIES: frozenset[str] = frozenset(
+    {
+        "tensile",
+        "hipblas",
+        "hipblaslt",
+        "rocblas",
+        "rocblaslt",
+        "ck",
+        "composable_kernel",
+        "ck_kernels",
+        "miopen",
+    }
+)
+
+# torch ``__torch_function__`` / ``__torch_dispatch__`` interception shims.
+# These files intercept a tensor op and forward it to a vendor backend
+# (e.g. vLLM ``parameter.py`` forwards ``rocm_unquantized_gemm`` to Tensile);
+# the file itself contains no rewritable device kernel, so a symbol that
+# resolves here is a dispatch stub, not an editable kernel. Matched as a
+# POSIX path suffix against the resolved ``source_file``.
+_TORCH_DISPATCH_SHIM_SOURCES: tuple[str, ...] = (
+    "vllm/model_executor/parameter.py",
+)
+
+
+def is_torch_dispatch_shim_source(source_file: str) -> bool:
+    """True when ``source_file`` is a known torch-dispatch interception shim.
+
+    These ``__torch_function__`` / ``__torch_dispatch__`` files forward a
+    tensor op to a vendor backend and hold no rewritable device kernel, so a
+    symbol attributed here must be treated as a non-reusable dispatch stub
+    (same handling as ``@compile_ops`` JIT stubs in ``aiter/ops/moe_op.py``).
+    """
+    posix = str(source_file or "").replace("\\", "/")
+    return any(posix.endswith(suffix) for suffix in _TORCH_DISPATCH_SHIM_SOURCES)
+
 
 def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     """Return True for torch.compile / Inductor / cache-generated kernels.
@@ -1150,13 +1209,22 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, "vendor binary (no rewritable source)"
     if candidate.get("vendor_dispatch_wrapper"):
         return False, f"vendor dispatch wrapper at {source_file}"
+    if is_torch_dispatch_shim_source(source_file):
+        return False, (
+            f"torch dispatch shim (no rewritable kernel body): {source_file}"
+        )
     for marker in _NON_PATCHABLE_NAME_MARKERS:
         if marker in lower_name:
             return False, (
                 f"non-patchable kernel name marker '{marker}' in {name!r}"
             )
+    library = str(candidate.get("library") or "").strip().lower()
+    if library in _VENDOR_BACKEND_LIBRARIES:
+        return False, (
+            f"vendor backend library {candidate.get('library')!r} "
+            "(precompiled binary, no rewritable source)"
+        )
     if name.startswith("aten::"):
-        library = str(candidate.get("library") or "").strip().lower()
         if not library or library in {"tensile", "pytorch native"}:
             return False, (
                 f"PyTorch native op {name!r} backed by "
@@ -1943,7 +2011,12 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
         return "FlyDSL"
     name = str(candidate.get("name") or "").lower()
     if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
-                                "cijk", "sgemm", "hgemm")):
+                                "cijk", "sgemm", "hgemm",
+                                # PyTorch op-name variants the priority-1
+                                # csv lookup misses when unified_perf_summary
+                                # is absent (raw-trace path or empty op
+                                # category column).
+                                "::mm", "::addmm", "::bmm")):
         return "GEMM"
     if any(t in name for t in ("attention", "attn", "fmha",
                                 "paged_attention", "flash")):
@@ -2050,23 +2123,50 @@ def analyze_trace_files(trace_files: list[Path], top_k: int) -> list[dict[str, A
     return _finalize_candidates(top, total_dur=total_dur)
 
 
+def load_op_category_map(
+    perf_report_csv_dir: Path | str,
+) -> dict[str, str]:
+    """Read ``{name: raw TraceLens op category}`` from unified_perf_summary.csv.
+
+    TraceLens emits one row per (name, shape); we keep the first
+    non-empty op category per name (stable across shapes for one op).
+    Returns ``{}`` when the csv is unavailable so callers degrade
+    gracefully to the name-heuristic fallback in ``derive_kernel_category``.
+    """
+    csv_path = Path(perf_report_csv_dir) / "unified_perf_summary.csv"
+    if not csv_path.is_file():
+        return {}
+    import csv as _csv
+    out: dict[str, str] = {}
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                name = str(row.get("name") or "").strip()
+                cat = str(row.get("op category") or "").strip()
+                if name and cat and name not in out:
+                    out[name] = cat
+    except (OSError, _csv.Error):
+        return {}
+    return out
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]], *, total_dur: float | None = None,
+    perf_report_csv_dir: Path | str | None = None,
 ) -> list[dict[str, Any]]:
     """Apply source resolution / pybind upgrade / backend recommend / notes.
 
     Shared post-processing for parsed candidate rows. Mutates ``top`` in place.
 
-    Args:
-        top (list[dict[str, Any]]): Candidate rows to finalize, in priority
-            order.
-        total_dur (float | None): Total GPU duration used for ``gpu_pct``
-            normalization; summed from ``top`` when ``None``.
-
-    Returns:
-        list[dict[str, Any]]: The same ``top`` list, mutated in place with
-            resolved source, backends, notes, and category fields.
+    When ``perf_report_csv_dir`` is provided, populate each item's
+    ``tracelens_category`` from TraceLens's unified_perf_summary.csv so
+    ``derive_kernel_category`` takes its priority-1 (upstream) branch
+    instead of falling through to the name heuristic.
     """
+    op_cat_map = (
+        load_op_category_map(perf_report_csv_dir)
+        if perf_report_csv_dir is not None else {}
+    )
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
     for idx, item in enumerate(top, 1):
@@ -2074,6 +2174,11 @@ def _finalize_candidates(
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
+        # Shapes here are always extracted from trace events; mark the
+        # provenance so the dispatch-time validator can distinguish a
+        # trace-anchored shape from any future non-trace source.
+        if item.get("shapes"):
+            item.setdefault("shape_provenance", "torch_trace")
         item["kernel_id"] = f"k{idx:03d}"
         # Honour pre-computed gpu_pct when present, else compute now.
         if not item.get("gpu_pct"):
@@ -2158,6 +2263,14 @@ def _finalize_candidates(
         item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
         item["recommended_backends"] = recommend_backends(item)
         item["optimization_notes"] = build_notes(item)
+        # TraceLens csv lookup activates derive_kernel_category's
+        # priority-1 (upstream) path. Only overrides when there is no
+        # pre-set tracelens_category (analysis.md parsing path may set
+        # it directly).
+        if op_cat_map and not str(item.get("tracelens_category") or "").strip():
+            csv_cat = op_cat_map.get(str(item.get("name") or ""))
+            if csv_cat:
+                item["tracelens_category"] = csv_cat
         # Surface a stable kernel_category for GEAK to dispatch on, plus a
         # source_path mirror for downstream prompt/report consumers. Shape is
         # already populated in `shapes`.
@@ -2412,7 +2525,7 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "roofline_name": candidate.get("roofline_name"),
         "recommended_actions": list(candidate.get("recommended_actions") or []),
         "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
-    }
+        "rocprof_roofline": candidate.get("rocprof_roofline"),    }
 
 
 def build_kernel_roofline_payload(
@@ -3072,6 +3185,34 @@ def write_reports(
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
 
+    # Batch rocprof-compute enrichment is opt-in because it can profile many kernels.
+    # Kernel-opt still profiles the selected kernel on demand.
+    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
+    if enrich_value in {"1", "true", "yes", "on"}:
+        try:
+            tools_dir = str(Path(__file__).resolve().parent)
+            if tools_dir not in sys.path:
+                sys.path.insert(0, tools_dir)
+            from rocprof_roofline import enrich_kernel_roofline_sidecar  # noqa: WPS433
+            enrich_summary = enrich_kernel_roofline_sidecar(
+                sidecar_path=str(kernel_roofline_path),
+                candidates_path=str(kernel_candidates_path),
+                workdir=str(run_dir),
+                timeout_sec_per_kernel=int(
+                    os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800
+                ),
+                log_fn=None,
+            )
+            print(
+                "[rocprof_enrich] "
+                f"matched={enrich_summary.get('matched', 0)} "
+                f"skipped={enrich_summary.get('skipped', 0)} "
+                f"failed={enrich_summary.get('failed', 0)} "
+                f"rows={enrich_summary.get('rows', 0)}"
+            )
+        except Exception as exc:  # pragma: no cover - guard against import cycles
+            print(f"[rocprof_enrich] skipped: {type(exc).__name__}: {exc}")
+
     artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
         "kernel_candidates": str(kernel_candidates_path),
@@ -3103,10 +3244,12 @@ def _default_workspace_path() -> str:
        ``/workspace``). Kept as a second-tier fallback so existing
        launchers / CI / parallel_e2e_runner that already export it
        continue to work without changes.
-    3. ``/workspace/hyperloom`` — the same hard-coded default as
-       ``inference_optimizer/paths.py::DEFAULT_SESSION_DIR``, so a
+    3. ``_paths.workspace_root()`` — the final fallback. It returns the
+       same ``/workspace/hyperloom`` default as
+       ``inference_optimizer/paths.py::DEFAULT_SESSION_DIR`` (so a
        bare-image run without either env variable lands in the same
-       place the orchestrator does.
+       place the orchestrator does) BUT emits a one-shot loud warning so
+       the missing ``$USER_DATA_PATH`` is never silent.
 
     Note: GEAK / OOB tooling (``kernel_optimization.py``, the auth
     proxy, ray_runtime, install.sh) still defaults to the legacy
@@ -3121,11 +3264,16 @@ def _default_workspace_path() -> str:
         str: The resolved default workspace root, from ``$USER_DATA_PATH``,
             then ``$WORKSPACE_PATH``, then ``/workspace/hyperloom``.
     """
-    return (
-        os.environ.get("USER_DATA_PATH")
-        or os.environ.get("WORKSPACE_PATH")
-        or "/workspace/hyperloom"
-    )
+    user_data = os.environ.get("USER_DATA_PATH")
+    if user_data:
+        return user_data
+    workspace = os.environ.get("WORKSPACE_PATH")
+    if workspace:
+        return workspace
+    # Neither env set: route through the shared helper so the one-shot
+    # "USER_DATA_PATH unset" warning fires and we still return the same
+    # /workspace/hyperloom default the orchestrator uses.
+    return workspace_root()
 
 
 def main() -> int:
@@ -3171,7 +3319,16 @@ def main() -> int:
             "for legacy launchers, then to /workspace/hyperloom."
         ),
     )
-    parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
+    parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", ""),
+                        help="TraceLens public checkout (TRACELENS_ROOT). Required: "
+                             "kernel-agent/scripts/install.sh exports it from "
+                             "kernel-agent.env.sh; pass --tracelens-root only when "
+                             "running outside the installer-managed env.")
+    parser.add_argument("--tracelens-internal-root",
+                        default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
+                        help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
+                             "Rehydration module; plumbed to run_tracelens_skill. "
+                             "Leave empty for the open-source-only report.")
     parser.add_argument("--roofline-json", default="")
     parser.add_argument(
         "--capture-folder",
@@ -3361,17 +3518,41 @@ def main() -> int:
             update_status(status_path, state="running", current_step="install_tracelens",
                           log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                           started_at=started_at)
-            tl_root = Path(args.tracelens_root)
+            tl_root_arg = (args.tracelens_root or "").strip()
+            if not tl_root_arg:
+                raise SystemExit(
+                    "TraceLens root not provided: set TRACELENS_ROOT in env "
+                    "(kernel-agent/scripts/install.sh writes it to "
+                    "kernel-agent.env.sh) or pass --tracelens-root."
+                )
+            tl_root = Path(tl_root_arg)
+            # Internal extension is opt-in: used only when a non-empty
+            # --tracelens-internal-root / TRACELENS_INTERNAL_ROOT is provided.
+            internal_root_arg = (args.tracelens_internal_root or "").strip()
+            tl_internal_root: Path | None = (
+                Path(internal_root_arg) if internal_root_arg else None
+            )
             if not tl_root.exists():
                 raise FileNotFoundError(
                     f"TraceLens root not found: {tl_root} "
                     "(set TRACELENS_ROOT or pass --tracelens-root)"
                 )
+            if tl_internal_root is not None and not tl_internal_root.exists():
+                append_log(log_path,
+                    f"TraceLens-internal root not found: {tl_internal_root}; "
+                    "falling back to open-source-only "
+                    "(provide an existing internal checkout to enable)")
+                tl_internal_root = None
+            if tl_internal_root is None:
+                append_log(log_path,
+                    "TraceLens-internal: not provided "
+                    "(open-source-only; set TRACELENS_INTERNAL_ROOT to enable)")
+                os.environ.pop("TL_EXTENSION", None)
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))
-            # TraceLens-internal v0.3 (#148): the standalone analysis skill
-            # lives under TraceLens/Agent/Analysis/ with the shorter file name
+            # TraceLens v0.3 (#148): the standalone analysis skill lives
+            # under TraceLens/Agent/Analysis/ with the shorter file name
             # `analysis-orchestrator.md` (renamed from
             # `standalone-analysis-orchestrator.md` and moved out of the old
             # `AgenticMode/Standalone/` tree). Override by setting
@@ -3463,15 +3644,14 @@ def main() -> int:
                 # (TraceLens itself has no internal preference between them).
                 # The consumer (us) picks ONE per the configured intent.
                 #
-                # Pre-N25 behaviour was an implicit `mixed or decode_only or
-                # prefilldecode` chain that auto-fell-through silently. This
-                # broke for the SOLAR-10.7B TP=1 case where the mixed window
-                # degenerated to gpu_busy=0.13% (all forward in CUDA graph
-                # + rocprofiler-sdk emits no Dispatch Task aggregate without
-                # TP-multi-stream sync) while the prefilldecode chunk carried
-                # 60% busy + 480 GEMM + 240 paged_attention. Implicit
-                # fall-through hid the issue. N25 makes the mode explicit
-                # (--steady-state-mode flag, default 'mixed') and hard-fails
+                # An implicit `mixed or decode_only or prefilldecode`
+                # fall-through chain silently hid bad windows: e.g. a mixed
+                # window can degenerate to gpu_busy=0.13% (all forward in a
+                # CUDA graph + rocprofiler-sdk emits no Dispatch Task
+                # aggregate without TP-multi-stream sync) while the
+                # prefilldecode chunk carries 60% busy + 480 GEMM + 240
+                # paged_attention. So the mode is explicit
+                # (--steady-state-mode flag, default 'mixed') and we hard-fail
                 # when the selected chunk doesn't exist or is empty so the
                 # operator can re-issue roofline with a different mode.
                 def _collect(prefix: str) -> list[Path]:
@@ -3532,7 +3712,7 @@ def main() -> int:
                     # produced chunks but per TraceLens design we don't pick
                     # them as a silent fallback -- emit a structured warning
                     # so the coordinator can re-issue roofline with a
-                    # different --steady-state-mode (N25 contract).
+                    # different --steady-state-mode.
                     warning = {
                         "code": "steady_state_chunk_missing",
                         "severity": "blocking",
@@ -3608,18 +3788,16 @@ def main() -> int:
                         f"{empty_chunk_warning['non_empty_modes']}"
                     )
 
-                # N36 (May 2026) — quality gate on busy_ratio. N25
-                # only catches structurally empty chunks (events==0
-                # OR busy==0); a chunk like the DSR1-0528 10k/1k case
-                # (160 events / 2ms busy / 3.26s duration = 0.06%
-                # busy) passes N25 but is substantively garbage. The
-                # quality gate looks for an alternate mode with
-                # materially higher busy_ratio and emits a
-                # ``steady_state_chunk_low_quality`` warning the
-                # coordinator's N26 retry path consumes -- same
-                # remediation flow as the empty-chunk case, no
-                # additional wiring required. See N36 module-level
-                # comment + test_n36_chunk_quality_gate.py.
+                # Quality gate on busy_ratio. The structural gate only
+                # catches empty chunks (events==0 OR busy==0); a chunk
+                # like a 10k/1k case (160 events / 2ms busy / 3.26s
+                # duration = 0.06% busy) passes that gate but is
+                # substantively garbage. The quality gate looks for an
+                # alternate mode with materially higher busy_ratio and
+                # emits a ``steady_state_chunk_low_quality`` warning the
+                # coordinator's retry path consumes -- same remediation
+                # flow as the empty-chunk case, no additional wiring
+                # required. See the chunk-quality-gate module comment.
                 low_quality_warning = _check_selected_chunk_has_gpu_events_quality(
                     split_dir=split_dir,
                     selected_chunk=cli_trace_path,
@@ -3678,6 +3856,7 @@ def main() -> int:
                         trace_path=cli_trace_path,
                         output_dir=tracelens_dir,
                         tracelens_root=tl_root,
+                        tracelens_internal_root=tl_internal_root,
                         platform=args.target_platform,
                         framework=args.framework,
                         analysis_mode=args.analysis_mode,
@@ -3777,6 +3956,9 @@ def main() -> int:
                         agent_candidates = _finalize_candidates(
                             raw_agent_candidates,
                             total_dur=total_dur or None,
+                            perf_report_csv_dir=(
+                                skill_result.output_dir / "perf_report_csvs"
+                            ),
                         )
                         append_log(
                             log_path,
@@ -3916,13 +4098,13 @@ def main() -> int:
         update_status(status_path, state="failed", current_step="failed",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at, error=f"{type(exc).__name__}: {exc}")
-        # N26: include any trace_health_warnings accumulated before the
+        # Include any trace_health_warnings accumulated before the
         # exception fired so the handler / Coordinator can auto-recover
         # (e.g. re-issue with a different --steady-state-mode when a
         # steady_state_chunk_empty warning carries non_empty_modes).
-        # Pre-N26 the failure JSON dropped warnings on the floor, so
-        # the RooflineExecutor saw `status=failed` without the structured
-        # hint it needed to decide between hard-fail and auto-retry.
+        # Otherwise the failure JSON would drop warnings on the floor and
+        # the RooflineExecutor would see `status=failed` without the
+        # structured hint it needs to decide hard-fail vs auto-retry.
         print(json.dumps({
             "tool": "tracelens_analysis",
             "session_id": session_id,

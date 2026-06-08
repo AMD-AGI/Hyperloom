@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``target_analysis`` ActionRunner — external baseline comparison.
 
 Replaces the no-op stub for ``target_analysis`` registered by

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Scope construction tests."""
 
 from __future__ import annotations

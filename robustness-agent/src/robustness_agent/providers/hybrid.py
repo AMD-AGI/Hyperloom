@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Hybrid provider — Robust when available, fallback to Local."""
 
 from __future__ import annotations

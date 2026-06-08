@@ -1,4 +1,6 @@
-"""Optimization action catalogue ().
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Optimization action catalogue.
 
 Layout:
 

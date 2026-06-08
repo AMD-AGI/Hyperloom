@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 M3 — ExploreExecutor + explore_search ledger tests.
 
 Mirror of ``test_p2_3_param_executors.py`` for the merged ``explore``
@@ -620,7 +622,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
         if "v00_v_keep" in slug:
             tput = 840.0   # +5% vs base 800
         elif "v01_v_revert" in slug:
-            tput = 800.4   # +0.05% — below 0.2% threshold
+            tput = 800.4   # +0.05% — below 1.0% threshold
         elif "stack_rebench" in slug:
             tput = 845.0   # stable for the KEEP'd variant
         else:
@@ -818,34 +820,38 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
     assert "stack_unstable" in rejected_reasons
 
 
-def test_default_stack_stable_pct_lowered_to_noise_band():
-    """Fix B unit-pin: the module default ``DEFAULT_STACK_STABLE_PCT``
-    must equal :data:`DEFAULT_KEEP_THRESHOLD_PCT` so the stack-rebench
-    gate stays inside the ±1 % inter-run noise band (the 0.5 % floor
-    used to silently downgrade real +0.3 % wins on MI300X)."""
+def test_default_keep_and_stack_stable_thresholds():
+    """Pin the per-variant KEEP threshold and the stack-rebench
+    stability floor. The KEEP gate is 1.0 %; the rebench floor sits
+    below it (0.5 %) so a genuine win that loses a little headroom when
+    layered onto the cumulative stack is not immediately evicted."""
     from inference_optimizer.orchestrator.action_executors.explore import (
         DEFAULT_KEEP_THRESHOLD_PCT,
         DEFAULT_STACK_STABLE_PCT,
     )
-    # Pin: defaults must match — both gates speak the same noise floor.
-    assert DEFAULT_STACK_STABLE_PCT == DEFAULT_KEEP_THRESHOLD_PCT == 0.2
+    assert DEFAULT_KEEP_THRESHOLD_PCT == 1.0
+    assert DEFAULT_STACK_STABLE_PCT == 0.5
+    # The rebench floor must not exceed the single-variant KEEP gate.
+    assert DEFAULT_STACK_STABLE_PCT <= DEFAULT_KEEP_THRESHOLD_PCT
 
 
 def test_stack_stable_floor_arithmetic_at_new_default():
-    """Fix B integration-pin: a rebench at +0.3 % vs baseline now sits
-    above ``base * (1 + 0.2/100)`` and would NOT trigger KEEP_UNSTABLE
-    eviction. Under the legacy 0.5 % default the same rebench was
-    below the floor — this test guards against any future revert."""
+    """Integration-pin: a rebench at +0.6 % vs baseline sits above
+    ``base * (1 + 0.5/100)`` and would NOT trigger KEEP_UNSTABLE
+    eviction, while a +0.3 % rebench falls below the 0.5 % floor and is
+    evicted. Guards the stability-floor arithmetic against drift."""
     from inference_optimizer.orchestrator.action_executors.explore import (
         DEFAULT_STACK_STABLE_PCT,
     )
-    base = 4438.83   # mirrors the real-run baseline_tput in the bug report
-    rebench_tput = base * 1.003   # +0.3 %, just inside the noise band
+    base = 4438.83
     stable_floor = base * (1.0 + DEFAULT_STACK_STABLE_PCT / 100.0)
-    assert rebench_tput > stable_floor, (
-        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT} would "
-        f"still reject +0.3% rebenches; floor={stable_floor:.2f}, "
-        f"rebench={rebench_tput:.2f}"
+    assert base * 1.006 > stable_floor, (
+        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.6% "
+        f"rebench should clear floor={stable_floor:.2f}"
+    )
+    assert base * 1.003 < stable_floor, (
+        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.3% "
+        f"rebench should fall below floor={stable_floor:.2f}"
     )
 
 

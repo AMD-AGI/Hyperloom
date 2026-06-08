@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Profile trace promotion + last_profile_status tests."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SpecialistRunner._finalize must hard-truncate ``proposal_set`` to the
 single-source-of-truth cap (``DEFAULT_SPECIALIST_MAX_PROPOSALS``) before
 persisting ``specialist_done.json`` and returning the SpecialistRunResult.

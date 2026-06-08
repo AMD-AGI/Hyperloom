@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``inference_optimizer.compat.payload_aliases``.
 
 Covers the read-only deprecation alias from ``extra_sglang_args`` ->

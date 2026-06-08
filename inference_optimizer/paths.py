@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Filesystem path resolver.
 
 Two distinct path concepts:
@@ -36,9 +38,12 @@ Two distinct path concepts:
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import re
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
 ENV_USER_DATA_PATH = "USER_DATA_PATH"
@@ -48,23 +53,28 @@ ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 
+# One-shot guard so the "USER_DATA_PATH unset" fallback warning fires at
+# most once per process. workspace_root() is on a hot path (every
+# runtime_dir/magpie_dir/session_dir call routes through it), so a guard
+# keeps the loud signal from drowning the logs.
+_WARNED_NO_USER_DATA = False
+
 # Directory skeleton mkdir-ed on `make_session_dir()`. Order is irrelevant
 # (each dir is created with `parents=True, exist_ok=True`), but the listing
 # below is the canonical layout — keep it in sync with the docstring above
 # and SKILL.md "Session Layout".
 #
-# N17 split (May 2026): the layout used to fold ``runtime/`` (Magpie clone,
-# source mirrors, pod-local env files, GEAK config) + ``optimizer_runs/``
-# + ``kernel-agent/`` into the session_dir, on the rationale that
+# The layout used to fold ``runtime/`` (Magpie clone, source mirrors,
+# pod-local env files, GEAK config) + ``optimizer_runs/`` +
+# ``kernel-agent/`` into the session_dir, on the rationale that
 # ``$USER_DATA_PATH`` was the one knob an operator might move. That worked
 # when each pod ran a single session end-to-end, but a multi-tenant
-# workspace (operator pinning ``$USER_DATA_PATH=/wekafs/xiaofei/sessions``
-# and launching multiple optimisation runs against different models
-# back-to-back) silently collapsed every session into the same flat dir —
-# state.json / agents / runs / manifest all overwritten, no per-session
-# audit possible.
+# workspace (operator pinning ``$USER_DATA_PATH`` and launching multiple
+# optimisation runs against different models back-to-back) silently
+# collapsed every session into the same flat dir — state.json / agents /
+# runs / manifest all overwritten, no per-session audit possible.
 #
-# N17 splits into two roots:
+# The layout now splits into two roots:
 #
 # * **Workspace-shared** (one copy per ``$USER_DATA_PATH``, regardless of
 #   how many sessions launch from there): ``runtime/`` (Magpie clone,
@@ -93,8 +103,8 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "findings",
     "reports",
     "agents/orchestration",
-    # dynamic_action.MD P2 §3 — dispatch-time artefact root for every
-    # dyn_id. Per-<dyn_id> subdirs are mkdir-ed on-demand at dispatch.
+    # dispatch-time artefact root for every dyn_id. Per-<dyn_id> subdirs
+    # are mkdir-ed on-demand at dispatch.
     "agents/orchestration/dynamic_actions",
     "agents/kernel",
     "agents/critic",
@@ -119,11 +129,10 @@ _WORKSPACE_SKELETON: tuple[str, ...] = (
     "runtime/source-mirrors",  # writable mirrors of GEAK / OOB / TraceLens sources
     "runtime/geak-config",     # generated litellm config consumed by GEAK CLI
     # Cortex KB integration. Holds the per-session ``.kb_sid`` /
-    # ``.kb_warm.json`` / ``.kb_pitfalls.json`` / ``.kb_pending.ndjson`` /
-    # ``.kb_flushed.ndjson`` / ``.kb_dead_letter.ndjson`` / ``.kb_audit.jsonl``
-    # / ``.kb_flusher.pid`` files described in KB_design §3.6 + §3.13 M1.
-    # Created up-front so the CortexKBClient never has to ``mkdir -p`` on
-    # the hot path; absent files imply ``--degraded-kb`` or pre-T0 state.
+    # ``.kb_warm.json`` / ``.kb_pitfalls.json`` / ``.kb_audit.jsonl``
+    # files. Created up-front so the KB client never has to ``mkdir -p``
+    # on the hot path; absent files imply ``--degraded-kb`` or pre-T0
+    # state.
     "runtime/cortex",
     "logs",                    # launcher stdout (workspace-shared)
 )
@@ -149,12 +158,29 @@ def workspace_root() -> Path:
     either this same path (legacy ``flat`` layout) or
     ``<workspace_root>/<model>/<ts>/`` (``per_model_ts`` layout).
 
-    Returns:
-        Path: The workspace root directory for this Hyperloom workspace.
+    When ``$USER_DATA_PATH`` is set this returns it verbatim and NEVER
+    yields ``DEFAULT_SESSION_DIR`` — that is the whole point of the
+    operator knob. When it is unset/empty we fall back to
+    ``DEFAULT_SESSION_DIR`` but emit a single loud ``logging.warning`` so
+    a misconfigured launcher (one that forgot to export the env) is
+    immediately visible instead of silently writing to the pod-local
+    default.
     """
+    global _WARNED_NO_USER_DATA
     user_data = os.environ.get(ENV_USER_DATA_PATH)
     if user_data:
         return Path(user_data)
+    if not _WARNED_NO_USER_DATA:
+        _WARNED_NO_USER_DATA = True
+        log.warning(
+            "%s is not set; falling back to %s. All session/run artefacts "
+            "will be written there, NOT to an operator-chosen location. "
+            "Export %s to the intended workspace root before launching to "
+            "avoid silently writing to the pod-local default.",
+            ENV_USER_DATA_PATH,
+            DEFAULT_SESSION_DIR,
+            ENV_USER_DATA_PATH,
+        )
     return DEFAULT_SESSION_DIR
 
 

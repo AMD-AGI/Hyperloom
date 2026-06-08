@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Data-provenance renderer.
 
 Surfaces the ``data_provenance`` section of the breakdown — a

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Library entry-points for LLM specialists (Arbor / TBO / Hyperloom).
 
 Three high-level helpers that wrap framework-agent's internals without

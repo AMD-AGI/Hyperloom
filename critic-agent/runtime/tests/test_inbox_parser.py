@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :mod:`runtime.inbox_parser`.
 
 The corpus mirrors what ``Coordinator._compose_prompt`` actually emits, plus a

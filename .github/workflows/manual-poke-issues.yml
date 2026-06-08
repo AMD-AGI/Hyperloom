@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 name: Scan & poke stale issues
 
 # Manually-triggered ops tool. Scans every open issue and, for those where:

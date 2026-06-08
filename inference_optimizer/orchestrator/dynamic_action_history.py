@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Closed-schema writer for
 ``agents/orchestration/dynamic_actions/<dyn_id>/dispatch_history.jsonl``
 plus the per-``dyn_id`` ``telemetry.json`` rollup.

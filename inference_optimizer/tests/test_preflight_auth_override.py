@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for direct-gateway auth setup in ``_preflight``.
 
 The failure mode that motivated these tests:
@@ -29,7 +31,7 @@ from inference_optimizer import cli
 # _preflight() override semantics
 # ---------------------------------------------------------------------------
 @pytest.fixture
-def stub_install_steps(monkeypatch):
+def stub_install_steps(monkeypatch, tmp_path):
     """Stub out heavyweight install steps so _preflight() is fast."""
     monkeypatch.setattr(cli, "_load_dotenv_fallback", lambda: None)
     # N24: _load_kernel_agent_env_fallback now hard-fails (sys.exit 2)
@@ -39,6 +41,22 @@ def stub_install_steps(monkeypatch):
     # stub it out alongside _load_dotenv_fallback. The real fail-loud
     # behaviour is exercised by test_n24_kernel_agent_env_hardfail.
     monkeypatch.setattr(cli, "_load_kernel_agent_env_fallback", lambda: None)
+
+    # InferenceX setup is orthogonal to the auth block under test. On a CI
+    # runner the auto-detect finds no checkout and the clone path is a real
+    # ``git fetch`` against GitHub (no network / no writable runtime dir),
+    # so _preflight() would hit ``sys.exit(2)`` before reaching the auth
+    # logic. Point INFERENCEX_PATH at a writable dir so detection short-
+    # circuits, and stub the clone as a belt-and-braces fallback.
+    inferencex_dir = tmp_path / "InferenceX"
+    (inferencex_dir / "benchmarks").mkdir(parents=True)
+    (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text(
+        "# stub", encoding="utf-8"
+    )
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
+    monkeypatch.setattr(
+        cli, "_clone_inferencex", lambda dest: str(inferencex_dir)
+    )
 
     def _fake_which(name: str):
         return f"/usr/bin/{name}"  # pretend ray + python3 are present
@@ -267,8 +285,7 @@ def _make_args(**overrides) -> argparse.Namespace:
     """Build a minimal Namespace for _validate_and_resolve_claude_model.
 
     Tests historically passed ``critic_mock=True/False`` here; that flag was
-    folded into ``critic_backend`` (one of ``mock`` / ``agent`` /
-    ``codex_bare``) when CriticAgentBackend landed. We translate
+    folded into ``critic_backend`` (``mock`` / ``agent``). We translate
     ``critic_mock`` into the new attribute for back-compat.
     """
     base = dict(
@@ -279,7 +296,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         no_kernel=False,
     )
     if "critic_mock" in overrides:
-        base["critic_backend"] = "mock" if overrides.pop("critic_mock") else "codex_bare"
+        base["critic_backend"] = "mock" if overrides.pop("critic_mock") else "agent"
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -491,7 +508,7 @@ def test_smoke_test_codex_model_skipped_when_unused(monkeypatch, capsys):
 
 
 def test_smoke_test_codex_model_skipped_when_no_kernel(monkeypatch, capsys):
-    """--no-kernel hides kernel_codex; only --critic-real keeps codex live."""
+    """--no-kernel hides kernel_codex; critic-mock avoids Codex entirely."""
     args = _make_args(
         codex_model="gpt-totally-fake",
         critic_mock=True,

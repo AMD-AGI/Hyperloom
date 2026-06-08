@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Critic robustness renderer — captures pass-rate of LLM critic /
 self-consistency checks on candidate optimizations.
 """

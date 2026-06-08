@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Validate a GEAK-compatible test harness (static + runtime checks).
 
 Usage:

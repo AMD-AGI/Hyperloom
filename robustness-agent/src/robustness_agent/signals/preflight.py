@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pre-launch / pre-action feasibility signals (C1 / C2 / C3).
 
 Three independent detectors live here, each catching a different
@@ -82,9 +84,9 @@ PRECISION_BYTES_PER_PARAM: dict[str, float] = {
 }
 
 # Per-token KV cache bytes per model class. The numbers are a single
-# rough average across the architectures Hyperloom ships marathon
-# priors for. Override per-model via the optional ``$HYPERLOOM_KV_BYTES``
-# env if you have a more accurate figure.
+# rough average across the architectures Hyperloom ships priors for.
+# Override per-model via the optional ``$HYPERLOOM_KV_BYTES`` env if
+# you have a more accurate figure.
 KV_BYTES_PER_TOKEN: dict[str, float] = {
     "dense":        16.0,
     "moe_swa":      4.0,
@@ -283,7 +285,7 @@ class ModelGpuFitDetector:
         """
         self._config = config or ModelGpuFitConfig()
         self._state_view = state_view
-        # Disk-backed dedup. Without it, M1 subprocess-per-tick fires
+        # Disk-backed dedup. Without it, the subprocess-per-tick transport fires
         # ``model_gpu_infeasible`` on every tick and the operator inbox
         # gets one row per tick. Persisting the fingerprint keeps the
         # "fire at most once per session" semantics intact.

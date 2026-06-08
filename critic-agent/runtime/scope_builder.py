@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Build a KB scope dict from explicit context + session memory.
 
 The KB service requires the 6 mandatory scope dimensions

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Server health monitor — checks inference server HTTP endpoints."""
 
 from __future__ import annotations
