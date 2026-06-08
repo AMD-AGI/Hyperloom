@@ -58,8 +58,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         "explore", "specialist",
         # Specialist source patches apply only through integrate_patch.
         "integrate_patch",
-        # Cross-domain sub-agent channel; orchestration-only, capped per round.
-        "dynamic_action",
         # Free-form CPU-only specialist dispatch (not domain-locked).
         "dynamic_specialist",
         "dynamic_specialist_check", "dynamic_specialist_collect",
@@ -283,6 +281,17 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK:          int   = 5
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
 
+# IR-6 under phase interleave (fix B): when EXPLORE↔KERNEL interleave is on,
+# the original "leave 3h so the *separate* KERNEL phase can run" rationale is
+# obsolete — kernel work already runs *inside* EXPLORE. The time gate then only
+# needs to guarantee SWEEP → CLOSE + report can finish, so it collapses to a
+# small CLOSE-buffer instead of the full KERNEL reservation. The phase-budget
+# fraction gate is disabled in this mode for the same reason (EXPLORE legitimately
+# spends the bulk of the budget because it is also doing KERNEL work). Both are
+# overridable via the explicit thresholds the caller passes.
+DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE: float = 1.0
+DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE:      float = 0.0
+
 # FRAMEWORK_PR plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
 DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK:                 int   = 3
 DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT:            float = 1.0
@@ -459,10 +468,22 @@ def should_force_exit_explore(
 
     Fires when session remaining ≤ hours_threshold*3600 OR phase remaining
     pct ≤ budget_pct_threshold; ``evidence`` records which fired.
+
+    Fix B (interleave-aware IR-6): when EXPLORE↔KERNEL interleave is enabled
+    and the caller is using the default thresholds, narrow them to a
+    CLOSE-buffer (the "reserve 3h for a separate KERNEL phase" rationale no
+    longer applies because kernel work runs inside EXPLORE). Explicit
+    non-default thresholds from the caller always win.
     """
+    if is_phase_interleave_enabled():
+        if float(hours_remaining_threshold) == DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING:
+            hours_remaining_threshold = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE
+        if float(budget_pct_threshold) == DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:
+            budget_pct_threshold = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE
     evidence: dict[str, Any] = {
         "hours_remaining_threshold":  float(hours_remaining_threshold),
         "budget_pct_threshold":       float(budget_pct_threshold),
+        "interleave_aware_ir6":       bool(is_phase_interleave_enabled()),
     }
     fired = False
     fired_reasons: list[str] = []
@@ -1135,7 +1156,9 @@ def make_history_row(
 
 __all__ = [
     "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT",
+    "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE",
     "DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING",
+    "DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE",
     "DEFAULT_PHASE_BUDGET_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",

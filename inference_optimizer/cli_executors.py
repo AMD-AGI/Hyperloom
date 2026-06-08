@@ -192,61 +192,6 @@ def _build_specialist_executor(
     return _executor
 
 
-def _build_dynamic_action_executor(
-    args: argparse.Namespace,
-) -> "Callable[[Any], Awaitable[dict]]":
-    """Build a SubAgentRunner-compatible executor backed by
-    DynamicActionRunner. Falls back to the stub executor when no ``claude``
-    binary is on PATH.
-    """
-    import shutil
-
-    from .orchestrator.dynamic_action_runner import (
-        DEFAULT_TURN_CAP,
-        DEFAULT_WALL_CLOCK_BUDGET_SEC,
-        DynamicActionRunner,
-    )
-    from .orchestrator.action_executors.dynamic_action import (
-        dynamic_action_executor as _stub_executor,
-    )
-    from .orchestrator.framework_paths import resolve_source_file_allowlist
-
-    claude_bin = shutil.which("claude") or ""
-    if not claude_bin:
-        log.warning(
-            "dynamic_action: `claude` binary not on PATH; falling "
-            "back to the stub executor (empty proposal_set).",
-        )
-        return _stub_executor
-
-    model = (
-        getattr(args, "dynamic_action_model", None)
-        or getattr(args, "claude_model", "")
-    ).strip()
-    turn_cap_raw = getattr(args, "dynamic_action_turn_cap", None)
-    turn_cap = int(turn_cap_raw) if turn_cap_raw else DEFAULT_TURN_CAP
-    wall_clock_raw = getattr(args, "dynamic_action_wall_clock_sec", None)
-    wall_clock = (
-        float(wall_clock_raw) if wall_clock_raw
-        else DEFAULT_WALL_CLOCK_BUDGET_SEC
-    )
-    backend = ClaudeBackend(
-        model=model, max_turns_default=1, raw_completion=True,
-    )
-    runner = DynamicActionRunner(
-        backend,
-        wall_clock_budget_sec=wall_clock,
-        turn_cap=turn_cap,
-        framework_source_roots=tuple(resolve_source_file_allowlist()),
-    )
-
-    async def _executor(ctx: Any) -> dict:
-        result = await runner.run(ctx)
-        return result.to_dict()
-
-    return _executor
-
-
 def _register_executors(
     coordinator: "Coordinator",
     *,
@@ -254,12 +199,11 @@ def _register_executors(
     compare_against_gpu: str | None = None,
     session_dir: Path | None = None,
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
-    dynamic_action_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
 ) -> None:
     """Wire all available action executors onto ``coordinator``: the
     _REAL_EXECUTORS_FULL set, kernel-owned no-ops (skipped when no_kernel),
     the always-wired Coordinator-internal executors, and the optional
-    specialist / dynamic_action executors (latter falls back to a stub).
+    specialist executor.
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
@@ -274,18 +218,6 @@ def _register_executors(
 
     if specialist_executor is not None:
         coordinator.sub.register_executor("specialist", specialist_executor)
-
-    if dynamic_action_executor is not None:
-        coordinator.sub.register_executor(
-            "dynamic_action", dynamic_action_executor,
-        )
-    else:
-        from .orchestrator.action_executors.dynamic_action import (
-            dynamic_action_executor as _stub_dynamic_action_executor,
-        )
-        coordinator.sub.register_executor(
-            "dynamic_action", _stub_dynamic_action_executor,
-        )
 
     # IntegratePatchExecutor: applies specialist worktree patches via git
     # apply, benches, decides KEEP/REVERT. Single integration point.

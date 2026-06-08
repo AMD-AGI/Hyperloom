@@ -11,7 +11,6 @@ from .baseline import (
     BaselineExecutor,
     baseline_executor,
 )
-from .dynamic_action import dynamic_action_executor
 from .explore import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_STACK_STABLE_PCT,
@@ -48,7 +47,6 @@ __all__ = [
     "TargetAnalysisExecutor",
     "baseline_executor",
     "conc_sweep_executor",
-    "dynamic_action_executor",
     "explore_executor",
     "framework_pr_executor",
     "recover_executor",

@@ -48,7 +48,6 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "findings",
     "reports",
     "agents/orchestration",
-    "agents/orchestration/dynamic_actions",  # per-dyn_id subdirs mkdir-ed at dispatch
     "agents/kernel",
     "agents/critic",
     "agents/robustness",

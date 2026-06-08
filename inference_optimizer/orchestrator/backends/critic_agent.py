@@ -209,23 +209,7 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
         )
 
 
-# Cross-domain enrichment helper for dynamic_action proposals.
-def _proposal_provenance_literal(proposal: dict[str, Any]) -> str:
-    """Read the ``provenance`` literal off a proposal (top-level or nested
-    ``params``); comparison is case-sensitive to match the runner validator."""
-    if not isinstance(proposal, dict):
-        return ""
-    top = proposal.get("provenance")
-    if isinstance(top, str) and top.strip():
-        return top.strip()
-    params = proposal.get("params") or {}
-    if isinstance(params, dict):
-        nested = params.get("provenance")
-        if isinstance(nested, str):
-            return nested.strip()
-    return ""
-
-
+# Cross-domain enrichment helper for cross-domain (scope=domains) proposals.
 def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
     """Read the ``scope`` dial off a proposal (top-level or nested ``params``)."""
     if not isinstance(proposal, dict):
@@ -243,9 +227,7 @@ def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
 
 def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
     """Set ``review_constraints.cross_domain`` + rule descriptors when any
-    proposal is cross-domain. Triggers on the unified ``scope == 'domains'``
-    dial; the legacy ``provenance == 'dynamic'`` literal is also accepted until
-    the dynamic_action runtime is removed. Idempotent."""
+    proposal is cross-domain (unified ``scope == 'domains'`` dial). Idempotent."""
     proposals = judge_bundle.get("proposals") or []
     if not isinstance(proposals, list):
         return
@@ -255,7 +237,6 @@ def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None
     )
     has_cross_domain = any(
         _proposal_scope_literal(p) == SCOPE_DOMAINS_LITERAL
-        or _proposal_provenance_literal(p) == "dynamic"
         for p in proposals
     )
     if not has_cross_domain:

@@ -44,7 +44,6 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "specialist",
     "integrate_patch",
     "framework_pr",
-    "dynamic_action",
     # PR #461: Coordinator-handled (no runs/ workspace) but pipeline_phase=
     # explore, so they appear in the registry set; keep the fallback aligned.
     "dynamic_specialist",
@@ -212,54 +211,6 @@ def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
     return agent_dir(session_dir, role) / "system_prompt.snapshot.md"
 
 
-# dynamic_action artefact paths under
-# ``<sd>/agents/orchestration/dynamic_actions/<dyn_id>/`` (spec.json,
-# seed_kit.json, proposal_set.json, critic_verdict.json, telemetry.json, ...).
-def dynamic_actions_root(session_dir: Path) -> Path:
-    """Parent dir of every per-``dyn_id`` artefact dir."""
-    return agent_dir(session_dir, "orchestration") / "dynamic_actions"
-
-
-def dynamic_action_artifact_dir(session_dir: Path, dyn_id: str) -> Path:
-    """Per-``dyn_id`` artefact root. Caller mkdir's before writing."""
-    did = str(dyn_id or "").strip() or "unknown"
-    return dynamic_actions_root(session_dir) / did
-
-
-def dynamic_action_spec_path(session_dir: Path, dyn_id: str) -> Path:
-    return dynamic_action_artifact_dir(session_dir, dyn_id) / "spec.json"
-
-
-def dynamic_action_seed_kit_path(session_dir: Path, dyn_id: str) -> Path:
-    return dynamic_action_artifact_dir(session_dir, dyn_id) / "seed_kit.json"
-
-
-def dynamic_action_dispatch_history_path(
-    session_dir: Path, dyn_id: str,
-) -> Path:
-    return dynamic_action_artifact_dir(session_dir, dyn_id) / "dispatch_history.jsonl"
-
-
-def dynamic_action_proposal_set_path(
-    session_dir: Path, dyn_id: str,
-) -> Path:
-    return dynamic_action_artifact_dir(session_dir, dyn_id) / "proposal_set.json"
-
-
-def dynamic_action_critic_verdict_path(
-    session_dir: Path, dyn_id: str,
-) -> Path:
-    """Verdict envelope written by the Critic."""
-    return dynamic_action_artifact_dir(session_dir, dyn_id) / "critic_verdict.json"
-
-
-def dynamic_action_telemetry_path(
-    session_dir: Path, dyn_id: str,
-) -> Path:
-    """Per-``dyn_id`` terminal-state rollup written on lifecycle exit."""
-    return dynamic_action_artifact_dir(session_dir, dyn_id) / "telemetry.json"
-
-
 # External baseline comparison artefacts. Dedicated top-level subdir (not
 # runs/) because target_analysis is a prep-phase action and prep is not in
 # _RUNS_WORKSPACE_PHASES.
@@ -404,13 +355,6 @@ __all__ = [
     "cortex_pitfalls_json",
     "cortex_sid_file",
     "cortex_warm_json",
-    "dynamic_action_artifact_dir",
-    "dynamic_action_critic_verdict_path",
-    "dynamic_action_dispatch_history_path",
-    "dynamic_action_proposal_set_path",
-    "dynamic_action_seed_kit_path",
-    "dynamic_action_spec_path",
-    "dynamic_actions_root",
     "kernel_agent_runs_dir",
     "kernel_workspace",
     "logs_dir",

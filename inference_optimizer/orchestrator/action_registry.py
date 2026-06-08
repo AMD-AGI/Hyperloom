@@ -95,8 +95,6 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "vendor_kernel_config":    "exploration",
     "deep_kernel_analysis":    "exploration",
     "recover":                 "exploration",
-    # dynamic_action — multi-turn ReAct sub-agent (dynamic_action.MD P1).
-    "dynamic_action":          "exploration",
 }
 _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
 

@@ -125,9 +125,9 @@ class ClaudeBackend:
     # stay stateless.
     conversational: bool = False
     enable_mcp_emit_intent: bool = True
-    # Raw single-shot completion mode (e.g. dynamic_action ReAct runner):
-    # skips the emit_intent server + suffix, disallows all tools, and returns
-    # ``raw_text`` without requiring an emitted intent.
+    # Raw single-shot completion mode: skips the emit_intent server + suffix,
+    # disallows all tools, and returns ``raw_text`` without requiring an
+    # emitted intent.
     raw_completion: bool = False
     # Wall-clock cap for one ``run()`` call; bounds a hung ``claude`` CLI /
     # unreachable gateway. Env override: ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.

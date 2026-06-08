@@ -226,7 +226,7 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "through emit_intent delegate (async). PolicyGate still gates the "
         "run (phase / role / paths). Args: action_name (str), optional "
         "params (object). For deep multi-step investigation, delegate to "
-        "the dynamic_action sub-agent instead.",
+        "a specialist sub-agent instead.",
         _RUN_ACTION_SCHEMA,
         "run_action_now",
     ),

@@ -742,6 +742,13 @@ class SpecialistRunner:
                 "patches_claimed_but_missing:" + ",".join(missing[:8])
             )
 
+        # Stamp the dispatch scope onto every proposal so the cross-domain
+        # Critic enrichment fires deterministically for scope=domains (not
+        # dependent on the sub-agent self-reporting it).
+        for _proposal in done_payload.get("proposal_set") or []:
+            if isinstance(_proposal, dict):
+                _proposal.setdefault("scope", prep.profile.scope)
+
         # Universal patch-safety gate (applies to every scope): drop patches
         # that are not real unified diffs / escape the tree, git-ground the
         # rest against the clean base checkout, and scan for smuggled

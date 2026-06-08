@@ -18,7 +18,6 @@ from ..protocol.action_surfaces import (
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from .phase_state import (
-    PHASE_EXPLORE,
     PHASE_NAMES,
     PHASE_SWEEP,
     is_action_allowed_in_phase,
@@ -30,6 +29,11 @@ from .specialist_domains import (
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_MAX_TURNS_HARD_CAP,
     normalize_dispatch_tags,
+)
+from .specialist_profile import (
+    SCOPE_DOMAIN as SPECIALIST_SCOPE_DOMAIN,
+    SCOPE_DOMAINS as SPECIALIST_SCOPE_DOMAINS,
+    SCOPE_VALUES as SPECIALIST_SCOPE_VALUES,
 )
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
@@ -172,7 +176,7 @@ def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
 # Ceiling snapshot at import for callers needing a plain int; recomputed lazily by :func:`research_lane_ceiling`.
 MAX_RESEARCH_LANE_CAPACITY: int = research_lane_ceiling()
 
-# Canonical name of the LLM-sub-agent resource lane shared by specialists + dynamic_action.
+# Canonical name of the LLM-sub-agent resource lane shared by specialists.
 RESEARCH_LANE_NAME: str = "research_lane"
 DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
 
@@ -186,34 +190,6 @@ SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration
 
 # Prefix the SubAgentRunner stamps on specialist emit-intents (``from_agent='specialist:<task_id>'``).
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
-
-
-# dynamic_action — supplementary cross-domain ReAct sub-agent channel (shares research_lane; red-lines in ``_validate_dynamic_action_dispatch``).
-DYNAMIC_ACTION_NAME: str = "dynamic_action"
-
-# Roles allowed to dispatch a ``dynamic_action`` (no recursive spawn).
-DYNAMIC_ACTION_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({
-    "orchestration",
-})
-
-# Floor on the ``scope_domains`` list length.
-DYNAMIC_ACTION_MIN_SCOPE_DOMAINS: int = 1
-
-# Allowed values of the optional ``budget_hint`` field.
-DYNAMIC_ACTION_BUDGET_HINTS: frozenset[str] = frozenset({
-    "low", "medium", "high",
-})
-
-# Side-effect categories ``dynamic_action`` may never declare (mirror the dispatch red lines).
-DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES: frozenset[str] = frozenset({
-    "metric",
-    "accuracy_gate",
-    "server",
-    "magpie",
-})
-
-# A ``scope_domains`` list consisting only of this literal is a kernel-only patch in disguise; rejected.
-DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL: str = "kernel"
 
 
 # R4 / R5 — external tool whitelist registry (single source of truth for PolicyGate + SpecialistRunner).
@@ -416,9 +392,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "gaps",
     # Orchestration working-memory checkpoint; Coordinator-authored (LLM must not self-author durable memory).
     "orchestration_memory",
-    # dynamic_action aggregate view + round counter; Coordinator-only (no self-narration).
-    "dynamic_actions",
-    "dynamic_action_round_count",
     # FRAMEWORK_PR per-repo discovery budget; set once, locked against LLM inflation.
     "framework_pr_max_candidates",
     # Advisory model-architecture profile from the SKILL launcher; locked as the sole source of truth.
@@ -580,10 +553,6 @@ class PolicyGate:
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
             self._validate_phase_action(role, action_name, intent_kind="delegate")
-            return
-        # dynamic_action checks live in ``_validate_dynamic_action_dispatch`` (runs before the generic phase check for a specific reason code).
-        if action_name == DYNAMIC_ACTION_NAME:
-            self._validate_dynamic_action_dispatch(role, payload)
             return
         # ``integrate_patch`` requires a non-reject Critic verdict (``bypass_critic=True`` overrides, audit-visible).
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
@@ -1210,6 +1179,42 @@ class PolicyGate:
                 ),
             )
 
+        # ``scope`` dial (domain | domains | freeform). Absent => legacy
+        # single-domain default. ``domains`` is the cross-domain channel that
+        # absorbed the retired dynamic_action worker and requires >1 distinct
+        # tag; ``domain`` is single-tag. (``freeform`` has its own gate.)
+        scope = str(params.get("scope") or "").strip().lower()
+        if scope and scope not in SPECIALIST_SCOPE_VALUES:
+            raise PolicyDenied(
+                f"delegate{{action='specialist'}}: unknown scope={scope!r}",
+                rule="specialist_scope_invalid",
+                hint=(
+                    f"scope must be one of {sorted(SPECIALIST_SCOPE_VALUES)!r}"
+                ),
+            )
+        if scope == SPECIALIST_SCOPE_DOMAINS and len(tags) < 2:
+            raise PolicyDenied(
+                "delegate{action='specialist'}: scope='domains' is the "
+                "cross-domain channel and requires at least 2 distinct "
+                f"tags; got {tags!r}",
+                rule="specialist_scope_too_narrow",
+                hint=(
+                    "Declare every domain the patch must touch together in "
+                    "params.tags, or use scope='domain' for a single-domain "
+                    "specialist."
+                ),
+            )
+        if scope == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
+            raise PolicyDenied(
+                "delegate{action='specialist'}: scope='domain' is "
+                f"single-domain but got {len(tags)} tags {tags!r}",
+                rule="specialist_scope_mismatch",
+                hint=(
+                    "Use scope='domains' for a cross-domain specialist, or "
+                    "pass a single tag."
+                ),
+            )
+
         # ``sub_kind`` is a free-form prompt selector (not constrained to a catalogue).
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         if not gap:
@@ -1288,183 +1293,6 @@ class PolicyGate:
                         "larger GPU specialist pool."
                     ),
                 )
-
-    # dynamic_action dispatch validation
-    def _validate_dynamic_action_dispatch(
-        self, role: "AgentRole", payload: dict[str, Any],
-    ) -> None:
-        """Reject every dispatch crossing a ``dynamic_action`` red line (EXPLORE-only, orchestration-only, schema + side-effect red lines); each failure has a distinct ``rule=dynamic_*``."""
-        state = self.shared_state
-        phase = ""
-        if state is not None:
-            phase = str(getattr(state, "phase", "") or "").strip().upper()
-        if phase and phase != PHASE_EXPLORE:
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}} only valid in "
-                f"phase=EXPLORE; current phase={phase!r}",
-                rule="dynamic_phase_violation",
-                hint=(
-                    "dynamic_action is an EXPLORE-only channel; wait "
-                    "for the EXPLORE phase before dispatching."
-                ),
-            )
-        if role.name not in DYNAMIC_ACTION_DISPATCH_SOURCE_ALLOWLIST:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot dispatch dynamic_action "
-                f"(allowed: "
-                f"{sorted(DYNAMIC_ACTION_DISPATCH_SOURCE_ALLOWLIST)!r})",
-                rule="dynamic_source_violation",
-                hint=(
-                    "Only the orchestration role may dispatch "
-                    "dynamic_action; sub-agents must not recursively "
-                    "spawn one."
-                ),
-            )
-
-        params = payload.get("params") or {}
-        if not isinstance(params, dict):
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: params must "
-                f"be a dict",
-                rule="dynamic_payload_schema",
-                hint=(
-                    "params must carry motivation_gap_text, "
-                    "scope_domains, side_effects_declared (and optional "
-                    "budget_hint)."
-                ),
-            )
-        motivation = str(params.get("motivation_gap_text") or "").strip()
-        if not motivation:
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                f"params.motivation_gap_text is required and non-empty",
-                rule="dynamic_payload_schema",
-                hint=(
-                    "Provide a free-form motivation_gap_text explaining "
-                    "why a single specialist cannot cover this patch "
-                    "combination (audit only; PolicyGate does not parse "
-                    "the semantics)."
-                ),
-            )
-        scope_domains_raw = params.get("scope_domains")
-        if not isinstance(scope_domains_raw, (list, tuple)):
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                f"params.scope_domains must be a list of specialist "
-                f"domain keys",
-                rule="dynamic_payload_schema",
-            )
-        # Dedup (order-preserving) so a repeated entry can't fake a cross-domain dispatch.
-        scope_domains = list(dict.fromkeys(
-            d for d in (str(d or "").strip() for d in scope_domains_raw) if d
-        ))
-        # All-kernel scope is a kernel-only patch in disguise; checked before the min-length rule for its dedicated reason code.
-        if scope_domains and all(
-            d.lower() == DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL
-            for d in scope_domains
-        ):
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: every "
-                f"scope_domains entry is "
-                f"{DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL!r}; that is a "
-                f"kernel-only patch in disguise",
-                rule="dynamic_kernel_only_disallowed",
-                hint=(
-                    "Kernel-only patches must go through the kernel "
-                    "agent (REQUEST{target_agent='kernel', ...}); "
-                    "dynamic_action is for genuine cross-domain "
-                    "synthesis."
-                ),
-            )
-        if len(scope_domains) < DYNAMIC_ACTION_MIN_SCOPE_DOMAINS:
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                f"scope_domains has {len(scope_domains)} distinct "
-                f"entries; minimum is {DYNAMIC_ACTION_MIN_SCOPE_DOMAINS}",
-                rule="dynamic_scope_too_narrow",
-                hint=(
-                    "Declare at least one specialist domain in "
-                    "scope_domains so the sub-agent's scope is anchored."
-                ),
-            )
-        unknown_domains = [
-            d for d in scope_domains
-            if d not in SPECIALIST_DOMAIN_KEYS
-            and d != DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL
-        ]
-        if unknown_domains:
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                f"scope_domains contains unregistered keys: "
-                f"{unknown_domains!r}",
-                rule="dynamic_scope_unknown_domain",
-                hint=(
-                    f"Every scope_domains entry must be one of "
-                    f"{sorted(SPECIALIST_DOMAIN_KEYS)!r} (or the "
-                    f"reserved literal "
-                    f"{DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL!r})."
-                ),
-            )
-        side_effects_raw = params.get("side_effects_declared")
-        if not isinstance(side_effects_raw, (list, tuple)):
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                f"params.side_effects_declared must be a list",
-                rule="dynamic_payload_schema",
-                hint=(
-                    "Declare every action category the sub-agent "
-                    "expects to touch (e.g. ['framework_source']); "
-                    "verified against the red-line set below."
-                ),
-            )
-        side_effects = [str(s or "").strip() for s in side_effects_raw]
-        side_effects = [s for s in side_effects if s]
-        if not side_effects:
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                f"params.side_effects_declared cannot be empty",
-                rule="dynamic_payload_schema",
-                hint=(
-                    "Even a noop-shaped dynamic_action must declare "
-                    "its target side-effect category (e.g. "
-                    "['framework_source'])."
-                ),
-            )
-        budget_hint_raw = params.get("budget_hint")
-        if budget_hint_raw is not None:
-            budget_hint = str(budget_hint_raw or "").strip().lower()
-            if budget_hint and budget_hint not in DYNAMIC_ACTION_BUDGET_HINTS:
-                raise PolicyDenied(
-                    f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                    f"budget_hint={budget_hint!r} not in "
-                    f"{sorted(DYNAMIC_ACTION_BUDGET_HINTS)!r}",
-                    rule="dynamic_payload_schema",
-                )
-
-        offending_side_effects: list[str] = []
-        for se in side_effects:
-            se_norm = se.lower()
-            if (
-                se_norm in KERNEL_OWNED_ACTIONS
-                or se_norm in DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES
-            ):
-                offending_side_effects.append(se)
-        if offending_side_effects:
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                f"side_effects_declared crosses a red line: "
-                f"{offending_side_effects!r}",
-                rule="dynamic_side_effects_red_line",
-                hint=(
-                    "dynamic_action cannot declare kernel-owned "
-                    "actions, metric / accuracy_gate ownership, or "
-                    "independent server lifecycle."
-                ),
-            )
-        # Registry-backed phase allowlist as a final defense (round count bounded by lane/GPU leases, not a policy cap).
-        self._validate_phase_action(
-            role, DYNAMIC_ACTION_NAME, intent_kind="delegate",
-        )
 
     # R3 ``specialist_done_source``
     def _validate_specialist_intent(

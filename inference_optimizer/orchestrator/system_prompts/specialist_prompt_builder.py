@@ -523,7 +523,39 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.append("")
         body.extend(tag_focus(inp))
         rendered_focus_keys.add(tag_domain.key)
+    if inp.scope == "domains":
+        body.extend(_cross_domain_block(inp))
     return body
+
+
+def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
+    """Cross-domain mandate appended when ``scope == 'domains'`` (absorbed
+    from the retired dynamic_action channel). The single deliverable is still
+    ONE ``specialist_done``; the difference is the patch may span every domain
+    in scope and the Critic will hold it to the cross-domain rules."""
+    tags = ", ".join(inp.extra_focus_tags) if inp.extra_focus_tags else inp.domain.key
+    return [
+        "",
+        "### Cross-domain mandate (scope = domains)",
+        "",
+        f"You are dispatched as a **cross-domain** specialist over: {tags}.",
+        "You may author a single coherent patch that spans these domains "
+        "together when (and only when) the change must happen jointly — a "
+        "combination no single-domain specialist could surface from within "
+        "its own boundary.",
+        "",
+        "In your ``specialist_done`` you MUST justify the combination:",
+        "- give an independent rationale for the change **within each domain** "
+        "in scope;",
+        "- name the **coupling points** (why these changes must land together) "
+        "and at least one **side effect** of the combination;",
+        "- show this is genuine cross-domain synthesis, not a concatenation of "
+        "two independent single-domain edits (that is an explore grid combo, "
+        "not a cross-domain patch).",
+        "Set ``scope='domains'`` on the proposal so the Critic attaches the "
+        "cross-domain review rules. Never self-report numeric speedups — the "
+        "Coordinator measures gain.",
+    ]
 
 
 # Section 2 — Hardware context
