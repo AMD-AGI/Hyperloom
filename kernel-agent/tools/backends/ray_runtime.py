@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Ray cluster lifecycle helpers for kernel-agent backends.
 
 Conventions:
@@ -93,6 +95,60 @@ def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
         subprocess.run(["ray", "stop", "--force"], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
 
 
+def _is_ray_version_mismatch(text: str) -> bool:
+    """True when Ray refused the job because the reachable cluster was
+    started under a different Python / Ray than this process (issue #432).
+
+    Ray raises a RuntimeError whose message reads e.g.::
+
+        Version mismatch: The cluster was started with:
+            Ray: 2.44.1
+            Python: 3.10.12
+        This process on node ... was started with:
+            Ray: 2.44.1
+            Python: 3.12.13
+
+    Matching on the stable ``Version mismatch`` banner keeps this robust to
+    the surrounding Ray/Python version numbers.
+    """
+    return "version mismatch" in (text or "").lower()
+
+
+def force_restart_local_cluster(
+    num_gpus: Optional[int] = None, log_path: Optional[Path] = None,
+) -> None:
+    """Tear down any reachable Ray cluster and start a fresh local head
+    under THIS interpreter.
+
+    Recovers from a stale/foreign cluster started under a different Python
+    (issue #432): reusing it makes ``ray.init`` fail in ~0.8s with a
+    "Version mismatch" RuntimeError that otherwise surfaces as a mislabeled
+    "compile failed" REVERT. ``ray stop --force`` also clears raylet
+    zombies, so this doubles as wedged-cluster recovery.
+
+    Raises RuntimeError if the fresh head fails to start.
+    """
+    stop_cmd = ["ray", "stop", "--force"]
+    start_cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=0.0.0.0"]
+    if num_gpus is not None:
+        start_cmd.append(f"--num-gpus={num_gpus}")
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"$ {' '.join(stop_cmd)}  # issue #432 version-mismatch recovery\n")
+            subprocess.run(stop_cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
+            log.write(f"$ {' '.join(start_cmd)}\n")
+            proc = subprocess.run(start_cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
+            log.write(f"\n[ray_restart_exit_code] {proc.returncode}\n")
+    else:
+        subprocess.run(stop_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.run(start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"failed to restart local Ray after version mismatch; see {log_path}"
+        )
+
+
 # Env vars safe to forward to Ray workers. Notice we do NOT include
 # HIP_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES; those are
 # Ray's responsibility and forcing them from the driver triggers
@@ -158,28 +214,46 @@ def safe_runtime_env() -> dict:
     return {"env_vars": env}
 
 
-def quiet_ray_init():
+def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = None):
     """Initialize ray while suppressing the connect banner on stdout.
 
-    Connects to ``$RAY_ADDRESS`` (default ``auto``) with driver logging
-    silenced and the connect banner redirected away from stdout, using
-    the allowlisted runtime env from :func:`safe_runtime_env`.
-
-    Returns:
-        dict: The ``runtime_env`` mapping that was passed to
-            ``ray.init`` (so callers can reuse it for nested tasks).
+    If the reachable cluster was started under a different Python/Ray than
+    this process (issue #432 — e.g. cluster py3.10 vs submitter py3.12),
+    ``ray.init`` raises a "Version mismatch" RuntimeError in ~0.8s. Rather
+    than letting that bubble up as a mislabeled "compile failed" REVERT, we
+    tear the foreign cluster down, bring up a fresh local head under THIS
+    interpreter (``force_restart_local_cluster``), and retry ``ray.init``
+    once. ``num_gpus`` / ``log_path`` are threaded through to the restart so
+    the new head matches the requested GPU count and the action is audited
+    in ``ray_lifecycle.log``.
     """
     import contextlib
     import io
     import ray
     runtime_env = safe_runtime_env()
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        ray.init(
-            address=os.environ.get("RAY_ADDRESS", "auto"),
-            ignore_reinit_error=True,
-            log_to_driver=False,
-            logging_level="error",
-            runtime_env=runtime_env,
-        )
+
+    def _init() -> None:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ray.init(
+                address=os.environ.get("RAY_ADDRESS", "auto"),
+                ignore_reinit_error=True,
+                log_to_driver=False,
+                logging_level="error",
+                runtime_env=runtime_env,
+            )
+
+    try:
+        _init()
+    except Exception as exc:  # noqa: BLE001
+        if not _is_ray_version_mismatch(str(exc)):
+            raise
+        # Foreign cluster under a different interpreter — replace it with a
+        # local head under this Python, then retry exactly once.
+        try:
+            ray.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        force_restart_local_cluster(num_gpus=num_gpus, log_path=log_path)
+        _init()
     return runtime_env

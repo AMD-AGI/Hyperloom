@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Robustness monitor for long-running ``inference_optimizer optimize`` runs.
 #
 # Polls ``$INFERENCE_OPTIMIZER_SESSION_DIR/state.json`` every 300s. On a
@@ -18,11 +20,24 @@
 #                                            after MAX_HOURS + 1 buffer)
 #   TARGET_GAIN                        10    --target-gain forwarded to
 #                                            ``inference_optimizer optimize --resume``
-#   INFERENCE_OPTIMIZER_SESSION_DIR    /workspace/hyperloom
-#                                            session-dir holding state.json
+#   INFERENCE_OPTIMIZER_SESSION_DIR    (unset) session-dir holding state.json;
+#                                            when set it wins outright
+#   LAUNCH_INFO_FILE                   (unset) launch-info JSON written by
+#                                            ``optimize --launch-info-file``; its
+#                                            ``.session_dir`` is used when
+#                                            INFERENCE_OPTIMIZER_SESSION_DIR is unset
+#   LAUNCH_INFO_WAIT_SEC               60    seconds to poll for LAUNCH_INFO_FILE
+#                                            before failing (covers the monitor
+#                                            racing ahead of the optimizer write)
 #   MAGPIE_PYTHON                      /opt/venv/bin/python
 #                                            interpreter forwarded to the
 #                                            resume launch
+#
+# Session-dir resolution order (state.json holder; never a timestamp guess):
+#   1. $INFERENCE_OPTIMIZER_SESSION_DIR  (explicit; wins instantly)
+#   2. .session_dir from $LAUNCH_INFO_FILE  (authoritative launch-info JSON;
+#      polled for up to $LAUNCH_INFO_WAIT_SEC if not yet flushed)
+#   3. fail loudly; never guess or fall back to a timestamp/default path
 #
 # Invocation pattern (see ``inference_optimizer/SKILL.md`` §"Robustness
 # Monitor for Long Runs"):
@@ -53,7 +68,40 @@ set -u
 : "${REPO_ROOT:?error: REPO_ROOT must be the Hyperloom checkout root (resume logs land in \$REPO_ROOT/optimizer_runs/)}"
 
 export MAGPIE_PYTHON="${MAGPIE_PYTHON:-/opt/venv/bin/python}"
-session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
+
+# Resolve the session dir holding state.json (see resolution order above).
+# The launch-info JSON is the authoritative source; never guess by timestamp.
+# When LAUNCH_INFO_FILE is configured but not yet flushed (the monitor raced
+# ahead of the optimizer's launch-info write), poll for a bounded window
+# instead of dying immediately. An explicit INFERENCE_OPTIMIZER_SESSION_DIR
+# resolves instantly; an unset LAUNCH_INFO_FILE fails fast (no wasted wait).
+session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-}"
+if [ -z "$session_dir" ] && [ -n "${LAUNCH_INFO_FILE:-}" ]; then
+  # Validate the wait BEFORE arithmetic: a non-integer value would otherwise
+  # make the $(( ... )) below error out under ``set -u`` (e.g. "60x" ->
+  # "value too great for base"), skipping the bounded wait entirely. Degrade a
+  # malformed value to the default instead of crashing / failing early.
+  launch_info_wait_sec="${LAUNCH_INFO_WAIT_SEC:-60}"
+  if ! [[ "$launch_info_wait_sec" =~ ^[0-9]+$ ]]; then
+    echo "WARN: invalid LAUNCH_INFO_WAIT_SEC='${launch_info_wait_sec}'; using default 60s." >&2
+    launch_info_wait_sec=60
+  fi
+  # Force base-10: a regex-valid but leading-zero value ("08"/"09") is parsed
+  # as octal by bash arithmetic and would error ("value too great for base").
+  launch_info_deadline=$(( $(date +%s) + 10#$launch_info_wait_sec ))
+  while [ -z "$session_dir" ]; do
+    if [ -f "${LAUNCH_INFO_FILE}" ]; then
+      session_dir="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("session_dir") or "")' "${LAUNCH_INFO_FILE}" 2>/dev/null || true)"
+    fi
+    [ -n "$session_dir" ] && break
+    [ "$(date +%s)" -ge "$launch_info_deadline" ] && break
+    sleep 2
+  done
+fi
+if [ -z "$session_dir" ]; then
+  echo "ERROR: session dir is unknown (no INFERENCE_OPTIMIZER_SESSION_DIR; LAUNCH_INFO_FILE absent or not written within ${launch_info_wait_sec:-60}s). Refusing to fall back to /workspace/hyperloom." >&2
+  exit 2
+fi
 deadline=$(( $(date +%s) + (${MAX_HOURS:-24} + 1) * 3600 ))
 
 read_stop() {
@@ -97,6 +145,7 @@ except ImportError:
         "crash_threshold_exceeded", "user_stop_requested",
         "time_exhausted_during_prelude", "cortex_t0_failed",
         "cortex_drain_failed", "cortex_commit_failed",
+        "model_context_window_too_small", "unsupported_model_arch",
     })
 
 if stop and stop in STOP_REASON_VOCAB:

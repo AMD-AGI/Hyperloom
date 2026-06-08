@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Framework Agent CLI entry point.
 
 Subcommands:
@@ -11,9 +13,9 @@ Subcommands:
 * ``fa kb``         - knowledge-base operations: ``list``, ``show``,
   ``search``, ``contribute``, ``synthesize``. Defaults to pure-Python
   digest; ``synthesize --with-llm`` lazy-imports ``claude_agent_sdk``.
-* ``fa phase-discover`` / ``phase-fetch`` / ``phase-emit-proposal`` -
-  Hyperloom FRAMEWORK_PR phase entry points. Each reads a JSON
-  ``--request`` and writes a JSON ``--out`` (critic-agent style).
+* ``fa phase-discover`` - Hyperloom FRAMEWORK_PR phase entry point.
+  Reads a JSON ``--request`` and writes a JSON ``--out``
+  (critic-agent style).
 """
 
 from __future__ import annotations
@@ -89,8 +91,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
         {
             "required": ["framework", "repo_url", "baseline"],
             "subcommands_available": [
-                "schema", "candidates", "explore", "kb",
-                "phase-discover", "phase-fetch", "phase-emit-proposal",
+                "schema", "candidates", "explore", "kb", "phase-discover",
             ],
             "subcommands_planned": [],
             "search_modes_supported": ["primus_cortex", "github"],
@@ -313,172 +314,6 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     )
 
 
-def _cmd_phase_fetch(args: argparse.Namespace) -> None:
-    """Materialise a PR candidate into an isolated worktree.
-
-    Request shape:
-        {"pr_url": str, "repo": str, "ref": str,
-         "framework": str, "repo_url": str (optional),
-         "worktree_dir": str (parent directory under which to create
-                              the per-candidate worktree)}
-
-    Output shape:
-        {"status": "ok" | "skipped" | "error",
-         "worktree_path": str, "applied_files": [str, ...],
-         "message": str (on non-ok)}
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
-
-    Raises:
-        RuntimeAdapterError: If neither ``pr_url`` nor ``ref`` is given, or
-            ``worktree_dir`` is missing.
-    """
-    from ..isolation import (
-        WorkspacePaths,
-        prepare_candidate_workspace,
-        prepare_repo_cache,
-    )
-    from ..models import Candidate, ExploreRequest
-
-    request = _read_json_request(args.request)
-    pr_url = str(request.get("pr_url") or "").strip()
-    repo = str(request.get("repo") or "").strip()
-    ref = str(request.get("ref") or "").strip()
-    framework = str(request.get("framework") or "sglang").strip().lower()
-    repo_url = str(request.get("repo_url") or "").strip()
-    if not repo_url:
-        from framework_agent.repo_map import repo_url_for_framework
-        repo_url = repo_url_for_framework(framework)
-    worktree_dir = Path(str(request.get("worktree_dir") or "")).expanduser()
-    if not (pr_url or ref) or not worktree_dir:
-        raise RuntimeAdapterError(
-            "phase-fetch: pr_url|ref and worktree_dir are required"
-        )
-    worktree_dir.mkdir(parents=True, exist_ok=True)
-
-    req = ExploreRequest.from_dict({
-        "framework": framework,
-        "repo_url": repo_url,
-        "work_dir": str(worktree_dir),
-        "baseline": {"throughput": 1.0},
-        "search_modes": ["github"],
-        "prepare_candidate_env": False,
-    })
-    candidate = Candidate(
-        ref=ref or (f"PR:{pr_url.rsplit('/', 1)[-1]}" if pr_url else ""),
-        repo=repo,
-        source="github",
-        title=str(request.get("title") or ""),
-        html_url=pr_url,
-    )
-    try:
-        repo_cache = prepare_repo_cache(req)
-        paths: WorkspacePaths = prepare_candidate_workspace(
-            req, candidate, repo_cache_dir=repo_cache
-        )
-    except Exception as exc:  # noqa: BLE001
-        _emit_json(
-            {
-                "status": "error",
-                "worktree_path": "",
-                "applied_files": [],
-                "message": f"prepare_candidate_workspace failed: {exc!r}",
-            },
-            args.out,
-        )
-        return
-
-    applied: list[str] = []
-    if paths.worktree.exists():
-        # Walk the worktree and record top-level changed files for the
-        # caller's manifest (best-effort; full diff lives inside the
-        # worktree's git history).
-        try:
-            import subprocess as _sp
-            cp = _sp.run(
-                ["git", "diff", "--name-only", "HEAD~1..HEAD"],
-                cwd=paths.worktree,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
-            if cp.returncode == 0:
-                applied = [ln.strip() for ln in cp.stdout.splitlines() if ln.strip()]
-        except Exception:  # noqa: BLE001
-            applied = []
-
-    _emit_json(
-        {
-            "status": "ok",
-            "worktree_path": str(paths.worktree),
-            "applied_files": applied,
-            "message": "",
-        },
-        args.out,
-    )
-
-
-def _cmd_phase_emit_proposal(args: argparse.Namespace) -> None:
-    """Emit a ``specialist_done``-shaped envelope for the Coordinator.
-
-    Request shape:
-        {"task_id": str, "pr_url": str, "worktree_path": str,
-         "gap_canonical_id": str, "framework": str,
-         "patches_written": [str, ...] (optional),
-         "rationale": str (optional)}
-
-    Output shape:
-        {"from_agent": "framework_agent:<task_id>",
-         "kind": "specialist_done",
-         "gap_canonical_id": str,
-         "proposal_set": [{"kind": "framework_pr",
-                            "pr_url": str,
-                            "worktree_path": str,
-                            "framework": str,
-                            "rationale": str}],
-         "patches_written": [str, ...]}
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
-
-    Raises:
-        RuntimeAdapterError: If ``task_id``, ``pr_url``, or ``worktree_path`` is
-            missing.
-    """
-    request = _read_json_request(args.request)
-    task_id = str(request.get("task_id") or "").strip()
-    pr_url = str(request.get("pr_url") or "").strip()
-    worktree_path = str(request.get("worktree_path") or "").strip()
-    framework = str(request.get("framework") or "sglang").strip().lower()
-    gap_canonical_id = str(request.get("gap_canonical_id") or "")
-    patches_written = request.get("patches_written") or []
-    if not isinstance(patches_written, list):
-        patches_written = []
-    rationale = str(request.get("rationale") or "")
-    if not task_id or not pr_url or not worktree_path:
-        raise RuntimeAdapterError(
-            "phase-emit-proposal: task_id, pr_url, worktree_path required"
-        )
-    envelope = {
-        "from_agent": f"framework_agent:{task_id}",
-        "kind": "specialist_done",
-        "gap_canonical_id": gap_canonical_id,
-        "proposal_set": [
-            {
-                "kind": "framework_pr",
-                "pr_url": pr_url,
-                "worktree_path": worktree_path,
-                "framework": framework,
-                "rationale": rationale,
-            }
-        ],
-        "patches_written": [str(p) for p in patches_written],
-    }
-    _emit_json(envelope, args.out)
-
-
 def _cmd_kb(args: argparse.Namespace) -> None:
     """Dispatch ``fa kb <op>`` to the appropriate kb-module helper.
 
@@ -636,23 +471,6 @@ def _build_parser() -> argparse.ArgumentParser:
     schema_p = sub.add_parser("schema", help="Print the request schema summary")
     schema_p.set_defaults(func=_cmd_schema)
 
-    # Sibling-skill `fa agent` subcommand -- P2 PR-D. Used by
-    # inference_optimizer's FrameworkAgentBackend.
-    # NOTE: ``framework_agent.agent`` is not always shipped (e.g. PR branch
-    # ``framework-agent-pr`` ships runtime/ but not agent/). Tolerate the
-    # missing module so the core ``fa candidates`` / ``fa explore`` verbs
-    # (used by the inference_optimizer ``framework_pr`` bandit arm) still
-    # work; the ``fa agent`` subcommand simply becomes unavailable.
-    try:
-        from ..agent.cli import register_subparser as _register_agent_subparser
-        _register_agent_subparser(sub)
-    except ModuleNotFoundError as _exc:
-        import logging as _logging
-        _logging.getLogger(__name__).debug(
-            "framework_agent.agent not installed; skipping 'fa agent' subcommand (%s)",
-            _exc,
-        )
-
     cand_p = sub.add_parser(
         "candidates",
         help="Enumerate PR/ref candidates per request.search_modes (no build/bench)",
@@ -699,22 +517,6 @@ def _build_parser() -> argparse.ArgumentParser:
     pd_p.add_argument("--request", required=True, help="JSON request file path")
     pd_p.add_argument("--out", default="-", help="Output path (default stdout)")
     pd_p.set_defaults(func=_cmd_phase_discover)
-
-    pf_p = sub.add_parser(
-        "phase-fetch",
-        help="Materialise a PR into an isolated worktree (FRAMEWORK_PR phase)",
-    )
-    pf_p.add_argument("--request", required=True, help="JSON request file path")
-    pf_p.add_argument("--out", default="-", help="Output path (default stdout)")
-    pf_p.set_defaults(func=_cmd_phase_fetch)
-
-    pep_p = sub.add_parser(
-        "phase-emit-proposal",
-        help="Emit a specialist_done-shaped envelope (FRAMEWORK_PR phase)",
-    )
-    pep_p.add_argument("--request", required=True, help="JSON request file path")
-    pep_p.add_argument("--out", default="-", help="Output path (default stdout)")
-    pep_p.set_defaults(func=_cmd_phase_emit_proposal)
 
     kb_p = sub.add_parser(
         "kb",

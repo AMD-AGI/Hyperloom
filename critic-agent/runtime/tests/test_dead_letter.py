@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :class:`runtime.dead_letter.DeadLetter`."""
 
 from __future__ import annotations

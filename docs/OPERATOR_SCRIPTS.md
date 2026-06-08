@@ -140,9 +140,9 @@ Reads at most the last 500 events from
   "kernel_request:tracelens_analysis": 1,
   "kernel_response:kernel_optimization:KEEP": 3,
   "kernel_response:kernel_optimization:NEEDS_REVIEW": 4,
-  "proposal:backends": 12,
-  "proposal:kernel_opt": 5,
-  "proposal:params": 9
+  "proposal:explore": 12,
+  "proposal:specialist": 4,
+  "proposal:kernel_opt": 5
 }
 ```
 

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Session_dir layout regression tests (N17 per-model/ts default).
 
 Locks the contract:
@@ -45,7 +47,7 @@ from inference_optimizer.manifest import (
     write_manifest,
 )
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
 from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager,

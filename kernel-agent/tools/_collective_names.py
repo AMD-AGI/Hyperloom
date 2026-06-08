@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Collective-kernel name detection.
 
 Some hot-kernel candidates surfaced by TraceLens are multi-GPU

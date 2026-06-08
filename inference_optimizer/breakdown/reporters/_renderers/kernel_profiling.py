@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Kernel profiling renderer (v1.1).
 
 Surfaces profile / TraceLens runs: launch args, artifact paths,

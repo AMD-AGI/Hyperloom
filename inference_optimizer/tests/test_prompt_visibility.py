@@ -1,6 +1,8 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pin the Orchestration system prompt's specialist / integrate_patch visibility.
 
-Empirical evidence from a v0.8 12h DeepSeek-R1-0528 marathon showed that
+Empirical evidence from a v0.8 12h DeepSeek-R1-0528 run showed that
 ``storage/coordinator.db tasks`` carried 0 rows of ``kind='specialist'``
 for an entire session. Root cause: the orchestration system prompt's
 ACTIONS catalogue did not render an entry for ``specialist`` because
@@ -16,7 +18,7 @@ PR-A1 (Arbor-into-Hyperloom) adds:
 * ``specialist`` / ``integrate_patch`` in
   ``FULL_ENABLED_ACTIONS`` / ``NO_KERNEL_ENABLED_ACTIONS``
 * ``integrate_patch`` in ``PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE]``
-* EXPLORE specialist-first contract in ``orchestration.md``
+* EXPLORE specialist-informed contract in ``orchestration.md``
 
 These tests enforce that those changes hold so a future refactor cannot
 silently regress the visibility.
@@ -119,7 +121,7 @@ def test_integrate_patch_allowed_in_explore_phase() -> None:
     allowed = PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE]
     assert "integrate_patch" in allowed
     # ``specialist`` should already be there from v0.8 M5; assert that
-    # to anchor the EXPLORE specialist-first contract.
+    # to anchor the EXPLORE specialist-informed contract.
     assert "specialist" in allowed
 
 
@@ -167,9 +169,9 @@ def test_specialist_emit_hint_in_no_kernel_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Orchestration rules fragment: EXPLORE specialist-first contract
+# Orchestration rules fragment: EXPLORE specialist-informed contract
 # ---------------------------------------------------------------------------
-def test_orchestration_rules_mentions_explore_specialist_first(
+def test_orchestration_rules_mentions_explore_specialist_informed(
     rules_path: Path,
 ) -> None:
     text = rules_path.read_text(encoding="utf-8")
@@ -179,5 +181,10 @@ def test_orchestration_rules_mentions_explore_specialist_first(
     assert "EXPLORE" in text
     assert "specialist" in text
     assert "integrate_patch" in text
-    # The PR-A1 specialist-first contract directive must be present.
-    assert "specialist-first" in text
+    assert "Specialist-informed" in text
+    assert "llm_direct" in text
+    assert "needs_gpu" in text
+    assert "gpu_count" in text
+    assert "specialist_gpu_pool_disabled" in text
+    assert "All-llm_direct grids are denied" not in text
+    assert "explore_requires_specialist_provenance" not in text

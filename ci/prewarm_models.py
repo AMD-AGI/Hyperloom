@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ci/prewarm_models.py — pre-populate /wekafs/models/ from HuggingFace,
 bypassing SaFE playground download (which is single-flight + slow).
 

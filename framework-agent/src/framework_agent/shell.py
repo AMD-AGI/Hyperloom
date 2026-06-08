@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shell helpers for trusted framework exploration commands.
 
 Pure subprocess + template rendering with no external deps. The

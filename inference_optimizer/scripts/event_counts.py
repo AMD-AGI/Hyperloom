@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Print action / proposal / kernel counts from a session's coordinator.db.
 
 Usage:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — CLOSE phase 5-step sequencer tests.
 
 KB_gaps/Gap-06 root cause: CLOSE phase had three uncoordinated exit
@@ -141,10 +143,6 @@ class _StubCortex:
         *,
         drain_remaining: int = 0,
         drain_raises: BaseException | None = None,
-        # Back-compat constructor kwargs for tests that still pass
-        # ``commit_summary`` / ``commit_raises``; the values are ignored.
-        commit_raises: BaseException | None = None,
-        commit_summary: dict | None = None,
     ):
         self.drain_calls: int = 0
         self._drain_remaining = drain_remaining
@@ -357,7 +355,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord,
 ):
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.cortex_kb = _StubCortex(commit_summary={"status": "committed"})
+    coord.cortex_kb = _StubCortex()
     coord.shared_state.cortex_session_id = "sid-test"
 
     await coord._on_enter_close(from_phase="SWEEP")
@@ -384,24 +382,46 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     assert rows[5]["status"] == "done"     # done
     # close_sequence_done flag set.
     assert coord.shared_state.close_sequence_done is True
-    # v0.8 §3.2 §5.5 — sequencer last step must set stop_reason so
-    # the main loop terminates on the next tick.
-    assert coord.shared_state.stop_reason == "time_exhausted"
+    # v0.8 §3.2 §5.5 — sequencer must set stop_reason so the main loop
+    # terminates on the next tick. A normal SWEEP completion carries a
+    # ``sweep_done`` phase-exit reason, which must be preserved (NOT
+    # mislabelled ``time_exhausted``).
+    assert coord.shared_state.stop_reason == "sweep_done"
 
 
 @pytest.mark.asyncio
-async def test_close_sequencer_sets_time_exhausted_stop_reason(coord):
-    """Step 5 stamps ``stop_reason='time_exhausted'`` when no other
-    step set it first. ``time_exhausted`` is the canonical CLOSE
-    vocab term in :data:`STOP_REASON_VOCAB` and matches the
-    wall-clock-deadline path's terminator (Coordinator.run).
+async def test_close_sequencer_falls_back_to_time_exhausted(coord):
+    """The sequencer falls back to ``stop_reason='time_exhausted'`` only
+    when the run reached CLOSE with no usable phase-exit reason (the
+    wall-clock-deadline path is the common case). ``time_exhausted`` is
+    the canonical fallback vocab term in :data:`STOP_REASON_VOCAB`.
     """
-    coord.shared_state.phase_history = [_close_phase_history_row()]
+    # CLOSE-bound row with no recorded reason → genuine fallback.
+    coord.shared_state.phase_history = [
+        {"to_phase": "CLOSE", "reason": "", "evidence": {}},
+    ]
     assert coord.shared_state.stop_reason == ""
 
     await coord._on_enter_close(from_phase="SWEEP")
 
     assert coord.shared_state.stop_reason == "time_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
+    """A normal SWEEP → CLOSE transition records ``reason='sweep_done'``
+    (a valid STOP_REASON_VOCAB term) on the latest phase_history row.
+    The sequencer must derive that reason rather than blanket-stamping
+    ``time_exhausted`` — otherwise a clean run is mislabelled a timeout
+    in session_breakdown.json / downstream dashboards (P1 regression)."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "CLOSE", "reason": "conc_sweep_done", "evidence": {}},
+    ]
+    assert coord.shared_state.stop_reason == ""
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    assert coord.shared_state.stop_reason == "conc_sweep_done"
 
 
 @pytest.mark.asyncio
@@ -482,7 +502,7 @@ def test_policy_blocks_llm_close_sequence_done_write():
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (

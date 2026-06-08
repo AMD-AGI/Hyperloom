@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """OOB (claude/codex/cursor) submission via Ray (preferred) or direct CLI fallback.
 
 Self-contained: does not depend on inference-optimization scripts.
@@ -106,7 +108,7 @@ def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
         FileNotFoundError: If the ``oob`` CLI is not on ``PATH``.
     """
     if not shutil.which("oob"):
-        raise FileNotFoundError("oob CLI not in PATH; run install.sh --with-oob")
+        raise FileNotFoundError("oob CLI not in PATH; run install.sh")
     cmd = [
         "oob", "run", "-a", agent,
         "--prompt-file", str(prompt_file),
@@ -228,7 +230,8 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
             ``thread_id`` attribution keys.
     """
     import ray
-    runtime_env = quiet_ray_init()
+    runtime_env = quiet_ray_init(
+        num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
     system_prompt_text = _safety_system_prompt(
         kernel_repo, budget_minutes=timeout_s / 60.0, num_gpus=num_gpus)
 

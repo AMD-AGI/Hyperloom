@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Idempotent run-time patcher for vLLM and SGLang server installs
 (Hyperloom issue #194 §4 / §5).
 
@@ -12,7 +14,7 @@ that are *not* in upstream vLLM / SGLang:
 * SGLang: ``--enable-shape-discovery-for-cuda-graph-profile``
 
 These only exist in builds that have the TraceLens patch set applied
-(``TraceLens-internal/examples/custom_workflows/inference_analysis/``).
+(``TraceLens/examples/custom_workflows/inference_analysis/``).
 Without the patch, vLLM rejects ``capture_torch_profiler_dir`` as an
 "unknown JSON key" and SGLang ``argparse`` errors on the unknown flag —
 the server fails to start and the entire profile run is wasted.
@@ -92,9 +94,9 @@ _LOCK_PATH = "/tmp/hyperloom_server_patcher.lock"
 # hung NFS / weird filesystems.
 _GIT_TIMEOUT_SEC = 30
 
-# PR-C §2: SGLang version gate is a *minor-version* allowlist rather
-# than an exact pin so the fuzzy patch fallback (PR-C §1) gets a
-# chance to apply TraceLens patches against a freshly bumped point
+# SGLang version gate is a *minor-version* allowlist rather than an
+# exact pin so the fuzzy patch fallback gets a chance to apply
+# TraceLens patches against a freshly bumped point
 # release. ``0.5.x`` covers all of 0.5.9, 0.5.10, 0.5.11, … which is
 # the typical bump cadence between TraceLens patch revisions.
 #
@@ -112,7 +114,7 @@ _GIT_TIMEOUT_SEC = 30
 # wins over the minor allowlist.
 _SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
 
-# PR-D §5: TraceLens-shipped manifest filename(s). When present in the
+# TraceLens-shipped manifest filename(s). When present in the
 # SGLang patches dir, the manifest is the source of truth for which
 # SGLang versions the patches support — Hyperloom's hardcoded default
 # allowlist is bypassed entirely. The day TraceLens starts shipping
@@ -228,11 +230,11 @@ def _sglang_version_accepted(
             text == minor or text.startswith(f"{minor}.")
             for minor in minors
         )
-    # PR-D §5: vendor manifest. When present, the manifest IS the
-    # allowlist — fully replaces the hardcoded default. When absent,
-    # the manifest helper returns None and we fall through to the
-    # default below (preserves PR-C.2 behaviour for today's TraceLens
-    # which doesn't ship the manifest).
+    # vendor manifest. When present, the manifest IS the allowlist —
+    # fully replaces the hardcoded default. When absent, the manifest
+    # helper returns None and we fall through to the default below
+    # (preserves the minor-version-allowlist behaviour for today's
+    # TraceLens which doesn't ship the manifest).
     if patches_dir is not None:
         manifest_versions = _load_sglang_supported_versions_from_manifest(
             patches_dir,
@@ -373,7 +375,7 @@ class _PatchPlan:
     apply_root: Path                       # cwd for ``git apply``
     patches: tuple[Path, ...]              # in apply order
     sentinel_file: Path                    # file we grep to detect "already patched"
-    # PR-D §4: list of substrings that MUST ALL be present in
+    # list of substrings that MUST ALL be present in
     # ``sentinel_file`` for the install to count as patched. A single
     # substring (the historical case) goes in a 1-tuple; multi-element
     # tuples raise the bar for accidental false positives if upstream
@@ -389,7 +391,7 @@ class _PatchPlan:
     # while leaving the single historical sentinel present; require the actual
     # execution-step annotation sites too.
     extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = ()
-    # PR-D §1: per-plan ``-p<N>`` strip count. Editable SGLang layouts
+    # per-plan ``-p<N>`` strip count. Editable SGLang layouts
     # and the vLLM patch set both use ``-p1`` (default); wheel-install
     # SGLang uses ``-p3`` so the ``a/python/sglang/`` prefix is
     # stripped relative to the wheel install dir. Always passed to
@@ -452,7 +454,7 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
         log.info(
-            "_server_patcher: TRACELENS_ROOT unset/missing — skip vLLM patch"
+            "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch"
         )
         return None
 
@@ -489,7 +491,7 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
-    # PR-D §4: both substrings live in the same dataclass body that
+    # both substrings live in the same dataclass body that
     # the TraceLens patch adds to ``profiler.py``. Requiring BOTH
     # collapses the false-positive surface to ~zero: upstream vLLM
     # has no reason to add a config field named both
@@ -524,7 +526,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
         log.info(
-            "_server_patcher: TRACELENS_ROOT unset/missing — skip SGLang patch"
+            "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip SGLang patch"
         )
         return None
 
@@ -537,7 +539,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     version = (getattr(sglang, "__version__", "") or "").strip()
 
     # Resolve the patches dir BEFORE the version check so the gate
-    # can consult the TraceLens-shipped manifest (PR-D §5). If the
+    # can consult the TraceLens-shipped manifest. If the
     # patches root itself is missing, no point checking the version.
     patches_root = _patch_tree(tracelens_root, "sglang_roofline_patches")
     if not patches_root.is_dir():
@@ -575,7 +577,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.info("_server_patcher: SGLang patches directory empty; skip")
         return None
 
-    # PR-D §1: support both layouts.
+    # support both layouts.
     #
     # * Editable install (``.../python/sglang/__init__.py``): apply
     #   from the repo root with ``-p1`` so the patches' ``a/python/
@@ -798,7 +800,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         return False
     patch_bin = shutil.which("patch")  # may be ``None`` — fuzzy fallback then disabled
 
-    # PR-C §1: per-patch precheck. Each patch must EITHER pass
+    # per-patch precheck. Each patch must EITHER pass
     # ``git apply --check`` (the strict path, preferred) OR pass
     # ``patch -p1 --fuzz=2 --dry-run`` (the fuzzy fallback for minor
     # context drift when TraceLens patches haven't been rev'd against
@@ -876,10 +878,10 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     return True
 
 
-# PR-D §6: fuzz value chosen deliberately at GNU patch's default (2)
-# rather than the maximum (10).
+# fuzz value chosen deliberately at GNU patch's default (2) rather
+# than the maximum (10).
 #
-# Rationale: fuzz=10 (PR-C §1's original value) tolerates up to 10
+# Rationale: fuzz=10 tolerates up to 10
 # context lines of mismatch per hunk — near GNU patch's practical
 # upper limit. That lets multi-line upstream refactors near a patch
 # site silently apply the patch's CHANGE lines to a similar-looking

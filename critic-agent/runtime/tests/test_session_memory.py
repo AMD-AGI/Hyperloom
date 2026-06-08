@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :mod:`runtime.session_memory`.
 
 We test against a temp directory so we don't touch the real

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-turn ReAct sub-agent runner for ``dynamic_action`` dispatches.
 
 Sibling to :class:`SpecialistRunner`: shared infrastructure

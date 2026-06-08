@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Regression tests for the Ray-cluster pre-flight gate on the backend
 submit paths.
 

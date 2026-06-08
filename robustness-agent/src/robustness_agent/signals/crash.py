@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Crash-count signal.
 
  lets ``crash_count >= crash_emergency_threshold``

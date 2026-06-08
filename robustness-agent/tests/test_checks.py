@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for disk, stall, and event checks."""
 
 from __future__ import annotations

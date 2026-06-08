@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Lightweight numerical-accuracy check for the explore --execute e2e path.
 
 Compares sglang's RMSNorm output against a reference torch implementation

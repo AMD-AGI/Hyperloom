@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Canonical mapping from serving framework name to its upstream git repo URL.
 
 Lives in the ``framework_agent`` package so the standalone ``fa`` CLI

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 KB_design §3.5 §5 / M5 §5 step 5 / KB_gaps/Gap-11 — Critic
 per-variant ``verdict_map`` tests.
 
@@ -41,7 +43,7 @@ from inference_optimizer.orchestrator.coordinator import (
     CoordinatorState,
     PendingProposal,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
     IntentValidationError,

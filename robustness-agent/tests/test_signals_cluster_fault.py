@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``signals/cluster_fault.py`` (M2)."""
 
 from __future__ import annotations

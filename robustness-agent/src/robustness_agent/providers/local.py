@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Local metrics provider — collects via shell commands on the sandbox host.
 
 Used when Primus-Robust-Internal is not available (single-machine / dev mode).
