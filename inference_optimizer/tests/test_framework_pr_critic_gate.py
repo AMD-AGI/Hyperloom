@@ -92,8 +92,7 @@ class _RejectBackend:
         max_turns: int = 1,
     ) -> Any:
         self.calls.append(prompt)
-        # Extract msg_id from prompt so the verdict targets the right
-        # proposal (matches MockCriticBackend's wire format).
+        # Extract msg_id so the verdict targets the right proposal.
         import re
         m = re.search(r"msg_id=([a-f0-9]+)", prompt)
         msg_id = m.group(1) if m else "unknown"
@@ -123,12 +122,11 @@ def test_gate_returns_reject_with_rationale(tmp_path: Path) -> None:
 
 
 def test_gate_abstains_when_no_critic_backend(tmp_path: Path) -> None:
-    """Missing Critic must NOT block the phase — the caller treats
-    ``abstain`` like ``approve``. The cache still records the decision."""
+    """Missing Critic must NOT block the phase — the caller treats ``abstain`` like ``approve``."""
     stub = _CoordinatorStub(tmp_path, backend=None)
     result = _call_gate(stub, {"candidate_id": "pr-1", "batch_id": "b-1"})
     assert result["verdict"] == "abstain"
-    # No backend → no cache write (we short-circuit before the cache append).
+    # No backend → no cache write (short-circuit before the cache append).
     assert stub.shared_state.framework_pr_critic_decisions == []
 
 
@@ -184,18 +182,14 @@ class _NeedsReviewBackend:
 
 
 def test_gate_maps_needs_review_to_abstain(tmp_path: Path) -> None:
-    """Critic vocab outside {approve, reject} maps to ``abstain`` so the
-    phase keeps moving instead of stalling on a soft verdict."""
+    """Critic vocab outside {approve, reject} maps to ``abstain`` so the phase keeps moving."""
     stub = _CoordinatorStub(tmp_path, _NeedsReviewBackend())
     result = _call_gate(stub, {"candidate_id": "pr-7", "batch_id": "b-7"})
     assert result["verdict"] == "abstain"
     assert "insufficient context" in result["rationale"]
 
 
-# ---------------------------------------------------------------------------
 # Resume-safe cache lookup
-
-
 class _CountingBackend:
     """Records how many .run() calls it received."""
 
@@ -229,9 +223,7 @@ class _CountingBackend:
 
 
 def test_gate_uses_cached_decision_on_repeat_call(tmp_path: Path) -> None:
-    """Second call for the same candidate_id reads from
-    ``framework_pr_critic_decisions`` instead of re-invoking the
-    Critic — this is the resume path."""
+    """Resume path: a repeat call reads ``framework_pr_critic_decisions`` instead of re-invoking the Critic."""
     backend = _CountingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
     cand = {"candidate_id": "pr-cached", "batch_id": "b-c"}
@@ -240,14 +232,10 @@ def test_gate_uses_cached_decision_on_repeat_call(tmp_path: Path) -> None:
     assert first["verdict"] == "approve"
     assert second["verdict"] == "approve"
     assert backend.run_count == 1, "second call should hit the cache"
-    # Only one decision row.
     assert len(stub.shared_state.framework_pr_critic_decisions) == 1
 
 
-# ---------------------------------------------------------------------------
 # Gap 3 — prompt enrichment (diff_url + session-local priors).
-
-
 class _PromptCapturingBackend:
     """Captures the prompt body so we can assert on its contents."""
 

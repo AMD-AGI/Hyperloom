@@ -202,7 +202,6 @@ def test_orchestration_prompt_has_no_scoreboard_block():
         framework="sglang", kernel_enabled=True,
         objective_kind="gain_pct", objective_value=10.0, max_minutes=120,
     )
-    # No live scoring vocabulary.
     forbidden = (
         "eff_score=", "score_mult *=", "score_mult=",
         "cooldown_until_tick", "[locked:", "[cooldown",
@@ -212,25 +211,17 @@ def test_orchestration_prompt_has_no_scoreboard_block():
         assert needle not in prompt, (
             f"prompt still references retired scoring token {needle!r}"
         )
-    # KB_design §3.9 Inv-9.1 mention is present (the LLM is told why
-    # there's no scoreboard).
     assert "Inv-9.1" in prompt
-    # New phase-aware action selection block landed.
     assert "Phase-aware action selection" in prompt
 
 
 def test_kernel_opt_body_has_no_scoreboard_vocab():
-    """KB_gaps/Dead-D — the kernel-pipeline body injected into the
-    Orchestration prompt whenever KERNEL is enabled must NOT carry any
-    v0.6 scoreboard vocabulary."""
+    """KB_gaps/Dead-D — the kernel-pipeline body must NOT carry v0.6 scoreboard vocab."""
     from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
         _KERNEL_OPT_PIPELINE_BODY,
     )
 
     haystack = _KERNEL_OPT_PIPELINE_BODY.lower()
-    # ``Action scores`` may appear as a historical callout (the body
-    # explicitly tells the LLM the surface was retired); the *live*
-    # scoring vocab below must not.
     forbidden = (
         "scoreboard",
         "score_mult",
@@ -250,10 +241,7 @@ def test_kernel_opt_body_has_no_scoreboard_vocab():
 
 
 def test_kernel_opt_body_references_v08_decision_signals():
-    """KB_gaps/Dead-D §5.1 — the body must surface the v0.8 decision
-    facts (gaps[] / last_action_failures / last_kernel_opt / PARTIAL
-    cap / KERNEL plateau advisory) so KERNEL-phase action selection has
-    a concrete fact list instead of an implicit scoreboard."""
+    """KB_gaps/Dead-D §5.1 — the body must surface the v0.8 decision facts."""
     from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
         _KERNEL_OPT_PIPELINE_BODY,
     )
@@ -274,8 +262,7 @@ def test_kernel_opt_body_references_v08_decision_signals():
 
 
 def test_orchestration_md_has_no_score_view():
-    """The rules fragment (``orchestration.md``) should also be free of
-    score-view directives (KB_design §3.9 §8)."""
+    """The ``orchestration.md`` fragment should be free of score-view directives."""
     from inference_optimizer.paths import asset_system_prompts_dir
 
     fragment = (asset_system_prompts_dir() / "orchestration.md").read_text(

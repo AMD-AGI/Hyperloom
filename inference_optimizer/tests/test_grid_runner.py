@@ -882,9 +882,7 @@ def test_probe_server_help_text_unknown_framework_returns_empty(
 def test_probe_sglang_help_text_back_compat_shim(
     _reset_help_cache, monkeypatch,
 ):
-    """The legacy ``_probe_sglang_help_text`` name is preserved as a
-    thin wrapper around the framework-keyed probe. Pre-existing test
-    fixtures that monkey-patch this exact name must keep working."""
+    """The legacy ``_probe_sglang_help_text`` name is preserved as a thin wrapper so fixtures patching it keep working."""
     monkeypatch.setattr(
         subprocess, "run",
         lambda cmd, *a, **kw: subprocess.CompletedProcess(
@@ -900,26 +898,18 @@ def test_probe_sglang_help_text_back_compat_shim(
 def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     _reset_help_cache, monkeypatch,
 ):
-    """When ``$FRAMEWORK=atom`` the compatibility filter must validate
-    variant flag literals against the atom --help output, not sglang's. We mock the probe so atom's
-    help advertises one flag but not another and confirm the variant
-    with the unrecognised flag is dropped with a reason mentioning
-    ``atom --help``."""
+    """When ``$FRAMEWORK=atom`` the compatibility filter validates variant flags against atom --help, dropping a sglang-only flag with a reason mentioning ``atom --help``."""
     monkeypatch.setenv("FRAMEWORK", "atom")
-    # MoE keyword so the model-class predicate doesn't drop the variant
-    # before the help-text check runs.
+    # MoE keyword so the model-class predicate doesn't drop the variant first.
     monkeypatch.setenv("MODEL_PATH", "/wekafs/models/DeepSeek-R1-0528")
 
-    # Pre-populate the cache so the test doesn't have to mock subprocess
-    # for the underlying probe — the predicate reads from the cache when
-    # populated.
+    # Pre-populate the cache so the predicate reads from it without mocking subprocess.
     _grid_runner._HELP_TEXT_CACHE["atom"] = (
         "usage: atom-engine [--tensor-parallel-size INT] "
         "[--enable-deepep-moe]"
     )
 
-    # Two variants: one whose flag IS in the atom help (kept), one that
-    # references a sglang-only flag (dropped).
+    # One variant's flag IS in the atom help (kept); one references a sglang-only flag (dropped).
     kept_variant = GridVariant(
         name="atom_compatible",
         extra_server_args="--enable-deepep-moe",

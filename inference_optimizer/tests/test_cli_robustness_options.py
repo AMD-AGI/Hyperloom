@@ -2,27 +2,10 @@
 
 """Unit tests for ``inference_optimizer.cli`` robustness backend wiring.
 
-Covers two helpers:
-
-* ``_build_robustness_options`` — translates ``argparse.Namespace`` into
-  the ``request.options`` overrides that :class:`RobustnessAgentBackend`
-  forwards verbatim to ``python -m robustness_agent.runtime.cli tick``.
-  The multi-node policy lives here: when ``--nodes >= 2`` the agent must
-  disable its local sandbox probe and lean on robustness-server for
-  cluster pod metrics, and the hardcoded ``127.0.0.1:8888`` inference
-  probe is turned off while the ``no_levers_found`` floor is lifted to
-  60 min. These tests pin that contract so a future refactor cannot
-  silently regress to the false-positive M1 behaviour.
-
-* ``_resolve_robustness_choice`` — picks ``"mock"`` vs ``"agent"`` from
-  the operator flag with multi-node auto-downgrade (the agent backend's
-  ``LocalProbeSource`` family targets sandbox-local resources that all
-  live in separate pods on ``--nodes >= 2``, so the cleanest path is to
-  fall back to the heartbeat-only mock). Repro: sandbox
-  primus-claw-20260522063032-mcctl turn=0 emitted ``ray_head_dead`` HIGH
-  + ``prune_branch(kernel_opt)`` + ``escalate_strategy_change`` from a
-  ``ray status`` probe failing because the Ray head lives in a separate
-  RayJob pod, unreachable from the sandbox.
+Covers ``_build_robustness_options`` (multi-node ``--nodes >= 2`` cluster
+policy: disable local probe, enable cluster pod metrics, turn off the
+127.0.0.1:8888 inference probe, lift the no_levers floor to 60 min) and
+``_resolve_robustness_choice`` (multi-node auto-downgrade to mock).
 """
 
 from __future__ import annotations
@@ -60,7 +43,7 @@ def _ns(**overrides) -> argparse.Namespace:
         nodes=1,
         robustness_server_url=None,
         robustness_llm_rca=None,
-        robustness_backend=None,  # CLI default; resolves to DEFAULT_*
+        robustness_backend=None,
         robustness_workload_uid=None,
         robustness_disable_local_probe=None,
         robustness_enable_cluster_pod_metrics=None,
@@ -70,9 +53,7 @@ def _ns(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-# ---------------------------------------------------------------------------
 # _build_robustness_options — multi-node cluster policy
-# ---------------------------------------------------------------------------
 
 def test_single_node_emits_no_multi_node_options():
     """Default 1-node call passes nothing extra into request.options."""
@@ -102,9 +83,7 @@ def test_multi_node_auto_enables_disable_local_probe_and_pod_metrics():
 
 
 def test_multi_node_disables_inference_probe_and_bumps_floor():
-    """``nodes >= 2`` → auto-probe-inference-server False (the hardcoded
-    ``127.0.0.1:8888/health`` probe can never reach the head pod) plus
-    the full cluster policy and the 60 min no_levers floor."""
+    """``nodes >= 2`` → inference probe off plus the full cluster policy and the 60 min no_levers floor."""
     options = _build_robustness_options(_ns(nodes=2))
     assert options == {
         "nodes": 2,
@@ -116,9 +95,7 @@ def test_multi_node_disables_inference_probe_and_bumps_floor():
 
 
 def test_multi_node_bumps_no_levers_floor_to_60_minutes():
-    """``nodes >= 2`` → progress_no_levers_min_minutes=60.0 layers a
-    wall-clock buffer on top of the explore_started gate; single-node
-    must keep the runtime default (key absent)."""
+    """``nodes >= 2`` → progress_no_levers_min_minutes=60.0; single-node keeps the default (key absent)."""
     multi = _build_robustness_options(_ns(nodes=2))
     assert multi["progress_no_levers_min_minutes"] == 60.0
     single = _build_robustness_options(_ns(nodes=1))
@@ -176,8 +153,7 @@ def test_pod_metrics_categories_csv_is_split():
 
 
 def test_missing_nodes_attr_treated_as_single_node():
-    """Legacy entry points that build a Namespace without ``nodes`` at
-    all must not crash and must default to single-node semantics."""
+    """A Namespace without ``nodes`` must not crash and defaults to single-node semantics."""
     ns = argparse.Namespace(
         robustness_server_url=None,
         robustness_llm_rca=None,
@@ -199,9 +175,7 @@ def test_nodes_zero_or_none_treated_as_single_node():
         assert "disable_local_probe" not in options
 
 
-# ---------------------------------------------------------------------------
 # _resolve_robustness_choice — multi-node auto-downgrade to mock
-# ---------------------------------------------------------------------------
 
 def test_resolve_choice_single_node_default_keeps_agent():
     """Default path on single-node must stay ``"agent"`` so the real
