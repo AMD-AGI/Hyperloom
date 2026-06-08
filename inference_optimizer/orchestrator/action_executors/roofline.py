@@ -374,6 +374,48 @@ class RooflineExecutor:
                 sub_result=ta_result,
             )
 
+        # #431: trace_analyze can succeed (status=ok) yet return ZERO hot
+        # kernels when CUDA/HIP-graph capture folds per-kernel device
+        # activity into hipGraphLaunch wrappers, stripping the
+        # execute_*/user_annotation events trace_analyze needs to attribute
+        # kernels. That is NOT a TraceLens failure (so the N26 status!="ok"
+        # retry above never fires) — it is a degraded-input signal. We
+        # append a ``trace_health_warnings`` entry: that is the existing
+        # channel ``record_trace_analyze`` persists into last_trace_analyze
+        # and the orchestration prompt renders as ``warnings=[...]`` so the
+        # LLM grounds its next action (re-profile in eager mode, or a future
+        # capture-fold fallback over capture_traces/) instead of reading
+        # ``top=[]`` as "no optimizable kernels in this trace".
+        hot = (
+            ta_result.get("hot_kernels_top15")
+            or ta_result.get("hot_kernels")
+            or []
+        )
+        trace_health = profile_result.get("trace_health") or {}
+        attribution_degraded = bool(
+            not hot and trace_health.get("per_kernel_attribution_degraded")
+        )
+        if attribution_degraded:
+            warning = {
+                "code": "cuda_graph_attribution_degraded",
+                "severity": "warning",
+                "message": (
+                    "trace_analyze returned 0 hot kernels: the profile trace "
+                    "has no execute_*/user_annotation events, so per-kernel "
+                    "device time is folded into hipGraphLaunch wrappers under "
+                    "cuda-graph capture (#431). Re-profile in eager mode "
+                    "(append --enforce-eager to EXTRA_SGLANG_ARGS / "
+                    "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
+                    "a capture-fold fallback over capture_traces/."
+                ),
+                "capture_traces_present": bool(
+                    trace_health.get("capture_traces_present")
+                ),
+            }
+            health = list(ta_result.get("trace_health_warnings") or [])
+            health.append(warning)
+            ta_result["trace_health_warnings"] = health
+
         # Cache the trace_analyze result via existing C1 recorder.
         # The recorder bumps roofline_snapshot_id by one against the
         # previous snapshot (kept intact above) and writes
@@ -389,6 +431,11 @@ class RooflineExecutor:
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile_result.get("workspace"),
+            # #431: False on a healthy run; True when trace_analyze produced
+            # 0 hot kernels because cuda-graph folding stripped per-kernel
+            # attribution (a ``cuda_graph_attribution_degraded`` entry was
+            # appended to trace_health_warnings for the prompt/audit).
+            "kernel_attribution_degraded": attribution_degraded,
         }
 
     # ------------------------------------------------------------------

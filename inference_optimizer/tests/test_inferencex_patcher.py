@@ -35,6 +35,23 @@ from inference_optimizer.orchestrator.action_executors._inferencex_patcher impor
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_inferencex_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every test in this module hermetic w.r.t. the discovery env.
+
+    ``_discover_inferencex_roots`` (the #210 fix) merges the caller's
+    explicit path with ``$INFERENCEX_PATH`` and ``$MAGPIE_DIR/InferenceX``.
+    On a pod where ``install.sh`` has run, those env vars point at a REAL
+    InferenceX checkout that has a patchable file — so a test passing a
+    synthetic ``tmp_path`` (expecting ``False``) would instead discover
+    the real root and return ``True``. Clear both by default; tests that
+    exercise the env fallback set them explicitly via ``monkeypatch.setenv``
+    (autouse runs first, so the in-test setenv still wins).
+    """
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+
+
 # A reduced fixture that captures the exact upstream shape the patcher
 # targets. Keeping this verbatim (including the leading 8-space indent)
 # is load-bearing — the patcher matches on that exact prefix to avoid

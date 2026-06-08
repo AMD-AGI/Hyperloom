@@ -1052,6 +1052,15 @@ class SharedState:
     # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
     # bypassed (``--degraded-kb``) or T0 failed.
     warm_start_ts: str = ""
+    # Model-facing WarmStartContext built by ``cortex_t0`` from the KB
+    # recipe row. PARALLEL to ``warm_start_recipe`` (which stays the raw
+    # KB envelope that breakdown / kb_explorer read). Carries an explicit
+    # ``status`` (``hit`` / ``seed_only`` / ``miss`` / ``error``) plus a
+    # ready-to-replay ``recommended_replay`` champion and the experiential
+    # lists, so warm-replay / specialist / ledger consumers branch on
+    # status without re-deriving it from tier+confidence. Empty dict when
+    # T0 was bypassed or failed.
+    warm_start_context: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # structured gaps ledger: a dedup'd list of unresolved bottlenecks
@@ -1904,6 +1913,15 @@ class SharedState:
             or (result.get("candidate") or {}).get("source_file")
             or ""
         )
+        # Extract test_command from the first attempt that recorded one so
+        # after_kernel_opt rocprof can reuse it without re-deriving from scratch.
+        test_command = ""
+        for _attempt in (result.get("attempts") or []):
+            if isinstance(_attempt, dict):
+                _tc = str((_attempt.get("backend_paths") or {}).get("test_command") or "").strip()
+                if _tc:
+                    test_command = _tc
+                    break
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
         # A pure infra failure is a backend ladder that produced no
@@ -1957,6 +1975,8 @@ class SharedState:
         entry["last_source_file"] = source_file
         entry["last_ts"] = ts
         entry["history"] = history
+        if test_command:
+            entry["test_command"] = test_command
 
         # Overwrite policy for last_kernel_opt:
         #   * KEEP always wins (highest micro bubbles up).
@@ -2328,8 +2348,8 @@ class SharedState:
         Uniform entry schema (see audit-trail plan):
 
             {ts, task_id, status, decision, key_metric, key_metric_kind,
-             workspace, error_class, error_excerpt, raw_result_path,
-             reported_success, extras}
+             workspace, error_class, error_excerpt, stderr_tail,
+             raw_result_path, reported_success, extras}
 
         ``status`` is ``"succeeded"`` or ``"failed"``; ``decision`` is the
         Coordinator's interpretation of what it did with the result
@@ -2379,6 +2399,18 @@ class SharedState:
                 if result.get("error_class") else None
             ),
             "error_excerpt": self._truncate_excerpt(result.get("error")),
+            # stderr_tail mirrors record_action_failure: only for subprocess
+            # failures, so the breakdown exporter can surface the raw crash.
+            "stderr_tail": (
+                self._stderr_tail(result.get("error"))
+                if str(result.get("error_class") or "")
+                in {"subprocess_nonzero", "timeout"}
+                else None
+            ),
+            "stderr_log_path": (
+                str(result.get("stderr_log_path"))
+                if result.get("stderr_log_path") else None
+            ),
             "raw_result_path": (
                 str(result.get("raw_result_path"))
                 if result.get("raw_result_path") else None
@@ -2441,6 +2473,10 @@ class SharedState:
                 self._stderr_tail(result.get("error"))
                 if error_class_str in {"subprocess_nonzero", "timeout"}
                 else None
+            ),
+            "stderr_log_path": (
+                str(result.get("stderr_log_path"))
+                if result.get("stderr_log_path") else None
             ),
             "workspace": (
                 str(result.get("workspace"))
@@ -2512,6 +2548,16 @@ class SharedState:
         summary: list[dict[str, Any]] = []
         kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
+        rocprof_by_kernel_id: dict[str, Any] = {}
+        if kernel_roofline_path:
+            try:
+                roofline_payload = json.loads(Path(kernel_roofline_path).read_text(encoding="utf-8"))
+                for row in roofline_payload.get("kernels") or []:
+                    if not isinstance(row, dict) or not row.get("kernel_id"):
+                        continue
+                    rocprof_by_kernel_id[str(row["kernel_id"])] = row.get("rocprof_roofline")
+            except Exception:  # noqa: BLE001 — sidecar merge is best-effort
+                rocprof_by_kernel_id = {}
         for entry in hot[:15] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
@@ -2523,6 +2569,9 @@ class SharedState:
             efficiency_percent = entry.get("efficiency_percent")
             if efficiency_percent is None:
                 efficiency_percent = entry.get("efficiency_pct")
+            rocprof_roofline = entry.get("rocprof_roofline")
+            if rocprof_roofline is None and kid is not None:
+                rocprof_roofline = rocprof_by_kernel_id.get(str(kid))
             summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
@@ -2540,6 +2589,7 @@ class SharedState:
                 "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
                 "suggestion": entry.get("suggestion") or "",
                 "roofline_name": entry.get("roofline_name"),
+                "rocprof_roofline": rocprof_roofline,
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
                 "recommended_backends": entry.get("recommended_backends") or [],
@@ -2557,6 +2607,7 @@ class SharedState:
                     "bandwidth_utilization_pct",
                     "suggestion",
                     "roofline_name",
+                    "rocprof_roofline",
                 )
             ):
                 kernel_roofline.append(dict(summary_entry))
@@ -2663,11 +2714,11 @@ class SharedState:
             from .roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
+                compute_roofline_from_perfmodel,
+                load_model_meta,
             )
-            # Two-sided roofline (T_mem + T_cmp + min) — see formula
-            # change in roofline_ceiling.py. ``peak_tput`` continues to
-            # equal ``min(mem, cmp)`` so the existing dashboard
-            # ``theoretical_peak_tok_per_sec`` field stays meaningful.
+            # Primary decode ceiling plus matching memory/compute sides.
+            # PerfModel uses one bottom-up formula; legacy is fallback only.
             breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
             try:
                 breakdown = compute_roofline_breakdown_from_state(self)
@@ -2691,6 +2742,76 @@ class SharedState:
                 cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
                 bound_kind=breakdown.bound_kind,
             )
+            # Per-op PerfModel breakdown for dashboard visualization.
+            try:
+                from .roofline_ceiling import resolve_runtime_workload
+                runtime = resolve_runtime_workload(self)
+                meta = load_model_meta(
+                    runtime.model_path,
+                    precision_hint=runtime.precision,
+                )
+                if meta is not None:
+                    from .roofline_ceiling import (
+                        apply_runtime_dtype,
+                        resolve_runtime_dtype,
+                    )
+                    eff_conc = runtime.concurrency
+                    # Use the dtype the run actually read (e.g. fp8 over a
+                    # float32 checkpoint), not the on-disk torch_dtype.
+                    rt = resolve_runtime_dtype(self, meta)
+                    meta = apply_runtime_dtype(meta, rt)
+                    pm_bd = compute_roofline_from_perfmodel(
+                        meta=meta,
+                        gpu_type=runtime.gpu_type,
+                        concurrency=eff_conc,
+                        isl=runtime.isl,
+                        osl=runtime.osl,
+                        num_gpus=runtime.tp,
+                        precision_tag=rt.compute_precision_tag
+                        or runtime.precision
+                        or "bf16",
+                    )
+                    # Tag the formula by what actually produced the ceiling:
+                    # ``perfmodel`` only when the bottom-up model succeeded,
+                    # else ``legacy`` (fallback aggregate in the breakdown).
+                    history_entry["roofline_provenance"] = {
+                        "formula": "perfmodel" if pm_bd is not None else "legacy",
+                        "runtime_weight_dtype": rt.weight_dtype_tag,
+                        "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
+                        "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
+                        "quantization": rt.quantization,
+                        "dtype_source": rt.source,
+                        "effective_concurrency": eff_conc,
+                        "runtime_tp": runtime.tp,
+                        "runtime_isl": runtime.isl,
+                        "runtime_osl": runtime.osl,
+                        "runtime_precision": runtime.precision,
+                        "runtime_framework": runtime.framework,
+                    }
+                    if pm_bd is not None:
+                        history_entry["perfmodel_breakdown"] = {
+                            "decode_tok_per_s": pm_bd.decode_tok_per_s,
+                            "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
+                            "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
+                            "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
+                            "bound_kind": pm_bd.bound_kind,
+                            "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
+                            "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
+                            "ops": [
+                                {
+                                    "name": op.name,
+                                    "flops": op.flops,
+                                    "bytes_moved": op.bytes_moved,
+                                    "ai": op.ai,
+                                    "time_s": op.time_s,
+                                    "bound": op.bound,
+                                    "pct_time": op.pct_time,
+                                }
+                                for op in pm_bd.ops
+                            ],
+                        }
+            except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
+                pass
             history_entry["trace_input"] = str(trace_input)
             history_entry["analysis_md_path"] = str(analysis_md_path)
             # 9fe4609 sidecar artifact pointer: dashboards read this
