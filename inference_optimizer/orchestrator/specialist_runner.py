@@ -38,6 +38,7 @@ from .specialist_subprocess import (
     _pick_worktree_base,
     _setup_worktree,
 )
+from . import specialist_patch_safety as _patch_safety
 from .policy import DEFAULT_SPECIALIST_MAX_PROPOSALS
 from .specialist_profile import SpecialistProfile, resolve_specialist_profile
 from .sub_agent_runner import RunnerContext, SubAgentResult
@@ -735,12 +736,36 @@ class SpecialistRunner:
             if p not in _seen:
                 _seen.add(p)
                 deduped.append(p)
-        done_payload["patches_written"] = deduped
         if missing:
             # Record dangling patch claims for the session_breakdown audit.
             notes.append(
                 "patches_claimed_but_missing:" + ",".join(missing[:8])
             )
+
+        # Universal patch-safety gate (applies to every scope): drop patches
+        # that are not real unified diffs / escape the tree, git-ground the
+        # rest against the clean base checkout, and scan for smuggled
+        # quantitative claims. Stale-but-valid patches are kept (integrate_patch
+        # + Critic adjudicate) with a grounding note.
+        base_checkout = prep.worktree_base or prep.worktree
+        kept, dropped, grounding = _patch_safety.vet_patches(
+            deduped, base_checkout=base_checkout,
+        )
+        forbidden_fields, numeric_warnings = _patch_safety.scan_quantitative_claims(
+            done_payload,
+        )
+        safety = _patch_safety.PatchSafetyReport(
+            kept_patches=kept,
+            dropped=dropped,
+            grounding=grounding,
+            numeric_warnings=numeric_warnings,
+            forbidden_fields=forbidden_fields,
+        )
+        done_payload["patches_written"] = kept
+        done_payload["patch_grounding"] = grounding
+        if not kept:
+            done_payload["empty"] = not bool(done_payload.get("proposal_set"))
+        notes.extend(safety.notes())
 
         self._write_specialist_done(workspace, done_payload)
         status = "succeeded"

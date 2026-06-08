@@ -226,36 +226,46 @@ def _proposal_provenance_literal(proposal: dict[str, Any]) -> str:
     return ""
 
 
+def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
+    """Read the ``scope`` dial off a proposal (top-level or nested ``params``)."""
+    if not isinstance(proposal, dict):
+        return ""
+    top = proposal.get("scope")
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+    params = proposal.get("params") or {}
+    if isinstance(params, dict):
+        nested = params.get("scope")
+        if isinstance(nested, str):
+            return nested.strip()
+    return ""
+
+
 def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
     """Set ``review_constraints.cross_domain`` + rule descriptors when any
-    proposal carries ``provenance == "dynamic"``. Idempotent."""
+    proposal is cross-domain. Triggers on the unified ``scope == 'domains'``
+    dial; the legacy ``provenance == 'dynamic'`` literal is also accepted until
+    the dynamic_action runtime is removed. Idempotent."""
     proposals = judge_bundle.get("proposals") or []
     if not isinstance(proposals, list):
         return
-    from ..dynamic_action_critic import (
-        CROSS_DOMAIN_RULES,
-        EXPECTED_PROVENANCE,
+    from ..specialist_patch_safety import (
+        SCOPE_DOMAINS_LITERAL,
+        cross_domain_rule_descriptors,
     )
-    has_dynamic = any(
-        _proposal_provenance_literal(p) == EXPECTED_PROVENANCE
+    has_cross_domain = any(
+        _proposal_scope_literal(p) == SCOPE_DOMAINS_LITERAL
+        or _proposal_provenance_literal(p) == "dynamic"
         for p in proposals
     )
-    if not has_dynamic:
+    if not has_cross_domain:
         return
     rc = judge_bundle.setdefault("review_constraints", {})
     if not isinstance(rc, dict):
         rc = {}
         judge_bundle["review_constraints"] = rc
     rc["cross_domain"] = True
-    rc["cross_domain_rules"] = [
-        {
-            "rule_id": r.rule_id,
-            "description": r.description,
-            "failure_verdict": r.failure_verdict,
-            "failure_reason_code": r.failure_reason_code,
-        }
-        for r in CROSS_DOMAIN_RULES
-    ]
+    rc["cross_domain_rules"] = cross_domain_rule_descriptors()
 
 
 @dataclass
