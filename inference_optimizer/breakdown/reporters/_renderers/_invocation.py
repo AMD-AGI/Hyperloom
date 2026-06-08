@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared invocation-block renderer for baseline / final sections.
 
 Centralised here because both renderers need the exact same five-line

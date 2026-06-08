@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Framework source-root resolution for PolicyGate and flag discovery.
 
 Containers may ship framework code under ``/sgl-workspace/{aiter,sglang,vllm}``

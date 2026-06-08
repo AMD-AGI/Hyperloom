@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-turn prompt assembler for the ``dynamic_action`` sub-agent.
 
 Every turn's prompt is composed deterministically from the immutable

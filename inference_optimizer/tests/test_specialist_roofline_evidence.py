@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SpecialistPromptInputs.roofline_evidence + ROOFLINE EVIDENCE
 section tests.
 
@@ -247,7 +249,7 @@ def test_build_specialist_prompts_inserts_section_between_kb_and_recipe():
     _system, user = build_specialist_prompts(inp)
     # Order matters: KB heading must precede ROOFLINE heading, which
     # must precede recipe heading.
-    kb_idx = user.index("## 4. CORTEX KB SUB-GRAPH")
+    kb_idx = user.index("## 4. KB CONTEXT (optional, advisory)")
     roof_idx = user.index("## 4a. ROOFLINE EVIDENCE")
     recipe_idx = user.index("## 5. WARM-START RECIPE SUMMARY")
     assert kb_idx < roof_idx < recipe_idx

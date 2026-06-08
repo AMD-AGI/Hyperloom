@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Read-only deprecation aliases for renamed payload fields.
 
 The payload-surface field ``extra_sglang_args`` (sglang-era name) is

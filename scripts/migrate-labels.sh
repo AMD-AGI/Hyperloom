@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 #
 # Label & Milestone migration script for AMD-AGI/Hyperloom
 # Prerequisites: gh CLI authenticated with repo + project access

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Winner-decision gates split out of ``explorer.py``.
 
 Per merged-design §2.2 / §4.6, the 3-gate logic

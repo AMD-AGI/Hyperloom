@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """N36 — low-quality steady-state chunk auto-recovery.
 
 Background — May 2026 DSR1-0528 (671B FP8 MoE) TP=8 / ISL=10240 OSL=1024

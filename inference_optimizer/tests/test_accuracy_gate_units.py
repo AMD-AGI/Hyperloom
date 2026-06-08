@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``action_executors._accuracy_gate``.
 
 Covers the three public helpers (``is_high_accuracy_risk``,

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pluggable search backends — Tavily and Serper for the first cut.
 
 Each provider implements :class:`WebSearchProvider` and returns a

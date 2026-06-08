@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``orchestrator.action_executors.benchmark_result``.
 
 Combines three previously-separate suites:

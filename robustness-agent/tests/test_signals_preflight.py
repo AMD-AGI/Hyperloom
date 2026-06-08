@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for C1 / C2 / C3 preflight signals."""
 
 from __future__ import annotations

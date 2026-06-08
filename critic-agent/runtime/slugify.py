@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Deterministic slug generation per ``kb-critic-integration-contract`` Appendix D.
 
 Two writers — Critic and Alchemist — share this algorithm so the same fact

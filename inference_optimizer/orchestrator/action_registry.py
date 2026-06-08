@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ActionRegistry
 
 Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per
@@ -72,22 +74,21 @@ VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
 # DESIGN §11 timeline rather than the family taxonomy because family is
 # scheduler-oriented (prep/analysis/...) while phases are LLM-oriented.
 VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
-    "prep",        # setup / classify / target_analysis / baseline
+    "prep",        # target_analysis / baseline / warm replay
     "measure",     # baseline (gates explore)
-    "explore",     # backends / params / sweep
+    "explore",     # explore / specialists / patch integration
     "analysis",    # profile / roofline / deep_kernel_analysis
     "deep",        # kernel_opt / integrate / operator_tuning / vendor_kernel_config
-    "validate",    # validate_stack — apply optimization_stack + rebench
+    "validate",    # reserved; stack validation is inlined into explore
     "finalize",    # report
-    "support",     # recover (v0.8 KB_design §3.15 §2.3 retired the rest)
+    "support",     # recover (the rest were retired)
 })
 
-# N38 (May 2026) — per-action verdict policy class. Drives the
-# Critic's primary per-proposal rule via the ``action_verdict_policy``
-# entry in ``judge_bundle.review_constraints`` (built by
-# CriticAgentBackend from this registry). Replaces the hard-coded
-# carve-out lists that N33/N35/N37 had to patch into ``critic.md``
-# every time a new action class got introduced.
+# Per-action verdict policy class. Drives the Critic's primary
+# per-proposal rule via the ``action_verdict_policy`` entry in
+# ``judge_bundle.review_constraints`` (built by CriticAgentBackend from
+# this registry), instead of hard-coded carve-out lists in
+# ``critic.md``.
 #
 # * ``archival`` — transcribes existing state to disk; introduces
 #   NO new measurements. Always approve: refusing forces the run
@@ -97,8 +98,8 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
 #   before/after data the gate would otherwise demand as input.
 #   Approve when the proposal is the natural next TODO per
 #   orchestration's sequencing rules. The measurement IS the
-#   evidence. (Examples: baseline / profile / roofline / params /
-#   backends / sweep / kernel_opt / validate_stack / ...)
+#   evidence. (Examples: baseline / profile / roofline / explore /
+#   sweep / kernel_opt / ...)
 # * ``promotion`` — MUTATES ``optimization_stack`` by appending a
 #   KEEP'd entry with an E2E gain claim. Genuinely requires
 #   before/after benchmark + accuracy gate + rollback evidence to
@@ -129,6 +130,7 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "baseline":                "exploration",
     "roofline":                "exploration",
     "sweep":                   "exploration",
+    "conc_sweep":              "exploration",
     "kernel_opt":              "exploration",
     "gemm_tuning":             "exploration",
     "operator_tuning":         "exploration",
@@ -192,7 +194,7 @@ class ActionMetadata:
     description: str = ""
     pipeline_phase: str = "explore"
     typical_runtime_min: float = 0.0
-    # N38 (May 2026) — per-action verdict policy class. Drives Critic's
+    # per-action verdict policy class. Drives Critic's
     # ``action_verdict_policy`` lookup (see ``VALID_VERDICT_CLASSES``).
     # Defaults inferred from ``default_verdict_class_for(name)`` when
     # the yaml omits the field.
@@ -278,7 +280,7 @@ class ActionMetadata:
                 f"action {expected_name!r}: typical_runtime_min must be >= 0, "
                 f"got {typical_runtime_min}"
             )
-        # N38 verdict_class — explicit yaml override wins; otherwise
+        # verdict_class — explicit yaml override wins; otherwise
         # the loader fills in the default from the table. Validate
         # whichever resolved value against the allowlist so a typo in
         # the yaml fails loudly at boot rather than silently producing

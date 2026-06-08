@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """State-integrity signals (I1-I5).
 
 Five detectors guard the **session itself** — the files Coordinator

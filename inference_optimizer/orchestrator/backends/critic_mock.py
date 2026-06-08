@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Mock Critic backend — auto-approves every proposal it sees.
 
 Used in P0 main-path tests so Coordinator + Orchestration + Kernel can run
@@ -22,7 +24,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..intent_parser import Intent, IntentType
+from ...protocol.intent import Intent, IntentType
 from .base import BackendTurnResult
 
 

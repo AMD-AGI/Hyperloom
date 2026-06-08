@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Benchmark result parsing shared by Magpie-backed executors.
 
 Magpie and shell wrappers can report failure after InferenceX has already
@@ -543,6 +545,8 @@ def _merge_raw_result(
         measurement["ttft_mean_ms"] = _to_float(raw.get("mean_ttft_ms"))
     if measurement.get("ttft_p99_ms") is None:
         measurement["ttft_p99_ms"] = _to_float(raw.get("p99_ttft_ms"))
+    if measurement.get("tpot_mean_ms") is None:
+        measurement["tpot_mean_ms"] = _to_float(raw.get("mean_tpot_ms"))
     if measurement.get("e2el_mean_ms") is None:
         measurement["e2el_mean_ms"] = _first_float(
             raw.get("mean_e2el_ms"),
@@ -588,6 +592,7 @@ def extract_benchmark_measurement(
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
     ttft = latency.get("ttft") or {}
+    tpot = latency.get("tpot") or {}
     e2el = latency.get("e2el") or {}
 
     measurement: dict[str, Any] = {
@@ -606,6 +611,7 @@ def extract_benchmark_measurement(
         "duration_seconds": _to_float(throughput.get("duration_seconds")),
         "ttft_mean_ms": _to_float(ttft.get("mean_ms")),
         "ttft_p99_ms": _to_float(ttft.get("p99_ms")),
+        "tpot_mean_ms": _to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": _to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": _to_float(e2el.get("p99_ms")),
         "raw_result_path": None,
@@ -627,6 +633,7 @@ def extract_benchmark_measurement(
     if workspace is not None and measurement.get("raw_result_path"):
         warnings.append("raw_inferencex_result_used")
 
+    _derive_tpot_if_missing(measurement, report)
     measurement["valid_measurement"] = is_valid_measurement(measurement)
 
     # Second-chance salvage: try documented Magpie leak destinations
@@ -669,8 +676,49 @@ def extract_benchmark_measurement(
                         f"{rescue_path}"
                     )
                 break
+        _derive_tpot_if_missing(measurement, report)
         measurement["valid_measurement"] = is_valid_measurement(measurement)
     return measurement
+
+
+def _derive_tpot_if_missing(
+    measurement: dict[str, Any],
+    report: dict[str, Any] | None,
+) -> None:
+    """Fill ``tpot_mean_ms`` from ``(e2el - ttft) / (osl - 1)`` when absent.
+
+    Best-effort: only derives when end-to-end and TTFT latencies are
+    available and an output sequence length greater than 1 can be
+    resolved from the report. Leaves the field untouched otherwise.
+    """
+    if measurement.get("tpot_mean_ms") is not None:
+        return
+    e2el = _to_float(measurement.get("e2el_mean_ms"))
+    ttft = _to_float(measurement.get("ttft_mean_ms"))
+    if e2el is None or ttft is None or e2el <= ttft:
+        return
+    osl = _resolve_osl(report)
+    if osl is None or osl <= 1:
+        return
+    measurement["tpot_mean_ms"] = (e2el - ttft) / (osl - 1)
+
+
+def _resolve_osl(report: dict[str, Any] | None) -> int | None:
+    """Pull the output sequence length from common report locations."""
+    if not isinstance(report, dict):
+        return None
+    candidates: list[Any] = [report.get("osl"), report.get("output_len")]
+    for section_key in ("config", "request", "params", "workload"):
+        section = report.get(section_key)
+        if isinstance(section, dict):
+            candidates.extend(
+                section.get(k) for k in ("osl", "output_len", "max_tokens")
+            )
+    for value in candidates:
+        n = _to_int(value)
+        if n is not None and n > 0:
+            return n
+    return None
 
 
 def is_valid_measurement(result: dict[str, Any] | None) -> bool:
