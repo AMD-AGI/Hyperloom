@@ -1,20 +1,21 @@
 {
   "schema_version": "hyperloom.production_corpus.v1",
-  "pool_id": "kimi-tp4-probe",
+  "pool_id": "kimi-mimo-probe",
   "source": "manual",
   "_readme": [
-    "TEMPORARY probe: Kimi K2.6 at tp4 (was tp8) to verify it boots on MI300X.",
-    "Root cause of the tp8 baseline_failed: Kimi has 64 attention heads; tp8 = 8",
-    "heads/GPU, NOT a multiple of 16, so sglang falls back to the triton backend +",
-    "the buggy ROCm fused-decode-MLA path (forward_mla_fused_rope_rocm.py ->",
-    "'cannot unpack non-iterable ForwardMetadata object'). tp4 = 16 heads/GPU,",
-    "which satisfies the aiter MLA kernel (the exact same path DeepSeek-R1 tp8 =",
-    "128/8 = 16 takes cleanly). Single-variable test: only tp changed. Delete after dispatch."
+    "TEMPORARY probe (core42-top8): re-run ONLY the two models that baseline_failed.",
+    "Kimi K2.6 -> tp4 (was tp8): 64 heads/4=16 satisfies the aiter MLA kernel and",
+    "avoids the triton fused-decode-MLA ROCm bug that killed tp8 (the same aiter path",
+    "DeepSeek-R1 tp8=128/8=16 takes cleanly).",
+    "MiMo V2.5-Pro -> UNCHANGED (sglang FP8 tp8). EXPECTED to baseline_fail again:",
+    "the v0.5.11 image has no MiMoV2ForCausalLM (day0 support is sglang PR#23811 /",
+    "2026-05-11 nightly, and there is no ROCm build of it yet). Included per request",
+    "to re-confirm + capture fresh logs. Delete this file after dispatch."
   ],
   "policy": {"rotation": "none", "refresh_mode": "manual"},
   "candidates": [
     {
-      "pool_id": "kimi-tp4-probe",
+      "pool_id": "kimi-mimo-probe",
       "pool_index": 0,
       "label": "Kimi K2.6 tp4",
       "repo_id": "moonshotai/Kimi-K2.6",
@@ -23,7 +24,19 @@
       "tp": 4,
       "conc": 64,
       "registered": true,
-      "note": "tp4 probe @ core42-hyperloom: 64 heads/4=16 -> aiter MLA, avoids the triton fused-decode bug that killed tp8"
+      "note": "tp4 FIX probe: 64 heads/4=16 -> aiter MLA path (avoids triton fused-decode bug)"
+    },
+    {
+      "pool_id": "kimi-mimo-probe",
+      "pool_index": 1,
+      "label": "MiMo V2.5 Pro",
+      "repo_id": "XiaomiMiMo/MiMo-V2.5-Pro",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "note": "UNCHANGED; EXPECTED baseline_fail (v0.5.11 sglang lacks MiMoV2ForCausalLM; needs a PR#23811 ROCm image)"
     }
   ]
 }
