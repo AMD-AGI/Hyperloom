@@ -2776,31 +2776,59 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
     assert g["aggregate_call_count"] == 96
 
 
-def test_aggregate_merges_native_kernel_across_template_dtypes(tmp_path):
-    """#420: the same native kernel emitted at two dtypes mangles to
-    ``rmsnorm_kernel<bf16>`` vs ``rmsnorm_kernel<fp16>``. Operation-name
-    normalization collapses them into a single task_group / dispatch."""
-    src = tmp_path / "rmsnorm.hip"
-    src.write_text("// device kernel\n", encoding="utf-8")
+def test_aggregate_merges_native_template_instances_by_source(tmp_path):
+    """#420 real-world case (Qwen3-32B rmsnorm_quant from the issue):
+    k005/k006/k007 are three instantiations of ONE ``__global__`` template
+    (``add_rmsnorm_quant_kernel``) living in ONE .cu. TraceLens names them
+    with DIFFERENT Itanium-mangled operation symbols — a mangled symbol,
+    NOT a ``<...>`` spelling — and the candidates autoresolve to the SAME
+    bare .cu path (no ``(line): func`` suffix), so resolution yields the
+    file stem as ``function``. They MUST collapse into ONE composite
+    task_group: the mangled operation and the per-call line are NOT part of
+    the native key, so 3 instantiations don't become 3 redundant GEAK
+    dispatches that each edit the same template body from the same baseline.
+
+    Regression guard for the original fix that wrongly kept a normalized
+    operation in the native key — since the real symbols carry no ``<...>``
+    to strip, that left k005/k006/k007 in three separate groups."""
+    src = tmp_path / "rmsnorm_quant_kernels.cu"
+    src.write_text(
+        "template <typename DTYPE_I, typename DTYPE_O, int BlockSize,\n"
+        "          bool ADD_RESIDUAL, bool FUSE_QUANT>\n"
+        "__global__ void add_rmsnorm_quant_kernel() {}\n",
+        encoding="utf-8",
+    )
+    bare = str(src)  # autoresolved .cu carries no "(line): func" suffix
     cands = [
-        {
-            "kernel_id": "k001",
-            "name": "rmsnorm_kernel<bf16>",
-            "duration_us": 80.0,
-            "call_count": 16,
-            "tracelens_launcher_path": f"{src}(10): rmsnorm_kernel",
+        {  # rmsnorm (mode 1), shape A
+            "kernel_id": "k005",
+            "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb0ELb0EEEvPKT_",
+            "duration_us": 300.0, "call_count": 30,
+            "tracelens_launcher_path": bare,
         },
-        {
-            "kernel_id": "k002",
-            "name": "rmsnorm_kernel<fp16>",
-            "duration_us": 20.0,
-            "call_count": 4,
-            "tracelens_launcher_path": f"{src}(10): rmsnorm_kernel",
+        {  # rmsnorm (mode 1), shape B -> different BlockSize template arg
+            "kernel_id": "k006",
+            "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi512ELi16ELb0ELb0EEEvPKT_",
+            "duration_us": 200.0, "call_count": 20,
+            "tracelens_launcher_path": bare,
+        },
+        {  # add_rmsnorm (mode 2) -> ADD_RESIDUAL=true template arg
+            "kernel_id": "k007",
+            "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0EEEvPKT_",
+            "duration_us": 100.0, "call_count": 10,
+            "tracelens_launcher_path": bare,
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
-    assert len(groups) == 1
-    assert set(groups[0]["kernel_ids"]) == {"k001", "k002"}
+    assert len(groups) == 1, (
+        f"3 instantiations of one __global__ split into {len(groups)} "
+        "groups — #420 native grouping must ignore the mangled operation"
+    )
+    g = groups[0]
+    assert set(g["kernel_ids"]) == {"k005", "k006", "k007"}
+    assert g["aggregate_duration_us"] == 600.0
+    assert g["aggregate_call_count"] == 60
+    assert g["source_path"].endswith("rmsnorm_quant_kernels.cu")
 
 
 def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):

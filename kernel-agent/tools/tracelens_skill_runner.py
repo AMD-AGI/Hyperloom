@@ -1267,12 +1267,15 @@ def aggregate_by_source_function(
     *,
     source_root: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Group TraceLens candidates by normalized operation + source.
+    """Group TraceLens candidates into per-kernel task_groups.
 
-    Python sources key on the AST-resolved ``(operation, path, line, fn)``;
-    native (.cu/.hip/.cpp) sources key on ``(operation, path)`` only since
-    they have no stable AST def-line (#420). ``operation`` is normalized to
-    drop C++ template/dtype args so one kernel is not split by dtype.
+    Native (.cu/.hip/.cpp) sources key on ``(source_path, function)`` ONLY:
+    one ``__global__`` instantiated at many dtypes/shapes emits different
+    mangled operation symbols + per-call lines but is ONE kernel, so both
+    are dropped and the instances collapse into one composite job (#420).
+    Python sources key on ``(operation, path, line, function)`` because one
+    caller frame can launch distinct kernels (Q1); ``operation`` is
+    normalized to fold a kernel seen at multiple dtypes.
 
     Returns a list of ``task_group`` dicts, sorted by aggregate kernel
     time (descending). Each group carries:
@@ -1315,17 +1318,29 @@ def aggregate_by_source_function(
     # identity intact while still collapsing the same kernel called at
     # different shapes (the Q1 case from the user screenshots).
     #
-    # #420 refinements so the SAME device kernel is not over-split into
-    # redundant task_groups (one wasted GEAK dispatch each):
-    #   * ``operation`` is normalized (``_normalize_operation_key``) to
-    #     drop C++ template/dtype args, so ``rmsnorm_kernel<bf16>`` and
-    #     ``rmsnorm_kernel<fp16>`` collapse into one group.
-    #   * ``source_path`` is ``os.path.normpath``-canonicalized so the
-    #     same file reached via different path spellings does not split.
-    #   * Native (.cu/.hip/.cpp) sources have no Python AST def-line;
-    #     TraceLens reports the per-call ``#L`` line, so we key on
-    #     ``(normalized_op, source_path)`` ONLY and drop the line/function
-    #     components that would otherwise fragment one kernel.
+    # #420 — collapse the instantiations of ONE device kernel that
+    # TraceLens otherwise over-splits into redundant task_groups (one
+    # wasted GEAK dispatch each). Two tracks:
+    #   * Native (.cu/.hip/.cpp): a single ``__global__`` template
+    #     instantiated at many dtypes/shapes/modes emits DIFFERENT mangled
+    #     ``operation`` symbols (Itanium ABI, e.g.
+    #     ``_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256E...`` — a
+    #     mangled symbol, NOT a ``<...>`` spelling) and a different per-call
+    #     ``#L`` line, yet it is ONE kernel body in ONE translation unit.
+    #     We therefore key on ``(source_path, function)`` ONLY and DROP both
+    #     the mangled operation and the volatile call-site line, so every
+    #     instance collapses into one composite job carrying all member
+    #     (op/mode, shape, quant) rows (issue #420; the GEAK side that
+    #     synthesizes a single-metric harness is AMD-AGI/GEAK#258). For
+    #     native sources ``function`` is the file stem (no C++ AST), so this
+    #     is effectively per-source-file aggregation.
+    #   * Python wrappers: TraceLens's "Kernel Path" reports the calling
+    #     Python frame (e.g. ``.../gpt_oss.py(283): forward``), and ONE
+    #     caller can launch DISTINCT kernels — ``vllm::rocm_unquantized_gemm``
+    #     (GEMM) and ``vllm::rocm_aiter_triton_add_rmsnorm_pad`` (RMSNorm)
+    #     under one ``forward``. So ``operation`` MUST stay in the key (Q1
+    #     invariant), normalized to fold a kernel seen at multiple dtypes.
+    #     ``source_path`` is ``os.path.normpath``-canonicalized either way.
     groups: dict[tuple, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):
@@ -1334,17 +1349,22 @@ def aggregate_by_source_function(
         if target is None:
             continue
         operation = str(cand.get("name") or "").strip()
-        norm_op = _normalize_operation_key(operation)
         src_norm = os.path.normpath(str(target["source_path"]))
+        function_name = str(target["function_name"])
         if _is_native_source(src_norm):
-            key: tuple = ("native", norm_op, src_norm)
+            # Drop the mangled operation + per-call line: one __global__
+            # template == one composite job, keyed on its source TU.
+            key: tuple = ("native", src_norm, function_name)
         else:
+            # Keep the (normalized) operation so distinct kernels sharing
+            # one Python caller frame stay separate (Q1 invariant).
+            norm_op = _normalize_operation_key(operation)
             key = (
                 "py",
                 norm_op,
                 src_norm,
                 int(target["definition_line"]),
-                str(target["function_name"]),
+                function_name,
             )
         bucket = groups.get(key)
         if bucket is None:
