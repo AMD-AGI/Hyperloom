@@ -2129,6 +2129,55 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
+    """Resolve the TraceLens/device kernel name for a roofline sidecar row."""
+    sidecar_path = session_dir / "reports" / "kernel_roofline.json"
+    try:
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    rows = payload.get("kernels") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return ""
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("kernel_id") or "") == str(kernel_id):
+            return str(row.get("name") or row.get("matched_kernel_name") or "").strip()
+    return ""
+
+
+def _record_after_kernel_opt_rocprof_status(
+    *,
+    session_dir: Path,
+    kernel_id: str,
+    status: str,
+    reason: str = "",
+    json_path: str = "",
+    txt_path: str = "",
+    log: Any = None,
+) -> None:
+    """Best-effort sidecar status update for skipped/failed after-opt rocprof."""
+    try:
+        ko_tool = _kernel_agent_tool_path("kernel_optimization.py")
+        ko_dir = ko_tool.parent
+        import sys as _sys
+        if str(ko_dir) not in _sys.path:
+            _sys.path.insert(0, str(ko_dir))
+        from kernel_optimization import _update_kernel_roofline_sidecar  # type: ignore[import-not-found]  # noqa: PLC0415
+        _update_kernel_roofline_sidecar(
+            workspace_path=str(session_dir),
+            kernel_id=kernel_id,
+            rocprof_json_path=json_path,
+            rocprof_txt_path=txt_path,
+            log_path=None,
+            rocprof_status=status,
+            rocprof_reason=reason,
+            phase="after_kernel_opt",
+        )
+    except Exception as exc:
+        if log is not None:
+            log.warning("integrate: after_kernel_opt sidecar status update failed: %s", exc)
+
+
 async def _run_after_kernel_opt_rocprof(
     *,
     kernel_id: str,
@@ -2143,11 +2192,15 @@ async def _run_after_kernel_opt_rocprof(
 
     Always returns a small status dict; never raises.
     """
-    enrich_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "1").strip().lower()
-    if enrich_env in {"0", "false", "no", "off"}:
-        return {"status": "skipped", "reason": "disabled_by_env"}
     rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
     if rocprof_env in {"0", "false", "no", "off"}:
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason="disabled_by_env",
+            log=log,
+        )
         return {"status": "skipped", "reason": "disabled_by_env"}
 
     try:
@@ -2171,14 +2224,36 @@ async def _run_after_kernel_opt_rocprof(
             elif sf.is_dir():
                 run_workdir = sf
     except Exception as exc:
-        return {"status": "skipped", "reason": f"state_load_error: {type(exc).__name__}"}
+        reason = f"state_load_error: {type(exc).__name__}"
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason=reason,
+            log=log,
+        )
+        return {"status": "skipped", "reason": reason}
 
     if not test_command:
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason="no_test_command_in_state",
+            log=log,
+        )
         return {"status": "skipped", "reason": "no_test_command_in_state"}
 
     try:
         tool = _kernel_agent_tool_path("rocprof_roofline.py")
     except Exception:
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason="rocprof_roofline_tool_unavailable",
+            log=log,
+        )
         return {"status": "skipped", "reason": "rocprof_roofline_tool_unavailable"}
 
     out_dir = session_dir / "kernel-agent" / "rocprof_after_kernel_opt" / kernel_id
@@ -2195,12 +2270,25 @@ async def _run_after_kernel_opt_rocprof(
         "--out-txt", str(out_txt),
         "--timeout-sec", str(timeout_sec),
     ]
+    target_kernel = _lookup_kernel_roofline_name(session_dir, kernel_id)
+    if target_kernel:
+        cmd.extend(["--target-kernel", target_kernel])
     log.info("integrate: running after_kernel_opt rocprof for %s", kernel_id)
     try:
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec + 30)
     except Exception as exc:
         log.warning("integrate: after_kernel_opt rocprof subprocess error: %s", exc)
-        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        reason = f"{type(exc).__name__}: {exc}"
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="failed",
+            reason=reason,
+            json_path=str(out_json),
+            txt_path=str(out_txt),
+            log=log,
+        )
+        return {"status": "failed", "reason": reason}
 
     try:
         payload = json.loads(out_json.read_text(encoding="utf-8"))

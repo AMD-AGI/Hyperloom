@@ -1812,6 +1812,7 @@ def _run_rocprof_roofline(
     tool = Path(__file__).resolve().parent / "rocprof_roofline.py"
     workdir = _rocprof_workdir(candidate, source_file, out_dir)
     profiling_command = _rocprof_profile_command(test_command)
+    target_kernel = str(candidate.get("name") or "").strip()
     cmd = [
         sys.executable,
         str(tool),
@@ -1821,6 +1822,8 @@ def _run_rocprof_roofline(
         "--out-txt", str(out_txt),
         "--timeout-sec", str(_rocprof_timeout_sec()),
     ]
+    if target_kernel:
+        cmd.extend(["--target-kernel", target_kernel])
     if log_path is not None:
         append_log(log_path, f"[rocprof_roofline] workdir={workdir}")
         append_log(log_path, "[rocprof_roofline] running before GEAK")
@@ -1859,6 +1862,17 @@ def _run_rocprof_roofline(
     }
 
 
+def _rocprof_kernel_matches(row: dict[str, Any], target_kernel: str) -> bool:
+    if not target_kernel:
+        return True
+    target = target_kernel.strip()
+    names = (
+        str(row.get("matched_kernel_name") or "").strip(),
+        str(row.get("name") or "").strip(),
+    )
+    return any(name == target for name in names)
+
+
 def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_path: str) -> dict[str, Any]:
     rows = payload.get("results") if isinstance(payload, dict) else []
     if not isinstance(rows, list) or not rows:
@@ -1867,11 +1881,33 @@ def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_p
             "report_path": txt_path,
             "json_path": json_path,
         }
-    first = rows[0] if isinstance(rows[0], dict) else {}
+    target_kernel = str(payload.get("target_kernel") or "").strip()
+    first = None
+    if target_kernel:
+        for row in rows:
+            if isinstance(row, dict) and _rocprof_kernel_matches(row, target_kernel):
+                first = row
+                break
+        if first is None:
+            return {
+                "status": "skipped",
+                "reason": "target_kernel_not_matched",
+                "target_kernel": target_kernel,
+                "matched_kernel_names": [
+                    str(row.get("matched_kernel_name") or row.get("name") or "")
+                    for row in rows
+                    if isinstance(row, dict)
+                ],
+                "report_path": txt_path,
+                "json_path": json_path,
+            }
+    else:
+        first = rows[0] if isinstance(rows[0], dict) else {}
     roof = dict(first.get("rocprof_roofline") or {})
     roof.update({
         "status": first.get("status") or payload.get("status") or "matched",
         "matched_kernel_name": first.get("matched_kernel_name") or first.get("name"),
+        "target_kernel": target_kernel,
         "report_path": txt_path,
         "json_path": json_path,
     })

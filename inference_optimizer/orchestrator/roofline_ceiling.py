@@ -425,6 +425,10 @@ def load_model_meta(
             cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
         )
     )
+    intermediate_size = int(cfg.get("intermediate_size") or 0)
+    moe_intermediate_size = int(cfg.get("moe_intermediate_size") or 0)
+    if num_experts > 0 and moe_intermediate_size <= 0:
+        moe_intermediate_size = intermediate_size
     return ModelMeta(
         weight_bytes=weight_bytes,
         num_layers=int(cfg.get("num_hidden_layers") or 0),
@@ -436,8 +440,8 @@ def load_model_meta(
         experts_per_tok=experts_per_tok,
         expert_weight_bytes=total_expert_bytes,
         hidden_size=int(cfg.get("hidden_size") or 0),
-        intermediate_size=int(cfg.get("intermediate_size") or 0),
-        moe_intermediate_size=int(cfg.get("moe_intermediate_size") or 0),
+        intermediate_size=intermediate_size,
+        moe_intermediate_size=moe_intermediate_size,
         vocab_size=int(cfg.get("vocab_size") or 0),
         num_attention_heads=int(cfg.get("num_attention_heads") or 0),
     )

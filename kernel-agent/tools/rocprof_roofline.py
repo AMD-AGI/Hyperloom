@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -267,7 +268,7 @@ class RocprofRooflineAnalyzer:
             return False, "rocprof-compute is not installed or not on PATH"
         self.output_path.mkdir(parents=True, exist_ok=True)
         name = Path(workdir).name or "rocprof_roofline"
-        kernel_filter = f" -k {target_kernel}" if target_kernel else ""
+        kernel_filter = f" -k {shlex.quote(target_kernel)}" if target_kernel else ""
         profile_cmd = (
             f"rocprof-compute profile -n {name}{kernel_filter} "
             f"--path {self.output_path} -- {cmd}"
@@ -343,16 +344,46 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
-def _project_payload_to_row(payload: dict[str, Any]) -> dict[str, Any]:
-    """Pick the first ``results[]`` row and shape it for ``kernel_roofline.json``."""
+def _kernel_name_matches(row: dict[str, Any], target_kernel: str) -> bool:
+    if not target_kernel:
+        return True
+    target = target_kernel.strip()
+    names = (
+        str(row.get("matched_kernel_name") or "").strip(),
+        str(row.get("name") or "").strip(),
+    )
+    return any(name == target for name in names)
+
+
+def _project_payload_to_row(payload: dict[str, Any], target_kernel: str = "") -> dict[str, Any]:
+    """Project the row that matches ``target_kernel`` into ``kernel_roofline.json``."""
     rows = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(rows, list) or not rows:
         return {"status": payload.get("status", "failed") if isinstance(payload, dict) else "failed"}
-    first = rows[0] if isinstance(rows[0], dict) else {}
+    first = None
+    if target_kernel:
+        for row in rows:
+            if isinstance(row, dict) and _kernel_name_matches(row, target_kernel):
+                first = row
+                break
+        if first is None:
+            return {
+                "status": "skipped",
+                "reason": "target_kernel_not_matched",
+                "target_kernel": target_kernel,
+                "matched_kernel_names": [
+                    str(row.get("matched_kernel_name") or row.get("name") or "")
+                    for row in rows
+                    if isinstance(row, dict)
+                ],
+            }
+    else:
+        first = rows[0] if isinstance(rows[0], dict) else {}
     roof = dict(first.get("rocprof_roofline") or {})
     roof.update({
         "status": first.get("status") or payload.get("status") or "matched",
         "matched_kernel_name": first.get("matched_kernel_name") or first.get("name"),
+        "target_kernel": target_kernel,
     })
     return roof
 
@@ -524,11 +555,13 @@ def enrich_kernel_roofline_sidecar(
 
         run_workdir = _profile_workdir(cand, fallback_workdir)
         analyzer = RocprofRooflineAnalyzer()
+        target_kernel = str(row.get("name") or cand.get("name") or "").strip()
         _log(f"[rocprof_enrich:{kid}] running rocprof-compute (cmd={test_command[:120]}...)")
         try:
             ok, error = analyzer.run(
                 workdir=str(run_workdir),
                 cmd=test_command,
+                target_kernel=target_kernel,
                 timeout_sec=timeout_sec_per_kernel,
             )
         except Exception as exc:
@@ -563,12 +596,13 @@ def enrich_kernel_roofline_sidecar(
         payload.update({
             "status": "ok",
             "profiling_cmd": test_command,
+            "target_kernel": target_kernel,
             "rocprof_output_path": str(analyzer.output_path),
         })
         _atomic_write_json(out_json, payload)
         out_txt.write_text(analyzer.content + "\n" + build_text_report(payload), encoding="utf-8")
 
-        row_payload = _project_payload_to_row(payload)
+        row_payload = _project_payload_to_row(payload, target_kernel=target_kernel)
         row_payload.setdefault("status", "matched")
         row_payload["report_path"] = str(out_txt)
         row_payload["json_path"] = str(out_json)
