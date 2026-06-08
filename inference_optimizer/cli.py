@@ -1414,7 +1414,7 @@ def _print_session_skeleton(session_dir: Path) -> None:
     for sub in _SESSION_SKELETON:
         marker = "ok" if (session_dir / sub).is_dir() else "MISSING"
         print(f"  [{marker}] {sub}/")
-    print(f"  [ok] manifest.json (written first)")
+    print("  [ok] manifest.json (written first)")
 
 
 def _snapshot_system_prompts(
@@ -1967,8 +1967,8 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
         )
     else:
         print(
-            f"  cumulative_gain_val  : 0.00% "
-            f"⚠ never validated — no `explore` stack-rebench has succeeded yet"
+            "  cumulative_gain_val  : 0.00% "
+            "⚠ never validated — no `explore` stack-rebench has succeeded yet"
         )
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
@@ -4447,7 +4447,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             picked = find_latest_per_session_dir()
             if picked is not None:
                 session_dir = picked
-                print(f"  --resume: auto-picked latest per-session subdir")
+                print("  --resume: auto-picked latest per-session subdir")
             else:
                 # Legacy flat layout — workspace_root itself is the
                 # session_dir. Validate it has manifest.json + state.json

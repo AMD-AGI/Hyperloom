@@ -150,8 +150,8 @@ def _format_md(summary: dict[str, Any]) -> str:
         )
     else:
         lines.append(
-            f"- cumulative_gain_val : `0.00%` "
-            f"⚠ never validated — no `validate_stack` action ran in this session"
+            "- cumulative_gain_val : `0.00%` "
+            "⚠ never validated — no `validate_stack` action ran in this session"
         )
     if cb.get("ttft_mean_ms") is not None:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")

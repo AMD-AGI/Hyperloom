@@ -12,7 +12,6 @@ free of subprocess / sqlite plumbing.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +25,6 @@ from inference_optimizer.orchestrator.coordinator import (
     PendingProposal,
 )
 from inference_optimizer.orchestrator.dynamic_action_pipeline import (
-    DYNAMIC_SPECIALIST_TASK_ID_PREFIX,
     build_integrate_patch_proposal_payload,
     compose_critic_verdict_envelope,
     integrate_status_to_lifecycle,
