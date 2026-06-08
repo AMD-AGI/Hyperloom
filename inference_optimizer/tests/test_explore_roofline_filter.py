@@ -2,11 +2,8 @@
 
 """Unit tests for the roofline-categorized advisory annotator.
 
-Loosen plan P2_15 demoted the previously opt-in hard filter to an
-advisory annotator: variants are never dropped here; the annotator
-just reports which variants the latest roofline snapshot flags as
-``likely_saturated`` so the Orchestration prompt can prioritise
-differently next round.
+Plan P2_15 demoted the hard filter to an advisory annotator: variants are never
+dropped; it only reports which ones the latest snapshot flags ``likely_saturated``.
 """
 
 from __future__ import annotations
@@ -26,9 +23,7 @@ class _FakeVariant:
     extra_envs: dict | None = None
 
 
-# ---------------------------------------------------------------------------
 # categorize_variant
-# ---------------------------------------------------------------------------
 def test_categorize_host_overhead_flag():
     cats = categorize_variant("--num-continuous-decode-steps 4", {})
     assert cats == frozenset({"host_overhead"})
@@ -75,9 +70,7 @@ def test_categorize_combines_args_and_envs():
     assert cats == frozenset({"memory", "host_overhead"})
 
 
-# ---------------------------------------------------------------------------
 # compute_saturation_advisory
-# ---------------------------------------------------------------------------
 def test_advisory_no_saturation_returns_empty():
     grid = [
         _FakeVariant(name="v1", extra_server_args="--num-continuous-decode-steps 4"),

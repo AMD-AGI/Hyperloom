@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Intervention-mix ledger telemetry.
-
-``SharedState.record_intervention`` maintains a config-vs-code_patch
-ledger + ``consecutive_config_only_rounds`` counter.
-``to_intervention_mix_summary`` renders the ledger as neutral counts for
-the Orchestration per-tick prompt — no directive. These tests pin the
-counter bookkeeping and the telemetry rendering.
-"""
+"""Intervention-mix ledger telemetry: counter bookkeeping + neutral-counts rendering."""
 
 from __future__ import annotations
 
@@ -17,8 +10,7 @@ from inference_optimizer.orchestrator.task_registry import Task
 
 
 def test_empty_ledger_renders_nothing():
-    """No interventions recorded yet → empty string (no early-tick noise,
-    nothing to escalate)."""
+    """No interventions recorded yet → empty string."""
     s = SharedState(session_id="im-empty")
     assert s.to_intervention_mix_summary() == ""
 

@@ -1,10 +1,4 @@
-"""Path A feedback-fidelity tests (A1 / A2 / A3).
-
-Covers the structured inbox formatter, the ``get_recent_outcomes`` pull
-tool + its Coordinator-backed reader, and the ``run_action_now`` inline
-fast-action tool (whitelist gating, flag off, and the happy path with a
-stub executor + ``delegated_result`` audit emission).
-"""
+"""Path A feedback-fidelity tests (A1 inbox formatter / A2 get_recent_outcomes / A3 run_action_now inline)."""
 
 from __future__ import annotations
 
@@ -28,9 +22,7 @@ from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.paths import make_session_dir
 
 
-# ---------------------------------------------------------------------------
 # A1 — structured inbox formatter
-# ---------------------------------------------------------------------------
 def _msg(topic: str, payload: dict, seq: int = 7) -> Message:
     m = Message.new("coordinator", "*", topic, payload)
     m.seq = seq
@@ -71,8 +63,7 @@ def test_format_delegated_result_with_error_is_truncated():
     ))
     assert "state='failed'" in line
     assert "error=" in line
-    # 200-char cap on the error string.
-    assert len(line) < 600
+    assert len(line) < 600  # 200-char cap on the error string
 
 
 def test_format_review_verdict_and_denial():
@@ -99,9 +90,7 @@ def test_format_unknown_topic_falls_back_to_payload_dump():
     assert "payload=" in line
 
 
-# ---------------------------------------------------------------------------
 # Shared coordinator fixture
-# ---------------------------------------------------------------------------
 def _silent_coordinator(session_dir) -> Coordinator:
     silent = ScriptedPlan(turns=[])
     return Coordinator(
@@ -121,9 +110,7 @@ def session_dir(tmp_path, monkeypatch):
     return make_session_dir()
 
 
-# ---------------------------------------------------------------------------
 # A2 — get_recent_outcomes tool + reader
-# ---------------------------------------------------------------------------
 def test_get_recent_outcomes_tool_is_registered():
     assert "get_recent_outcomes" in CONTEXT_TOOL_NAMES
     assert "run_action_now" in CONTEXT_TOOL_NAMES
@@ -177,9 +164,7 @@ async def test_recent_outcomes_reader_empty(session_dir):
         await c.stop()
 
 
-# ---------------------------------------------------------------------------
 # A3 — run_action_now inline fast-action
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_inline_whitelist_picks_lane_light_registered_actions(session_dir):
     c = _silent_coordinator(session_dir)

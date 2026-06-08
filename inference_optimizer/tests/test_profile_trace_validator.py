@@ -1,24 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``profile._validate_trace_structure`` (#210 / Deval's
-``check_torch_trace.py`` guidance).
-
-The validator's contract:
-
-* Read-only inspection of the trace folder; never mutates anything.
-* Logs WARNINGs (does NOT raise) so a partial / silently-degraded
-  profile run still completes — operators see actionable messages
-  pointing at the specific symptom (PROFILE_EXTRA_BODY leaked,
-  shape-discovery patch missed, etc.).
-* No false positives on the healthy reference layout from Deval's
-  comment 1.
-* Detects the smoking-gun symptom: ``trace_split/`` carrying
-  ``_extend_*`` / ``_decode_*`` files instead of ``_steady_state_*``
-  (proves ``profile_by_stage=True`` leaked through).
-* Detects the sglang-specific symptom: main rank-0 trace lacking
-  ``kernel_shape_profiler`` substring (proves the server-side patch
-  from PR #207 didn't reach the deployed SGLang).
-"""
+"""Tests for ``profile._validate_trace_structure`` (#210 / Deval's check_torch_trace.py)."""
 
 from __future__ import annotations
 
@@ -39,18 +21,7 @@ def _write_minimal_sglang_trace(
     with_user_annotation: bool = True,
     with_execute_star: bool = True,
 ) -> None:
-    """Write a tiny gzipped JSON trace blob carrying enough event
-    structure to satisfy the validator's substring-based content
-    checks. The validator counts:
-
-    * ``"name": "cpu_op"`` events
-    * ``"name": "user_annotation"`` events
-    * ``"execute_`` substrings (per-step InferenceX annotations)
-    * ``kernel_shape_profiler`` substring (sglang-specific marker)
-
-    Each flag here lets a test selectively turn off the corresponding
-    signal to assert the validator's per-check warnings independently.
-    """
+    """Write a tiny gzipped JSON trace blob; each flag toggles one validator signal."""
     events: list[dict] = [
         {"name": "cpu_op", "ph": "X", "ts": 0, "dur": 1, "args": {"Input Dims": [[1, 2, 3]]}},
     ]
@@ -80,10 +51,7 @@ def _write_minimal_sglang_trace(
 def _write_capture_file(
     path: Path, *, cpu_op_count: int, with_input_dims_fraction: float = 1.0,
 ) -> None:
-    """Synthesize a ``capture_traces/<file>.json.gz`` carrying
-    ``cpu_op_count`` events; ``with_input_dims_fraction`` of them
-    have an ``Input Dims`` arg field (rest don't). Used to test
-    Deval check [2]: capture file shape-discovery instrumentation."""
+    """Synthesize a capture file with a given fraction of ``Input Dims`` events (check [2])."""
     events: list[dict] = []
     threshold = int(round(cpu_op_count * with_input_dims_fraction))
     for i in range(cpu_op_count):
@@ -97,8 +65,7 @@ def _write_capture_file(
 
 
 def _write_split_file(path: Path, *, with_execute_star: bool = True) -> None:
-    """Synthesize a ``trace_split/<file>.json.gz`` carrying (or not)
-    ``execute_*`` user_annotations. Used to test Deval check [4]."""
+    """Synthesize a ``trace_split`` file with/without ``execute_*`` annotations (check [4])."""
     events: list[dict] = [
         {"name": "cpu_op", "ph": "X", "ts": 0, "dur": 1},
     ]
@@ -114,10 +81,7 @@ def _write_split_file(path: Path, *, with_execute_star: bool = True) -> None:
 
 
 def _build_healthy_layout(tmp_path: Path) -> Path:
-    """Build a complete reference layout that satisfies all 6 checks.
-    Used by tests that need a 'no false positives' baseline AND by
-    targeted-symptom tests as a starting point to selectively
-    invalidate one piece."""
+    """Build a complete reference layout that satisfies all 6 checks."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     capture = trace_dir / "capture_traces"
@@ -147,16 +111,7 @@ def _build_healthy_layout(tmp_path: Path) -> Path:
 
 
 def test_validator_no_warnings_on_healthy_layout(tmp_path, caplog):
-    """Reference healthy layout from Deval's example output (issue
-    #210, comment 1) MUST NOT trip any of the 6 checks:
-
-    * [1] ``capture_traces/`` exists with files
-    * [2] capture file has ``cpu_op`` + ``Input Dims`` ≥ floor
-    * [3] main trace has ``user_annotation`` + ``execute_*``
-    * [4] every ``trace_split/`` file has ``execute_*``
-    * [5] (sglang) main trace has ``kernel_shape_profiler``
-    * [6] ``trace_split/`` has only ``_steady_state_*`` (no _extend/_decode)
-    """
+    """The reference healthy layout (#210) must not trip any of the 6 checks."""
     trace_dir = _build_healthy_layout(tmp_path)
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
@@ -167,20 +122,13 @@ def test_validator_no_warnings_on_healthy_layout(tmp_path, caplog):
     )
 
 
-# ---------------------------------------------------------------------------
 # Check [6] (Hyperloom-specific #210 smoking-gun)
-# ---------------------------------------------------------------------------
 def test_validator_warns_on_extend_decode_files_without_steady_state(
     tmp_path, caplog,
 ):
-    """The exact #210 / mohbasit-comment-3 symptom: ``trace_split/``
-    carries ``_extend_*`` / ``_decode_*`` files (per-stage splits)
-    instead of ``_steady_state_*`` files. This is the visible signal
-    that ``profile_by_stage=True`` leaked through and PROFILE_EXTRA_BODY
-    didn't reach the framework."""
+    """#210 symptom: ``_extend_*`` / ``_decode_*`` split files signal
+    ``profile_by_stage=True`` leaked through."""
     trace_dir = _build_healthy_layout(tmp_path)
-    # Replace the healthy steady_state split files with the smoking-gun
-    # _extend_* / _decode_* layout.
     split = trace_dir / "trace_split"
     for p in list(split.iterdir()):
         p.unlink()
@@ -200,15 +148,10 @@ def test_validator_warns_on_extend_decode_files_without_steady_state(
     )
 
 
-# ---------------------------------------------------------------------------
 # Check [1] capture_traces/ presence
-# ---------------------------------------------------------------------------
 def test_validator_warns_when_capture_traces_missing(tmp_path, caplog):
-    """When ``capture_traces/`` doesn't exist at all, graph capture
-    didn't fire — typically because the server-side patch from PR
-    #207 didn't land. The validator should call this out explicitly."""
+    """A missing ``capture_traces/`` means graph capture didn't fire."""
     trace_dir = _build_healthy_layout(tmp_path)
-    # Remove the healthy capture_traces/ subtree to trigger check [1].
     capture = trace_dir / "capture_traces"
     for p in list(capture.iterdir()):
         p.unlink()
@@ -220,20 +163,13 @@ def test_validator_warns_when_capture_traces_missing(tmp_path, caplog):
     assert any("capture_traces/" in m and "missing" in m for m in msgs), msgs
 
 
-# ---------------------------------------------------------------------------
 # Check [2] (Deval) capture file has cpu_op + Input Dims
-# ---------------------------------------------------------------------------
 def test_validator_warns_when_capture_file_lacks_input_dims(tmp_path, caplog):
-    """Capture file with cpu_op events but missing the ``Input Dims``
-    field on most events → shape-discovery instrumentation isn't
-    fully active. Healthy reference is 99.97% (Deval); validator
-    floors at 90%."""
+    """A capture file with too few ``Input Dims`` events trips the 90% floor."""
     trace_dir = _build_healthy_layout(tmp_path)
     capture = trace_dir / "capture_traces"
     bad = capture / "bs_104_rank0.json.gz"
     bad.unlink()
-    # Only 50% of cpu_op events have Input Dims — well below the 90%
-    # floor.
     _write_capture_file(bad, cpu_op_count=200, with_input_dims_fraction=0.5)
 
     caplog.set_level(logging.WARNING)
@@ -245,10 +181,7 @@ def test_validator_warns_when_capture_file_lacks_input_dims(tmp_path, caplog):
 
 
 def test_validator_warns_when_capture_file_has_no_cpu_op(tmp_path, caplog):
-    """Capture file present but contains zero ``cpu_op`` events →
-    graph capture wrote files but they don't carry kernel-level
-    events. Distinct failure mode from missing capture_traces/
-    entirely."""
+    """A capture file with zero ``cpu_op`` events is a distinct failure mode."""
     trace_dir = _build_healthy_layout(tmp_path)
     capture = trace_dir / "capture_traces"
     bad = capture / "bs_104_rank0.json.gz"
@@ -263,24 +196,15 @@ def test_validator_warns_when_capture_file_has_no_cpu_op(tmp_path, caplog):
     assert any("no literal 'cpu_op' events" in m for m in msgs), msgs
 
 
-# ---------------------------------------------------------------------------
 # Check [3] (Deval) main trace has user_annotation + execute_*
-# ---------------------------------------------------------------------------
 def test_validator_no_warning_when_execute_star_present_without_user_annotation(
     tmp_path, caplog,
 ):
-    """Regression guard for the profiler-version false positive: some
-    torch / SGLang builds (e.g. sglang 0.5.11 on ROCm) emit the
-    ``execute_*`` per-step annotation labels WITHOUT wrapping them in a
-    literal ``"name": "user_annotation"`` event. That trace is healthy —
-    the splitter and roofline analysis key on ``execute_*`` — so Check
-    [3] MUST NOT warn just because the ``user_annotation`` wrapper is
-    absent."""
+    """``execute_*`` present without a ``user_annotation`` wrapper is healthy — Check [3] must not warn."""
     trace_dir = _build_healthy_layout(tmp_path)
     main = next(trace_dir.glob("*.trace.json.gz"))
     main.unlink()
-    # execute_* label present, but emitted under a non-user_annotation
-    # event name (mimics the ROCm/SGLang 0.5.11 profiler shape).
+    # execute_* under a non-user_annotation event (ROCm/SGLang 0.5.11 shape).
     payload = {
         "schemaVersion": 1,
         "traceEvents": [
@@ -311,18 +235,15 @@ def test_validator_no_warning_when_execute_star_present_without_user_annotation(
 def test_validator_warns_when_main_trace_lacks_all_annotations(
     tmp_path, caplog,
 ):
-    """Genuine absence: neither ``execute_*`` labels NOR
-    ``user_annotation`` events anywhere in the trace → InferenceX
-    per-step annotations really didn't fire. This is the only case
-    Check [3] should warn on."""
+    """Neither ``execute_*`` nor ``user_annotation`` anywhere → Check [3] warns."""
     trace_dir = _build_healthy_layout(tmp_path)
     main = next(trace_dir.glob("*.trace.json.gz"))
     main.unlink()
     _write_minimal_sglang_trace(
         main,
         with_kernel_shape_profiler=True,
-        with_user_annotation=False,   # no user_annotation wrapper
-        with_execute_star=False,      # and no execute_* labels at all
+        with_user_annotation=False,
+        with_execute_star=False,
     )
 
     caplog.set_level(logging.WARNING)
@@ -336,21 +257,16 @@ def test_validator_warns_when_main_trace_lacks_all_annotations(
     )
 
 
-# ---------------------------------------------------------------------------
 # Check [4] (Deval) per-file execute_* in trace_split/
-# ---------------------------------------------------------------------------
 def test_validator_warns_when_split_file_lacks_execute_star(
     tmp_path, caplog,
 ):
-    """Splitter ran but a chunk has no ``execute_*`` annotations →
-    the chunk is empty (or worse, the source trace was already
-    missing execute_* labels). Validator names the offending
-    file(s) so operators can grep them."""
+    """A split chunk with no ``execute_*`` annotations warns, naming the file."""
     trace_dir = _build_healthy_layout(tmp_path)
     split = trace_dir / "trace_split"
     bad = split / "decode_only_steady_state_chunk0.json.gz"
     bad.unlink()
-    _write_split_file(bad, with_execute_star=False)  # empty split
+    _write_split_file(bad, with_execute_star=False)
 
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
@@ -364,21 +280,17 @@ def test_validator_warns_when_split_file_lacks_execute_star(
     ), "warning should name the offending file"
 
 
-# ---------------------------------------------------------------------------
 # Check [5] (Deval) sglang kernel_shape_profiler presence
-# ---------------------------------------------------------------------------
 def test_validator_warns_when_kernel_shape_profiler_absent_in_sglang(
     tmp_path, caplog,
 ):
-    """sglang trace lacking the ``kernel_shape_profiler`` substring →
-    server-side shape-discovery patch didn't land. Pointer to PR #207
-    in the message so operators know where to look."""
+    """A sglang trace lacking ``kernel_shape_profiler`` warns (PR #207 patch missing)."""
     trace_dir = _build_healthy_layout(tmp_path)
     main = next(trace_dir.glob("*.trace.json.gz"))
     main.unlink()
     _write_minimal_sglang_trace(
         main,
-        with_kernel_shape_profiler=False,  # smoking-gun for check [5]
+        with_kernel_shape_profiler=False,
     )
 
     caplog.set_level(logging.WARNING)
@@ -391,33 +303,26 @@ def test_validator_warns_when_kernel_shape_profiler_absent_in_sglang(
 
 
 def test_validator_skips_kernel_shape_check_for_non_sglang(tmp_path, caplog):
-    """vLLM traces don't carry ``kernel_shape_profiler`` events — that
-    sentinel is sglang-specific. The validator must NOT fire that
-    warning when ``framework != "sglang"``, otherwise vLLM runs would
-    log a false-positive on every profile."""
+    """The ``kernel_shape_profiler`` check is sglang-specific and must not fire for vLLM."""
     trace_dir = _build_healthy_layout(tmp_path)
     main = next(trace_dir.glob("*.trace.json.gz"))
     main.unlink()
     _write_minimal_sglang_trace(
         main,
-        with_kernel_shape_profiler=False,  # would fire on sglang…
+        with_kernel_shape_profiler=False,
     )
 
     caplog.set_level(logging.WARNING)
-    _validate_trace_structure(trace_dir, "vllm")  # …but framework=vllm
+    _validate_trace_structure(trace_dir, "vllm")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert not any("kernel_shape_profiler" in m for m in msgs), (
         f"vLLM run should NOT produce kernel_shape_profiler warnings, got: {msgs}"
     )
 
 
-# ---------------------------------------------------------------------------
 # Defensive: validator is best-effort
-# ---------------------------------------------------------------------------
 def test_validator_never_raises_even_on_unreadable_trace(tmp_path, caplog):
-    """Validator is best-effort — if the gzipped trace is malformed /
-    truncated, the check must continue and log a debug message, never
-    raise (would fail the profile post-execution path otherwise)."""
+    """A malformed/truncated trace must log and continue, never raise."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     (trace_dir / "capture_traces").mkdir()

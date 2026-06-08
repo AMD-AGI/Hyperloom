@@ -1,17 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR-A4 (Arbor-into-Hyperloom): IntegratePatchExecutor tests.
-
-Covers the deterministic patch integration step that consumes a
-specialist's worktree patches and KEEPs / REVERTs them against the
-framework source roots.
-
-The tests use a tiny git repo + a real patch file so the ``git apply``
-path is exercised end-to-end. The Magpie bench step is bypassed via
-``params.apply_only=True`` — PR-A4's job is to land the patch protocol;
-the benchmark integration is the same code path that ``explore``
-already exercises in production and has dedicated coverage there.
-"""
+"""PR-A4 (Arbor-into-Hyperloom): IntegratePatchExecutor tests."""
 
 from __future__ import annotations
 
@@ -34,9 +23,7 @@ from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.orchestrator.task_registry import Task
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 def _init_git_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -125,9 +112,7 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-# ---------------------------------------------------------------------------
 # 1. Patch path resolution
-# ---------------------------------------------------------------------------
 def test_resolve_patch_paths_prefers_explicit_param(tmp_path: Path):
     workspace = _write_specialist_workspace(tmp_path, "t-a", patch_contents=[_VALID_PATCH])
     explicit = [str(workspace / "worktree" / "patches" / "001_test.patch")]
@@ -158,8 +143,7 @@ def test_resolve_patch_paths_falls_back_to_filesystem_scan(tmp_path: Path):
     workspace = _write_specialist_workspace(
         tmp_path, "t-c", patch_contents=[_VALID_PATCH],
     )
-    # Pass done_payload=None to bypass the patches_written shortcut and
-    # force the filesystem scan.
+    # done_payload=None forces the filesystem scan.
     paths = _resolve_patch_paths(
         specialist_workspace=workspace,
         explicit_patches=None,
@@ -169,8 +153,7 @@ def test_resolve_patch_paths_falls_back_to_filesystem_scan(tmp_path: Path):
 
 
 def test_resolve_patch_paths_respects_empty_done_list(tmp_path: Path):
-    """When done_payload says explicitly 'no patches', the resolver
-    respects that and does NOT fall through to filesystem scan."""
+    """An explicit empty patches list is respected; no filesystem-scan fallthrough."""
     workspace = _write_specialist_workspace(
         tmp_path, "t-c-empty", patch_contents=[_VALID_PATCH],
         done_payload_override={"patches_written": []},
@@ -183,9 +166,7 @@ def test_resolve_patch_paths_respects_empty_done_list(tmp_path: Path):
     assert paths == []
 
 
-# ---------------------------------------------------------------------------
 # 2. git apply primitives
-# ---------------------------------------------------------------------------
 def test_git_apply_succeeds_on_valid_patch(tmp_path: Path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)
@@ -193,7 +174,6 @@ def test_git_apply_succeeds_on_valid_patch(tmp_path: Path):
     patch.write_text(_VALID_PATCH, encoding="utf-8")
     ok, err = _git_apply(repo, patch)
     assert ok, err
-    # File was actually mutated.
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
@@ -204,7 +184,7 @@ def test_git_apply_fails_on_bad_patch(tmp_path: Path):
     patch.write_text(_BAD_PATCH, encoding="utf-8")
     ok, err = _git_apply(repo, patch)
     assert not ok
-    assert err  # stderr non-empty
+    assert err
 
 
 def test_git_apply_reverse_rolls_back(tmp_path: Path):
@@ -219,9 +199,7 @@ def test_git_apply_reverse_rolls_back(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# ---------------------------------------------------------------------------
 # 3. Framework root resolution
-# ---------------------------------------------------------------------------
 def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)
@@ -231,28 +209,21 @@ def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path):
 
 
 def test_resolve_framework_root_returns_none_when_no_candidate(monkeypatch, tmp_path: Path):
-    # Force allowlist to a path that doesn't exist + no override.
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
         str(tmp_path / "does-not-exist"),
     )
-    # Clear default allowlist by pointing INFERENCEX_PATH at a nonexistent
-    # location so the resolve function finds nothing.
     monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path / "missing-ix"))
     root = _resolve_framework_root(None)
-    # Either None (clean miss) or a fallback root that contains
-    # something — both acceptable for this defensive helper.
+    # Either None or a fallback root — both acceptable for this defensive helper.
     if root is not None:
         assert root.exists()
 
 
-# ---------------------------------------------------------------------------
 # 4. End-to-end executor invocation
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_executor_apply_only_succeeds(tmp_path: Path):
-    """apply_only=True path: patches applied, bench skipped, status
-    reports 'applied_no_bench'."""
+    """apply_only=True: patches applied, bench skipped, status='applied_no_bench'."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -272,14 +243,12 @@ async def test_executor_apply_only_succeeds(tmp_path: Path):
     assert result["status"] == "applied_no_bench"
     assert len(result["patches_applied"]) == 1
     assert result["patches_reverted"] == []
-    # Patch survives in the framework repo.
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
 @pytest.mark.asyncio
 async def test_executor_apply_failure_rolls_back(tmp_path: Path):
-    """A patch that targets a non-existent file fails ``git apply``;
-    the executor reverses any partial apply and reports apply_failed."""
+    """A bad patch fails ``git apply``; the executor reverses + reports apply_failed."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -298,7 +267,6 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
 
     assert result["status"] == "apply_failed"
     assert result["error_class"] == "git_apply_failed"
-    # Source tree must remain pristine.
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
@@ -337,8 +305,7 @@ async def test_executor_no_patches_returns_no_patches(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_config_changes_only_no_patches(tmp_path: Path):
-    """Specialist produced no patches but provided config_changes only.
-    The executor still proceeds (apply_only=True bench skip)."""
+    """config_changes-only (no patches) still proceeds under apply_only=True."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     workspace = session_dir / "runs" / "specialist" / "t-spec-5"
@@ -363,12 +330,9 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     assert result["patches_applied"] == []
 
 
-# ---------------------------------------------------------------------------
 # 5. CLI registration
-# ---------------------------------------------------------------------------
 def test_integrate_patch_executor_imports_clean():
-    """The real executor module must import without side effects
-    (regression guard for the cli wiring step)."""
+    """The real executor module must import without side effects."""
     from inference_optimizer.orchestrator.action_executors import integrate_patch as ip_mod
     assert hasattr(ip_mod, "IntegratePatchExecutor")
     assert callable(ip_mod.IntegratePatchExecutor)

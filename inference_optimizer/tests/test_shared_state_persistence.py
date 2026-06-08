@@ -1,21 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P1-3 SharedState + Coordinator integration tests.
-
-Covers:
-
-* SharedState defaults are sensible blank values
-* SharedState.save → load round-trips across instances
-* SharedState.save is atomic (no half-written file under crash sim)
-* SharedState.apply_changes only writes known fields, drops unknown
-* SharedState.add_pruned_family is idempotent
-* SharedState.to_prompt_summary contains all major fields
-* Coordinator loads existing state.json on construction (resume hook)
-* Coordinator.PRUNE_BRANCH writes state.json (pruned_families persisted)
-* Coordinator.PRUNE_BRANCH-cancelled families survive a Coordinator restart
-* Coordinator.UPDATE_STATE persists allowed fields to state.json
-* Coordinator.UPDATE_STATE rejects unknown fields (logged in 'rejected')
-"""
+"""P1-3 SharedState + Coordinator integration tests."""
 
 from __future__ import annotations
 
@@ -37,9 +22,7 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -61,9 +44,7 @@ def _backends_full() -> dict[str, object]:
     }
 
 
-# ===========================================================================
 # SharedState unit
-# ===========================================================================
 def test_shared_state_defaults_blank():
     s = SharedState()
     assert s.session_id == ""
@@ -126,7 +107,6 @@ def test_save_is_atomic(tmp_path):
     raw = (tmp_path / "state.json").read_text()
     parsed = json.loads(raw)
     assert parsed["session_id"] == "x"
-    # No leftover .state-* tmp files
     leftovers = list(tmp_path.glob(".state-*"))
     assert leftovers == []
 
@@ -186,9 +166,7 @@ def test_to_prompt_summary_contains_key_fields():
     assert "deep_kernel" in summary
 
 
-# ===========================================================================
 # Coordinator × SharedState integration
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_coordinator_loads_existing_shared_state(session_dir):
     """Coordinator.__init__ must pick up an existing state.json (resume hook)."""
@@ -236,9 +214,8 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.shared_state.is_pruned("long")
-        # The prune is advisory after loosen P3_19: future proposals
-        # still flow through to the pending queue and an advisory
-        # observation is dropped onto the inbox so the LLM can decide.
+        # P3_19: the prune is advisory — proposals still reach the pending queue
+        # with an advisory observation so the LLM can decide.
         await c2._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,
             payload={"action_name": "long", "predicted_gain_pct": 5.0},
@@ -254,9 +231,7 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_update_state_persists_known_fields(session_dir):
-    """Orchestration may write non-core fields (current_action / target_summary).
-    Core fields (model_name / baseline_tput / current_best / ...) are gated
-    by PolicyGate's CORE_STATE_FIELDS — see test_p0_2_roles_policy."""
+    """Orchestration may write non-core fields; core fields are gated by PolicyGate's CORE_STATE_FIELDS."""
     c = Coordinator(session_dir, backends=_backends_full())
     try:
         await c._handle_intent("orchestration", Intent(

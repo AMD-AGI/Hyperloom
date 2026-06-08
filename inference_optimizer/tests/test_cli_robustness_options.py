@@ -178,9 +178,7 @@ def test_nodes_zero_or_none_treated_as_single_node():
 # _resolve_robustness_choice — multi-node auto-downgrade to mock
 
 def test_resolve_choice_single_node_default_keeps_agent():
-    """Default path on single-node must stay ``"agent"`` so the real
-    LocalProbe coverage is preserved on hosts where the inference server
-    / ray actually live in the sandbox container."""
+    """Default path on single-node stays ``"agent"`` to preserve real LocalProbe coverage."""
     ns = _ns(nodes=1, robustness_backend=None)
     assert _resolve_robustness_choice(ns) == "agent"
 
@@ -192,9 +190,7 @@ def test_resolve_choice_single_node_explicit_mock_kept():
 
 
 def test_resolve_choice_multi_node_no_server_default_downgrades_to_mock(capsys):
-    """``nodes >= 2`` + default agent + no robustness-server → mock,
-    silently (no cluster source available, so the agent would fall back
-    to the noisy sandbox-local LocalProbe)."""
+    """``nodes >= 2`` + default agent + no server → mock, silently."""
     ns = _ns(nodes=2, robustness_backend=None)
     chosen = _resolve_robustness_choice(ns)
     assert chosen == "mock"
@@ -204,9 +200,7 @@ def test_resolve_choice_multi_node_no_server_default_downgrades_to_mock(capsys):
 
 
 def test_resolve_choice_multi_node_no_server_explicit_agent_warns(capsys):
-    """``nodes >= 2`` + explicit ``--robustness-agent`` + no server →
-    mock with a WARNING that points operators at the SKILL section and
-    tells them to configure a server to keep the agent."""
+    """``nodes >= 2`` + explicit agent + no server → mock with a WARNING pointing at the SKILL section."""
     ns = _ns(nodes=2, robustness_backend="agent")
     chosen = _resolve_robustness_choice(ns)
     assert chosen == "mock"
@@ -217,9 +211,7 @@ def test_resolve_choice_multi_node_no_server_explicit_agent_warns(capsys):
 
 
 def test_resolve_choice_multi_node_with_server_url_keeps_agent(capsys):
-    """``nodes >= 2`` + explicit agent + ``--robustness-server-url`` →
-    stays ``agent``: the cluster source replaces the sandbox-local
-    probes, so no downgrade and no warning."""
+    """``nodes >= 2`` + explicit agent + ``--robustness-server-url`` → stays ``agent`` (no downgrade, no warning)."""
     ns = _ns(
         nodes=2,
         robustness_backend="agent",
@@ -242,16 +234,14 @@ def test_resolve_choice_multi_node_default_with_server_keeps_agent():
 
 
 def test_resolve_choice_multi_node_server_via_env_keeps_agent(monkeypatch):
-    """A server configured via ``ROBUSTNESS_SERVER_URL`` env also keeps
-    the agent backend on multi-node."""
+    """A server via ``ROBUSTNESS_SERVER_URL`` env also keeps the agent on multi-node."""
     monkeypatch.setenv("ROBUSTNESS_SERVER_URL", "http://robustness.svc:8080")
     ns = _ns(nodes=2, robustness_backend="agent")
     assert _resolve_robustness_choice(ns) == "agent"
 
 
 def test_resolve_choice_multi_node_explicit_mock_no_warning(capsys):
-    """Operators who anticipate the auto-downgrade and pass
-    ``--robustness-mock`` explicitly must NOT see the WARNING."""
+    """Explicit ``--robustness-mock`` must NOT see the WARNING."""
     ns = _ns(nodes=4, robustness_backend="mock")
     chosen = _resolve_robustness_choice(ns)
     assert chosen == "mock"

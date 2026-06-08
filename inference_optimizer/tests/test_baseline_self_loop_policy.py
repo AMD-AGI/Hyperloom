@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PolicyGate ``baseline_no_param_change`` denial tests.
-
-After a baseline failure the agent must retry with **identical** params.
-Changing any knob (extra_server_args, benchmark_script, etc.) is denied
-by ``_baseline_self_loop_denial`` with ``rule='baseline_no_param_change'``.
-Same-fingerprint retries are allowed; the ``baseline_failure_streak``
-counter terminates the run at 3 with ``stop_reason='baseline_failed'``.
-"""
+"""PolicyGate ``baseline_no_param_change`` denial tests."""
 
 from __future__ import annotations
 
@@ -59,9 +52,7 @@ def _mute_action_scoring(coordinator: Coordinator) -> None:
 
 
 def _seed_target_analysis_marker(sd: Path) -> None:
-    """Satisfy the unconditional ``target_analysis`` gate for tests that
-    target a downstream rule (self-loop / baseline) and must reach it.
-    """
+    """Satisfy the unconditional ``target_analysis`` gate to reach downstream rules."""
     path = target_baseline_json(sd)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -92,9 +83,7 @@ async def _record_failed_baseline(
     )
 
 
-# ---------------------------------------------------------------------------
 # Core: deny param changes after a baseline failure
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_denies_changed_params_after_single_failure(session_dir):
     """After ONE failure, changing any param is denied."""
@@ -132,9 +121,7 @@ async def test_denies_extra_server_args_tweak_after_failure(session_dir):
         await c.stop()
 
 
-# ---------------------------------------------------------------------------
 # Core: allow same-params retry (streak counter handles exit)
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_allows_same_params_retry_after_failure(session_dir):
     """Same fingerprint → allowed (the streak counter handles termination)."""
@@ -162,9 +149,7 @@ async def test_allows_same_params_retry_after_two_failures(session_dir):
         await c.stop()
 
 
-# ---------------------------------------------------------------------------
 # Streak counter: 3 failures → stop_reason='baseline_failed'
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_three_failures_set_stop_reason(session_dir):
     """Three consecutive baseline failures set stop_reason='baseline_failed'."""
@@ -195,9 +180,7 @@ async def test_two_failures_do_not_set_stop_reason(session_dir):
         await c.stop()
 
 
-# ---------------------------------------------------------------------------
 # Success resets the gate
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_success_resets_denial_gate(session_dir):
     """A succeeded baseline between failures resets the denial gate."""
@@ -218,16 +201,13 @@ async def test_success_resets_denial_gate(session_dir):
             task=ok_task,
         )
 
-        # After success, changing params on next failure is fine.
         different = {"benchmark_script": "sglang_mi300x.sh"}
         assert c._baseline_self_loop_denial(different) is None
     finally:
         await c.stop()
 
 
-# ---------------------------------------------------------------------------
 # No prior failures → no denial
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_no_failures_no_denial(session_dir):
     """Fresh session with no baseline attempts → no denial."""
@@ -241,9 +221,7 @@ async def test_no_failures_no_denial(session_dir):
         await c.stop()
 
 
-# ---------------------------------------------------------------------------
 # _sequence_denial_for_action integration
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_sequence_denial_returns_no_param_change_for_baseline(
     session_dir,
@@ -289,9 +267,7 @@ async def test_sequence_denial_no_param_change_for_other_actions(session_dir):
         await c.stop()
 
 
-# ---------------------------------------------------------------------------
 # Audit trail carries error detail
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_failure_attempt_carries_error_excerpt(session_dir):
     """Each failed baseline attempt stores error_class and error_excerpt."""

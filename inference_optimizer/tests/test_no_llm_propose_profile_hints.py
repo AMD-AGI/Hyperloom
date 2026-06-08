@@ -1,30 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Post-PR-321 review Finding 1 regression — Coordinator runtime hints
-must not tell the LLM to propose ``profile`` / ``roofline``.
+"""Post-PR-321 review Finding 1 regression — Coordinator sequence-denial hints must not steer the LLM toward proposing ``profile`` / ``roofline``.
 
-Both names are absent from ``PHASE_LLM_PROPOSABLE_ACTIONS``, so any
-LLM-emitted ``propose_action`` / ``delegate`` is denied by PolicyGate
-R1 with ``rule='phase_incompatible'``. The sequence-denial hints in
-coordinator.py previously emitted phrasing like *"propose/delegate
-`profile`"* even after the single-path refactor. If the PRELUDE /
-watermark auto-analysis fails (or the pending field gets stuck mid-
-restart), those hints would point the LLM at a guaranteed denial and
-trip a policy loop — there is no manual recovery path for the LLM
-other than ``recover``.
-
-This test pins the sequence-denial sites:
-
-  * ``_sequence_denial_for_action()`` — the action-layer profile-prereq
-    deny was removed (P2_10), so explore-family actions are no longer
-    blocked on an empty ``last_profile_trace``.
-  * ``_sequence_denial_for_request()`` — the request-layer profile-prereq
-    deny was demoted (P2_11) to a data-contract check inside
-    ``run_optimization_handler``, so kernel requests are no longer
-    pre-denied on an empty ``last_profile_trace``.
-
-Both checks guarantee the LLM is never steered into the forbidden
-``propose/delegate profile`` phrasing via these sequencing hints.
+Pins that ``_sequence_denial_for_action`` (P2_10) and
+``_sequence_denial_for_request`` (P2_11) no longer block on an empty
+``last_profile_trace``.
 """
 
 from __future__ import annotations
@@ -58,10 +38,7 @@ def coord(tmp_path: Path) -> Coordinator:
     c.shared_state = _BareState()
     c.role_registry = {"kernel": object()}
     c._compare_against_gpu = ""
-    # ``_sequence_denial_for_action`` calls
-    # ``_target_analysis_baseline_exists`` — short-circuit it so the
-    # target_analysis gate doesn't mask the profile-prereq denial branch
-    # the sequence-denial tests below target.
+    # Short-circuit ``_target_analysis_baseline_exists`` so the gate doesn't mask the profile-prereq branch under test.
     c._target_analysis_baseline_exists = lambda: True  # type: ignore[assignment]
     return c
 
@@ -73,9 +50,7 @@ def coord(tmp_path: Path) -> Coordinator:
 def test_sequence_denial_action_no_longer_blocks_on_profile(
     coord: Coordinator, action: str,
 ):
-    """The action-layer profile-prereq deny was removed (P2_10): with an
-    empty ``last_profile_trace`` (and baseline done), explore-family
-    actions are no longer sequence-denied for a missing profile."""
+    """P2_10: with baseline done and empty ``last_profile_trace``, explore-family actions are no longer sequence-denied."""
     coord.shared_state.last_profile_trace = ""
     coord.shared_state.baseline_tput = 100.0
     assert coord._sequence_denial_for_action(action) is None
@@ -87,13 +62,7 @@ def test_sequence_denial_action_no_longer_blocks_on_profile(
 def test_sequence_denial_request_no_longer_blocks_on_profile(
     coord: Coordinator, req_kind: str,
 ):
-    """The REQUEST-layer profile-prereq deny was demoted alongside the
-    action-layer one: with baseline done and an empty
-    ``last_profile_trace``, the request layer no longer pre-denies kernel
-    requests on a missing profile. The data dependency on a fresh
-    trace_analyze (and the candidates artifact it produces) is enforced
-    inside ``run_optimization_handler`` instead, so the LLM hint surface
-    cannot leak forbidden ``propose/delegate profile`` phrasing."""
+    """P2_11: the request-layer profile-prereq deny was demoted into ``run_optimization_handler``, so kernel requests aren't pre-denied on an empty ``last_profile_trace``."""
     coord.shared_state.last_profile_trace = ""
     coord.shared_state.baseline_tput = 100.0
     assert coord._sequence_denial_for_request("kernel", req_kind) is None

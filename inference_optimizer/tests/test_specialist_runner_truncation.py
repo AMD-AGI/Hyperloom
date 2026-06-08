@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""SpecialistRunner._finalize must carry the specialist's ``proposal_set``
-back unmodified.
-
-``max_proposals`` is a prompt-side self-curation target, not a runtime
-cap: the runner no longer drops proposals beyond any threshold, so the
-on-disk artifact, Coordinator bookkeeping, Critic review, and explore-grid
-materialisation all see the full set the specialist surfaced.
-"""
+"""SpecialistRunner._finalize must carry the specialist's ``proposal_set`` back unmodified (``max_proposals`` is a prompt-side target, not a runtime cap)."""
 
 from __future__ import annotations
 
@@ -26,9 +19,7 @@ from inference_optimizer.orchestrator.task_registry import Task
 
 
 def _make_runner() -> SpecialistRunner:
-    """Build a minimum-viable runner. backend_factory is never called by
-    ``_finalize`` (which is downstream of the execute phase), so a trivial
-    placeholder satisfies the ``exactly one of`` constructor invariant."""
+    """Build a minimum-viable runner; ``_finalize`` never calls backend_factory."""
     return SpecialistRunner(backend_factory=lambda _domain: None)
 
 
@@ -70,8 +61,7 @@ def _proposal(idx: int) -> dict:
 
 
 def test_finalize_carries_full_proposal_set(tmp_path: Path):
-    """A large proposal_set is carried back unmodified — no truncation,
-    no ``proposals_truncated_from`` field, no audit note."""
+    """A large proposal_set is carried back unmodified — no truncation, no audit note."""
     runner = _make_runner()
     ctx = _make_ctx()
     prep = _make_prep(tmp_path)
@@ -116,8 +106,7 @@ def test_finalize_carries_full_proposal_set(tmp_path: Path):
 
 
 def test_finalize_empty_proposal_set_unchanged(tmp_path: Path):
-    """Empty proposal_set should pass through untouched, with
-    ``empty=True`` set when not provided."""
+    """Empty proposal_set passes through untouched, with ``empty=True`` set when not provided."""
     runner = _make_runner()
     ctx = _make_ctx(task_id="spec-003")
     prep = _make_prep(tmp_path)

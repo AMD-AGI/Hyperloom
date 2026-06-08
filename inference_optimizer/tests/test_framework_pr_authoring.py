@@ -1,27 +1,4 @@
-"""Tests for the FRAMEWORK_PR authoring track.
-
-The authoring track widens the FRAMEWORK_PR phase from "apply an existing
-PR diff" to "read source + author a new patch". For each discovered +
-Critic-approved candidate the pump dispatches a write-capable
-``serving_specialist`` (in addition to the diff-only ``framework_pr``
-task); the authored patch then flows through the existing
-autosubmit → Critic → integrate_patch → bench → KEEP/REVERT chain.
-
-Coverage:
-
-1. **pump dispatches authoring specialist** — happy path enqueues BOTH a
-   ``framework_pr`` task (diff track) and a ``specialist`` task
-   (authoring track), and the specialist params carry the FRAMEWORK_PR
-   provenance markers + PR seed notes.
-2. **authoring disabled** — with the flag off, only the diff track runs
-   (preserves the legacy behaviour the other pump tests assert).
-3. **_framework_pr_authoring_inflight** — True while a specialist /
-   integrate_patch task is in flight or an integrate_patch proposal is
-   pending Critic review; False otherwise.
-4. **_record_framework_pr_authored_outcome** — a KEEP integrate_patch
-   result writes a progress row + rolls the batch max-gain stat the
-   plateau judge reads; non-terminal statuses are ignored.
-"""
+"""Tests for the FRAMEWORK_PR authoring track."""
 
 from __future__ import annotations
 
@@ -197,11 +174,9 @@ def test_pump_dispatches_authoring_specialist_alongside_diff_track(
     assert params["framework_pr_candidate_id"] == _CANDIDATE["pr_url"]
     assert _CANDIDATE["pr_url"] in params["notes"]
     assert _CANDIDATE["diff_url"] in params["notes"]
-    # Write tools are granted so the specialist can author a patch.
     assert "Write" in spec["allowed_tools"]
     assert "Edit" in spec["allowed_tools"]
-    # Worktree authoring lane (not the serving lane — integrate_patch
-    # grabs that later).
+    # Worktree authoring lane, not the serving lane.
     assert spec["requires_lanes"] == ["research_lane"]
 
 
@@ -244,8 +219,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     ) is True
     stub.tasks._queued.clear()
 
-    # A pending integrate_patch Critic proposal counts (the gap between
-    # specialist completion and integrate_patch task creation).
+    # A pending integrate_patch Critic proposal counts.
     stub.state.pending_proposals = {
         "m1": SimpleNamespace(action_name="integrate_patch"),
     }
@@ -286,7 +260,6 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     assert row["provenance"] == "authored"
     assert row["candidate_id"] == "pr-42"
     assert row["gain_pct"] == pytest.approx(6.5)
-    # Batch max-gain rolled from 1.0 → 6.5.
     assert stub.shared_state.framework_pr_batches[0][
         "max_gain_pct_observed_in_batch"
     ] == pytest.approx(6.5)

@@ -1,7 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Coordinator manually-created tasks inherit requires_lanes +
-lease_ttl_sec from the ActionRegistry (filtered to dispatcher lanes)."""
+"""Coordinator-created tasks inherit requires_lanes + lease_ttl_sec from the ActionRegistry."""
 
 from __future__ import annotations
 

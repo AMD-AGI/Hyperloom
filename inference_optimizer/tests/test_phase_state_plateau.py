@@ -1,24 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 M7 — plateau pure functions + escalate hints + stop_reason ENUM.
-
-Covers KB_design §3.8 + §3.13 M7:
-
-* ``compute_plateau_explore`` AND-of (recent_keep_gain < ε AND
-  recent_empty_streak ≥ ε).
-* ``compute_plateau_kernel`` OR-of (revert_streak OR keep_gain).
-* ``exit_normal_explore`` / ``exit_normal_kernel`` plug the real
-  plateau pure functions, with M2 proxy fallback when explore_search
-  is empty.
-* ``escalate_strategy_change`` hint plumbing:
-  ``skip_to_kernel`` / ``skip_to_close`` / ``extend_*_budget`` /
-  ``pause_specialist_<domain>``.
-* ``apply_escalate_budget_bump`` clamps to ESCALATE_HINT_BUDGET_BUMP_CAP.
-* ``SharedState.set_stop_reason`` lenient + strict ENUM enforcement.
-* ``SharedState.set_pending_escalate_hint`` /
-  ``consume_pending_escalate_hint``.
-* ``collect_attribution.phase_breakdown`` per-phase bucketing.
-"""
+"""v0.8 M7 — plateau pure functions + escalate hints + stop_reason ENUM (KB_design §3.8 + §3.13 M7)."""
 
 from __future__ import annotations
 
@@ -51,9 +33,7 @@ from inference_optimizer.orchestrator.phase_state import (
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
-# ===========================================================================
 # 1. ESCALATE_HINT vocab
-# ===========================================================================
 def test_escalate_hint_vocab_closed():
     assert ESCALATE_HINT_VOCAB == frozenset({
         "skip_to_kernel", "skip_to_sweep", "skip_to_close",
@@ -77,9 +57,7 @@ def test_is_pause_specialist_hint_requires_suffix():
     assert not is_pause_specialist_hint("skip_to_kernel")
 
 
-# ===========================================================================
 # 2. compute_plateau_explore (KB_design §3.8 §5.1 AND-of)
-# ===========================================================================
 def test_plateau_explore_empty_state_returns_false():
     state = SimpleNamespace()
     triggered, ev = compute_plateau_explore(state)
@@ -158,9 +136,7 @@ def test_plateau_explore_supports_threshold_overrides():
     assert triggered is True
 
 
-# ===========================================================================
 # 3. compute_plateau_kernel (KB_design §3.8 §5.2 OR-of)
-# ===========================================================================
 def test_plateau_kernel_revert_streak_triggers():
     """3 consecutive REVERTs → triggered."""
     state = SimpleNamespace(
@@ -196,8 +172,7 @@ def test_plateau_kernel_low_gain_triggers():
 
 
 def test_plateau_kernel_high_gain_blocks_revert_streak():
-    """When the REVERT streak is below threshold and gain is large,
-    plateau doesn't fire."""
+    """When the REVERT streak is below threshold and gain is large, plateau doesn't fire."""
     state = SimpleNamespace(
         kernel_integrate_attempts={
             "k1": {"attempts": [
@@ -220,15 +195,7 @@ def test_plateau_kernel_zero_lookback_returns_false():
 
 
 def test_plateau_kernel_empty_attempts_does_not_trigger():
-    """Fix A: zero kernel attempts must NOT flip plateau via the
-    ``recent_keep_gain == 0.0 < 0.5`` arm.
-
-    Pre-fix this returned ``(True, ...)`` the moment KERNEL entered
-    with an empty ``kernel_integrate_attempts`` ledger — coupled with
-    EXPLORE that produced no KEEPs (e.g. force-exit on low budget),
-    the session went EXPLORE → KERNEL → SWEEP without ever spawning a
-    single ``trace_analyze`` / ``run_optimization`` request.
-    """
+    """Fix A: zero kernel attempts must NOT flip plateau via the ``recent_keep_gain == 0.0 < 0.5`` arm."""
     state = SimpleNamespace(kernel_integrate_attempts={})
     triggered, ev = compute_plateau_kernel(state)
     assert triggered is False
@@ -237,8 +204,7 @@ def test_plateau_kernel_empty_attempts_does_not_trigger():
 
 
 def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
-    """Same Fix-A invariant when the ledger has keys but every entry
-    is structurally empty (resume cleanup edge case)."""
+    """Same Fix-A invariant when the ledger has keys but every entry is structurally empty."""
     state = SimpleNamespace(
         kernel_integrate_attempts={
             "k_pruned": {"attempts": []},
@@ -250,13 +216,9 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
     assert ev.get("reason") == "no_kernel_attempts_yet"
 
 
-# ===========================================================================
 # 4. exit_normal_explore / exit_normal_kernel — wired to real plateau
-# ===========================================================================
 def test_exit_normal_explore_does_not_exit_on_plateau():
-    """Loosen P3_17: plateau is advisory only; the EXPLORE exit is now
-    driven exclusively by IR-6 force-exit, an explicit skip hint, or
-    phase budget exhaustion. A bare plateau signal must NOT exit."""
+    """P3_17: plateau is advisory only; a bare plateau signal must NOT exit EXPLORE."""
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -276,8 +238,7 @@ def test_exit_normal_explore_does_not_exit_on_plateau():
 
 
 def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
-    """``skip_to_kernel`` hint forces ``plateau_explore`` even when the
-    real signals don't agree."""
+    """``skip_to_kernel`` hint forces ``plateau_explore`` even when the real signals disagree."""
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -294,8 +255,7 @@ def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
 
 
 def test_exit_normal_kernel_does_not_exit_on_plateau():
-    """Loosen P3_17: KERNEL plateau is advisory only; only the
-    skip_to_sweep hint or phase-budget exhaustion may exit KERNEL."""
+    """P3_17: KERNEL plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
@@ -313,8 +273,7 @@ def test_exit_normal_kernel_does_not_exit_on_plateau():
 
 
 def test_exit_normal_kernel_after_gemm_does_not_exit():
-    """Loosen P3_17: the GEMM-completed shortcut is removed.
-    GEMM completion alone never advances KERNEL → SWEEP."""
+    """P3_17: the GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL → SWEEP."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
@@ -378,8 +337,7 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
 
 
 def test_exit_normal_explore_skip_to_sweep_is_non_terminal():
-    # skip_to_sweep (steward stop_session / safety net) is the new
-    # non-terminal "no more leverage" signal.
+    # skip_to_sweep is the non-terminal "no more leverage" signal.
     out = exit_normal_explore(_skip_to_sweep_state("EXPLORE"))
     assert out is not None
     reason, evidence = out
@@ -388,8 +346,7 @@ def test_exit_normal_explore_skip_to_sweep_is_non_terminal():
 
 
 def test_compute_next_phase_skip_to_sweep_from_explore_skips_kernel():
-    # Even with kernel enabled, no_more_leverage routes EXPLORE -> SWEEP
-    # (no KERNEL hop) and is NOT terminal.
+    # no_more_leverage routes EXPLORE -> SWEEP (no KERNEL hop), non-terminal.
     out = compute_next_phase(_skip_to_sweep_state("EXPLORE"), kernel_enabled=True)
     assert out is not None
     target, reason, evidence = out
@@ -406,9 +363,7 @@ def test_compute_next_phase_skip_to_sweep_from_kernel_routes_to_sweep():
     assert reason == "no_more_leverage"
 
 
-# ===========================================================================
 # 5. apply_escalate_budget_bump
-# ===========================================================================
 def test_apply_escalate_budget_bump_lifts_phase_within_cap():
     out = apply_escalate_budget_bump(
         {"EXPLORE": 0.60}, phase="EXPLORE",
@@ -428,14 +383,11 @@ def test_apply_escalate_budget_bump_clamps_to_cap():
 def test_apply_escalate_budget_bump_ignores_unknown_phase():
     inp = {"EXPLORE": 0.60}
     out = apply_escalate_budget_bump(inp, phase="NOT_A_PHASE")
-    # No bump, but the helper still returns a normalised copy with
-    # all known phases populated.
+    # No bump, but the helper returns a normalised copy with all known phases populated.
     assert out["EXPLORE"] == 0.60
 
 
-# ===========================================================================
 # 6. SharedState — escalate hint plumbing + stop_reason ENUM
-# ===========================================================================
 def test_set_pending_escalate_hint_accepts_vocab():
     s = SharedState()
     assert s.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_KERNEL) == "skip_to_kernel"
@@ -504,13 +456,9 @@ def test_stop_reason_vocab_has_v08_additions():
         assert is_valid_stop_reason(new)
 
 
-# ===========================================================================
 # 7. plateau is advisory only — pure compute_plateau_* still works
-# ===========================================================================
 def test_compute_next_phase_does_not_advance_on_plateau():
-    """Loosen P3_17: even when the EXPLORE plateau judge fires,
-    compute_next_phase returns None unless an explicit hint or hard
-    budget gate is active."""
+    """P3_17: even when the EXPLORE plateau judge fires, compute_next_phase returns None without an explicit hint or budget gate."""
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -534,9 +482,7 @@ def test_compute_next_phase_does_not_advance_on_plateau():
     assert triggered is True
 
 
-# ===========================================================================
 # 8. breakdown.attribution.phase_breakdown
-# ===========================================================================
 def test_collect_phase_breakdown_buckets_by_phase():
     from inference_optimizer.breakdown.collectors import collect_attribution
 
@@ -612,8 +558,7 @@ def test_collect_phase_breakdown_falls_back_to_action_family_when_history_empty(
 
 
 def test_collect_phase_breakdown_skips_zero_or_negative_deltas():
-    """Negative / None deltas (e.g. validate_stack measurement) don't
-    enter the per-phase bucket."""
+    """Negative / None deltas don't enter the per-phase bucket."""
     from inference_optimizer.breakdown.collectors import collect_attribution
 
     state = {

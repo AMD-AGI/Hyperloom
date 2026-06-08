@@ -1,20 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 M4 — Knowledge plane + PR Monitor tests.
-
-Covers KB_design §3.6 + §3.13 M4:
-
-* PR Monitor REST client (stdlib urllib): healthz / list_repos /
-  list_prs / pr_feed_warm with stubbed ``urlopen``. Disabled / network
-  failure paths return empty lists + warnings, never raise.
-* domain → repos yaml loader (``actions/_meta/_domain_repos.yaml``)
-  with wildcard handling.
-* KnowledgePlane facade: pr_feed_warm dispatch (disabled / unknown
-  domain / wildcard / per-repo failure folded into warnings).
-* SpecialistRunner tool-list gating: ``mcp__pr_monitor__*`` stripped
-  when KnowledgePlane reports PR Monitor disabled; default still
-  exposes the 12 PR Monitor MCP tool names.
-"""
+"""v0.8 M4 — Knowledge plane + PR Monitor tests (KB_design §3.6 + §3.13 M4)."""
 
 from __future__ import annotations
 
@@ -42,9 +28,7 @@ from inference_optimizer.orchestrator.specialist_runner import (
 )
 
 
-# ---------------------------------------------------------------------------
 # helpers
-# ---------------------------------------------------------------------------
 def _make_response(body: dict[str, Any] | list[Any], *, status: int = 200):
     """Return a context-manager that mimics ``urllib.request.urlopen``."""
     class _Resp:
@@ -57,9 +41,7 @@ def _make_response(body: dict[str, Any] | list[Any], *, status: int = 200):
     return _Resp()
 
 
-# ===========================================================================
 # 1. PR Monitor client — direct REST surface
-# ===========================================================================
 def test_pr_monitor_client_from_args_default_url():
     c = PRMonitorClient.from_args()
     assert c.base_url == DEFAULT_PR_MONITOR_URL.rstrip("/")
@@ -69,8 +51,7 @@ def test_pr_monitor_client_from_args_default_url():
 def test_pr_monitor_client_from_args_disabled():
     c = PRMonitorClient.from_args(enabled=False)
     assert c.enabled is False
-    # Disabled client raises through the low-level helper but the
-    # high-level wrappers swallow into empty results.
+    # The low-level helper raises; the high-level wrappers swallow into empty results.
     with pytest.raises(PRMonitorError):
         c._get_json("/healthz")
     assert c.healthz() is False
@@ -93,8 +74,7 @@ def test_pr_monitor_healthz_handles_network_error(monkeypatch):
 
 
 def test_pr_monitor_list_repos_parses_items(monkeypatch):
-    """Legacy mock shape: dict-wrapped ``{items: [{name: ...}]}``.
-    Kept supported for back-compat with old test fixtures."""
+    """Legacy mock shape ``{items: [{name: ...}]}`` is still supported for back-compat."""
     c = PRMonitorClient.from_args()
     payload = {"items": [
         {"name": "ROCm/aiter"},
@@ -109,10 +89,7 @@ def test_pr_monitor_list_repos_parses_items(monkeypatch):
 
 
 def test_pr_monitor_list_repos_parses_real_rest_shape(monkeypatch):
-    """Production PR Monitor returns a top-level JSON array whose
-    entries carry ``repo_name`` + ``is_active``. Reading ``name``
-    silently dropped every entry (pr_intel_specialist wildcard
-    expansion bug). Inactive repos must be skipped."""
+    """Production returns a JSON array of ``repo_name`` + ``is_active`` entries; reading ``name`` dropped every row (wildcard bug). Inactive repos are skipped."""
     c = PRMonitorClient.from_args()
     payload = [
         {
@@ -243,9 +220,7 @@ def test_matches_keywords_case_insensitive():
     assert not _matches_keywords(pr, ["allreduce"])
 
 
-# ===========================================================================
 # 2. domain → repos yaml loader
-# ===========================================================================
 def test_load_domain_repos_returns_six_domains():
     repos = load_domain_repos()
     assert set(repos.keys()) == {
@@ -286,9 +261,7 @@ def test_load_domain_repos_ignores_unknown_domain(tmp_path):
     assert "ghost_specialist" not in out
 
 
-# ===========================================================================
 # 3. KnowledgePlane facade
-# ===========================================================================
 @pytest.fixture
 def plane_with_disabled_pr() -> KnowledgePlane:
     return KnowledgePlane.from_clients(
@@ -366,9 +339,7 @@ def test_plane_pr_feed_warm_wildcard_expands_via_list_repos(monkeypatch):
     # pr_intel_specialist has empty keywords → everything passes.
 
 
-# ===========================================================================
 # 5. SpecialistRunner tool-list gating
-# ===========================================================================
 def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
     for t in PR_MONITOR_MCP_TOOLS:
         assert t in DEFAULT_SPECIALIST_TOOLS
@@ -377,14 +348,7 @@ def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
 
 
 def test_default_specialist_tools_exclude_orphan_cortex_kb_readonly():
-    """Cortex KB has no MCP surface (REST only); KB read context is
-    pre-warmed into the specialist prompt by
-    ``Coordinator._warm_specialist_params``. Advertising
-    ``mcp__cortex_kb__{traverse,find_recipe,query}`` in the
-    ``--allowedTools`` list caused specialists to attempt orphan
-    tool calls and silently fall back to ``WebSearch``. The names
-    remain importable for PolicyGate (denial validation) but are NOT
-    in the default specialist whitelist."""
+    """Cortex KB has no MCP surface; advertising its read-only tool names caused orphan calls, so they're kept out of the default whitelist (importable for PolicyGate)."""
     for t in CORTEX_KB_READONLY_MCP_TOOLS:
         assert t not in DEFAULT_SPECIALIST_TOOLS
 
@@ -419,17 +383,14 @@ def test_specialist_runner_keeps_pr_monitor_when_plane_enabled():
 
 
 def test_specialist_runner_without_plane_keeps_default_tools():
-    """Back-compat: callers that don't pass a KnowledgePlane keep
-    every default tool (M5 behaviour preserved)."""
+    """Back-compat: callers without a KnowledgePlane keep every default tool."""
     runner = SpecialistRunner(backend_factory=lambda d: None)
     tools = runner._resolve_tools()
     for t in DEFAULT_SPECIALIST_TOOLS:
         assert t in tools
 
 
-# ===========================================================================
 # 6. KnowledgePlane cache reset
-# ===========================================================================
 def test_plane_reset_round_caches():
     pr = PRMonitorClient.from_args()
     pr._cache["x"] = []

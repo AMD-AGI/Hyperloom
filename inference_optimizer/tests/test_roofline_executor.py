@@ -1,32 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Roofline-v2 N2b: real RooflineExecutor orchestration tests.
-
-These tests pin the contract N3 (Coordinator sequence_denial) and N5
-(prompt rendering) build on top of:
-
-* **Happy path** — profile succeeds + trace_analyze succeeds →
-  SharedState carries `last_profile_trace` + `last_trace_analyze`
-  (with `analysis_md_text` + `roofline_snapshot_id` from C1 path)
-  and the executor returns `status=succeeded` with `snapshot_id`.
-* **profile failure** — executor returns `_failed("profile", ...)` and
-  SharedState is **not mutated** (preserves the pre-roofline state so
-  subsequent ticks can retry).
-* **profile success but no trace_path** — executor returns
-  `_failed("profile_no_trace", ...)`; corner case where profile
-  succeeds but doesn't surface a `main_trace_path` / `trace_files`.
-* **trace_analyze failure (after profile succeeded)** — executor
-  returns `_failed("trace_analyze", ...)`. SharedState **does** keep
-  the newly-set `last_profile_trace` (profile artifact is
-  independently useful) but NOT `last_trace_analyze` cache.
-* **Sub-step exceptions** — `profile_executor` / `trace_analyze_handler`
-  raising bubbles back as `_failed(..., error="<reason> raised: ...")`
-  not as an executor crash.
-* **trace_path extraction** — prefers `main_trace_path` over first
-  `trace_files` entry; both missing → no_trace failure.
-* **shared_state required** — constructor without shared_state raises
-  ValueError (cli wiring contract).
-"""
+"""Roofline-v2 N2b: real RooflineExecutor orchestration tests."""
 
 from __future__ import annotations
 
@@ -46,9 +20,7 @@ from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.orchestrator.task_registry import Task
 
 
-# ---------------------------------------------------------------------------
 # Test fixtures
-# ---------------------------------------------------------------------------
 def _ctx(tmp_path: Path | None = None) -> RunnerContext:
     task = Task(
         task_id="t-roofline-1", kind="roofline", state="running",
@@ -78,7 +50,7 @@ def _profile_success(trace_path: str = "/tmp/trace.json.gz") -> dict:
 
 
 def _trace_analyze_success(*, snapshot_id_in_state: int = 1) -> dict:
-    """`trace_analyze_handler` result shape per kernel_request_handlers."""
+    """`trace_analyze_handler` success result shape."""
     return {
         "status": "ok",
         "candidates_path": "/tmp/kc.json",
@@ -89,11 +61,7 @@ def _trace_analyze_success(*, snapshot_id_in_state: int = 1) -> dict:
 
 
 def _patch_subs(profile_result, ta_result):
-    """Context manager patching both sub-step callables.
-
-    Returns the two patches applied in order so a test can assert
-    side-effects via the mock objects.
-    """
+    """Return patches for both sub-step callables."""
     async def fake_profile(ctx):
         if isinstance(profile_result, Exception):
             raise profile_result
@@ -113,16 +81,13 @@ def _patch_subs(profile_result, ta_result):
     )
 
 
-# ---------------------------------------------------------------------------
 # Happy path
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     state = _state()
     state.cumulative_gain_validated = 2.5
     ctx = _ctx(tmp_path)
 
-    # Write a placeholder analysis.md so record_trace_analyze can read it
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\nCompute 51%, Idle 48%\n", encoding="utf-8")
     ta = _trace_analyze_success()
@@ -142,7 +107,6 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     assert result["profile_workspace"] == "/tmp/workspace"
     assert "executed_at_iso" in result
 
-    # SharedState mutations
     assert state.last_profile_trace == "/tmp/trace.gz"
     assert state.last_profile_status == "succeeded"
     assert state.last_profile_args == "--mem-fraction-static=0.92"
@@ -179,9 +143,7 @@ async def test_happy_path_increments_snapshot_id_on_re_run(tmp_path):
     assert state.last_trace_analyze["roofline_baseline_gain_at_snapshot"] == 4.0
 
 
-# ---------------------------------------------------------------------------
 # Failure paths — profile
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_profile_failed_does_not_mutate_shared_state(tmp_path):
     state = _state()
@@ -205,7 +167,6 @@ async def test_profile_failed_does_not_mutate_shared_state(tmp_path):
     assert "magpie exited 1" in result["error"]
     assert result["sub_result"]["status"] == "failed"
 
-    # SharedState UNCHANGED
     assert state.last_profile_trace == "/old/trace.gz"
     assert state.last_trace_analyze["roofline_snapshot_id"] == 5
 
@@ -216,8 +177,6 @@ async def test_profile_no_trace_path(tmp_path):
     state = _state()
     ctx = _ctx(tmp_path)
     profile_bad = {"status": "succeeded", "output_throughput": 110.0}
-    # No main_trace_path, no trace_files
-
     p1, p2 = _patch_subs(profile_bad, _trace_analyze_success())
     executor = RooflineExecutor(shared_state=state)
     with p1, p2:
@@ -226,7 +185,6 @@ async def test_profile_no_trace_path(tmp_path):
     assert result["status"] == "failed"
     assert result["error_class"] == "profile_no_trace_failed"
     assert "no trace_path" in result["error"]
-    # SharedState UNCHANGED (we caught this before promote)
     assert state.last_profile_trace == ""
 
 
@@ -258,14 +216,10 @@ async def test_profile_returns_non_dict(tmp_path):
     assert "non-dict" in result["error"]
 
 
-# ---------------------------------------------------------------------------
 # Failure paths — trace_analyze
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_trace_analyze_failed_keeps_profile_promote(tmp_path):
-    """After profile succeeds but trace_analyze fails:
-    - last_profile_trace IS promoted (profile artifact is useful)
-    - last_trace_analyze stays empty (no fresh cache)"""
+    """trace_analyze failure keeps last_profile_trace but leaves last_trace_analyze empty."""
     state = _state()
     ctx = _ctx(tmp_path)
     ta_failed = {"status": "failed", "error": "tracelens crashed"}
@@ -279,10 +233,8 @@ async def test_trace_analyze_failed_keeps_profile_promote(tmp_path):
     assert result["error_class"] == "trace_analyze_failed"
     assert result["phase"] == "trace_analyze"
 
-    # last_profile_trace IS updated (profile artifact retained)
     assert state.last_profile_trace == "/tmp/new.gz"
     assert state.last_profile_status == "succeeded"
-    # last_trace_analyze is EMPTY (cleared during profile promote, never re-populated)
     assert state.last_trace_analyze == {}
 
 
@@ -297,7 +249,6 @@ async def test_trace_analyze_raises_exception(tmp_path):
     assert result["status"] == "failed"
     assert result["error_class"] == "trace_analyze_failed"
     assert "bad payload" in result["error"]
-    # Profile promote still happened
     assert state.last_profile_trace == "/tmp/t.gz"
 
 
@@ -314,9 +265,7 @@ async def test_trace_analyze_returns_non_dict(tmp_path):
     assert "non-dict" in result["error"]
 
 
-# ---------------------------------------------------------------------------
 # Helpers + factory
-# ---------------------------------------------------------------------------
 def test_extract_trace_path_prefers_main_trace_path():
     r = {
         "main_trace_path": "/main.gz",
@@ -353,7 +302,6 @@ def test_failed_helper_constructs_canonical_shape():
     f2 = _failed("trace_analyze", "x",
                  sub_result={"status": "failed", "error": "y", "extra": "ignored"})
     assert f2["sub_result"] == {"status": "failed", "error": "y"}
-    # 'extra' key not in the pinned allowlist → dropped
     assert "extra" not in f2["sub_result"]
 
 
@@ -369,9 +317,7 @@ def test_make_roofline_executor_factory_signature():
     assert exe.shared_state is state
 
 
-# ---------------------------------------------------------------------------
 # Ctx wrap helper
-# ---------------------------------------------------------------------------
 def test_wrap_profile_ctx_creates_child_task():
     state = SharedState()
     exe = RooflineExecutor(shared_state=state)
@@ -384,7 +330,6 @@ def test_wrap_profile_ctx_creates_child_task():
     assert child.task.state == "running"
     assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92"}
     assert child.extra["session_dir"] == "/sess"
-    # Lease inherited (None in this test fixture)
     assert child.lease is parent.lease
 
 
@@ -398,24 +343,8 @@ def test_resolve_session_dir_handles_missing_extra():
     assert exe._resolve_session_dir(ctx) == Path("/abc")
 
 
-# ===========================================================================
-# (formerly test_n10_roofline_promote_persistence.py)
-# ===========================================================================
-"""Roofline-v2 N10: Coordinator persists roofline executor SharedState mutations.
-
-GPU-empirical post-fix (Qwen3-32B session 15:24-15:55 of 2026-05-19).
-
-Bug observed: RooflineExecutor mutates `shared_state.last_profile_trace`
-/ `last_profile_status` / `last_profile_args` / `last_trace_analyze`
-inline during its sub-step orchestration. The mutations land on the
-in-memory SharedState object (so the next-tick LLM prompt reflects
-them), BUT `_promote_to_shared_state` previously had no `"roofline"`
-branch — so `changed` stayed False and the standard
-`if changed: self.shared_state.save(...)` tail never persisted the
-mutations to `state.json`. Disk view stayed stale (snapshot_id=0,
-analysis_md_len=0) while in-memory was correct.
-"""
-
+# (formerly test_n10_roofline_promote_persistence.py) — N10: Coordinator persists
+# roofline executor SharedState mutations to state.json.
 import json
 
 from inference_optimizer.orchestrator.backends import (
@@ -470,7 +399,7 @@ def _roofline_task(snapshot_id: int = 1) -> Task:
 
 
 def _roofline_result(snapshot_id: int = 1) -> dict:
-    """Mirrors what RooflineExecutor returns on success per design §8.4."""
+    """Mirrors RooflineExecutor's success result (design §8.4)."""
     return {
         "status": "succeeded",
         "executed_at_iso": "2026-05-19T15:55:00+00:00",
@@ -625,17 +554,7 @@ async def test_promote_roofline_non_dict_result_short_circuits(session_dir):
     assert coord.shared_state.roofline_attempts == []
 
 
-# ===========================================================================
-# (formerly test_n11_strip_base64.py)
-# ===========================================================================
-"""Roofline-v2 N11: strip base64 image data URLs from analysis.md.
-
-GPU-empirical root cause (DeepSeek-R1 session 16:06-02:00 of
-2026-05-19): the 200 KB analysis.md TraceLens emits has 184.5 KB of
-base64 PNG payload. N11 strips the data-URL payload before injection.
-"""
-
-
+# (formerly test_n11_strip_base64.py) — N11: strip base64 image data URLs from analysis.md.
 def test_strip_passes_text_through_when_no_base64_url():
     md = (
         "# Analysis\n\nNo images here, just text.\n"
@@ -799,13 +718,8 @@ def test_strip_keeps_surrounding_markdown_intact():
     assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx" not in out
 
 
-# ===========================================================================
-# (formerly test_n26_steady_state_auto_retry.py)
-# ===========================================================================
-"""N26 — RooflineExecutor auto-retries trace_analyze on
-steady_state_chunk_{empty,missing} with TraceLens-supplied alternate mode.
-"""
-
+# (formerly test_n26_steady_state_auto_retry.py) — N26: RooflineExecutor auto-retries
+# trace_analyze on steady_state_chunk_{empty,missing} with an alternate mode.
 from inference_optimizer.orchestrator.action_executors.roofline import (
     _extract_steady_state_retry_mode,
 )

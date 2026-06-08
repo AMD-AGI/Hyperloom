@@ -280,13 +280,10 @@ def test_orchestration_md_has_no_score_view():
         assert needle not in fragment, (
             f"orchestration.md still references retired token {needle!r}"
         )
-    # The v0.8 §3.9 decision rule shows up.
     assert "§3.9" in fragment
 
 
-# ===========================================================================
 # 6. CLI flag presence
-# ===========================================================================
 def test_cli_exposes_legacy_action_scores_flag():
     """``--legacy-action-scores`` must be wired (drop / warn)."""
     from inference_optimizer.cli import _build_parser
@@ -301,7 +298,6 @@ def test_cli_exposes_legacy_action_scores_flag():
         "optimize",
         "--model", "/tmp/dummy-model",
     ])
-    # Default is "drop" (or the env override).
     assert args2.legacy_action_scores in ("drop", "warn")
 
 

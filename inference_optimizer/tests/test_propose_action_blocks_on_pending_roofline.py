@@ -1,24 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression — the auto-roofline pending deny is gone (loosen P2_12).
-
-The Coordinator used to deny ``specialist`` / ``explore`` /
-kernel-owned proposals while an auto-enqueued analysis task was in
-flight (rule ``wait_for_auto_roofline``), making the LLM wait on a
-stale ``analysis.md`` snapshot. The pending field still drives the
-watermark re-arm logic, but it no longer gates dispatches: actions
-proceed against the current snapshot and any GPU conflict is
-serialised by the lane / GPU lease instead of a policy deny.
-
-This regression pins:
-
-  * the gate hooks (``_roofline_denial_for_action`` /
-    ``_auto_roofline_pending_denial``) are absent from
-    :class:`Coordinator`;
-  * ``_handle_propose_action`` happily emits a ``proposal`` envelope
-    for an ``explore`` proposal while ``auto_roofline_pending_task_id``
-    points at a still-running roofline task.
-"""
+"""Regression (loosen P2_12): the ``wait_for_auto_roofline`` deny is gone — proposals proceed while an analysis task is in flight."""
 
 from __future__ import annotations
 
@@ -83,8 +65,7 @@ def coord(tmp_path: Path) -> Coordinator:
 
 
 def test_roofline_pending_gate_hooks_removed():
-    """The deny helpers and the gated-action set must be gone from
-    the Coordinator surface so no caller can re-introduce the gate."""
+    """The deny helpers and gated-action set must be gone from the Coordinator surface."""
     for attr in (
         "_roofline_denial_for_action",
         "_auto_roofline_pending_denial",
@@ -105,9 +86,7 @@ def test_roofline_pending_gate_hooks_removed():
 async def test_propose_action_passes_through_while_roofline_pending(
     coord: Coordinator,
 ):
-    """An ``explore`` proposal lands on the bus even with an in-flight
-    auto-roofline task — the dispatch is no longer deferred and no
-    ``wait_for_auto_roofline`` denial is recorded."""
+    """An ``explore`` proposal lands on the bus even with an in-flight auto-roofline task (no deferral, no denial)."""
     coord.shared_state.auto_roofline_pending_task_id = "rl-pending-id"
 
     intent = Intent(
