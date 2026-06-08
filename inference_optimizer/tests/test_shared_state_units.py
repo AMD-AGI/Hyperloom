@@ -284,6 +284,7 @@ def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
             "error_class": "subprocess_nonzero",
             "error": big_err,
             "reported_success": False,
+            "stderr_log_path": "/runs/baseline/t-oom/baseline_stderr.log",
         },
     )
     attempt = s.baseline_attempts[-1]
@@ -291,6 +292,7 @@ def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
     assert attempt["stderr_tail"] is not None
     assert len(attempt["stderr_tail"]) == 1000
     assert attempt["stderr_tail"].endswith("HIP out of memory")
+    assert attempt["stderr_log_path"] == "/runs/baseline/t-oom/baseline_stderr.log"
 
 
 def test_attempts_history_caps_at_default():

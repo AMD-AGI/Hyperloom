@@ -104,3 +104,10 @@ def test_validated_inferencex_path_overwrites_env_not_setdefault():
     # The final export must be an unconditional assignment, never setdefault.
     assert 'os.environ["INFERENCEX_PATH"] = inferencex_path' in src
     assert 'os.environ.setdefault("INFERENCEX_PATH"' not in src
+
+
+def test_auto_detected_inferencex_candidates_must_be_writable():
+    """Auto-detected read-only checkouts are skipped so preflight can clone."""
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    assert "if os.access(candidate, os.W_OK):" in src
+    assert "skipping non-writable auto-detected" in src

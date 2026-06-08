@@ -2407,6 +2407,10 @@ class SharedState:
                 in {"subprocess_nonzero", "timeout"}
                 else None
             ),
+            "stderr_log_path": (
+                str(result.get("stderr_log_path"))
+                if result.get("stderr_log_path") else None
+            ),
             "raw_result_path": (
                 str(result.get("raw_result_path"))
                 if result.get("raw_result_path") else None
@@ -2469,6 +2473,10 @@ class SharedState:
                 self._stderr_tail(result.get("error"))
                 if error_class_str in {"subprocess_nonzero", "timeout"}
                 else None
+            ),
+            "stderr_log_path": (
+                str(result.get("stderr_log_path"))
+                if result.get("stderr_log_path") else None
             ),
             "workspace": (
                 str(result.get("workspace"))

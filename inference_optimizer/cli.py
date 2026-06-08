@@ -2872,7 +2872,7 @@ def _preflight(
     # InferenceX/benchmarks/benchmark_lib.sh → _install_lm_eval_deps.
     # We just ensure the InferenceX checkout exists; lm-eval deps are
     # auto-installed by benchmark_lib.sh at runtime.
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "")
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if not inferencex_path:
         from .paths import (
             magpie_dir as _magpie_default,
@@ -2897,8 +2897,14 @@ def _preflight(
             runtime_root / "InferenceX",
         ):
             if candidate.is_dir():
-                inferencex_path = str(candidate)
-                break
+                if os.access(candidate, os.W_OK):
+                    inferencex_path = str(candidate)
+                    break
+                print(
+                    "Preflight: skipping non-writable auto-detected "
+                    f"InferenceX checkout at {candidate}; cloning a "
+                    "writable checkout instead."
+                )
     # When no writable checkout was found (e.g. a brain-launched run that
     # skipped install.sh's ensure_inferencex), clone one ourselves rather
     # than falling back to a read-only host mount. baseline cannot run

@@ -95,6 +95,7 @@ class BaselineAttemptSummary(TypedDict, total=False):
     # without crawling server logs. None on success / reconstruction.
     error_excerpt: str | None
     stderr_tail: str | None
+    stderr_log_path: str | None
 
 
 class BenchmarkInvocation(TypedDict, total=False):

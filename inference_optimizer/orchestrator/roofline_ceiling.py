@@ -31,6 +31,7 @@ accordingly (e.g. ``Theoretical Peak — single-stream-reuse ceiling``).
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -242,20 +243,30 @@ def _read_baseline_yaml_server_args(state: Any) -> str:
     )
 
 
-def _server_args_from(entry: Any) -> str:
-    """Extract the server-args string from a ``current_best`` / baseline dict."""
+def _server_args_env_override(entry: Any) -> str:
+    """Return framework server args pinned via ``extra_envs``."""
     if not isinstance(entry, dict):
         return ""
     envs = entry.get("extra_envs") or {}
     if isinstance(envs, dict):
-        env_args = _server_args_from_envs(envs)
-        if env_args:
-            return env_args
+        return _server_args_from_envs(envs)
+    return ""
+
+
+def _server_args_payload(entry: Any) -> str:
+    """Return framework-neutral overlay server args from an entry."""
+    if not isinstance(entry, dict):
+        return ""
     for key in ("candidate_extra_server_args", "extra_server_args", "extra_args"):
         val = entry.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()
     return ""
+
+
+def _server_args_from(entry: Any) -> str:
+    """Extract the final server-args string from one state entry."""
+    return _server_args_env_override(entry) or _server_args_payload(entry)
 
 
 def _achieved_arm_source(state: Any) -> str:
@@ -287,9 +298,23 @@ def _collect_runtime_server_args(state: Any) -> str:
         or _server_args_from(getattr(state, "last_baseline", None))
     )
     if _achieved_arm_source(state) == "current_best":
-        overlay = _server_args_from(getattr(state, "current_best", None))
+        current_best = getattr(state, "current_best", None)
+        override = _server_args_env_override(current_best)
+        if override:
+            return override
+        overlay = _server_args_payload(current_best)
         return " ".join(p for p in (base_args, overlay) if p)
     return base_args
+
+
+def _runtime_gpu_type(state: Any, benchmark: dict[str, Any]) -> str:
+    """Resolve real hardware for roofline; runner_type is only script routing."""
+    return str(
+        getattr(state, "gpu_type", "")
+        or os.environ.get("TARGET_GPU_TYPE", "")
+        or benchmark.get("runner_type")
+        or ""
+    )
 
 
 def resolve_runtime_workload(state: Any) -> RuntimeWorkload:
@@ -306,7 +331,7 @@ def resolve_runtime_workload(state: Any) -> RuntimeWorkload:
 
     return RuntimeWorkload(
         model_path=str(benchmark.get("model") or getattr(state, "model_path", "") or ""),
-        gpu_type=str(benchmark.get("runner_type") or getattr(state, "gpu_type", "") or ""),
+        gpu_type=_runtime_gpu_type(state, benchmark),
         precision=str(benchmark.get("precision") or getattr(state, "precision", "") or ""),
         framework=str(benchmark.get("framework") or getattr(state, "framework", "") or ""),
         tp=_env_int(envs, "TP") or _state_int("tp"),

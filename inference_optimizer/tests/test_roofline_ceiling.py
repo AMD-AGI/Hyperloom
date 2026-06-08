@@ -1982,6 +1982,23 @@ class TestRuntimeDtypeResolution:
         assert rt.weight_dtype_bytes == 1.0
         assert rt.quantization == "fp8"
 
+    def test_optimized_extra_envs_replace_baseline_server_args(self, tmp_path):
+        """extra_envs.EXTRA_*_ARGS replaces the YAML server-args env."""
+        cfg_path = self._baseline_yaml(
+            tmp_path, "EXTRA_SGLANG_ARGS", "--quantization fp8",
+        )
+        state = self._dense_fp32_state(tmp_path, "")
+        state.current_best = {
+            "tput": 1000.0,
+            "extra_envs": {"EXTRA_SGLANG_ARGS": "--dtype bfloat16"},
+        }
+        state.last_baseline = {"extras": {"materialized_config": cfg_path}}
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.source == "server_args_dtype"
+        assert rt.weight_dtype_tag == "bfloat16"
+        assert rt.quantization == "none"
+
     def test_runtime_workload_uses_baseline_yaml_fields(self, tmp_path):
         state = self._dense_fp32_state(tmp_path, "")
         runtime_model = state.model_path
@@ -2013,6 +2030,21 @@ class TestRuntimeDtypeResolution:
         assert runtime.isl == 1024
         assert runtime.osl == 2048
         assert runtime.server_args == "--dtype bfloat16"
+
+    def test_runtime_workload_uses_real_gpu_over_magpie_runner(self, tmp_path):
+        """MI325X runs via Magpie's mi300x runner but roofline uses MI325X."""
+        state = self._dense_fp32_state(tmp_path, "")
+        state.gpu_type = "mi325x"
+        cfg_path = self._baseline_yaml(
+            tmp_path,
+            "EXTRA_SGLANG_ARGS",
+            "--dtype bfloat16",
+            runner_type="mi300x",
+        )
+        state.last_baseline = {"extras": {"materialized_config": cfg_path}}
+
+        runtime = resolve_runtime_workload(state)
+        assert runtime.gpu_type == "mi325x"
 
     def test_ceiling_uses_baseline_yaml_model_when_state_is_stale(self, tmp_path):
         state = self._dense_fp32_state(tmp_path, "")

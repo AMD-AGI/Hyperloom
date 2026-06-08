@@ -2287,7 +2287,8 @@ def test_baseline_attempts_history_passes_through_error_excerpt(
              "status": "failed", "decision": "no_promote",
              "key_metric": None, "error_class": "subprocess_nonzero",
              "error_excerpt": "torch.OutOfMemoryError: HIP out of memory",
-             "stderr_tail": "aiter_backend.py line 219 workspace_buffer"},
+             "stderr_tail": "aiter_backend.py line 219 workspace_buffer",
+             "stderr_log_path": "runs/baseline/t1/baseline_stderr.log"},
         ],
     })
 
@@ -2299,6 +2300,9 @@ def test_baseline_attempts_history_passes_through_error_excerpt(
         "torch.OutOfMemoryError: HIP out of memory"
     )
     assert "workspace_buffer" in (history[0]["stderr_tail"] or "")
+    assert history[0]["stderr_log_path"] == (
+        "runs/baseline/t1/baseline_stderr.log"
+    )
 
 
 # ---------------------------------------------------------------------------
