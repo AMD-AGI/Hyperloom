@@ -55,6 +55,7 @@ from .specialist_subprocess import (
     _teardown_worktree,
 )
 from .sub_agent_runner import RunnerContext
+from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .system_prompts.dynamic_action_prompt_builder import (
     INPUT_TOKEN_CAP,
     JournalTurn,
@@ -182,6 +183,47 @@ class DynamicActionRunner:
         self.turn_cap = int(turn_cap)
         self.framework_source_roots = tuple(framework_source_roots)
 
+    @staticmethod
+    def _trace_dynamic_action_llm_call(
+        *,
+        session_dir: Path,
+        dyn_id: str,
+        turn: int,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """Append one ``llm_calls.jsonl`` row for a dynamic_action turn.
+
+        Only rows carrying real token counters are written (the backend
+        reports usage on metadata). Wrapped broadly so a trace failure
+        degrades to a debug log instead of aborting the dispatch.
+        """
+        try:
+            md = metadata or {}
+            has_tokens = any(
+                md.get(k) is not None
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                )
+            )
+            if not has_tokens:
+                return
+            record = LLMCallRecord.from_metadata(
+                session_id=session_dir.name,
+                component="dynamic_action",
+                dyn_id=dyn_id,
+                turn=turn,
+                metadata=md,
+            )
+            append_llm_call(session_dir=session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break dispatch
+            log.debug(
+                "full-trace: dynamic_action llm_call append failed for "
+                "dyn_id=%s turn=%s", dyn_id, turn, exc_info=True,
+            )
+
     # ------------------------------------------------------------------
     # Public entry — one dispatch
     # ------------------------------------------------------------------
@@ -257,6 +299,17 @@ class DynamicActionRunner:
                     )
                     error_msg = repr(exc)
                     break
+                # Full-trace A2: record this dynamic_action turn's token
+                # spend, keyed by dyn_id + turn so the collector can attach
+                # it to the dispatch decision. tick/phase are unknown inside
+                # the sub-agent runner — the collector backfills them from
+                # the ts window. Best-effort; never breaks the turn loop.
+                self._trace_dynamic_action_llm_call(
+                    session_dir=session_dir,
+                    dyn_id=dyn_id,
+                    turn=turn,
+                    metadata=backend_result.metadata,
+                )
                 raw_text = backend_result.raw_text or ""
                 try:
                     action = parse_llm_action(raw_text)
