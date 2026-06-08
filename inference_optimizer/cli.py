@@ -1140,6 +1140,25 @@ def _load_model_max_position_embeddings(model_path: str) -> int | None:
     return None
 
 
+def _model_has_dual_chunk_attention(model_path: str) -> bool:
+    """Best-effort detect a ``dual_chunk_attention_config`` in config.json.
+
+    Qwen 1M long-context models ship this block; sglang then rejects the
+    default aiter attention backend and demands ``dual_chunk_flash_attn``.
+    Checks the top level and a nested ``text_config``. Soft-degrades to
+    False on any missing / unreadable / invalid config.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    if data.get("dual_chunk_attention_config"):
+        return True
+    nested = data.get("text_config")
+    return isinstance(nested, dict) and bool(
+        nested.get("dual_chunk_attention_config")
+    )
+
+
 def _context_headroom_tokens() -> int:
     """Resolve the context headroom (tokens); env override, else default."""
     raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
