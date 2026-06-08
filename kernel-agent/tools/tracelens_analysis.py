@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import functools
 import gzip
 import json
@@ -24,7 +25,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from tracelens_arch_benchmark import ensure_gpu_arch_json
+try:
+    from inference_optimizer.orchestrator.framework_paths import (
+        resolve_patch_target_roots as _resolve_patch_target_roots,
+    )
+except ImportError:
+    _resolve_patch_target_roots = None
+
+try:
+    from apply_kernel_patch import known_target_roots as _known_target_roots
+except ImportError:
+    _known_target_roots = None
+
+try:
+    import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
+except Exception:
+    _aiter_jit_core = None
+
+from tracelens_arch_benchmark import populate_gpu_arch_json
 from tracelens_skill_runner import (
     aggregate_by_source_function,
     discover_capture_folder,
@@ -173,8 +191,6 @@ def _check_selected_chunk_has_gpu_events(
     fails here and the coordinator re-issues with
     ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE=prefilldecode``.
     """
-    import csv
-
     details_path = split_dir / "execution_details.csv"
     if not details_path.is_file():
         # Splitter didn't emit the CSV (older TraceLens?) -- cannot
@@ -337,15 +353,13 @@ def _check_selected_chunk_has_gpu_events_quality(
 
     See module-level N36 comment for the empirical case + design.
     """
-    import csv as _csv
-
     details_path = split_dir / "execution_details.csv"
     if not details_path.is_file():
         return None
     try:
         with details_path.open("r", encoding="utf-8") as fh:
-            rows = list(_csv.DictReader(fh))
-    except (OSError, _csv.Error):
+            rows = list(csv.DictReader(fh))
+    except (OSError, csv.Error):
         return None
 
     def _row_for(chunk_path: "Path") -> "dict[str, str] | None":
@@ -757,15 +771,14 @@ def _framework_patch_roots() -> tuple[str, ...]:
     the case-insensitive match working.
     """
     try:
-        from inference_optimizer.orchestrator.framework_paths import (
-            resolve_patch_target_roots,
-        )
-
-        roots = resolve_patch_target_roots()
+        if _resolve_patch_target_roots is None:
+            raise ImportError
+        roots = _resolve_patch_target_roots()
     except ImportError:
-        from apply_kernel_patch import known_target_roots
-
-        roots = known_target_roots()
+        if _known_target_roots is None:
+            roots = []
+        else:
+            roots = _known_target_roots()
     out: list[str] = []
     seen: set[str] = set()
     for root in roots:
@@ -781,11 +794,9 @@ def _aiter_csrc_root() -> str:
     """aiter's own device-source root (e.g. ``.../aiter_meta/csrc/``),
     resolved from the installed package. Empty when aiter is not importable.
     Cached once per process."""
-    try:
-        import aiter.jit.core as _jc  # type: ignore
-    except Exception:
+    if _aiter_jit_core is None:
         return ""
-    raw = (getattr(_jc, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
+    raw = (getattr(_aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
     return (raw.rstrip("/") + "/") if raw else ""
 
 
@@ -1024,7 +1035,6 @@ def _candidate_keywords(name: str) -> list[str]:
         # Itanium ABI uses <len><name>; walk through and slice manually so
         # consecutive segments (e.g. 5aiter26cross_device_reduce_2stage...) are
         # parsed as separate identifiers.
-        import re
         tokens = []
         pos = 0
         while pos < len(cleaned):
@@ -1611,16 +1621,15 @@ def load_op_category_map(
     csv_path = Path(perf_report_csv_dir) / "unified_perf_summary.csv"
     if not csv_path.is_file():
         return {}
-    import csv as _csv
     out: dict[str, str] = {}
     try:
         with csv_path.open(newline="", encoding="utf-8") as f:
-            for row in _csv.DictReader(f):
+            for row in csv.DictReader(f):
                 name = str(row.get("name") or "").strip()
                 cat = str(row.get("op category") or "").strip()
                 if name and cat and name not in out:
                     out[name] = cat
-    except (OSError, _csv.Error):
+    except (OSError, csv.Error):
         return {}
     return out
 
@@ -1805,11 +1814,19 @@ def build_notes(candidate: dict[str, Any]) -> str:
     return f"resolved source: {candidate['source_file']}"
 
 
-def run_command(cmd: list[str], *, cwd: Path | None, log_path: Path, timeout_s: int) -> int:
+def run_command(
+    cmd: list[str],
+    *,
+    cwd: Path | None,
+    log_path: Path,
+    timeout_s: int,
+    env: dict[str, str] | None = None,
+) -> int:
     append_log(log_path, f"$ {' '.join(cmd)}")
     proc = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -2826,7 +2843,7 @@ def main() -> int:
             update_status(
                 status_path,
                 state="running",
-                current_step="ensure_gpu_arch_json",
+                current_step="populate_gpu_arch_json",
                 log_path=log_path,
                 artifact_paths=artifacts,
                 run_id=run_id,
@@ -2841,15 +2858,16 @@ def main() -> int:
                     )
                 ),
             )
-            gpu_arch_path = ensure_gpu_arch_json(
+            gpu_arch_path = populate_gpu_arch_json(
                 tracelens_root=tl_root,
                 platform=args.target_platform,
                 log=lambda msg: append_log(log_path, msg),
-                run_command=lambda cmd, *, cwd, timeout_s: run_command(
+                run_command=lambda cmd, *, cwd, timeout_s, env=None: run_command(
                     cmd,
                     cwd=cwd,
                     log_path=log_path,
                     timeout_s=timeout_s,
+                    env=env,
                 ),
                 timeout_s=arch_benchmark_timeout_s,
             )
