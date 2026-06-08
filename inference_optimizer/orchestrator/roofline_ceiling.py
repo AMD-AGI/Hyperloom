@@ -670,10 +670,10 @@ def _resolve_effective_concurrency(state: Any) -> int:
 
 @dataclass(frozen=True)
 class RooflineBreakdown:
-    """Two-sided decode roofline ceiling.
+    """Decode roofline ceiling plus memory/compute side projections.
 
-    Captures the result of ``T_peak = min(T_mem, T_cmp)`` together with
-    the side that dominated so reports can label which bound is active.
+    For PerfModel, ``peak_tok_per_sec`` is based on summing per-op
+    ``max(t_mem, t_cmp)`` and may differ from ``min(T_mem, T_cmp)``.
 
     ``bound_kind`` values:
       * ``"memory"``  — T_mem ≤ T_cmp (or T_cmp unavailable/degenerate).
@@ -696,7 +696,7 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 
 
 def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
-    """Compute T_mem + T_cmp + min(T_mem, T_cmp) + bound_kind in one shot.
+    """Compute the primary decode ceiling plus T_mem/T_cmp side projections.
 
     Primary entry point for roofline ceiling. Uses the TraceLens-compatible
     bottom-up PerfModel (``compute_roofline_from_perfmodel``) as the preferred

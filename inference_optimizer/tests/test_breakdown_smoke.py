@@ -1293,6 +1293,16 @@ def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
                 "call_count": 48,
                 "duration_us": 6874.0,
                 "reusable_native_kernel": True,
+                "rocprof_roofline": {
+                    "before_kernel_opt": {
+                        "status": "matched",
+                        "roofline_efficiency_pct": 37.77,
+                    },
+                    "after_kernel_opt": {
+                        "status": "scheduled",
+                        "reason": "background_task",
+                    },
+                },
             },
             {
                 "kernel_id": "k002",
@@ -1331,6 +1341,8 @@ def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
     assert k1["call_count"] == 48
     assert k1["duration_us"] == pytest.approx(6874.0)
     assert k1["reusable_native_kernel"] is True
+    assert k1["rocprof_roofline"]["before_kernel_opt"]["status"] == "matched"
+    assert k1["rocprof_roofline"]["after_kernel_opt"]["status"] == "scheduled"
     # Compute-bound entry preserves False explicitly.
     assert kr["kernels"][1]["reusable_native_kernel"] is False
 

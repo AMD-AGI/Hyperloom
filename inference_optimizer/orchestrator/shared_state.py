@@ -2747,6 +2747,9 @@ class SharedState:
                         history_entry["perfmodel_breakdown"] = {
                             "decode_tok_per_s": pm_bd.decode_tok_per_s,
                             "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
+                            "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
+                            "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
+                            "bound_kind": pm_bd.bound_kind,
                             "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
                             "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
                             "ops": [
