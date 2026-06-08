@@ -1,18 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""End-to-end integration with inference_optimizer.
-
-Round-trip: build a Coordinator-style prompt, drive it through the
-reactor (the same path the subprocess CLI takes), and validate every
-emitted intent against the upstream :class:`PolicyGate`. The test is
-skipped when the inference_optimizer package is not on ``sys.path``.
-
-The host-visible transport (``python -m robustness_agent.runtime.cli
-tick``) is exercised separately in ``test_runtime_cli.py``; this file
-focuses on the contract between the reactor and the upstream
-PolicyGate, which is identical regardless of which transport the
-Coordinator picks.
-"""
+"""End-to-end integration with inference_optimizer: drive a Coordinator prompt through the reactor and validate every intent against the upstream PolicyGate. Skipped when inference_optimizer is not importable."""
 
 from __future__ import annotations
 
@@ -72,12 +60,7 @@ def _to_upstream(local_intent):
 
 
 async def _drive_reactor_with_prompt(config, prompt: str):
-    """Build a reactor bundle, run one tick from a Coordinator-style
-    prompt, return ``(intents, bundle)`` so the test can ``aclose`` it.
-
-    Mirrors what ``robustness_agent.runtime.cli._run_tick`` does without
-    paying for subprocess startup.
-    """
+    """Run one reactor tick from a Coordinator prompt, returning ``(intents, bundle)`` (mirrors ``_run_tick`` without subprocess startup)."""
     from robustness_agent.factory import build_reactor_components
     from robustness_agent.role.prompt_inputs import from_coordinator_prompt
 
@@ -130,10 +113,7 @@ async def test_backend_high_severity_path_passes_gate(tmp_path):
         gate = _gate()
         assert intents
         types_emitted = {i.type.value for i in intents}
-        # Strategic HIGH symptoms now emit alert(high) only; the
-        # escalate / prune / delegate(report) auto-emits were dropped
-        # in loosen P3_19. Orchestration consumes the alert detail and
-        # decides whether to act.
+        # Strategic HIGH symptoms emit alert(high) only; escalate/prune/delegate auto-emits dropped in loosen P3_19.
         assert "alert" in types_emitted
         assert "escalate_strategy_change" not in types_emitted
         for intent in intents:
@@ -186,19 +166,7 @@ async def test_heartbeat_passes_gate(tmp_path):
 
 @pytest.mark.asyncio
 async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_path):
-    """Full Change A/B round-trip: 2 ticks of "all GPUs full + no live
-    owner" -> classifier emits gpu_memory_leaked HIGH -> ladder emits
-    alert + delegate(recover) -> each intent survives upstream
-    PolicyGate validation.
-
-    Loosen P3_19 dropped the strategic ``escalate_strategy_change``
-    auto-emit; ``delegate(recover, force_gpu_cleanup=True)`` stays as
-    the resource-recovery path because Robustness owns it for cleanup.
-
-    The reactor pipeline is stateful (the GpuLeakDetector counter), so
-    we hand-build the bundle's components and feed SourceData directly
-    to skip the LocalProbe / DegradeRouter dance.
-    """
+    """Full Change A/B round-trip: 2 ticks of leak -> gpu_memory_leaked HIGH -> alert + delegate(recover), each surviving upstream PolicyGate (escalate dropped, loosen P3_19). Feeds SourceData directly since the GpuLeakDetector counter is stateful."""
     from robustness_agent.config import Config
     from robustness_agent.factory import build_reactor_components
     from robustness_agent.role.prompt_inputs import (
@@ -254,8 +222,6 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
         assert {"alert", "delegate"} <= types_emitted
         assert "escalate_strategy_change" not in types_emitted
 
-        # Every intent the gpu_memory_leaked branch produced must pass
-        # the upstream PolicyGate when sourced from role=robustness.
         gate = _gate()
         for intent in decision.intents:
             gate.validate_intent("robustness", _to_upstream(intent))
@@ -273,9 +239,7 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
 
 @pytest.mark.asyncio
 async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
-    """Mirror of the unit test, but driven via the public factory:
-    presence of an EngineCore process keeps the detector silent even
-    after several ticks of leaked-looking metrics."""
+    """Via the public factory: a live EngineCore process keeps the detector silent across several ticks of leaked-looking metrics."""
     from robustness_agent.config import Config
     from robustness_agent.factory import build_reactor_components
     from robustness_agent.role.prompt_inputs import (
@@ -324,10 +288,7 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
 async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     from robustness_agent.config import Config
 
-    # Inbox doesn't natively carry delegated_result, so we reach into
-    # the local probe via direct injection: feed a fake conductor.db
-    # entry matching delegated_result with state=failed twice on the
-    # same family.
+    # Inbox can't carry delegated_result, so inject a fake conductor.db with state=failed twice on the same family.
     import json
     import sqlite3
 

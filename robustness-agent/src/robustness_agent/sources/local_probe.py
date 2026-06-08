@@ -2,20 +2,13 @@
 
 """Local fallback source.
 
-Wraps a small set of best-effort probes that work on any host: a SQLite
-read of the Coordinator session DB, a ``shutil.disk_usage`` sample,
-optional ``ps``/``rocm-smi``/``nvidia-smi`` invocations, a tail of a
-configured log file plus error-pattern extraction, and an HTTP probe
-of locally-running inference servers.  Any sub-probe that fails
-returns empty data without raising — :class:`LocalProbeSource` only
-raises :class:`SourceUnavailable` when *every* sub-probe yields
-nothing, so :class:`DegradeRouter` does not get stuck switching back
-and forth.
-
-The probes here intentionally only collect data the agent itself can
-see on the host. Cluster-wide GPU time-series, workload inference
-metrics, and node-level fault detection stay with primus-robust /
-robustness-server (see plan §6.1).
+Wraps best-effort host-local probes (Coordinator SQLite read, disk
+usage, ``ps``/``rocm-smi``/``nvidia-smi``, log tail + error-pattern
+extraction, HTTP server probe). A failing sub-probe returns empty data
+without raising; :class:`LocalProbeSource` raises
+:class:`SourceUnavailable` only when *every* sub-probe yields nothing,
+so :class:`DegradeRouter` does not flap. Cluster-wide metrics and
+node-level fault detection stay with robustness-server (plan §6.1).
 """
 
 from __future__ import annotations
@@ -40,17 +33,10 @@ from .base import SourceData, SourceUnavailable
 log = logging.getLogger(__name__)
 
 
-# Default process patterns we surface in ``local_processes``. The list
-# spans every owner that may legitimately hold AMD GPU VRAM during an
-# inference_optimizer session, so the gpu_memory_leaked signal can
-# distinguish "leaked VRAM (no live owner)" from "active server holding
-# VRAM". ``sglang.launch_server`` / ``EngineCore`` / ``Magpie`` were
-# added in 2026-05 alongside the GPU-leak detector. The second batch
-# (``vllm.v1.engine.core`` / ``vllm.engine.async_llm_engine`` /
-# ``ray::IDLE`` / ``raylet`` / ``hipcc`` / ``inferencex``) closes the
-# detection gap exposed by the 2026-05-18 GPU-leak post-mortem where
-# the vLLM v1 ``EngineCore-`` child processes still held VRAM under
-# names ``_DEFAULT_PROCESS_PATTERNS`` did not match.
+# Process patterns surfaced in ``local_processes``: every owner that may
+# legitimately hold AMD GPU VRAM, so gpu_memory_leaked can distinguish
+# leaked VRAM (no live owner) from an active server. Must cover vLLM v1
+# ``EngineCore-`` children that held VRAM in the 2026-05-18 leak post-mortem.
 _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
     # SGLang
     "sglang.srt",
@@ -67,33 +53,19 @@ _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
     # Ray + per-task workers (kernel_opt and GEAK schedule via Ray)
     "ray::IDLE",
     "raylet",
-    # aiter JIT compilation — when ``hipcc`` is stuck mid-build it
-    # holds GPU locks and CPU but produces no progress, masking as
-    # "live owner" for the gpu_memory_leaked detector unless we list it.
+    # hipcc stuck mid-build holds GPU locks; list it so it doesn't mask as a live owner.
     "hipcc",
     # Generic benchmark serving client (Magpie sub-process)
     "benchmark_serving",
 )
 
 
-# Default error patterns extracted from local logs. Conservative — only
-# unambiguous failure markers — to keep false-positive RCA prompts low.
-# The 2026-05-19 extension (D1) adds 11 inference-framework-specific
-# patterns drawn from the 2026-05 post-mortem: vLLM EngineCore exits,
-# server port reuse, MTP/MLA arch mismatches, hipcc compile fail,
-# accuracy gate fail, KFD resource exhaustion (≠ OOM), ROCblas/hipBLAS
-# errors, NCCL timeouts, model checkpoint load fail, and the critic-
-# agent runtime timeout (E5). Severity tier is decided by
+# Conservative log error markers; severity tier decided by
 # :data:`signals.local_health._HIGH_SEVERITY_PATTERNS`.
-#
-# **Order matters** — :func:`_extract_log_errors` short-circuits on the
-# first matching pattern per line, so MORE SPECIFIC patterns must come
-# BEFORE GENERIC ones. The D1 / E5 additions in 2026-05-19 are ordered
-# so framework-specific errors (Engine core / aiter compile / runtime
-# timeout) win over the generic ``RuntimeError`` / ``Killed`` fallback.
+# **Order matters** — :func:`_extract_log_errors` short-circuits on the first
+# match per line, so MORE SPECIFIC patterns MUST come BEFORE GENERIC ones.
 _DEFAULT_LOG_ERROR_PATTERNS: tuple[str, ...] = (
-    # D1/E5 specific patterns — listed first so the generic
-    # ``RuntimeError`` / ``Killed`` fallbacks below don't shadow them.
+    # D1/E5 specific patterns — first so generic ``RuntimeError`` / ``Killed`` don't shadow them.
     # E5 critic-agent runtime stuck.
     r"runtime\.cli .* timed out after \d+s",
     # D1 vLLM v1 EngineCore subprocess crashes.
@@ -143,34 +115,22 @@ class LocalProbeConfig:
     """Inputs the LocalProbe needs from the agent config."""
 
     session_dir: Path | None = None
-    # D2 — single server log path (legacy). For multi-variant grid
-    # runs, also set ``extra_server_log_globs`` so executor-side logs
-    # like ``runs/<action>/<task_id>/server.log`` are picked up. Empty
-    # default keeps backwards compat with hosts that only emit one log.
+    # Single server log path (legacy); ``extra_server_log_globs`` picks up
+    # per-variant grid-run logs. Empty default keeps single-log hosts working.
     server_log_path: Path | None = None
     extra_server_log_globs: tuple[str, ...] = (
         "runs/*/*/server.log",
         "runs/*/*/server_log",
         "runs/*/server.log",
-        # 2026-05 grid_runner layout — ``runs/<action>/<task_id>/<variant>/
-        # <benchmark_dir>/server.log``. Without these depth-3/4 patterns
-        # the F-pattern log scanner sees zero live server logs while a
-        # grid is running, because Magpie/SGLang's per-variant log lives
-        # two directories deeper than the legacy single-run layout.
+        # depth-3/4 grid_runner layout (per-variant logs live deeper than legacy single-run).
         "runs/*/*/*/server.log",
         "runs/*/*/*/*/server.log",
     )
-    # Max number of additional log files scanned per tick (sorted by
-    # mtime desc). 5 is enough to cover the most-recent grid variants
-    # while staying cheap.
+    # Max extra log files per tick (mtime desc); 5 covers recent grid variants cheaply.
     max_extra_server_logs: int = 5
     log_tail_lines: int = 200
-    # ``/dev/shm`` is required by SGLang / vLLM multi-process queues
-    # (``SHM_*``). The Hyperloom SKILL preflight requires ≥ 16 GiB free
-    # before the run starts, but the host can exhaust it mid-session
-    # (Magpie wrappers + Ray plasma both write here). We surface
-    # ``/dev/shm`` alongside ``/`` so ``signals/local_health`` can fire
-    # ``shm_pressure`` separately from ``disk_pressure``.
+    # Surface ``/dev/shm`` (SGLang/vLLM SHM_* queues, can exhaust mid-session)
+    # alongside ``/`` so signals fire ``shm_pressure`` separately from ``disk_pressure``.
     disk_mountpoints: tuple[str, ...] = ("/", "/dev/shm")
     process_patterns: tuple[str, ...] = _DEFAULT_PROCESS_PATTERNS
     coordinator_event_limit: int = 200
@@ -178,62 +138,43 @@ class LocalProbeConfig:
     log_error_window_lines: int = 500
     health_probe_targets: tuple[str, ...] = ()
     health_probe_timeout_s: float = 1.5
-    # A5 / A6 / A7 — knobs for the new sub-probes. ``ray_probe_enabled``
-    # short-circuits the Ray check when the operator knows there's no
-    # Ray head on this node (smoke tests). ``aiter_jit_dir`` defaults to
-    # the env-supplied dir; when missing we fall back to scanning known
-    # locations under the running aiter wheel. ``fd_probe_pid`` defaults
-    # to the current Coordinator process (``os.getpid()``).
+    # A5/A6/A7 sub-probe knobs. ``ray_probe_enabled`` skips the Ray check on
+    # head-less nodes; ``aiter_jit_dir`` falls back to the aiter wheel when unset;
+    # ``fd_probe_pid`` defaults to the current Coordinator process (os.getpid()).
     ray_probe_enabled: bool = True
     ray_probe_timeout_s: float = 5.0
     aiter_jit_dir: Path | None = None
     fd_probe_pid: int | None = None
     fd_probe_enabled: bool = True
-    # G — decision-audit probe knobs (2026-05-18). The probe scans
-    # ``runs/integrate/*/result.json``, ``results/ci_metrics*.json`` and
-    # ``kernel-agent/runs/*/optimization_attempts.jsonl`` once per tick
-    # and surfaces the contents under :attr:`SourceData.local_decision_audit`.
-    # Disable wholesale via ``decision_audit_enabled=False`` for hosts
-    # that ship their own auditing.
+    # G — decision-audit probe. Scans ``runs/integrate/*/result.json``,
+    # ``results/ci_metrics*.json``, ``kernel-agent/runs/*/optimization_attempts.jsonl``
+    # into :attr:`SourceData.local_decision_audit`.
     decision_audit_enabled: bool = True
-    # Max recent ``runs/integrate/*/result.json`` files inspected per
-    # tick (sorted by mtime desc). 20 is enough to catch a same-fingerprint
-    # KEEP loop within a single Coordinator tick window without blowing
-    # up file IO budget.
+    # Max recent integrate result.json per tick (mtime desc); 20 catches a
+    # same-fingerprint KEEP loop within a tick without blowing the IO budget.
     decision_audit_max_integrate: int = 20
     # Max tail entries pulled from ``optimization_attempts.jsonl``.
     decision_audit_max_oob_attempts: int = 50
-    # C — preflight probe knobs (2026-05-19). ``preflight_enabled`` reads
-    # ``manifest.json`` once per tick into :attr:`SourceData.local_manifest`
-    # and aggregates ``profiles/kernel_breakdown.json`` into
-    # :attr:`SourceData.local_kernel_breakdown`. Both files are tiny and
-    # change rarely; cost is one ``json.load`` per tick.
+    # C — preflight probe. Reads ``manifest.json`` into local_manifest and
+    # aggregates ``profiles/kernel_breakdown.json`` into local_kernel_breakdown.
     preflight_enabled: bool = True
-    # E — critic-health probe knobs (2026-05-19). ``critic_health_enabled``
-    # scans ``critic-workdir/*/judge_bundle.json`` for KB-unreachable
-    # markers and counts workdir entries (used by ``critic_prune_stuck``).
+    # E — critic-health probe. Scans ``critic-workdir/*/judge_bundle.json`` for
+    # KB-unreachable markers and counts workdir entries (``critic_prune_stuck``).
     critic_health_enabled: bool = True
-    # Max ``critic-workdir/<turn>/`` directories scanned for judge bundles
-    # per tick. Robustness only needs the recent ones to catch a
-    # consecutive-tick KB outage; the rest of the corpus stays cold.
+    # Max ``critic-workdir/<turn>/`` dirs scanned per tick; recent ones suffice
+    # to catch a consecutive-tick KB outage.
     max_critic_judge_bundles: int = 20
-    # I — state-integrity probe (2026-05-19). Scans state.json /
-    # coordinator.db-wal / leases / agent JSONLs / Coordinator PID file.
-    # Disable wholesale via ``state_integrity_enabled=False`` for hosts
-    # that audit these externally.
+    # I — state-integrity probe. Scans state.json / coordinator.db-wal / leases /
+    # agent JSONLs / Coordinator PID file.
     state_integrity_enabled: bool = True
-    # Optimiser-run dir under ``session_dir`` where ``run_*.pid`` lives.
-    # Defaults to ``$USER_DATA_PATH/optimizer_runs/`` per SKILL.md.
+    # Optimiser-run dir under ``session_dir`` holding ``run_*.pid``
+    # (defaults to ``$USER_DATA_PATH/optimizer_runs/`` per SKILL.md).
     optimizer_runs_dirname: str = "optimizer_runs"
-    # J — external-deps probe (2026-05-19). Reads $OPENAI_BASE_URL etc.
-    # from env; disable when running offline or when the host has its
-    # own gateway-health monitor.
+    # J — external-deps probe. Reads $OPENAI_BASE_URL etc. from env.
     external_deps_enabled: bool = True
-    # Per-mount stat-latency budget. Above this → ``wekafs_degraded``.
-    # 5s matches the SKILL.md WekaFS read-latency expectation.
+    # Per-mount stat-latency budget; above this → ``wekafs_degraded`` (5s per SKILL.md).
     external_mount_stat_timeout_s: float = 5.0
-    # When set, override the default gateway probe URL. Empty → derive
-    # from ``$OPENAI_BASE_URL`` via ``/models`` suffix.
+    # Override gateway probe URL; empty → derive from ``$OPENAI_BASE_URL`` + ``/models``.
     external_gateway_probe_url: str = ""
 
     @property
@@ -414,8 +355,7 @@ def _read_coordinator_events(
         return []
     try:
         conn.row_factory = sqlite3.Row
-        # The events table uses ``seq`` as monotonic id; some schemas
-        # alias it to ``id`` ??? probe both.
+        # ``events`` uses ``seq`` as monotonic id; some schemas alias it to ``id`` — probe both.
         rows = _try_select(
             conn,
             [
@@ -573,17 +513,13 @@ def _sample_rocm_smi() -> dict[str, Any]:
         return {}
     gpus = _parse_rocm_smi_csv(proc.stdout)
     if not gpus:
-        # Keep the raw text in case of parser drift so RCA still has
-        # something to look at.
+        # Keep raw text on parser drift so RCA still has something to look at.
         return {"raw_csv": proc.stdout, "tool": "rocm-smi"}
     return {"gpus": gpus, "tool": "rocm-smi"}
 
 
-# Mapping rocm-smi column header -> SourceData GPU snapshot field. The
-# column names below are stable across ROCm 5.x / 6.x; new metrics map
-# to None and stay in ``raw`` for future inspection. The two
-# ``VRAM Total ... Memory (B)`` columns are bytes-valued and translated
-# to MiB by ``_parse_rocm_smi_csv`` via :data:`_ROCM_BYTE_TO_MB_FIELDS`.
+# rocm-smi column header -> SourceData GPU field (stable across ROCm 5.x/6.x).
+# The ``VRAM ... (B)`` columns are bytes, translated to MiB via _ROCM_BYTE_TO_MB_FIELDS.
 _ROCM_HEADER_MAP: dict[str, str] = {
     "GPU use (%)": "util_gpu_pct",
     "GPU memory use (%)": "util_mem_pct",
@@ -596,9 +532,7 @@ _ROCM_HEADER_MAP: dict[str, str] = {
     "VRAM Total Memory (B)": "vram_total_mb",
 }
 
-# Snapshot fields whose underlying rocm-smi CSV value is in bytes; the
-# parser divides by 1024**2 so the final units match nvidia-smi
-# (``vram_used_mb`` / ``vram_total_mb``).
+# Byte-valued rocm-smi fields; parser divides by 1024**2 to match nvidia-smi units.
 _ROCM_BYTE_TO_MB_FIELDS: frozenset[str] = frozenset({
     "vram_used_mb",
     "vram_total_mb",
@@ -651,13 +585,10 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
     for k in sorted(by_id):
         snap = by_id[k]
         if len(snap) > 1:  # at least one parsed metric beyond ``gpu_id``
-            # Derive ``util_mem_pct`` from VRAM used/total when rocm-smi
-            # didn't emit the percentage column (it's optional on older
-            # rocm releases). Without this the GpuLeakDetector's primary
-            # trigger ``util_mem_pct ≥ 99%`` never fires on AMD hosts,
-            # leaving only the very strict ``free_mb ≤ 500MB`` path —
-            # 500 MB is 0.25% of an MI300X (192 GiB), so legitimate
-            # multi-GB leaks slipped past the detector in B2 testing.
+            # Derive ``util_mem_pct`` from VRAM used/total when rocm-smi omits the
+            # percentage column (optional on older releases); otherwise GpuLeakDetector's
+            # ``util_mem_pct >= 99%`` trigger never fires on AMD, and the strict
+            # ``free_mb <= 500MB`` fallback (0.25% of a 192GiB MI300X) misses multi-GB leaks.
             if "util_mem_pct" not in snap:
                 used = snap.get("vram_used_mb")
                 total = snap.get("vram_total_mb")
@@ -772,8 +703,7 @@ def _tail_logs(
             candidates: list[Path] = []
             for pattern in extra_globs:
                 candidates.extend(session_dir.glob(pattern))
-            # Deduplicate (a path may match multiple globs) and order by
-            # mtime desc so the most-recently-touched variant lands first.
+            # Dedupe (a path may match multiple globs) and order by mtime desc.
             unique: dict[Path, float] = {}
             for path in candidates:
                 if not path.is_file():
@@ -795,9 +725,7 @@ def _tail_logs(
         except OSError as exc:
             log.debug("local_probe: extra log glob failed: %s", exc)
 
-    # Merge: primary first (so primary patterns surface first), then
-    # extras with a per-file tag. Final cap = max_lines * (1 + len(extras))
-    # so cumulative scan cost stays linear.
+    # Primary first (so its patterns surface first), then extras with a per-file tag.
     out: list[str] = list(primary)
     for path, lines in extras:
         tag = f"[{path.name}]"
@@ -943,11 +871,9 @@ def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
         }
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
-        # A broken `ray status` CLI entrypoint (e.g. click/import error in
-        # ray's own scripts) is NOT evidence the head is down: the library
-        # imports fine, only the CLI shim crashes. Treat such self-crashes
-        # as inconclusive (silent) so we do not falsely emit ray_head_dead
-        # and prune the kernel_opt branch.
+        # A crashing `ray status` CLI shim (click/import error in ray's own scripts)
+        # is NOT evidence the head is down; treat as inconclusive so we don't falsely
+        # emit ray_head_dead and prune the kernel_opt branch.
         cli_self_crash = "Traceback (most recent call last)" in stderr and (
             "ray/scripts/scripts.py" in stderr
             or "add_command_alias" in stderr
@@ -1324,9 +1250,8 @@ def _load_manifest_extras(session_dir: Path | None) -> dict[str, Any]:
     return data
 
 
-# Tier mapping kept as a private constant so the signal layer can
-# compute the Amdahl ceiling without importing the inference_optimizer
-# package.
+# Private tier mapping so the signal layer computes the Amdahl ceiling
+# without importing the inference_optimizer package.
 _AMDAHL_TIER_FAMILIES: dict[str, str] = {
     "T1_TRITON":      "triton",
     "T2_AITER_CK":    "vendor",
@@ -1431,9 +1356,7 @@ def _sample_critic_workdir(
             mtime = judge_path.stat().st_mtime
         except (FileNotFoundError, PermissionError, OSError):
             mtime = 0.0
-        # Proposals count comes from ``judge_bundle.proposals``
-        # (decision_reviewer.PrepareReviewBundle); some bundles emit
-        # ``kb_priors_by_proposal`` dict instead, fall back gracefully.
+        # Count from ``proposals``; some bundles emit ``kb_priors_by_proposal`` instead.
         proposals = data.get("proposals")
         if isinstance(proposals, list):
             proposal_count = len(proposals)
@@ -1756,19 +1679,13 @@ async def _probe_gateway_health(
     return out
 
 
-# Default mount paths probed by J2. Each is read from the env at probe
-# time so an operator can move them without rebuilding the agent.
-# All entries default to "" (no in-process fallback): we only probe what
-# the operator/env actually points at. TRACELENS_ROOT is no longer
-# expected to be an external /wekafs mount — install.sh now clones the
-# public repo into $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens (a
-# session-local path), so the J2 probe should only flag it as a degraded
-# external mount when the operator has explicitly overridden TRACELENS_ROOT
-# to point at one (e.g. a shared cluster checkout).
+# J2 mount paths, read from env at probe time. All default to "" (no fallback):
+# we only probe what the operator points at. TRACELENS_ROOT is now session-local
+# (install.sh clones into $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens), so it
+# is only flagged degraded when explicitly overridden to a shared mount.
 _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
     ("TRACELENS_ROOT", ""),
-    # Internal extension is optional: no default path, so an open-source-only
-    # setup (TRACELENS_INTERNAL_ROOT unset) is not flagged as a degraded mount.
+    # Optional internal extension; unset means open-source-only, not a degraded mount.
     ("TRACELENS_INTERNAL_ROOT", ""),
     ("INFERENCEX_PATH", ""),
     ("OOB_SRC", ""),
@@ -1809,9 +1726,8 @@ def _probe_external_mounts(
     return out
 
 
-# Both TraceLens CLI names ship from the public repo; the
-# ``_inference`` variant is the canonical one for vLLM/SGLang traces
-# per SKILL.md but the legacy name remains valid for older builds.
+# Both TraceLens CLI names; the ``_inference`` variant is canonical for
+# vLLM/SGLang traces per SKILL.md, the legacy name remains valid for older builds.
 _TRACELENS_CLI_NAMES: tuple[str, ...] = (
     "TraceLens_generate_perf_report_pytorch_inference",
     "TraceLens_generate_perf_report_pytorch",

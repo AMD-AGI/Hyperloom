@@ -2,27 +2,9 @@
 
 """Aiter JIT-cache regression detector (A7).
 
-Hyperloom's baseline cold-start cost is dominated by aiter's JIT
-compiler producing per-shape ``.so`` artefacts. ``BaselineExecutor``
-already logs ``baseline_executor: COLD_START`` vs ``WARM`` based on
-the count of ``.so`` files under aiter's ``jit/`` cache root, but it
-only acts on the value at the moment the next baseline starts. We add
-a cross-tick view here so the robustness reactor can shout BEFORE the
-next cold-start ticks the run over the 3600s ``hipcc`` timeout.
-
-Two failure modes the detector catches:
-
-1. **Cache regressed mid-session** — operator (or a stale ``install.sh``
-   re-run) emptied ``jit/``; the next baseline / validate_stack will
-   silently fall into cold-path.
-2. **Build dir stuck** — ``jit/build/`` keeps a non-zero count of
-   in-flight artefacts for many consecutive ticks; usually means a
-   prior ``hipcc`` invocation crashed mid-build and left stale staging
-   files that block re-attempts.
-
-The detector tracks the previous tick's ``so_count`` in its own
-counter; the LocalProbe is stateless so we cannot move this into the
-sub-probe itself.
+Cross-tick view of aiter's ``jit/`` ``.so`` cache, warning before the next
+cold-start hits the 3600s ``hipcc`` timeout. Catches cache-regressed-mid-session
+and build-dir-stuck; tracks prior ``so_count`` itself since LocalProbe is stateless.
 """
 
 from __future__ import annotations
@@ -41,15 +23,11 @@ from .symptom import Symptom, SymptomSeverity
 class AiterJitConfig:
     """Tunables for :class:`AiterJitDetector`."""
 
-    # Below this count the detector calls the cache "cold". Hyperloom
-    # SKILL pins the warm/cold split at 20.
+    # Below this count the cache is "cold".
     cold_so_count: int = 20
-    # Relative drop ratio (current / previous) below which we treat the
-    # cache as regressed. 0.8 means: if ``so_count`` falls below 80% of
-    # the previous tick value AND it is now cold, fire HIGH.
+    # current/previous ``so_count`` ratio below which (when also cold) → regressed, fire HIGH.
     regression_ratio: float = 0.8
-    # Build-dir staling: count > stale_build_threshold AND unchanged for
-    # ``stale_build_persist_ticks`` consecutive ticks.
+    # Build-dir stale: count > stale_build_threshold AND unchanged for stale_build_persist_ticks ticks.
     stale_build_threshold: int = 1
     stale_build_persist_ticks: int = 5
 
@@ -65,11 +43,7 @@ class AiterJitDetector:
     ) -> None:
         self._config = config or AiterJitConfig()
         self._state_view = state_view
-        # Disk-backed cross-tick state: ``last_so_count`` is the
-        # baseline used for the regression comparison; ``last_build_count``
-        # and ``stale_build_streak`` track the build-dir staling rule.
-        # Without persistence the regression check never has a prior
-        # value to compare against under the subprocess-per-tick transport.
+        # Disk-backed cross-tick state; required for the regression check under subprocess-per-tick transport.
         loaded = state_view.load() if state_view is not None else {}
         last_so = loaded.get("last_so_count")
         self._last_so_count: int | None = (
@@ -102,8 +76,7 @@ class AiterJitDetector:
     ) -> list[Symptom]:
         info = data.local_aiter_jit
         if not isinstance(info, dict) or not info:
-            # No JIT data this tick — keep last counters intact, do not
-            # accuse the run of regressing on missing telemetry.
+            # No JIT data this tick — keep counters; don't accuse on missing telemetry.
             return []
         so_count = info.get("so_count")
         build_count = info.get("build_count") or 0
@@ -123,9 +96,7 @@ class AiterJitDetector:
         if self._stale_build_streak >= self._config.stale_build_persist_ticks:
             symptoms.append(self._build_stuck_symptom(info))
 
-        # Cache regression check — only fires when we have a previous
-        # baseline AND the new value crossed both the relative-drop and
-        # absolute-cold thresholds.
+        # Cache regression: needs a prior baseline AND the new value crossing both relative-drop and absolute-cold thresholds.
         prev = self._last_so_count
         if (
             prev is not None
@@ -135,8 +106,6 @@ class AiterJitDetector:
         ):
             symptoms.append(self._regression_symptom(info, prev=prev))
 
-        # Always update the counters last so the next tick has fresh
-        # references even if no symptom fired this tick.
         self._last_so_count = so_count
         self._last_build_count = int(build_count)
         self._persist()

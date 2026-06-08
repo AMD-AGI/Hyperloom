@@ -2,31 +2,18 @@
 
 """Translate Symptoms into Coordinator Intents.
 
-The ladder has three tiers, matching:
+Three tiers by severity:
 
-1. **observe** — low severity: emit ``send_message(topic="observation")``
-   so the orchestration agent has visibility but no pause is triggered.
-2. **diagnose** — medium severity: emit ``alert(severity="medium")``
-   carrying the symptom evidence; the orchestration agent runs a
-   focused RCA next tick.
-3. **recommend** — high severity: emit ``alert(severity="high")`` plus,
-   for resource-safety symptoms only, the resource recovery intent
-   (``kill_task`` for ``stale_lease``, ``delegate(recover)`` for
-   ``gpu_memory_leaked``, ``delegate(report)`` for the wall-clock
-   deadline backstops).
+1. **observe** (low) — ``send_message(topic="observation")``: visibility, no pause.
+2. **diagnose** (medium) — ``alert(severity="medium")`` carrying evidence.
+3. **recommend** (high) — ``alert(severity="high")`` plus, for resource-safety
+   only, ``kill_task`` (stale_lease), ``delegate(recover)`` (gpu_memory_leaked),
+   ``delegate(report)`` (wall-clock deadline backstops).
 
-Strategic suggestions (prune branches, skip a phase, wind down on
-plateau) are surfaced via the ``suggestion`` field in the alert
-``detail`` payload. Orchestration consumes them and decides whether
-to act; the ladder no longer auto-emits ``escalate_strategy_change``
-or ``prune_branch`` from a HIGH symptom.
-
-To avoid flooding the inbox the ladder maintains a per-key cooldown:
-the same ``Symptom.dedup_key()`` will not produce another intent until
-``cooldown_ticks`` ticks have elapsed.
-
-Findings — one persistent record per intent batch — are emitted
-alongside the intents and consumed by :class:`FindingSink` (T9).
+Strategic suggestions ride the alert ``detail.suggestion`` field; the ladder no
+longer auto-emits ``escalate_strategy_change`` / ``prune_branch``. A per-key
+cooldown (``Symptom.dedup_key`` × ``cooldown_ticks``) prevents inbox flooding.
+Findings — one record per intent batch — go to :class:`FindingSink`.
 """
 
 from __future__ import annotations
@@ -97,18 +84,15 @@ class ActionLadder:
     ) -> None:
         self._config = config or ActionLadderConfig()
         self._state_view = state_view
-        # Cooldown bookkeeping — persisted across subprocess restarts.
-        # Without persistence the ladder re-emits the same intent every
-        # tick because the in-memory dict resets, defeating the
-        # cooldown contract advertised in :class:`ActionLadderConfig`.
+        # Cooldown bookkeeping persisted across subprocess restarts; without
+        # it the in-memory dict resets each tick and re-emits every intent.
         loaded = state_view.load() if state_view is not None else {}
         self._last_emitted_tick: dict[tuple[str, ...], int] = (
             _decode_last_emitted(loaded.get("last_emitted"))
         )
-        # Updated at the top of each :meth:`decide` call so per-symptom
-        # branches (notably ``gpu_memory_leaked``) can stamp a stable
-        # tick-indexed ``idempotency_key`` onto the intents they emit
-        # without threading the tick through every helper.
+        # Stamped at the top of decide() so branches (e.g. gpu_memory_leaked)
+        # can build a stable tick-indexed idempotency_key without threading
+        # the tick through every helper.
         self._last_tick_index: int = 0
 
     def _persist_cooldown(self) -> None:
@@ -198,10 +182,8 @@ class ActionLadder:
 
     def _recommend(self, sym: Symptom) -> list[Intent]:
         intents: list[Intent] = [build_alert("high", sym.summary, detail=_detail(sym))]
-        # Resource-safety branch: stale lease releases a lane that is
-        # held by a dead PID. Robustness owns ``kill_task(scope='task')``
-        # exclusively for this case; everything else is policy and stays
-        # advisory.
+        # Resource-safety: stale lease holds a lane on a dead PID. Robustness
+        # owns ``kill_task(scope='task')`` exclusively here; else stays advisory.
         if sym.name == "stale_lease":
             evidence = (
                 dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
@@ -212,10 +194,8 @@ class ActionLadder:
                     build_kill_task(task_id=task_id, reason="stale_lease")
                 )
             return intents
-        # Resource-safety: GPU memory leak detected by the local probe.
-        # ``delegate(recover, force_gpu_cleanup=True)`` is the in-loop
-        # recovery action; Robustness has explicit allowlist authority
-        # for it.
+        # Resource-safety: GPU leak -> ``delegate(recover, force_gpu_cleanup=True)``,
+        # the in-loop recovery action Robustness is explicitly allowlisted for.
         if sym.name == "gpu_memory_leaked":
             evidence = (
                 dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
@@ -234,12 +214,10 @@ class ActionLadder:
                 )
             )
             return intents
-        # Wall-clock invariant wind-down: the absolute-time deadline
-        # supervisor will SIGTERM in-flight work past the wall, so
-        # ``delegate(report)`` is the only way to land a deterministic
-        # report inside the remaining budget. ``recover_unsuccessful``
-        # is the matching finalization path when an in-loop recover has
-        # already returned ``needs_review``.
+        # Wall-clock wind-down: the deadline supervisor SIGTERMs work past the
+        # wall, so ``delegate(report)`` is the only way to land a deterministic
+        # report in the remaining budget. ``recover_unsuccessful`` is the
+        # finalization path after an in-loop recover returned ``needs_review``.
         if sym.name in {
             "deadline_warning",
             "deadline_imminent",
@@ -260,11 +238,9 @@ class ActionLadder:
                 )
             )
             return intents
-        # Every other HIGH symptom is strategic. The alert above already
-        # carries the symptom evidence and the suggested hint via
-        # :func:`_detail`; Orchestration consumes those and decides
-        # whether to emit ``escalate_strategy_change`` / ``prune_branch``
-        # itself.
+        # Every other HIGH symptom is strategic: the alert above carries
+        # evidence + suggestion via _detail(); Orchestration decides whether
+        # to emit escalate_strategy_change / prune_branch itself.
         return intents
 
 
@@ -318,22 +294,16 @@ async def _safe_rca(provider: Any | None, sym: Symptom) -> str:
 # State-store (de)serialisation helpers
 # ---------------------------------------------------------------------------
 
-# Separator used to pack ``tuple[str, ...]`` dedup keys into a single
-# JSON-safe string. A vertical-bar is unlikely to appear in symptom
-# names / subject IDs and keeps the encoded key human-readable in the
-# detector_state.json file (useful when debugging cooldown behaviour).
+# Packs ``tuple[str, ...]`` dedup keys into a single JSON-safe object key;
+# unlikely to collide with symptom names / subject IDs.
 _LADDER_KEY_SEP: str = "\x1f"  # ASCII unit separator — safe inside JSON strings
 
 
 def _encode_last_emitted(
     last_emitted: dict[tuple[str, ...], int],
 ) -> dict[str, int]:
-    """Serialise a tuple-keyed cooldown dict to a JSON-safe dict.
-
-    JSON object keys must be strings; we join the ``Symptom.dedup_key``
-    tuple components with ``_LADDER_KEY_SEP`` so reads can recover the
-    original tuple verbatim.
-    """
+    """Serialise a tuple-keyed cooldown dict to a JSON-safe dict (tuple
+    components joined with ``_LADDER_KEY_SEP`` so decode recovers them)."""
     out: dict[str, int] = {}
     for key, tick in last_emitted.items():
         try:

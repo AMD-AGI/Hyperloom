@@ -1,36 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Pre-launch / pre-action feasibility signals (C1 / C2 / C3).
+"""Pre-launch / pre-action feasibility signals (C1 / C2 / C3) — "doomed before it starts".
 
-Three independent detectors live here, each catching a different
-"this run is doomed before it starts" failure mode:
+* **C1 ``model_gpu_infeasible``** — the ``(model_name, precision, tp, gpu_type,
+  max_model_len, conc)`` tuple cannot fit in available HBM. Fires once per session.
+* **C2 ``amdahl_kernel_ceiling_low``** — Triton-optimizable tier too small for kernel_opt
+  to move E2E: ``E2E_ceiling = 1 / ((1 - p) + p / s)``. Re-fires when breakdown mtime changes.
+* **C3 ``cold_start_budget_exhausted``** — aiter JIT cache empty AND remaining budget shorter
+  than one cold-start, so the next baseline is SIGTERM'd mid-``hipcc``.
 
-* **C1 ``model_gpu_infeasible``** — at session boot, the requested
-  ``(model_name, precision, tp, gpu_type, max_model_len, conc)`` tuple
-  cannot possibly fit in available HBM. The 2026-05 DSR1 post-mortem
-  showed 5 sessions burning through 30 minutes of baseline before
-  failing because the LLM-supplied ``--tp 1`` couldn't load 671B FP8
-  weights into a single MI300X (192 GB).
-
-* **C2 ``amdahl_kernel_ceiling_low``** — after profile completes the
-  ``T1_TRITON`` (Hyperloom-optimizable) tier is too small for kernel
-  optimization to move the E2E needle. DSR1-FP8 case:
-  ``optimizable_triton_pct=30.9%`` × ``single_kernel_speedup=1.5`` =
-  ``E2E_ceiling = 1 / ((1 - 0.309) + 0.309 / 1.5) ≈ 1.117``, i.e. at
-  best 11.7%; in practice each kernel patch is ~1.1× and lands well
-  inside the noise floor.
-
-* **C3 ``cold_start_budget_exhausted``** — aiter JIT cache is empty
-  AND the remaining wall-clock budget is shorter than one cold-start
-  cycle, so the next baseline/validate_stack will be SIGTERM'd
-  mid-``hipcc`` and produce nothing.
-
-All three are stateful in the sense that they suppress repeat fires
-across the same input fingerprint. The model-GPU rule only fires once
-per session (manifest is immutable); the Amdahl rule re-fires when the
-breakdown mtime changes (re-profiled); cold-start fires at most once
-per (cold_state, remaining_quanta) tuple to avoid spamming during a
-slow cooldown.
+All three suppress repeat fires across the same input fingerprint.
 """
 
 from __future__ import annotations
@@ -48,16 +27,10 @@ from .symptom import Symptom, SymptomSeverity
 
 
 # ---------------------------------------------------------------------------
-# Static physics tables — conservative engineering values.
-# Override-by-env hooks are provided where operators need to tune for
-# new GPUs / unusual model classes without code edits.
+# Static physics tables — conservative engineering values, env-overridable.
 # ---------------------------------------------------------------------------
 
-# HBM size per GPU type in GiB (per device, not aggregate).
-# MI325X is 256 GB but the upstream installer maps mi325x → mi300x; we
-# track it separately so the explicit override case stays correct.
-# Reference (NVIDIA) GPUs are included so ``--compare-against-gpu`` runs
-# also get a feasibility check.
+# HBM GiB per GPU device (not aggregate); NVIDIA refs included for ``--compare-against-gpu``.
 GPU_HBM_GIB: dict[str, float] = {
     "mi300x": 192.0,
     "mi325x": 256.0,
@@ -68,9 +41,7 @@ GPU_HBM_GIB: dict[str, float] = {
     "a100":   80.0,
 }
 
-# Bytes per parameter, indexed by ``precision`` field from manifest.
-# Includes the int-quant family because Hyperloom supports them on
-# specific models (AWQ / GPTQ / SmoothQuant).
+# Bytes per parameter, indexed by manifest ``precision`` (incl. int-quant family).
 PRECISION_BYTES_PER_PARAM: dict[str, float] = {
     "fp32":  4.0,
     "fp16":  2.0,
@@ -83,10 +54,7 @@ PRECISION_BYTES_PER_PARAM: dict[str, float] = {
     "gptq":  0.5,
 }
 
-# Per-token KV cache bytes per model class. The numbers are a single
-# rough average across the architectures Hyperloom ships priors for.
-# Override per-model via the optional ``$HYPERLOOM_KV_BYTES`` env if
-# you have a more accurate figure.
+# Per-token KV cache bytes per model class (rough averages; override via $HYPERLOOM_KV_BYTES).
 KV_BYTES_PER_TOKEN: dict[str, float] = {
     "dense":        16.0,
     "moe_swa":      4.0,
@@ -94,28 +62,17 @@ KV_BYTES_PER_TOKEN: dict[str, float] = {
     "moe_mla_nsa":  0.5,
 }
 
-# Fixed activation / scratch buffer per GPU (GiB). MoE models consume
-# more (gate matmul + expert dispatch buffer), so a single conservative
-# 8 GiB matches the steady-state allocation seen in the 2026-05 runs.
+# Fixed activation / scratch buffer per GPU (GiB); 8 GiB covers MoE steady-state.
 DEFAULT_ACTIVATION_BUF_GIB: float = 8.0
 
-# Model-name regex: matches ``-671B`` / ``-7b`` / `` 32B`` variants and
-# decimal suffixes (`` 3.5B``). Conservative — we want to match common
-# upstream conventions, not invent.
+# Model-name regex matching ``-671B`` / ``-7b`` / `` 3.5B`` size tokens.
 _PARAM_BILLIONS_RE: re.Pattern[str] = re.compile(
     r"(?<![A-Za-z0-9])(?P<n>\d+(?:\.\d+)?)\s*[Bb](?![A-Za-z])"
 )
 
 
 def extract_params_billions(model_name: str) -> float | None:
-    """Best-effort parse of ``-<N>B`` from a model name.
-
-    Returns ``None`` when no obvious size token is present. We
-    deliberately accept the first match — most HF-style names put the
-    parameter count at the end (``Qwen3-32B`` / ``DeepSeek-R1-671B``)
-    so the leading number ambiguity (e.g. ``LLaMA-2-7B``) is rare
-    enough not to warrant heuristics.
-    """
+    """Best-effort parse of ``-<N>B`` from a model name (first match; ``None`` if absent)."""
     if not model_name:
         return None
     match = _PARAM_BILLIONS_RE.search(model_name)
@@ -146,12 +103,8 @@ def compute_headroom_gib(
 ) -> HeadroomBreakdown | None:
     """Project per-GPU HBM headroom from manifest metadata.
 
-    Returns ``None`` when any of the required fields can't be resolved
-    (no model size in the name, unknown precision, unknown GPU type,
-    missing ``tp``). The C1 detector treats ``None`` as "skip — not
-    enough data to judge", which is intentional: the caller's
-    fallback is *always* the existing failure mode (baseline returns
-    ``bt=0``), so silent-skip is no worse than current behaviour.
+    Returns ``None`` when a required field (model size, precision, gpu_type, ``tp``) is
+    unresolved; the C1 detector treats ``None`` as "skip — not enough data to judge".
     """
     if not isinstance(manifest, dict) or not manifest:
         return None
@@ -181,14 +134,11 @@ def compute_headroom_gib(
     if not isinstance(conc, int) or conc <= 0:
         conc = 8
 
-    # Weights — split across TP. 5% overhead for KV-cache pool reservation
-    # / param shards / launch-time temporaries the framework reserves
-    # before serving traffic.
+    # Weights split across TP; 5% overhead for pool reservation / shards / launch temporaries.
     total_weights_bytes = params_b * 1_000_000_000 * bytes_per_param * 1.05
     weights_gib = (total_weights_bytes / float(tp)) / (1024 ** 3)
 
-    # KV cache — total bytes for the in-flight batch; also shards over
-    # TP because the heads are sharded.
+    # KV cache for the in-flight batch; shards over TP (heads are sharded).
     total_kv_bytes = kv_bpt * max_model_len * conc
     kv_cache_gib = (total_kv_bytes / float(tp)) / (1024 ** 3)
 
@@ -211,12 +161,7 @@ def amdahl_e2e_ceiling(
     optimizable_pct: float,
     single_kernel_speedup: float,
 ) -> float:
-    """Amdahl's law: best-case E2E speedup if we optimize the optimizable
-    fraction by ``single_kernel_speedup``.
-
-    Returns the *ratio* (1.0 = no speedup). The caller converts to a
-    percentage gain via ``(ratio - 1.0) * 100.0``.
-    """
+    """Amdahl's law best-case E2E speedup ratio (1.0 = none); caller converts via ``(ratio - 1.0) * 100``."""
     p = max(0.0, min(1.0, optimizable_pct / 100.0))
     s = max(1.0, float(single_kernel_speedup))
     serial = 1.0 - p
@@ -239,12 +184,8 @@ class ModelGpuFitConfig:
 
 
 class ModelGpuFitDetector:
-    """Stateful: emit ``model_gpu_infeasible`` at most once per session.
-
-    The manifest is immutable after boot, so the fingerprint we cache
-    is the manifest path + ``(model_name, gpu_type, tp, precision,
-    max_model_len, conc)`` tuple. Two consecutive ticks see the same
-    fingerprint → second tick stays quiet.
+    """Stateful: emit ``model_gpu_infeasible`` at most once per session, keyed off the
+    immutable manifest fingerprint ``(model_name, gpu_type, tp, precision, max_model_len, conc)``.
     """
 
     def __init__(
@@ -255,10 +196,7 @@ class ModelGpuFitDetector:
     ) -> None:
         self._config = config or ModelGpuFitConfig()
         self._state_view = state_view
-        # Disk-backed dedup. Without it, the subprocess-per-tick transport fires
-        # ``model_gpu_infeasible`` on every tick and the operator inbox
-        # gets one row per tick. Persisting the fingerprint keeps the
-        # "fire at most once per session" semantics intact.
+        # Disk-backed dedup so "fire once per session" survives the subprocess-per-tick transport.
         loaded = state_view.load() if state_view is not None else {}
         raw_fp = loaded.get("fired_fingerprint")
         if isinstance(raw_fp, list):
@@ -291,9 +229,7 @@ class ModelGpuFitDetector:
             manifest, activation_buf_gib=self._config.activation_buf_gib,
         )
         if breakdown is None:
-            # Insufficient data — don't claim infeasibility from missing
-            # fields. Record the fingerprint anyway so we don't re-try
-            # endlessly until manifest changes.
+            # Insufficient data — record the fingerprint to avoid retrying until manifest changes.
             self._fired_fingerprint = fingerprint
             self._persist()
             return []
@@ -361,20 +297,14 @@ def _manifest_fingerprint(manifest: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _recommend_tp(breakdown: HeadroomBreakdown) -> int:
-    """Smallest TP power-of-two that would clear ``required_gib`` if we
-    rescaled weights linearly. Helper for the operator-facing hint;
-    deliberately conservative (assumes weights dominate KV, which is
-    typical for big MoE FP8 models)."""
+    """Smallest power-of-two TP clearing ``required_gib`` (operator hint; assumes weights dominate KV)."""
     if breakdown.hbm_gib <= 0 or breakdown.weights_gib <= 0:
         return 8
-    # Estimate: weights would shrink linearly with TP; pick the smallest
-    # TP where weights_gib / extra_factor + kv + activation <= hbm.
-    # We approximate by ignoring KV scaling for the hint.
+    # Weights shrink ~linearly with TP; ignore KV scaling for the hint.
     target_weight = breakdown.hbm_gib - breakdown.activation_gib - breakdown.kv_cache_gib
     if target_weight <= 0:
         return 16
     ratio = breakdown.weights_gib / max(0.1, target_weight)
-    # Round up to next power of two of current TP × ratio.
     out = 1
     while out < int(ratio) + 1:
         out *= 2
@@ -389,14 +319,11 @@ def _recommend_tp(breakdown: HeadroomBreakdown) -> int:
 class AmdahlCeilingConfig:
     """Tunables for :class:`AmdahlCeilingDetector`."""
 
-    # Assumed best-case single-kernel speedup (multiple of baseline).
-    # 1.5x reflects the GEAK 2026-05 average across accepted kernels.
+    # Assumed best-case single-kernel speedup (1.5x = GEAK 2026-05 average).
     single_kernel_speedup: float = 1.5
-    # E2E ceiling (percent gain) below which we judge kernel_opt
-    # pointless and fire HIGH. Default 5% matches the spec C2 example.
+    # E2E ceiling (% gain) below which kernel_opt is judged pointless → HIGH.
     min_e2e_ceiling_pct: float = 5.0
-    # Optimizable tier names from local_kernel_breakdown. Triton is
-    # historically the only tier Hyperloom moves the needle on.
+    # Optimizable tiers from local_kernel_breakdown; Triton is the only one Hyperloom moves.
     optimizable_tier_names: tuple[str, ...] = ("triton",)
 
 
@@ -411,9 +338,7 @@ class AmdahlCeilingDetector:
     ) -> None:
         self._config = config or AmdahlCeilingConfig()
         self._state_view = state_view
-        # Disk-backed dedup. ``fired_mtime`` ensures we only re-evaluate
-        # when ``kernel_breakdown.json`` is regenerated by a fresh
-        # profile run, not every Coordinator tick.
+        # Disk-backed dedup; ``fired_mtime`` re-evaluates only on a fresh kernel_breakdown.json.
         loaded = state_view.load() if state_view is not None else {}
         raw_mtime = loaded.get("fired_mtime")
         self._fired_mtime: float | None = (
@@ -453,8 +378,7 @@ class AmdahlCeilingDetector:
             single_kernel_speedup=cfg.single_kernel_speedup,
         )
         ceiling_pct = (ceiling_ratio - 1.0) * 100.0
-        # We always advance the gate so we don't keep re-evaluating an
-        # unchanged trace; symptom only fires when the ceiling is low.
+        # Always advance the gate (skip unchanged traces); fire only when the ceiling is low.
         self._fired_mtime = mtime
         self._persist()
         if ceiling_pct >= cfg.min_e2e_ceiling_pct:
@@ -509,15 +433,11 @@ class AmdahlCeilingDetector:
 class ColdStartConfig:
     """Tunables for :func:`evaluate_cold_start_signals`."""
 
-    # ``aiter_jit.so_count`` below this → COLD. Mirrors the upstream
-    # BaselineExecutor threshold.
+    # ``aiter_jit.so_count`` below this → COLD (mirrors upstream BaselineExecutor).
     cold_so_count: int = 20
-    # When cold AND remaining_minutes < this → fire HIGH. The default
-    # mirrors the cold-start timeout (60 min) so we predict SIGTERM
-    # exactly when a cold compile cycle won't finish.
+    # When cold AND remaining_minutes < this → fire HIGH (defaults to the cold-start timeout).
     cold_start_minutes: float | None = None  # None → read env
-    # Minimum session budget below which we don't bother evaluating
-    # (cold-start signals are pointless on a 10-min smoke).
+    # Min session budget below which evaluation is skipped (pointless on a smoke test).
     min_budget_minutes: float = 30.0
 
 

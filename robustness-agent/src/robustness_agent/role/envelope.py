@@ -2,23 +2,11 @@
 
 """Intent envelope contract.
 
-This module mirrors the wire shape defined by
-``inference_optimizer/protocol/intent.py`` so that the
-robustness reactor can construct intents that the Coordinator's
-``PolicyGate`` accepts without change.
-
-Hosts drive the reactor through the subprocess CLI in
-:mod:`robustness_agent.runtime.cli`, which writes the resulting
-intents through :func:`build_envelope_dict` into ``emit.json`` —
-identical to how ``critic-agent`` ships its commit-review output.
-This file is *transport-agnostic*: same shape works for the Coordinator
-subprocess bridge today and for a long-running CLI writing JSONL rows
-to ``$SESSION_DIR/agents/robustness/outbox.jsonl`` in the future.
-
-The class layout intentionally avoids importing from inference_optimizer
-to keep this package independent. A contract test cross-checks the
-``IntentType`` / ``_PAYLOAD_REQUIRED`` table against the upstream module
-when both packages are importable.
+Mirrors the wire shape of ``inference_optimizer/protocol/intent.py`` so the
+reactor can build intents the Coordinator's ``PolicyGate`` accepts unchanged.
+Transport-agnostic; avoids importing inference_optimizer to stay independent.
+A contract test cross-checks ``IntentType`` / ``_PAYLOAD_REQUIRED`` against the
+upstream module when both packages are importable.
 """
 
 from __future__ import annotations
@@ -50,17 +38,12 @@ class IntentType(str, Enum):
     FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
-    # specialist sub-agent exit protocol mirror.
-    # Robustness never emits this intent (PolicyGate restricts the
-    # source to specialist sub-agents), but the value belongs in the
-    # mirror so the upstream-contract test stays green and any tooling
-    # that round-trips envelopes does not lose the symbol.
+    # Robustness never emits this; kept in the mirror for the upstream-contract test.
     SPECIALIST_DONE = "specialist_done"
 
 
 # Per-intent required payload fields. Identical to upstream
-# ``policy._PAYLOAD_REQUIRED``; ``decision.policy_aware`` reuses the same
-# table to validate intents before they leave the reactor.
+# ``policy._PAYLOAD_REQUIRED``; ``decision.policy_aware`` reuses it to validate.
 PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.SEND_MESSAGE: ("topic",),
     IntentType.DELEGATE: ("action_name",),
@@ -72,13 +55,9 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
-    # The ``verdict``/``verdict_map`` choice is mutually exclusive but
-    # at least one of them must be
-    # present. intent_parser only enforces the structural
-    # ``target_proposal_msg_id`` here; the verdict-payload mutual
-    # exclusion lives in ``policy._validate_review_verdict_payload``.
-    # Mirror the same shape so the upstream-sync contract test stays
-    # green.
+    # Only the structural ``target_proposal_msg_id`` is enforced here; the
+    # verdict/verdict_map mutual exclusion lives in
+    # ``policy._validate_review_verdict_payload``.
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.KILL_TASK: ("task_id", "reason"),
     IntentType.FORCE_DISPATCH: ("task_id", "reason"),
@@ -93,9 +72,8 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
 }
 
 
-# Intents that PolicyGate restricts to ``source == "robustness"``. The
-# reactor guards these locally to surface configuration / programming
-# bugs early; the gate still enforces them server-side.
+# Intents PolicyGate restricts to ``source == "robustness"``; guarded locally
+# to fail fast, still enforced server-side by the gate.
 ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset({
     IntentType.KILL_TASK,
     IntentType.FORCE_DISPATCH,
@@ -104,10 +82,8 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset({
 })
 
 
-# Intents the robustness role may emit. Mirrors ``_ROBUSTNESS_INTENTS``
-# in upstream agent_role.py. PROPOSE_ACTION / REQUEST / RESPONSE /
-# REVIEW_VERDICT / ASK_QUESTION continuations handled by other roles are
-# excluded so a programming mistake is caught at construction time.
+# Intents the robustness role may emit. Mirrors ``_ROBUSTNESS_INTENTS`` in
+# upstream agent_role.py; other roles' intents are excluded to fail fast.
 ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset({
     IntentType.SEND_MESSAGE,
     IntentType.ASK_QUESTION,
@@ -132,18 +108,9 @@ ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
 
-# Handle actions the robustness role is allowed to delegate. Upstream
-# documents the quartet in ``system_prompts/robustness.md``.
-#
-# ``report`` is an exception to the "handle action" pattern of the other
-# three: it is the deterministic session-finalize action owned by
-# Orchestration. Robustness is allowed to delegate it ONLY as a
-# last-resort wind-down lever, when the evidence shows the session is
-# locked out from making further progress on the remaining time budget
-# (deadline_imminent with zero validated gain, or recover_failed_finalize
-# after a GPU leak recovery returned needs_review and the leak re-fires).
-# Action-ladder ``_recommend`` is the single source-of-truth for those
-# guard conditions; ``build_delegate`` here only enforces the allowlist.
+# Handle actions robustness may delegate; ``report`` is the Orchestration-owned
+# session-finalize action, allowed only as a last-resort wind-down lever (guard
+# conditions live in action-ladder ``_recommend``; here we only enforce the allowlist).
 ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({
     "accuracy_gate",
     "recover",
@@ -216,14 +183,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "gaps",
     # Orchestration working-memory checkpoint (Coordinator-authored).
     "orchestration_memory",
-    # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled
-    # search depth knob).
+    # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled).
     "framework_pr_max_candidates",
     # Advisory model-architecture profile (launcher / state.json owned).
     "model_arch",
-    # Architecture-identity tags lifted from config.json (recipe-snapshot
-    # KB tags). Fact-layer; locked to mirror upstream
-    # ``policy.CORE_STATE_FIELDS``.
+    # Architecture-identity tags from config.json; mirrors upstream.
     "model_architectures",
     "model_type",
 })

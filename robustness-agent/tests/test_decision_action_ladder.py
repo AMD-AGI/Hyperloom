@@ -66,11 +66,7 @@ async def test_medium_severity_yields_alert_only():
 
 
 async def test_high_crash_emits_alert_only():
-    """Strategic HIGH symptoms (crash_count_high / agent_stall /
-    cluster_fault / repeated_failure / same_payload_loop / ...) now
-    surface alert(high) only. The escalate / prune auto-emit was
-    dropped in loosen P3_19; Orchestration consumes the alert detail
-    (suggestion + evidence) and decides whether to act."""
+    """Strategic HIGH symptoms surface alert(high) only (escalate/prune auto-emit dropped in loosen P3_19)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("crash_count_high", SymptomSeverity.HIGH, suggestion="revert")],
@@ -142,8 +138,7 @@ async def test_high_agent_stall_emits_alert_only():
 
 
 async def test_repeated_failure_emits_alert_only():
-    """The prune_branch suggestion lives in the alert detail; the
-    auto-emit was dropped in loosen P3_19."""
+    """prune_branch suggestion lives in the alert detail; auto-emit dropped in loosen P3_19."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -167,12 +162,7 @@ async def test_repeated_failure_emits_alert_only():
 # ---------------------------------------------------------------------------
 
 async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
-    """``recover_unsuccessful`` keeps the resource-finalization
-    ``delegate(report)`` path: an in-loop ``recover`` already returned
-    needs_review, so the only productive use of remaining wall-clock
-    is to land a deterministic report. The strategic
-    ``escalate_strategy_change`` auto-emit was dropped (loosen P3_19);
-    the alert detail still carries the suggestion."""
+    """``recover_unsuccessful`` keeps the ``delegate(report)`` finalization path (escalate auto-emit dropped, loosen P3_19)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -213,8 +203,7 @@ async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
 
 
 async def test_state_json_corrupt_alert_only():
-    """I1: state.json broken → HIGH alert only (no prune; can't
-    auto-heal). Loosen P3_19 dropped the escalate auto-emit."""
+    """I1: state.json broken → HIGH alert only (can't auto-heal; escalate auto-emit dropped in loosen P3_19)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("state_json_corrupt", SymptomSeverity.HIGH,
@@ -257,9 +246,7 @@ async def test_coordinator_wal_bloat_medium_alert_only():
 
 
 async def test_stale_lease_emits_kill_task_for_owner_lane():
-    """I3: HIGH emits kill_task(task_id) — resource-safety path
-    (releasing a lane held by a dead PID). Loosen P3_19 dropped the
-    paired escalate auto-emit; the alert still carries the hint."""
+    """I3: HIGH emits kill_task(task_id) to release a lane held by a dead PID (paired escalate auto-emit dropped, loosen P3_19)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("stale_lease", SymptomSeverity.HIGH,
@@ -279,8 +266,7 @@ async def test_stale_lease_emits_kill_task_for_owner_lane():
 
 
 async def test_stale_lease_without_task_id_does_not_kill():
-    """If evidence lacks task_id we skip the kill_task to avoid bad
-    payloads. Alert still fires for operator visibility."""
+    """Missing task_id → skip kill_task to avoid bad payloads; alert still fires for visibility."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("stale_lease", SymptomSeverity.HIGH,
@@ -313,9 +299,7 @@ async def test_inbox_bloat_low_emits_observation_only():
 
 
 async def test_coordinator_zombie_alert_only():
-    """I5: HIGH alert (cannot self-heal — Robustness lives in the same
-    process tree). Loosen P3_19 dropped the escalate auto-emit; the
-    alert detail carries the operator-restart hint."""
+    """I5: HIGH alert — cannot self-heal (Robustness shares the process tree); escalate auto-emit dropped in loosen P3_19."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("coordinator_zombie", SymptomSeverity.HIGH,
@@ -437,9 +421,7 @@ async def test_geak_budget_starvation_alert_only():
 
 
 async def test_kernel_opt_no_progress_alert_only():
-    """F5: pipeline structurally cannot optimise — alert only;
-    Orchestration consumes the suggestion in detail and may emit
-    prune_branch / escalate itself."""
+    """F5: pipeline structurally cannot optimise — alert only; Orchestration may emit prune_branch/escalate itself."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("kernel_opt_no_progress", SymptomSeverity.HIGH,
@@ -467,10 +449,7 @@ async def test_critic_prune_stuck_falls_to_medium_alert():
 
 
 async def test_model_gpu_infeasible_alert_only():
-    """C1: configuration cannot fit in HBM — alert with operator hint
-    in detail. Loosen P3_19 dropped the auto prune of every server-
-    launching family; Orchestration consumes the alert and decides
-    whether to wind the run down."""
+    """C1: config cannot fit in HBM — alert only (auto prune of server-launching families dropped, loosen P3_19)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -681,13 +660,7 @@ async def test_g_medium_signals_fall_to_diagnose_alert():
 
 
 async def test_deadline_warning_high_emits_delegate_report():
-    """``deadline_warning`` HIGH = absolute-time backstop for the
-    no-validated-gain case. Wall-clock invariant: alert(high) + the
-    finalization ``delegate(report)`` so the run lands a deterministic
-    report inside the remaining wall-clock. The strategic
-    ``escalate_strategy_change`` was dropped (loosen P3_19); the
-    MEDIUM branch is covered separately because it falls through the
-    default _diagnose rung (no destructive action)."""
+    """``deadline_warning`` HIGH (no validated gain) = alert(high) + finalization ``delegate(report)`` (escalate dropped, loosen P3_19)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -923,10 +896,7 @@ async def test_shm_pressure_high_alert_only():
 
 
 async def test_no_levers_found_falls_to_medium_alert():
-    """Loosen P3_19 demoted ``no_levers_found`` to MEDIUM (advisory)
-    and dropped the auto ``delegate(report)``. Orchestration consumes
-    the alert and decides whether to wind the run down via
-    ``escalate_strategy_change`` or ``report``."""
+    """Loosen P3_19 demoted ``no_levers_found`` to MEDIUM (advisory) and dropped the auto ``delegate(report)``."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -990,13 +960,7 @@ async def test_idempotency_replay_falls_to_medium_diagnose_tier():
 
 
 async def test_wind_down_idempotency_key_varies_per_tick():
-    """Same symptom across consecutive ticks → distinct idempotency keys.
-
-    The cooldown blocks intra-window re-emission, but post-cooldown
-    re-fires (e.g. recover still failing 10 ticks later) MUST carry a
-    different idempotency_key so PolicyGate accepts the second
-    ``delegate(report)`` instead of de-duping it.
-    """
+    """Post-cooldown re-fires MUST carry distinct idempotency_keys so PolicyGate accepts the second ``delegate(report)``."""
     ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=1))
     sym = _sym(
         "recover_unsuccessful",
@@ -1134,11 +1098,7 @@ def _gpu_leak_symptom(*, summary: str = "all 4 GPUs full, no owner") -> Symptom:
 
 
 async def test_gpu_memory_leaked_emits_alert_and_delegate():
-    """``gpu_memory_leaked`` keeps the resource-recovery path:
-    ``delegate(recover, force_gpu_cleanup=True)`` is the in-loop
-    cleanup. Loosen P3_19 dropped the strategic
-    ``escalate_strategy_change`` auto-emit; the alert detail still
-    carries the suggestion."""
+    """``gpu_memory_leaked`` keeps the ``delegate(recover, force_gpu_cleanup=True)`` cleanup path (escalate dropped, loosen P3_19)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_gpu_leak_symptom()], tick_index=7, now_unix=1.0,
@@ -1164,8 +1124,7 @@ async def test_gpu_memory_leaked_emits_alert_and_delegate():
 
 
 async def test_gpu_memory_leaked_does_not_emit_prune_branch():
-    """Resource recovery does not prune families — ``recover`` is the
-    in-loop fix; if it fails ``recover_unsuccessful`` triggers report."""
+    """Resource recovery does not prune families — ``recover`` is the fix; on failure ``recover_unsuccessful`` triggers report."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_gpu_leak_symptom()], tick_index=0, now_unix=1.0,
