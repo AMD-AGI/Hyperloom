@@ -562,8 +562,30 @@ def detect_concurrency(tp: int, framework: str) -> int:
     return 64 if tp == 1 else 32 if tp <= 4 else 64
 
 
-def detect_image(framework: str) -> str:
-    return _default_vllm_image() if framework == "vllm" else _default_sglang_image()
+def _sglang_image_for(repo_id: str = "") -> str:
+    """Pick the sglang image, honoring per-model baseline-arch needs.
+
+    Default is the profilerfix image. MiMo-V2.x is the exception: the undated
+    v0.5.11 profilerfix base does NOT register ``MiMoV2ForCausalLM`` (the
+    server dies at model-loader registration, three baseline attempts in a
+    row -> ``baseline_failed``), so it needs the image that carries the dated
+    20260508 sglang arch. That image is profilerfix's two patched ROCm libs
+    (libamdhip64/libroctracer, issue #352) layered onto the dated 20260508
+    build, so rocprofiler kernel capture under HipGraphLaunch still works.
+    Must be paired with ``--attention-backend triton`` (injected in
+    ``_workload_envs.materialize_config_with_envs``) to dodge the aiter
+    attention CUDA-graph-capture SIGABRT. Matched on the repo basename so it
+    fires for the HF repo id (the /wekafs/<org>-<repo> local path is derived
+    downstream from this same id).
+    """
+    basename = (repo_id or "").split("/")[-1].lower()
+    if "mimo-v2" in basename:
+        return "primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-profilerfix"
+    return _default_sglang_image()
+
+
+def detect_image(framework: str, repo_id: str = "") -> str:
+    return _default_vllm_image() if framework == "vllm" else _sglang_image_for(repo_id)
 
 
 def auto_detect(hf: HuggingFaceClient, repo_id: str,
@@ -601,7 +623,7 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str,
     max_context_tokens = detect_max_context_tokens(config)
     tp = detect_tp(params_b, precision, gpu_type)
     conc = detect_concurrency(tp, framework)
-    image = detect_image(framework)
+    image = detect_image(framework, repo_id)
 
     cfg = DetectedConfig(
         arch=arch, framework=framework, precision=precision,
@@ -1292,7 +1314,7 @@ def process_model(
     precision = overrides.get("precision") or (detected.precision if detected else "FP8")
     tp        = overrides.get("tp")        or (detected.tp if detected else 1)
     conc      = overrides.get("concurrency") or (detected.concurrency if detected else 64)
-    image     = overrides.get("image") or (detected.image if detected else detect_image(framework))
+    image     = overrides.get("image") or (detected.image if detected else detect_image(framework, repo_id))
 
     log.info("[%s] => mode=%s framework=%s precision=%s tp=%d conc=%d image=%s",
              repo_id, mode, framework, precision, tp, conc, image)
