@@ -97,6 +97,22 @@ KIND_PROFILE:      str = "profile"
 KIND_OTHER:        str = "other"
 
 
+def _optional_int(value: Any) -> int | None:
+    """Coerce a value to int, or ``None`` on absence / bad type.
+
+    Used to load the optional ``tick`` field tolerantly: an old journal
+    written before D1 has no ``tick`` key, and a corrupted value must not
+    crash :meth:`JournalEntry.from_dict` (the journal is a best-effort
+    audit artifact loaded on resume).
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class JournalEntry:
     """One row in the journal — exactly one KEEP / REVERT / no_promote
@@ -118,6 +134,13 @@ class JournalEntry:
     task_id:           str = ""
     variant_name:      str = ""
     ts:                str = ""
+    # Full-trace D1: orchestrator tick at the moment of decision. Lets the
+    # decision-trace collector join this KEEP/REVERT row to the LLM calls
+    # recorded for the same tick. Defaults to ``None`` (not 0) so older
+    # journals — and call sites that don't know the tick — are stripped by
+    # ``to_dict`` and remain indistinguishable from "tick unknown" rather
+    # than masquerading as the pre-first-increment tick 0.
+    tick:              int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Strip ``None`` values so the file stays compact and JSON-diffable."""
@@ -139,6 +162,7 @@ class JournalEntry:
             task_id=str(d.get("task_id", "")),
             variant_name=str(d.get("variant_name", "")),
             ts=str(d.get("ts", "")),
+            tick=_optional_int(d.get("tick")),
         )
 
     def dedupe_key(self) -> tuple[str, int, str, str, str, str, str]:
