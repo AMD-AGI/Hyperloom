@@ -159,7 +159,8 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
                 extra_files: list[str] | None = None,
                 kernel_repo: str = "") -> dict:
     import ray
-    runtime_env = quiet_ray_init()
+    runtime_env = quiet_ray_init(
+        num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
     system_prompt_text = _safety_system_prompt(
         kernel_repo, budget_minutes=timeout_s / 60.0, num_gpus=num_gpus)
 
