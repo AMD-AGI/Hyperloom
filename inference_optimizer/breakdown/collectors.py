@@ -844,6 +844,8 @@ def collect_baseline(
             "key_metric":    _to_float(a.get("key_metric")),
             "workspace":     a.get("workspace"),
             "error_class":   a.get("error_class"),
+            "error_excerpt": a.get("error_excerpt"),
+            "stderr_tail":   a.get("stderr_tail"),
         })
 
     # Disk-walking fallback: state.baseline_attempts is empty in many
@@ -992,6 +994,8 @@ def _reconstruct_baseline_attempts(
             "key_metric":   out_tput,
             "workspace":    _rel(task_dir, session_dir) or str(task_dir),
             "error_class":  None,
+            "error_excerpt": None,
+            "stderr_tail":  None,
         })
     return out
 

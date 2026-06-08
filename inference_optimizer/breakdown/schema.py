@@ -91,6 +91,10 @@ class BaselineAttemptSummary(TypedDict, total=False):
     key_metric: float | None
     workspace: str | None
     error_class: str | None
+    # Real failure text from the executor; lets RCA read the cause
+    # without crawling server logs. None on success / reconstruction.
+    error_excerpt: str | None
+    stderr_tail: str | None
 
 
 class BenchmarkInvocation(TypedDict, total=False):
