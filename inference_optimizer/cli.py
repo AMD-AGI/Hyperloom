@@ -2668,6 +2668,17 @@ _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 _INFERENCEX_REF_DEFAULT = "2035a2117ad22403376359be0064dfa2c078c59b"
 
 
+def _inferencex_checkout_ok(path: Path | str) -> bool:
+    """True when ``path`` is a usable InferenceX checkout, not a stub.
+
+    A bare ``is_dir()`` check accepts a half-cloned dir left behind by a
+    ``git init`` that then failed to fetch/checkout. Magpie sources
+    ``benchmarks/benchmark_lib.sh`` at runtime, so require that file to
+    exist — a complete checkout always has it, a stub never does.
+    """
+    return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
+
+
 def _clone_inferencex(dest: Path) -> str | None:
     """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF.
 
@@ -2675,6 +2686,10 @@ def _clone_inferencex(dest: Path) -> str | None:
     shallow fetch-checkout (GitHub serves SHA fetches), otherwise a
     ``--branch`` clone. Returns the path on success, ``None`` on failure
     (caller decides how to surface it). Never raises out.
+
+    On any failure the partial ``dest`` (e.g. a bare ``git init`` with no
+    fetched tree) is removed so a later preflight's detection does not
+    mistake the stub for a valid checkout and skip re-cloning.
     """
     repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
     ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
@@ -2696,9 +2711,15 @@ def _clone_inferencex(dest: Path) -> str | None:
                 ["git", "clone", "-q", "--depth", "1", "--branch", ref, repo, dest_str],
                 check=True, timeout=600,
             )
+        if not _inferencex_checkout_ok(dest):
+            raise OSError(
+                f"clone reported success but {dest_str} is missing "
+                "benchmarks/benchmark_lib.sh"
+            )
         return dest_str
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         log.warning("InferenceX clone into %s failed: %s", dest_str, exc)
+        shutil.rmtree(dest, ignore_errors=True)
         return None
 
 
@@ -2896,7 +2917,7 @@ def _preflight(
             magpie_root / "InferenceX",
             runtime_root / "InferenceX",
         ):
-            if candidate.is_dir():
+            if _inferencex_checkout_ok(candidate):
                 if os.access(candidate, os.W_OK):
                     inferencex_path = str(candidate)
                     break
@@ -2909,12 +2930,12 @@ def _preflight(
     # skipped install.sh's ensure_inferencex), clone one ourselves rather
     # than falling back to a read-only host mount. baseline cannot run
     # without InferenceX, so a clone failure is a hard error.
-    if not (inferencex_path and Path(inferencex_path).is_dir()):
+    if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
         from .paths import runtime_dir as _runtime_default
         dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
         inferencex_path = _clone_inferencex(dest)
-        if not (inferencex_path and Path(inferencex_path).is_dir()):
+        if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
             print(
                 "Preflight: ERROR — InferenceX checkout missing and clone "
                 "failed. baseline cannot run without it. Set INFERENCEX_PATH "

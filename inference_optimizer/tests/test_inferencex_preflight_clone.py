@@ -35,6 +35,11 @@ def test_clone_inferencex_sha_ref_uses_shallow_fetch(tmp_path, monkeypatch):
 
     def fake_run(cmd, *a, **kw):
         calls.append(cmd)
+        # The checkout step materializes the validity marker the post-clone
+        # check looks for (benchmarks/benchmark_lib.sh).
+        if "checkout" in cmd:
+            (dest / "benchmarks").mkdir(parents=True, exist_ok=True)
+            (dest / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
         return subprocess.CompletedProcess(cmd, 0)
 
     with patch("inference_optimizer.cli.subprocess.run", side_effect=fake_run):
@@ -55,6 +60,9 @@ def test_clone_inferencex_branch_ref_uses_clone(tmp_path, monkeypatch):
 
     def fake_run(cmd, *a, **kw):
         calls.append(cmd)
+        if "clone" in cmd:
+            (dest / "benchmarks").mkdir(parents=True, exist_ok=True)
+            (dest / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
         return subprocess.CompletedProcess(cmd, 0)
 
     with patch("inference_optimizer.cli.subprocess.run", side_effect=fake_run):
@@ -76,6 +84,64 @@ def test_clone_inferencex_failure_returns_none(tmp_path, monkeypatch):
         out = cli._clone_inferencex(dest)
 
     assert out is None
+
+
+def test_clone_inferencex_removes_partial_dir_on_failure(tmp_path, monkeypatch):
+    """A bare ``git init`` that then fails to fetch leaves a stub dir; the
+    clone must delete it so a later preflight does not mistake the stub for
+    a valid checkout and skip re-cloning."""
+    monkeypatch.setenv("INFERENCEX_REF", "a" * 40)
+    dest = tmp_path / "InferenceX"
+
+    def init_then_fail(cmd, *a, **kw):
+        if "init" in cmd:
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / ".git").mkdir(exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0)
+        raise subprocess.CalledProcessError(128, cmd)  # fetch fails
+
+    with patch("inference_optimizer.cli.subprocess.run", side_effect=init_then_fail):
+        out = cli._clone_inferencex(dest)
+
+    assert out is None
+    assert not dest.exists()
+
+
+def test_clone_inferencex_rejects_checkout_without_marker(tmp_path, monkeypatch):
+    """git reports success but the tree lacks benchmarks/benchmark_lib.sh →
+    treat as failure and clean up, never return a half-checkout."""
+    monkeypatch.setenv("INFERENCEX_REF", "main")
+    dest = tmp_path / "InferenceX"
+
+    def fake_run(cmd, *a, **kw):
+        dest.mkdir(parents=True, exist_ok=True)  # empty, no marker
+        return subprocess.CompletedProcess(cmd, 0)
+
+    with patch("inference_optimizer.cli.subprocess.run", side_effect=fake_run):
+        out = cli._clone_inferencex(dest)
+
+    assert out is None
+    assert not dest.exists()
+
+
+def test_inferencex_checkout_ok_requires_benchmark_lib(tmp_path):
+    """The validity check rejects a bare dir and accepts a real checkout."""
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    assert cli._inferencex_checkout_ok(stub) is False
+
+    good = tmp_path / "good"
+    (good / "benchmarks").mkdir(parents=True)
+    (good / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
+    assert cli._inferencex_checkout_ok(good) is True
+
+
+def test_preflight_detects_checkout_via_validity_not_isdir():
+    """Detection and post-clone guards must use the validity helper, not a
+    bare ``is_dir()`` that would accept a half-cloned stub."""
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    assert "_inferencex_checkout_ok(candidate)" in src
+    assert "_inferencex_checkout_ok(inferencex_path)" in src
 
 
 # ---------------------------------------------------------------------------

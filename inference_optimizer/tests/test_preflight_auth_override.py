@@ -49,7 +49,10 @@ def stub_install_steps(monkeypatch, tmp_path):
     # logic. Point INFERENCEX_PATH at a writable dir so detection short-
     # circuits, and stub the clone as a belt-and-braces fallback.
     inferencex_dir = tmp_path / "InferenceX"
-    inferencex_dir.mkdir()
+    (inferencex_dir / "benchmarks").mkdir(parents=True)
+    (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text(
+        "# stub", encoding="utf-8"
+    )
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
     monkeypatch.setattr(
         cli, "_clone_inferencex", lambda dest: str(inferencex_dir)
