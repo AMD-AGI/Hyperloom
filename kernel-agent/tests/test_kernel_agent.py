@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Local tests for Kernel Agent tools.
-
-The tests generate all fixtures at runtime so the repository does not carry
-large trace files.
-"""
+"""Local tests for Kernel Agent tools (fixtures generated at runtime; no large trace files in repo)."""
 
 from __future__ import annotations
 
@@ -91,16 +87,10 @@ def write_vendor_trace(path: Path) -> None:
 
 
 class UpdateStatusTimingTests(unittest.TestCase):
-    """Hyperloom P2-3: ``update_status`` writes ``ended_at`` +
-    ``duration_seconds`` once the run reaches a terminal state, so
-    downstream session-breakdown collectors can fill the timeline
-    event with a real wall-clock duration.
-    """
+    """Hyperloom P2-3: ``update_status`` writes ``ended_at``/``duration_seconds`` on terminal states."""
 
     def _import_module(self):
-        # The tracelens_analysis module imports ``tracelens_skill_runner``
-        # as a sibling module, so we need the tools directory on
-        # ``sys.path`` for the import to resolve.
+        # tools dir must be on sys.path so the sibling import resolves.
         tools_dir = str(TRACE_TOOL.parent)
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
@@ -199,8 +189,7 @@ class KernelAgentToolTests(unittest.TestCase):
             timeout=30,
             env={
                 **os.environ,
-                # Point at missing paths explicitly so the "not found" warning is
-                # deterministic regardless of the on-disk default checkout.
+                # Missing paths make the "not found" warning deterministic.
                 "TRACELENS_ROOT": str(ROOT / "missing-tracelens-root"),
                 "TRACELENS_INTERNAL_ROOT": str(ROOT / "missing-tracelens"),
                 "HYPERLOOM_BUNDLE": str(ROOT / "missing-bundle"),
@@ -218,33 +207,20 @@ class KernelAgentToolTests(unittest.TestCase):
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors/TraceLens}"', install_text)
-        # Internal extension is opt-in: no default path (open-source-only unless
-        # TRACELENS_INTERNAL_ROOT is explicitly set).
+        # Internal extension is opt-in: no default path.
         self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)
-        # GEAK_REF is pinned to a tag/branch/SHA but must stay operator-
-        # overridable; assert the override pattern, not the exact pin, so a
-        # future ref bump doesn't break this guard.
+        # Assert the override pattern, not the exact pin, so ref bumps don't break this.
         self.assertIn('GEAK_REF="${GEAK_REF:-', install_text)
         self.assertIn("ensure_rocm_torch_for_geak()", install_text)
         self.assertIn("KERNEL_AGENT_SKIP_TORCH_GATE", install_text)
         self.assertIn("rocm-smi --showid", install_text)
-        # pip flags are factored into `_PIP_FLAGS`; assert the core flags
-        # survive (prefix match allows future additions) and the install line
-        # references the variable.
+        # Prefix match on `_PIP_FLAGS` allows future flag additions.
         self.assertIn('_PIP_FLAGS="-q --no-cache-dir', install_text)
         self.assertIn(
             'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${HYPERLOOM_ROOT}/geak"',
             install_text,
         )
-        # GEAK v3.2.0 ships 4 MCP tool folders; minisweagent imports
-        # profiler_mcp / cross_session_memory_mcp / automated_test_discovery
-        # in addition to rag-mcp. Metrix is consumed transitively as a
-        # PyPI dependency of profiler-mcp (no standalone metrix-mcp folder
-        # in v3.2.0). Regression-guard: install.sh must NOT pip-install a
-        # ``mcp_tools/metrix-mcp`` path (it does not exist in v3.2.0 and
-        # was causing install to fail with "File ... does not exist").
-        # We assert on the path form to allow human-readable comments that
-        # explain the v3.1.0 -> v3.2.0 removal to keep mentioning the name.
+        # GEAK v3.2.0 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
         for _mcp in (
             "rag-mcp",
             "profiler-mcp",
@@ -252,12 +228,7 @@ class KernelAgentToolTests(unittest.TestCase):
             "automated-test-discovery",
         ):
             self.assertIn(_mcp, install_text)
-        # The actual install loop iterates over hyphenated names; v3.1.0
-        # had ``rag-mcp profiler-mcp metrix-mcp ...``. Pin the v3.2.0
-        # ordering so accidental re-adding of ``metrix-mcp`` between
-        # ``profiler-mcp`` and ``cross-session-memory-mcp`` regresses
-        # this test (the comment block above is allowed to mention
-        # ``metrix-mcp`` for human readers).
+        # Pin the v3.2.0 install-loop ordering so re-adding metrix-mcp regresses this.
         self.assertIn(
             "for _geak_mcp in rag-mcp profiler-mcp \\\n"
             "                    cross-session-memory-mcp automated-test-discovery; do",
@@ -268,11 +239,7 @@ class KernelAgentToolTests(unittest.TestCase):
             '        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"',
             install_text,
         )
-        # GEAK_RAG_INDEX_DEVICE_VAL was refactored from a single-line `:-cuda`
-        # default into an auto-detect block (rocm-smi / torch.cuda) with an
-        # explicit env override. Assert the two semantic invariants instead of
-        # the old literal: cuda remains the preferred default, and the env var
-        # can still override.
+        # Auto-detect block: cuda stays the preferred default, env var still overrides.
         self.assertIn('if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cuda"', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cpu"', install_text)
@@ -290,10 +257,7 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('chmod 600 "$env_file"', install_text)
         self.assertIn("GEAK_MEMORY_STORE_PATH", ray_runtime_text)
         self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
-        # tracelens_analysis no longer hard-codes a /wekafs fallback for
-        # TRACELENS_ROOT: install.sh exports it via kernel-agent.env.sh and
-        # the tool fails loudly when it is missing rather than silently
-        # poking a path that may not exist on the node.
+        # No hard-coded /wekafs TRACELENS_ROOT fallback; tool fails loudly when missing.
         self.assertNotIn("DEFAULT_TRACELENS_ROOT", trace_tool_text)
         self.assertIn(
             'parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", "")',
@@ -306,9 +270,7 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens}"', install_text)
         self.assertNotIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
-        # TraceLens public follows Magpie / InferenceX: clone the open-source
-        # repo into the runtime tree by default, independent of HYPERLOOM_ROOT.
-        # Explicit TRACELENS_ROOT remains an operator-owned override.
+        # Public TraceLens is cloned into the runtime tree by default; TRACELENS_ROOT overrides.
         self.assertIn(
             'TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"',
             install_text,
@@ -318,8 +280,7 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"', install_text)
         self.assertIn('git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
         self.assertNotIn('TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"', install_text)
-        # Read-only TRACELENS_INTERNAL_ROOT may still trigger a writable mirror
-        # under ${HYPERLOOM_ROOT}/TraceLens-internal (optional extension).
+        # Read-only internal root may trigger a writable mirror (optional extension).
         self.assertIn(
             'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"',
             install_text,
@@ -399,15 +360,7 @@ class KernelAgentToolTests(unittest.TestCase):
             self.assertGreaterEqual(len(result["hot_kernels"]), 2)
 
     def test_default_backends_include_geak_without_benchmark(self) -> None:
-        """Policy change (#144 last comment Layer 1, broadened): every
-        kernel Claude/Codex can rewrite, GEAK can rewrite too. Auto-pick
-        MUST include GEAK in the ladder even when no benchmark is
-        present — the previous "skip GEAK" behaviour was over-conservative
-        and starved GEAK of high-priority kernels on runs that hadn't
-        registered a harness yet. ``geak_without_benchmark`` flags the
-        reduced verification confidence so downstream KEEP gates audit
-        appropriately; the decision is still ``NEEDS_REVIEW`` because
-        E2E evidence is missing."""
+        """Policy change (#144): auto-pick includes GEAK even with no benchmark; decision stays NEEDS_REVIEW."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             trace = workspace / "trace.json"
@@ -432,17 +385,14 @@ class KernelAgentToolTests(unittest.TestCase):
                 "--dry-run",
             ], workspace=workspace)
 
-            # GEAK is now in the ladder (FIRST, the high-priority handoff
-            # the policy intended).
+            # GEAK is now first in the ladder.
             self.assertIn("geak", result["selected_backends"])
             self.assertEqual(result["selected_backends"][0], "geak")
             # No bench → flagged for downstream verification gates.
             self.assertTrue(
                 result["backend_selection"]["geak_without_benchmark"]
             )
-            # Decision unchanged: E2E evidence still missing, still
-            # NEEDS_REVIEW. The change is that GEAK got a swing at the
-            # rewrite, not that we lowered the KEEP bar.
+            # E2E evidence still missing, so still NEEDS_REVIEW.
             self.assertEqual(result["proposal"]["decision"], "NEEDS_REVIEW")
             self.assertIn("E2E evidence missing", result["proposal"]["reasons"])
 
@@ -504,8 +454,7 @@ class KernelAgentToolTests(unittest.TestCase):
                 "--test-harness-path", str(harness),
                 "--e2e-gain-pct", "1.5",
                 "--accuracy-passed", "true",
-                # Need >= 1.50x microbench to clear KEEP threshold; the
-                # dry-run placeholder of 1.05 only earns NEEDS_REVIEW now.
+                # Need >= 1.50x microbench to clear KEEP threshold.
                 "--micro-speedup", "1.6",
                 "--dry-run",
             ], workspace=workspace)
@@ -603,20 +552,7 @@ class KernelAgentToolTests(unittest.TestCase):
 
 
 class AuthFailureDetectionTests(unittest.TestCase):
-    """Cover :func:`_count_auth_failures` and the partial-promotion guard.
-
-    Regression for the r24 custom_allreduce loop where GEAK's inner
-    SelectPatchAgent kept hitting 401 against the wrong gateway
-    (``https://llm-api.amd.com/Anthropic`` expecting an
-    ``AMD_LLM_API_KEY`` distinct from ``SAFE_API_KEY``), left an empty
-    ``optimized_versions/`` directory on disk, got promoted to "partial"
-    by the evidence scanner, and shipped back ``decision=PARTIAL``. The
-    matching SharedState fix only retires kernels whose run_optimization
-    returns >= max_partial PARTIAL outcomes; this test fixture pins the
-    upstream half — when stdout shows a persistent 401 loop, the attempt
-    must NOT be promoted to partial in the first place, so make_proposal
-    returns REVERT and SharedState retires the kernel immediately.
-    """
+    """Cover :func:`_count_auth_failures` and the partial-promotion guard (r24 custom_allreduce 401-loop regression)."""
 
     def test_count_auth_failures_recognises_401_loop(self) -> None:
         sys.path.insert(0, str(ROOT / "tools"))
@@ -641,7 +577,7 @@ class AuthFailureDetectionTests(unittest.TestCase):
             sys.path.pop(0)
         self.assertEqual(ko._count_auth_failures(""), 0)
         self.assertEqual(ko._count_auth_failures("speedup: 1.32x faster"), 0)
-        # A single 401 in a long run is recoverable; below threshold.
+        # A single 401 is recoverable; below threshold.
         self.assertLess(
             ko._count_auth_failures(
                 "WARN: HTTP/1.1 401 Unauthorized; retrying.\n"
@@ -666,25 +602,7 @@ class AuthFailureDetectionTests(unittest.TestCase):
 
 
 class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
-    """A custom GEAK config (e.g. install.sh-generated ``local.yaml``)
-    must end up with ``env.timeout`` >= the unittest harness's own
-    advertised budget before it reaches mini-swe-agent, or every
-    ``save_and_test`` call inside the auto-generated unittest harness
-    silently dies at the 30s default ``LocalEnvironmentConfig.timeout``
-    with ``Test command timed out``.
-
-    GEAK's ``--test-command`` harness (generated by the unittest skill or
-    discovered from benchmark files) can take minutes (e.g. aiter JIT
-    recompile + multi-shape benchmark). mini-swe-agent's
-    ``LocalEnvironmentConfig.timeout`` defaults to 30s, so if the GEAK
-    config doesn't override it, every patch test gets SIGKILLed.
-
-    Hyperloom kernel_optimization fixes this at two layers:
-      * ``scripts/install.sh`` writes ``env.timeout: 3600`` into newly
-        generated ``local.yaml`` files (covered by the install.sh diff).
-      * ``_ensure_yaml_env_timeout`` defensively rewrites any pre-existing
-        config to a timeout of at least 3600s.
-    """
+    """GEAK config ``env.timeout`` must be >= harness budget (else SIGKILL at mini-swe-agent's 30s default)."""
 
     def _import_ko(self):
         sys.path.insert(0, str(ROOT / "tools"))
@@ -700,7 +618,7 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
         injected = ko._ensure_yaml_env_timeout(base)
         self.assertIn("env:", injected)
         self.assertRegex(injected, r"timeout:\s*3600")
-        # Idempotent: applying twice does not stack duplicate env blocks.
+        # Idempotent.
         self.assertEqual(injected, ko._ensure_yaml_env_timeout(injected))
 
     def test_preserves_existing_env_block_when_already_large_enough(self) -> None:
@@ -715,9 +633,7 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
         self.assertEqual(ko._ensure_yaml_env_timeout(base), base)
 
     def test_upgrades_too_small_explicit_timeout(self) -> None:
-        """A copy-pasted ``env.timeout: 30`` (or any value < harness budget)
-        must be rewritten to the harness budget rather than silently
-        defeating the entire safety net."""
+        """A too-small env.timeout must be rewritten up to the harness budget."""
         ko = self._import_ko()
         base = (
             "model:\n  model_class: litellm\n"
@@ -743,7 +659,6 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
         )
         out = ko._ensure_yaml_env_timeout(base, timeout=2100)
         self.assertRegex(out, r"timeout:\s*2100")
-        # Did not duplicate the env block.
         self.assertEqual(out.count("\nenv:\n"), 1)
 
     def test_geak_config_for_run_falls_back_to_3600(self) -> None:
@@ -773,31 +688,11 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
             text = Path(override).read_text(encoding="utf-8")
             self.assertRegex(text, r"timeout:\s*3600")
 class GeakCostLimitDefaultTests(unittest.TestCase):
-    """Lock in the GEAK cost-limit contract: Hyperloom must pass 0.0
-    (= unlimited) so GEAK's sub-agent spawn path does not silently
-    fall back to ``AgentConfig.cost_limit = 3.0``
-    (``minisweagent/agents/default.py``), which on 2026-05-15 killed
-    every Qwen3-32B GEAK sub-agent at $3.08 after ~50 steps.
-
-    The only externally addressable lever is GEAK's
-    ``-l/--cost-limit`` CLI option (``minisweagent/run/mini.py:194``),
-    which writes ``config["agent"]["cost_limit"]`` and is honoured by
-    every child agent spawned from that config. These tests guard the
-    full propagation chain:
-
-      kernel_optimization.py --geak-cost-limit (default 0.0)
-        → geak_submit.submit(cost_limit=0.0)
-        → ``geak ... --cost-limit 0.0``
-
-    If anyone reverts the default to ``None`` or drops the
-    propagation, every GEAK attempt will silently die at $3 again.
-    """
+    """Lock in the GEAK cost-limit contract: Hyperloom passes 0.0 (unlimited) so GEAK skips its 3.0 fallback."""
 
     def setUp(self) -> None:
         import tempfile
-        # _resolve_geak_config() requires GEAK_CONFIG to point at a file
-        # containing "model_class: litellm". Create a minimal stub so tests
-        # that exercise _build_cmd() can run without a real install.
+        # _resolve_geak_config() needs GEAK_CONFIG pointing at a litellm stub.
         self._cfg_file = tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False
         )
@@ -814,11 +709,7 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
             os.environ["GEAK_CONFIG"] = self._prev_geak_config
         Path(self._cfg_file.name).unlink(missing_ok=True)
 
-    # Source-text match: ArgumentParser does not surface ``default=...``
-    # in ``--help`` output, so the most direct way to lock the contract
-    # is to assert the exact ``add_argument`` expression. If anyone
-    # refactors the expression they must update this assertion at the
-    # same time — which is the point.
+    # Assert the exact add_argument expression since --help doesn't show defaults.
     _EXPECTED_DEFAULT_EXPR = (
         'default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0"))'
     )
@@ -863,13 +754,8 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
 
     def test_env_var_overrides_default(self) -> None:
-        """End-to-end smoke: HYPERLOOM_GEAK_COST_LIMIT must reach
-        kernel_optimization.py's argparse default at import time.
-        We exercise this by invoking the tool with ``--help`` and a
-        bogus required arg so the parser instantiation completes."""
+        """HYPERLOOM_GEAK_COST_LIMIT must override the argparse default."""
         env = {**os.environ, "HYPERLOOM_GEAK_COST_LIMIT": "12.5"}
-        # Inject a probe right before ``main()`` runs so we can read the
-        # resolved default without executing the tool body.
         probe = (
             "import sys, re, runpy\n"
             f"sys.argv = ['kernel_optimization.py', '--help']\n"
@@ -878,12 +764,7 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
             "except SystemExit:\n"
             "    pass\n"
         )
-        # Simpler / more direct: import the parser construction as a
-        # subprocess and have argparse error out on missing --kernel-id,
-        # which prints the help line including the resolved default — no,
-        # argparse still does not show defaults. Fall back to AST: load
-        # the source, evaluate the default expression in a controlled
-        # namespace with the env var set.
+        # AST fallback: evaluate the default expression in a controlled namespace.
         import ast
         src = OPT_TOOL.read_text(encoding="utf-8")
         tree = ast.parse(src)
@@ -903,7 +784,6 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
                 break
         self.assertIsNotNone(default_node,
                              "--geak-cost-limit add_argument not found")
-        # Evaluate the default expression with our env var set.
         os.environ["HYPERLOOM_GEAK_COST_LIMIT"] = "12.5"
         try:
             value = eval(  # noqa: S307 — controlled expression from our own source
@@ -917,9 +797,7 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
                          f"--geak-cost-limit default; got {value!r}")
 
     def _import_geak_submit(self):
-        # geak_submit imports its sibling ``ray_runtime`` with a bare
-        # ``from ray_runtime import ...``, so the ``backends/`` directory
-        # must be on sys.path BEFORE the import (not the package root).
+        # backends/ must be on sys.path for geak_submit's bare sibling import.
         backends_dir = ROOT / "tools" / "backends"
         sys.path.insert(0, str(backends_dir))
         try:
@@ -931,9 +809,7 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
             sys.path.pop(0)
 
     def test_geak_submit_build_cmd_propagates_zero(self) -> None:
-        """``_build_cmd(cost_limit=0.0)`` must emit ``--cost-limit 0.0``;
-        the ``is not None`` check is what makes 0.0 reach GEAK's mini.py
-        and override the dataclass $3 default."""
+        """``_build_cmd(cost_limit=0.0)`` must emit ``--cost-limit 0.0`` to override the $3 default."""
         geak_submit = self._import_geak_submit()
         cmd = geak_submit._build_cmd(
             prompt_file=Path("/tmp/p.md"),
@@ -950,8 +826,7 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
                          f"--cost-limit must carry the explicit 0.0 value: {cmd}")
 
     def test_geak_submit_build_cmd_omits_when_none(self) -> None:
-        """``cost_limit=None`` (direct CLI users of geak_submit) must NOT
-        add the flag, so GEAK falls through to its config-file value."""
+        """``cost_limit=None`` must NOT add the flag, so GEAK uses its config-file value."""
         geak_submit = self._import_geak_submit()
         cmd = geak_submit._build_cmd(
             prompt_file=Path("/tmp/p.md"),

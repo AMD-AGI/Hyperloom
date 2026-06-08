@@ -63,28 +63,12 @@ def known_target_roots() -> tuple[str, ...]:
 KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS
 
 
-# Default location of the multi-node patch backup directory on the
-# RayJob pod. Mirrors the apply_kernel_patch.backup_root convention
-# (per-target subdir) but lives on the pod's local fs, not the
-# sandbox's, so it survives sglang restarts without depending on
-# wekafs. Overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR for tests.
+# Pod-local multi-node backup dir; survives sglang restarts.
+# Overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR for tests.
 _MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
 
-# State file written by ``inference_optimizer.multi_node create-rayjob``.
-# Presence of ``nodes >= 2`` is the multi-node signal used to decide
-# whether apply_kernel_patch.py should fan-out the patch to RayJob pods
-# via the multi_node CLI in addition to writing the sandbox-local copy.
-#
-# Resolution mirrors ``inference_optimizer.orchestrator.action_executors
-# ._multi_node_env._state_path``: ``$MULTI_NODE_STATE_FILE`` wins,
-# default ``/tmp/multi_node_state.json``. Honouring the env var keeps
-# test runs isolated — pytest can point this at a non-existent path
-# so the fan-out branch is never taken, even on a sandbox whose
-# hardcoded ``/tmp`` file is left over from a prior real multi-node
-# session (without this override, an active inference_optimizer's
-# ``/tmp/multi_node_state.json`` would silently turn ``test_p2_4``
-# integrate fixtures into multi-node fan-out attempts that
-# mock-mismatch ``subprocess.run``).
+# Multi-node signal file (nodes >= 2) written by multi_node create-rayjob.
+# $MULTI_NODE_STATE_FILE wins; env override keeps test runs isolated.
 _MN_STATE_FILE_DEFAULT = "/tmp/multi_node_state.json"
 
 
@@ -93,22 +77,12 @@ def _mn_state_path() -> Path:
     return Path(os.environ.get("MULTI_NODE_STATE_FILE", _MN_STATE_FILE_DEFAULT))
 
 
-# Legacy module attribute. Kept for any caller / test that imports
-# ``_MN_STATE_FILE`` directly; runtime checks go through
-# :func:`_mn_state_path` so each call re-resolves the env override.
+# Legacy module attribute kept for direct importers; runtime uses _mn_state_path.
 _MN_STATE_FILE = Path(_MN_STATE_FILE_DEFAULT)
 
 
 def _is_multi_node() -> bool:
-    """True iff a multi-node RayJob is active (nodes >= 2).
-
-    Reads ``$MULTI_NODE_STATE_FILE`` (default
-    ``/tmp/multi_node_state.json``) — the same checkpoint
-    ``inference_optimizer.multi_node.cli`` writes after
-    ``create-rayjob``. Missing file / unreadable / ``nodes < 2`` →
-    ``False``, so single-node and standalone CLI use of this tool
-    keep their pre-multinode behaviour bit-for-bit.
-    """
+    """True iff a multi-node RayJob is active (nodes >= 2); missing/unreadable → False."""
     state_path = _mn_state_path()
     try:
         if not state_path.is_file():
@@ -127,17 +101,10 @@ def _dispatch_multinode_apply(
     backup_dir_on_pod: str,
     timeout_sec: int = 180,
 ) -> dict[str, Any]:
-    """Run ``python3 -m inference_optimizer.multi_node apply-patch`` to
-    fan the same patch out to every pod (head + workers).
+    """Fan the patch out to every pod (head + workers); return parsed JSON.
 
-    Returns the parsed JSON document produced by
-    kernel_patch_multinode.py — caller checks ``status == "ok"`` and
-    persists ``per_node`` (host → backup_path map) into the
-    apply-kernel-patch manifest so revert can reach the same pods.
-
-    Raises RuntimeError on subprocess failure / non-JSON output / pod
-    status != ok so the apply_kernel_patch caller can roll back the
-    sandbox-local copy.
+    Raises RuntimeError on subprocess failure / non-JSON / pod status != ok so
+    the caller can roll back the sandbox-local copy.
     """
     cmd = [
         sys.executable, "-m", "inference_optimizer.multi_node",
@@ -178,13 +145,7 @@ def _dispatch_multinode_revert(
     backup_map: dict[str, str],
     timeout_sec: int = 120,
 ) -> dict[str, Any]:
-    """Run ``python3 -m inference_optimizer.multi_node revert-patch`` to
-    restore the original file on every pod that received the apply.
-
-    Best-effort: a partial revert is logged but not raised — the
-    caller (revert_kernel_patch) has already restored the sandbox
-    copy, and re-running revert is idempotent on noop_missing_backup.
-    """
+    """Restore the original file on every pod that received the apply (best-effort)."""
     cmd = [
         sys.executable, "-m", "inference_optimizer.multi_node",
         "revert-patch",
@@ -200,8 +161,7 @@ def _dispatch_multinode_revert(
     except json.JSONDecodeError:
         parsed = {}
     if proc.returncode != 0 or str(parsed.get("status", "")).lower() != "ok":
-        # Don't raise — sandbox revert already won; warn-only so caller
-        # can mark the manifest reverted regardless.
+        # Warn-only: sandbox revert already won.
         sys.stderr.write(
             f"WARN multi-node revert-patch rc={proc.returncode} "
             f"status={parsed.get('status')!r} "
@@ -355,55 +315,17 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
     return {"status": "ok", "removed": removed}
 
 
-# ---------------------------------------------------------------------------
-# PR-K: aiter JIT cache invalidation around compiled-source rebuilds.
-#
-# aiter ships ``@compile_ops("module_<name>", gen_func=...)`` decorators that
-# JIT-codegen + hipcc-compile per-instance ``.so`` files into
-# ``<aiter>/jit/build/module_<name>_<sig>/``. ``setup.py develop`` rebuilds the
-# python package + statically-compiled ``.so`` but does NOT invalidate the
-# jit/build entries: a patch under ``aiter/csrc/ck_gemm_moe_2stages_codegen/``
-# would rebuild the wheel yet the next ``import aiter.ops.moe_op`` would still
-# pick up the pre-patch ``module_moe_ck2stages_*.so`` from jit/build/, leaving
-# the integrate benchmark to measure unchanged performance and emit REVERT.
-#
-# We move (NOT copy) the entire jit/build/ directory aside before the rebuild
-# step so the post-rebuild first-import re-codegens + re-compiles every module
-# from clean state. ``shutil.move`` is atomic on the same filesystem and zero-
-# copy. Revert moves the backup back, removing any regenerated jit/build/ dir
-# first so the pre-patch state is restored bit-for-bit.
-#
-# Scope: ONLY aiter is affected. sglang's sgl-kernel and vllm have no JIT
-# codegen layer — their ``.so`` are produced by setup.py at install time, so
-# the standard ``setup.py develop`` rebuild + cache_clear is sufficient and
-# this invalidation step is a no-op for those targets.
-# ---------------------------------------------------------------------------
+# PR-K: aiter JIT cache invalidation around rebuilds (setup.py develop won't invalidate jit/build/ .so).
 _AITER_CSRC_MARKER = "/aiter/csrc/"
 
 
 def _target_is_in_aiter_csrc(target_file: Path) -> bool:
-    """Return True iff ``target_file`` resides under any ``aiter/csrc/`` tree.
-
-    Matches both the editable checkout (``/sgl-workspace/aiter/csrc/...``) and
-    the dist-packages layout (``/usr/local/lib/python3.10/dist-packages/aiter/
-    csrc/...``) — in both cases the relative segment ``aiter/csrc/`` appears
-    verbatim in the absolute path.
-    """
+    """Return True iff ``target_file`` resides under any ``aiter/csrc/`` tree."""
     return _AITER_CSRC_MARKER in str(target_file).replace(os.sep, "/")
 
 
 def _aiter_jit_build_dir() -> Path | None:
-    """Return ``<aiter>/jit/build`` for the importable aiter, or ``None``.
-
-    Resolved via ``importlib.util.find_spec("aiter")`` so editable installs
-    (``/sgl-workspace/aiter/aiter/__init__.py``), wheel installs
-    (``/usr/local/lib/python3.12/dist-packages/aiter/__init__.py``) and any
-    other layout on ``sys.path`` resolve correctly without hardcoding.
-
-    Returns ``None`` when aiter is not importable in the current interpreter
-    (the kernel-agent sandbox container always has aiter available; this
-    fallback exists so unit tests on a host without aiter still pass).
-    """
+    """Return ``<aiter>/jit/build`` for the importable aiter, or ``None`` if absent."""
     try:
         spec = importlib.util.find_spec("aiter")
     except (ImportError, ValueError):
@@ -422,21 +344,7 @@ def _invalidate_aiter_jit_build(
 ) -> dict[str, Any]:
     """Move aiter ``jit/build/`` aside so a post-rebuild first import re-JITs.
 
-    No-op for targets outside ``aiter/csrc/`` and for sandboxes where the
-    aiter package isn't importable / hasn't populated its jit/build/ yet.
-    Returns one of:
-
-      * ``{"status": "ok", "src": ..., "backup_path": ..., "moved_at": ...}``
-        — backup written; caller must persist this in the manifest before
-        rebuild so revert can find it.
-      * ``{"status": "skipped", "reason": ...}`` — non-aiter target, aiter
-        not importable, or jit/build already absent/empty.
-      * ``{"status": "failed", "error": ...}`` — backup path collision; the
-        caller is expected to abort apply rather than rebuild against an
-        inconsistent jit cache.
-
-    ``jit_build_dir_override`` is a test-only escape hatch so unit tests can
-    point at a synthetic jit/build/ tree without an importable aiter package.
+    Returns status ok / skipped / failed; ``jit_build_dir_override`` is test-only.
     """
     if not _target_is_in_aiter_csrc(target_file):
         return {"status": "skipped", "reason": "target not under aiter/csrc/"}
@@ -481,12 +389,7 @@ def _invalidate_aiter_jit_build(
 
 
 def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]:
-    """Reverse of :func:`_invalidate_aiter_jit_build`.
-
-    Moves the backup back to its original location. If the post-rebuild first
-    import already regenerated a fresh jit/build/, that fresh dir is removed
-    first so the pre-patch state is restored bit-for-bit (revert semantics).
-    """
+    """Reverse of :func:`_invalidate_aiter_jit_build`: restore the backup, removing any regenerated dir first."""
     if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
         return {"status": "skipped", "reason": "no backup recorded"}
     src = Path(jit_build_backup.get("src", ""))
@@ -633,13 +536,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
                 manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
 
-    # PR-K: restore aiter jit/build/ if it was moved aside during apply.
-    # Done after source/artifact restore but before multi-node fan-out so
-    # the host-local jit cache is back in place even if pod-side revert
-    # subsequently fails. Manifest's ``jit_build_backup`` carries ``src``
-    # and ``backup_path`` set by :func:`_invalidate_aiter_jit_build` and
-    # is only present (with status=ok) when the apply actually moved the
-    # dir aside.
+    # PR-K: restore aiter jit/build/ (before multi-node fan-out) if apply moved it aside.
     jit_build_backup = manifest.get("jit_build_backup") or {}
     if jit_build_backup.get("status") == "ok":
         jit_build_restore = _restore_aiter_jit_build(jit_build_backup)
@@ -647,11 +544,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         if jit_build_restore.get("status") == "ok" and jit_build_restore.get("restored_to"):
             restored.append(str(jit_build_restore["restored_to"]))
 
-    # Multi-node: also fan-out a revert to every pod that received the
-    # corresponding apply. Best-effort; sandbox revert above already
-    # restored the LLM-visible source, but we still want pod-side
-    # sglang to load v0 on the next restart so the integrate
-    # baseline rerun measures the right thing.
+    # Multi-node: fan-out a revert to every pod that received the apply (best-effort).
     multinode_info = manifest.get("multinode") or {}
     mn_revert: dict[str, Any] = {}
     if multinode_info and multinode_info.get("host_backup_map"):
@@ -681,8 +574,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         "restored_paths": restored,
         "reverted_at": reverted_at,
     }
-    # Only attach multinode_revert when fan-out actually ran. Preserves
-    # single-node revert return shape bit-for-bit.
+    # Only attach multinode_revert when fan-out actually ran.
     if mn_revert:
         result["multinode_revert"] = mn_revert
     return result
@@ -747,14 +639,7 @@ def apply_kernel_patch(
         {"status": "skipped", "reason": "not a python source target"}
     )
 
-    # Multi-node: fan-out the SAME patch to every RayJob pod so head +
-    # workers see identical source. Sandbox-local write above already
-    # succeeded, so the apply is in a "sandbox-applied, pod-pending"
-    # state; the dispatch either promotes it to a fully-applied state
-    # across all three (sandbox + head + workers) or we hard-revert the
-    # sandbox copy to avoid a partial multinode state where LLM would
-    # next round see v1 source locally but pod-side sglang still runs
-    # v0.
+    # Multi-node: fan-out the patch to every RayJob pod, else hard-revert the sandbox copy.
     multinode_info: dict[str, Any] = {}
     if _is_multi_node():
         pod_backup_dir = os.environ.get(
@@ -768,8 +653,7 @@ def apply_kernel_patch(
                 backup_dir_on_pod=pod_backup_dir,
             )
         except Exception as exc:  # noqa: BLE001
-            # Pod fan-out failed: revert sandbox copy from the source
-            # backup so the three sides agree on v0 again.
+            # Pod fan-out failed: revert sandbox copy to v0.
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
@@ -782,8 +666,7 @@ def apply_kernel_patch(
                 ),
                 "manifest_path": str(manifest_path),
             }
-        # Persist per-host backups into the manifest so revert can find
-        # them. Map shape: {hostname: backup_path}.
+        # Persist per-host backups {hostname: backup_path} so revert can find them.
         backup_map: dict[str, str] = {}
         for entry in mn_apply.get("per_node", []) or []:
             host = (entry.get("host") or "").strip()
@@ -797,11 +680,7 @@ def apply_kernel_patch(
             "host_backup_map": backup_map,
             "per_node": mn_apply.get("per_node", []),
         }
-        # CRITICAL: persist multinode info to the manifest NOW (not at
-        # the end with status=applied) so a later rebuild failure
-        # triggers revert_kernel_patch with the multinode block still
-        # visible — without this, rebuild failure would revert only
-        # the sandbox copy and leave pod-side patches stranded.
+        # Persist multinode info now so a later rebuild failure reverts pod-side patches too.
         manifest["multinode"] = multinode_info
         manifest_path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -821,19 +700,10 @@ def apply_kernel_patch(
         "status": "skipped", "reason": "rebuild not run",
     }
     if strategy["compiled"] and not skip_rebuild:
-        # PR-K: aiter @compile_ops modules cache JIT-built .so under
-        # <aiter>/jit/build/module_*/. setup.py develop rebuilds the
-        # python package + statically-linked .so but does NOT touch
-        # jit/build/, so a patched .cu under aiter/csrc/ would rebuild
-        # yet the next import would still load the pre-patch .so. Move
-        # jit/build/ aside before rebuild so the post-rebuild first
-        # import re-codegens + re-compiles cleanly. No-op for sglang/
-        # vllm targets (they have no JIT codegen layer).
+        # PR-K: move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
         jit_build_backup = _invalidate_aiter_jit_build(target, backup_dir)
         if jit_build_backup.get("status") == "failed":
-            # Refuse to rebuild against an inconsistent jit cache state:
-            # restore source from backup so the on-disk file matches v0
-            # again, then bail out.
+            # Refuse to rebuild against an inconsistent jit cache: restore v0 and bail.
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
@@ -849,9 +719,7 @@ def apply_kernel_patch(
                 "jit_build_backup": jit_build_backup,
             }
         if jit_build_backup.get("status") == "ok":
-            # Persist the backup record into the manifest BEFORE rebuild
-            # so a rebuild failure can still trigger restore via
-            # revert_kernel_patch (which reads the manifest).
+            # Persist the backup record before rebuild so a failure can still restore.
             manifest["jit_build_backup"] = jit_build_backup
             manifest_path.write_text(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -875,13 +743,9 @@ def apply_kernel_patch(
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "skipped"}:
-        # Surface skipped reason too so manifest readers can audit why
-        # invalidation didn't run on a particular apply (e.g. non-aiter
-        # target, aiter not importable in this sandbox).
+        # Surface skipped reason too so manifest readers can audit it.
         manifest["jit_build_backup"] = jit_build_backup
-    # multinode block (when present) is already persisted at fan-out
-    # time above; we don't rewrite it here to avoid clobbering the
-    # per-host backup map.
+    # multinode block already persisted at fan-out time; don't rewrite it here.
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     result: dict[str, Any] = {
         "status": "ok",
@@ -894,9 +758,7 @@ def apply_kernel_patch(
         "rebuild": rebuild,
         "jit_build_backup": jit_build_backup,
     }
-    # Only attach the multinode key when fan-out actually ran. Keeps
-    # single-node callers' return shape bit-for-bit identical to
-    # pre-multinode behaviour.
+    # Only attach the multinode key when fan-out actually ran.
     if multinode_info:
         result["multinode"] = multinode_info
     return result

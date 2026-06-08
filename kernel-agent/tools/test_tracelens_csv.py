@@ -2,18 +2,9 @@
 
 """Regression tests for the kernel-agent tracelens_analysis filter fixes.
 
-Locks the raw trace filtering fix uncovered by the resume3/resume4 1h
-validation:
-
-* **A path** ``is_kernel_event`` previously did fuzzy substring matching
-  on `KERNEL_HINTS=("kernel","triton","hip","cuda",...)` against both the
-  event name AND category. That accidentally promoted `cat='python_function'`
-  rows like ``torch/cuda/streams.py(222): synchronize`` (a CPU wait that
-  accumulates the entire wrapped GPU duration) to be the #1 hot kernel —
-  88ms attributed to a CPU sync. Fix: require ``cat == 'kernel'`` strictly.
-
-The production TraceLens interface now consumes only ``analysis.md``. Legacy
-``priority_data`` / ``category_data`` / CSV fallbacks are intentionally gone.
+Locks the ``is_kernel_event`` fix to require strict ``cat == 'kernel'`` (fuzzy
+name/category matching had promoted a CPU sync to the #1 hot kernel). Production
+TraceLens now consumes only ``analysis.md``; legacy CSV fallbacks are gone.
 """
 
 from __future__ import annotations
@@ -33,9 +24,7 @@ import tracelens_analysis as tla  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
-# ===========================================================================
 # A path — is_kernel_event strict cat == 'kernel'
-# ===========================================================================
 def test_a_filters_python_function_synchronize():
     """The exact event that ranked #1 in the buggy resume3/4 trace."""
     sync_event = {
@@ -117,9 +106,7 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         assert "synchronize" not in n.lower()
 
 
-# ===========================================================================
 # Native-only kernel-opt targeting
-# ===========================================================================
 def test_compile_generated_kernel_is_not_reusable_native():
     candidate = {
         "name": "triton_poi_fused_add_mul_0",
@@ -161,14 +148,7 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
 
 
 def test_recommend_backends_includes_geak_for_python_source():
-    """Policy: every kernel Claude/Codex can rewrite, GEAK can rewrite
-    too. Pre-fix, ``python`` source_type returned ``["claude", "codex"]``
-    and dropped GEAK — that excluded e.g. the hottest kernel on a
-    Qwen3-30B-A3B run (`fused_moe_kernel` mis-resolved to a Python
-    benchmark harness) from ever reaching GEAK. Post-fix GEAK is in
-    the ladder for python too; the AST resolver (PR-B.1) addresses
-    the underlying misclassification but the policy change is the
-    safety net for cases the resolver can't disambiguate."""
+    """GEAK must be in the ladder for ``python`` source_type too (pre-fix it was dropped)."""
     candidate = {
         "name": "some_python_dispatcher",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/dispatcher.py",
@@ -179,10 +159,7 @@ def test_recommend_backends_includes_geak_for_python_source():
 
 
 def test_recommend_backends_includes_geak_for_unknown_source():
-    """Fallback / unknown source_type path: GEAK must still be in the
-    ladder. The capability differences are GEAK-side, not
-    Hyperloom-side — let GEAK decide what to handle rather than
-    pre-filtering by extension."""
+    """Unknown source_type: GEAK must still be in the ladder (let GEAK decide, don't pre-filter by extension)."""
     candidate = {
         "name": "some_unrecognised_kernel",
         "source_file": "/some/path/kernel.xyz",
@@ -193,9 +170,7 @@ def test_recommend_backends_includes_geak_for_unknown_source():
 
 
 def test_recommend_backends_geak_is_first_in_ladder():
-    """Invariant: when GEAK is in the ladder, it is FIRST. High-priority
-    handoff means GEAK gets the swing before Claude/Codex; the
-    fallback order matters at runtime if GEAK times out or rejects."""
+    """Invariant: when GEAK is in the ladder, it is FIRST."""
     candidate = {
         "name": "some_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
@@ -254,11 +229,7 @@ def test_125_derive_category_normalizations():
         ("moe_dispatch_kernel", "MoE"),
         ("softmax_kernel_v2", "Softmax"),
         ("all_reduce_xgmi_kernel", "Communication"),
-        # PyTorch GEMM op-name variants. The csv-priority path catches
-        # these when unified_perf_summary.csv carries the op category,
-        # but the heuristic must also resolve them so raw-trace sessions
-        # / sessions where the csv has empty op category for these ops
-        # do not fall through to "unknown".
+        # PyTorch GEMM op-name variants the heuristic must also resolve (not just the CSV path).
         ("aten::mm", "GEMM"),
         ("aten::addmm", "GEMM"),
         ("aten::bmm", "GEMM"),
@@ -283,15 +254,7 @@ def test_125_finalize_outputs_source_path_field():
 
 
 def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
-    """Layer-2 fix: aten::mm gets GEMM via TraceLens csv, not heuristic.
-
-    derive_kernel_category's priority-1 branch (use upstream TraceLens
-    category) was dead: tracelens_category was never populated from
-    TraceLens's unified_perf_summary.csv, so aten::mm fell through to
-    the name heuristic and landed as "unknown". This pins the wiring:
-    pass perf_report_csv_dir to _finalize_candidates and aten::mm must
-    classify as GEMM via the csv lookup.
-    """
+    """Layer-2 fix: aten::mm classifies as GEMM via the TraceLens CSV op-category lookup, not the name heuristic."""
     csv_dir = tmp_path / "perf_report_csvs"
     csv_dir.mkdir()
     (csv_dir / "unified_perf_summary.csv").write_text(
@@ -316,11 +279,7 @@ def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
 
 
 def test_load_op_category_map_parses_unified_perf_summary(tmp_path):
-    """load_op_category_map: {name -> raw TraceLens op category}.
-
-    Keeps the first non-empty op category per name (rows are per-shape;
-    categories are stable across shapes for one op).
-    """
+    """load_op_category_map: {name -> raw TraceLens op category}, first non-empty per name."""
     csv_dir = tmp_path / "perf_report_csvs"
     csv_dir.mkdir()
     (csv_dir / "unified_perf_summary.csv").write_text(
@@ -341,19 +300,14 @@ def test_load_op_category_map_parses_unified_perf_summary(tmp_path):
 
 
 def test_load_op_category_map_missing_returns_empty(tmp_path):
-    """csv absent / wrong path => {} so callers degrade to the
-    name heuristic. Backward-compatible with sessions that never
-    produced a perf_report_csvs/ dir (TraceLens pre-5/30 flow)."""
+    """csv absent / wrong path => {} so callers degrade to the name heuristic."""
     assert tla.load_op_category_map(tmp_path / "nonexistent") == {}
     (tmp_path / "perf_report_csvs").mkdir()
     assert tla.load_op_category_map(tmp_path / "perf_report_csvs") == {}
 
 
 def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
-    """Backward compatibility: no csv => exact same behavior as today.
-
-    Without perf_report_csv_dir the heuristic still tags aiter::ck_moe_*
-    as MoE via name substring, proving the csv path is purely additive."""
+    """Backward compatibility: no csv => the name heuristic still tags aiter::ck_moe_* as MoE (csv path is additive)."""
     candidates = [{
         "name": "aiter::ck_moe_stage1",
         "duration_us": 100.0,
@@ -371,8 +325,7 @@ def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
 
 
 def test_normalize_upstream_category_handles_moe_aux_and_collective():
-    """New mappings let TraceLens csv values normalize cleanly:
-    MoE_aux (moe_sorting / topk) and CustomCollective (reg_all_gather)."""
+    """New mappings: MoE_aux -> MoE and CustomCollective -> Communication normalize cleanly."""
     from tracelens_skill_runner import normalize_upstream_category
     assert normalize_upstream_category("MoE_aux") == "MoE"
     assert normalize_upstream_category("moe_aux") == "MoE"
@@ -567,10 +520,7 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
     assert payload["hot_kernels"][0]["kernel_params"]["HEAD_SIZE"] == 128
 
 
-# ===========================================================================
-# #203 — write_reports must surface the upstream analysis.md as-is
-# (no copies, no aliases, no inline fabricated fallback)
-# ===========================================================================
+# #203 — write_reports surfaces the upstream analysis.md as-is (no copies/aliases/fabrication)
 def _make_write_reports_args(trace_path):
     from argparse import Namespace
 
@@ -586,11 +536,7 @@ def _make_write_reports_args(trace_path):
 
 
 def test_write_reports_raises_when_analysis_md_missing(tmp_path):
-    """#203: write_reports refuses to fabricate a Markdown when the
-    TraceLens SDK orchestrator failed to produce analysis.md.
-    The legacy inline bullet-list fallback silently masked upstream
-    failures (see #144 mis-resolution chain) and is gone.
-    """
+    """#203: write_reports refuses to fabricate a Markdown when analysis.md is missing."""
     import pytest
 
     trace = tmp_path / "trace.json"
@@ -608,10 +554,7 @@ def test_write_reports_raises_when_analysis_md_missing(tmp_path):
 
 
 def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
-    """#203: even if a path is passed, the file must actually exist —
-    a non-existent path is treated as orchestrator failure, not as a
-    cue to fabricate a stand-in.
-    """
+    """#203: a passed-but-nonexistent report path is treated as orchestrator failure, not a cue to fabricate."""
     import pytest
 
     trace = tmp_path / "trace.json"
@@ -630,11 +573,7 @@ def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
 
 
 def test_write_reports_does_not_create_filename_aliases(tmp_path):
-    """#203: ``analysis.md`` is the single contracted exit. The legacy
-    ``standalone_analysis.md`` / ``tracelens_report.md`` aliases were
-    removed because they wrote byte-identical copies of the same file
-    under different names. This test pins that hygiene fix.
-    """
+    """#203: ``analysis.md`` is the single exit; legacy aliases must not be written."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     run_dir = tmp_path / "run"
@@ -662,10 +601,7 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
 
 
 def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
-    """#203: Hyperloom must not rewrite the upstream report's contents.
-    Verifying byte-identity here prevents a future refactor from
-    sneaking a re-render in.
-    """
+    """#203: Hyperloom must not rewrite the upstream report's contents (byte-identity check)."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     run_dir = tmp_path / "run"
@@ -688,9 +624,7 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
 
 
-# ===========================================================================
 # #124 — SDK runner for TraceLens analysis-orchestrator skill
-# ===========================================================================
 def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     skill = tmp_path / "analysis-orchestrator.md"
     trace = tmp_path / "mixed_steady_state_0_trace.json.gz"
@@ -742,10 +676,7 @@ def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path
 
 
 def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
-    """Issue #126/#124 regression: when the upstream profile run produces
-    a CPU-only trace (e.g. PMC LD_PRELOAD steals the rocprofiler-sdk slot
-    from torch.profiler), tracelens_analysis must fail loudly *before*
-    spending time on TraceLens install / split / SDK orchestrator runs."""
+    """#126/#124 regression: a CPU-only trace must fail loudly before TraceLens install / split / SDK runs."""
     import gzip
     import json as _json
     from unittest.mock import patch
@@ -861,9 +792,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "Task" in captured["options"]["allowed_tools"]
 
 
-# ===========================================================================
 # T2 — analysis.md is the only contracted TraceLens output.
-# ===========================================================================
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
     import asyncio
@@ -919,9 +848,7 @@ def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
 
 
 def test_t2_missing_analysis_md_still_raises(tmp_path):
-    """Negative control: ``analysis.md`` itself is still the contracted
-    single source of truth, so its absence is still a hard error. T2
-    only relaxes the sidecars, not the report."""
+    """Negative control: a missing ``analysis.md`` is still a hard error (T2 only relaxes sidecars)."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -942,9 +869,7 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
 
     async def _fake_query(*, prompt, options):
         output_dir.mkdir(parents=True, exist_ok=True)
-        # Deliberately write ONLY a sidecar (no analysis.md). The wrapper
-        # must still fail loudly because analysis.md is the contracted
-        # report (docx §2 "single source of truth").
+        # Write ONLY a sidecar (no analysis.md); the wrapper must still fail loudly.
         (output_dir / "priority_data.json").write_text("{}", encoding="utf-8")
         yield _Message(content=[_TextBlock("done")])
 
@@ -965,12 +890,8 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         ))
 
 
-# ===========================================================================
-# #127 — TraceLens splitter CLI must match the real
-# split_inference_trace_annotation interface (positional trace_path,
-# -o/--output-dir, --find-steady-state). The previous --input/--platform
-# form failed at runtime against a real Magpie/SGLang trace.
-# ===========================================================================
+# #127 — splitter CLI must match the real split_inference_trace_annotation interface
+# (positional trace_path, -o, --find-steady-state); the old --input/--platform form failed.
 def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
@@ -990,9 +911,7 @@ def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
 def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     tmp_path, capsys,
 ):
-    """The end-to-end split path must call the real splitter interface,
-    not the broken --input/--platform form. Drives a mock subprocess.run
-    and asserts argv shape."""
+    """The end-to-end split path must call the real splitter interface, not the broken --input/--platform form."""
     import gzip
     import json as _json
     from unittest.mock import patch
@@ -1094,18 +1013,10 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     assert "trace_split_no_steady_state" in result["error"]
 
 
-# ===========================================================================
-# #194 §3 — splitter must receive --R so mixed-window selection uses the
-# analytic PD ratio. Source: tracelens_analysis must pass --R when given
-# either via --split-r CLI arg or via the RANDOM_RANGE_RATIO env var (the
-# same env Hyperloom propagates from the YAML config to the benchmark
-# subprocess). Without --R the splitter falls back to an empirical
-# heuristic, drifting from the benchmark-contract ratio the skill aligns
-# the rest of the pipeline to.
-# ===========================================================================
+# #194 §3 — splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window
+# selection uses the analytic PD ratio instead of an empirical heuristic.
 def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
-    """Helper: stage a TraceLens-ish tree, stub subprocess.run + which,
-    drive tla.main() once, and return the list of captured argvs."""
+    """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs."""
     import gzip
     import json as _json
     import os as _os
@@ -1180,10 +1091,7 @@ def _find_splitter_cmd(captured):
 
 
 def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
-    """`--split-r 0.5` on the wrapper must produce `--R 0.5` on the
-    splitter argv. Floating-point ratios must survive verbatim — the
-    splitter declares `type=float` and any string coercion to int
-    would silently truncate fractional R."""
+    """`--split-r 0.5` must produce `--R 0.5` on the splitter argv (fractional ratios survive verbatim)."""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=[
@@ -1231,11 +1139,7 @@ def test_194_3_splitter_omits_R_when_unset(tmp_path):
 
 
 def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
-    """A malformed env value must NOT be propagated to the splitter —
-    the splitter would `argparse.error` and abort the whole pipeline
-    on a value error. Silently dropping (with a log line) is the
-    least-bad option; it falls back to the splitter's default heuristic
-    which is exactly the pre-#194-§3 behaviour."""
+    """A malformed env --R value must be dropped (not propagated, which would argparse.error the splitter)."""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=["--split-conc", "32", "--split-osl", "1024"],
@@ -1246,9 +1150,7 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
     assert "--R" not in splitter_cmd, splitter_cmd
 
 
-# ===========================================================================
 # parse_analysis_md — TraceLens final-report contract (#155 review)
-# ===========================================================================
 _FIXTURE_LLAMA70B_ANALYSIS_MD = (
     Path(__file__).resolve().parents[1]
     / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
@@ -1256,13 +1158,7 @@ _FIXTURE_LLAMA70B_ANALYSIS_MD = (
 
 
 def test_parse_analysis_md_llama70b_fixture_yields_21_compute_candidates():
-    """Round-trip the TraceLens reference fixture for Llama-3 70B.
-
-    The fixture (TraceLens-internal ``evals/analysis_tests/e2e_tests/
-    llama_70b/analysis_output_ref/analysis.md``) is the official golden
-    output, so its 9-column Detailed Analysis tables are the contract our
-    parser must round-trip without loss.
-    """
+    """Round-trip the official Llama-3 70B golden analysis.md fixture into 21 compute candidates."""
     cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
     assert len(cands) == 21, (
         f"expected 21 candidates (18 GEMM + 2 SDPA_fwd + 1 SDPA_bwd) from "
@@ -1337,10 +1233,7 @@ def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
     assert all(c["tracelens_pitem_rank"] == 1 for c in cands)
 
 
-# ===========================================================================
-# docx §2 Recommended Interfacing Approach — Filter for GEAK based on
-# budget (Higher P-item, Lower Efficiency)
-# ===========================================================================
+# docx §2 — Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
 def _write_two_pitem_analysis_md(md: Path) -> None:
     md.write_text(
         "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
@@ -1387,10 +1280,7 @@ def _write_two_pitem_analysis_md(md: Path) -> None:
 
 
 def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
-    """docx §2 Recommended Interfacing Approach: ``Filter for GEAK based
-    on budget (Higher P-item, Lower Efficiency)``. Within a P-item, rows
-    with lower efficiency must come first so they survive the ``top_k``
-    budget cap. Cross-P-item order is still rank-based (P1 before P2)."""
+    """docx §2: within a P-item, lower-efficiency rows sort first (survive top_k); P1 before P2 across items."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -1409,10 +1299,7 @@ def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
 
 
 def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
-    """docx §2 budget cap: after sorting by efficiency within a P-item,
-    the ``top_k`` slice must keep the lowest-efficiency rows. Without
-    the sort, a budget of 2 would drop the kernel with the most
-    headroom — exactly the regression docx §2 calls out."""
+    """docx §2 budget cap: top_k keeps the lowest-efficiency rows within a P-item."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -1424,9 +1311,7 @@ def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
     )
 
 
-# ===========================================================================
 # normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
-# ===========================================================================
 @pytest.mark.parametrize("raw,expected", [
     ("gemm", "GEMM"),
     ("groupedgemm_fwd", "GEMM"),
@@ -1486,9 +1371,7 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
 
-# ===========================================================================
 # PR-A §1: _extract_pitem_prose extracts Reasoning / Resolution / Impact
-# ===========================================================================
 _SYNTHETIC_PITEM_BODY = """\
 #### 🔴 P1: RMSNorm fused with quantization (Triton)
 
@@ -1529,10 +1412,7 @@ def test_extract_pitem_prose_pulls_all_sections():
 
 
 def test_extract_pitem_prose_identification_stops_at_data_marker():
-    """Identification ends at ``**Data:**`` — must NOT leak the
-    9-column table or any subsequent prose into the identification
-    field. Without the Data end-marker the identification would
-    swallow everything up to ``**Reasoning for Slowdown:**``."""
+    """Identification ends at ``**Data:**`` — must not leak the 9-column table into the field."""
     body = (
         "**Identification:** Three ops flagged at 0.5% efficiency. "
         "(source: gemm_metrics.json)\n\n"
@@ -1549,8 +1429,7 @@ def test_extract_pitem_prose_identification_stops_at_data_marker():
 
 
 def test_extract_pitem_prose_returns_empty_strings_when_markers_absent():
-    """Bodies without the four labels must still return the full dict
-    shape so downstream consumers can rely on key presence."""
+    """Bodies without the four labels still return the full dict shape (key presence guaranteed)."""
     prose = tlr._extract_pitem_prose("**Data:**\n| ... | ... |\n")
     assert prose["identification"] == ""
     assert prose["reasoning_for_slowdown"] == ""
@@ -1562,8 +1441,7 @@ def test_extract_pitem_prose_returns_empty_strings_when_markers_absent():
 
 
 def test_extract_pitem_prose_reasoning_stops_at_resolution_marker():
-    """Reasoning should not leak into Resolution when both are present —
-    the end-marker ordering is what guarantees a clean split."""
+    """Reasoning must not leak into Resolution when both are present."""
     body = (
         "**Reasoning for Slowdown:**\nFirst paragraph.\n\n"
         "**Resolution:**\nSecond paragraph.\n\n"
@@ -1583,11 +1461,7 @@ def test_extract_between_returns_empty_when_start_marker_missing():
 
 
 def test_parse_analysis_md_attaches_prose_from_fixture():
-    """Round-trip the LLama70B fixture and verify every parsed candidate
-    carries the new prose fields populated from its parent P-item block.
-    The fixture has 4 Detailed Analysis blocks (P1 GEMM, P2 SDPA_fwd, etc.),
-    each with all three sections, so every candidate must end up with
-    non-empty reasoning / resolution / both impact halves."""
+    """Every parsed LLama70B fixture candidate carries non-empty prose fields from its parent P-item block."""
     cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
     assert cands, "fixture must produce at least one candidate"
     # All 21 fixture candidates share P-item prose with their group.
@@ -1636,17 +1510,7 @@ _FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
 
 
 def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
-    """Real-world reproducer: Qwen3-30B MoE inferenceattention P-item.
-
-    TraceLens emitted a 12-column ``**Data:**`` table for the attention
-    category (canonical 9 + ``Dominant Kernel`` + ``Workload`` +
-    ``Attention Pattern``). The previous strict-equality header check
-    skipped the block entirely, returning ``hot_kernels=[]`` and
-    starving a 1.5h KERNEL phase of any candidate to optimize. Per
-    ``sub_agent_spec.md`` (Operations Table Schema, compute tier),
-    appending extra columns at the end is spec-compliant, so the parser
-    must consume the row using only the first 9 cells.
-    """
+    """A 12-column attention ``**Data:**`` table (9 canonical + 3 spec-allowed extras) must parse using the first 9 cells."""
     cands = tlr.parse_analysis_md(_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD, top_k=10)
     assert len(cands) == 1, (
         f"expected 1 attention candidate from the 12-column fixture; got "
@@ -1669,20 +1533,13 @@ def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
     # Kernel Path is a real launcher string (not "—"), so source_file
     # must round-trip the relative path (resolution happens downstream).
     assert "qwen3_moe.py" in c["source_file"]
-    # The three trailing extra cells (Dominant Kernel / Workload /
-    # Attention Pattern) are SPEC-allowed extras (sub_agent_spec.md
-    # § Operations Table Schema: "Agents may append extra columns at
-    # the end when needed"). The parser preserves them verbatim under
-    # ``tracelens_extra_columns`` so downstream consumers (GEAK / OOB)
-    # have programmatic access to category-specific metadata without
-    # re-parsing analysis.md.
+    # The three trailing extra cells are spec-allowed extras, preserved under tracelens_extra_columns.
     extras = c.get("tracelens_extra_columns")
     assert extras is not None, "tracelens_extra_columns missing for 12-col row"
     assert extras.get("dominant kernel") == "`_fwd_kernel` (93.61%)"
     assert extras.get("workload") == "unknown"
     assert extras.get("attention pattern") == "GQA (8:1)"
-    # Canonical fields must NOT leak into extras (they belong on the
-    # candidate top-level as typed fields).
+    # Canonical fields must NOT leak into extras.
     for canonical_key in (
         "operation", "args", "kernel path", "time (ms)", "%e2e",
         "count", "flops/byte", "efficiency", "bound",
@@ -1691,11 +1548,7 @@ def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
 
 
 def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_path):
-    """The generic-op analyzer appends a ``Sub-Category`` column for
-    uncategorized ops (`other` category). The parser must accept the
-    row using only the first 9 cells, dropping the Sub-Category cell
-    as expected.
-    """
+    """A 10-column table with a trailing ``Sub-Category`` must parse using the first 9 cells."""
     md = tmp_path / "analysis.md"
     md.write_text(
         "<!-- impact-begin kind=p_item category=other mid=4.0 low=2.0 high=8.0 -->\n"
@@ -1720,8 +1573,7 @@ def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_pa
     assert c["tracelens_category"] == "other"
     assert c["bound_type"] == "compute-bound"
     assert c["call_count"] == 10
-    # ``Sub-Category`` is preserved verbatim for downstream GEAK / OOB
-    # access; it never leaks into the candidate top-level.
+    # ``Sub-Category`` is preserved in extras, never the candidate top-level.
     extras = c.get("tracelens_extra_columns")
     assert extras is not None
     assert extras.get("sub-category") == "scatter_gather"
@@ -1729,12 +1581,7 @@ def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_pa
 
 
 def test_parse_analysis_md_canonical_9_column_table_has_no_extras_key():
-    """Regression guard: candidates parsed from a canonical 9-column
-    table (the Llama70B fixture) must NOT carry the
-    ``tracelens_extra_columns`` field. Adding the key with an empty
-    dict would force downstream consumers to special-case "extras
-    present but empty" vs "extras absent".
-    """
+    """Canonical 9-column candidates must NOT carry a ``tracelens_extra_columns`` key."""
     cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
     assert cands, "Llama70B fixture must produce candidates"
     for c in cands:
@@ -1745,10 +1592,7 @@ def test_parse_analysis_md_canonical_9_column_table_has_no_extras_key():
 
 
 def test_parse_analysis_md_rejects_fewer_than_canonical_columns(tmp_path):
-    """Regression guard: a table missing any of the 9 canonical columns
-    must still be skipped — silent wrong-mapping would be worse than a
-    missed candidate. Here ``Bound`` is dropped (8 columns total).
-    """
+    """A table missing a canonical column (here ``Bound``, 8 cols) must be skipped, not mis-mapped."""
     md = tmp_path / "analysis.md"
     md.write_text(
         "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
@@ -1770,11 +1614,7 @@ def test_parse_analysis_md_rejects_fewer_than_canonical_columns(tmp_path):
 
 
 def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
-    """Regression guard: spec requires the 9 canonical columns ``in this
-    order``. Swapping any two breaks the row→field mapping silently, so
-    the parser must skip the block instead of producing rows whose
-    ``efficiency`` / ``bound`` are misread.
-    """
+    """Reordered canonical columns (Bound/Efficiency swapped) must be skipped, not mis-mapped."""
     md = tmp_path / "analysis.md"
     md.write_text(
         "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
@@ -1795,9 +1635,7 @@ def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
     assert tlr.parse_analysis_md(md, top_k=10) == []
 
 
-# ===========================================================================
 # PR-A §2: classify_patchability gate + skip_reason audit field
-# ===========================================================================
 def test_classify_patchability_accepts_stable_triton_source():
     """Previously-reusable candidate stays reusable; skip_reason is empty."""
     cand = {
@@ -1819,8 +1657,7 @@ def test_classify_patchability_rejects_missing_source_file():
 
 
 def test_classify_patchability_rejects_vendor_blas_name_markers():
-    """Folded from feature branch _NON_PATCHABLE_MARKERS: rocblas/hipblas/etc.
-    rejected even when source_file resolves under a reusable framework root."""
+    """Vendor BLAS / collective name markers are rejected even under a reusable framework root."""
     for marker_name in (
         "rocblas_sgemm_kernel",
         "hipblas_gemm_strided",

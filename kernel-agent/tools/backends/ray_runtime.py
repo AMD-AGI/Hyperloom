@@ -30,9 +30,7 @@ def ray_status_ok() -> bool:
 def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> bool:
     """Ensure a Ray cluster is reachable.
 
-    Returns True if this call started Ray (so caller may stop it later).
-    Returns False if Ray was already running.
-    Raises RuntimeError if Ray fails to start.
+    Returns True if this call started Ray, False if already running; raises on failure.
     """
     if ray_status_ok():
         return False
@@ -63,19 +61,11 @@ def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
         subprocess.run(["ray", "stop", "--force"], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
 
 
-# Env vars safe to forward to Ray workers. Notice we do NOT include
-# HIP_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES; those are
-# Ray's responsibility and forcing them from the driver triggers
-# `set_visible_accelerator_ids` IndexError on ROCm.
+# Env vars safe to forward to Ray workers; excludes *_VISIBLE_DEVICES (forcing them triggers ROCm IndexError).
 SAFE_ENV_KEYS = (
     "PATH", "HOME", "LD_LIBRARY_PATH",
     "HYPERLOOM_KERNEL_AGENT_ROOT", "KERNEL_AGENT_ROOT",
-    # USER_DATA_PATH is the single artefact root; HYPERLOOM_RUNTIME_DIR /
-    # KERNEL_AGENT_ENV / MAGPIE_DIR / INFERENCEX_PATH all default under it.
-    # WORKSPACE_ROOT / WORKSPACE_PATH / AGENT_WORKSPACE_ROOT were retired
-    # during the "all artefacts under USER_DATA_PATH" migration — drop them
-    # from the propagate list so we don't accidentally leak stale values
-    # into Ray workers.
+    # USER_DATA_PATH is the single artefact root others default under.
     "USER_DATA_PATH", "HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV",
     "MAGPIE_DIR", "INFERENCEX_PATH",
     "SAFE_API_KEY",
