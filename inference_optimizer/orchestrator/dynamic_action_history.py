@@ -56,6 +56,15 @@ class DispatchHistoryEvent(str, Enum):
 # Common header fields shared by every event row.
 _COMMON_FIELDS: frozenset[str] = frozenset({"event", "ts"})
 
+# Full-trace D2: an OPTIONAL header field carrying the orchestrator tick at
+# which the row was written. Unlike the required event fields it may be
+# absent (older rows, or call sites without a tick handy) — so it is NOT
+# part of any ``*_FIELDS`` required set; the writer fills it from its
+# ``tick`` parameter and the schema check below allows-but-doesn't-require
+# it. Keeping it a header (writer-filled) rather than a per-event payload
+# field means existing call sites need no change.
+_OPTIONAL_HEADER_FIELDS: frozenset[str] = frozenset({"tick"})
+
 
 DISPATCHED_FIELDS: frozenset[str] = _COMMON_FIELDS | {
     "round_index",
@@ -138,6 +147,7 @@ def append_dispatch_history_row(
     dyn_id: str,
     event: DispatchHistoryEvent | str,
     payload: dict[str, Any],
+    tick: int | None = None,
 ) -> None:
     """Append one row to ``dispatch_history.jsonl`` after schema check.
 
@@ -145,25 +155,38 @@ def append_dispatch_history_row(
     extras. ``event`` + ``ts`` are filled in by the writer; OSError on
     disk is logged + swallowed so audit-write failures never break the
     lifecycle.
+
+    ``tick`` (full-trace D2) is an optional header the writer stamps onto
+    the row so the decision-trace collector can place this dispatch event
+    on the orchestrator timeline. It is left off the row entirely when
+    ``None``, keeping older rows and tick-less call sites schema-valid.
     """
     event_enum = (
         event if isinstance(event, DispatchHistoryEvent)
         else DispatchHistoryEvent(str(event))
     )
     field_set = _EVENT_FIELD_SETS[event_enum]
-    if {"event", "ts"} & set(payload.keys()):
+    header_collisions = ({"event", "ts"} | _OPTIONAL_HEADER_FIELDS) & set(
+        payload.keys()
+    )
+    if header_collisions:
         raise DispatchHistoryRowError(
             f"payload for event={event_enum.value!r} must not include "
-            "'event' / 'ts' — these are header fields filled in by the "
-            "writer."
+            f"header fields {sorted(header_collisions)!r} — these are "
+            "filled in by the writer."
         )
     row: dict[str, Any] = {
         "event": event_enum.value,
         "ts": _now_iso(),
         **payload,
     }
+    if tick is not None:
+        row["tick"] = int(tick)
     keys = set(row.keys())
-    extra = sorted(keys - field_set)
+    # The optional header is allowed but never required: subtract it from
+    # the row keys before the extra-field check, and never list it as
+    # missing.
+    extra = sorted((keys - field_set) - _OPTIONAL_HEADER_FIELDS)
     missing = sorted(field_set - keys)
     if extra or missing:
         raise DispatchHistoryRowError(

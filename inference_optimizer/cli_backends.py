@@ -121,12 +121,17 @@ def _build_backends(
 
 def _build_proposal_scorer(
     args: argparse.Namespace,
+    session_dir: Path | None = None,
 ) -> ProposalScorer | None:
     """Construct the advisory specialist-proposal scorer, or ``None``.
 
     Returns ``None`` when ``--no-proposal-scoring`` is set or the resolved
     model list is empty (defaults to :data:`DEFAULT_SCORER_MODELS`). The
     scorer is purely advisory and never gates anything.
+
+    ``session_dir`` is forwarded so the scorer can append its per-model
+    token usage to the full-trace ledger (component=proposal_scorer); when
+    omitted the scorer simply skips trace writes.
     """
     if getattr(args, "no_proposal_scoring", False):
         return None
@@ -139,7 +144,7 @@ def _build_proposal_scorer(
         )
     if not models:
         return None
-    return ProposalScorer(models=models)
+    return ProposalScorer(models=models, session_dir=session_dir)
 
 
 def _robustness_server_configured(args: argparse.Namespace) -> bool:

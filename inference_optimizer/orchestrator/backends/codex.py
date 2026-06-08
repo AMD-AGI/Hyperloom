@@ -212,11 +212,23 @@ class CodexBackend:
         choice = resp.choices[0]
         text = (choice.message.content or "")
         finish = getattr(choice, "finish_reason", None)
+        # Token usage: the OpenAI chat-completions response carries a
+        # ``usage`` object (prompt_tokens / completion_tokens). Map it
+        # onto the SAME metadata keys ClaudeBackend uses so
+        # Coordinator's accumulator stays backend-agnostic. OpenAI has
+        # no prompt-cache split, so the two cache_* counters are 0.
+        usage = getattr(resp, "usage", None)
+        input_tokens = self._safe_int(getattr(usage, "prompt_tokens", None))
+        output_tokens = self._safe_int(getattr(usage, "completion_tokens", None))
         self.calls.append({
             "prompt_chars": len(full_prompt),
             "reply_chars": len(text),
             "finish_reason": finish,
             "model": self.model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
         })
 
         envelope = _extract_envelope(text)
@@ -234,8 +246,27 @@ class CodexBackend:
         return BackendTurnResult(
             intents=intents,
             raw_text=text,
-            metadata={"model": self.model, "finish_reason": finish},
+            metadata={
+                "model": self.model,
+                "finish_reason": finish,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            },
         )
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        """Coerce a usage value to int, defaulting to 0 on None / bad type.
+
+        Mirrors ``ClaudeBackend._safe_int`` so both backends report
+        identically-shaped token counts on metadata.
+        """
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
 
 
 __all__ = ["CodexBackend", "_extract_envelope"]
