@@ -117,15 +117,11 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
   fi
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Pin GEAK to the save-and-test-diff-fallthrough fix tip
-# (https://github.com/AMD-AGI/GEAK/pull/244, not yet released as a tag).
-# We pin to the *commit SHA* of the branch tip, NOT the branch name, so a
-# future force-push / rebase upstream cannot silently change what every
-# fresh install gets.
-# TODO(post-GEAK-PR-244): once PR #244 lands and ships in a new GEAK tag,
-# revert this pin to the tag (e.g. v3.2.1) for stronger discoverability.
-# Operators can override with GEAK_REF=<tag|branch|sha>.
-GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
+# Track GEAK's gwiab-scheduler integration branch. Supersedes the earlier
+# ec61bdbd SHA pin (GEAK PR #244, now merged upstream). This is a branch, so
+# fresh installs follow its tip — set GEAK_REF=<tag|sha> for a frozen,
+# reproducible GEAK. Operators can override with GEAK_REF=<tag|branch|sha>.
+GEAK_REF="${GEAK_REF:-gwiab-scheduler}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
