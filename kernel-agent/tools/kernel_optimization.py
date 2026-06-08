@@ -96,6 +96,46 @@ def update_status(
     atomic_write_json(status_path, payload)
 
 
+def resolve_candidates_path(run_dir: Path) -> Path:
+    """Locate the ``kernel_candidates.json`` TraceLens wrote for this session.
+
+    PR-C (``tracelens_analysis.py``) moved every TraceLens invocation's
+    outputs into a per-run sub-directory
+    ``runs/<session_id>/<compact_ts>_<run_id>/`` so successive watermark
+    refreshes no longer overwrite each other. ``kernel_optimization.py``
+    still keys its own artifacts off the flat ``runs/<session_id>/`` root,
+    so the candidates file is no longer where the pre-PR-C lookup expected
+    it. Resolve it here with the same "latest pointer" semantics the
+    roofline sidecar uses:
+
+    * honour the flat legacy path (``run_dir/kernel_candidates.json``) when
+      present so pre-PR-C sessions / callers that drop the file at the
+      session root keep working;
+    * otherwise descend into the newest ``<ts>_<run_id>`` sub-directory that
+      actually carries a ``kernel_candidates.json`` — the compact-timestamp
+      prefix sorts chronologically, so ``max()`` is the most recent run.
+
+    Falls back to the flat path (which ``load_candidates`` will surface as a
+    clean ``FileNotFoundError``) when nothing matches, preserving the
+    "no fabricated target" failure mode for genuinely missing analyses.
+    """
+    flat = run_dir / "kernel_candidates.json"
+    if flat.is_file():
+        return flat
+    if run_dir.is_dir():
+        sub_candidates = [
+            child / "kernel_candidates.json"
+            for child in run_dir.iterdir()
+            if child.is_dir() and (child / "kernel_candidates.json").is_file()
+        ]
+        if sub_candidates:
+            # Sort by the parent sub-dir name (``<compact_ts>_<run_id>``);
+            # the zero-padded timestamp prefix makes lexical order == time
+            # order, so the last element is the most recent TraceLens run.
+            return max(sub_candidates, key=lambda p: p.parent.name)
+    return flat
+
+
 def load_candidates(path: Path) -> list[dict[str, Any]]:
     """Load kernel candidates from JSON, normalizing legacy shapes.
 
@@ -617,12 +657,42 @@ def _format_shapes_for_case(shapes: Any) -> str:
     return str(shapes)
 
 
+def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
+    """Fallback shapes block when no TraceLens ``task_group`` is attached.
+
+    Surfaces the candidate's TraceLens-captured argument shapes so GEAK binds
+    its (self-generated) harness to the EXACT shapes the kernel saw during
+    serving -- the optimization signal must match the workload or a kernel-level
+    speedup will not translate to an end-to-end gain. Generic: applies to any
+    candidate carrying captured shapes; returns ``""`` when none exist so the
+    prompt stays byte-identical to legacy in that case.
+    """
+    shapes = candidate.get("shapes") or candidate.get("kernel_shapes")
+    rendered = _format_shapes_for_case(shapes)
+    if not rendered:
+        return ""
+    bound = str(candidate.get("bound_type") or candidate.get("bound") or "").strip()
+    bound_line = f" (bound: {bound})" if bound else ""
+    return (
+        "\n## Benchmark shapes (TraceLens-captured from the serving run)\n\n"
+        "Build your harness shape sweep / `get_inputs()` from EXACTLY these\n"
+        f"captured argument shapes{bound_line} -- do NOT invent shapes. They are what\n"
+        "the kernel saw during sglang/vLLM serving, so optimizing against them is\n"
+        "what produces an end-to-end gain on the workload:\n"
+        f"- args: {rendered}\n"
+        "Correctness golden: the ORIGINAL kernel's output on these shapes "
+        "(baseline / `fn=` injection); do not hand-derive a reference from scratch.\n"
+    )
+
+
 def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
     """Render the multi-row benchmark cases section for a task_group.
 
-    Returns the empty string when ``candidate["task_group"]`` is absent
-    so the prompt body stays byte-identical for legacy per-kernel
-    dispatch. When present, emits one bullet per TraceLens Operation
+    Falls back to :func:`_build_captured_shapes_block` when
+    ``candidate["task_group"]`` is absent (or carries no rows) so the
+    captured serving shapes still reach GEAK -- previously this returned
+    ``""`` and GEAK got no shapes. When a task_group is present, emits one
+    bullet per TraceLens Operation
     row sorted by aggregate time (descending). Each bullet carries
     ``operation``, ``args``, ``aggregate_time_ms``, ``percent_e2e``,
     ``count``, ``per_call_ms``, ``flops_per_byte``, ``efficiency``,
@@ -636,11 +706,12 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
     rather than buried inside the kernel_metadata JSON.
     """
     group = candidate.get("task_group")
-    if not isinstance(group, dict):
-        return ""
-    rows = group.get("rows") or []
-    if not isinstance(rows, list) or not rows:
-        return ""
+    rows = group.get("rows") if isinstance(group, dict) else None
+    if not (isinstance(rows, list) and rows):
+        # No task_group (or no rows): still surface the captured serving
+        # shapes so GEAK's harness is bound to the real workload (generic
+        # fallback). Returns "" when the candidate carries no shapes either.
+        return _build_captured_shapes_block(candidate)
     function_name = str(group.get("function_name") or "")
     source_path = str(group.get("source_path") or "")
     definition_line = group.get("definition_line")
@@ -1738,6 +1809,290 @@ def _try_generate_harness(
     return None
 
 
+def _rocprof_roofline_enabled() -> bool:
+    value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _rocprof_timeout_sec() -> int:
+    try:
+        return max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800")))
+    except ValueError:
+        return 1800
+
+
+def _rocprof_workdir(candidate: dict[str, Any], source_file: str, out_dir: Path) -> Path:
+    for raw in (candidate.get("kernel_repo"), source_file):
+        if not raw:
+            continue
+        path = Path(str(raw))
+        if path.is_file():
+            path = path.parent
+        if path.is_dir():
+            return path
+    return out_dir
+
+
+def _rocprof_profile_command(test_command: str) -> str:
+    if "--correctness" not in test_command:
+        return test_command
+    if "/unittest/harness_" not in test_command and " harness_" not in test_command:
+        return test_command
+    return test_command.replace("--correctness", "--profile", 1)
+
+
+def _compact_rocprof_prompt(payload: dict[str, Any]) -> str:
+    rows = payload.get("results") if isinstance(payload, dict) else []
+    if not isinstance(rows, list) or not rows:
+        return ""
+    lines = [
+        "",
+        "## rocprof-compute Roofline Evidence",
+        "",
+        "Use these measured roofline signals to choose the kernel optimization direction.",
+    ]
+    for row in rows[:3]:
+        if not isinstance(row, dict):
+            continue
+        roof = row.get("rocprof_roofline") or {}
+        if not isinstance(roof, dict):
+            roof = {}
+        lines.extend([
+            f"- Device kernel: {row.get('matched_kernel_name') or row.get('name') or 'unknown'}",
+            f"  - Bound type: {roof.get('bound_type') or row.get('bottleneck') or 'unknown'}",
+            f"  - Roofline efficiency: {roof.get('roofline_efficiency_pct')}",
+            f"  - AI HBM: {roof.get('ai_hbm')}",
+            f"  - Compute util pct: {roof.get('compute_utilization_pct')}",
+            f"  - Bandwidth util pct: {roof.get('bandwidth_utilization_pct')}",
+        ])
+    return "\n".join(lines) + "\n"
+
+
+def _run_rocprof_roofline(
+    *,
+    test_command: str,
+    candidate: dict[str, Any],
+    source_file: str,
+    out_dir: Path,
+    prompt_file: Path,
+    log_path: Path | None,
+) -> dict[str, Any]:
+    roof_dir = out_dir / "rocprof_roofline"
+    roof_dir.mkdir(parents=True, exist_ok=True)
+    out_json = roof_dir / "before.json"
+    out_txt = roof_dir / "before.txt"
+    if not _rocprof_roofline_enabled():
+        return {"status": "skipped", "reason": "disabled_by_env"}
+    if not test_command:
+        return {"status": "skipped", "reason": "missing_test_command"}
+
+    tool = Path(__file__).resolve().parent / "rocprof_roofline.py"
+    workdir = _rocprof_workdir(candidate, source_file, out_dir)
+    profiling_command = _rocprof_profile_command(test_command)
+    target_kernel = str(candidate.get("name") or "").strip()
+    cmd = [
+        sys.executable,
+        str(tool),
+        "--workdir", str(workdir),
+        "--cmd", profiling_command,
+        "--out-json", str(out_json),
+        "--out-txt", str(out_txt),
+        "--timeout-sec", str(_rocprof_timeout_sec()),
+    ]
+    if target_kernel:
+        cmd.extend(["--target-kernel", target_kernel])
+    if log_path is not None:
+        append_log(log_path, f"[rocprof_roofline] workdir={workdir}")
+        append_log(log_path, "[rocprof_roofline] running before GEAK")
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=_rocprof_timeout_sec() + 30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        payload = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+        atomic_write_json(out_json, payload)
+        out_txt.write_text(payload["error"] + "\n", encoding="utf-8")
+        return {"status": "failed", "json_path": str(out_json), "txt_path": str(out_txt), "error": payload["error"]}
+
+    if log_path is not None and proc.stdout.strip():
+        append_log(log_path, "[rocprof_roofline] " + proc.stdout.strip()[-1000:])
+    try:
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {"status": "failed", "error": proc.stdout.strip() or "missing rocprof roofline JSON"}
+        atomic_write_json(out_json, payload)
+    prompt_addendum = _compact_rocprof_prompt(payload)
+    if prompt_addendum:
+        with prompt_file.open("a", encoding="utf-8") as fh:
+            fh.write(prompt_addendum)
+    status = "ok" if proc.returncode == 0 and payload.get("status") == "ok" else payload.get("status", "failed")
+    return {
+        "status": status,
+        "json_path": str(out_json),
+        "txt_path": str(out_txt),
+        "returncode": proc.returncode,
+        "num_results": len(payload.get("results") or []) if isinstance(payload.get("results"), list) else 0,
+    }
+
+
+def _rocprof_kernel_matches(row: dict[str, Any], target_kernel: str) -> bool:
+    if not target_kernel:
+        return True
+    target = target_kernel.strip()
+    names = (
+        str(row.get("matched_kernel_name") or "").strip(),
+        str(row.get("name") or "").strip(),
+    )
+    return any(name == target for name in names)
+
+
+def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_path: str) -> dict[str, Any]:
+    rows = payload.get("results") if isinstance(payload, dict) else []
+    if not isinstance(rows, list) or not rows:
+        return {
+            "status": payload.get("status", "failed") if isinstance(payload, dict) else "failed",
+            "report_path": txt_path,
+            "json_path": json_path,
+        }
+    target_kernel = str(payload.get("target_kernel") or "").strip()
+    first = None
+    if target_kernel:
+        for row in rows:
+            if isinstance(row, dict) and _rocprof_kernel_matches(row, target_kernel):
+                first = row
+                break
+        if first is None:
+            return {
+                "status": "skipped",
+                "reason": "target_kernel_not_matched",
+                "target_kernel": target_kernel,
+                "matched_kernel_names": [
+                    str(row.get("matched_kernel_name") or row.get("name") or "")
+                    for row in rows
+                    if isinstance(row, dict)
+                ],
+                "report_path": txt_path,
+                "json_path": json_path,
+            }
+    else:
+        first = rows[0] if isinstance(rows[0], dict) else {}
+    roof = dict(first.get("rocprof_roofline") or {})
+    roof.update({
+        "status": first.get("status") or payload.get("status") or "matched",
+        "matched_kernel_name": first.get("matched_kernel_name") or first.get("name"),
+        "target_kernel": target_kernel,
+        "report_path": txt_path,
+        "json_path": json_path,
+    })
+    return roof
+
+
+def _update_kernel_roofline_sidecar(
+    *,
+    workspace_path: str,
+    kernel_id: str,
+    rocprof_json_path: str,
+    rocprof_txt_path: str,
+    log_path: Path | None,
+    rocprof_status: str = "",
+    rocprof_reason: str = "",
+    phase: str = "before_kernel_opt",
+) -> None:
+    """Mirror per-attempt rocprof artifacts into ``reports/kernel_roofline.json``.
+
+    ``phase`` controls which sub-key is written:
+      - ``"before_kernel_opt"``: pre-optimization snapshot (default, written by
+        ``invoke_backend`` for every backend).
+      - ``"after_kernel_opt"``: post-optimization snapshot (written after
+        integrate succeeds).
+
+    The outer ``rocprof_roofline`` dict is now::
+
+        "rocprof_roofline": {
+            "before_kernel_opt": {...},   # pre-opt rocprof
+            "after_kernel_opt":  null,    # post-opt rocprof (null until available)
+        }
+
+    Even when ``_run_rocprof_roofline`` skipped (e.g. no ``test_command``)
+    or failed, we still write a tagged entry so the dashboard can distinguish
+    "considered but skipped/failed" from "not yet evaluated" (``null``).
+    """
+    sidecar_path = Path(workspace_path) / "reports" / "kernel_roofline.json"
+    if not sidecar_path.is_file():
+        return
+    try:
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        if log_path is not None:
+            append_log(log_path, f"[rocprof_roofline] sidecar update skipped: {exc}")
+        return
+    kernels = payload.get("kernels")
+    if not isinstance(kernels, list):
+        return
+
+    phase_data: dict[str, Any]
+    if rocprof_json_path and Path(rocprof_json_path).is_file():
+        try:
+            rocprof_payload = json.loads(Path(rocprof_json_path).read_text(encoding="utf-8"))
+        except Exception as exc:
+            if log_path is not None:
+                append_log(log_path, f"[rocprof_roofline] sidecar payload load failed: {exc}")
+            phase_data = {
+                "status": rocprof_status or "failed",
+                "reason": rocprof_reason or f"json_load_error: {type(exc).__name__}",
+                "report_path": rocprof_txt_path or "",
+                "json_path": rocprof_json_path or "",
+            }
+        else:
+            phase_data = _rocprof_sidecar_from_payload(rocprof_payload, rocprof_txt_path, rocprof_json_path)
+            if rocprof_status and rocprof_status != "ok":
+                phase_data.setdefault("status", rocprof_status)
+                if rocprof_reason:
+                    phase_data.setdefault("reason", rocprof_reason)
+    else:
+        if not rocprof_status:
+            return
+        phase_data = {"status": rocprof_status}
+        if rocprof_reason:
+            phase_data["reason"] = rocprof_reason
+
+    changed = False
+    for row in kernels:
+        if not isinstance(row, dict) or str(row.get("kernel_id") or "") != str(kernel_id):
+            continue
+        # Ensure the outer rocprof_roofline is a dict with both sub-keys
+        outer = row.get("rocprof_roofline")
+        if not isinstance(outer, dict):
+            outer = {"before_kernel_opt": None, "after_kernel_opt": None}
+        outer[phase] = phase_data
+        row["rocprof_roofline"] = outer
+
+        # Mirror key metrics from before_kernel_opt to the row level for
+        # fast dashboard rendering.
+        if phase == "before_kernel_opt":
+            if phase_data.get("bound_type"):
+                row["bottleneck"] = row.get("bottleneck") or phase_data["bound_type"]
+                row["bound_type"] = row.get("bound_type") or phase_data["bound_type"]
+            if phase_data.get("ai_hbm") is not None:
+                row["arithmetic_intensity"] = row.get("arithmetic_intensity") or phase_data["ai_hbm"]
+            if phase_data.get("roofline_efficiency_pct") is not None:
+                row["efficiency_percent"] = phase_data["roofline_efficiency_pct"]
+            if phase_data.get("compute_utilization_pct") is not None:
+                row["compute_utilization_pct"] = phase_data["compute_utilization_pct"]
+            if phase_data.get("bandwidth_utilization_pct") is not None:
+                row["bandwidth_utilization_pct"] = phase_data["bandwidth_utilization_pct"]
+        changed = True
+    if changed:
+        payload["source"] = "tracelens_analysis+rocprof_roofline"
+        atomic_write_json(sidecar_path, payload)
+        if log_path is not None:
+            append_log(log_path, f"[rocprof_roofline] updated {sidecar_path} [{phase}]")
+
+
 def _apply_geak_env_overrides(
     args: argparse.Namespace,
     prompt_file: Path,
@@ -1836,38 +2191,61 @@ def invoke_backend(
     # then 1.
     num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0)
                    or int(candidate.get("num_gpus_recommended") or 1))
+
+    # ---------------------------------------------------------------------------
+    # Common test-command + before_kernel_opt rocprof — runs for ALL backends
+    # so every optimization attempt (GEAK, Claude, Codex, Cursor) gets the same
+    # pre-optimization roofline snapshot without duplicating the logic.
+    # ---------------------------------------------------------------------------
+    cand_name = str(candidate.get("name") or "")
+    is_multigpu_common = (
+        bool(candidate.get("is_multigpu"))
+        or kernel_name_implies_multigpu(cand_name)
+    )
+    # Derive a shared test_command that GEAK will use and rocprof will profile.
+    # OOB backends don't accept --test-command but we still want the rocprof
+    # snapshot, so we compute it here unconditionally.
+    common_test_command = getattr(args, "test_command", "").strip()
+    if not common_test_command:
+        common_test_command = _render_geak_test_command(
+            kernel_name=cand_name,
+            bench_files=bench_files,
+            is_multigpu=is_multigpu_common,
+            num_gpus=num_gpus,
+            timeout_sec=_profile_timeout_sec(),
+        )
+    # Shared temp out_dir for the before_kernel_opt rocprof artifact
+    # (each backend will further scope its own out_dir below).
+    _shared_out_dir = (
+        _geak_output_dir(args.session_id, prompt_file)
+        if backend == "geak"
+        else _oob_output_dir(args.session_id)
+    )
+    if common_test_command:
+        _harness_cmd = _try_generate_harness(
+            common_test_command, candidate, source_file, _shared_out_dir,
+            kernel_repo, log_path,
+        )
+        if _harness_cmd:
+            common_test_command = _harness_cmd
+    rocprof_before = {}
+    if common_test_command:
+        rocprof_before = _run_rocprof_roofline(
+            test_command=common_test_command,
+            candidate=candidate,
+            source_file=source_file,
+            out_dir=_shared_out_dir,
+            prompt_file=prompt_file,
+            log_path=log_path,
+        )
+
     try:
         if backend == "geak":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
-            # test_command: prefer external --test-command generated by the
-            # unittest skill; otherwise derive from benchmark files with the
-            # kernel-aware selector/timeout wrapper.
-            test_command = getattr(args, "test_command", "").strip()
-            cand_name = str((candidate or {}).get("name") or "")
-            is_multigpu = (
-                bool((candidate or {}).get("is_multigpu"))
-                or kernel_name_implies_multigpu(cand_name)
-            )
-            if not test_command:
-                # GEAK preprocess may invent a non-existent bench path when
-                # --test-command is empty. Always provide a real test command.
-                test_command = _render_geak_test_command(
-                    kernel_name=cand_name,
-                    bench_files=bench_files,
-                    is_multigpu=is_multigpu,
-                    num_gpus=num_gpus,
-                    timeout_sec=_profile_timeout_sec(),
-                )
-            # Auto-generate GEAK-compatible harness when needed (e.g. raw
-            # AITER op_test without 4-mode CLI contract).
-            if test_command:
-                _harness_cmd = _try_generate_harness(
-                    test_command, candidate, source_file, out_dir,
-                    kernel_repo, log_path,
-                )
-                if _harness_cmd:
-                    test_command = _harness_cmd
+            # Use the common test_command (already derived + harness-patched above).
+            test_command = common_test_command
+            is_multigpu = is_multigpu_common
             if log_path is not None and test_command:
                 append_log(log_path, f"[geak] test_command={test_command}")
             if test_command:
@@ -1900,6 +2278,14 @@ def invoke_backend(
             result["output_dir"] = str(out_dir)
             if test_command:
                 result["test_command"] = test_command
+            if rocprof_before:
+                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
+                if rocprof_before.get("reason"):
+                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
+                if rocprof_before.get("json_path"):
+                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
+                if rocprof_before.get("txt_path"):
+                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
             # Surface GEAK partial outputs (final_report.json / results dir)
             # so a SIGTERM'd attempt with patches on disk still gets
             # promoted to "partial" by the run_attempt scanner below.
@@ -1980,6 +2366,16 @@ def invoke_backend(
                 kernel_repo=kernel_repo,
             )
             result["output_dir"] = str(out_dir)
+            if common_test_command:
+                result["test_command"] = common_test_command
+            if rocprof_before:
+                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
+                if rocprof_before.get("reason"):
+                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
+                if rocprof_before.get("json_path"):
+                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
+                if rocprof_before.get("txt_path"):
+                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
             return result
         return {
             "returncode": 2,
@@ -2144,6 +2540,32 @@ def run_attempt(
             test_cmd_used = (result.get("test_command") or "") if isinstance(result, dict) else ""
             if test_cmd_used:
                 backend_paths["test_command"] = test_cmd_used
+            rocprof_json = (result.get("rocprof_before_kernel_opt_json") or "") if isinstance(result, dict) else ""
+            rocprof_txt = (result.get("rocprof_before_kernel_opt_txt") or "") if isinstance(result, dict) else ""
+            rocprof_status = (result.get("rocprof_before_kernel_opt_status") or "") if isinstance(result, dict) else ""
+            rocprof_reason = (result.get("rocprof_before_kernel_opt_reason") or "") if isinstance(result, dict) else ""
+            if rocprof_status:
+                backend_paths["rocprof_before_kernel_opt_status"] = rocprof_status
+            if rocprof_reason:
+                backend_paths["rocprof_before_kernel_opt_reason"] = rocprof_reason
+            if rocprof_json:
+                backend_paths["rocprof_before_kernel_opt_json"] = rocprof_json
+            if rocprof_txt:
+                backend_paths["rocprof_before_kernel_opt_txt"] = rocprof_txt
+            # Always mirror status/reason into the dashboard sidecar even
+            # when no JSON artifact exists (skipped by best-effort gate)
+            # so the row distinguishes "considered/skipped/failed" from
+            # "not yet evaluated" (``null``).
+            if rocprof_status:
+                _update_kernel_roofline_sidecar(
+                    workspace_path=str(getattr(args, "workspace_path", "")),
+                    kernel_id=str(candidate.get("kernel_id") or args.kernel_id),
+                    rocprof_json_path=rocprof_json,
+                    rocprof_txt_path=rocprof_txt,
+                    log_path=log_path,
+                    rocprof_status=rocprof_status,
+                    rocprof_reason=rocprof_reason,
+                )
             # GEAK partial-output surface (forwarded by invoke_backend on
             # the geak branch). final_report.json / per-round patches.
             geak_final = (result.get("geak_final_report") or "") if isinstance(result, dict) else ""
@@ -2980,7 +3402,11 @@ def main() -> int:
         update_status(status_path, state="running", current_step="load_candidate",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at)
-        candidates_path = Path(args.candidates_path) if args.candidates_path else run_dir / "kernel_candidates.json"
+        candidates_path = (
+            Path(args.candidates_path)
+            if args.candidates_path
+            else resolve_candidates_path(run_dir)
+        )
         all_candidates = load_candidates(candidates_path)
         candidate = find_candidate(all_candidates, args.kernel_id)
         if candidate is None:
