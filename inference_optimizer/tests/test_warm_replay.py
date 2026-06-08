@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """GAP 1 — warm-recipe replay tests.
 
 Coverage:

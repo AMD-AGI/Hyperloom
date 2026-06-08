@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the gbrain read-side recipe-snapshot client.
 
 Exercises the page->Recipe adaptation + the RemoteRecipeClient-compatible

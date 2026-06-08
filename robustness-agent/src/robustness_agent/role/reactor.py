@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Reactor: the heart of the robustness role.
 
 A single :meth:`Reactor.tick` runs the M1 pipeline:

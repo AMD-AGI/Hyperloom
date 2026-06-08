@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Idempotent, atomic-write patcher for Magpie ``_prepare_benchmark_scripts``
 (Hyperloom ``bugs.md`` §C #1 root-cause fix).
 
@@ -125,11 +127,17 @@ two writers never race on the same byte range. The patch write itself is
 atomic (temp file + ``os.replace``) so a crash mid-write cannot corrupt
 ``benchmarker.py``.
 
-If the expected legacy two-line block is missing (Magpie refactored, or
-someone has hand-patched the file to a different shape) the patcher
-logs a warning and returns ``False`` so the install script can decide
-whether to fail-loud (recommended, since this is a known RCA fix; an
-unpatched Magpie means ``bugs.md`` §C #1 is still wide open).
+If the expected legacy two-line block is missing the patcher is
+upstream-aware: it first checks whether the cloned Magpie already copies
+scripts atomically (newer upstream extracted a ``_copy_benchmark_script_atomic``
+helper, or otherwise does ``tempfile.mkstemp`` + ``os.replace`` inside
+``_prepare_benchmark_scripts``). If so the race is already closed, the
+Hyperloom #C1 patch is redundant, and ``ensure_*`` logs an ``info`` line
+and returns ``True`` without touching the file. Only when *neither* the
+legacy block *nor* any atomic implementation is found does the patcher log
+a warning and return ``False`` (a genuinely-unexpected shape) so the
+install script can decide whether to fail-loud; that case means
+``bugs.md`` §C #1 cannot be confirmed mitigated.
 """
 
 from __future__ import annotations
@@ -196,6 +204,24 @@ _PATCHED_BLOCK = (
 # patched?" sentinel so we don't have to re-derive the patched block.
 _PATCH_SENTINEL = "Hyperloom #C1 patch"
 
+# Name of the static helper upstream Magpie introduced when it refactored
+# the copy loop to be race-safe on its own (``tempfile.mkstemp`` +
+# ``shutil.copy2`` + ``os.chmod`` + ``os.replace``). Its presence means the
+# legacy two-line block is *gone because upstream already fixed it*, not
+# because the checkout drifted into an unrecognised shape.
+_UPSTREAM_ATOMIC_HELPER = "_copy_benchmark_script_atomic"
+
+# Atomic-write primitives we look for *within* the
+# ``_prepare_benchmark_scripts`` body when upstream inlined the temp-file +
+# rename dance instead of extracting the named helper above.
+_ATOMIC_MKSTEMP = "tempfile.mkstemp("
+_ATOMIC_REPLACE = "os.replace("
+
+# Header used to locate the method body we scope inline-atomic detection to,
+# so an unrelated ``os.replace`` elsewhere in ``benchmarker.py`` cannot be
+# mistaken for an already-fixed copy loop.
+_PREPARE_METHOD_MARKER = "def _prepare_benchmark_scripts"
+
 # System-wide lock. ``/tmp`` is writable inside containers and on the
 # validation Slurm nodes; persistence across reboots isn't needed (the
 # patch itself is persistent on disk).
@@ -260,6 +286,52 @@ def _is_patched(src: Path) -> bool:
         return False
 
 
+def _extract_prepare_region(text: str) -> str:
+    """Return the source slice covering the ``_prepare_benchmark_scripts``
+    method body, or ``""`` when the method header is absent.
+
+    Inline-atomic detection (``mkstemp`` + ``os.replace``) is scoped to this
+    slice so an unrelated ``os.replace`` elsewhere in ``benchmarker.py``
+    cannot masquerade as an already-fixed copy loop. The slice spans from
+    the ``def`` header to the first subsequent non-blank line indented at or
+    below the header column (the next sibling ``def``/``class`` or dedented
+    code), which bounds exactly one method body.
+    """
+    start = text.find(_PREPARE_METHOD_MARKER)
+    if start == -1:
+        return ""
+    line_start = text.rfind("\n", 0, start) + 1
+    def_indent = start - line_start
+    lines = text[line_start:].splitlines(keepends=True)
+    region = [lines[0]]
+    for line in lines[1:]:
+        if not line.strip():
+            region.append(line)
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= def_indent:
+            break
+        region.append(line)
+    return "".join(region)
+
+
+def _upstream_is_already_atomic(text: str) -> bool:
+    """True when the cloned Magpie already copies scripts atomically, so the
+    Hyperloom #C1 patch is redundant (a no-op) rather than missing.
+
+    Either signal is sufficient:
+
+    * the file defines/uses ``_copy_benchmark_script_atomic`` — the helper
+      upstream Magpie introduced when it made the copy loop race-safe; or
+    * the ``_prepare_benchmark_scripts`` body itself performs an inline
+      temp-file + atomic rename (``tempfile.mkstemp(`` and ``os.replace(``).
+    """
+    if _UPSTREAM_ATOMIC_HELPER in text:
+        return True
+    region = _extract_prepare_region(text)
+    return _ATOMIC_MKSTEMP in region and _ATOMIC_REPLACE in region
+
+
 def _apply_patch_atomic(src: Path) -> bool:
     """Rewrite ``src`` via temp-file + atomic rename so a crash
     mid-write cannot leave a corrupt ``benchmarker.py``.
@@ -271,11 +343,20 @@ def _apply_patch_atomic(src: Path) -> bool:
         return False
 
     if _LEGACY_BLOCK not in original:
+        if _upstream_is_already_atomic(original):
+            log.info(
+                "_magpie_patcher: Magpie upstream already performs atomic "
+                "script copy (found _copy_benchmark_script_atomic / "
+                "mkstemp+os.replace); Hyperloom #C1 patch is a no-op for %s",
+                src,
+            )
+            return True
         log.warning(
-            "_magpie_patcher: expected legacy two-line block not found in %s; "
-            "Magpie may have been refactored upstream, or this checkout was "
-            "hand-patched. Hyperloom bugs.md §C #1 (script-tearing race) is "
-            "NOT mitigated — `profile`/`baseline` may hit "
+            "_magpie_patcher: neither the legacy shutil.copy2/chmod block nor "
+            "an atomic copy implementation found in %s; Magpie may have been "
+            "refactored into an unrecognised shape, or this checkout was "
+            "hand-patched. Hyperloom bugs.md §C #1 (script-tearing race) "
+            "cannot be confirmed mitigated — `profile`/`baseline` may hit "
             "`syntax error near unexpected token 'fi'` again. Manual review "
             "needed.",
             src,
@@ -325,16 +406,21 @@ def _apply_patch_atomic(src: Path) -> bool:
 def ensure_magpie_atomic_scripts_patch(
     magpie_dir: Path | str | None = None,
 ) -> bool:
-    """Ensure cloned Magpie's ``_prepare_benchmark_scripts`` uses an
-    atomic ``os.replace`` for each script copy.
+    """Ensure cloned Magpie's ``_prepare_benchmark_scripts`` copies each
+    script atomically (via ``os.replace``).
 
-    Returns ``True`` when the file is in patched state at exit
-    (already-patched or freshly-patched both count); ``False`` when
-    the file could not be located or the expected legacy block is
-    missing. The install script is expected to ``fail-loud`` on
-    ``False`` (unlike the InferenceX patcher which is best-effort) —
-    this is a known root-cause fix; an unpatched Magpie means
-    ``bugs.md`` §C #1 remains wide open.
+    Returns ``True`` when the race is closed at exit, which covers three
+    cases: freshly-patched, already-patched (sentinel present), or an
+    upstream that is *already* atomic (``_copy_benchmark_script_atomic`` /
+    inline ``mkstemp`` + ``os.replace``) — in the last case the Hyperloom
+    #C1 patch is a redundant no-op and the file is left untouched.
+
+    Returns ``False`` only when the file could not be located, or when
+    *neither* the legacy block *nor* any atomic implementation is found
+    (a genuinely-unexpected shape). The install script is expected to
+    ``fail-loud`` on ``False`` (unlike the InferenceX patcher which is
+    best-effort) — this is a known root-cause fix, and that case means
+    ``bugs.md`` §C #1 cannot be confirmed mitigated.
 
     Safe to call from any number of processes concurrently — flock
     serialises the read-then-write window; temp-file + rename

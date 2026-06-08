@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``profile._validate_trace_structure`` (#210 / Deval's
 ``check_torch_trace.py`` guidance).
 

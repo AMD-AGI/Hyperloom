@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Top-level orchestration for the external baseline comparison step.
 
 The :func:`analyze` entry point is the **only** function the action

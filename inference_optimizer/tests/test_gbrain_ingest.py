@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the local-recipe -> gbrain bulk ingest."""
 from __future__ import annotations
 

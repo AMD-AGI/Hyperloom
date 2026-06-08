@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """kernel_id mismatch handling at the kernel-agent boundary.
 
 The Orchestration LLM occasionally supplies a ``kernel_id`` that does not

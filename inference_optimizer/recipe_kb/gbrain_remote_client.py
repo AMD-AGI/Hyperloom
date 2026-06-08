@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Gbrain-backed read-only remote for the recipe-snapshot KB.
 
 A drop-in alternative to :class:`recipe_kb.RemoteRecipeClient`: it

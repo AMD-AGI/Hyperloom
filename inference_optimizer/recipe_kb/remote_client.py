@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Read-only HTTP client for the central recipe-snapshot kb-service.
 
 The local store (:class:`recipe_kb.LocalRecipeStore`) is the source

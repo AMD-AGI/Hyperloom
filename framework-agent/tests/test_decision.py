@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.decision (winner_decision + candidate_score)."""
 
 from __future__ import annotations

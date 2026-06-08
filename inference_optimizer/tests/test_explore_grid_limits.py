@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``explore_specialist_grid_max_one``.
 
 Covers the PolicyGate rule that caps ``provenance='specialist:*'``

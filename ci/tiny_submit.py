@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tiny CI — long-running queue controller for the full 3B-12B pool.
 
 A single process keeps up to ``--sandbox-cap`` + ``--hyperloom-cap`` SaFE
@@ -51,7 +53,6 @@ if str(_CI_DIR) not in sys.path:
 from optimize_submit import (  # noqa: E402
     DEFAULT_API_URL,
     DEFAULT_GPU_TYPE,
-    DEFAULT_OOB_PATH,
     DEFAULT_REGISTER_WORKSPACE,
     DEFAULT_RESULTS_PATH,
     DEFAULT_TARGET_GAIN,
@@ -196,7 +197,7 @@ class TinyController:
                                 or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
                                 or "")
         self.oob_path = (args.oob_path or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
-                         or DEFAULT_OOB_PATH)
+                         or "")
         self.tracelens_root = (args.tracelens_root
                                or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT", ""))
         self.hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")

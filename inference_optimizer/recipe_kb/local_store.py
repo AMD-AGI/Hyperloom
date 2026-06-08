@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """On-disk recipe-snapshot store backing the local-only write path.
 
 Mirrors the wire contract documented in

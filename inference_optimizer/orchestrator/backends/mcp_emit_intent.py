@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """In-process MCP server exposing the ``emit_intent`` tool
 
 Wires :data:`EMIT_INTENT_TOOL_NAME` into the Claude SDK as a real tool

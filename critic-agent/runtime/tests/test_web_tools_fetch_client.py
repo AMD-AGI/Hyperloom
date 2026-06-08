@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :class:`runtime.web_tools.fetch_client.WebFetchClient`.
 
 httpx is mocked with ``MockTransport``; SSRF DNS resolution is patched

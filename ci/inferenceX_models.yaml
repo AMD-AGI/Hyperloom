@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # InferenceX API model name mapping (verified 2026-04-08)
 #
 # Website display name → API `model` parameter

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Read-vs-write dispatcher for the recipe-snapshot KB.
 
 Routes calls between the local store and the central kb-service

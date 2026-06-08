@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Benchmark result parsing shared by Magpie-backed executors.
 
 Magpie and shell wrappers can report failure after InferenceX has already

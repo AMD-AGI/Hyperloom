@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Session manifest writer.
 
 The manifest is the **first** file written to a session directory after

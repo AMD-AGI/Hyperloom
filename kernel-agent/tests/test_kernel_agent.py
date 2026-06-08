@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Local tests for Kernel Agent tools.
 
 The tests generate all fixtures at runtime so the repository does not carry

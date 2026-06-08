@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SharedState
 
 Persistent session-level state that all reactors read (via prompt injection)

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Aggregate kernel-optimization attempts into a single forensic report.
 
 Combines two data sources to answer "why did the kernel-agent not

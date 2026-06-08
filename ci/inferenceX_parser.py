@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Parse InferenceX configs and fetch benchmark data via API."""
 
 from __future__ import annotations

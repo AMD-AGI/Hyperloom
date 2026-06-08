@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Blocker #2 (safety net) — ``_materialize_approved_proposal`` must
 re-check the auto-roofline gate after Critic approval.
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ci/optimize_submit.py — Hyperloom CI variant of SaFE optimize_submit.
 
 Submits SaFE inference optimization tasks. Reuses the same SaFE bearer token
@@ -95,7 +97,7 @@ DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # which is wrong for core42 (it's MI300X). Override here so the generated
 # prompt and our TP policy use the right architecture.
 #
-# We deliberately do NOT pin an InferenceX path. install.sh clones a
+# We deliberately do NOT pin tool source paths. install.sh clones a
 # per-session WRITABLE copy (INFERENCEX_REPO -> $USER_DATA_PATH/runtime/
 # InferenceX) whenever INFERENCEX_PATH is unset, and the orchestrator prompt
 # references it via the $INFERENCEX_PATH env var that install.sh exports.
@@ -104,18 +106,10 @@ DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # "OSError: [Errno 30] Read-only file system" on every model's first session.
 # Leaving it unset lets each session own a writable per-install checkout
 # (--inferencex-path / SAFE_OPTIMIZE_INFERENCEX_PATH still override for dev).
+# OOB and TraceLens are also explicit opt-in overrides; sandbox-side install
+# owns runtime setup and SaFE should not receive stale shared default paths.
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
-# OOB is a not-yet-open-source internal repo, so it still lives on the
-# shared hyperloom-managed mount (read-only is fine — nothing stages
-# writable files into it). --oob-path (or SAFE_OPTIMIZE_OOB_PATH)
-# overrides per-cluster.
-DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
-# TraceLens has no in-process fallback: kernel-agent/scripts/install.sh
-# clones AMD-AGI/TraceLens into $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens
-# inside the sandbox (pinned to a fixed SHA), so --tracelens-root stays
-# empty by default and the installer manages the checkout. Operators can
-# still override via $SAFE_OPTIMIZE_TRACELENS_ROOT or --tracelens-root.
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
 DEFAULT_TARGET_GAIN = 100.0
@@ -230,6 +224,42 @@ def _with_image_env_prompt_prefix(prompt_prefix: str | None, image: str | None) 
     return f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
 
 
+# RDMA bnxt_re tar package staged on WekaFS — same path the validated
+# ci-config.yaml multi-node entries hand the agent. Kept as a module constant
+# so the orchestrator (Claw-direct) and this SaFE path stay in sync.
+_MULTINODE_BNXT_TAR = "/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz"
+
+
+def _multinode_prompt_suffix(nodes: int, rayjob_image: str) -> str:
+    """RayJob topology block injected into the agent prompt when nodes > 1.
+
+    The SaFE ``/api/v1/optimization/tasks`` body has no node-count field (tp/ep
+    only), so a model that does not fit on one 8-GPU node is expressed the same
+    way the validated Claw-direct CI does it (ci-config.yaml + orchestrator.py
+    ``build_prompt``): tell the agent it MUST fan out to an N-node RayJob and
+    hand it the exact topology (image / per-node resources / NODES=N / bnxt tar).
+
+    Returns "" for single-node runs so the default path is byte-for-byte
+    unchanged.
+    """
+    if nodes <= 1:
+        return ""
+    return (
+        f"\n\nMulti-node run ({nodes} nodes): this model does NOT fit on a single "
+        f"8-GPU sandbox node. You CANNOT benchmark it directly in the sandbox -- "
+        f"launch it as a SaFE RayJob (Claw fan-out) and export NODES={nodes} "
+        f"before starting `inference_optimizer optimize` so the Coordinator sizes "
+        f"the cluster for {nodes}x8 GPUs (TP spans all nodes).\n"
+        f"Task submission ({nodes}-node):\n"
+        f"RayJob image: {rayjob_image}\n"
+        f"RayJob resource per node: CPU=96, GPU=8, memory=1024Gi, ephemeralStorage=400Gi\n"
+        f"RayJob node count: {nodes}\n"
+        f"env:\n"
+        f"- NODES={nodes}\n"
+        f"- PATH_TO_BNXT_TAR_PACKAGE={_MULTINODE_BNXT_TAR}\n"
+    )
+
+
 def parse_kernel_backends(raw: str | None) -> list[str]:
     """Normalize user-facing kernel backend names for SaFE's API payload."""
 
@@ -304,8 +334,8 @@ def _default_sglang_image() -> str:
     # v0.5.11 (2026-05-05): Spec V2 by default + DFLASH on ROCm + all-reduce/RMSNorm fusion.
     # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures kernels under
     # HipGraphLaunch (issue #352). Drop the suffix once the fix lands in upstream ROCm.
-    # Pre-profilerfix image (restore when reverting): f"{_proxy()}/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
-    return f"{_proxy()}/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
+    # Pre-profilerfix image (restore when reverting): lmsysorg/sglang:v0.5.11-rocm720-mi30x
+    return "primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
 
 
 def _default_vllm_image() -> str:
@@ -2819,8 +2849,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Override detected framework")
     parser.add_argument("--precision", choices=["FP8", "FP4", "BF16", "INT4"],
                         help="Override detected precision")
-    parser.add_argument("--tp", type=int, choices=[1, 2, 4, 8],
-                        help="Override detected tensor parallel size")
+    parser.add_argument("--tp", type=int, choices=[1, 2, 4, 8, 16, 32],
+                        help="Override detected tensor parallel size. Values >8 "
+                             "require --nodes>1 (multi-node RayJob); tp must be "
+                             "<= nodes*8.")
     parser.add_argument("--concurrency", type=int,
                         help="Override detected concurrency")
     parser.add_argument("--image", help="Override container image")
@@ -2829,6 +2861,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=["local", "claw"], default="local",
                         help="Execution mode passed to SaFE (default: local — "
                              "agent runs in sandbox directly; 'claw' routes via RayJob)")
+    parser.add_argument("--nodes", type=int, default=1, metavar="N",
+                        help="Node count for the run. N>1 spreads the model across "
+                             "an N-node RayJob (8 GPUs/node): forces --mode claw and "
+                             "injects the RayJob topology (image, per-node resources, "
+                             "NODES=N, bnxt tar) into the agent prompt — mirrors the "
+                             "validated ci-config.yaml multi-node entries. Default 1.")
+    parser.add_argument("--rayjob-image", default="",
+                        help="Container image for the multi-node RayJob (used only "
+                             "when --nodes>1). Falls back to --image when empty.")
 
     parser.add_argument("--api-url", default="",
                         help="SaFE base URL (defaults to $SAFE_BASE_URL or $SAFE_API_URL)")
@@ -2870,8 +2911,9 @@ def _build_parser() -> argparse.ArgumentParser:
                              "install.sh clones a writable per-session copy "
                              "instead of pinning a shared read-only mount.")
     parser.add_argument("--oob-path", default="",
-                        help=f"OOB checkout path inside the sandbox (defaults to "
-                             f"$SAFE_OPTIMIZE_OOB_PATH then '{DEFAULT_OOB_PATH}').")
+                        help="Optional OOB checkout override inside the sandbox. "
+                             "Default is unset: sandbox-side install.sh prepares "
+                             "and exports OOB paths.")
     parser.add_argument("--tracelens-root", default="",
                         help="TraceLens checkout path inside the sandbox. "
                              "Leave empty (the default) so install.sh clones "
@@ -3016,7 +3058,7 @@ def main() -> int:
                        or "")
     oob_path = (args.oob_path
                 or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
-                or DEFAULT_OOB_PATH)
+                or "")
     tracelens_root = (args.tracelens_root
                       or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT", ""))
     try:
@@ -3090,6 +3132,42 @@ def main() -> int:
         "source_task_id": args.pool_source_task_id,
     }
 
+    # ── Multi-node resolution ──────────────────────────────────────────────
+    # --nodes>1 means the model spans an N-node RayJob (8 GPUs/node). The SaFE
+    # optimization-task body carries no node count (tp/ep only), so we express
+    # topology the same way the validated Claw-direct CI does (ci-config.yaml +
+    # orchestrator.build_prompt): force mode=claw (the documented RayJob
+    # fan-out path) and append the RayJob topology block to the prompt suffix.
+    # A global --nodes applies to every --model in this invocation; the daily
+    # matrix runs one model per invocation, so in practice it is per-model.
+    effective_mode = args.mode
+    effective_prompt_suffix = args.prompt_suffix or None
+    _nodes = args.nodes or 1
+    # tp must fit the cluster: nodes * 8 GPUs/node. Enforced for single-node too
+    # (tp<=8), so a stray --tp 16 without --nodes>1 is rejected at submit time
+    # instead of failing at runtime on an 8-GPU sandbox.
+    if args.tp and args.tp > _nodes * 8:
+        log.error("--tp %d exceeds --nodes %d * 8 GPUs = %d; lower --tp or raise "
+                  "--nodes (tp>8 requires multi-node).",
+                  args.tp, _nodes, _nodes * 8)
+        return 2
+    if _nodes > 1:
+        if effective_mode != "claw":
+            log.warning("--nodes %d > 1 needs RayJob fan-out; forcing --mode claw "
+                        "(was %r)", _nodes, effective_mode)
+            effective_mode = "claw"
+        rayjob_image = (args.rayjob_image or args.image or "").strip()
+        if not rayjob_image:
+            log.warning("--nodes %d > 1 but no --rayjob-image/--image set; the agent "
+                        "must pick a RayJob image itself", args.nodes)
+        effective_prompt_suffix = (
+            (args.prompt_suffix or "")
+            + _multinode_prompt_suffix(args.nodes, rayjob_image)
+        ) or None
+        log.info("multi-node: nodes=%d tp=%s mode=%s rayjob_image=%s",
+                 args.nodes, args.tp, effective_mode,
+                 rayjob_image or "(agent-chosen)")
+
     records: list[SubmissionRecord] = []
     for repo in repos:
         log.info("=" * 60)
@@ -3098,13 +3176,13 @@ def main() -> int:
             repo, hf, safe, overrides,
             args.isl, args.osl, args.dry_run, args.hf_token,
             manual_mode=args.manual,
-            mode=args.mode,
+            mode=effective_mode,
             gpu_type=gpu_type,
             inferencex_path=inferencex_path,
             oob_path=oob_path,
             tracelens_root=tracelens_root,
             prompt_prefix=args.prompt_prefix or None,
-            prompt_suffix=args.prompt_suffix or None,
+            prompt_suffix=effective_prompt_suffix,
             kernel_backends=kernel_backends,
             max_hours=args.max_hours,
             target_gain=args.target_gain,

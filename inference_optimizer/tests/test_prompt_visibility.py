@@ -1,6 +1,8 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pin the Orchestration system prompt's specialist / integrate_patch visibility.
 
-Empirical evidence from a v0.8 12h DeepSeek-R1-0528 marathon showed that
+Empirical evidence from a v0.8 12h DeepSeek-R1-0528 run showed that
 ``storage/coordinator.db tasks`` carried 0 rows of ``kind='specialist'``
 for an entire session. Root cause: the orchestration system prompt's
 ACTIONS catalogue did not render an entry for ``specialist`` because

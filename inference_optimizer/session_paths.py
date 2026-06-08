@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Per-session path helpers.
 
 Single source of truth for every path *inside* a session directory. The
@@ -71,6 +73,9 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "framework_pr",
     "assess_remaining_gaps",
     "dynamic_action",
+    "dynamic_specialist",
+    "dynamic_specialist_check",
+    "dynamic_specialist_collect",
     "integrate", "kernel_opt", "deep_kernel_analysis", "gemm_tuning",
     "operator_tuning", "vendor_kernel_config",
     "recover",

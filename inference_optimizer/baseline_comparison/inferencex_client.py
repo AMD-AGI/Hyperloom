@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """HTTP client for the InferenceX public benchmarks API.
 
 Endpoint shape verified against

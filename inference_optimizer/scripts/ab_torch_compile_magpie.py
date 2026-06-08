@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """A/B: same Magpie YAML, compare **throughput** without vs with --enable-torch-compile.
 
 For **which GPU kernels appear in the profile** (native vs Inductor), use
@@ -8,7 +10,7 @@ kernel-agent targeting.
 Arm A — baseline flags only (optionally pass --base-extra-args).
 Arm B — skill-aligned pair from inference-optimization/actions/baseline.md:
         ``--enable-torch-compile --mem-fraction-static 0.6`` so memory matches
-        marathon scripts when compile is on.
+        benchmark scripts when compile is on.
 
 Outputs JSON with both arms' benchmark_report paths and throughput.
 

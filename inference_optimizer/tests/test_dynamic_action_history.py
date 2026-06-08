@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the dispatch_history.jsonl closed-schema writer +
 per-event schema audit + telemetry.json rollup."""
 

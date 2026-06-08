@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Kernel-pipeline / external-backend health signals (F1-F5).
 
 Five detectors catch the failure modes that K1 + K3 + remain_issue.md

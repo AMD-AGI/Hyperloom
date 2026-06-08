@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P1-2 full action catalogue tests.
 
 Asserts the v0.6 OptimizationAction catalogue is complete and that
@@ -54,7 +56,7 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # (``analysis_action_not_llm_proposable``).
     "roofline":             "analysis",
     "profile":              "analysis",
-    # shallow (5) — ``explore`` is the merged grid-runner entry.
+    # shallow (9) — ``explore`` is the merged grid-runner entry.
     # PR-A1: ``integrate_patch`` joins the shallow family as the
     # EXPLORE-phase serving-lane-locked patch integration step.
     "explore":              "shallow",
@@ -72,14 +74,18 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "conc_sweep":           "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
-    # creative (3) — PR-A1: specialist LLM sub-agent dispatch;
+    "dynamic_specialist_check": "shallow",
+    "dynamic_specialist_collect": "shallow",
+    # creative (4) — PR-A1: specialist LLM sub-agent dispatch;
     # IR-7 (Saturday May 2026): assess_remaining_gaps is a thin
     # wrapper that dispatches the session_steward_specialist domain;
     # dynamic_action.MD P1: cross-domain multi-turn ReAct sub-agent
-    # dispatch (supplementary EXPLORE channel).
+    # dispatch (supplementary EXPLORE channel); dynamic_specialist:
+    # free-form CPU-only specialist wave dispatch.
     "specialist":           "creative",
     "assess_remaining_gaps": "creative",
     "dynamic_action":        "creative",
+    "dynamic_specialist":    "creative",
     # deep_kernel (6)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",

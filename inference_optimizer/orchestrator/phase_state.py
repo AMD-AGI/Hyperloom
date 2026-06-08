@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Phase state machine.
 
 The Coordinator owns the run-level phase ("where are we in the optimization
@@ -114,6 +116,14 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # Supplementary cross-domain sub-agent channel; orchestration-only
         # dispatch, capped per EXPLORE round by PolicyGate.
         "dynamic_action",
+        # dynamic_specialist — free-form CPU-only specialist dispatch
+        # via the dynamic_dispatch module. Not domain-locked; the
+        # orchestration agent decides task descriptions freely.
+        "dynamic_specialist",
+        # dynamic_specialist_check / collect — explicit poll / result
+        # retrieval (the Coordinator also auto-surfaces via per-tick
+        # _poll_dynamic_specialists, but these let the agent force it).
+        "dynamic_specialist_check", "dynamic_specialist_collect",
         # ``roofline`` / ``profile`` are Coordinator-auto-enqueued mid-
         # EXPLORE whenever the watermark check at the
         # cumulative_gain_validated writer fires (10% step compound vs
@@ -252,6 +262,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "no_kernel_skipped",
     "sweep_done",
     "conc_sweep_done",
+    "sweep_budget_exhausted",
     "explore_force_exit_low_budget",
     "framework_pr_phase_done",
     "framework_pr_plateau",
@@ -261,6 +272,13 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     # the model's max_position_embeddings cannot hold ISL+OSL+headroom, so we
     # fail fast before booting a server that would 400 every request.
     "model_context_window_too_small",
+    # Pre-run model-architecture preflight
+    # (``cli._preflight_unsupported_model_arch``): the model is a
+    # multimodal/vision model (e.g. Gemma3ForConditionalGeneration, qwen2_vl)
+    # but Hyperloom only supports text-generation (decoder-only causal LM)
+    # models, so we fail fast before booting a server that would die ~5min in
+    # with a cryptic image-processor load error.
+    "unsupported_model_arch",
 })
 
 
