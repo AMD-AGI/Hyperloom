@@ -60,8 +60,19 @@ inference_optimizer = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["inference_optimizer/tests", "robustness-agent/tests", "critic-agent/runtime/tests"]
-pythonpath = [".", "robustness-agent/src", "critic-agent"]
+# importlib import mode lets the multiple test roots that live under
+# non-package (hyphenated) directories — robustness-agent/tests,
+# framework-agent/tests, etc. — coexist without their top-level
+# ``tests`` package names colliding under the default "prepend" mode.
+addopts = "--import-mode=importlib"
+testpaths = [
+    "inference_optimizer/tests",
+    "robustness-agent/tests",
+    "critic-agent/runtime/tests",
+    "framework-agent/tests",
+    "kernel-agent/tests",
+]
+pythonpath = [".", "robustness-agent/src", "critic-agent", "framework-agent/src"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
