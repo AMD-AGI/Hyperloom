@@ -40,6 +40,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -831,6 +832,52 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
     return data
 
 
+def _load_model_config_dict(model_path: str) -> dict | None:
+    """Best-effort parse of ``<model_path>/config.json`` into a dict.
+
+    Shared soft-degrade reader used by every config.json-derived preflight /
+    KB-tag loader (never blocks launch): returns the parsed mapping, or
+    ``None`` when ``config.json`` is missing / unreadable / invalid-JSON /
+    not a JSON object. Callers decide how to treat ``None`` (the KB-tag loader
+    degrades to ``{}``; the unsupported-model gate degrades to "do not block").
+    """
+    if not model_path:
+        return None
+    cfg_path = Path(model_path) / "config.json"
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logging.warning("model_config_unreadable: %s (%s)", cfg_path, exc)
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logging.warning("model_config_invalid_json: %s (%s)", cfg_path, exc)
+        return None
+    if not isinstance(data, dict):
+        logging.warning(
+            "model_config_not_a_dict: %s (got %s)", cfg_path, type(data).__name__,
+        )
+        return None
+    return data
+
+
+def _config_architectures(config: dict) -> list[str]:
+    """Normalise ``config["architectures"]`` to a list of non-empty strings.
+
+    Tolerates a scalar ``architectures`` by wrapping it in a single-item list;
+    returns ``[]`` when the key is absent or yields no non-empty entries.
+    """
+    arches_raw = config.get("architectures")
+    if isinstance(arches_raw, list):
+        return [str(a).strip() for a in arches_raw if str(a or "").strip()]
+    if isinstance(arches_raw, str) and arches_raw.strip():
+        return [arches_raw.strip()]
+    return []
+
+
 def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture tags from ``config.json``.
 
@@ -852,41 +899,187 @@ def _load_model_config_tags(model_path: str) -> dict:
     its normalised value is empty, so callers can ``.get(key, default)``
     without re-checking for ``[]`` / ``""``.
     """
-    if not model_path:
-        return {}
-    cfg_path = Path(model_path) / "config.json"
-    try:
-        raw = cfg_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}
-    except OSError as exc:
-        logging.warning("model_config_tags_unreadable: %s (%s)", cfg_path, exc)
-        return {}
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
-        logging.warning("model_config_tags_invalid_json: %s (%s)", cfg_path, exc)
-        return {}
-    if not isinstance(data, dict):
-        logging.warning(
-            "model_config_tags_not_a_dict: %s (got %s)",
-            cfg_path,
-            type(data).__name__,
-        )
+    data = _load_model_config_dict(model_path)
+    if data is None:
         return {}
     out: dict = {}
-    arches_raw = data.get("architectures")
-    if isinstance(arches_raw, list):
-        arches = [str(a).strip() for a in arches_raw if str(a or "").strip()]
-        if arches:
-            out["architectures"] = arches
-    elif isinstance(arches_raw, str) and arches_raw.strip():
-        # Tolerate a scalar ``architectures`` by wrapping it in a list.
-        out["architectures"] = [arches_raw.strip()]
+    arches = _config_architectures(data)
+    if arches:
+        out["architectures"] = arches
     model_type = str(data.get("model_type") or "").strip()
     if model_type:
         out["model_type"] = model_type
     return out
+
+
+# ---------------------------------------------------------------------------
+# Unsupported-model (multimodal / vision) preflight gate
+# ---------------------------------------------------------------------------
+# Hyperloom only supports text-generation (decoder-only causal LM) models.
+# Multimodal / vision models occasionally leak past the upstream submission
+# filter and only fail ~5 minutes into the run with a cryptic vLLM
+# ``OSError: Can't load image processor ...``, burning a full session slot.
+# The constants below drive a fail-fast classifier that runs before the
+# (expensive) baseline server boot. It first rejects explicit multimodal /
+# vision signals, then uses a WHITELIST approach: only models whose
+# architecture matches known text-generation patterns are allowed.
+
+# Supported text-generation architecture markers. Only decoder-only causal LM
+# models are supported. If a model's architecture does NOT match any of these
+# patterns, it is rejected as unsupported. ``ForCausalLM`` is treated as an
+# infix because some text-generation variants append a suffix
+# (for example ``DeepseekV3ForCausalLMNextN`` / ``LlamaForCausalLMEagle3``).
+_SUPPORTED_ARCH_MARKERS = (
+    "ForCausalLM",
+    "LMHeadModel",
+    "ForCausalLMWithValueHead",
+)
+
+# Explicit allowlist of supported model_type values (fallback when architectures
+# field is empty/missing). Models whose model_type is in this set pass through.
+_SUPPORTED_MODEL_TYPES = frozenset({
+    "llama", "mistral", "mixtral", "qwen2", "qwen2_moe", "qwen3", "qwen3_moe",
+    "gemma", "gemma2", "phi", "phi3", "phimoe",
+    "starcoder2", "codellama", "deepseek_v2", "deepseek_v3",
+    "falcon", "gpt_neox", "gpt2", "opt", "bloom",
+    "internlm", "internlm2", "yi", "baichuan",
+    "chatglm", "glm", "glm4",
+    "command-r", "cohere", "cohere2", "dbrx",
+    "mpt", "olmo", "olmo2", "jamba", "arctic",
+    "exaone", "granite", "granitemoeshared",
+    "stablelm", "persimmon",
+})
+
+# Explicit multimodal / vision signals that must win even if an architecture
+# also happens to end with ``ForCausalLM`` (for example Phi3VForCausalLM).
+_UNSUPPORTED_MODEL_TYPES = frozenset({
+    "gemma3",
+    "mllama",
+    "llava",
+    "llava_next",
+    "qwen2_vl",
+    "qwen2_5_vl",
+    "idefics",
+    "idefics2",
+    "idefics3",
+    "paligemma",
+    "pixtral",
+    "internvl_chat",
+    "phi3_v",
+})
+
+_UNSUPPORTED_ARCHITECTURES = frozenset({
+    "Gemma3ForConditionalGeneration",
+    "InternVLChatModel",
+    "Phi3VForCausalLM",
+    "LlavaForConditionalGeneration",
+    "LlavaNextForConditionalGeneration",
+    "MllamaForConditionalGeneration",
+    "PaliGemmaForConditionalGeneration",
+    "Qwen2VLForConditionalGeneration",
+    "Qwen2_5_VLForConditionalGeneration",
+    "Idefics2ForConditionalGeneration",
+    "Idefics3ForConditionalGeneration",
+    "PixtralForConditionalGeneration",
+})
+
+_UNSUPPORTED_CONFIG_KEYS = (
+    "vision_config",
+    "image_token_id",
+    "image_token_index",
+    "mm_config",
+    "multi_modal_config",
+    "vision_tower",
+    "vision_tower_cfg",
+    "image_processor_type",
+    "projector_config",
+    "mm_projector_type",
+)
+
+
+def _arch_is_supported_text_generation(arch: str) -> bool:
+    """True when an architecture class name denotes a supported text-generation
+    (decoder-only causal LM) model."""
+    a = (arch or "").strip()
+    if not a:
+        return False
+    return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
+
+
+def _detect_unsupported_model(model_path: str) -> dict | None:
+    """Best-effort classification of a model as unsupported (non-text-generation).
+
+    Explicit multimodal / vision signals are rejected first. Otherwise, uses a
+    WHITELIST approach: a model is supported if its architecture ends with a
+    known text-generation suffix (ForCausalLM, LMHeadModel, etc.) OR its
+    model_type is in the explicit allowlist. Everything else is rejected.
+
+    Returns a dict ``{"architecture", "model_type", "signal"}`` describing why
+    the model is unsupported, else ``None`` (supported). ``None`` also covers the
+    best-effort case where ``config.json`` is missing / unreadable / invalid:
+    we deliberately do NOT hard-block on a config we cannot read (the upstream
+    submission filter and the downstream model loader still apply).
+    """
+    config = _load_model_config_dict(model_path)
+    if config is None:
+        return None
+    architectures = _config_architectures(config)
+    model_type = str(config.get("model_type") or "").strip()
+    model_type_l = model_type.lower()
+
+    for arch in architectures:
+        if arch in _UNSUPPORTED_ARCHITECTURES:
+            return {
+                "architecture": arch,
+                "model_type": model_type,
+                "signal": f"unsupported architecture '{arch}'",
+            }
+    if model_type_l in _UNSUPPORTED_MODEL_TYPES:
+        return {
+            "architecture": architectures[0] if architectures else "",
+            "model_type": model_type,
+            "signal": f"unsupported model_type '{model_type}'",
+        }
+    for key in _UNSUPPORTED_CONFIG_KEYS:
+        if key in config:
+            return {
+                "architecture": architectures[0] if architectures else "",
+                "model_type": model_type,
+                "signal": f"unsupported multimodal config key '{key}'",
+            }
+
+    if any(_arch_is_supported_text_generation(a) for a in architectures):
+        return None
+
+    if model_type_l in _SUPPORTED_MODEL_TYPES:
+        return None
+
+    if architectures:
+        return {
+            "architecture": architectures[0],
+            "model_type": model_type,
+            "signal": (
+                f"architecture '{architectures[0]}' does not match any "
+                f"supported text-generation pattern "
+                f"({', '.join(_SUPPORTED_ARCH_MARKERS)})"
+            ),
+        }
+
+    if model_type:
+        return {
+            "architecture": "",
+            "model_type": model_type,
+            "signal": (
+                f"model_type '{model_type}' is not in the supported "
+                f"text-generation allowlist"
+            ),
+        }
+
+    return {
+        "architecture": "",
+        "model_type": "",
+        "signal": "config.json has neither architectures nor model_type",
+    }
 
 
 # config.json keys that carry the model's max sequence length, priority order.
@@ -946,6 +1139,25 @@ def _load_model_max_position_embeddings(model_path: str) -> int | None:
             if isinstance(val, int) and val > 0:
                 return val
     return None
+
+
+def _model_has_dual_chunk_attention(model_path: str) -> bool:
+    """Best-effort detect a ``dual_chunk_attention_config`` in config.json.
+
+    Qwen 1M long-context models ship this block; sglang then rejects the
+    default aiter attention backend and demands ``dual_chunk_flash_attn``.
+    Checks the top level and a nested ``text_config``. Soft-degrades to
+    False on any missing / unreadable / invalid config.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    if data.get("dual_chunk_attention_config"):
+        return True
+    nested = data.get("text_config")
+    return isinstance(nested, dict) and bool(
+        nested.get("dual_chunk_attention_config")
+    )
 
 
 def _context_headroom_tokens() -> int:
@@ -1061,6 +1273,92 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         print(
             f"WARNING: failed to write session_breakdown.json on context "
             f"fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
+
+
+def _preflight_unsupported_model_arch(
+    args: argparse.Namespace, session_dir: Path,
+) -> bool:
+    """Fail fast when the model is an unsupported multimodal / vision model.
+
+    Hyperloom only supports text-generation (decoder-only causal LM) models.
+    A multimodal model (e.g. ``Gemma3ForConditionalGeneration``, ``qwen2_vl``)
+    that slips past the upstream submission filter would otherwise boot the
+    baseline server and only die ~5 minutes in with a cryptic vLLM
+    ``OSError: Can't load image processor ...``, wasting a full session slot.
+    We classify the model from its ``config.json`` and, when it is positively
+    identified as multimodal/vision, persist a clear stop reason
+    (state.json + reports/final.{json,md} + session_breakdown.json) and signal
+    the caller to exit non-zero — before any expensive bring-up.
+
+    Best-effort: a missing / unreadable / invalid ``config.json`` is NOT a
+    hard block (the upstream filter + downstream loader still apply); only a
+    positively-identified multimodal model is rejected.
+
+    Returns True when the model is unsupported (caller should exit); False
+    when it is a supported text model or cannot be classified (gate skipped).
+    """
+    model = str(getattr(args, "model", "") or "")
+    hit = _detect_unsupported_model(model)
+    if hit is None:
+        return False
+
+    name = Path(model).name or model
+    arch = hit.get("architecture") or "<unknown>"
+    mt = hit.get("model_type") or "<unknown>"
+    reason = (
+        f"Unsupported model '{name}': architecture '{arch}' (model_type "
+        f"'{mt}') is not a supported text-generation model. Hyperloom only "
+        f"supports decoder-only causal LM models (architectures containing "
+        f"ForCausalLM or LMHeadModel). Rejected because: "
+        f"{hit.get('signal', 'unknown architecture')}. Submit a "
+        f"text-generation checkpoint instead."
+    )
+    # Persist the stop reason so CI / the robustness monitor read it from
+    # state.json + reports/final.json instead of grepping the run log.
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        # Validated writer keeps the vocab-closed invariant: the term is
+        # registered in STOP_REASON_VOCAB, so this neither maps to 'unknown'
+        # (lenient) nor raises (strict), and the robustness monitor's
+        # vocab-based terminal check recognises the fail-fast.
+        state.set_stop_reason("unsupported_model_arch")
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist unsupported-model stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    # Delivery-artifact parity: cli's normal exit writes session_breakdown.json
+    # in coordinator.run()'s finally, but this fail-fast sys.exit(2)s before
+    # that try/finally is ever entered. Emit it here too (best-effort) so CI's
+    # delivery contract sees a clean, documented skip — not "Missing artifacts".
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on unsupported-"
+            f"model fail-fast: {exc!r}",
             file=sys.stderr,
         )
     print(f"ERROR: {reason}", file=sys.stderr)
@@ -2364,6 +2662,67 @@ def _smoke_test_codex_model(
     )
 
 
+# InferenceX clone defaults — kept in sync with
+# inference_optimizer/scripts/install.sh (INFERENCEX_REPO / INFERENCEX_REF).
+_INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
+_INFERENCEX_REF_DEFAULT = "2035a2117ad22403376359be0064dfa2c078c59b"
+
+
+def _inferencex_checkout_ok(path: Path | str) -> bool:
+    """True when ``path`` is a usable InferenceX checkout, not a stub.
+
+    A bare ``is_dir()`` check accepts a half-cloned dir left behind by a
+    ``git init`` that then failed to fetch/checkout. Magpie sources
+    ``benchmarks/benchmark_lib.sh`` at runtime, so require that file to
+    exist — a complete checkout always has it, a stub never does.
+    """
+    return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
+
+
+def _clone_inferencex(dest: Path) -> str | None:
+    """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF.
+
+    Mirrors install.sh ``git_fetch_pinned``: a 7-40 hex ref triggers a
+    shallow fetch-checkout (GitHub serves SHA fetches), otherwise a
+    ``--branch`` clone. Returns the path on success, ``None`` on failure
+    (caller decides how to surface it). Never raises out.
+
+    On any failure the partial ``dest`` (e.g. a bare ``git init`` with no
+    fetched tree) is removed so a later preflight's detection does not
+    mistake the stub for a valid checkout and skip re-cloning.
+    """
+    repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
+    ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+    dest_str = str(dest)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
+            subprocess.run(["git", "init", "-q", dest_str], check=True, timeout=60)
+            subprocess.run(
+                ["git", "-C", dest_str, "fetch", "-q", "--depth", "1", repo, ref],
+                check=True, timeout=600,
+            )
+            subprocess.run(
+                ["git", "-C", dest_str, "checkout", "-q", "FETCH_HEAD"],
+                check=True, timeout=120,
+            )
+        else:
+            subprocess.run(
+                ["git", "clone", "-q", "--depth", "1", "--branch", ref, repo, dest_str],
+                check=True, timeout=600,
+            )
+        if not _inferencex_checkout_ok(dest):
+            raise OSError(
+                f"clone reported success but {dest_str} is missing "
+                "benchmarks/benchmark_lib.sh"
+            )
+        return dest_str
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("InferenceX clone into %s failed: %s", dest_str, exc)
+        shutil.rmtree(dest, ignore_errors=True)
+        return None
+
+
 def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
@@ -2534,7 +2893,7 @@ def _preflight(
     # InferenceX/benchmarks/benchmark_lib.sh → _install_lm_eval_deps.
     # We just ensure the InferenceX checkout exists; lm-eval deps are
     # auto-installed by benchmark_lib.sh at runtime.
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "")
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if not inferencex_path:
         from .paths import (
             magpie_dir as _magpie_default,
@@ -2548,24 +2907,60 @@ def _preflight(
         )
         # InferenceX detection order: Magpie's own InferenceX submodule
         # first (the canonical layout after install.sh), then the
-        # standalone runtime checkout, then legacy host-level mounts so
-        # existing pre-migration pods keep working.
+        # standalone runtime checkout. Legacy host-level mounts
+        # (/wekafs/hyperloom/InferenceX, ...) were removed: they are
+        # read-only shared mounts, and selecting one made Magpie's
+        # _prepare_benchmark_scripts mkstemp fail with [Errno 30] before
+        # the server even booted (the only on-disk source of those
+        # baseline failures). We clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
             runtime_root / "InferenceX",
-            Path("/wekafs/hyperloom/InferenceX"),
-            Path("/opt/hyperloom/InferenceX"),
-            Path("/wekafs/fully-local/inference_optimization/InferenceX"),
         ):
-            if candidate.is_dir():
-                inferencex_path = str(candidate)
-                break
-    if inferencex_path and Path(inferencex_path).is_dir():
-        os.environ.setdefault("INFERENCEX_PATH", inferencex_path)
-    else:
-        print("Preflight: WARNING — InferenceX not found. GSM8K accuracy "
-              "eval will fail. Set INFERENCEX_PATH or clone Magpie with "
-              "InferenceX submodule.")
+            if _inferencex_checkout_ok(candidate):
+                if os.access(candidate, os.W_OK):
+                    inferencex_path = str(candidate)
+                    break
+                print(
+                    "Preflight: skipping non-writable auto-detected "
+                    f"InferenceX checkout at {candidate}; cloning a "
+                    "writable checkout instead."
+                )
+    # When no writable checkout was found (e.g. a brain-launched run that
+    # skipped install.sh's ensure_inferencex), clone one ourselves rather
+    # than falling back to a read-only host mount. baseline cannot run
+    # without InferenceX, so a clone failure is a hard error.
+    if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+        from .paths import runtime_dir as _runtime_default
+        dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
+        print(f"Preflight: InferenceX not found; cloning into {dest} ...")
+        inferencex_path = _clone_inferencex(dest)
+        if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+            print(
+                "Preflight: ERROR — InferenceX checkout missing and clone "
+                "failed. baseline cannot run without it. Set INFERENCEX_PATH "
+                "to a writable checkout or re-run "
+                "inference_optimizer/scripts/install.sh.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    # Guard against a read-only selection (shared mount handed to us via
+    # INFERENCEX_PATH): Magpie stages benchmark scripts there, so a
+    # non-writable tree fails the run before server boot.
+    if not os.access(inferencex_path, os.W_OK):
+        print(
+            f"Preflight: ERROR — INFERENCEX_PATH={inferencex_path} is not "
+            f"writable. Magpie stages benchmark scripts into it and will "
+            f"fail with [Errno 30] Read-only file system. Point "
+            f"INFERENCEX_PATH at a writable checkout (unset it to let "
+            f"Hyperloom clone a fresh one).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH that
+    # triggered the clone above must not survive into the child env, or Magpie
+    # still reads the bad path. The validated value wins.
+    os.environ["INFERENCEX_PATH"] = inferencex_path
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
@@ -3748,6 +4143,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
         )
+        # Unsupported-model preflight: Hyperloom only supports text-generation
+        # (decoder-only causal LM) models. Refuse to run (with a persisted stop
+        # reason) when config.json identifies a multimodal/vision model, which
+        # would otherwise boot the baseline server only to die minutes in with
+        # a cryptic image-processor load error. Runs first (most fundamental
+        # rejection) and, like the context-window gate, after the SharedState
+        # seed but before the heavy Cortex / backend / Coordinator bring-up.
+        if _preflight_unsupported_model_arch(args, session_dir):
+            sys.exit(2)
         # Context-window preflight: refuse to run (with a persisted stop
         # reason) when ISL+OSL+headroom exceeds the model's
         # max_position_embeddings, instead of booting a server that 400s every
