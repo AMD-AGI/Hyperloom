@@ -44,11 +44,24 @@ def run_json_allow_fail(cmd: list[str], *, workspace: Path) -> tuple[int, dict]:
     return proc.returncode, payload
 
 
+# ``classify_patchability`` only routes a candidate to optimization
+# backends when its ``source_file`` resolves under a reusable framework
+# root (sglang / vllm / aiter / FlyDSL checkouts) — see
+# ``tracelens_analysis.classify_patchability``. The synthetic fixtures
+# below therefore live under ``/sgl-workspace/sglang/...`` so the trace
+# tool classifies them as routable; arbitrary paths like
+# ``/src/kernels/rmsnorm.py`` are (correctly) rejected as "source not
+# under a reusable framework root" and short-circuit to a skipped REVERT.
+# The files need not exist on disk: the gate keys off the path prefix +
+# source_type, not file contents.
+_FRAMEWORK_ROOT = "/sgl-workspace/sglang/python/sglang/srt/layers"
+
+
 def write_trace(
     path: Path,
     *,
     kernel_name: str = "triton_rmsnorm_kernel",
-    source_file: str = "/src/kernels/rmsnorm.py",
+    source_file: str = f"{_FRAMEWORK_ROOT}/rmsnorm.py",
 ) -> None:
     payload = {
         "traceEvents": [
@@ -66,7 +79,7 @@ def write_trace(
                 "cat": "kernel",
                 "dur": 3000,
                 "args": {
-                    "source_file": "/src/kernels/moe.hip",
+                    "source_file": f"{_FRAMEWORK_ROOT}/moe.py",
                     "shape": {"M": 128, "N": 4096, "K": 4096},
                 },
             },
@@ -354,7 +367,7 @@ class KernelAgentToolTests(unittest.TestCase):
             write_trace(
                 trace,
                 kernel_name="triton_unmapped_kernel",
-                source_file="/src/kernels/unmapped.py",
+                source_file=f"{_FRAMEWORK_ROOT}/unmapped.py",
             )
 
             result = run_json([
@@ -414,7 +427,7 @@ class KernelAgentToolTests(unittest.TestCase):
             write_trace(
                 trace,
                 kernel_name="triton_unmapped_kernel",
-                source_file="/src/kernels/unmapped.py",
+                source_file=f"{_FRAMEWORK_ROOT}/unmapped.py",
             )
             run_json([
                 sys.executable, str(TRACE_TOOL),
@@ -453,7 +466,7 @@ class KernelAgentToolTests(unittest.TestCase):
             write_trace(
                 trace,
                 kernel_name="triton_unmapped_kernel",
-                source_file="/src/kernels/unmapped.py",
+                source_file=f"{_FRAMEWORK_ROOT}/unmapped.py",
             )
             run_json([
                 sys.executable, str(TRACE_TOOL),
@@ -551,9 +564,19 @@ class KernelAgentToolTests(unittest.TestCase):
                 "--dry-run",
             ], workspace=workspace)
 
-            self.assertEqual(result["selected_backends"], [])
+            # A vendor BLAS binary (hipblasLt) carries no rewritable source,
+            # so ``classify_patchability`` marks it non-routable. The
+            # optimizer now short-circuits *before* backend selection
+            # (PR #314 "filter non-routable kernels") into a skipped/REVERT
+            # result instead of running an empty backend ladder. The
+            # invariant remains: no backend is dispatched and the proposal
+            # is REVERT.
+            self.assertEqual(result["status"], "skipped")
+            self.assertEqual(result["reason"], "non_routable_candidate")
+            self.assertEqual(result["error_class"], "missing_native_source")
+            self.assertEqual(result["decision"], "REVERT")
             self.assertEqual(result["proposal"]["decision"], "REVERT")
-            self.assertIn("compile failed", result["proposal"]["reasons"])
+            self.assertNotIn("selected_backends", result)
 
     def test_unknown_kernel_id_fails_without_partial_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -574,9 +597,18 @@ class KernelAgentToolTests(unittest.TestCase):
                 "--dry-run",
             ], workspace=workspace)
 
-            self.assertNotEqual(code, 0)
-            self.assertEqual(result["status"], "failed")
-            self.assertIn("kernel not found", result["error"])
+            # A hallucinated kernel_id is now a *graceful skip* rather than
+            # a hard failure (commit bdeac3ce "survive hallucinated
+            # kernel_id"): the optimizer exits 0 with status=skipped so the
+            # orchestrator moves to the next decision instead of burning the
+            # whole run. The invariant this test pins is that no fabricated /
+            # partial optimization result is emitted for an unknown id.
+            self.assertEqual(code, 0)
+            self.assertEqual(result["status"], "skipped")
+            self.assertEqual(result["reason"], "kernel_id_not_in_candidates")
+            self.assertEqual(result["error_class"], "invalid_kernel_id")
+            self.assertNotIn("proposal", result)
+            self.assertNotIn("verification", result)
 
     def test_invalid_backend_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
