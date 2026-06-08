@@ -90,6 +90,39 @@ def test_stale_env_magpie_python_ignored_and_autodetected(monkeypatch, caplog):
                for r in caplog.records)
 
 
+def test_probe_requires_yaml_dependency(monkeypatch):
+    """The probe must verify Magpie's runtime deps (yaml), not just that
+    ``import Magpie`` works.
+
+    Regression: an interpreter where ``import Magpie`` succeeds (editable
+    .pth points at the source tree, independent of installed deps) but
+    PyYAML is missing was selected, then Magpie died at startup with
+    ``ModuleNotFoundError: No module named 'yaml'`` -> subprocess_nonzero /
+    baseline_failed. The probe command must include ``yaml``.
+    """
+    monkeypatch.setenv("MAGPIE_PYTHON", "/deps-missing/python")
+    probe_cmds: list[list[str]] = []
+
+    def fake_run(cmd, *a, **k):
+        probe_cmds.append(list(cmd))
+        # The deps-missing interpreter fails the (Magpie+yaml) probe; only
+        # the canonical venv passes.
+        rc = 0 if cmd[0] == "/opt/venv/bin/python3" else 1
+        return type("P", (), {"returncode": rc})()
+
+    monkeypatch.setattr(_grid_runner, "run_with_session_kill", fake_run)
+    monkeypatch.setattr(
+        _grid_runner.shutil, "which", lambda _n: "/opt/venv/bin/python3",
+    )
+
+    resolved = _grid_runner._resolve_magpie_python()
+
+    assert resolved == "/opt/venv/bin/python3"
+    # Every probe must import yaml (Magpie's top-level runtime dependency).
+    assert probe_cmds, "probe must run"
+    assert all("yaml" in c[-1] for c in probe_cmds), probe_cmds
+
+
 def test_falls_back_to_opt_venv_when_path_python_cannot_import(monkeypatch, tmp_path):
     """When neither the (stale) env value nor PATH python3 can import Magpie,
     return /opt/venv/bin/python as the unconditional last resort.

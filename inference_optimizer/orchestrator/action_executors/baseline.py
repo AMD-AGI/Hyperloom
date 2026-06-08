@@ -912,6 +912,24 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
             }
+            # Magpie never created a benchmark_* workspace, so the wrapper
+            # never wrote server.log. Persist the captured stderr/stdout to
+            # a file so the failure survives the NFS clone and S3 archive
+            # (without this, no_workspace failures leave zero on-disk logs).
+            captured = (proc_stderr or "") + (proc_stdout or "")
+            stderr_log_path: str | None = None
+            if captured.strip():
+                try:
+                    log_file = output_dir / "baseline_stderr.log"
+                    log_file.write_text(captured, encoding="utf-8")
+                    stderr_log_path = str(log_file)
+                except OSError as exc:
+                    log.warning(
+                        "baseline_executor: failed to persist stderr log: %s",
+                        exc,
+                    )
+            if stderr_log_path:
+                failure_extras["stderr_log_path"] = stderr_log_path
             if proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
                 return {
