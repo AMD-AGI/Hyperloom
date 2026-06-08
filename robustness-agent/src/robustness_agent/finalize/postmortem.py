@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Session-end postmortem + decision trace finalizer (L1 + L2).
 
 The reactor fires this once per session — on the first tick where

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-node inference optimization helpers.
 
 Used when the optimization session needs more GPU memory than a single

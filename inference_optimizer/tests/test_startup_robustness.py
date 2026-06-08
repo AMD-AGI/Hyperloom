@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the startup-robustness preflight + launch-info wire format.
 
 Covers five independent surfaces that all live in ``cli.py``:

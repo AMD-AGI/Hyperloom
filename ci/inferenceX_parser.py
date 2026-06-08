@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Parse InferenceX configs and fetch benchmark data via API."""
 
 from __future__ import annotations
@@ -516,7 +518,7 @@ def merge_model_config(
         "inferencex_path": defaults.get("inferencex_path") or (get_nfs_root() + "/InferenceX"),
         "oob_path": defaults.get("oob_path") or (get_nfs_root() + "/OOB"),
         "tracelens_root": defaults.get("tracelens_root") or (get_nfs_root() + "/TraceLens-internal"),
-        "result_dir": defaults.get("result_dir", "/workspace/hyperloom"),
+        "result_dir": defaults.get("result_dir") or os.environ.get("USER_DATA_PATH") or "/workspace/hyperloom",
         "inferenceX_benchmarks": ifx_benchmarks,
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
         "inferenceX_key": model_cfg.get("inferenceX_key", ""),

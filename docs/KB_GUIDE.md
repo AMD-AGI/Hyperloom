@@ -1,31 +1,29 @@
 # Knowledge-Base Guide
 
-> **Scope.** This page explains the two knowledge-base (KB) stores
-> referenced by Hyperloom, how to obtain or populate them, and what to
-> do when you don't have either. Both KB stores are **optional** for a
-> first run; Hyperloom degrades gracefully when they are missing.
+> **Scope.** This page explains the optional knowledge-base (KB) store
+> referenced by Hyperloom, how to obtain or populate it, and what to do
+> when you don't have one. The KB is **optional** for a first run;
+> Hyperloom degrades gracefully when it is missing.
 
-Hyperloom references two distinct KB stores:
+Hyperloom references one optional KB store:
 
 | KB                                     | Owner / process                | Purpose                                                                                              |
 |----------------------------------------|--------------------------------|------------------------------------------------------------------------------------------------------|
 | **`INFERENCE_OPTIMIZER_KB_ROOT`**      | `inference_optimizer` / Critic | Cross-run optimization lessons (architecture quirks, validated wins, crash patterns).                |
-| **Marathon KB** (`marathon_optimization/kb/`) | Marathon offline pipeline      | Bulk-import store of per-model optimization traces used to seed `INFERENCE_OPTIMIZER_KB_ROOT`.        |
 
-The two stores share a JSONL schema (`{category, model, lesson, confidence, ...}`)
-but are populated by different pipelines.
+The KB uses a JSONL schema (`{category, model, lesson, confidence, ...}`).
 
 ---
 
 ## 1. TL;DR — I just want to start a run
 
-You don't need either KB to start. Run optimization without setting
+You don't need the KB to start. Run optimization without setting
 `INFERENCE_OPTIMIZER_KB_ROOT`, and Hyperloom will:
 
 * Skip the KB-prior step in scoring (every action starts at its base
   prior, no boosts and no penalties).
 * Skip the post-action `kb_ingest` step (no new lessons are written).
-* Continue normally through baseline, profile, params, backends, kernel
+* Continue normally through baseline, roofline/profile, explore, kernel
   optimization, sweep, and report.
 
 Expect modestly worse performance on the **first** run (the agent may
@@ -50,7 +48,7 @@ lessons accumulated across optimization runs. Each entry looks like:
   "category": "lesson",
   "model_class": "moe_mla_nsa",
   "model": "GLM-5-FP8",
-  "action": "backends",
+  "action": "explore",
   "lesson": "Super-linear synergy: combining --nsa-decode-backend aiter, --enable-mixed-chunk, and --enable-aiter-allreduce-fusion gave +41.2% combined vs +3%/+3%/+0.3% individually.",
   "confidence": 0.92,
   "evidence_paths": ["sessions/glm5-20260415/state.json"],
@@ -59,10 +57,9 @@ lessons accumulated across optimization runs. Each entry looks like:
 }
 ```
 
-The Critic agent owns reads and writes; the Coordinator queries it
-during action-stack scoring (see
-[HOW_THE_OPTIMIZATION_LOOP_WORKS.md](HOW_THE_OPTIMIZATION_LOOP_WORKS.md)
-§"Self-Evolving Knowledge Base").
+The Critic agent owns reads and writes; the Coordinator and specialist
+warmup paths surface relevant priors during the live optimization loop
+(see [HOW_THE_OPTIMIZATION_LOOP_WORKS.md](HOW_THE_OPTIMIZATION_LOOP_WORKS.md)).
 
 ### Layout
 
@@ -126,26 +123,7 @@ The path is arbitrary, but recommended layouts:
 
 ---
 
-## 3. Marathon KB — offline bulk import
-
-The `marathon_optimization/` subtree is an **offline** pipeline that
-batch-processes session breakdowns from many models into a single KB
-suitable for seeding `INFERENCE_OPTIMIZER_KB_ROOT`. It is **internal
-tooling** and not required for normal Hyperloom use.
-
-If you are not running the marathon pipeline, you can safely:
-
-* Ignore the `marathon_optimization/` directory.
-* Leave any `MARATHON_KB_*` environment variables unset.
-
-If you are running it (typically AMD-internal users with access to
-historical session archives on WekaFS), see
-`marathon_optimization/README.md` in the marathon subtree for the
-pipeline-specific instructions.
-
----
-
-## 4. KB-unreachable behaviour
+## 3. KB-unreachable behaviour
 
 When `judge_bundle.kb_read_skipped_reason == "kb_unreachable"` (or
 `kb_read_disabled`), Critic was unable to read the KB for that turn.
@@ -163,7 +141,7 @@ in `$USER_DATA_PATH/critic-session-memory/kb_drafts/`, and proceed.
 
 ---
 
-## 5. Quick FAQ
+## 4. Quick FAQ
 
 **Q: I'm on PrimusClaw. Do I need to set anything?**
 No. The sandbox mounts a shared KB and sets
@@ -190,7 +168,7 @@ A single-model KB is typically <100 KB; a full cross-model KB
 
 ---
 
-## 6. See also
+## 5. See also
 
 * [ENV_AND_AUTH.md](ENV_AND_AUTH.md) — credentials and path env.
 * [CONFIGURATION_REFERENCE.md](CONFIGURATION_REFERENCE.md) — all

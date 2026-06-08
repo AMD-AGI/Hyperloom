@@ -1,3 +1,4 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 """Metrics provider implementations and the provider factory.
 
 Exposes the base provider protocol, the local/robust/hybrid providers,

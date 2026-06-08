@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Submit InferenceX PRs based on Hyperloom CI optimization results.
 
 Flow: read ci_summary.json + optimization reports → extract changes via

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for metrics providers — factory, ring buffer, LocalProvider,
 RobustProvider, and helper plumbing.
 

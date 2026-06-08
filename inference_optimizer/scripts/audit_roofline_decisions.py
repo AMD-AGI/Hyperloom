@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 N7: per-session decision-quality audit per design §10.5.
 
 Reads one Hyperloom session_dir's ``state.json`` and prints a forensic

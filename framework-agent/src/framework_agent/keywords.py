@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smart keyword extraction from free-form gap descriptions.
 
 Adapted from Arbor's `_TECHNICAL_TERMS` + `_extract_keywords` helpers

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ci/progress.py — promote / dedup batch results.
 
 After a batch finishes, this script promotes Succeeded models from the

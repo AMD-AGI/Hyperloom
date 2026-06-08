@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """On-disk recipe-snapshot store backing the local-only write path.
 
 Mirrors the wire contract documented in
@@ -832,8 +834,14 @@ class LocalRecipeStore:
         updated_since: str | None = None,
         order_by: str = "updated_at DESC",
         limit: int = 50,
+        prefer: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Filter live recipes by labels / metrics / updated_at.
+
+        ``prefer`` (workload-similarity hints) is accepted for the
+        unified KB-interface signature; the dispatcher reranks the
+        returned rows, so the local store only honours the ``required``
+        (``label_match`` / metric / updated_since) filter.
 
         Mirrors the central server's ``POST /recipes/search``:
 
@@ -869,6 +877,7 @@ class LocalRecipeStore:
         Raises:
             ValueError: If ``order_by`` is not in the whitelist.
         """
+        del prefer  # client-side rerank lives in RecipeKB
         if order_by not in _ORDER_BY_KEYS:
             raise ValueError(
                 f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, "

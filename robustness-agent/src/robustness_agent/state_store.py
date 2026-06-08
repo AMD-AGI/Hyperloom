@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Cross-tick state persistence for stateful subsystems.
 
 The robustness-agent M1 transport spawns a fresh ``python -m

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Run TraceLens analysis-orchestrator skill through Claude SDK.
 
 This is the LLM-backed path for issue #124. It deliberately lives outside
@@ -22,7 +24,7 @@ DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 
 
-# Upstream-defined kernel category enum (TraceLens-internal v0.3,
+# Upstream-defined kernel category enum (TraceLens,
 # see TraceLens/Agent/Analysis/utils/orchestrator_prepare.py CATEGORY_SKILL_MAP).
 # Hyperloom's GEAK pipeline expects a small fixed set of category labels;
 # this map keeps the upstream → GEAK translation in one place so a future
@@ -34,6 +36,7 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
     "groupedgemm_bwd": "GEMM",
     "moe_fused": "MoE",
     "moe_unfused": "MoE",
+    "moe_aux": "MoE",
     "sdpa_fwd": "SDPA",
     "sdpa_bwd": "SDPA",
     "inferenceattention": "SDPA",
@@ -48,6 +51,7 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
     "convolution": "Convolution",
     "conv_fwd": "Convolution",
     "conv_bwd": "Convolution",
+    "customcollective": "Communication",
     "other": "Other",
 }
 
@@ -190,6 +194,7 @@ def build_orchestrator_prompt(
     trace_path: Path,
     output_dir: Path,
     tracelens_root: Path,
+    tracelens_internal_root: Path | None,
     platform: str,
     framework: str,
     analysis_mode: str,
@@ -223,6 +228,16 @@ def build_orchestrator_prompt(
     else:
         exec_mode = "default"
 
+    internal_root_text = (
+        str(tracelens_internal_root) if tracelens_internal_root
+        else "(not installed; OSS-only mode)"
+    )
+    tl_extension_text = (
+        "TraceLens_internal" if tracelens_internal_root
+        else "(unset)"
+    )
+
+    comparison_scope = "standalone"
     capture_text = str(capture_folder) if capture_folder else "N/A"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
@@ -234,15 +249,19 @@ questions; proceed with the analysis.
 
 Execution context:
 - Environment: local
-- TraceLens project root: {tracelens_root}
+- TraceLens root: {tracelens_root}
+- TraceLens-internal root: {internal_root_text}
 - Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
 - Trace file path: {trace_path}
 - Output directory: {output_dir}
 - Platform: {platform}
 - Framework: {framework or "unknown"}
+- Comparison scope: {comparison_scope}
 - Analysis mode: {analysis_mode}
 - Inference execution mode: {exec_mode}
 - Capture folder path: {capture_text}
+- TL_EXTENSION: {tl_extension_text}
+
 
 Important requirements:
 1. Use the provided command prefix cache for all shell commands.
@@ -251,7 +270,7 @@ Important requirements:
    capture folder to the inference perf-report CLI exactly as the skill says.
 4. Write all TraceLens outputs under the output directory above.
 5. Ensure this file exists before you finish:
-   - {output_dir / "analysis.md"}  (TraceLens v0.3 final report; REQUIRED)
+   - {output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
 6. Do not run GEAK, OOB kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
@@ -309,6 +328,7 @@ async def run_tracelens_skill(
     trace_path: Path,
     output_dir: Path,
     tracelens_root: Path,
+    tracelens_internal_root: Path | None,
     platform: str,
     framework: str,
     analysis_mode: str,
@@ -357,6 +377,7 @@ async def run_tracelens_skill(
         trace_path=trace_path,
         output_dir=output_dir,
         tracelens_root=tracelens_root,
+        tracelens_internal_root=tracelens_internal_root,
         platform=platform,
         framework=framework,
         analysis_mode=analysis_mode,
@@ -415,12 +436,12 @@ async def run_tracelens_skill(
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
 
-    # TraceLens v0.3 ships the final report as ``analysis.md`` per
+    # TraceLens ships the final report as ``analysis.md`` per
     # ``TraceLens/Agent/Analysis/utils/templates/analysis_template.md``.
     # We deliberately do NOT accept the v0.2 ``standalone_analysis.md``
     # fallback any longer: in #203 that fallback was found to silently
     # paper over SDK-orchestrator failures by picking up a stale
-    # Hyperloom-fabricated bullet list from a prior run. The v0.3 layout
+    # Hyperloom-fabricated bullet list from a prior run. The layout
     # has been the contract since #148, so any miss here is a real
     # upstream failure that should surface to the operator.
     #
@@ -469,7 +490,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-# --- analysis.md parser (TraceLens v0.3 final-report contract) -------------
+# --- analysis.md parser (TraceLens final-report contract) ------------------
 #
 # The reviewer-preferred exit interface for the TraceLens analysis-orchestrator
 # is the final ``analysis.md`` report (see PR #155 review by @tsrikris). The
@@ -527,7 +548,7 @@ _EFFICIENCY_RE = re.compile(
     r"([\d.]+)\s*%\s*of\s*([\d.]+)\s*([A-Za-z/]+)",
     re.IGNORECASE,
 )
-# TraceLens v0.3 Detailed Analysis blocks include three sibling labels:
+# TraceLens Detailed Analysis blocks include three sibling labels:
 #   **Reasoning for Slowdown:** <prose>
 #   **Resolution:**             <prose>
 #   **Impact estimate:**        Low end ...: <ms> ms savings (<pct>% E2E)
@@ -872,7 +893,7 @@ _IDLE_PCT_TABLE_RE = re.compile(
 def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
     """Extract ``Idle %`` from the Executive Summary table in ``analysis.md``.
 
-    The TraceLens v0.3 ``analysis_template.md`` always emits an Executive
+    The TraceLens ``analysis_template.md`` always emits an Executive
     Summary table whose rows are ``| Metric | Value |``; the row of
     interest looks exactly like ``| Idle % | 0.25% |``. Per
     ``Report_Interfacing.docx`` §1 (Executive Summary schema) and §2
@@ -949,7 +970,7 @@ def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
 
 
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
-    """Parse the TraceLens v0.3 ``analysis.md`` final report into hot-kernels.
+    """Parse the TraceLens ``analysis.md`` final report into hot-kernels.
 
     This is the only place in Hyperloom that reads TraceLens candidate
     data. The returned list follows the priority order required by
@@ -1417,7 +1438,7 @@ def _resolve_source_target(
     # ``_row_to_candidate``) so AST resolution still works after
     # ``_finalize_candidates`` overwrites ``source_file`` with the
     # grep-located absolute path. Fall back to ``source_file`` /
-    # ``kernel_path`` for candidates from non-v0.3 sources (raw trace
+    # ``kernel_path`` for candidates from non-TraceLens sources (raw trace
     # parser, priority_data.json fallback, csv) that never had a
     # launcher-formatted Kernel Path field.
     kernel_path = str(
@@ -1451,12 +1472,63 @@ def _resolve_source_target(
     }
 
 
+_NATIVE_SOURCE_SUFFIXES = (
+    ".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c",
+)
+
+
+def _is_native_source(path: str) -> bool:
+    """True for C/C++/HIP/CUDA source files (#420).
+
+    Native sources have no Python AST to resolve a stable ``def`` line, so
+    TraceLens reports the call-site ``#L<line>`` which differs per call —
+    keying a task_group on that line splits one device kernel across
+    groups. Callers therefore drop the line/function key components for
+    these files.
+    """
+    return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
+
+
+def _normalize_operation_key(operation: str) -> str:
+    """Canonicalize a TraceLens operation name for task-group keying (#420).
+
+    Strips balanced ``<...>`` template-argument lists (nested-safe) so the
+    SAME kernel profiled at different dtypes/shapes — e.g.
+    ``rmsnorm_kernel<bf16>`` vs ``rmsnorm_kernel<fp16>`` — groups together,
+    while DISTINCT kernels (different base names) stay separate (the Q1
+    invariant). Returns the original string when stripping leaves nothing.
+    """
+    s = str(operation).strip()
+    if "<" not in s:
+        return s
+    out: list[str] = []
+    depth = 0
+    for ch in s:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            if depth > 0:
+                depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    normalized = "".join(out).strip()
+    return normalized or s
+
+
 def aggregate_by_source_function(
     candidates: list[dict[str, Any]],
     *,
     source_root: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Group TraceLens candidates by AST-resolved ``(path, line, fn)``.
+    """Group TraceLens candidates into per-kernel task_groups.
+
+    Native (.cu/.hip/.cpp) sources key on ``(source_path, function)`` ONLY:
+    one ``__global__`` instantiated at many dtypes/shapes emits different
+    mangled operation symbols + per-call lines but is ONE kernel, so both
+    are dropped and the instances collapse into one composite job (#420).
+    Python sources key on ``(operation, path, line, function)`` because one
+    caller frame can launch distinct kernels (Q1); ``operation`` is
+    normalized to fold a kernel seen at multiple dtypes.
 
     Returns a list of ``task_group`` dicts, sorted by aggregate kernel
     time (descending). Each group carries:
@@ -1507,7 +1579,31 @@ def aggregate_by_source_function(
     # "rewrite forward" task. Including ``operation`` keeps each kernel
     # identity intact while still collapsing the same kernel called at
     # different shapes (the Q1 case from the user screenshots).
-    groups: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+    #
+    # #420 — collapse the instantiations of ONE device kernel that
+    # TraceLens otherwise over-splits into redundant task_groups (one
+    # wasted GEAK dispatch each). Two tracks:
+    #   * Native (.cu/.hip/.cpp): a single ``__global__`` template
+    #     instantiated at many dtypes/shapes/modes emits DIFFERENT mangled
+    #     ``operation`` symbols (Itanium ABI, e.g.
+    #     ``_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256E...`` — a
+    #     mangled symbol, NOT a ``<...>`` spelling) and a different per-call
+    #     ``#L`` line, yet it is ONE kernel body in ONE translation unit.
+    #     We therefore key on ``(source_path, function)`` ONLY and DROP both
+    #     the mangled operation and the volatile call-site line, so every
+    #     instance collapses into one composite job carrying all member
+    #     (op/mode, shape, quant) rows (issue #420; the GEAK side that
+    #     synthesizes a single-metric harness is AMD-AGI/GEAK#258). For
+    #     native sources ``function`` is the file stem (no C++ AST), so this
+    #     is effectively per-source-file aggregation.
+    #   * Python wrappers: TraceLens's "Kernel Path" reports the calling
+    #     Python frame (e.g. ``.../gpt_oss.py(283): forward``), and ONE
+    #     caller can launch DISTINCT kernels — ``vllm::rocm_unquantized_gemm``
+    #     (GEMM) and ``vllm::rocm_aiter_triton_add_rmsnorm_pad`` (RMSNorm)
+    #     under one ``forward``. So ``operation`` MUST stay in the key (Q1
+    #     invariant), normalized to fold a kernel seen at multiple dtypes.
+    #     ``source_path`` is ``os.path.normpath``-canonicalized either way.
+    groups: dict[tuple, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
@@ -1515,18 +1611,29 @@ def aggregate_by_source_function(
         if target is None:
             continue
         operation = str(cand.get("name") or "").strip()
-        key = (
-            operation,
-            target["source_path"],
-            int(target["definition_line"]),
-            str(target["function_name"]),
-        )
+        src_norm = os.path.normpath(str(target["source_path"]))
+        function_name = str(target["function_name"])
+        if _is_native_source(src_norm):
+            # Drop the mangled operation + per-call line: one __global__
+            # template == one composite job, keyed on its source TU.
+            key: tuple = ("native", src_norm, function_name)
+        else:
+            # Keep the (normalized) operation so distinct kernels sharing
+            # one Python caller frame stay separate (Q1 invariant).
+            norm_op = _normalize_operation_key(operation)
+            key = (
+                "py",
+                norm_op,
+                src_norm,
+                int(target["definition_line"]),
+                function_name,
+            )
         bucket = groups.get(key)
         if bucket is None:
             bucket = {
                 "task_group_id":          "",  # filled below after sorting
                 "operation":              operation,
-                "source_path":            target["source_path"],
+                "source_path":            src_norm,
                 "definition_line":        target["definition_line"],
                 "function_name":          target["function_name"],
                 "ast_resolved":           bool(target.get("ast_resolved")),

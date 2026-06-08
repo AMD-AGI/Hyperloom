@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the dynamic_action sub-agent tool whitelist."""
 
 from __future__ import annotations

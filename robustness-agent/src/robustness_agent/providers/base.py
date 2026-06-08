@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Abstract base for metrics providers."""
 
 from __future__ import annotations

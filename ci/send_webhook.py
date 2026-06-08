@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Send Hyperloom CI summary to Teams / Power Automate webhook.
 
 Power Automate accepts large JSON bodies (256 KB) but the downstream Teams

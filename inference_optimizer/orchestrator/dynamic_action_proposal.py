@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Proposal validator + lifecycle / terminal-state enums.
 
 The runner calls :func:`validate_proposal` on every ``emit_proposal``

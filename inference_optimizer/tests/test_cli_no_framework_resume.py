@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Cover the --no-framework env default + resume write-back semantics
 introduced by the P2.c+d fix."""
 

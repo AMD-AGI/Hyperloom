@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PD-disaggregation router launcher (head pod, multi-node).
 
 When ``inference_optimizer.multi_node restart-server`` runs in PD mode,

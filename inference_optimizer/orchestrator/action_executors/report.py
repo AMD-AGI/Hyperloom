@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``report`` ActionRunner report action.
 
 Reads the session's SharedState + bus event log and produces:
@@ -60,7 +62,7 @@ def _build_summary_dict(
         "stop_reason":      state.stop_reason,
         "baseline_tput":    state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
-        # IR-7 — steward verdict + history. The final report's section
+        # steward verdict + history. The final report's section
         # 9.1 (remaining gaps) reads ``last_remaining_gaps_assessment``
         # rationale verbatim.
         "remaining_gaps_assessment": dict(
@@ -121,6 +123,9 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"- **Model**: {summary['model_name']}  (`{summary['model_path']}`)")
     lines.append(f"- **Stop reason**: `{summary['stop_reason']}`")
+    stop_detail = str(summary.get("stop_detail") or "").strip()
+    if stop_detail:
+        lines.append(f"- **Stop detail**: {stop_detail}")
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
@@ -184,7 +189,7 @@ def _format_md(summary: dict[str, Any]) -> str:
             )
     lines.append("")
 
-    # IR-7 — steward verdict transcript.
+    # steward verdict transcript.
     lines.extend(_format_steward_section(summary))
 
     roofline_cmp = summary.get("roofline_comparison")
@@ -262,7 +267,7 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
         text = Path(analysis_md_path).read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return f"(could not read {analysis_md_path}: {exc})"
-    # Strip N11 base64 image data URLs upfront so the report stays
+    # Strip base64 image data URLs upfront so the report stays
     # compact even if TraceLens regressed on inline images.
     import re
     text = re.sub(
@@ -451,7 +456,7 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     if reason == "no_target_gpu_configured":
         lines.append("## External baseline (not requested)")
     else:
-        lines.append("## External baseline (InferenceX, advisory)")
+        lines.append("## External baseline (competitor target, advisory)")
     lines.append("")
     if reason == "no_target_gpu_configured":
         lines.append(
@@ -555,6 +560,82 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
             session_dir, exc,
         )
         return None
+
+
+def _write_kernel_opt_summary(
+    state: SharedState,
+    session_dir: Path,
+    output_dir: Path,
+) -> Path | None:
+    """Build + atomically write ``reports/kernel_optimization_summary.json``.
+
+    Best-effort: any failure is logged and returns ``None`` so the
+    upstream ``final.json`` write still happens. The summary aggregates
+    :attr:`SharedState.kernel_opt_attempts` with per-kernel kernel-agent
+    ``results/<kid>.json`` so the front-end can answer "why did each
+    kernel-agent attempt not produce an optimized kernel?".
+    """
+    try:
+        from ..kernel_attempt_summary import build_kernel_optimization_summary
+        summary = build_kernel_optimization_summary(state, session_dir)
+        out_path = output_dir / "kernel_optimization_summary.json"
+        with out_path.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
+        return out_path
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "report_executor: failed to write kernel_optimization_summary.json: %s",
+            exc,
+        )
+        return None
+
+
+def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
+    """Build the ``conc_sweep_summary`` pointer block for ``final.json``.
+
+    Returns ``None`` when the conc_sweep action did not write a
+    summary (either disabled, skipped, or report write failed). The
+    pointer is small (report_path + status + summary) so the
+    front-end can decide whether to lazy-load the full
+    ``conc_sweep_summary.json`` payload.
+    """
+    from ...session_paths import reports_dir as _reports_dir
+    json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
+    if not json_path.exists():
+        return None
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning(
+            "report_executor: cannot read conc_sweep_summary.json: %s", exc,
+        )
+        return None
+    try:
+        rel = json_path.relative_to(session_dir).as_posix()
+    except ValueError:
+        rel = json_path.as_posix()
+    return {
+        "report_path":      rel,
+        "status":           data.get("status"),
+        "summary":          data.get("summary", {}),
+        "budget_exhausted": bool(data.get("budget_exhausted", False)),
+        "total_budget_sec": data.get("total_budget_sec"),
+    }
+
+
+def _read_ko_summary_totals(path: Path) -> dict[str, int]:
+    """Re-read the just-written totals so the pointer in final.json
+    doesn't drift from the on-disk file."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        totals = data.get("totals") or {}
+        return {
+            k: int(v)
+            for k, v in totals.items()
+            if isinstance(v, (int, float))
+        }
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
 
 
 def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
@@ -680,6 +761,31 @@ class ReportExecutor:
             highlights,
             external_baseline=external_baseline,
         )
+
+        # Kernel-optimization forensic summary — separate file so the
+        # front-end can poll it independently of final.json. The pointer
+        # is added to final.json for discoverability.
+        ko_summary_path = _write_kernel_opt_summary(state, session_dir, output_dir)
+        if ko_summary_path is not None:
+            try:
+                rel = ko_summary_path.relative_to(session_dir)
+                summary["kernel_optimization_summary"] = {
+                    "report_path": str(rel),
+                    "totals": _read_ko_summary_totals(ko_summary_path),
+                }
+            except ValueError:
+                summary["kernel_optimization_summary"] = {
+                    "report_path": str(ko_summary_path),
+                    "totals": _read_ko_summary_totals(ko_summary_path),
+                }
+
+        # Post-sweep concurrency comparison pointer. The conc_sweep
+        # action (SWEEP-phase, off by default) writes its own JSON +
+        # CSV; we just surface a compact summary in final.json so the
+        # front-end discovers it without having to globbing reports/.
+        cs_pointer = _read_conc_sweep_pointer(session_dir)
+        if cs_pointer is not None:
+            summary["conc_sweep_summary"] = cs_pointer
 
         json_path = output_dir / "final.json"
         md_path = output_dir / "final.md"

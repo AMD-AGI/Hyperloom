@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Delegate idempotency + policy-denial ladder tests."""
 
 from __future__ import annotations
@@ -8,7 +10,7 @@ import pytest
 
 from inference_optimizer.orchestrator.backends import MockBackend, ScriptedPlan
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
 
@@ -206,7 +208,7 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
 import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.phase_state import (
@@ -297,16 +299,20 @@ def test_phase_explore_allowlist_drops_legacy_actions():
     """The EXPLORE allowlist contains only the canonical action set:
     merged grid runner, specialist dispatch, integrate_patch,
     assess_remaining_gaps (IR-7 self-stop wrapper), dynamic_action
-    (dynamic_action.MD P1 supplementary cross-domain channel), the
-    auto-managed analysis kinds (``roofline`` and ``profile``, both
-    Coordinator-enqueued on watermark crossings; mode picked by
-    ``--enable-roofline``), and ``recover``. PolicyGate's
+    (dynamic_action.MD P1 supplementary cross-domain channel),
+    dynamic_specialist dispatch / check / collect (free-form CPU-only
+    specialist wave channel), the auto-managed analysis kinds
+    (``roofline`` and ``profile``, both Coordinator-enqueued on watermark
+    crossings; mode picked by ``--enable-roofline``), and ``recover``.
+    PolicyGate's
     ``analysis_action_not_llm_proposable`` rule keeps the LLM from
     delegating either analysis kind directly.
     """
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
         "explore", "specialist", "integrate_patch",
         "assess_remaining_gaps", "dynamic_action",
+        "dynamic_specialist", "dynamic_specialist_check",
+        "dynamic_specialist_collect",
         "roofline", "profile", "recover",
     })
 

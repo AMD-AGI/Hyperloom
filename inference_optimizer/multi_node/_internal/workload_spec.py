@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pure functions that build the SaFE CreateWorkloadRequest body for a
 session-scoped RayJob that hosts a multi-node inference server.
 

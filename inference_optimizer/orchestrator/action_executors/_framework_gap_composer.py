@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Compose ``gap_description`` + ``keywords`` for the framework_pr arm.
 
 The fa pre-stage hook (legacy, scheduled for removal) took ``--framework-gap``
@@ -177,19 +179,26 @@ def compose_gap(
 ) -> tuple[str, list[str]]:
     """Build ``(gap_description, keywords)`` for the framework_pr arm.
 
-    Args:
-        framework (str): Framework token lifted from :class:`SharedState`
-            (optional; dropped from the gap when empty).
-        gpu_type (str): GPU type token lifted from SharedState (optional).
-        model_class (str): Model-class label lifted from SharedState (optional;
-            mapped to a fa-friendly architectural token).
-        precision (str): Precision sourced from ``manifest.json``'s
-            ``workload.precision``; empty string is fine.
-        profile_kernel_breakdown_path (str | Path | None): Path to the profile
-            executor's kernel breakdown JSON; adds a bottleneck keyword when
-            readable, else silently falls back to a manifest-only gap.
-        tried_refs (Sequence[str]): Refs already tried this session (accepted
-            for forward-compat; currently unused by the composer).
+    Parameters
+    ----------
+    framework, gpu_type, model_class
+        Lifted from :class:`SharedState` (already populated during
+        PRELUDE / baseline). All optional; missing fields are quietly
+        dropped from the composed gap so the executor still has
+        *something* to send to fa.
+    precision
+        Sourced from ``manifest.json``'s ``workload.precision`` because
+        SharedState does not surface it directly. Empty string is fine.
+    profile_kernel_breakdown_path
+        Path to the JSON dumped by the profile executor (sorted-by-time top
+        kernels). When present, the composer adds a bottleneck keyword like
+        ``attention`` / ``moe`` / ``gemm``. Missing / unreadable → silent
+        fallback to manifest-only gap.
+    tried_refs
+        Refs already tried this session (passed through; reserved for future
+        use to bias the gap away from previously-rejected PR categories).
+        Currently unused by the composer, but accepted now so callers stay
+        forward-compatible.
 
     Returns:
         tuple[str, list[str]]: ``(gap_description, keywords)`` where

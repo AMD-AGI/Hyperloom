@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Symptoms derived from cluster-fault snapshots (M2).
 
 The reactor consumes :data:`SourceData.cluster_faults` (a list of

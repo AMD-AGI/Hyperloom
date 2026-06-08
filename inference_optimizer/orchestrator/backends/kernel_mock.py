@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Mock Kernel backend — auto-responds to every REQUEST it sees.
 
 Used in P0 main-path tests so Coordinator + Orchestration can exercise the
@@ -17,7 +19,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..intent_parser import Intent, IntentType
+from ...protocol.intent import Intent, IntentType
 from .base import BackendTurnResult
 
 

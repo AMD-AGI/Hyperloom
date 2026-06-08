@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Map a local model path to the InferenceX upstream's display name.
 
 InferenceX (https://inferencex.semianalysis.com) refers to models by
