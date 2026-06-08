@@ -31,6 +31,7 @@ accordingly (e.g. ``Theoretical Peak — single-stream-reuse ceiling``).
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -124,6 +125,357 @@ def _resolve_dtype_bytes(tag: str | None) -> float:
     if not tag:
         return 2.0
     return _DTYPE_BYTES.get(str(tag).strip().lower(), 2.0)
+
+
+# ---------------------------------------------------------------------------
+# Runtime dtype / quantization resolution.
+# ---------------------------------------------------------------------------
+#: Map a server-arg ``--quantization`` value to weight bytes-per-element.
+#: Only weight-quantization methods are listed; activation/KV dtype is
+#: tracked separately (``runtime_activation_dtype``) and stays >= bf16.
+_QUANT_WEIGHT_BYTES: dict[str, float] = {
+    "fp8": 1.0, "fp8_e4m3": 1.0, "fp8_e5m2": 1.0,
+    "fp4": 0.5, "mxfp4": 0.5, "nvfp4": 0.5,
+    "int8": 1.0, "w8a8_int8": 1.0,
+    "int4": 0.5, "awq": 0.5, "gptq": 0.5,
+}
+
+
+def _parse_server_arg(args: str, flag: str) -> str:
+    """Return the value following ``--flag`` (space or ``=`` form), else ``""``.
+
+    Tolerant of both ``--quantization fp8`` and ``--quantization=fp8``.
+    When the flag appears multiple times, the last value wins so an
+    optimized overlay can override the baseline args.
+    """
+    if not args:
+        return ""
+    toks = str(args).replace("=", " ").split()
+    value = ""
+    for i, tok in enumerate(toks):
+        if tok == flag and i + 1 < len(toks):
+            value = toks[i + 1].strip()
+    return value
+
+
+#: Magpie ``benchmark.envs`` keys that carry the runtime server args, one
+#: per framework. The baseline yaml only ever sets the one matching its
+#: framework, so reading all three and concatenating is safe.
+_RUNTIME_SERVER_ARG_ENV_KEYS = (
+    "EXTRA_SGLANG_ARGS", "EXTRA_VLLM_ARGS", "EXTRA_ATOM_ARGS",
+)
+
+
+@dataclass(frozen=True)
+class RuntimeWorkload:
+    """Runtime workload config used by the roofline ceiling.
+
+    Baseline materialized yaml is the base source of truth; optimized
+    current_best contributes only overlay server args.
+    """
+
+    model_path: str
+    gpu_type: str
+    precision: str
+    framework: str
+    tp: int
+    concurrency: int
+    isl: int
+    osl: int
+    server_args: str
+
+
+def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
+    """Read ``benchmark`` from the materialized baseline yaml."""
+    last_bl = getattr(state, "last_baseline", None) or {}
+    if not isinstance(last_bl, dict):
+        return {}
+    extras = last_bl.get("extras") or {}
+    cfg_path = extras.get("materialized_config") if isinstance(extras, dict) else ""
+    if not cfg_path:
+        return {}
+    try:
+        import yaml as _yaml  # type: ignore[reportMissingModuleSource]
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = _yaml.safe_load(f) or {}
+        benchmark = cfg.get("benchmark") or {}
+        return benchmark if isinstance(benchmark, dict) else {}
+    except Exception:  # noqa: BLE001 — yaml IO / parse is best-effort
+        return {}
+
+
+def _benchmark_envs(benchmark: dict[str, Any]) -> dict[str, Any]:
+    envs = benchmark.get("envs") or {}
+    return envs if isinstance(envs, dict) else {}
+
+
+def _env_int(envs: dict[str, Any], key: str) -> int:
+    raw = envs.get(key)
+    if raw is None:
+        return 0
+    try:
+        parsed = int(raw)
+        return parsed if parsed > 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _server_args_from_envs(envs: dict[str, Any]) -> str:
+    parts = [
+        str(envs[k]).strip()
+        for k in _RUNTIME_SERVER_ARG_ENV_KEYS
+        if isinstance(envs.get(k), str) and envs[k].strip()
+    ]
+    return " ".join(parts)
+
+
+def _read_baseline_yaml_server_args(state: Any) -> str:
+    """Read the runtime server args from the materialized baseline yaml.
+
+    The baseline ``current_best`` snapshot carries no ``extra_server_args``
+    (the flags live only in ``benchmark.envs.EXTRA_*_ARGS`` of the on-disk
+    yaml), so a baseline-only run with ``--quantization fp8`` in the yaml
+    would otherwise be invisible to dtype resolution. Returns ``""`` when
+    the file / fields are unreadable.
+    """
+    return _server_args_from_envs(
+        _benchmark_envs(_read_baseline_yaml_benchmark(state))
+    )
+
+
+def _server_args_env_override(entry: Any) -> str:
+    """Return framework server args pinned via ``extra_envs``."""
+    if not isinstance(entry, dict):
+        return ""
+    envs = entry.get("extra_envs") or {}
+    if isinstance(envs, dict):
+        return _server_args_from_envs(envs)
+    return ""
+
+
+def _server_args_payload(entry: Any) -> str:
+    """Return framework-neutral overlay server args from an entry."""
+    if not isinstance(entry, dict):
+        return ""
+    for key in ("candidate_extra_server_args", "extra_server_args", "extra_args"):
+        val = entry.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+def _server_args_from(entry: Any) -> str:
+    """Extract the final server-args string from one state entry."""
+    return _server_args_env_override(entry) or _server_args_payload(entry)
+
+
+def _achieved_arm_source(state: Any) -> str:
+    """Which arm the roofline ``achieved`` throughput comes from.
+
+    Mirrors the snapshot writer (``current_best.tput > 0`` ⇒ optimized,
+    else baseline) so the ceiling's dtype is resolved from the SAME run
+    its measured throughput came from. Returns ``"current_best"`` or
+    ``"baseline"``.
+    """
+    cb = getattr(state, "current_best", None)
+    if isinstance(cb, dict):
+        t = cb.get("tput")
+        if isinstance(t, (int, float)) and t > 0:
+            return "current_best"
+    return "baseline"
+
+
+def _collect_runtime_server_args(state: Any) -> str:
+    """Server args for the arm the ceiling is actually compared against.
+
+    Selects a SINGLE source aligned with ``achieved`` (see
+    ``_achieved_arm_source``). Baseline materialized yaml is the base
+    config; current_best contributes only overlay server args when the
+    measured throughput comes from the optimized arm.
+    """
+    base_args = (
+        _read_baseline_yaml_server_args(state)
+        or _server_args_from(getattr(state, "last_baseline", None))
+    )
+    if _achieved_arm_source(state) == "current_best":
+        current_best = getattr(state, "current_best", None)
+        override = _server_args_env_override(current_best)
+        if override:
+            return override
+        overlay = _server_args_payload(current_best)
+        return " ".join(p for p in (base_args, overlay) if p)
+    return base_args
+
+
+def _runtime_gpu_type(state: Any, benchmark: dict[str, Any]) -> str:
+    """Resolve real hardware for roofline; runner_type is only script routing."""
+    return str(
+        getattr(state, "gpu_type", "")
+        or os.environ.get("TARGET_GPU_TYPE", "")
+        or benchmark.get("runner_type")
+        or ""
+    )
+
+
+def resolve_runtime_workload(state: Any) -> RuntimeWorkload:
+    """Resolve runtime workload fields from baseline yaml plus overlay args."""
+    benchmark = _read_baseline_yaml_benchmark(state)
+    envs = _benchmark_envs(benchmark)
+
+    def _state_int(name: str) -> int:
+        try:
+            parsed = int(getattr(state, name, 0) or 0)
+            return parsed if parsed > 0 else 0
+        except (TypeError, ValueError):
+            return 0
+
+    return RuntimeWorkload(
+        model_path=str(benchmark.get("model") or getattr(state, "model_path", "") or ""),
+        gpu_type=_runtime_gpu_type(state, benchmark),
+        precision=str(benchmark.get("precision") or getattr(state, "precision", "") or ""),
+        framework=str(benchmark.get("framework") or getattr(state, "framework", "") or ""),
+        tp=_env_int(envs, "TP") or _state_int("tp"),
+        concurrency=_env_int(envs, "CONC") or _state_int("conc") or 1,
+        isl=_env_int(envs, "ISL") or _state_int("isl"),
+        osl=_env_int(envs, "OSL") or _state_int("osl"),
+        server_args=_collect_runtime_server_args(state),
+    )
+
+
+@dataclass(frozen=True)
+class RuntimeDtype:
+    """Resolved runtime precision provenance for the roofline ceiling.
+
+    ``weight_dtype_bytes`` drives the per-token weight IO term; it reflects
+    the dtype weights are *actually read in* at runtime (e.g. fp8 when the
+    server ran ``--quantization fp8``), not the on-disk ``torch_dtype``.
+    ``activation_dtype_bytes`` is the activation/KV dtype and stays >= 2B.
+
+    ``compute_precision_tag`` is the precision key for the compute-peak
+    TFLOPS lookup (``fp8`` / ``bf16`` / ...). It differs from
+    ``weight_dtype_tag`` for pre-quantized checkpoints whose provenance
+    label is ``quantization_config`` but whose GEMM peak is fp8.
+    """
+
+    weight_dtype_bytes: float
+    activation_dtype_bytes: float
+    weight_dtype_tag: str
+    quantization: str
+    source: str
+    compute_precision_tag: str = ""
+
+
+def resolve_runtime_dtype(state: Any, meta: "ModelMeta") -> RuntimeDtype:
+    """Resolve the runtime weight/activation dtype from the actual run.
+
+    Priority (first decisive signal wins):
+      1. ``--quantization`` in the recorded server args (the run truly
+         quantized the weights, e.g. dense fp8 over a float32 checkpoint).
+      2. Model ``quantization_config`` already reflected in ``meta``
+         (on-disk weights are pre-quantized; ``weight_dtype_bytes`` < 2).
+      3. ``--dtype`` server arg (sets weight+activation when not quantized).
+      4. Config ``torch_dtype`` already in ``meta``, floored at bf16.
+
+    Workload ``precision`` is deliberately NOT used to drive the weight dtype:
+    a workload tagged ``precision=fp8`` whose run did NOT pass
+    ``--quantization`` actually serves bf16/fp16 weights (the server only
+    downcasts float32→fp16), so trusting the tag would over-shrink the
+    weight IO term and under-report baseline within%.
+
+    Weight dtype is floored at bf16 (2B) in the fallback: servers downcast
+    float32 checkpoints to fp16, never keep 4B at runtime, and never go
+    sub-bf16 without an explicit quantization signal. Activation dtype
+    follows ``--dtype`` when present, else bf16, also floored at 2B.
+    """
+    runtime = resolve_runtime_workload(state)
+    args = runtime.server_args
+    quant = _parse_server_arg(args, "--quantization").lower()
+    dtype_arg = _parse_server_arg(args, "--dtype").lower()
+
+    act_bytes = max(_resolve_dtype_bytes(dtype_arg) if dtype_arg else 2.0, 2.0)
+
+    if quant and quant in _QUANT_WEIGHT_BYTES:
+        wb = _QUANT_WEIGHT_BYTES[quant]
+        return RuntimeDtype(
+            weight_dtype_bytes=wb,
+            activation_dtype_bytes=act_bytes,
+            weight_dtype_tag=quant,
+            quantization=quant,
+            source="server_args_quantization",
+            compute_precision_tag=_compute_tag_for_bytes(wb),
+        )
+    # On-disk weights already sub-bf16 → pre-quantized checkpoint (MoE fp8).
+    meta_w_bytes = float(getattr(meta, "weight_dtype_bytes", 0.0) or 0.0)
+    if 0 < meta_w_bytes < 2.0:
+        wb = meta_w_bytes
+        return RuntimeDtype(
+            weight_dtype_bytes=wb,
+            activation_dtype_bytes=act_bytes,
+            weight_dtype_tag="quantization_config",
+            quantization="quantization_config",
+            source="quantization_config",
+            compute_precision_tag=_compute_tag_for_bytes(wb),
+        )
+    if dtype_arg:
+        b = _resolve_dtype_bytes(dtype_arg)
+        return RuntimeDtype(
+            weight_dtype_bytes=b,
+            activation_dtype_bytes=act_bytes,
+            weight_dtype_tag=dtype_arg,
+            quantization="none",
+            source="server_args_dtype",
+            compute_precision_tag=_compute_tag_for_bytes(b),
+        )
+    # No weight-quantization signal: serve at the checkpoint dtype, floored
+    # at bf16 (fp32 checkpoints are downcast to fp16 at runtime).
+    cfg_b = min(meta_w_bytes, 2.0) if meta_w_bytes > 0 else 2.0
+    return RuntimeDtype(
+        weight_dtype_bytes=cfg_b,
+        activation_dtype_bytes=act_bytes,
+        weight_dtype_tag="config_torch_dtype",
+        quantization="none",
+        source="config_torch_dtype",
+        compute_precision_tag=_compute_tag_for_bytes(cfg_b),
+    )
+
+
+def _compute_tag_for_bytes(weight_bytes: float) -> str:
+    """Map weight bytes-per-element to a HW_SPECS compute precision key."""
+    if weight_bytes <= 0.5:
+        return "fp4"
+    if weight_bytes <= 1.0:
+        return "fp8"
+    if weight_bytes <= 2.0:
+        return "bf16"
+    return "fp32"
+
+
+def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
+    """Rescale ``meta`` weight bytes to the runtime weight dtype.
+
+    The on-disk ``weight_bytes`` reflects the checkpoint dtype (e.g.
+    float32). When the run reads weights at a different dtype (fp8), the
+    per-token weight IO must scale by ``runtime_bpe / checkpoint_bpe``.
+    No-op (scale == 1.0) when the checkpoint already matches runtime
+    (pre-quantized MoE fp8), so it is safe to call unconditionally.
+    """
+    import dataclasses as _dc
+
+    # Safe degrade for non-dataclass / fake meta (test doubles): return as-is.
+    if not _dc.is_dataclass(meta):
+        return meta
+    cfg_b = float(getattr(meta, "weight_dtype_bytes", 0.0) or 0.0)
+    rt_b = float(rt.weight_dtype_bytes or 0.0)
+    if cfg_b <= 0 or rt_b <= 0 or abs(cfg_b - rt_b) < 1e-9:
+        return _dc.replace(meta, weight_dtype_bytes=rt_b or cfg_b)
+    scale = rt_b / cfg_b
+    return _dc.replace(
+        meta,
+        weight_dtype_bytes=rt_b,
+        weight_bytes=int(meta.weight_bytes * scale),
+        active_weight_bytes=int(meta.active_weight_bytes * scale),
+        expert_weight_bytes=int(meta.expert_weight_bytes * scale),
+    )
 
 
 def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
@@ -617,26 +969,10 @@ def _read_baseline_yaml_conc(state: Any) -> int:
     This is the ground-truth concurrency the Magpie subprocess actually
     ran with. Returns ``0`` when the file / field is unreadable.
     """
-    last_bl = getattr(state, "last_baseline", None) or {}
-    if not isinstance(last_bl, dict):
-        return 0
-    extras = last_bl.get("extras") or {}
-    cfg_path = extras.get("materialized_config") if isinstance(extras, dict) else ""
-    if not cfg_path:
-        return 0
-    try:
-        import yaml as _yaml
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = _yaml.safe_load(f) or {}
-        envs = (cfg.get("benchmark") or {}).get("envs") or {}
-        raw = envs.get("CONC")
-        if raw is not None:
-            parsed = int(raw)
-            if parsed > 0:
-                return parsed
-    except Exception:  # noqa: BLE001 — yaml IO / parse is best-effort
-        pass
-    return 0
+    return _env_int(
+        _benchmark_envs(_read_baseline_yaml_benchmark(state)),
+        "CONC",
+    )
 
 
 def _resolve_effective_concurrency(state: Any) -> int:
@@ -670,10 +1006,10 @@ def _resolve_effective_concurrency(state: Any) -> int:
 
 @dataclass(frozen=True)
 class RooflineBreakdown:
-    """Two-sided decode roofline ceiling.
+    """Decode roofline ceiling plus memory/compute side projections.
 
-    Captures the result of ``T_peak = min(T_mem, T_cmp)`` together with
-    the side that dominated so reports can label which bound is active.
+    For PerfModel, ``peak_tok_per_sec`` is based on summing per-op
+    ``max(t_mem, t_cmp)`` and may differ from ``min(T_mem, T_cmp)``.
 
     ``bound_kind`` values:
       * ``"memory"``  — T_mem ≤ T_cmp (or T_cmp unavailable/degenerate).
@@ -696,7 +1032,7 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 
 
 def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
-    """Compute T_mem + T_cmp + min(T_mem, T_cmp) + bound_kind in one shot.
+    """Compute the primary decode ceiling plus T_mem/T_cmp side projections.
 
     Primary entry point for roofline ceiling. Uses the TraceLens-compatible
     bottom-up PerfModel (``compute_roofline_from_perfmodel``) as the preferred
@@ -710,17 +1046,23 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
     missing-field path so the caller can stamp the result into history
     snapshots unconditionally.
     """
+    runtime = resolve_runtime_workload(state)
     meta = load_model_meta(
-        getattr(state, "model_path", ""),
-        precision_hint=str(getattr(state, "precision", "") or ""),
+        runtime.model_path,
+        precision_hint=runtime.precision,
     )
     if meta is None:
         return _EMPTY_BREAKDOWN
-    gpu_type = str(getattr(state, "gpu_type", "") or "")
-    num_gpus = int(getattr(state, "tp", 0) or 0)
-    concurrency = _resolve_effective_concurrency(state)
+    gpu_type = runtime.gpu_type
+    num_gpus = runtime.tp
+    concurrency = runtime.concurrency
+    # Rescale weights to the dtype the run actually read (e.g. fp8 over a
+    # float32 checkpoint) so the ceiling reflects runtime, not on-disk size.
+    rt = resolve_runtime_dtype(state, meta)
+    meta = apply_runtime_dtype(meta, rt)
     precision_tag = (
-        str(getattr(state, "precision", "") or "")
+        rt.compute_precision_tag
+        or runtime.precision
         or "bf16"  # mirror _resolve_dtype_bytes default
     )
     mem = compute_theoretical_peak_output_tok_per_sec(
@@ -735,8 +1077,8 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
         num_kv_heads=meta.num_kv_heads,
         head_dim=meta.head_dim,
         kv_dtype_bytes=_activation_kv_dtype_bytes(meta),
-        isl=int(getattr(state, "isl", 0) or 0),
-        osl=int(getattr(state, "osl", 0) or 0),
+        isl=runtime.isl,
+        osl=runtime.osl,
         concurrency=concurrency,
     )
     cmp = compute_compute_bound_ceiling_tok_per_sec(
@@ -769,8 +1111,8 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
             meta=meta,
             gpu_type=gpu_type,
             concurrency=concurrency,
-            isl=int(getattr(state, "isl", 0) or 0),
-            osl=int(getattr(state, "osl", 0) or 0),
+            isl=runtime.isl,
+            osl=runtime.osl,
             num_gpus=num_gpus,
             precision_tag=precision_tag,
         )
@@ -1193,21 +1535,26 @@ def compute_roofline_breakdown_from_state_v2(state: Any) -> "tuple[RooflineBreak
     ``breakdown.peak_tok_per_sec`` for supported configs.
     """
     legacy = compute_roofline_breakdown_from_state(state)
+    runtime = resolve_runtime_workload(state)
     meta = load_model_meta(
-        getattr(state, "model_path", ""),
-        precision_hint=str(getattr(state, "precision", "") or ""),
+        runtime.model_path,
+        precision_hint=runtime.precision,
     )
     pm_bd: "PerfModelBreakdown | None" = None
     if meta is not None:
         try:
+            rt = resolve_runtime_dtype(state, meta)
+            meta = apply_runtime_dtype(meta, rt)
             pm_bd = compute_roofline_from_perfmodel(
                 meta=meta,
-                gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                concurrency=_resolve_effective_concurrency(state),
-                isl=int(getattr(state, "isl", 0) or 0),
-                osl=int(getattr(state, "osl", 0) or 0),
-                num_gpus=int(getattr(state, "tp", 0) or 0),
-                precision_tag=str(getattr(state, "precision", "") or "bf16") or "bf16",
+                gpu_type=runtime.gpu_type,
+                concurrency=runtime.concurrency,
+                isl=runtime.isl,
+                osl=runtime.osl,
+                num_gpus=runtime.tp,
+                precision_tag=rt.compute_precision_tag
+                or runtime.precision
+                or "bf16",
             )
         except Exception:  # noqa: BLE001 — best-effort, never raise
             pm_bd = None
