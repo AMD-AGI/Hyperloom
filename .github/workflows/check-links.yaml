@@ -1,0 +1,43 @@
+name: Check Markdown links
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+      - "release/**"
+  push:
+    branches:
+      - main
+      - dev
+      - "release/**"
+      - "docs/check-links-*"
+      - "docs/fix-links-*"
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  check-modified:
+    name: Check links in modified files
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: tcort/github-action-markdown-link-check@v1
+        with:
+          use-verbose-mode: 'yes'
+          check-modified-files-only: 'yes'
+          base-branch: ${{ github.base_ref }}
+          config-file: .github/mlc_config.json
+
+  check-all:
+    name: Check all links
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: tcort/github-action-markdown-link-check@v1
+        with:
+          use-verbose-mode: 'yes'
+          config-file: .github/mlc_config.json
