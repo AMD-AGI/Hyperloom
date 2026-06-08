@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Source this at the start of every shell call when your shell does
 # not persist `export`s between invocations. Idempotent.
 
@@ -7,7 +9,13 @@ export REPO_ROOT
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+# TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens to
+# $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens and pin it to a fixed SHA.
+# Only export it to point at a pre-existing checkout you maintain as an
+# explicit operator override — this skips both the clone and the SHA pin.
+# export TRACELENS_ROOT=/path/to/your/TraceLens
+# Optional internal extension; export only to enable it (open-source-only if unset):
+# export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 export OOB_SRC="${OOB_SRC:-/wekafs/hyperloom/OOB}"
 # INFERENCEX_PATH and MAGPIE_DIR default under $USER_DATA_PATH/runtime/
 # (Magpie clone lives there now); override only if you share Magpie /

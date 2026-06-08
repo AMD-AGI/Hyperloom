@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """CLI entry
 
 Usage::
@@ -38,6 +40,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -48,33 +51,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .orchestrator.action_executors import (
-    TargetAnalysisExecutor,
-    baseline_executor,
-    explore_executor,
-    recover_executor,
-    report_executor,
-    session_breakdown_executor,
-    sweep_executor,
+from .cli_executors import (  # noqa: F401 - re-exported for callers/tests
+    _NOOP_KINDS_KERNEL_ONLY,
+    _REAL_EXECUTORS_FULL,
+    _build_dynamic_action_executor,
+    _build_specialist_executor,
+    _noop_prep,
+    _register_executors,
 )
-from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
-from .orchestrator.action_executors.framework_pr import FrameworkPrExecutor
-from .orchestrator.action_executors.recover import recover_executor
-from .orchestrator.action_executors.profile import profile_executor
-from .orchestrator.action_executors.roofline import make_roofline_executor
-from .orchestrator.backends import (
-    ClaudeBackend,
-    CodexBackend,
-    CriticAgentBackend,
-    MockCriticBackend,
-    MockRobustnessBackend,
-    RobustnessAgentBackend,
+from .cli_kb import (  # noqa: F401 - re-exported for callers/tests
+    _bootstrap_cortex_kb,
+    _bootstrap_knowledge_plane,
+    _build_recipe_kb_dispatcher,
+    _resolve_local_kb_root,
 )
+from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
+    _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
+    _build_backends,
+    _build_proposal_scorer,
+    _build_robustness_options,
+    _robustness_server_configured,
+)
+from .orchestrator.backends import ClaudeBackend
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
-from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
-from .orchestrator.cortex_t0 import run_t0_anchor
+from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS
 from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
@@ -386,8 +388,8 @@ def _validate_critic_agent_runtime(root: Path) -> None:
             f"  cwd={root}\n"
             f"  cmd={' '.join(cmd)}\n"
             f"Either fix CRITIC_AGENT_ROOT, install critic-agent at "
-            f"$REPO_ROOT/critic-agent, or pass --critic-mock / "
-            f"--critic-codex-bare to bypass critic-agent.",
+            f"$REPO_ROOT/critic-agent, or pass --critic-mock to bypass "
+            f"critic-agent.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -481,7 +483,7 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """IR-8: validate atom-specific CLI knob compatibility.
+    """Validate atom-specific CLI knob compatibility.
 
     The function's only responsibility is the multi-node fail-fast
     guard. The forward-looking alias :data:`_assert_atom_single_node`
@@ -547,6 +549,34 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
 # function — both names point at the same callable object so
 # monkeypatching either still works.
 _assert_atom_single_node = _apply_atom_auto_tighten
+
+
+_DEPTH_GATE_THRESHOLD_KEYS = frozenset({
+    "scout_runs_min", "prs_fetched_min", "pr_diffs_read_min",
+    "nvidia_refs_min", "code_patches_min", "reverts_to_evaluate",
+})
+
+
+def _parse_depth_gate_thresholds(raw: str) -> dict[str, int]:
+    """Parse ``--depth-gate-thresholds`` (``key=value,...``) into a dict.
+
+    Unknown keys and non-integer values are skipped silently so a typo
+    degrades to the defaults rather than aborting startup.
+    """
+    out: dict[str, int] = {}
+    for token in str(raw or "").split(","):
+        token = token.strip()
+        if not token or "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        key = key.strip()
+        if key not in _DEPTH_GATE_THRESHOLD_KEYS:
+            continue
+        try:
+            out[key] = int(value.strip())
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _resolve_gpu_type(
@@ -803,179 +833,6 @@ def _autodetect_gpu_type() -> str | None:
         return None
 
 
-async def _noop_prep(ctx) -> dict:
-    """No-op executor stub for kernel-owned action kinds.
-
-    Registered for action kinds whose real work happens inside the kernel
-    agent's request handlers (via ``emit_intent``); this process only needs a
-    well-formed success payload so ``SubAgentRunner`` does not raise
-    ``no_executor`` on the dispatched task.
-
-    Args:
-        ctx: The runner context; ``ctx.task.kind`` names the dispatched action.
-
-    Returns:
-        dict: A ``succeeded`` result echoing the task kind with a ``noop-stub`` note.
-    """
-    return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
-
-
-def _build_backends(
-    *,
-    claude_model: str,
-    codex_model: str,
-    kernel_codex: bool,
-    critic_choice: str,
-    session_dir: Path,
-    critic_agent_root: Path | None = None,
-    critic_kb_mode: str = "inmemory",
-    robustness_choice: str = "mock",
-    robustness_agent_root: Path | None = None,
-    robustness_options: dict[str, Any] | None = None,
-    no_kernel: bool = False,
-) -> dict[str, Any]:
-    """Construct all per-role backends.
-
-    ``critic_choice`` ∈ {``"mock"``, ``"agent"``, ``"codex_bare"``}:
-
-    * ``mock`` — always-approve adapter (smoke / offline tests).
-    * ``agent`` — :class:`CriticAgentBackend` driving the ``critic-agent``
-      skill runtime. Adds KB priors / writes, session memory, and
-      ``review_constraints``-gated verdicts. Requires ``critic_agent_root``.
-    * ``codex_bare`` — legacy direct :class:`CodexBackend` chat-completion
-      path. Kept available for debugging the LLM layer in isolation.
-
-    ``robustness_choice`` ∈ {``"mock"``, ``"agent"``}:
-
-    * ``mock`` — heartbeat-only :class:`MockRobustnessBackend` (default;
-      keeps optimizer self-contained).
-    * ``agent`` — :class:`RobustnessAgentBackend` driving
-      ``python -m robustness_agent.runtime.cli`` in a subprocess. Mirrors
-      the critic-agent transport. Requires ``robustness_agent_root``.
-
-    Args:
-        claude_model (str): Model id for the Claude-backed roles.
-        codex_model (str): Model id for the Codex-backed roles.
-        kernel_codex (bool): When True, use a Codex backend for the kernel role.
-        critic_choice (str): One of ``"mock"`` / ``"agent"`` / ``"codex_bare"``.
-        session_dir (Path): Session root passed to agent backends.
-        critic_agent_root (Path | None): Critic-agent skill root; required when
-            ``critic_choice == "agent"``.
-        critic_kb_mode (str): KB mode for the critic-agent backend. Defaults to
-            ``"inmemory"``.
-        robustness_choice (str): One of ``"mock"`` / ``"agent"``. Defaults to
-            ``"mock"``.
-        robustness_agent_root (Path | None): Robustness-agent skill root;
-            required when ``robustness_choice == "agent"``.
-        robustness_options (dict[str, Any] | None): Optional options forwarded
-            to the robustness-agent backend.
-        no_kernel (bool): When True, skip constructing a kernel backend.
-
-    Returns:
-        dict[str, Any]: A mapping of role name (``orchestration`` / ``critic`` /
-        ``robustness`` and optionally ``kernel``) to its backend instance.
-
-    Raises:
-        ValueError: If ``critic_choice`` / ``robustness_choice`` is invalid or a
-            required agent root is missing for the selected mode.
-    """
-    if critic_choice not in ("mock", "agent", "codex_bare"):
-        raise ValueError(
-            f"_build_backends: critic_choice={critic_choice!r} not in "
-            "{'mock','agent','codex_bare'}"
-        )
-
-    if critic_choice == "mock":
-        critic_backend: Any = MockCriticBackend()
-    elif critic_choice == "codex_bare":
-        critic_backend = CodexBackend(model=codex_model)
-    else:  # "agent"
-        if critic_agent_root is None:
-            raise ValueError(
-                "_build_backends: critic_choice='agent' requires critic_agent_root"
-            )
-        # N38 (May 2026) — feed the registry-derived per-action
-        # verdict policy so the critic-agent runtime sees
-        # ``review_constraints.action_verdict_policy[<action_name>]``
-        # and approves exploration / archival actions without
-        # demanding the before/after evidence they themselves produce.
-        # Replaces the prompt-hardcoded carve-out lists N33/N35/N37
-        # had to patch one action at a time.
-        try:
-            from inference_optimizer.orchestrator.action_registry import (
-                ActionRegistry,
-            )
-            _reg = ActionRegistry().load()
-            _policy = {a.name: a.verdict_class for a in _reg.all()}
-        except Exception:  # noqa: BLE001 — degrade to empty policy
-            _policy = {}
-        critic_backend = CriticAgentBackend(
-            critic_agent_root=critic_agent_root,
-            session_dir=session_dir,
-            codex_model=codex_model,
-            kb_mode=critic_kb_mode,
-            action_verdict_policy=_policy,
-        )
-
-    if robustness_choice not in ("mock", "agent"):
-        raise ValueError(
-            f"_build_backends: robustness_choice={robustness_choice!r} not in "
-            "{'mock','agent'}"
-        )
-    if robustness_choice == "mock":
-        robustness_backend: Any = MockRobustnessBackend()
-    else:  # "agent"
-        if robustness_agent_root is None:
-            raise ValueError(
-                "_build_backends: robustness_choice='agent' requires "
-                "robustness_agent_root"
-            )
-        robustness_backend = RobustnessAgentBackend(
-            robustness_agent_root=robustness_agent_root,
-            session_dir=session_dir,
-            options=robustness_options,
-        )
-
-    backends: dict[str, Any] = {
-        "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
-        "critic":        critic_backend,
-        "robustness":    robustness_backend,
-    }
-    if not no_kernel:
-        if kernel_codex:
-            backends["kernel"] = CodexBackend(model=codex_model)
-        else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
-    return backends
-
-
-def _build_proposal_scorer(
-    args: argparse.Namespace,
-) -> ProposalScorer | None:
-    """Construct the advisory specialist-proposal scorer, or ``None``.
-
-    Returns ``None`` when ``--no-proposal-scoring`` is set or the
-    resolved model list is empty. Models default to
-    :data:`DEFAULT_SCORER_MODELS` (``claude-opus-4-8,gpt-5.5,
-    dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview``).
-    Adding a
-    model = appending its gateway slug to ``--proposal-scorer-models``.
-    The scorer is purely advisory and never gates anything.
-    """
-    if getattr(args, "no_proposal_scoring", False):
-        return None
-    raw = getattr(args, "proposal_scorer_models", None)
-    if raw is None:
-        models = tuple(DEFAULT_SCORER_MODELS)
-    else:
-        models = tuple(
-            m for m in (s.strip() for s in str(raw).split(",")) if m
-        )
-    if not models:
-        return None
-    return ProposalScorer(models=models)
-
-
 def _resume_safe_flag(
     args: argparse.Namespace,
     arg_name: str,
@@ -1138,46 +995,569 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
     return data
 
 
+def _load_model_config_dict(model_path: str) -> dict | None:
+    """Best-effort parse of ``<model_path>/config.json`` into a dict.
+
+    Shared soft-degrade reader used by every config.json-derived preflight /
+    KB-tag loader (never blocks launch): returns the parsed mapping, or
+    ``None`` when ``config.json`` is missing / unreadable / invalid-JSON /
+    not a JSON object. Callers decide how to treat ``None`` (the KB-tag loader
+    degrades to ``{}``; the unsupported-model gate degrades to "do not block").
+    """
+    if not model_path:
+        return None
+    cfg_path = Path(model_path) / "config.json"
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logging.warning("model_config_unreadable: %s (%s)", cfg_path, exc)
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logging.warning("model_config_invalid_json: %s (%s)", cfg_path, exc)
+        return None
+    if not isinstance(data, dict):
+        logging.warning(
+            "model_config_not_a_dict: %s (got %s)", cfg_path, type(data).__name__,
+        )
+        return None
+    return data
+
+
+def _config_architectures(config: dict) -> list[str]:
+    """Normalise ``config["architectures"]`` to a list of non-empty strings.
+
+    Tolerates a scalar ``architectures`` by wrapping it in a single-item list;
+    returns ``[]`` when the key is absent or yields no non-empty entries.
+    """
+    arches_raw = config.get("architectures")
+    if isinstance(arches_raw, list):
+        return [str(a).strip() for a in arches_raw if str(a or "").strip()]
+    if isinstance(arches_raw, str) and arches_raw.strip():
+        return [arches_raw.strip()]
+    return []
+
+
+def _load_model_config_tags(model_path: str) -> dict:
+    """Best-effort loader for KB architecture tags from ``config.json``.
+
+    Reads ``<model_path>/config.json`` (the HF weights dir) and lifts the
+    two architecture-identity fields the recipe-snapshot KB stamps as
+    ``extras`` tags:
+
+      * ``architectures`` — a list like ``["LlamaForCausalLM"]``.
+      * ``model_type``    — a string like ``"llama"``.
+
+    Both are shared by a base model and the models fine-tuned from it, so
+    stamping them lets a fine-tuned recipe be recognised as carrying the
+    base model's architecture identity.
+
+    Soft-degrade contract (never blocks launch): a missing / unreadable /
+    invalid-JSON / non-dict ``config.json`` returns ``{}``. Individual
+    fields are normalised (``architectures`` -> list of non-empty strings;
+    ``model_type`` -> stripped string) and a key is omitted entirely when
+    its normalised value is empty, so callers can ``.get(key, default)``
+    without re-checking for ``[]`` / ``""``.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return {}
+    out: dict = {}
+    arches = _config_architectures(data)
+    if arches:
+        out["architectures"] = arches
+    model_type = str(data.get("model_type") or "").strip()
+    if model_type:
+        out["model_type"] = model_type
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Unsupported-model (multimodal / vision) preflight gate
+# ---------------------------------------------------------------------------
+# Hyperloom only supports text-generation (decoder-only causal LM) models.
+# Multimodal / vision models occasionally leak past the upstream submission
+# filter and only fail ~5 minutes into the run with a cryptic vLLM
+# ``OSError: Can't load image processor ...``, burning a full session slot.
+# The constants below drive a fail-fast classifier that runs before the
+# (expensive) baseline server boot. It first rejects explicit multimodal /
+# vision signals, then uses a WHITELIST approach: only models whose
+# architecture matches known text-generation patterns are allowed.
+
+# Supported text-generation architecture markers. Only decoder-only causal LM
+# models are supported. If a model's architecture does NOT match any of these
+# patterns, it is rejected as unsupported. ``ForCausalLM`` is treated as an
+# infix because some text-generation variants append a suffix
+# (for example ``DeepseekV3ForCausalLMNextN`` / ``LlamaForCausalLMEagle3``).
+_SUPPORTED_ARCH_MARKERS = (
+    "ForCausalLM",
+    "LMHeadModel",
+    "ForCausalLMWithValueHead",
+)
+
+# Explicit allowlist of supported model_type values (fallback when architectures
+# field is empty/missing). Models whose model_type is in this set pass through.
+_SUPPORTED_MODEL_TYPES = frozenset({
+    "llama", "mistral", "mixtral", "qwen2", "qwen2_moe", "qwen3", "qwen3_moe",
+    "gemma", "gemma2", "phi", "phi3", "phimoe",
+    "starcoder2", "codellama", "deepseek_v2", "deepseek_v3",
+    "falcon", "gpt_neox", "gpt2", "opt", "bloom",
+    "internlm", "internlm2", "yi", "baichuan",
+    "chatglm", "glm", "glm4",
+    "command-r", "cohere", "cohere2", "dbrx",
+    "mpt", "olmo", "olmo2", "jamba", "arctic",
+    "exaone", "granite", "granitemoeshared",
+    "stablelm", "persimmon",
+})
+
+# Explicit multimodal / vision signals that must win even if an architecture
+# also happens to end with ``ForCausalLM`` (for example Phi3VForCausalLM).
+_UNSUPPORTED_MODEL_TYPES = frozenset({
+    "gemma3",
+    "mllama",
+    "llava",
+    "llava_next",
+    "qwen2_vl",
+    "qwen2_5_vl",
+    "idefics",
+    "idefics2",
+    "idefics3",
+    "paligemma",
+    "pixtral",
+    "internvl_chat",
+    "phi3_v",
+})
+
+_UNSUPPORTED_ARCHITECTURES = frozenset({
+    "Gemma3ForConditionalGeneration",
+    "InternVLChatModel",
+    "Phi3VForCausalLM",
+    "LlavaForConditionalGeneration",
+    "LlavaNextForConditionalGeneration",
+    "MllamaForConditionalGeneration",
+    "PaliGemmaForConditionalGeneration",
+    "Qwen2VLForConditionalGeneration",
+    "Qwen2_5_VLForConditionalGeneration",
+    "Idefics2ForConditionalGeneration",
+    "Idefics3ForConditionalGeneration",
+    "PixtralForConditionalGeneration",
+})
+
+_UNSUPPORTED_CONFIG_KEYS = (
+    "vision_config",
+    "image_token_id",
+    "image_token_index",
+    "mm_config",
+    "multi_modal_config",
+    "vision_tower",
+    "vision_tower_cfg",
+    "image_processor_type",
+    "projector_config",
+    "mm_projector_type",
+)
+
+
+def _arch_is_supported_text_generation(arch: str) -> bool:
+    """True when an architecture class name denotes a supported text-generation
+    (decoder-only causal LM) model."""
+    a = (arch or "").strip()
+    if not a:
+        return False
+    return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
+
+
+def _detect_unsupported_model(model_path: str) -> dict | None:
+    """Best-effort classification of a model as unsupported (non-text-generation).
+
+    Explicit multimodal / vision signals are rejected first. Otherwise, uses a
+    WHITELIST approach: a model is supported if its architecture ends with a
+    known text-generation suffix (ForCausalLM, LMHeadModel, etc.) OR its
+    model_type is in the explicit allowlist. Everything else is rejected.
+
+    Returns a dict ``{"architecture", "model_type", "signal"}`` describing why
+    the model is unsupported, else ``None`` (supported). ``None`` also covers the
+    best-effort case where ``config.json`` is missing / unreadable / invalid:
+    we deliberately do NOT hard-block on a config we cannot read (the upstream
+    submission filter and the downstream model loader still apply).
+    """
+    config = _load_model_config_dict(model_path)
+    if config is None:
+        return None
+    architectures = _config_architectures(config)
+    model_type = str(config.get("model_type") or "").strip()
+    model_type_l = model_type.lower()
+
+    for arch in architectures:
+        if arch in _UNSUPPORTED_ARCHITECTURES:
+            return {
+                "architecture": arch,
+                "model_type": model_type,
+                "signal": f"unsupported architecture '{arch}'",
+            }
+    if model_type_l in _UNSUPPORTED_MODEL_TYPES:
+        return {
+            "architecture": architectures[0] if architectures else "",
+            "model_type": model_type,
+            "signal": f"unsupported model_type '{model_type}'",
+        }
+    for key in _UNSUPPORTED_CONFIG_KEYS:
+        if key in config:
+            return {
+                "architecture": architectures[0] if architectures else "",
+                "model_type": model_type,
+                "signal": f"unsupported multimodal config key '{key}'",
+            }
+
+    if any(_arch_is_supported_text_generation(a) for a in architectures):
+        return None
+
+    if model_type_l in _SUPPORTED_MODEL_TYPES:
+        return None
+
+    if architectures:
+        return {
+            "architecture": architectures[0],
+            "model_type": model_type,
+            "signal": (
+                f"architecture '{architectures[0]}' does not match any "
+                f"supported text-generation pattern "
+                f"({', '.join(_SUPPORTED_ARCH_MARKERS)})"
+            ),
+        }
+
+    if model_type:
+        return {
+            "architecture": "",
+            "model_type": model_type,
+            "signal": (
+                f"model_type '{model_type}' is not in the supported "
+                f"text-generation allowlist"
+            ),
+        }
+
+    return {
+        "architecture": "",
+        "model_type": "",
+        "signal": "config.json has neither architectures nor model_type",
+    }
+
+
+# config.json keys that carry the model's max sequence length, priority order.
+# Most modern decoders use max_position_embeddings; a few legacy/alt configs
+# use these aliases.
+_MAXPOS_CONFIG_KEYS = (
+    "max_position_embeddings",
+    "n_positions",
+    "max_sequence_length",
+    "seq_length",
+    "max_seq_len",
+)
+
+# Safety headroom (tokens) the model context window must have ABOVE the nominal
+# ISL+OSL workload: covers the BOS token, chat-template tokens, and random-
+# dataset length jitter (a nominal 2048 workload has been observed to emit
+# requests up to ~2568). Operator-tunable via env.
+_CONTEXT_HEADROOM_ENV = "HYPERLOOM_CONTEXT_HEADROOM_TOKENS"
+_CONTEXT_HEADROOM_DEFAULT = 512
+
+# Extra context budget (tokens) layered on top of ISL+OSL when sizing the
+# server-facing ``MAX_MODEL_LEN`` (KV-cache ceiling). Larger than the preflight
+# headroom because it also absorbs decode-side slack, but ALWAYS clamped to the
+# model's native window by :func:`_resolve_max_model_len` so it can never stretch
+# the context. sglang ignores MAX_MODEL_LEN (its ``context_length`` stays None),
+# but the vllm benchmark wires it into ``--max-model-len``, so an unclamped value
+# above the native window would crash that server.
+_MAX_MODEL_LEN_HEADROOM = 4096
+
+
+def _load_model_max_position_embeddings(model_path: str) -> int | None:
+    """Best-effort read of the model's max sequence length from config.json.
+
+    Returns the first positive integer among the known max-length keys (also
+    checking a nested ``text_config`` for multimodal configs), or None when
+    config.json is missing/unreadable/has none of them — callers then skip the
+    context preflight rather than guessing.
+    """
+    if not model_path:
+        return None
+    cfg_path = Path(model_path) / "config.json"
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg in candidates:
+        for key in _MAXPOS_CONFIG_KEYS:
+            val = cfg.get(key)
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, int) and val > 0:
+                return val
+    return None
+
+
+def _model_has_dual_chunk_attention(model_path: str) -> bool:
+    """Best-effort detect a ``dual_chunk_attention_config`` in config.json.
+
+    Qwen 1M long-context models ship this block; sglang then rejects the
+    default aiter attention backend and demands ``dual_chunk_flash_attn``.
+    Checks the top level and a nested ``text_config``. Soft-degrades to
+    False on any missing / unreadable / invalid config.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    if data.get("dual_chunk_attention_config"):
+        return True
+    nested = data.get("text_config")
+    return isinstance(nested, dict) and bool(
+        nested.get("dual_chunk_attention_config")
+    )
+
+
+def _context_headroom_tokens() -> int:
+    """Resolve the context headroom (tokens); env override, else default."""
+    raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
+    if not raw:
+        return _CONTEXT_HEADROOM_DEFAULT
+    try:
+        val = int(raw)
+    except ValueError:
+        return _CONTEXT_HEADROOM_DEFAULT
+    return val if val >= 0 else _CONTEXT_HEADROOM_DEFAULT
+
+
+def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
+    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to the native window.
+
+    Never returns a value above the model's ``max_position_embeddings``: by
+    policy we do not stretch the context (RoPE extrapolation / learned-absolute
+    position breakage), and the vllm benchmark wires this value straight into
+    ``--max-model-len`` — an unclamped ISL+OSL+4096 above a small native window
+    would crash the server. The clamp keeps it aligned with the preflight gate
+    (which already guarantees ``maxpos >= ISL+OSL+headroom``), so the resolved
+    value always lands in ``[ISL+OSL, max_position_embeddings]``. When the native
+    window is unknown the headroom default stands (prior behaviour).
+
+    sglang ignores ``MAX_MODEL_LEN`` (its ``context_length`` stays None), but the
+    value is still mirrored into the benchmark YAML, so it must not advertise a
+    length above the model's real window there either.
+    """
+    desired = int(isl) + int(osl) + _MAX_MODEL_LEN_HEADROOM
+    maxpos = _load_model_max_position_embeddings(model_path)
+    if maxpos:
+        return min(desired, maxpos)
+    return desired
+
+
+def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
+    """Fail fast when the model context window cannot hold ISL+OSL+headroom.
+
+    We deliberately do NOT pass ``--context-length`` to stretch a small window:
+    that forces RoPE extrapolation (quality loss) and can CUDA-error on models
+    with learned absolute position embeddings. Instead, when
+    ``max_position_embeddings < ISL + OSL + headroom`` we persist a clear stop
+    reason (state.json + reports/final.{json,md}) and signal the caller to exit
+    non-zero — far better than booting a server that 400s every request and
+    dies on the scheduler watchdog (the observed baseline_failed mode for
+    stale 2048-ctx checkpoints).
+
+    Returns True when the workload does NOT fit (caller should exit); False
+    when it fits or the model's max length is unknown (gate skipped).
+    """
+    isl = int(getattr(args, "isl", 0) or 0)
+    osl = int(getattr(args, "osl", 0) or 0)
+    if isl <= 0 or osl <= 0:
+        return False
+    maxpos = _load_model_max_position_embeddings(str(getattr(args, "model", "") or ""))
+    if not maxpos:
+        return False
+    headroom = _context_headroom_tokens()
+    required = isl + osl + headroom
+    if maxpos >= required:
+        return False
+
+    reason = (
+        f"model max_position_embeddings={maxpos} < required {required} "
+        f"(ISL={isl} + OSL={osl} + headroom={headroom}). The workload exceeds "
+        f"the model context window; every request would 400. Refusing to run "
+        f"(no --context-length override by policy). Lower ISL/OSL for this "
+        f"model, or lower {_CONTEXT_HEADROOM_ENV} if the headroom is too "
+        f"conservative (it is added to `required`, so raising it makes "
+        f"admission stricter, not looser)."
+    )
+    # Persist the stop reason so CI / the robustness monitor read it from
+    # state.json + reports/final.json instead of grepping the run log.
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        # Use the validated writer so the vocab-closed invariant (Inv-8.3)
+        # holds: the term is registered in STOP_REASON_VOCAB, so this neither
+        # maps to 'unknown' (lenient) nor raises (strict), and the robustness
+        # monitor's vocab-based terminal check recognises the fail-fast.
+        state.set_stop_reason("model_context_window_too_small")
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist context-window stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    # Delivery-artifact parity: cli's normal exit writes session_breakdown.json
+    # in coordinator.run()'s finally, but this fail-fast sys.exit(2)s before that
+    # try/finally is ever entered. Emit it here too (best-effort) so CI's
+    # delivery contract sees a clean, documented skip — not "Missing artifacts".
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on context "
+            f"fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
+
+
+def _preflight_unsupported_model_arch(
+    args: argparse.Namespace, session_dir: Path,
+) -> bool:
+    """Fail fast when the model is an unsupported multimodal / vision model.
+
+    Hyperloom only supports text-generation (decoder-only causal LM) models.
+    A multimodal model (e.g. ``Gemma3ForConditionalGeneration``, ``qwen2_vl``)
+    that slips past the upstream submission filter would otherwise boot the
+    baseline server and only die ~5 minutes in with a cryptic vLLM
+    ``OSError: Can't load image processor ...``, wasting a full session slot.
+    We classify the model from its ``config.json`` and, when it is positively
+    identified as multimodal/vision, persist a clear stop reason
+    (state.json + reports/final.{json,md} + session_breakdown.json) and signal
+    the caller to exit non-zero — before any expensive bring-up.
+
+    Best-effort: a missing / unreadable / invalid ``config.json`` is NOT a
+    hard block (the upstream filter + downstream loader still apply); only a
+    positively-identified multimodal model is rejected.
+
+    Returns True when the model is unsupported (caller should exit); False
+    when it is a supported text model or cannot be classified (gate skipped).
+    """
+    model = str(getattr(args, "model", "") or "")
+    hit = _detect_unsupported_model(model)
+    if hit is None:
+        return False
+
+    name = Path(model).name or model
+    arch = hit.get("architecture") or "<unknown>"
+    mt = hit.get("model_type") or "<unknown>"
+    reason = (
+        f"Unsupported model '{name}': architecture '{arch}' (model_type "
+        f"'{mt}') is not a supported text-generation model. Hyperloom only "
+        f"supports decoder-only causal LM models (architectures containing "
+        f"ForCausalLM or LMHeadModel). Rejected because: "
+        f"{hit.get('signal', 'unknown architecture')}. Submit a "
+        f"text-generation checkpoint instead."
+    )
+    # Persist the stop reason so CI / the robustness monitor read it from
+    # state.json + reports/final.json instead of grepping the run log.
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        # Validated writer keeps the vocab-closed invariant: the term is
+        # registered in STOP_REASON_VOCAB, so this neither maps to 'unknown'
+        # (lenient) nor raises (strict), and the robustness monitor's
+        # vocab-based terminal check recognises the fail-fast.
+        state.set_stop_reason("unsupported_model_arch")
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist unsupported-model stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    # Delivery-artifact parity: cli's normal exit writes session_breakdown.json
+    # in coordinator.run()'s finally, but this fail-fast sys.exit(2)s before
+    # that try/finally is ever entered. Emit it here too (best-effort) so CI's
+    # delivery contract sees a clean, documented skip — not "Missing artifacts".
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on unsupported-"
+            f"model fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
     *,
     session_id: str,
 ) -> SharedState:
-    """Build and persist the fresh-session :class:`SharedState`.
-
-    Resolves every CLI/env knob the optimizer's main loop needs and writes the
-    resulting state to ``session_dir``. Notable resolution steps:
-
-    * ``research_lane_capacity`` is clamped to ``[0, MAX_RESEARCH_LANE_CAPACITY]``.
-    * Plateau / EXPLORE-force-exit / steward overrides are collected from the
-      matching ``--plateau-*`` / ``--explore-*`` / ``--steward-*`` flags; absent
-      keys fall through to library defaults at phase-compute time.
-    * Workload metadata (``tp``, ``ep``, ``conc``, ``isl``, ``osl``,
-      ``max_model_len``) is read from CLI flags first, then the matching env var.
-    * The advisory ``model_arch`` profile is loaded fresh (soft-degrades to ``{}``).
-
-    Args:
-        session_dir (Path): The session directory to save the state into.
-        args (argparse.Namespace): Parsed ``optimize`` arguments.
-        session_id (str): The canonical session id for this run.
-
-    Returns:
-        SharedState: The freshly seeded, already-persisted shared state.
-    """
-    # research_lane capacity is locked here for the lifetime
-    # of the session. Clamp to [0, MAX_RESEARCH_LANE_CAPACITY] (M6
-    # ceiling; values above this are silently clamped down). The cap
-    # protects LLM quota and PR Monitor load (§3.14 R-07).
+    # research_lane capacity is locked here for the lifetime of the
+    # session. Clamp to [0, research-lane ceiling], where the ceiling
+    # scales with the visible GPU count (``2 × GPU``). The cap protects
+    # LLM quota and PR Monitor load.
     from inference_optimizer.orchestrator.policy import (
-        MAX_RESEARCH_LANE_CAPACITY,
+        research_lane_ceiling,
     )
     research_lane_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 1
     )
     research_lane_capacity = max(
-        0, min(MAX_RESEARCH_LANE_CAPACITY, research_lane_capacity),
+        0, min(research_lane_ceiling(), research_lane_capacity),
     )
+    gpu_specialist_capacity_raw = getattr(
+        args, "gpu_specialist_capacity", None,
+    )
+    try:
+        gpu_specialist_capacity = max(
+            0,
+            int(gpu_specialist_capacity_raw)
+            if gpu_specialist_capacity_raw is not None else 0,
+        )
+    except (TypeError, ValueError):
+        gpu_specialist_capacity = 0
     # collect plateau threshold overrides into a single dict
     #. Only non-None CLI overrides
     # land in the dict; absent keys fall through to the
@@ -1195,7 +1575,7 @@ def _seed_shared_state(
         plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
-    # EXPLORE HARD force-exit thresholds (IR-6). Either condition fires
+    # EXPLORE HARD force-exit thresholds. Either condition fires
     # an ``explore_force_exit_low_budget`` exit (overrides plateau /
     # steward / LLM proposals).
     if getattr(args, "explore_force_exit_hours_remaining", None) is not None:
@@ -1206,7 +1586,7 @@ def _seed_shared_state(
         plateau_overrides["force_exit_budget_pct"] = float(
             args.explore_force_exit_budget_pct
         )
-    # IR-7 steward controls.
+    # steward controls.
     if getattr(args, "steward_disabled", False):
         plateau_overrides["steward_disabled"] = True
     if getattr(args, "steward_continuation_cap", None) is not None:
@@ -1288,8 +1668,8 @@ def _seed_shared_state(
         # fallback on its own at use time.
         return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
 
-    # Fix E (--explore-overtime-kill-ratio): mirror the CLI value into
-    # the fresh SharedState so the ExploreExecutor can read it via the
+    # --explore-overtime-kill-ratio: mirror the CLI value into the
+    # fresh SharedState so the ExploreExecutor can read it via the
     # Coordinator-injected task.params on the very first explore round.
     # ``0`` (and any non-positive) disables the gate.
     explore_overtime_kill_ratio_raw = getattr(
@@ -1339,6 +1719,11 @@ def _seed_shared_state(
         args, "explore_roofline_hard_gate", False,
     ))
 
+    # KB architecture tags from the model weights' config.json
+    # (``architectures`` + ``model_type``). Fresh-launch only — resume
+    # rehydrates the persisted values from state.json (see load_or_init).
+    _cfg_tags = _load_model_config_tags(str(args.model))
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -1353,6 +1738,11 @@ def _seed_shared_state(
         model_arch=_load_model_arch(
             _workspace_root_resolve(), Path(args.model).name
         ),
+        # Architecture-identity tags lifted from config.json; stamped into
+        # the recipe-snapshot ``extras`` so a fine-tuned model carries the
+        # base model's identity (see ``_load_model_config_tags``).
+        model_architectures=_cfg_tags.get("architectures", []),
+        model_type=_cfg_tags.get("model_type", ""),
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI / env at fresh-session time
@@ -1364,7 +1754,7 @@ def _seed_shared_state(
         tp=_int_env_or_arg("tp", "TP"),
         # ``ep`` mirrors the EP env var so resume in a fresh shell
         # still recovers the value — KB warm-start queries depend on
-        # it for the T2 same-shape filter.
+        # it for the same-shape filter.
         ep=_int_env_or_arg("ep", "EP"),
         precision=(
             str(getattr(args, "precision", None) or os.environ.get("PRECISION", "") or "").strip()
@@ -1383,6 +1773,7 @@ def _seed_shared_state(
         cumulative_gain=0.0,
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
+        gpu_specialist_capacity=gpu_specialist_capacity,
         plateau_overrides=plateau_overrides,
         explore_overtime_kill_ratio=explore_overtime_kill_ratio,
         enable_roofline=bool(
@@ -1398,9 +1789,51 @@ def _seed_shared_state(
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
+        research_scout_enabled=bool(getattr(args, "research_scout", True)),
+        research_scout_interval=max(
+            1, int(getattr(args, "research_scout_interval", 3) or 3)
+        ),
+        target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
+        recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
+        depth_gate_thresholds=_parse_depth_gate_thresholds(
+            getattr(args, "depth_gate_thresholds", "") or ""
+        ),
+        # SWEEP-phase post-sweep concurrency sweep flags (on by default).
+        # See ``orchestrator/conc_sweep.py`` + coordinator hook
+        # ``_enqueue_internal_conc_sweep_task``.
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        conc_sweep_concs=_parse_conc_sweep_concs(args),
+        conc_sweep_total_budget_sec=int(
+            getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
+        ),
+        conc_sweep_variant_timeout_sec=int(
+            getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
+        ),
     )
+    state.set_depth_gate_enabled(bool(getattr(args, "depth_gate", True)))
     state.save(session_dir)
     return state
+
+
+def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
+    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]. Drops
+    non-integer tokens with a warning rather than crashing the CLI
+    boot so a typo doesn't take the whole session down. Empty list
+    (e.g. ``--conc-sweep-concs ''``) lets ``SharedState`` default-factory
+    populate the canonical 1..128 ladder."""
+    raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
+    if not raw:
+        return [1, 2, 4, 8, 16, 32, 64, 128]
+    out: list[int] = []
+    for tok in raw.split(","):
+        t = tok.strip()
+        if not t:
+            continue
+        try:
+            out.append(int(t))
+        except ValueError:
+            log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
+    return out or [1, 2, 4, 8, 16, 32, 64, 128]
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
@@ -1468,467 +1901,6 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
-# --- Executor wiring tables ------------------------------------------------
-# Declarative mappings of action_kind → ExecutorFn so tests can introspect
-# what's actually wired without re-parsing the imperative body of
-# ``_register_executors``. Adding a new action with a real executor MUST
-# update these tables; the regression test in
-# ``tests/test_p1_2_full_action_catalogue.py`` enforces consistency between
-# these tables and ``session_paths._runs_actions()``.
-
-# Real executors enabled in every run mode (kernel + no-kernel).
-#
-# The merged ``explore`` action subsumes the per-variant KEEP/REVERT
-# plus the per-KEEP stack rebench; there is no standalone validation
-# action.
-_REAL_EXECUTORS_FULL: dict[str, Any] = {
-    "baseline":          baseline_executor,
-    # GAP 1 — ``replay_warm_recipe`` runs the same Magpie subprocess
-    # as ``baseline`` but applies ``warm_start_recipe.best_config``
-    # (extra_sglang_args + extra_envs) via ``task.params``. We reuse
-    # the BaselineExecutor instance because the subprocess pipeline,
-    # the cold-start timeout logic, the rescue-path salvage, and the
-    # measurement parser are all identical — the only thing that
-    # differs is which params get passed in (and the Coordinator-side
-    # interpretation of the result, see ``_promote_replay_warm_recipe``).
-    "replay_warm_recipe": baseline_executor,
-    # ``profile`` is registered so the Coordinator-internal task path
-    # (kind switched via ``--no-enable-roofline``) can dispatch it
-    # through SubAgentRunner. PolicyGate denies LLM-proposed
-    # delegate{action_name='profile'} via
-    # ``analysis_action_not_llm_proposable``, so this registration is
-    # effectively Coordinator-only.
-    "profile":           profile_executor,
-    "explore":           explore_executor,
-    "sweep":             sweep_executor,
-    "report":            report_executor,
-    "session_breakdown": session_breakdown_executor,
-    # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
-    # ``gpu_memory_leaked`` signal (Change A/B): a real executor now
-    # cleans up leaked VRAM owners and, behind
-    # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
-    # ``rocm-smi --gpureset``. See
-    # ``orchestrator/action_executors/recover.py``.
-    "recover":           recover_executor,
-}
-
-# Kernel-only real executors. The composite ``roofline`` action is
-# registered separately by ``_register_executors`` below. ``profile``
-# is registered in ``_REAL_EXECUTORS_FULL`` so the Coordinator's
-# auto-managed analysis path can dispatch it through SubAgentRunner
-# when ``--no-enable-roofline`` is set; the same ``profile_executor``
-# is also called directly from RooflineExecutor's ``_wrap_profile_ctx``
-# in the default roofline mode. PolicyGate denies LLM-proposed
-# delegate{action_name='profile'} regardless of mode.
-_REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
-
-# Kernel-owned action kinds dispatched via
-# ``request{target_agent='kernel', kind=...}``. The executor body is a
-# no-op in this process — actual work happens inside the kernel agent's
-# request handlers — but the names must stay registered so SubAgentRunner
-# does not raise ``no_executor`` on a stale task.
-_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
-    "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
-)
-
-
-def _build_specialist_executor(
-    args: argparse.Namespace,
-    *,
-    session_dir: Path,
-    knowledge_plane: Any,
-) -> "Callable[[Any], Awaitable[dict]]":
-    """v0.8 §3.5 / §3.13 M5 + PR-A2 (Arbor-into-Hyperloom) — build the
-    specialist executor adapter.
-
-    Returns an ``async fn(ctx: RunnerContext) -> dict`` compatible with
-    :data:`SubAgentRunner.ExecutorFn`. The adapter wraps a
-    :class:`SpecialistRunner` and translates its
-    :class:`SpecialistRunResult` dataclass into the dict the dispatcher
-    expects to publish onto the bus.
-
-    Dispatch mode (PR-A2): production wires the
-    :class:`SpecialistSubprocessDispatcher` so each specialist runs in
-    a fresh ``claude`` subprocess inside a per-task git worktree
-    (``runs/specialist/<task_id>/worktree/``). The
-    ``--specialist-dispatch-mode`` flag can fall back to the legacy M5
-    in-process :class:`ClaudeBackend` path (used by tests + when the
-    ``claude`` binary is missing from $PATH).
-
-    Backend choice: every specialist runs on Claude (matching the
-    orchestration role). The CLI flag ``--specialist-model`` overrides
-    the default model (``--claude-model``) so operators can dedicate a
-    cheaper / faster model to specialist research without touching the
-    main orchestration loop. KB_design §3.5 §6 / §3.14 R-05.
-
-    The factory captures ``session_dir`` + ``knowledge_plane`` once at
-    cli boot; the same runner instance handles every specialist task
-    for the session.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments (reads the
-            ``specialist_*`` knobs and ``claude_model``).
-        session_dir (Path): Session root captured by the adapter.
-        knowledge_plane (Any): The live KnowledgePlane captured by the adapter.
-
-    Returns:
-        Callable[[Any], Awaitable[dict]]: An ``async fn(ctx) -> dict`` executor
-        adapter compatible with ``SubAgentRunner.ExecutorFn``.
-    """
-    import shutil
-
-    from .orchestrator.specialist_mcp_config import write_specialist_mcp_config
-    from .orchestrator.specialist_runner import (
-        DEFAULT_SPECIALIST_TOOLS,
-        SpecialistRunner,
-    )
-    from .orchestrator.specialist_subprocess import SpecialistSubprocessConfig
-
-    claude_model = (
-        (getattr(args, "specialist_model", None) or args.claude_model)
-        .strip()
-    )
-    max_turns = int(getattr(args, "specialist_max_turns", 8) or 8)
-    per_turn_max_seconds = float(
-        getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0
-    )
-    dispatch_mode = (
-        str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess")
-        .strip().lower()
-    )
-
-    # PR-A2: subprocess dispatch is the production default. We fall
-    # back to in-process when (a) the operator picks ``inprocess`` or
-    # (b) the ``claude`` binary is not on $PATH (e.g. dev environments
-    # using only the in-process SDK). The fallback is logged so it's
-    # visible in the manifest.
-    # PR-A2: derive framework_source_roots from the canonical resolver so
-    # the specialist worktree is rooted at the same set the orchestration
-    # prompt + PolicyGate path-validator already trust.
-    framework_source_roots = tuple(resolve_source_file_allowlist())
-    claude_bin = shutil.which("claude") or ""
-    use_subprocess = dispatch_mode != "inprocess" and bool(claude_bin)
-    if dispatch_mode == "subprocess" and not claude_bin:
-        log.warning(
-            "specialist_dispatch_mode=subprocess requested but `claude` "
-            "binary not found on PATH; falling back to in-process backend",
-        )
-
-    if use_subprocess:
-        # Operator-supplied --specialist-mcp-config wins. When unset,
-        # auto-generate ``<session_dir>/runtime/specialist_mcp.json``
-        # from the live KnowledgePlane so the spawned claude subprocess
-        # actually has the PR Monitor MCP server wired (without it the
-        # ``mcp__pr_monitor__*`` tool names in the whitelist resolve to
-        # nothing and the specialist falls back to WebSearch).
-        mcp_config_path: str | None = str(
-            getattr(args, "specialist_mcp_config", "") or ""
-        ) or None
-        if mcp_config_path is None and knowledge_plane is not None:
-            try:
-                pr_mcp_url = knowledge_plane.specialist_mcp_url()
-            except AttributeError:
-                pr_mcp_url = ""
-            generated = write_specialist_mcp_config(
-                session_dir=session_dir,
-                pr_monitor_mcp_url=pr_mcp_url,
-            )
-            if generated is not None:
-                mcp_config_path = str(generated)
-        sub_config = SpecialistSubprocessConfig(
-            claude_executable=claude_bin or "claude",
-            model=claude_model,
-            framework_source_roots=framework_source_roots,
-            mcp_config_path=mcp_config_path,
-            per_turn_max_seconds=per_turn_max_seconds,
-        )
-        runner = SpecialistRunner(
-            subprocess_config=sub_config,
-            session_dir=session_dir,
-            default_tools=DEFAULT_SPECIALIST_TOOLS,
-            default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
-            knowledge_plane=knowledge_plane,
-        )
-    else:
-        def _backend_factory(domain: Any) -> Any:
-            """Build an in-process :class:`ClaudeBackend` for a specialist domain.
-
-            Fallback path used when the ``claude`` binary is unavailable for
-            subprocess dispatch.
-
-            Args:
-                domain (Any): The specialist domain requesting a backend (unused;
-                    every domain shares the same Claude model configuration).
-
-            Returns:
-                Any: A :class:`ClaudeBackend` configured with the specialist model
-                and turn cap.
-            """
-            # in-process Claude path (fallback).
-            return ClaudeBackend(
-                model=claude_model, max_turns_default=max_turns,
-            )
-
-        runner = SpecialistRunner(
-            backend_factory=_backend_factory,
-            session_dir=session_dir,
-            default_tools=DEFAULT_SPECIALIST_TOOLS,
-            default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
-            knowledge_plane=knowledge_plane,
-        )
-
-    async def _executor(ctx: Any) -> dict:
-        """Adapter: SubAgentRunner.run_task → SpecialistRunner.run.
-
-        The SubAgentRunner wrapper has already transitioned the task to
-        ``running`` and ``ctx.task`` is the live :class:`Task`. We
-        always return a dict (even on failure) so the dispatcher's
-        ``state.transition('succeeded', evidence={...})`` step gets a
-        well-formed payload. SpecialistRunResult's distinction between
-        ``succeeded`` / ``empty_synthesised`` / ``stale`` etc. is
-        preserved under ``result.runner_status`` for downstream
-        analytics (breakdown.specialist_runs).
-
-        Args:
-            ctx (Any): The live :class:`SubAgentRunner` runner context whose
-                ``task`` is the dispatched specialist :class:`Task`.
-
-        Returns:
-            dict: A well-formed result payload translating the
-            :class:`SpecialistRunResult` dataclass fields.
-        """
-        run_result = await runner.run(ctx)
-        # Translate dataclass → dict. The Coordinator's
-        # ``_handle_intent`` Gap-03 path (when wired) will pull
-        # ``specialist_done`` out of result.payload['specialist_done'].
-        return {
-            "runner_status": run_result.status,
-            "task_id": run_result.task_id,
-            "domain": run_result.domain,
-            "gap_canonical_id": run_result.gap_canonical_id,
-            "specialist_done": run_result.specialist_done,
-            "turns_used": run_result.turns_used,
-            "workspace": run_result.workspace,
-            "transcript_path": run_result.transcript_path,
-            "done_path": run_result.done_path,
-            "error": run_result.error,
-            "notes": list(run_result.notes or []),
-        }
-
-    return _executor
-
-
-def _build_dynamic_action_executor(
-    args: argparse.Namespace,
-) -> "Callable[[Any], Awaitable[dict]]":
-    """Build a SubAgentRunner-compatible executor backed by
-    :class:`DynamicActionRunner`.
-
-    Production uses a real Claude backend; tests register a
-    :class:`MockBackend` through the same path. Falls back to the
-    stub executor when no ``claude`` binary is on PATH.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments (reads the
-            ``dynamic_action_*`` knobs and ``claude_model``).
-
-    Returns:
-        Callable[[Any], Awaitable[dict]]: An ``async fn(ctx) -> dict`` executor
-        backed by :class:`DynamicActionRunner`, or the stub executor when no
-        ``claude`` binary is available.
-    """
-    import shutil
-
-    from .orchestrator.dynamic_action_runner import (
-        DEFAULT_TURN_CAP,
-        DEFAULT_WALL_CLOCK_BUDGET_SEC,
-        DynamicActionRunner,
-    )
-    from .orchestrator.action_executors.dynamic_action import (
-        dynamic_action_executor as _stub_executor,
-    )
-    from .orchestrator.framework_paths import resolve_source_file_allowlist
-
-    claude_bin = shutil.which("claude") or ""
-    if not claude_bin:
-        log.warning(
-            "dynamic_action: `claude` binary not on PATH; falling "
-            "back to the stub executor (empty proposal_set).",
-        )
-        return _stub_executor
-
-    model = (
-        getattr(args, "dynamic_action_model", None)
-        or getattr(args, "claude_model", "")
-    ).strip()
-    turn_cap_raw = getattr(args, "dynamic_action_turn_cap", None)
-    turn_cap = int(turn_cap_raw) if turn_cap_raw else DEFAULT_TURN_CAP
-    wall_clock_raw = getattr(args, "dynamic_action_wall_clock_sec", None)
-    wall_clock = (
-        float(wall_clock_raw) if wall_clock_raw
-        else DEFAULT_WALL_CLOCK_BUDGET_SEC
-    )
-    backend = ClaudeBackend(
-        model=model, max_turns_default=1, raw_completion=True,
-    )
-    runner = DynamicActionRunner(
-        backend,
-        wall_clock_budget_sec=wall_clock,
-        turn_cap=turn_cap,
-        framework_source_roots=tuple(resolve_source_file_allowlist()),
-    )
-
-    async def _executor(ctx: Any) -> dict:
-        """Adapter: run the :class:`DynamicActionRunner` and return its result dict.
-
-        Args:
-            ctx (Any): The :class:`SubAgentRunner` runner context for the task.
-
-        Returns:
-            dict: The runner result serialised via ``DynamicActionResult.to_dict``.
-        """
-        result = await runner.run(ctx)
-        return result.to_dict()
-
-    return _executor
-
-
-def _register_executors(
-    coordinator: Coordinator,
-    *,
-    no_kernel: bool = False,
-    compare_against_gpu: str | None = None,
-    session_dir: Path | None = None,
-    specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
-    dynamic_action_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
-) -> None:
-    """Wire all currently-available action executors.
-
-    Real executors are pulled from ``_REAL_EXECUTORS_FULL`` (always) and
-    ``_REAL_EXECUTORS_KERNEL_ONLY`` (when kernel-mode is on). Kernel-owned
-    kinds (whose work is done inside the kernel agent via emit_intent)
-    get ``_noop_prep`` so SubAgentRunner doesn't fail with "no_executor".
-
-    When ``no_kernel`` is True, the kernel-owned executor table is
-    skipped and the kernel-only no-op stubs are skipped. The Coordinator-
-    internal ``profile`` and ``roofline`` analysis executors are
-    registered unconditionally so PRELUDE's auto-enqueued analysis task
-    (kind switched by ``--enable-roofline``) can always dispatch.
-
-    ``target_analysis`` is *always* registered with the real
-    :class:`TargetAnalysisExecutor`. When ``compare_against_gpu`` is a
-    non-empty string, the executor fetches the matching InferenceX
-    reference; when empty / None, it writes a structured
-    ``reason='no_target_gpu_configured'`` marker JSON so the report
-    section is rendered uniformly in both cases.
-
-    ``specialist_executor`` (v0.8 §3.5 / KB_gaps/Gap-01): the
-    :func:`_build_specialist_executor` adapter, when the operator has
-    ``--research-lane-capacity > 0``. ``None`` keeps the legacy
-    behaviour where a ``delegate{action='specialist'}`` task hits
-    ``no_executor`` and fails (M3 / pre-M5 path).
-
-    Args:
-        coordinator (Coordinator): The coordinator whose SubAgentRunner the
-            executors are registered on.
-        no_kernel (bool): When True, skip the kernel-owned executor table and
-            no-op stubs. Defaults to False.
-        compare_against_gpu (str | None): Reference GPU for the
-            ``target_analysis`` executor; empty/None writes a no-target marker.
-        session_dir (Path | None): Session root passed to executors that need it.
-        specialist_executor (Callable[[Any], Awaitable[dict]] | None): Optional
-            specialist adapter to register for ``delegate{action='specialist'}``.
-        dynamic_action_executor (Callable[[Any], Awaitable[dict]] | None):
-            Optional dynamic-action adapter to register.
-    """
-    for kind, fn in _REAL_EXECUTORS_FULL.items():
-        coordinator.sub.register_executor(kind, fn)
-
-    coordinator.sub.register_executor(
-        "target_analysis",
-        TargetAnalysisExecutor(
-            compare_against_gpu=(compare_against_gpu or "").strip(),
-            session_dir=session_dir,
-        ),
-    )
-
-    # v0.8 §3.5 + register the specialist sub-agent
-    # adapter so ``delegate{action='specialist'}`` no longer hits
-    # ``no_executor``. Gated by ``--research-lane-capacity`` upstream
-    # (cli only passes a non-None executor when capacity > 0).
-    if specialist_executor is not None:
-        coordinator.sub.register_executor("specialist", specialist_executor)
-
-    # Register the runner-driven dynamic_action executor when
-    # available; otherwise fall back to the stub.
-    if dynamic_action_executor is not None:
-        coordinator.sub.register_executor(
-            "dynamic_action", dynamic_action_executor,
-        )
-    else:
-        from .orchestrator.action_executors.dynamic_action import (
-            dynamic_action_executor as _stub_dynamic_action_executor,
-        )
-        coordinator.sub.register_executor(
-            "dynamic_action", _stub_dynamic_action_executor,
-        )
-
-    # PR-A4 (Arbor-into-Hyperloom): wire the real IntegratePatchExecutor.
-    # The executor reads the specialist's worktree patches, applies them
-    # to framework_source_roots via ``git apply``, runs a Magpie bench,
-    # and decides KEEP / REVERT. It is the single integration point —
-    # specialists never apply patches themselves (Inv-5.1 updated by
-    # PR-A2; the worktree authorisation gives them write capability,
-    # but the orchestrator-side ``integrate_patch`` is what makes those
-    # patches visible to the serving framework).
-    coordinator.sub.register_executor(
-        "integrate_patch",
-        IntegratePatchExecutor(session_dir=session_dir),
-    )
-
-    # FRAMEWORK_PR phase per-candidate executor — Coordinator-internal
-    # only (PolicyGate denies LLM ``delegate{action='framework_pr'}``
-    # via ``framework_pr_action_not_llm_proposable``).
-    coordinator.sub.register_executor(
-        "framework_pr",
-        FrameworkPrExecutor(session_dir=session_dir),
-    )
-
-    # The composite ``roofline`` action runs profile + trace_analyze
-    # atomically and surfaces analysis.md to the next orchestration
-    # tick. Coordinator auto-enqueues it at PRELUDE and on every 10%
-    # gain watermark crossing — independent of ``--no-kernel`` — so the
-    # executor is unconditionally registered. ``profile`` is the
-    # ``--no-enable-roofline`` alternative and is registered via
-    # ``_REAL_EXECUTORS_FULL`` above. PolicyGate denies LLM-proposed
-    # delegate{action_name='roofline'|'profile'} regardless of mode.
-    coordinator.sub.register_executor(
-        "roofline",
-        make_roofline_executor(shared_state=coordinator.shared_state),
-    )
-
-    if log.isEnabledFor(logging.DEBUG):
-        for required_kind in ("roofline", "profile"):
-            if required_kind not in coordinator.sub.executor_registry:
-                log.debug(
-                    "register_executors: %r missing from sub-agent registry "
-                    "(no_kernel=%s); PRELUDE analysis task will fail with "
-                    "no_executor",
-                    required_kind, no_kernel,
-                )
-
-    if no_kernel:
-        return
-
-    for kind, fn in _REAL_EXECUTORS_KERNEL_ONLY.items():
-        coordinator.sub.register_executor(kind, fn)
-    for kind in _NOOP_KINDS_KERNEL_ONLY:
-        coordinator.sub.register_executor(kind, _noop_prep)
-
-
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     """Print the end-of-run summary block to stdout.
 
@@ -1973,7 +1945,105 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
+    _print_kernel_opt_summary_line(state)
     print("===============================================")
+
+
+def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
+    """Make the persisted ``crash_count`` agree with the authoritative
+    in-memory value printed in the final summary.
+
+    The ReportExecutor and the breakdown writer both reload state from
+    ``state.json`` (``SharedState.load_or_init``), so a reactor-pass
+    crash increment that lost a write race against a later save would
+    leave ``state.json`` / ``reports/final.json`` showing a stale (lower)
+    count while the live coordinator object — and therefore the console
+    summary — shows the true count. Reconcile both disk artifacts to the
+    live value at teardown so all three sources never disagree. We only
+    ever raise the persisted value (``max``); we never lower a count that
+    disk recorded but memory somehow missed. Best-effort: never fatal.
+    """
+    live = int(getattr(state, "crash_count", 0) or 0)
+
+    # 1) state.json — reload, bump if stale, atomic re-save.
+    try:
+        disk_state = SharedState.load_or_init(session_dir)
+        if int(disk_state.crash_count or 0) < live:
+            disk_state.crash_count = live
+            disk_state.save(session_dir)
+    except Exception:  # noqa: BLE001
+        log.exception("crash_count reconcile (state.json) failed (non-fatal)")
+
+    # 2) reports/final.json — patch the single field in place if present.
+    try:
+        from .session_paths import reports_dir
+        final_json = reports_dir(session_dir) / "final.json"
+        if final_json.exists():
+            data = json.loads(final_json.read_text(encoding="utf-8"))
+            if int(data.get("crash_count") or 0) < live:
+                data["crash_count"] = live
+                final_json.write_text(
+                    json.dumps(data, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+    except Exception:  # noqa: BLE001
+        log.exception("crash_count reconcile (final.json) failed (non-fatal)")
+
+
+def _print_kernel_opt_summary_line(state: SharedState) -> None:
+    """One-line forensic readout of kernel_opt attempts at session end.
+
+    Pulls the same aggregation used by
+    ``reports/kernel_optimization_summary.json`` so stdout matches the
+    on-disk report. Best-effort: any failure is swallowed (this is a
+    summary print, not a critical path).
+    """
+    try:
+        from .orchestrator.kernel_attempt_summary import (
+            build_kernel_optimization_summary,
+        )
+        session_dir = _resolve_session_dir_for_summary(state)
+        if session_dir is None:
+            return
+        summary = build_kernel_optimization_summary(state, session_dir)
+        totals = summary.get("totals") or {}
+        attempted = int(totals.get("attempted") or 0)
+        if attempted == 0 and int(totals.get("unattempted") or 0) == 0:
+            return
+        integrated = int(totals.get("integrated") or 0)
+        rejected = int(totals.get("rejected") or 0)
+        unattempted = int(totals.get("unattempted") or 0)
+        print(
+            f"  kernel_opt           : {attempted} attempted "
+            f"({integrated} integrated, {rejected} rejected), "
+            f"{unattempted} unattempted in top candidates"
+        )
+        takeaways = summary.get("top_takeaways") or []
+        if len(takeaways) >= 2:
+            print(f"  kernel_opt_top_cause : {takeaways[1]}")
+        report_path = (
+            Path(session_dir) / "reports" / "kernel_optimization_summary.json"
+        )
+        if report_path.is_file():
+            print(f"  kernel_opt_report    : {report_path}")
+    except Exception:  # noqa: BLE001 — stdout print must never fail the run
+        pass
+
+
+def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
+    """Best-effort session_dir lookup for the stdout kernel_opt line.
+
+    SharedState does not carry session_dir directly, so we use the same
+    discovery the SessionInit path uses: HYPERLOOM_SESSION_DIR env when
+    set, else the cwd-anchored default. Returns ``None`` if neither
+    resolves to an existing directory.
+    """
+    env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
+    if env_sd:
+        p = Path(env_sd).expanduser()
+        if p.is_dir():
+            return p
+    return None
 
 
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
@@ -2094,6 +2164,12 @@ def _validate_credentials() -> None:
     sys.exit(2)
 
 
+def _is_placeholder_tracelens_path(value: str) -> bool:
+    """Treat .env.template's bare ``\\`` and whitespace-only values as unset."""
+    stripped = value.strip()
+    return stripped in ("", "\\")
+
+
 def _load_dotenv_fallback() -> None:
     """Env always wins over .env. If SAFE_API_KEY or OPENAI_BASE_URL is
     missing from os.environ, source ``$REPO_ROOT/.env`` (defaults to
@@ -2121,6 +2197,8 @@ def _load_dotenv_fallback() -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        if key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT") and _is_placeholder_tracelens_path(value):
+            continue
         if key not in os.environ:
             os.environ[key] = value
             loaded += 1
@@ -2134,25 +2212,23 @@ def _load_kernel_agent_env_fallback() -> None:
     install.sh`` at ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``
     (overridable via ``$KERNEL_AGENT_ENV``).
 
-    Background: the May 2026 R1 N14 run stalled for 1h 12min because
-    the launcher only sourced the user's basic ``.env`` (3 vars) and
-    missed kernel-agent.env.sh. ``RooflineExecutor``'s trace_analyze
-    sub-step imports ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT``
-    at module load — that read happens before any user code can fix the
-    env, so the only way to recover without a restart is to source the
-    file here, before any orchestrator import. Setting the env in this
+    Background: a run once stalled because the launcher only sourced
+    the user's basic ``.env`` and missed kernel-agent.env.sh.
+    ``RooflineExecutor``'s trace_analyze sub-step imports
+    ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT`` at module
+    load — that read happens before any user code can fix the env, so
+    the only way to recover without a restart is to source the file
+    here, before any orchestrator import. Setting the env in this
     process also propagates to all subprocesses launched by Magpie /
     TraceLens / GEAK runners.
 
-    Hard-fail contract (revised after the May 2026 Qwen1.5-7B 10h
-    silent-stall: env file at the wrong path -> silent WARN-only ->
-    5 rooflines all profile-success / trace_analyze-fail / snapshot
-    stays None / LLM heartbeat-only 7.5h). The function now:
+    Hard-fail contract (a wrong-path env file used to WARN-only and let
+    trace_analyze silently fail for hours). The function now:
 
     * Looks ONLY at ``$KERNEL_AGENT_ENV`` (if set) or
       ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``. USER_DATA_PATH
-      MUST be the workspace root (per N17 split: ``runtime/`` is
-      workspace-shared, not per-session). No parent-dir fallback.
+      MUST be the workspace root (``runtime/`` is workspace-shared,
+      not per-session). No parent-dir fallback.
     * If the file is missing OR parses 0 vars OR
       HYPERLOOM_KERNEL_AGENT_ROOT is still unset after sourcing,
       ``sys.exit(2)`` with a clear actionable message instead of
@@ -2387,7 +2463,7 @@ def _check_tracelens_cli() -> None:
     ``inference_optimizer/scripts/install.sh``) into the *pod-local*
     ``/opt/venv/bin/`` — they do NOT persist across pod restarts even
     when ``$USER_DATA_PATH`` (typically ``/workspace/hyperloom``) is a
-    WekaFS-backed session dir that survives pod recycling. SKILL §IR-2
+    WekaFS-backed session dir that survives pod recycling. SKILL
     therefore requires running ``install.sh`` before every launch; the
     only carve-out is ``--resume`` in the *same shell* that earlier ran
     install.sh.
@@ -2396,14 +2472,14 @@ def _check_tracelens_cli() -> None:
     ``runtime/kernel-agent.env.sh`` and skip install.sh (fresh-start
     ``--model`` path) land here with no TraceLens CLI on PATH. Until this
     gate was added, the missing-CLI failure was surfaced only by the
-    robustness agent's J3 signal at tick ~6 (HIGH severity
-    ``tracelens_cli_missing``) — after baseline had already completed
+    robustness agent's HIGH-severity ``tracelens_cli_missing`` signal
+    at tick ~6 — after baseline had already completed
     (or hung) and a multi-minute setup cost was wasted.
     ``trace_analyze`` / ``kernel_opt`` then fail downstream when they
     shell out to ``tracelens_analysis.py``.
 
-    Moving discovery to launch — mirroring ``_gate_claude_model``
-    (SKILL §Step 2 step 10) — turns a delayed silent strike into a
+    Moving discovery to launch — mirroring ``_gate_claude_model`` —
+    turns a delayed silent strike into a
     fail-fast with an actionable error pointing at the install.sh fix.
     """
     missing = [
@@ -2412,7 +2488,7 @@ def _check_tracelens_cli() -> None:
     ]
     if not missing:
         return
-    session_dir = os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")
+    session_dir = str(_workspace_root_resolve())
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
@@ -2436,8 +2512,8 @@ def _check_node_claude_cli() -> None:
     ``@anthropic-ai/claude-code`` CLI; without it on PATH the SDK falls
     back to a direct HTTP path against the upstream gateway, so this
     is informational rather than fatal. Same for ``codex`` (used by
-    ``CodexBackend`` whenever Codex is on the wire — i.e. ``--critic-agent``
-    / ``--critic-codex-bare`` and/or ``--kernel-codex``). ``node`` is a
+    ``CriticAgentBackend`` review reasoning and ``--kernel-codex``).
+    ``node`` is a
     transitive dep — if it's missing, npm-based recovery via
     ``kernel-agent/scripts/install.sh`` won't work either.
 
@@ -2555,12 +2631,11 @@ def _emit_preflight_diagnostics(
         print(f"  pr_degraded_reason  = {pr_reason}")
 
     # Issue-H (Saturday May 2026): surface Cortex KB offline-queue
-    # state. The flusher daemon already drains ``.kb_pending.ndjson``
-    # in the background, but a dead-letter pile-up is the canonical
-    # signal for "the prior session's KB writes were rejected (HTTP
-    # 4xx schema), this session is starting cold." Operators have no
-    # in-band way to see this today — they discover it only when
-    # specialists return empty proposal_set.
+    # state. A dead-letter pile-up is the canonical signal for "the
+    # prior session's KB writes were rejected (HTTP 4xx schema), this
+    # session is starting cold." Operators have no in-band way to see
+    # this today — they discover it only when specialists return empty
+    # proposal_set.
     try:
         _print_cortex_kb_queue_status()
     except Exception as exc:  # noqa: BLE001 — defensive
@@ -2570,17 +2645,10 @@ def _emit_preflight_diagnostics(
 def _print_cortex_kb_queue_status() -> None:
     """Emit a one-line summary of the Cortex KB offline NDJSON queue.
 
-    Pure visibility helper. The flusher daemon does the actual draining;
-    we only count rows so the operator sees ``pending=N dead=M`` next
-    to the rest of the preflight diagnostics. When ``pending > 0`` the
-    operator can verify the flusher is alive via
-    ``runtime/cortex/.kb_flusher.pid``; the dead-letter count is the
-    422-style permanent-reject signal that telegraphs an upcoming
-    cold-start session for new models.
-
-    Returns:
-        None: This helper prints a diagnostics line as a side effect and
-        returns nothing.
+    Pure visibility helper. We count rows so the operator sees
+    ``pending=N dead=M`` next to the rest of the preflight diagnostics.
+    The dead-letter count is the 422-style permanent-reject signal that
+    telegraphs an upcoming cold-start session for new models.
     """
     from .session_paths import (
         cortex_dead_letter_ndjson,
@@ -2853,9 +2921,8 @@ def _smoke_test_codex_model(
     if catalog_ids is None:
         return
     # Codex is needed by the Kernel agent (when kernel-codex is on) and by
-    # the Critic — both via the ``codex_bare`` direct path and the
-    # ``agent`` path (which also calls Codex for review reasoning).
-    critic_uses_codex = args.critic_backend in ("agent", "codex_bare")
+    # the critic-agent path (which calls Codex for review reasoning).
+    critic_uses_codex = args.critic_backend == "agent"
     needs_codex = critic_uses_codex or (
         args.kernel_codex and not getattr(args, "no_kernel", False)
     )
@@ -2872,6 +2939,67 @@ def _smoke_test_codex_model(
         f"value in the catalog or use --critic-mock / --kernel-claude to "
         f"avoid the Codex path entirely."
     )
+
+
+# InferenceX clone defaults — kept in sync with
+# inference_optimizer/scripts/install.sh (INFERENCEX_REPO / INFERENCEX_REF).
+_INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
+_INFERENCEX_REF_DEFAULT = "2035a2117ad22403376359be0064dfa2c078c59b"
+
+
+def _inferencex_checkout_ok(path: Path | str) -> bool:
+    """True when ``path`` is a usable InferenceX checkout, not a stub.
+
+    A bare ``is_dir()`` check accepts a half-cloned dir left behind by a
+    ``git init`` that then failed to fetch/checkout. Magpie sources
+    ``benchmarks/benchmark_lib.sh`` at runtime, so require that file to
+    exist — a complete checkout always has it, a stub never does.
+    """
+    return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
+
+
+def _clone_inferencex(dest: Path) -> str | None:
+    """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF.
+
+    Mirrors install.sh ``git_fetch_pinned``: a 7-40 hex ref triggers a
+    shallow fetch-checkout (GitHub serves SHA fetches), otherwise a
+    ``--branch`` clone. Returns the path on success, ``None`` on failure
+    (caller decides how to surface it). Never raises out.
+
+    On any failure the partial ``dest`` (e.g. a bare ``git init`` with no
+    fetched tree) is removed so a later preflight's detection does not
+    mistake the stub for a valid checkout and skip re-cloning.
+    """
+    repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
+    ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+    dest_str = str(dest)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
+            subprocess.run(["git", "init", "-q", dest_str], check=True, timeout=60)
+            subprocess.run(
+                ["git", "-C", dest_str, "fetch", "-q", "--depth", "1", repo, ref],
+                check=True, timeout=600,
+            )
+            subprocess.run(
+                ["git", "-C", dest_str, "checkout", "-q", "FETCH_HEAD"],
+                check=True, timeout=120,
+            )
+        else:
+            subprocess.run(
+                ["git", "clone", "-q", "--depth", "1", "--branch", ref, repo, dest_str],
+                check=True, timeout=600,
+            )
+        if not _inferencex_checkout_ok(dest):
+            raise OSError(
+                f"clone reported success but {dest_str} is missing "
+                "benchmarks/benchmark_lib.sh"
+            )
+        return dest_str
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("InferenceX clone into %s failed: %s", dest_str, exc)
+        shutil.rmtree(dest, ignore_errors=True)
+        return None
 
 
 def _preflight(
@@ -3049,7 +3177,7 @@ def _preflight(
     # InferenceX/benchmarks/benchmark_lib.sh → _install_lm_eval_deps.
     # We just ensure the InferenceX checkout exists; lm-eval deps are
     # auto-installed by benchmark_lib.sh at runtime.
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "")
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if not inferencex_path:
         from .paths import (
             magpie_dir as _magpie_default,
@@ -3063,24 +3191,60 @@ def _preflight(
         )
         # InferenceX detection order: Magpie's own InferenceX submodule
         # first (the canonical layout after install.sh), then the
-        # standalone runtime checkout, then legacy host-level mounts so
-        # existing pre-migration pods keep working.
+        # standalone runtime checkout. Legacy host-level mounts
+        # (/wekafs/hyperloom/InferenceX, ...) were removed: they are
+        # read-only shared mounts, and selecting one made Magpie's
+        # _prepare_benchmark_scripts mkstemp fail with [Errno 30] before
+        # the server even booted (the only on-disk source of those
+        # baseline failures). We clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
             runtime_root / "InferenceX",
-            Path("/wekafs/hyperloom/InferenceX"),
-            Path("/opt/hyperloom/InferenceX"),
-            Path("/wekafs/fully-local/inference_optimization/InferenceX"),
         ):
-            if candidate.is_dir():
-                inferencex_path = str(candidate)
-                break
-    if inferencex_path and Path(inferencex_path).is_dir():
-        os.environ.setdefault("INFERENCEX_PATH", inferencex_path)
-    else:
-        print("Preflight: WARNING — InferenceX not found. GSM8K accuracy "
-              "eval will fail. Set INFERENCEX_PATH or clone Magpie with "
-              "InferenceX submodule.")
+            if _inferencex_checkout_ok(candidate):
+                if os.access(candidate, os.W_OK):
+                    inferencex_path = str(candidate)
+                    break
+                print(
+                    "Preflight: skipping non-writable auto-detected "
+                    f"InferenceX checkout at {candidate}; cloning a "
+                    "writable checkout instead."
+                )
+    # When no writable checkout was found (e.g. a brain-launched run that
+    # skipped install.sh's ensure_inferencex), clone one ourselves rather
+    # than falling back to a read-only host mount. baseline cannot run
+    # without InferenceX, so a clone failure is a hard error.
+    if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+        from .paths import runtime_dir as _runtime_default
+        dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
+        print(f"Preflight: InferenceX not found; cloning into {dest} ...")
+        inferencex_path = _clone_inferencex(dest)
+        if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+            print(
+                "Preflight: ERROR — InferenceX checkout missing and clone "
+                "failed. baseline cannot run without it. Set INFERENCEX_PATH "
+                "to a writable checkout or re-run "
+                "inference_optimizer/scripts/install.sh.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    # Guard against a read-only selection (shared mount handed to us via
+    # INFERENCEX_PATH): Magpie stages benchmark scripts there, so a
+    # non-writable tree fails the run before server boot.
+    if not os.access(inferencex_path, os.W_OK):
+        print(
+            f"Preflight: ERROR — INFERENCEX_PATH={inferencex_path} is not "
+            f"writable. Magpie stages benchmark scripts into it and will "
+            f"fail with [Errno 30] Read-only file system. Point "
+            f"INFERENCEX_PATH at a writable checkout (unset it to let "
+            f"Hyperloom clone a fresh one).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH that
+    # triggered the clone above must not survive into the child env, or Magpie
+    # still reads the bad path. The validated value wins.
+    os.environ["INFERENCEX_PATH"] = inferencex_path
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
@@ -3088,7 +3252,7 @@ def _preflight(
     # --- TraceLens CLI presence (HARD-FAIL; SKILL Step 2 step 8.5) ---
     # Catches brain-generated launchers that source only env.sh and skip
     # install.sh — without this gate the missing-CLI symptom would not
-    # surface until robustness J3 fires at tick ~6, after baseline.
+    # surface until the robustness probe fires at tick ~6, after baseline.
     _check_tracelens_cli()
 
     # --- IR-3: Cortex KB + PR Monitor reachability (soft degrade) ---
@@ -3137,7 +3301,7 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
         args.pr_degraded_reason = "explicit_flag"
         return
 
-    user_data = Path(os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"))
+    user_data = _workspace_root_resolve()
     marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
     script = (
         Path(__file__).resolve().parent / "scripts" / "preflight_kb.sh"
@@ -3197,13 +3361,13 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Default critic backend. Step D of the critic-agent integration plan flipped
 # this from "mock" to "agent" once CriticAgentBackend is wired and tested.
-# Override via env (operator runbook) or the --critic-mock / --critic-agent
-# / --critic-codex-bare flags. Step C tests pin a specific value via the
-# CLI flag so they're insulated from default drift.
+# Override via env (operator runbook) or the --critic-mock /
+# --critic-agent flags. Step C tests pin a specific value via the CLI flag
+# so they're insulated from default drift.
 DEFAULT_CRITIC_BACKEND = os.environ.get(
     "INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND", "agent",
 )
-_VALID_CRITIC_BACKENDS = ("mock", "agent", "codex_bare")
+_VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
 def _resolve_critic_choice(args: argparse.Namespace) -> str:
@@ -3231,7 +3395,7 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     if chosen not in _VALID_CRITIC_BACKENDS:
         print(
             f"ERROR: critic backend {chosen!r} not in {_VALID_CRITIC_BACKENDS!r} "
-            f"(set by --critic-mock / --critic-agent / --critic-codex-bare or "
+            f"(set by --critic-mock / --critic-agent or "
             f"INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND)",
             file=sys.stderr,
         )
@@ -3256,37 +3420,29 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     ``args.robustness_backend``); ``None`` falls back to
     :data:`DEFAULT_ROBUSTNESS_BACKEND`. Hard-fails on an invalid value.
 
-    Multi-node auto-downgrade: when ``args.nodes >= 2`` the
-    robustness-agent's ``LocalProbeSource`` family targets
-    sandbox-local resources only — ``ray status``, the inference
-    server health URL, GPU / FD / disk / shm metrics, etc. On
-    multi-node every one of those resources lives in a separate
-    Kubernetes pod (head pod / worker pod / RayJob submitter),
-    unreachable from the sandbox by design. Each probe failure
-    surfaces as a HIGH-severity false positive symptom
-    (``ray_head_dead``, ``local_server_unreachable``,
-    ``gpu_memory_leaked``, ...) that
-    drowns the bus, eats ActionLadder cooldown slots, and risks
-    tripping ``escalate_strategy_change`` chains that stall
-    Orchestration. Until ``robustness-agent`` grows multi-node-aware
-    probe targeting, the cleanest path is to disable the real
-    backend on multi-node and rely on the mock heartbeat. Operators
-    who explicitly pass ``--robustness-agent`` get a WARNING and
-    the auto-downgrade is honoured anyway; passing
-    ``--robustness-mock`` suppresses the WARNING. Single-node
-    behaviour is unchanged.
+    Multi-node policy: when ``args.nodes >= 2`` the robustness-agent's
+    ``LocalProbeSource`` family targets sandbox-local resources only
+    (``ray status``, the inference server health URL, GPU / FD / disk /
+    shm metrics, ...). On multi-node every one of those lives in a
+    separate Kubernetes pod, unreachable from the sandbox by design, so
+    each probe failure surfaces as a HIGH-severity false positive
+    (``ray_head_dead``, ``local_server_unreachable``, ...).
 
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments; reads
-            ``robustness_backend`` and ``nodes``.
+    The fix is to source signals from robustness-server instead of the
+    local sandbox. So on multi-node:
 
-    Returns:
-        str: The resolved robustness backend choice (``"mock"`` or
-        ``"agent"``), auto-downgraded to ``"mock"`` on multi-node.
+    * if a robustness-server is configured (``--robustness-server-url``
+      or ``ROBUSTNESS_SERVER_URL``) we keep the ``agent`` backend — it
+      runs with ``disable_local_probe`` / ``enable_cluster_pod_metrics``
+      (see :func:`_build_robustness_options`) and the cluster source
+      replaces the sandbox-local probes;
+    * if no server is configured the agent has no cluster-wide view and
+      would fall back to the noisy LocalProbe, so we auto-downgrade to
+      the heartbeat-only ``mock``.
 
-    Raises:
-        SystemExit: If the resolved value is not a valid robustness backend
-            (exit code 2).
+    Operators who explicitly pass ``--robustness-agent`` without a
+    server on multi-node get a WARNING; passing ``--robustness-mock``
+    suppresses it. Single-node behaviour is unchanged.
     """
     chosen = getattr(args, "robustness_backend", None)
     explicit = chosen is not None
@@ -3302,17 +3458,19 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
         )
         sys.exit(2)
     nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2 and chosen == "agent":
+    if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
         if explicit:
             print(
-                f"WARN: --robustness-agent selected but nodes={nodes} — "
-                f"robustness-agent's LocalProbe family targets "
-                f"sandbox-local resources (ray, inference server, "
-                f"GPU, ...) that all live in separate pods "
-                f"on multi-node and surface as HIGH false positives. "
-                f"Auto-downgrading to --robustness-mock; pass "
-                f"--robustness-mock explicitly to suppress this "
-                f"warning. See inference_optimizer/multi_node/SKILL.md "
+                f"WARN: --robustness-agent selected but nodes={nodes} and "
+                f"no robustness-server configured — the agent's LocalProbe "
+                f"family targets sandbox-local resources (ray, inference "
+                f"server, GPU, ...) that all live in separate pods on "
+                f"multi-node and surface as HIGH false positives. "
+                f"Auto-downgrading to --robustness-mock; configure "
+                f"--robustness-server-url / ROBUSTNESS_SERVER_URL to keep "
+                f"the agent backend, or pass --robustness-mock explicitly "
+                f"to suppress this warning. See "
+                f"inference_optimizer/multi_node/SKILL.md "
                 f"(Robustness limitation in multi-node mode).",
                 file=sys.stderr,
             )
@@ -3320,494 +3478,8 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
-    """Collect non-default ``request.options`` overrides from CLI flags.
-
-    Only emits keys the operator actually passed so the runtime CLI
-    falls back to its own defaults / env-discovery for the rest.
-
-    Multi-node auto-disable: when ``args.nodes >= 2`` the inference
-    server runs in the head pod (separate Kubernetes pod from the
-    sandbox where the robustness-agent subprocess lives), so the
-    hardcoded ``http://127.0.0.1:8888/health`` probe baked into
-    ``robustness_agent.config.Config.auto_probe_inference_server``
-    can never succeed and floods the bus with false-positive
-    ``local_server_unreachable`` symptoms each tick. Disable the
-    auto-probe by default in multi-node so single-node semantics stay
-    intact while multi-node stops emitting the bogus alert. Operators
-    who configure an explicit cluster-local probe target can re-enable
-    via a future ``--robustness-auto-probe-inference-server`` flag.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments; reads the
-            ``robustness_*`` knobs and ``nodes``.
-
-    Returns:
-        dict[str, Any]: The non-default ``request.options`` overrides to pass
-        to the robustness-agent runtime.
-    """
-    options: dict[str, Any] = {}
-    server_url = getattr(args, "robustness_server_url", None)
-    if server_url is not None:
-        options["robustness_server_url"] = server_url
-    llm_rca = getattr(args, "robustness_llm_rca", None)
-    if llm_rca is not None:
-        options["llm_rca_enabled"] = bool(llm_rca)
-    nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2:
-        options["auto_probe_inference_server"] = False
-        # B3 no_levers_found floor — multi-node large-model spends
-        # 35-50 min on sglang cold start + baseline + profile +
-        # turnaround alone before the first explore family runs.
-        # Bumping the elapsed-time floor from 45 to 60 minutes layers
-        # a wall-clock buffer on top of the explore_started gate
-        # (commit 97318ee) so the symptom only fires when both
-        # exploration has started AND a full hour has elapsed
-        # without finding a lever. Single-node default (45.0) stays
-        # untouched.
-        options["progress_no_levers_min_minutes"] = 60.0
-    return options
-
-
-# ---------------------------------------------------------------------------
-# Recipe-snapshot KB dispatcher bootstrap
-# ---------------------------------------------------------------------------
-def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
-    """Resolve the local recipe-snapshot KB root.
-
-    The contract per the local-kb-recipe-snapshot-requirements doc
-    (§2): "本地 KB 路径固定放在 ``${USER_DATA_PATH}/kb``". The
-    ``--local-kb-root`` and ``$HYPERLOOM_LOCAL_KB_ROOT`` overrides
-    exist for tests + sandbox isolation; the default for the
-    operator-visible runtime path is fixed.
-
-    Resolution ladder (highest priority first):
-
-    1. ``--local-kb-root <path>`` — explicit operator override
-       (typically only used by tests).
-    2. ``$HYPERLOOM_LOCAL_KB_ROOT`` — env override.
-    3. ``$USER_DATA_PATH/kb`` — the documented default. A single
-       ``USER_DATA_PATH`` override moves the whole KB tail.
-    4. ``/workspace/hyperloom/kb`` — container fallback when
-       ``$USER_DATA_PATH`` isn't set (degraded sandbox / fresh-image
-       boot).
-
-    The directory is NOT created here — :class:`LocalRecipeStore`
-    handles lazy creation on first write so a degraded run that
-    never touches the KB pays nothing on disk.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments; reads
-            ``local_kb_root``.
-
-    Returns:
-        Path: The resolved local recipe-snapshot KB root directory.
-    """
-    explicit = (
-        getattr(args, "local_kb_root", None)
-        or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
-    )
-    if explicit:
-        return Path(str(explicit).strip())
-    user_data = os.environ.get("USER_DATA_PATH", "").strip()
-    if user_data:
-        return Path(user_data) / "kb"
-    return Path("/workspace/hyperloom") / "kb"
-
-
-def _build_recipe_kb_dispatcher(
-    args: argparse.Namespace,
-) -> Any:
-    """Build the local-write / remote-read dispatcher for the
-    recipe-snapshot KB.
-
-    Returns a :class:`recipe_kb.RecipeKB` instance. The remote half
-    is wired according to the operator's flags:
-
-    * ``--degraded-kb`` (or ``$CORTEX_KB_URL`` empty AND
-      ``--cortex-kb-url`` not passed) → ``remote=None`` →
-      local-only mode.
-    * Otherwise → enabled :class:`RemoteRecipeClient` pointed at
-      the resolved URL with the foreground-friendly retry/timeout
-      profile (2 s + 1 retry) so a slow / unreachable kb-service
-      never blocks the optimizer's main loop for more than the
-      side-channel budget the operator already calibrated for the
-      legacy v2 client.
-
-    The local store is always wired, regardless of remote
-    presence — writes have to land somewhere.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments; reads ``degraded_kb``
-            and ``cortex_kb_url``.
-
-    Returns:
-        Any: A :class:`recipe_kb.RecipeKB` dispatcher wired with a local store
-        and (optionally) a remote client.
-    """
-    from .recipe_kb import LocalRecipeStore, RecipeKB, RemoteRecipeClient
-
-    local_root = _resolve_local_kb_root(args)
-    local_store = LocalRecipeStore(root=local_root)
-
-    if bool(getattr(args, "degraded_kb", False)):
-        # Operator explicitly opted out — no network calls regardless
-        # of CORTEX_KB_URL value.
-        return RecipeKB(local=local_store, remote=None)
-
-    cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
-    if not cortex_url:
-        cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
-    if not cortex_url:
-        # No URL configured anywhere — local-only. There is no
-        # hard-coded default endpoint to fall back to (the old central
-        # kb-service default was retired): with nothing configured the
-        # operator wants local-only.
-        return RecipeKB(local=local_store, remote=None)
-
-    remote = RemoteRecipeClient(
-        kb_url=cortex_url,
-        foreground=True,
-        enabled=True,
-    )
-    return RecipeKB(local=local_store, remote=remote)
-
-
-# ---------------------------------------------------------------------------
-# Cortex KB T0 hook
-# ---------------------------------------------------------------------------
-def _bootstrap_cortex_kb(
-    args: argparse.Namespace,
-    *,
-    session_dir: Path,
-    manifest: dict[str, Any],
-    resume: bool,
-):
-    """Boot the recipe-snapshot KB integration and run the T0 anchor.
-
-    Builds a :class:`recipe_kb.RecipeKB` dispatcher (local writes +
-    optional remote-read fall-through) and runs ``run_t0_anchor``
-    against it. Returns the dispatcher so the caller can thread it
-    into the Coordinator.
-
-    Failure handling:
-
-    * Local store is always wired — even ``--degraded-kb`` runs go
-      through the dispatcher (just with ``remote=None``).
-    * Remote read failures are absorbed by the dispatcher and
-      degrade silently to local-only.
-    * T0 hard failures (e.g. filesystem permission denied) log a
-      warning and continue with an empty warm-start; the recipe
-      will be created on the first KEEP/REVERT.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments used to build the KB
-            dispatcher; may be mutated with a degraded reason on T0 failure.
-        session_dir (Path): Session root for SharedState + T0 anchoring.
-        manifest (dict[str, Any]): The launch manifest providing workload /
-            hardware / fingerprint metadata.
-        resume (bool): Whether this is a resumed session (passed through to
-            ``run_t0_anchor``).
-
-    Returns:
-        Any: The :class:`recipe_kb.RecipeKB` dispatcher, so the caller can
-        thread it into the Coordinator.
-    """
-    kb = _build_recipe_kb_dispatcher(args)
-
-    state = SharedState.load_or_init(session_dir)
-    workload = (
-        state.model_name
-        or manifest.get("model_name", "")
-        or Path(manifest.get("model_path", "") or "").name
-        or "unknown_model"
-    )
-    hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
-    stack_fp = manifest.get("stack_fingerprint") or {}
-    image_digest = manifest.get("image") or ""
-    # Mirror version + image fingerprint onto SharedState so the
-    # CLOSE-time recipe write (coordinator._collect_workload_tags)
-    # can stamp them onto the recipe.extras WITHOUT re-reading
-    # manifest at every write. Resume reads ``stack_fingerprint_meta``
-    # back from state.json verbatim.
-    if isinstance(stack_fp, dict) and stack_fp:
-        merged_meta = dict(getattr(state, "stack_fingerprint_meta", {}) or {})
-        for key, value in stack_fp.items():
-            if value not in (None, "", "unknown"):
-                merged_meta[str(key)] = value
-        if image_digest and image_digest != "unknown":
-            merged_meta["image_digest"] = image_digest
-        if merged_meta:
-            state.stack_fingerprint_meta = merged_meta
-    extra_attrs = {
-        "marathon_dispatch_id": manifest.get("session_id", ""),
-        "framework":            state.framework or manifest.get("framework", ""),
-        "model_class":          state.model_class or "",
-        # Operator traceability — the recipe.extras carry the most-
-        # recent tracing tuple so a future debugger can answer
-        # "which Claw job / sandbox produced this best_config".
-        "claw_session_id":      manifest.get("claw_session_id") or "",
-        "sandbox_user_id":      manifest.get("sandbox_user_id") or "",
-    }
-    try:
-        run_t0_anchor(
-            kb,
-            state,
-            workload=workload,
-            hw=hw,
-            image_digest=image_digest,
-            stack_fingerprint=stack_fp,
-            extra_attrs=extra_attrs,
-            resume=resume,
-            # KB unavailability MUST NOT abort the launch. Operator
-            # requirement (May 2026): "if KB is not available, do not
-            # affect the main logic." IR-3 already soft-degrades when
-            # KB is unreachable at preflight; we mirror that policy
-            # here so an IR-3-pass + T0-fail race (KB UP at probe
-            # time but DOWN moments later) also degrades cleanly
-            # instead of aborting the optimizer. The Coordinator
-            # The dispatcher's remote half (if any) absorbs read
-            # failures internally; the local store is always
-            # writable, so a hard failure here is a programming bug
-            # (Path / OSError-class), not a remote outage.
-            fail_fast=False,
-            on_status=print,
-            session_dir=session_dir,
-            save_state=True,
-        )
-    except Exception as exc:  # noqa: BLE001 — defensive
-        print(
-            f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\n"
-            f"Continuing without warm-start (recipes for this 5-tuple "
-            f"will be created on first KEEP/REVERT).",
-            file=sys.stderr,
-        )
-        args.kb_degraded_reason = (
-            getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
-        )
-    return kb
-
-
-# ---------------------------------------------------------------------------
-# Retired (v2 RecipeKB cutover): the Cortex KB flusher daemon was a
-# background NDJSON drainer for failed central-server writes. Under
-# the local-write design writes are local-only so there is nothing
-# to drain. The two helpers below are kept as no-op stubs that
-# write a "skipped" status marker for the breakdown collector,
-# preserving the on-disk layout for a few session-cycles while
-# downstream consumers catch up.
-# ---------------------------------------------------------------------------
-def _maybe_spawn_kb_flusher(
-    args: argparse.Namespace,
-    *,
-    session_dir: Path,
-) -> tuple[subprocess.Popen | None, Path]:
-    """No-op shim — flusher daemon is retired.
-
-    Writes a status marker with ``reason="retired_v2_local_write"`` so the
-    breakdown collector surfaces the cutover state. Full retirement
-    (deleting the helper + its callers + the status marker / pid path
-    machinery) happens in a follow-up commit alongside the
-    cortex_kb_client module deletion.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments (unused by the shim,
-            kept for signature compatibility).
-        session_dir (Path): Session root under which the status marker / pid
-            path live.
-
-    Returns:
-        tuple[subprocess.Popen | None, Path]: Always ``(None, pid_path)`` since
-        the flusher daemon is retired.
-    """
-    from .session_paths import (
-        cortex_dir,
-        cortex_flusher_pid,
-        cortex_flusher_status_json,
-    )
-
-    pid_path = cortex_flusher_pid(session_dir)
-    status_path = cortex_flusher_status_json(session_dir)
-    cortex_root = cortex_dir(session_dir)
-    cortex_root.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "enabled":       False,
-        "spawned":       False,
-        "pid":           None,
-        "cmd":           [],
-        "cortex_kb_url": (getattr(args, "cortex_kb_url", None) or "").strip() or None,
-        "interval_sec":  0.0,
-        "batch_size":    0,
-        "reason":        "retired_v2_local_write",
-        "ts":            datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "pid_path":      str(pid_path),
-    }
-    try:
-        status_path.parent.mkdir(parents=True, exist_ok=True)
-        status_path.write_text(
-            json.dumps(payload, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log.warning("kb_flusher status marker write failed: %s", exc)
-    return None, pid_path
-
-
-def _stop_kb_flusher(
-    proc: subprocess.Popen | None,
-    pid_path: Path,
-    *,
-    grace_sec: float = 10.0,
-) -> None:
-    """No-op shim for the retired KB flusher daemon.
-
-    Production spawns ``proc=None`` so this returns immediately. The defensive
-    branch only fires when a stale daemon from a prior code version is still
-    alive: it sends ``SIGTERM`` (waiting up to ``grace_sec``), escalates to
-    ``kill()`` on timeout, and removes the pid file.
-
-    Args:
-        proc (subprocess.Popen | None): A live flusher process to stop, or
-            ``None`` (the normal case post-retirement).
-        pid_path (Path): The pid file to unlink after stopping.
-        grace_sec (float): Seconds to wait for graceful ``SIGTERM`` shutdown
-            before killing. Defaults to 10.0.
-
-    Returns:
-        None
-    """
-    if proc is None:
-        return
-    # Defensive: if a stale prior daemon still exists, terminate it.
-    if proc.poll() is None:
-        try:
-            proc.send_signal(signal.SIGTERM)
-            proc.wait(timeout=grace_sec)
-        except Exception:  # noqa: BLE001
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
-    try:
-        pid_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# PR Monitor + KnowledgePlane wiring
-# ---------------------------------------------------------------------------
-def _bootstrap_knowledge_plane(
-    args: argparse.Namespace,
-    *,
-    cortex_client: Any = None,
-    session_dir: Path | None = None,
-) -> "KnowledgePlane":
-    """Construct the :class:`KnowledgePlane` facade for one session.
-
-    Wires the (optional) PR Monitor REST client + the (already
-    bootstrapped) Cortex KB client into a single read/write surface.
-    Both backends fail-soft: if either is unreachable the facade
-    returns empty / disabled-status responses so prompt assembly +
-    breakdown collectors don't have to branch on availability.
-
-    ``--degraded-pr`` short-circuits the REST probe and yields a
-    disabled :class:`PRMonitorClient` (which also strips the
-    ``mcp__pr_monitor__*`` tool block on the specialist side via
-    :meth:`SpecialistRunner._resolve_tools`).
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments (reads the
-            ``pr_monitor_*`` knobs and degraded markers).
-        cortex_client (Any): Optional bootstrapped Cortex KB client. Defaults
-            to None (unwired per the local-kb design).
-        session_dir (Path | None): Optional session root used to write the
-            ``pr_monitor`` status marker.
-
-    Returns:
-        KnowledgePlane: The constructed facade wrapping the PR Monitor client.
-    """
-    from .orchestrator.knowledge_plane import (
-        KnowledgePlane,
-        load_domain_repos,
-    )
-    from .orchestrator.pr_monitor import (
-        DEFAULT_PR_FEED_WINDOW_DAYS,
-        DEFAULT_PR_MONITOR_MCP_URL,
-        PRMonitorClient,
-    )
-
-    pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
-    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip() or None
-    pr_mcp_url = (
-        (getattr(args, "pr_monitor_mcp_url", None) or "").strip()
-        or DEFAULT_PR_MONITOR_MCP_URL
-    )
-    window_days = int(
-        getattr(args, "pr_feed_window_days", DEFAULT_PR_FEED_WINDOW_DAYS)
-        or DEFAULT_PR_FEED_WINDOW_DAYS
-    )
-
-    pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
-    # IR-3 (``_preflight()`` step 13) already probed ``/healthz`` and
-    # set ``args.pr_monitor_enabled`` + ``args.pr_degraded_reason``.
-    # We trust that result here — runtime drift falls back to the
-    # specialist-side empty PR feed surface.
-    if not pr_enabled:
-        reason = getattr(args, "pr_degraded_reason", None) or "explicit_flag"
-        status_text = f"disabled ({reason})"
-        print(f"PR Monitor       : DISABLED ({reason})")
-        pr_reachable = False
-    else:
-        status_text = f"REST {pr_client.base_url} (window={window_days}d)"
-        print(
-            f"PR Monitor       : REST {pr_client.base_url} (window="
-            f"{window_days}d, mcp={pr_mcp_url})"
-        )
-        pr_reachable = True
-
-    # v0.8 §3.6 + record a one-shot status marker so
-    # ``breakdown.warnings`` can surface ``pr_monitor:disabled`` /
-    # ``pr_monitor:unreachable`` without scraping logs. Best-effort: a
-    # write failure here only loses the breakdown row, not the
-    # KnowledgePlane bootstrap itself.
-    if session_dir is not None:
-        try:
-            from .session_paths import pr_monitor_status_json
-            from .paths import asset_actions_dir  # noqa: F401 (unused import warning suppress)
-            marker = pr_monitor_status_json(session_dir)
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(json.dumps({
-                "enabled":      bool(pr_enabled),
-                "url":          (pr_client.base_url if pr_enabled else ""),
-                "reachable":    bool(pr_reachable),
-                "mcp_url":      pr_mcp_url if pr_enabled else "",
-                "window_days":  int(window_days),
-                "status_text":  status_text,
-            }, sort_keys=True, indent=2))
-        except OSError as exc:  # noqa: BLE001 — defensive
-            log.warning(
-                "pr_monitor_status marker write failed: %r "
-                "(breakdown.warnings will miss pr_monitor row)", exc,
-            )
-
-    # NOTE: ``cortex_kb=None`` per the local-kb-recipe-snapshot
-    # design (§3 of the requirements doc): the central kb-service
-    # is only consulted as a recipe-read source via the RecipeKB
-    # dispatcher; KnowledgePlane's legacy /v1/points read+write
-    # surface is no longer wired. PR Monitor (a separate service)
-    # is still routed through KnowledgePlane.
-    return KnowledgePlane.from_clients(
-        cortex_kb=None,
-        pr_monitor=pr_client,
-        domain_repos=load_domain_repos(),
-        pr_feed_window_days=window_days,
-        pr_monitor_mcp_url=pr_mcp_url,
-    )
-
-
 def _reset_state_file(session_dir: Path) -> None:
-    """v0.8 §3.10 — back up the existing ``state.json`` and start fresh.
+    """Back up the existing ``state.json`` and start fresh.
 
     The backup name is ``state.json.preReset.<unix_ts>`` so multiple
     resets in the same session_dir don't clobber each other. Symbolic
@@ -4402,9 +4074,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         args.resume = True
 
     if args.resume:
-        # Resume mode (N17-aware): USER_DATA_PATH stays at workspace
-        # level so runtime/ + logs/ resolution doesn't break (N15
-        # `_load_kernel_agent_env_fallback` looks at $USER_DATA_PATH/
+        # Resume mode: USER_DATA_PATH stays at workspace level so
+        # runtime/ + logs/ resolution doesn't break
+        # (`_load_kernel_agent_env_fallback` looks at $USER_DATA_PATH/
         # runtime/kernel-agent.env.sh, which only exists at workspace
         # level after install.sh ran). We then pick the per-session
         # subdir to resume from via either:
@@ -4673,9 +4345,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=True,
         )
-        kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
-            args, session_dir=session_dir,
-        )
         # KnowledgePlane facade. Bootstrapped
         # alongside the cortex client so a resumed session also gets the
         # PR Monitor + KB readonly tools wired into specialist dispatch.
@@ -4782,8 +4451,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
 
-        # Compute MAX_MODEL_LEN = ISL + OSL + 4096 headroom, export for yaml injection.
-        max_model_len = args.isl + args.osl + 4096
+        # MAX_MODEL_LEN = ISL + OSL + headroom, clamped to the model's native
+        # window (no context stretch); see _resolve_max_model_len. Exported for
+        # YAML injection — vllm wires it into --max-model-len; sglang ignores it
+        # (context_length stays None) but still mirrors it into the config.
+        max_model_len = _resolve_max_model_len(
+            args.isl, args.osl, str(args.model or ""),
+        )
         os.environ["MAX_MODEL_LEN"] = str(max_model_len)
         os.environ["ISL"] = str(args.isl)
         os.environ["OSL"] = str(args.osl)
@@ -4815,8 +4489,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
               f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision} "
               f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}")
 
-        # N17: session_dir is now <workspace_root>/<model>/<UTC ts>/
-        # by default (per-model + per-launch). Workspace_root is
+        # session_dir is <workspace_root>/<model>/<UTC ts>/ by default
+        # (per-model + per-launch). Workspace_root is
         # $USER_DATA_PATH (fallback /workspace/hyperloom). To restore
         # the legacy flat layout, set INFERENCE_OPTIMIZER_SESSION_LAYOUT=
         # flat. `make_session_dir(model_name=...)` does the layout
@@ -4849,16 +4523,31 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
         )
+        # Unsupported-model preflight: Hyperloom only supports text-generation
+        # (decoder-only causal LM) models. Refuse to run (with a persisted stop
+        # reason) when config.json identifies a multimodal/vision model, which
+        # would otherwise boot the baseline server only to die minutes in with
+        # a cryptic image-processor load error. Runs first (most fundamental
+        # rejection) and, like the context-window gate, after the SharedState
+        # seed but before the heavy Cortex / backend / Coordinator bring-up.
+        if _preflight_unsupported_model_arch(args, session_dir):
+            sys.exit(2)
+        # Context-window preflight: refuse to run (with a persisted stop
+        # reason) when ISL+OSL+headroom exceeds the model's
+        # max_position_embeddings, instead of booting a server that 400s every
+        # request and dies on the scheduler watchdog. No --context-length
+        # stretch by policy. Runs after the SharedState seed (so the stop
+        # reason lands in state.json/final.*) but before the heavy Cortex /
+        # backend / Coordinator bring-up.
+        if _preflight_context_window(args, session_dir):
+            sys.exit(2)
         # Cortex KB T0 anchor. Must run after the SharedState
         # seed (so model_name / gpu_type / framework are populated for
         # recipe_canonical_id derivation) but before Coordinator is
         # constructed (the Coordinator stores the client + threads it
-        # into T2/T3/T4 hooks). Fails fast unless --degraded-kb.
+        # into its KB hooks). Fails fast unless --degraded-kb.
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=False,
-        )
-        kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
-            args, session_dir=session_dir,
         )
         # KnowledgePlane facade for specialist
         # sub-agents. Wraps cortex_client (already T0'd above) + a
@@ -4893,13 +4582,45 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     elif no_explore:
         print("Explore phase   : DISABLED (--no-explore); "
               f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}")
+    if bool(getattr(args, "research_scout", True)):
+        print(
+            "Research scout  : ENABLED at PRELUDE (re-dispatch every "
+            f"{max(1, int(getattr(args, 'research_scout_interval', 3) or 3))} "
+            "explore rounds)"
+        )
+    else:
+        print("Research scout  : DISABLED (--no-research-scout)")
+    if bool(getattr(args, "target_advisory", True)):
+        print("Target advisory : ENABLED (External target gap injected into "
+              "prompts; advisory-only)")
+    else:
+        print("Target advisory : DISABLED (--no-target-advisory)")
+    if bool(getattr(args, "recipe_sediment", True)):
+        print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to "
+              "persistent recipe)")
+    else:
+        print("Recipe sediment : DISABLED (--no-recipe-sediment)")
+    if bool(getattr(args, "depth_gate", True)):
+        print("Depth gate      : ENABLED (stop/advance blocked while "
+              "exploration is too shallow; IR-6 budget overrides)")
+    else:
+        print("Depth gate      : DISABLED (--no-depth-gate); legacy "
+              "single steward continuation")
+    if bool(getattr(args, "allow_empty_kernel_shape", False)):
+        os.environ["HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE"] = "1"
+        print("Kernel shape    : empty-shape dispatch ALLOWED "
+              "(--allow-empty-kernel-shape)")
+    else:
+        os.environ.pop("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", None)
+        print("Kernel shape    : non-empty trace shape REQUIRED for "
+              "kernel-opt dispatch")
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
     # would otherwise blow up on missing runtime). Fail-fast policy: if the
     # operator selected --critic-agent (or it's the default) but the
     # critic-agent runtime is unreachable, we abort with rc=2 instead of
-    # silently falling back to mock/codex_bare.
+    # silently falling back to mock.
     critic_choice = _resolve_critic_choice(args)
     critic_agent_root: Path | None = None
     critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
@@ -4919,7 +4640,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
                 f"runtime/cli.py, or install critic-agent at "
                 f"$REPO_ROOT/critic-agent/.\n"
-                f"  Bypass with --critic-mock or --critic-codex-bare.",
+                f"  Bypass with --critic-mock.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -4982,9 +4703,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # as `policy_denied` in its inbox. Tests omit this and keep the
     # legacy lenient mode for fixture paths under /tmp.
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
-    # flip on PolicyGate R1 phase_incompatible enforcement
-    # for production runs (matches the legacy→v0.8 strict_paths
-    # rollout). Tests construct PolicyGate directly with strict_phase
+    # flip on PolicyGate R1 phase_incompatible enforcement for
+    # production runs. Tests construct PolicyGate directly with strict_phase
     # left at the dataclass default (False) so legacy fixtures aren't
     # broken; this env var only affects the cli boot path.
     if getattr(args, "strict_phase", True):
@@ -5031,8 +4751,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
 
     # Build the phase budget pct dict from CLI flags; ``None`` values
-    # fall back to library defaults inside Coordinator. See KB_design
-    # §3.13 M2 §7 + §3.8 §5.3.
+    # fall back to library defaults inside Coordinator.
     phase_budget_pct: dict[str, float] = {}
     for cli_field, phase_name in (
         ("phase_budget_prelude_pct", "PRELUDE"),
@@ -5065,7 +4784,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         ),
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
-        # v0.8 §3.5 + KB_gaps/Gap-01/Gap-02 — KnowledgePlane facade.
+        # KnowledgePlane facade.
         # ``None`` when --degraded-kb; otherwise wraps Cortex KB +
         # PR Monitor for specialist prompt assembly.
         knowledge_plane=knowledge_plane,
@@ -5074,7 +4793,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # each proposal_set and surfaces the results to Orchestration as
         # one reference among many (never gates anything).
         proposal_scorer=_build_proposal_scorer(args),
-        # GAP 1 — Warm-recipe replay controls. Default ON, fires when
+        # Warm-recipe replay controls. Default ON, fires when
         # warm_start_recipe.confidence >= min_confidence and the
         # measured gain reproduces at least min_reproduce_pct of the
         # recipe's historical claim. Manifest is the persistent
@@ -5117,13 +4836,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     except (TypeError, ValueError):
         coordinator.framework_pr_discover_timeout_sec = 0.0
-    # v0.8 §3.5 + build specialist executor when the
-    # research_lane capacity is non-zero. ``args.research_lane_capacity``
-    # is already clamped to [0, 32] by ``_seed_shared_state``; a value
-    # of 0 means "degrade to M3 LLM-direct grid", and we keep
-    # ``specialist_executor=None`` so the dispatcher falls back to the
-    # legacy ``no_executor`` rejection (which PolicyGate R2 also
-    # short-circuits in practice).
+    # Build specialist executor when the research_lane capacity is
+    # non-zero. ``args.research_lane_capacity`` is already clamped to
+    # [0, 32] by ``_seed_shared_state``; a value of 0 means "degrade to
+    # the LLM-direct grid", and we keep ``specialist_executor=None`` so
+    # the dispatcher falls back to the ``no_executor`` rejection (which
+    # PolicyGate R2 also short-circuits in practice).
     specialist_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 0
     )
@@ -5151,8 +4869,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     if critic_choice == "mock":
         critic_str = "mock"
-    elif critic_choice == "codex_bare":
-        critic_str = f"codex-bare({args.codex_model})"
     else:  # "agent"
         critic_str = (
             f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, "
@@ -5195,21 +4911,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         await coordinator.stop()
-        # v0.8 KB_gaps/Dead-E — stop the flusher daemon (best-effort;
-        # graceful SIGTERM with 10s budget then SIGKILL fallback). Done
-        # before the breakdown safety-net so the final NDJSON drain
-        # numbers reflect a stable post-shutdown queue.
-        try:
-            _stop_kb_flusher(kb_flusher_proc, kb_flusher_pid_path)
-        except Exception:  # noqa: BLE001
-            log.exception("kb_flusher stop failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json
         # for downstream consumers (claw-stats-service / hyperloom-results-
         # service / offline analysis). Best-effort — a failure here MUST NOT
         # mask the actual stop_reason, so we swallow exceptions and log.
         #
-        # v0.8 §3.2 §5.5 / KB_gaps/Gap-06: when the CLOSE phase sequencer
-        # ran to completion, step 2 already wrote the same artifact via
+        # When the CLOSE phase sequencer ran to completion, step 2
+        # already wrote the same artifact via
         # the standard session_breakdown executor. Skip the duplicate
         # write here so the cli.finally path doesn't clobber the
         # sequencer's output (which includes the full CLOSE-step
@@ -5249,6 +4957,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 log.exception(
                     "emergency final report write failed (non-fatal)"
                 )
+
+    _reconcile_crash_count(coordinator.shared_state, session_dir)
+    # NOTE: conc_sweep used to run here as a post-hook. It is now a
+    # real SWEEP-phase action auto-enqueued by the Coordinator after
+    # the SWEEP-entry sweep task lands (see
+    # ``coordinator._enqueue_internal_conc_sweep_task``). The CLI
+    # flags still live below and are mirrored onto SharedState at
+    # session init.
 
     _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in (
@@ -5543,11 +5259,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "token (action_executors/_framework_gap_composer.py), the recipe "
             "key, and the orchestration prompt label. Recognised values "
             "(case-insensitive, with -/+/space tolerated): dense / moe_mla / "
-            "moe_swa / moe_mla_nsa. The deleted ``classify`` action used to "
-            "discover this from the model files; the external SKILL caller is "
-            "now expected to supply it via this flag (or the MODEL_CLASS env "
-            "var). Unset / unknown values fall back to ``moe_mla`` so "
-            "DeepSeek-shaped sessions keep working. For richer *advisory* "
+            "moe_swa / moe_mla_nsa. When unset, Coordinator boot infers and "
+            "persists it from config.json (num_experts / architectures) or "
+            "model-path family keywords, replacing the deleted ``classify`` "
+            "action's lightweight state-write role. For richer *advisory* "
             "model context (attention variant, KV/token, experts, MTP, ...) "
             "the SKILL launcher writes $USER_DATA_PATH/model_arch.json, which "
             "is injected into prompts but drives no gating."
@@ -5631,7 +5346,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--kernel-claude", action="store_false", dest="kernel_codex",
                       help="Use Claude backend for Kernel agent")
     # Critic backend selection. ``critic_backend`` is the canonical
-    # attribute; the four flags below are convenience aliases that all
+    # attribute; the flags below are convenience aliases that all
     # set the same dest. Default is filled by the CLI default block in
     # ``_resolve_critic_choice``; a single explicit flag wins, conflicts
     # are caught at runtime (mutual exclusion checked there because
@@ -5653,25 +5368,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Force the critic-agent runtime backend (KB + session memory + "
              "review_constraints). Requires CRITIC_AGENT_ROOT or a sibling "
              "$REPO_ROOT/critic-agent/ directory.",
-    )
-    opt.add_argument(
-        "--critic-codex-bare",
-        dest="critic_backend",
-        action="store_const",
-        const="codex_bare",
-        help="Force the legacy bare-Codex Critic (single chat-completion + "
-             "JSON envelope; no KB, no session memory). For debugging the "
-             "LLM layer in isolation.",
-    )
-    # Back-compat alias for the old --critic-real flag (semantically the
-    # same as --critic-codex-bare). Hidden from --help to avoid promoting
-    # the old name; still accepted so existing launchers don't break.
-    opt.add_argument(
-        "--critic-real",
-        dest="critic_backend",
-        action="store_const",
-        const="codex_bare",
-        help=argparse.SUPPRESS,
     )
     # ----- Robustness backend selection (mirrors critic) ------------------
     opt.add_argument(
@@ -5715,6 +5411,56 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Forward llm_rca_enabled=false into request.options.",
     )
+    opt.add_argument(
+        "--robustness-workload-uid",
+        dest="robustness_workload_uid",
+        type=str,
+        default=None,
+        help="Forward workload_uid into request.options. The robustness-server "
+             "resolves it to every pod (head + workers) backing the RayJob via "
+             "the cluster/workloads/{uid}/hierarchy endpoint. Falls back to "
+             "$CLAW_WORKLOAD_UID / $WORKLOAD_UID / $RAY_JOB_ID when unset.",
+    )
+    opt.add_argument(
+        "--robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_true",
+        default=None,
+        help="Force disable_local_probe=true. The robustness-agent silences "
+             "its LocalProbe fallback so per-pod sandbox checks (ps, rocm-smi, "
+             "local HTTP) cannot emit false-positive symptoms.",
+    )
+    opt.add_argument(
+        "--no-robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_false",
+        help="Force disable_local_probe=false (keep the LocalProbe fallback "
+             "even in multi-node mode).",
+    )
+    opt.add_argument(
+        "--robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_true",
+        default=None,
+        help="Force enable_cluster_pod_metrics=true so the robustness-agent "
+             "fans out per-pod metrics through robustness-server and feeds "
+             "the local_health rules with cluster-decoded GPU snapshots.",
+    )
+    opt.add_argument(
+        "--no-robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_false",
+        help="Force enable_cluster_pod_metrics=false.",
+    )
+    opt.add_argument(
+        "--robustness-pod-metrics-categories",
+        dest="robustness_pod_metrics_categories",
+        type=str,
+        default=None,
+        help="Comma-separated metric categories forwarded into "
+             "pod_metrics_categories (e.g. 'gpu,memory'). Default 'gpu' is "
+             "applied by the runtime when this flag is omitted.",
+    )
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")
     opt.add_argument("--critic-prompt", type=str, default=None,
@@ -5724,14 +5470,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # Cortex KB integration flags
     # ------------------------------------------------------------------
-    # The defaults wire Cortex *on* (matches the "Loop 1" expectation in
-    # the cortex hand-off doc). ``--degraded-kb`` is a debug escape hatch
-    # that fully bypasses T0/T2/T3/T4 so a fresh sandbox can reproduce
-    # the behaviour without any KB writes. ``--cortex-kb-url``
+    # The defaults wire Cortex *on*. ``--degraded-kb`` is a debug escape
+    # hatch that fully bypasses the KB hooks so a fresh sandbox can
+    # reproduce the behaviour without any KB writes. ``--cortex-kb-url``
     # overrides the env value (``CORTEX_KB_URL``) without exporting one
     # process-wide. ``--cortex-strict-fingerprint`` enforces the
     # manifest stack_fingerprint matches a recipe before warm_start is
-    # consumed (M5 consumer; M1 records the flag into manifest only).
+    # consumed.
     opt.add_argument(
         "--cortex-kb-url",
         dest="cortex_kb_url",
@@ -5784,7 +5529,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "in manifest.json). Default: lenient (M1 records the flag "
              "in manifest only; consumed by M5 specialist assembly).",
     )
-    # GAP 1 — Warm-recipe replay (PRELUDE auto-applies the KB best_config
+    # Warm-recipe replay (PRELUDE auto-applies the KB best_config
     # before EXPLORE starts). Three flags control the behavior:
     #
     # 1. ``--no-warm-replay``         — disable the auto-enqueue entirely.
@@ -5829,49 +5574,16 @@ def _build_parser() -> argparse.ArgumentParser:
              "``status=drift`` and continue with the regular EXPLORE "
              "flow without inheriting the warm config.",
     )
-    # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle. The cli
-    # spawns ``scripts.cortex_kb_flusher`` after the T0 anchor (so the
-    # NDJSON pending queue gets drained in the background while the
-    # main loop runs); ``--no-kb-flusher`` short-circuits the spawn for
-    # operators debugging the NDJSON path manually. ``--kb-flusher-*``
-    # overrides forward the same flags to the daemon CLI.
-    opt.add_argument(
-        "--no-kb-flusher",
-        dest="kb_flusher_enabled",
-        action="store_false",
-        default=True,
-        help="Skip spawning the Cortex KB flusher daemon. The NDJSON "
-             "pending queue still accumulates but only drains on the "
-             "next session start (or via manual ``python -m "
-             "inference_optimizer.scripts.cortex_kb_flusher`` run). "
-             "Implied by --degraded-kb.",
-    )
-    opt.add_argument(
-        "--kb-flusher-interval-sec",
-        dest="kb_flusher_interval_sec",
-        type=float,
-        default=5.0,
-        help="Forwarded to the flusher daemon as --interval-sec "
-             "(default 5.0).",
-    )
-    opt.add_argument(
-        "--kb-flusher-batch-size",
-        dest="kb_flusher_batch_size",
-        type=int,
-        default=50,
-        help="Forwarded to the flusher daemon as --batch-size "
-             "(default 50).",
-    )
     # ------------------------------------------------------------------
     # PR Monitor REST + MCP
     # ------------------------------------------------------------------
     # ``--pr-monitor-url`` overrides the in-cluster default; the
-    # marathon pod is typically in a different cluster from
+    # optimizer pod is typically in a different cluster from
     # primus-cortex, so an operator running outside the primus-cortex
     # k8s namespace must port-forward + pass a localhost URL.
     # ``--degraded-pr`` switches the KnowledgePlane.pr_feed_warm
     # path to a no-op and strips ``mcp__pr_monitor__*`` from the
-    # specialist tool whitelist (Inv-6.3 degrade-to-empty).
+    # specialist tool whitelist (degrade-to-empty).
     opt.add_argument(
         "--pr-monitor-url",
         dest="pr_monitor_url",
@@ -5913,21 +5625,20 @@ def _build_parser() -> argparse.ArgumentParser:
              "Default: 30.",
     )
     # ------------------------------------------------------------------
-    # v0.8 M5/M6 — specialist research_lane capacity
+    # specialist research_lane capacity
     # ------------------------------------------------------------------
     # ``--research-lane-capacity`` locks the number of LLM specialists
     # that may run concurrently on the research_lane:
-    #   * 0   → degrade to M3 (no specialist dispatch; EXPLORE uses the
-    #           default_grid path).
-    #   * 1   → v0.8 M5 default (single specialist at a time).
-    #   * 4   → PR-A3 (Arbor-into-Hyperloom) default — enough headroom
+    #   * 0   → no specialist dispatch; EXPLORE uses the default_grid
+    #           path.
+    #   * 1   → single specialist at a time.
+    #   * 4   → default — enough headroom
     #           for the Orchestration LLM to fan out one specialist per
     #           top-K gap inside one tick (multi-emit shape) and have
     #           the dispatcher actually run them in parallel.
-    #   * 6   → M6 ceiling that matches Arbor's "six specialists across
-    #           domains" pattern; hard upper bound (values above this
-    #           are silently clamped down to 6 — see
-    #           ``MAX_RESEARCH_LANE_CAPACITY`` in
+    #   * The upper bound scales with the visible GPU count
+    #           (``2 × GPU``); operator values above the ceiling are
+    #           silently clamped down (see ``research_lane_ceiling`` in
     #           ``orchestrator/policy.py``).
     # Locked at session start (mirrored into manifest + SharedState);
     # PolicyGate denies mid-flight mutation via CORE_STATE_FIELDS.
@@ -5941,10 +5652,24 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help="Max concurrent LLM specialist sub-agents on the "
              "research_lane. 0 disables specialist "
-             "dispatch entirely (degrades to M3 LLM-direct grid); 4 is "
-             "the PR-A3 default (Arbor-into-Hyperloom); 6 is the M6 "
-             "hard cap. Range [0, 6]; values above 6 are silently "
-             "clamped down. Locked at session start.",
+             "dispatch entirely (degrades to LLM-direct grid); 4 is "
+             "the default. The upper bound scales with the visible GPU "
+             "count (2 x GPU); values above it are silently clamped "
+             "down. Locked at session start.",
+    )
+    opt.add_argument(
+        "--gpu-specialist-capacity",
+        dest="gpu_specialist_capacity",
+        type=int,
+        default=int(
+            os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0")
+            or "0"
+        ),
+        help="Number of GPUs available to specialists that request "
+             "needs_gpu=true. 0 disables GPU specialists (default). "
+             "Set INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES to a "
+             "comma-separated GPU id pool when the specialist pool should "
+             "not use device ids 0..N-1. Locked at session start.",
     )
     # ------------------------------------------------------------------
     # Advisory specialist-proposal scorer (ProposalScorer). Scores each
@@ -5973,7 +5698,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable the advisory specialist-proposal scorer entirely.",
     )
     # ------------------------------------------------------------------
-    # v0.8 §3.5 / §3.13 M5 + specialist sub-agent
+    # specialist sub-agent
     # backend selection. Specialists run via Claude (default) and inherit
     # the orchestration model unless overridden. Per-task turn / time
     # caps protect against runaway LLM consumption.
@@ -6049,7 +5774,7 @@ def _build_parser() -> argparse.ArgumentParser:
              ".",
     )
     # ------------------------------------------------------------------
-    # PR-A2 (Arbor-into-Hyperloom): specialist dispatch shape.
+    # specialist dispatch shape
     # ------------------------------------------------------------------
     opt.add_argument(
         "--specialist-dispatch-mode",
@@ -6096,6 +5821,20 @@ def _build_parser() -> argparse.ArgumentParser:
         return os.environ.get(env_var, "1").strip() != "0"
 
     opt.add_argument(
+        "--allow-empty-kernel-shape",
+        dest="allow_empty_kernel_shape",
+        action="store_true",
+        default=os.environ.get(
+            "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "0",
+        ).strip().lower() in {"1", "true", "yes", "on"},
+        help="Escape hatch (default off): allow kernel optimization to "
+             "dispatch a candidate with no trace-anchored shape. Normally "
+             "a shapeless candidate is rejected with a structured error so "
+             "the run returns to ``trace_analyze`` instead of burning a "
+             "GEAK / OOB budget on an unanchored kernel. Env: "
+             "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1.",
+    )
+    opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",
         action=argparse.BooleanOptionalAction,
@@ -6109,6 +5848,149 @@ def _build_parser() -> argparse.ArgumentParser:
              "identical (same idempotency keys, same pending-task "
              "dispatch gate, same watermark anchor update). Env: "
              "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
+    )
+    opt.add_argument(
+        "--research-scout",
+        dest="research_scout",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RESEARCH_SCOUT"),
+        help="Auto-dispatch a read-only research scout at PRELUDE (and "
+             "every --research-scout-interval EXPLORE rounds) that "
+             "collects proven priors — reference launch scripts, model "
+             "config.json architecture features, and cross-framework / "
+             "NVIDIA research — into ``research_hints.md`` and seeds "
+             "high-priority gaps. Default on; pass ``--no-research-scout`` "
+             "to disable the whole feature. Env: "
+             "INFERENCE_OPTIMIZER_RESEARCH_SCOUT=0.",
+    )
+    opt.add_argument(
+        "--research-scout-interval",
+        dest="research_scout_interval",
+        type=int,
+        default=3,
+        help="Re-dispatch the research scout every N EXPLORE rounds with "
+             "the current bottleneck context (append-only). Default 3. "
+             "Ignored when ``--no-research-scout`` is set.",
+    )
+    opt.add_argument(
+        "--recipe-sediment",
+        dest="recipe_sediment",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RECIPE_SEDIMENT"),
+        help="Sediment KEEP/REVERT provenance into the persistent recipe: "
+             "KEEP optimizations traceable to a research hint carry their "
+             "source + measured gain into ``what_worked``; REVERTs land in "
+             "``what_failed`` so the next warm-start avoids re-testing them. "
+             "Default on; pass ``--no-recipe-sediment`` to keep the recipe "
+             "purely ephemeral. Env: INFERENCE_OPTIMIZER_RECIPE_SEDIMENT=0.",
+    )
+    opt.add_argument(
+        "--target-advisory",
+        dest="target_advisory",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_TARGET_ADVISORY"),
+        help="Inject an advisory 'External target gap' block (throughput / "
+             "TPOT / interactivity gap vs the LLM-authored competitor "
+             "target) into the orchestration and specialist prompts; when "
+             "the TPOT ratio dominates it nudges toward latency-reducing "
+             "directions. Advisory only — never gates Objective or scoring. "
+             "Default on; pass ``--no-target-advisory`` to disable. Env: "
+             "INFERENCE_OPTIMIZER_TARGET_ADVISORY=0.",
+    )
+    opt.add_argument(
+        "--depth-gate",
+        dest="depth_gate",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_DEPTH_GATE"),
+        help="Deterministic exploration-depth guard. When the session "
+             "steward recommends stop / advance-to-kernel but the run "
+             "has not explored deeply enough (too few scout runs, no "
+             "code patch, too few PRs/diffs/NVIDIA refs), the verdict is "
+             "rewritten to continue_explore with a deepening hint — as "
+             "many times as needed, bounded only by the IR-6 budget "
+             "gate. Default on; ``--no-depth-gate`` restores the legacy "
+             "single-continuation steward behaviour. Env: "
+             "INFERENCE_OPTIMIZER_DEPTH_GATE=0.",
+    )
+    opt.add_argument(
+        "--depth-gate-thresholds",
+        dest="depth_gate_thresholds",
+        default="",
+        help="Override depth-gate minimums as comma-separated key=value "
+             "pairs. Keys: scout_runs_min, prs_fetched_min, "
+             "pr_diffs_read_min, nvidia_refs_min, code_patches_min, "
+             "reverts_to_evaluate. Defaults: 2,5,3,2,1 evaluated after "
+             "reverts_to_evaluate=3. Example: "
+             "``--depth-gate-thresholds scout_runs_min=1,code_patches_min=2``.",
+    )
+    # ------------------------------------------------------------------
+    # Post-optimization concurrency sweep (on by default).
+    #
+    # Runs an extra "baseline vs optimized" Magpie grid across CONC
+    # values after the close-sequence report has been written. The
+    # output is JSON/CSV in ``reports/conc_sweep_summary.json``; the
+    # frontend pairs it with the roofline ceiling to visualise the
+    # full curve. See ``orchestrator/conc_sweep.py``.
+    #
+    # Costs ~30 min/point on an 8xMI300 box and is bounded by
+    # ``--conc-sweep-total-budget-sec`` (default 2.5h) plus the
+    # remaining session wall-clock. Skip conditions (no baseline, no
+    # ``current_best``, no ISL/OSL) short-circuit before any subprocess
+    # is launched and are recorded in the JSON envelope. Disable with
+    # ``--no-enable-conc-sweep`` or
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--enable-conc-sweep",
+        dest="enable_conc_sweep",
+        action=argparse.BooleanOptionalAction,
+        default=(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", "",
+            ).strip().lower() not in ("0", "false", "no", "off")
+        ),
+        help="Run a post-optimization concurrency sweep (baseline vs "
+             "current_best across CONC) and write "
+             "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
+             "On by default; disable with --no-enable-conc-sweep or "
+             "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0.",
+    )
+    opt.add_argument(
+        "--conc-sweep-concs",
+        dest="conc_sweep_concs",
+        type=str,
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", "1,2,4,8,16,32,64,128",
+        ),
+        help="Comma-separated CONC ladder for --enable-conc-sweep. "
+             "Default 1,2,4,8,16,32,64,128.",
+    )
+    opt.add_argument(
+        "--conc-sweep-timeout-sec",
+        dest="conc_sweep_timeout_sec",
+        type=int,
+        default=int(os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_TIMEOUT_SEC", "1800",
+        )),
+        help="Per-variant timeout (seconds) for --enable-conc-sweep. "
+             "Default 1800 (~30 min). Per-variant cap is also clamped "
+             "by the remaining --conc-sweep-total-budget-sec.",
+    )
+    opt.add_argument(
+        "--conc-sweep-total-budget-sec",
+        dest="conc_sweep_total_budget_sec",
+        type=int,
+        default=int(os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_TOTAL_BUDGET_SEC", "9000",
+        )),
+        help="Total wall-clock budget (seconds) for the whole conc-sweep "
+             "action, independent of the per-variant Magpie timeout. "
+             "Once exhausted, remaining variants are recorded as "
+             "status=skipped / error_class=budget_exhausted and the "
+             "JSON envelope carries budget_exhausted=true. Default 9000 "
+             "(~2.5h); set to 0 to disable. Also bounded above by the "
+             "main session wall-clock deadline since conc_sweep runs as "
+             "a SWEEP-phase action.",
     )
     # Retired flags that operator scripts may still pass. We hard-fail
     # at argparse time with a one-line migration hint instead of
@@ -6135,7 +6017,7 @@ def _build_parser() -> argparse.ArgumentParser:
             hint=_retired_hint,
         )
     # ------------------------------------------------------------------
-    # Fix E — per-variant explore overtime kill ratio.
+    # Per-variant explore overtime kill ratio.
     #
     # Mirrored into :attr:`SharedState.explore_overtime_kill_ratio`
     # and read by :class:`ExploreExecutor` via task.params (Coordinator
@@ -6279,7 +6161,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # drop scoreboard
     # ------------------------------------------------------------------
-    # v0.8 retires the legacy ``action_scores`` decision system. The
+    # The legacy ``action_scores`` decision system is retired. The
     # flag below controls how a resumed session's leftover
     # scoreboard data is handled:
     #
@@ -6291,8 +6173,8 @@ def _build_parser() -> argparse.ArgumentParser:
     #   a ``breakdown.warnings`` entry so the operator sees the
     #   migration even on a fresh dashboard.
     #
-    # No third "keep" mode is offered: §3.9 §7 explicitly forbids
-    # carrying the field forward (the prompt builder no longer reads
+    # No third "keep" mode is offered: carrying the field forward is
+    # forbidden (the prompt builder no longer reads
     # it; keeping the bytes only inflates state.json).
     opt.add_argument(
         "--legacy-action-scores",
@@ -6429,13 +6311,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "gain sum is computed over. Default 5.",
     )
     # ------------------------------------------------------------------
-    # v0.8 IR-6 — EXPLORE HARD force-exit thresholds (Saturday May 2026)
+    # IR-6 — EXPLORE HARD force-exit thresholds
     # ------------------------------------------------------------------
     # Either condition fires an ``explore_force_exit_low_budget`` exit
-    # which routes EXPLORE → KERNEL (or SWEEP when --no-kernel). Iron
-    # Rule IR-6: this gate is non-negotiable — the steward / plateau /
-    # LLM cannot extend EXPLORE past either threshold. Locked at session
-    # start into ``SharedState.plateau_overrides``.
+    # which routes EXPLORE → KERNEL (or SWEEP when --no-kernel). This
+    # gate is non-negotiable — the steward / plateau / LLM cannot extend
+    # EXPLORE past either threshold. Locked at session start into
+    # ``SharedState.plateau_overrides``.
     opt.add_argument(
         "--explore-force-exit-hours-remaining",
         dest="explore_force_exit_hours_remaining",
@@ -6455,7 +6337,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "0.20 (IR-6).",
     )
     # ------------------------------------------------------------------
-    # IR-7 — session_steward_specialist controls (Saturday May 2026)
+    # IR-7 — session_steward_specialist controls
     # ------------------------------------------------------------------
     # The steward is the soft gate on plateau (HARD IR-6 still wins on
     # low budget). Operators can disable it for smoke runs or cap its
@@ -6482,8 +6364,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # Each phase claims a fraction of the total wall-clock budget. The
     # numbers below are caps — the Coordinator may exit a phase earlier
-    # if the plateau judge fires. Defaults follow §3.8 §5.3.  Sum need
-    # not equal 1.0 (a deliberate padding is encouraged).
+    # if the plateau judge fires. Sum need not equal 1.0 (a deliberate
+    # padding is encouraged).
     opt.add_argument(
         "--max-minutes-prelude-pct",
         dest="phase_budget_prelude_pct",
@@ -6497,21 +6379,21 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_explore_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.60.",
+        help="Wall-clock budget cap for EXPLORE. Default: 0.40.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL. Default: 0.25.",
+        help="Wall-clock budget cap for KERNEL. Default: 0.35.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.08.",
+        help="Wall-clock budget cap for SWEEP. Default: 0.18.",
     )
     opt.add_argument(
         "--max-minutes-close-pct",

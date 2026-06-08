@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared types and helpers across PR source backends.
 
 Defines `GitHubPr` (a lightweight result record) and `_repo_slug` (a

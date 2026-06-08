@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Internal helpers for ``inference_optimizer.multi_node``.
 
 Everything in here is implementation detail: ``log``, ``safe_client``,

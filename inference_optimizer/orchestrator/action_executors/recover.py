@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``recover`` ActionRunner — release leaked GPU VRAM.
 
 The recover action is the inference_optimizer counterpart of the
@@ -6,7 +8,7 @@ process (sglang / vLLM EngineCore / Magpie wrapper) has crashed and the
 ROCm KFD driver tables still attribute VRAM allocations to dead PIDs,
 every subsequent server start aborts with ``Free memory on device cuda:N
 (0.0/191.98 GiB) ... less than gpu-memory-utilization``. The optimizer
-loops on validate_stack and burns the remaining budget.
+loops on the failing server start and burns the remaining budget.
 
 ``RecoverExecutor`` is invoked via ``delegate{action_name="recover",
 params={force_gpu_cleanup: True, ...}}`` (Robustness-only by PolicyGate)

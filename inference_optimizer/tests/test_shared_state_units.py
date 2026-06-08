@@ -1,17 +1,22 @@
-"""Focused unit tests for ``SharedState`` helpers that lacked direct coverage.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Existing tests exercise SharedState through the full Coordinator + executor
-round-trip, but a handful of pure-data helpers (policy-denial bookkeeping,
-kernel-patch identity resolution, prune family mutators) only have
-integration coverage and miss specific edge branches. This module fills in
-the gap with small targeted tests.
+"""Focused unit tests for ``SharedState`` helpers / audit trails.
+
+Covers pure-data helpers that only had integration coverage (policy-denial
+bookkeeping, kernel-patch identity resolution, prune-family mutators) plus
+the per-action attempt audit trail and the global ``last_action_failures``
+rolling log.
 """
 
 from __future__ import annotations
 
+import pytest
 
-
-from inference_optimizer.orchestrator.shared_state import SharedState
+from inference_optimizer.orchestrator.shared_state import (
+    _DEFAULT_ATTEMPTS_HISTORY,
+    _DEFAULT_LAST_FAILURES,
+    SharedState,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -196,3 +201,258 @@ class TestPersistence:
         assert s.session_id == "abc"
         assert not hasattr(s, "unknown_field")
 
+
+# ---------------------------------------------------------------------------
+# Per-action attempt audit trail (record_action_attempt + <action>_attempts)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "action,metric_key,metric_kind",
+    [
+        ("baseline", "output_throughput", "output_throughput"),
+        ("profile",  "output_throughput", "output_throughput"),
+        ("sweep",    "output_throughput", "output_throughput"),
+        ("explore",  "best_gain_pct",     "gain_pct"),
+    ],
+)
+def test_record_action_attempt_succeeded_populates_last_and_history(
+    action, metric_key, metric_kind,
+):
+    s = SharedState()
+    entry = s.record_action_attempt(
+        action=action,
+        task_id="t-1",
+        status="succeeded",
+        decision="promoted",
+        result={metric_key: 1234.5, "workspace": "/runs/" + action},
+        extras={"variant_name": "vA"},
+    )
+    assert entry is not None
+    last = getattr(s, f"last_{action}")
+    history = getattr(s, f"{action}_attempts")
+    assert last["task_id"] == "t-1"
+    assert last["status"] == "succeeded"
+    assert last["decision"] == "promoted"
+    assert last["key_metric"] == pytest.approx(1234.5)
+    assert last["key_metric_kind"] == metric_kind
+    assert last["workspace"] == "/runs/" + action
+    assert last["extras"] == {"variant_name": "vA"}
+    assert history[-1] == last
+
+
+def test_record_action_attempt_failed_truncates_error_excerpt():
+    s = SharedState()
+    long_err = "boom! " * 400  # > 800 chars
+    s.record_action_attempt(
+        action="baseline",
+        task_id="t-2",
+        status="failed",
+        decision="no_promote",
+        result={
+            "error_class": "no_report",
+            "error": long_err,
+            "workspace": "/ws/baseline-2",
+            "reported_success": False,
+        },
+    )
+    last = s.last_baseline
+    assert last["status"] == "failed"
+    assert last["decision"] == "no_promote"
+    assert last["error_class"] == "no_report"
+    assert last["error_excerpt"] is not None
+    assert len(last["error_excerpt"]) == 800
+    assert last["error_excerpt"].startswith("boom!")
+    assert last["reported_success"] is False
+    assert last["key_metric"] is None
+    # no_report is not a subprocess failure -> no stderr_tail.
+    assert last["stderr_tail"] is None
+
+
+def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
+    """A subprocess_nonzero baseline attempt records stderr_tail into the
+    attempts history so the breakdown exporter can surface the raw crash
+    (regression: the field was only filled on the last_action_failures
+    path, leaving baseline_attempts[].stderr_tail always None)."""
+    s = SharedState()
+    big_err = "x" * 2000 + "torch.OutOfMemoryError: HIP out of memory"
+    s.record_action_attempt(
+        action="baseline",
+        task_id="t-oom",
+        status="failed",
+        decision="no_promote",
+        result={
+            "error_class": "subprocess_nonzero",
+            "error": big_err,
+            "reported_success": False,
+            "stderr_log_path": "/runs/baseline/t-oom/baseline_stderr.log",
+        },
+    )
+    attempt = s.baseline_attempts[-1]
+    assert attempt["error_class"] == "subprocess_nonzero"
+    assert attempt["stderr_tail"] is not None
+    assert len(attempt["stderr_tail"]) == 1000
+    assert attempt["stderr_tail"].endswith("HIP out of memory")
+    assert attempt["stderr_log_path"] == "/runs/baseline/t-oom/baseline_stderr.log"
+
+
+def test_attempts_history_caps_at_default():
+    s = SharedState()
+    for i in range(_DEFAULT_ATTEMPTS_HISTORY + 5):
+        s.record_action_attempt(
+            action="explore",
+            task_id=f"t-{i}",
+            status="succeeded",
+            decision="discarded",
+            result={"best_gain_pct": float(i)},
+        )
+    history = s.explore_attempts
+    assert len(history) == _DEFAULT_ATTEMPTS_HISTORY
+    assert history[-1]["task_id"] == f"t-{_DEFAULT_ATTEMPTS_HISTORY + 4}"
+    assert history[0]["task_id"] == "t-5"
+
+
+def test_record_action_attempt_skips_non_audit_kinds():
+    s = SharedState()
+    out = s.record_action_attempt(
+        action="kernel_opt",
+        task_id="t-99",
+        status="succeeded",
+        decision="promoted",
+        result={"output_throughput": 1.0},
+    )
+    assert out is None
+    assert not hasattr(s, "kernel_opt_attempts_list")
+
+
+def test_to_prompt_summary_renders_attempt_lines():
+    s = SharedState()
+    s.record_action_attempt(
+        action="baseline",
+        task_id="t-1",
+        status="succeeded",
+        decision="promoted",
+        result={"output_throughput": 1761.6, "workspace": "/ws"},
+    )
+    s.record_action_attempt(
+        action="explore",
+        task_id="t-2",
+        status="failed",
+        decision="no_promote",
+        result={"error_class": "subprocess_nonzero", "error": "rc=1"},
+    )
+    txt = s.to_prompt_summary()
+    assert "last_baseline=" in txt
+    assert "last_profile=" in txt
+    assert "last_explore=" in txt
+    assert "last_sweep=" in txt
+    assert "attempts_history=" in txt
+    assert "baseline:1(s1,f0)" in txt
+    assert "explore:1(s0,f1)" in txt
+
+
+def test_save_load_round_trips_attempt_fields(tmp_path):
+    s = SharedState()
+    s.record_action_attempt(
+        action="profile",
+        task_id="p-1",
+        status="succeeded",
+        decision="promoted",
+        result={"output_throughput": 100.0},
+        extras={"trace_path": "/tmp/trace.json"},
+    )
+    s.save(tmp_path)
+    s2 = SharedState.load_or_init(tmp_path)
+    assert s2.last_profile["task_id"] == "p-1"
+    assert s2.profile_attempts[-1]["extras"]["trace_path"] == "/tmp/trace.json"
+
+
+# ---------------------------------------------------------------------------
+# Global last_action_failures rolling log
+# ---------------------------------------------------------------------------
+
+def test_record_action_failure_basic_fields():
+    s = SharedState()
+    s.record_action_failure(
+        action="baseline",
+        task_id="t-1",
+        result={
+            "error_class": "no_report",
+            "error": "benchmark_report.json missing under runs/baseline/...",
+            "workspace": "/runs/baseline/t-1/benchmark_sglang_xyz",
+            "reported_success": False,
+            "raw_result_path": None,
+        },
+    )
+    assert len(s.last_action_failures) == 1
+    entry = s.last_action_failures[0]
+    assert entry["action"] == "baseline"
+    assert entry["task_id"] == "t-1"
+    assert entry["error_class"] == "no_report"
+    assert entry["error_excerpt"].startswith("benchmark_report.json missing")
+    assert entry["stderr_tail"] is None
+    assert entry["workspace"] == "/runs/baseline/t-1/benchmark_sglang_xyz"
+    assert entry["reported_success"] is False
+
+
+def test_record_action_failure_truncates_excerpt_and_tails_subprocess():
+    s = SharedState()
+    long_err = "x" * 2500
+    s.record_action_failure(
+        action="explore",
+        task_id="t-2",
+        result={
+            "error_class": "subprocess_nonzero",
+            "error": long_err,
+        },
+    )
+    entry = s.last_action_failures[0]
+    assert len(entry["error_excerpt"]) == 800
+    assert entry["stderr_tail"] is not None
+    assert len(entry["stderr_tail"]) == 1000
+
+
+def test_record_action_failure_caps_at_default():
+    s = SharedState()
+    for i in range(_DEFAULT_LAST_FAILURES + 3):
+        s.record_action_failure(
+            action="baseline",
+            task_id=f"t-{i}",
+            result={"error_class": "no_report", "error": f"err{i}"},
+        )
+    assert len(s.last_action_failures) == _DEFAULT_LAST_FAILURES
+    assert s.last_action_failures[-1]["task_id"] == (
+        f"t-{_DEFAULT_LAST_FAILURES + 2}"
+    )
+    assert s.last_action_failures[0]["task_id"] == "t-3"
+
+
+def test_to_prompt_summary_shows_last_three_failures_with_suffix():
+    s = SharedState()
+    for i in range(5):
+        s.record_action_failure(
+            action="baseline" if i % 2 == 0 else "explore",
+            task_id=f"t-{i}",
+            result={"error_class": "no_report", "error": f"err{i}"},
+        )
+    txt = s.to_prompt_summary()
+    assert "last_action_failures=" in txt
+    line = next(
+        l for l in txt.splitlines() if l.startswith("last_action_failures=")
+    )
+    assert "[baseline/no_report" in line
+    assert "[explore/no_report" in line
+    assert "[+2 earlier]" in line
+
+
+def test_save_load_round_trips_failure_log(tmp_path):
+    s = SharedState()
+    s.record_action_failure(
+        action="sweep",
+        task_id="p-1",
+        result={"error_class": "subprocess_nonzero", "error": "rc=1\nboom"},
+    )
+    s.save(tmp_path)
+    s2 = SharedState.load_or_init(tmp_path)
+    assert len(s2.last_action_failures) == 1
+    assert s2.last_action_failures[0]["action"] == "sweep"
+    assert s2.last_action_failures[0]["error_class"] == "subprocess_nonzero"

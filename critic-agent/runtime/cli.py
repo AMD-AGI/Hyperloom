@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Critic runtime CLI.
 
 The Critic SKILL shells out to this module via:

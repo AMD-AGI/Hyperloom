@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Knowledge-base selector + contributor for framework-agent.
 
 Derived from ``TBO/src/arbor/kb.py`` (the 4-file domain schema) with two

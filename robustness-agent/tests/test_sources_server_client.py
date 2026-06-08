@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the robustness-server client + Source adapter."""
 
 from __future__ import annotations
@@ -693,3 +695,170 @@ async def test_server_pod_metrics_drive_local_health_gpu_signal():
     assert len(thermal) == 1
     assert thermal[0].severity is SymptomSeverity.MEDIUM
     assert thermal[0].evidence["temperature_c"] == 95.0
+
+
+# ---------------------------------------------------------------------------
+# M2 multi-node: workload_uid -> /cluster/workloads/{uid}/hierarchy fan-out
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_source_workload_uid_merges_hierarchy_pods_into_session_pods():
+    """Hierarchy-derived workers are added even when session_pods skipped them."""
+
+    paths_hit: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths_hit.append(request.url.path)
+        if "/sessions/sess-1/pods" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[{"pod": {"namespace": "ns1", "name": "head-pod"}}],
+            )
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
+            return httpx.Response(
+                200,
+                json={
+                    "workload_id": "wl-1",
+                    "pods": [
+                        {"namespace": "ns1", "name": "head-pod"},
+                        {"namespace": "ns1", "name": "worker-0"},
+                        {"namespace": "ns1", "name": "worker-1"},
+                    ],
+                },
+            )
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(client, workload_uid="wl-1")
+        data = await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+    assert "/api/v1/cluster/workloads/wl-1/hierarchy" in paths_hit
+    pod_refs = {
+        (entry["pod"]["namespace"], entry["pod"]["name"])
+        for entry in data.session_pods
+    }
+    assert pod_refs == {
+        ("ns1", "head-pod"),
+        ("ns1", "worker-0"),
+        ("ns1", "worker-1"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_source_workload_uid_drives_multi_node_pod_metric_fan_out():
+    """Cluster pod-metrics fans out across hierarchy-only pods, not just session_pods."""
+
+    metric_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/sessions/sess-1/pods" in request.url.path:
+            # Session only knows about the head pod; the workers were
+            # registered by the cluster but never made it into the
+            # session view yet.
+            return httpx.Response(
+                200,
+                json=[{"pod": {"namespace": "ns1", "name": "head"}}],
+            )
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
+            return httpx.Response(
+                200,
+                json={
+                    "workload_id": "wl-1",
+                    "pods": [
+                        {"namespace": "ns1", "name": "head"},
+                        {"namespace": "ns1", "name": "worker-0"},
+                    ],
+                },
+            )
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        if "/api/v1/cluster/pods/" in request.url.path:
+            metric_paths.append(request.url.path)
+            return httpx.Response(200, json=_gpu_metric_response(80.0))
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(
+            client,
+            workload_uid="wl-1",
+            enable_cluster_pod_metrics=True,
+        )
+        await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+    assert sorted(metric_paths) == [
+        "/api/v1/cluster/pods/ns1/head/metrics",
+        "/api/v1/cluster/pods/ns1/worker-0/metrics",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_source_workload_uid_hierarchy_5xx_triggers_degrade():
+    """A 5xx on the hierarchy endpoint must propagate as SourceUnavailable."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/sessions/sess-1/pods" in request.url.path:
+            return httpx.Response(200, json=[])
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/workloads/wl-1/hierarchy":
+            return httpx.Response(503, text="busy")
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(client, workload_uid="wl-1")
+        with pytest.raises(SourceUnavailable):
+            await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_source_no_workload_uid_skips_hierarchy_call():
+    """Single-node path keeps the existing list_session_pods behaviour."""
+
+    paths_hit: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths_hit.append(request.url.path)
+        if "/sessions/sess-1/pods" in request.url.path:
+            return httpx.Response(
+                200,
+                json=[{"pod": {"namespace": "ns1", "name": "head"}}],
+            )
+        if "/sessions/sess-1/events" in request.url.path:
+            return httpx.Response(200, json={"events": []})
+        if "/sessions/sess-1/summary" in request.url.path:
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/v1/cluster/faults":
+            return httpx.Response(200, json={"faults": []})
+        return httpx.Response(404)
+
+    client = _client(handler)
+    try:
+        source = RobustnessServerSource(client)
+        data = await source.fetch(_ctx())
+    finally:
+        await client.aclose()
+
+    assert not any("workloads" in p for p in paths_hit)
+    assert len(data.session_pods) == 1
+    assert data.session_pods[0]["pod"]["name"] == "head"

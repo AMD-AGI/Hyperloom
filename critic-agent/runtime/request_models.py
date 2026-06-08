@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Internal request / context models for the Critic runtime.
 
 The Critic agent has two main entry shapes today:

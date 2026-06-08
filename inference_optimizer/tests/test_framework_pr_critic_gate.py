@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Cover the P1.b fix — Critic gate before FRAMEWORK_PR apply.
 
 The gate lives in Coordinator._critic_review_framework_pr_candidate
@@ -23,7 +25,7 @@ from inference_optimizer.orchestrator.backends.critic_mock import (
     MockCriticBackend,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 
 
 class _StateStub:

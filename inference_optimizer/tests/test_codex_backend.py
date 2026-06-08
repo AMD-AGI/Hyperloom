@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P1-7 CodexBackend tests (mock OpenAI client — no network)."""
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ import pytest
 from inference_optimizer.orchestrator.backends import CodexBackend
 from inference_optimizer.orchestrator.backends.base import BackendError
 from inference_optimizer.orchestrator.backends.codex import _extract_envelope
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     IntentType,
     NoIntentEmitted,
 )

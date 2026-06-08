@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pod-health signal driven by robustness-server's session snapshot.
 
 The current session may include both brain (shared) and hands

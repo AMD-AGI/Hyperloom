@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 C3: Orchestration is allowed to emit PRUNE_BRANCH.
 
 These tests pin the permission boundary the ``roofline`` action (C4)
@@ -25,7 +27,7 @@ from __future__ import annotations
 import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
 
 

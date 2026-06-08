@@ -1,6 +1,8 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``sweep`` ActionRunner sweep action.
 
-Mirrors marathon/skills/actions/sweep.md: full ISL/OSL/CONC sweep with
+Full ISL/OSL/CONC sweep with
 the optimized server config to map the Pareto frontier. P2-3 keeps the
 implementation simple — relaunches sglang once per (CONC, ISL, OSL)
 combo via the same Magpie shell. A future single-server mode (one
@@ -14,8 +16,8 @@ Inputs (task.params):
 * ``conc_values``      — list of int CONC, default [4, 16, 64]
 * ``isl_osl_configs``  — list of "<ISL>:<OSL>" str, default ["1024:1024",
                           "8192:1024", "1024:8192"]
-* ``num_prompts_factor`` — multiplier vs CONC (default 5; matches
-                            marathon's adaptive default for OSL ≤ 1024)
+* ``num_prompts_factor`` — multiplier vs CONC (default 5; adaptive
+                            default for OSL ≤ 1024)
 
 Result::
 
@@ -56,28 +58,42 @@ DEFAULT_ISL_OSL = ["1024:1024", "8192:1024", "1024:8192"]
 DEFAULT_NUM_PROMPTS_FACTOR = 5
 
 
+def _coerce_int(value: Any) -> int:
+    """Best-effort int coercion that never raises; non-numeric / None
+    collapse to 0 so an unset ``max_model_len`` disables filtering."""
+    if value is None or value == "":
+        return 0
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
 def _build_grid(
     *,
     conc_values: list[int],
     isl_osl_configs: list[str],
     num_prompts_factor: int,
     base_extra_args: str,
-) -> list[GridVariant]:
+    max_model_len: int = 0,
+) -> tuple[list[GridVariant], list[dict[str, Any]]]:
     """Fan out CONC × (ISL, OSL) into per-combo Magpie variants.
 
     Each variant overrides ``CONC`` / ``ISL`` / ``OSL`` envs in the YAML
     so the same Magpie shell reuses our existing baseline machinery.
 
-    Args:
-        conc_values (list[int]): Concurrency levels to sweep.
-        isl_osl_configs (list[str]): ``"<ISL>:<OSL>"`` shape strings.
-        num_prompts_factor (int): Multiplier applied to CONC for NUM_PROMPTS.
-        base_extra_args (str): Server args layered into every variant.
+    When ``max_model_len`` is positive, any combo whose ``ISL + OSL``
+    exceeds it is dropped up front: the server rejects every request in
+    that combo with ``VLLMValidationError: maximum context length`` so
+    the benchmark always aborts with an invalid measurement. Filtering
+    here avoids burning a launch + warmup on a guaranteed failure.
 
-    Returns:
-        list[GridVariant]: One variant per valid (CONC, ISL, OSL) combo.
+    Returns ``(runnable_variants, skipped_records)`` where each skipped
+    record documents why a combo was dropped so the sweep result keeps
+    it visible instead of silently pretending it never existed.
     """
     out: list[GridVariant] = []
+    skipped: list[dict[str, Any]] = []
     for conc in conc_values:
         num_prompts = max(int(conc) * num_prompts_factor, conc)
         for io_cfg in isl_osl_configs:
@@ -89,6 +105,25 @@ def _build_grid(
                              io_cfg, exc)
                 continue
             name = f"conc{conc}_isl{isl}_osl{osl}"
+            if max_model_len > 0 and (isl + osl) > max_model_len:
+                reason = (
+                    f"isl+osl={isl + osl} exceeds max_model_len="
+                    f"{max_model_len}"
+                )
+                log.warning(
+                    "sweep: skipping variant %s: %s "
+                    "(server would reject every request)",
+                    name, reason,
+                )
+                skipped.append({
+                    "name":        name,
+                    "conc":        conc,
+                    "isl":         isl,
+                    "osl":         osl,
+                    "status":      "skipped",
+                    "skip_reason": reason,
+                })
+                continue
             out.append(GridVariant(
                 name=name,
                 extra_server_args=base_extra_args,
@@ -100,7 +135,7 @@ def _build_grid(
                 },
                 note=f"conc={conc} isl={isl} osl={osl}",
             ))
-    return out
+    return out, skipped
 
 
 def _result_dict(v: VariantResult) -> dict[str, Any]:
@@ -241,7 +276,6 @@ class SweepExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
-        # See backends.py for rationale.
         try:
             override_script = sanitize_script_name(params.get("benchmark_script"))
             override_result_dir = sanitize_result_dir(params.get("result_dir"))
@@ -271,11 +305,21 @@ class SweepExecutor:
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
-        grid = _build_grid(
+        # Drop ISL+OSL combos that can't fit the server's context window
+        # before launching anything (see _build_grid). Resolved from the
+        # task params first, then the MAX_MODEL_LEN process env that the
+        # workload contract materializes onto every variant YAML.
+        max_model_len = _coerce_int(
+            params.get("max_model_len")
+            or os.environ.get("MAX_MODEL_LEN")
+        )
+
+        grid, skipped_variants = _build_grid(
             conc_values=conc_values,
             isl_osl_configs=isl_osl_configs,
             num_prompts_factor=num_prompts_factor,
             base_extra_args=base_extra_args,
+            max_model_len=max_model_len,
         )
 
         # `resolved_model` / `resolved_gpu` were resolved above for the
@@ -294,6 +338,11 @@ class SweepExecutor:
         )
 
         entries = [_result_dict(v) for v in results]
+        # Surface context-window-skipped combos alongside the run
+        # entries so the grid stays complete and consumers can see why a
+        # combo never ran. Skipped entries never enter the Pareto / best
+        # selections below (those filter on status == "succeeded").
+        entries.extend(skipped_variants)
         front = _pareto_front(entries)
 
         # Best per CONC.

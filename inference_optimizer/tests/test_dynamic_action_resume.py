@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the resume-time abandoned-dispatch sweep.
 Auxiliary tests pin the closed dispatch_history schema, the
 worktree-cleanup outcome enum, and the multi-restart idempotency

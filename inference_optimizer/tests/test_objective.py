@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P2-1 Objective + Coordinator.run() long-loop tests."""
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from inference_optimizer.orchestrator.coordinator import (
     Coordinator,
     effective_closing_grace_sec,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.objective import (
     ObjectiveError,
     TargetBaselineObjective,
@@ -370,6 +372,75 @@ async def test_run_does_not_emergency_below_default_threshold(session_dir):
         c.shared_state.crash_count = 5
         reason = await c.run(max_ticks=2)
         assert reason == "max_ticks"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_records_tick_exception_and_continues(session_dir, monkeypatch):
+    c = Coordinator(session_dir, backends=_backends_silent())
+    calls = {"n": 0}
+
+    async def flaky_dispatcher_once() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("dispatcher boom")
+
+    monkeypatch.setattr(c, "_pump_dispatcher_once", flaky_dispatcher_once)
+    try:
+        reason = await c.run(max_ticks=2)
+        assert reason == "max_ticks"
+        assert calls["n"] == 2
+        assert c.shared_state.crash_count == 1
+        assert c.shared_state.last_tick_exception["stage"] == "tick_body"
+        assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
+        assert "dispatcher boom" in c.shared_state.last_tick_exception["message"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_repeated_tick_exceptions_stop_as_emergency(
+    session_dir,
+    monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_backends_silent())
+
+    async def broken_dispatcher_once() -> None:
+        raise RuntimeError("persistent dispatcher boom")
+
+    monkeypatch.setattr(c, "_pump_dispatcher_once", broken_dispatcher_once)
+    try:
+        reason = await c.run(max_ticks=10, crash_emergency_threshold=2)
+        assert reason == "emergency"
+        assert c.shared_state.crash_count == 2
+        assert c.shared_state.stop_reason == "emergency"
+        assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_finally_labels_residual_escape_as_coordinator_exception(
+    session_dir,
+    monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_backends_silent())
+
+    async def broken_dispatcher_once() -> None:
+        raise RuntimeError("recorded tick failure")
+
+    def broken_stop_when(_c) -> bool:
+        raise ValueError("stop callback failed")
+
+    monkeypatch.setattr(c, "_pump_dispatcher_once", broken_dispatcher_once)
+    try:
+        with pytest.raises(ValueError, match="stop callback failed"):
+            await c.run(stop_when=broken_stop_when, max_ticks=10)
+        persisted = SharedState.load_or_init(session_dir)
+        assert persisted.stop_reason == "coordinator_exception"
+        assert persisted.last_tick_exception["type"] == "RuntimeError"
+        assert "recorded tick failure" in persisted.last_tick_exception["message"]
     finally:
         await c.stop()
 

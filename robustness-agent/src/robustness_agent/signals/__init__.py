@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Signal rules.
 
 Each rule consumes :class:`ReactorContext` plus :class:`SourceData` and

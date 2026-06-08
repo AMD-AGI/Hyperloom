@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Render the DeepSeek-R1-0528 FP8 per-GPU throughput slide figure.
 
 Builds a bar chart comparing MI355X baseline, NVIDIA B200, and Hyperloom

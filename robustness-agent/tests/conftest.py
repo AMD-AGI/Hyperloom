@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared fixtures for robustness-agent tests."""
 
 from __future__ import annotations

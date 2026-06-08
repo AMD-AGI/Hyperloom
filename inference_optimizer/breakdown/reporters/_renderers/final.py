@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Final / validated result renderer."""
 
 from __future__ import annotations

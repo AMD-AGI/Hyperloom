@@ -1,4 +1,6 @@
-"""Per-session path helpers ().
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Per-session path helpers.
 
 Single source of truth for every path *inside* a session directory. The
 skeleton itself is created by :func:`paths.make_session_dir`; this module
@@ -60,14 +62,8 @@ def state_path(session_dir: Path) -> Path:
 # yaml field. Phases listed here are exactly the ones whose executors
 # write per-task artefacts under ``runs/``.
 #
-# History: this used to be a hand-maintained ``_RUNS_ACTIONS`` frozenset;
-# adding a new action (e.g. ``validate_stack``) required updating four
-# independent locations (yaml, cli register_executor, prompt builder
-# enabled-set, and this whitelist). Forgetting the last one made the
-# orchestrator loop forever proposing the action — every dispatch raised
-# ``ValueError: runs_dir: unknown action ...`` from inside the executor,
-# but mission TODOs never cleared. Driving the set from ``pipeline_phase``
-# keeps the four sources aligned automatically.
+# The run-workspace set is derived from action metadata so adding a new
+# executor-backed action does not require updating this file by hand.
 _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
     "measure", "analysis", "explore", "deep", "validate", "support",
 })
@@ -77,50 +73,23 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # sync with the union of action names whose ``pipeline_phase`` is in
 # ``_RUNS_WORKSPACE_PHASES``; the regression test in
 # ``tests/test_p1_2_full_action_catalogue.py`` enforces alignment.
-# ``specialist`` is yaml-less (v0.8 M5, parameterised by
-# ``params.domain``) so it is added explicitly.
-# ``support`` was added in 2026-05 alongside the real ``recover``
-# executor (Change C of the gpu-leak-robustness-fix plan); ``recover``
-# is the only fallback ``support`` entry.
+# The fallback is intentionally explicit because it is used only when
+# action metadata cannot be loaded during bootstrap.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline",
-    # GAP 1 — Coordinator-internal warm-recipe replay. Same workspace
-    # shape as ``baseline`` (under ``runs/replay_warm_recipe/<task_id>/``);
-    # included so the registry-loader-failure path still pre-mkdirs the
-    # workspace for the replay task that the PRELUDE hook will enqueue.
     "replay_warm_recipe",
-    # Coordinator-internal analysis actions. Which one runs is chosen
-    # by ``shared_state.enable_roofline`` (``--enable-roofline`` /
-    # ``--no-enable-roofline``, default on): ``roofline`` is the
-    # composite action (profile + trace_analyze + analysis.md
-    # snapshot); ``profile`` is the lighter trace-only fallback. Both
-    # land under ``runs/<kind>/<task_id>/`` so both names need a
-    # fallback entry for the loader-failure path. LLM proposals of
-    # either name are denied by PolicyGate
-    # (``analysis_action_not_llm_proposable``).
     "roofline", "profile",
     "sweep",
+    "conc_sweep",
     "explore",
     "specialist",
-    # PR-A1 (Arbor-into-Hyperloom): ``integrate_patch`` is an
-    # EXPLORE-phase deterministic Python executor that consumes
-    # ``runs/specialist/<task_id>/worktree/`` patches; pipeline_phase
-    # ``explore`` already includes it in the registry-derived set, the
-    # fallback only matters when the yaml can't be loaded.
     "integrate_patch",
-    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor
-    # mirroring integrate_patch (applies an upstream PR + benches +
-    # KEEP/REVERT). pipeline_phase=explore puts it in the registry-derived
-    # runs/<kind>/ set; the fallback only matters on registry load failure.
     "framework_pr",
-    # IR-7 (Saturday May 2026): ``assess_remaining_gaps`` is a thin
-    # wrapper that dispatches the ``session_steward_specialist``
-    # domain. Pipeline_phase ``explore`` includes it in the
-    # registry-derived set; fallback covers the rare bootstrap miss.
     "assess_remaining_gaps",
-    # Cross-domain ReAct sub-agent; owns
-    # ``agents/orchestration/dynamic_actions/<dyn_id>/``.
     "dynamic_action",
+    "dynamic_specialist",
+    "dynamic_specialist_check",
+    "dynamic_specialist_collect",
     "integrate", "kernel_opt", "deep_kernel_analysis", "gemm_tuning",
     "operator_tuning", "vendor_kernel_config",
     "recover",
@@ -150,13 +119,10 @@ def _runs_actions() -> frozenset[str]:
         registry = ActionRegistry().load()
     except Exception:
         return _RUNS_ACTIONS_FALLBACK
-    # ``specialist`` is a synthetic action
-    # with no yaml meta (parameterised by ``params.domain``); the
-    # registry-derived path can't see it, so we always add it explicitly.
     return frozenset(
         a.name for a in registry.all()
         if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    ) | frozenset({"specialist"})
+    )
 
 
 def _validate_action(action: str) -> str:
@@ -326,6 +292,24 @@ def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
         Path: The absolute path to ``<session_dir>/reports/<ts>_final.<suffix>``.
     """
     return reports_dir(session_dir) / f"{ts}_final.{suffix}"
+
+
+def research_hints_md(session_dir: Path) -> Path:
+    """``<sd>/research_hints.md`` — human-readable proven-prior hints
+    collected by the research scout."""
+    return Path(session_dir) / "research_hints.md"
+
+
+def research_hints_json(session_dir: Path) -> Path:
+    """``<sd>/research_hints.json`` — structured mirror of the research
+    hints (machine-readable; advisory gap-scoring reads this)."""
+    return Path(session_dir) / "research_hints.json"
+
+
+def competitor_target_json(session_dir: Path) -> Path:
+    """``<sd>/competitor_target.json`` — LLM-authored competitor target
+    numbers (each per-concurrency entry carries its own source)."""
+    return Path(session_dir) / "competitor_target.json"
 
 
 def logs_dir(session_dir: Path) -> Path:
@@ -910,6 +894,7 @@ __all__ = [
     "agent_outbox",
     "agent_persona",
     "agent_prompt_snapshot",
+    "competitor_target_json",
     "cortex_audit_jsonl",
     "cortex_dead_letter_ndjson",
     "cortex_dir",
@@ -937,6 +922,8 @@ __all__ = [
     "patches_dir",
     "report_file",
     "reports_dir",
+    "research_hints_json",
+    "research_hints_md",
     "runs_dir",
     "runs_root",
     "state_path",

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """OpenAI Chat Completions tool schemas for ``web_search`` and ``web_fetch``.
 
 The shapes mirror Primus-Claw's ``getToolSchemas`` so the LLM sees the

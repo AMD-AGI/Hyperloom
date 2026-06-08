@@ -1,3 +1,4 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 """Stateful monitors that sample runtime signals into alerts.
 
 Exposes the process, GPU, server-health, and log-tailing monitors used

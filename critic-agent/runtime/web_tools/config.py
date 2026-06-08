@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Environment-driven configuration for critic-agent web tools.
 
 All names mirror Primus-Claw's ``Claw/packages/brain/src/config.ts`` so an

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared data structures + registry for ``session_breakdown`` section
 renderers.
 
