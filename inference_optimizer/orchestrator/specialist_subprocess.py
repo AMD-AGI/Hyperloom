@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .trace.parse_usage import parse_claude_stream_json_usage
+
 
 log = logging.getLogger(__name__)
 
@@ -140,6 +142,16 @@ class SpecialistSubprocessResult:
     patches: list[str] = field(default_factory=list)
     """Worktree-relative patch paths discovered under
     ``runs/specialist/<task_id>/worktree/patches/``."""
+
+    usage: dict[str, Any] | None = None
+    """Token usage recovered from the Claude CLI ``stream-json`` log
+    (full-trace B1). Carries the four canonical counters
+    (``input_tokens`` / ``output_tokens`` /
+    ``cache_creation_input_tokens`` / ``cache_read_input_tokens``); the
+    two ``cache_*`` may be ``None``. ``None`` when no result row carried
+    a ``usage`` block (e.g. the subprocess crashed before completing).
+    This is how the *production-default* specialist path's token spend —
+    otherwise invisible to the parent — re-enters the unified ledger."""
 
     error: str = ""
 
@@ -395,6 +407,14 @@ class SpecialistSubprocessDispatcher:
                     done_file = cand
                     break
 
+        # 8. Token usage (full-trace B1): the Claude CLI's terminal
+        #    ``stream-json`` result row carries the cumulative session
+        #    ``usage``. Recover it from process.log so the production
+        #    specialist's token spend — which never touches the parent's
+        #    memory — re-enters the unified ledger. Best-effort: a missing
+        #    / truncated log yields ``None`` (parser swallows its own I/O).
+        usage = parse_claude_stream_json_usage(process_log)
+
         return SpecialistSubprocessResult(
             done_payload=done_payload,
             exit_code=outcome["exit_code"],
@@ -403,6 +423,7 @@ class SpecialistSubprocessDispatcher:
             stale_heartbeat=outcome["stale_heartbeat"],
             process_log_path=str(process_log),
             patches=patches,
+            usage=usage,
             error=outcome["error"],
         )
 
