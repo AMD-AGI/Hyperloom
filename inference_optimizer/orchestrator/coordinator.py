@@ -26,6 +26,13 @@ from ..recipe_snapshot_constants import detect_framework_version
 # Recipe snapshot severity tags (schema has no fixed enum).
 _SEVERITY_CRASH:   str = "crash"
 _SEVERITY_REGRESS: str = "regress"
+
+# Bounded transient-failure auto-retry for specialist dispatches: a subprocess
+# timeout / crash / stale-heartbeat re-dispatches up to this many times before
+# the failure is recorded normally. Infra-only (see classify_specialist_failure);
+# semantic empties are left for the orchestrator. Env override / disable via
+# INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY (set "0" to disable).
+SPECIALIST_AUTO_RETRY_MAX: int = 2
 from . import phase_state as _phase_state
 from .optimization_journal import (
     Journal,
@@ -4756,15 +4763,21 @@ class Coordinator:
                 continue
             sub_params = dict(shared)
             sub_params["scope"] = "freeform"
-            sub_params.setdefault("mode", "research")
-            sub_params.setdefault("lane", "cpu")
             sub_params["task_description"] = desc
             summary = str(task.get("task_summary") or "").strip()
             if summary:
                 sub_params["task_summary"] = summary
-            for carry in ("model", "priority", "timeout_minutes", "max_turns"):
-                if carry in task and carry not in sub_params:
+            # Per-task dial overrides (a wave task may opt into patch / bench /
+            # gpu) take precedence over the shared params; then fall back to the
+            # freeform recon defaults (research on the cpu lane).
+            for carry in (
+                "mode", "bench", "lane", "model", "priority",
+                "timeout_minutes", "max_turns",
+            ):
+                if carry in task:
                     sub_params[carry] = task[carry]
+            sub_params.setdefault("mode", "research")
+            sub_params.setdefault("lane", "cpu")
             sub_payload = dict(intent.payload)
             sub_payload["params"] = sub_params
             if base_key:
@@ -4774,6 +4787,95 @@ class Coordinator:
             await self._handle_delegate(
                 source, Intent(type=intent.type, payload=sub_payload),
             )
+
+    async def _maybe_auto_retry_specialist(
+        self, task: "Task", result: "SubAgentResult",
+    ) -> bool:
+        """Re-enqueue a fresh specialist task on a transient infra failure.
+
+        Returns ``True`` when a retry was scheduled (the caller must then skip
+        this attempt's delegated_result + bookkeeping). Only infra failures
+        (timeout / crash / stale-heartbeat, per ``classify_specialist_failure``)
+        are retried, capped at :data:`SPECIALIST_AUTO_RETRY_MAX`; the failure
+        reason is injected into the retry prompt. Disabled when
+        ``INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY`` is set to ``0``."""
+        flag = os.environ.get(
+            "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "1",
+        ).strip().lower()
+        if flag in ("0", "false", "no", "off"):
+            return False
+        try:
+            cap = int(os.environ.get(
+                "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY_MAX",
+                str(SPECIALIST_AUTO_RETRY_MAX),
+            ))
+        except (TypeError, ValueError):
+            cap = SPECIALIST_AUTO_RETRY_MAX
+        if cap <= 0:
+            return False
+        from .specialist_runner import classify_specialist_failure
+        result_dict = result.result if isinstance(result.result, dict) else {}
+        runner_status = str(result_dict.get("runner_status") or "")
+        error = str(result.error or "")
+        ftype, retry_eligible = classify_specialist_failure(runner_status, error)
+        if not retry_eligible:
+            return False
+        params = task.params or {}
+        attempt = int(params.get("_auto_retry_attempt", 0) or 0)
+        if attempt >= cap:
+            return False
+        next_attempt = attempt + 1
+
+        retry_params = dict(params)
+        retry_params["_auto_retry_attempt"] = next_attempt
+        retry_params["_auto_retry_reason"] = f"{ftype.value}: {error}"[:300]
+
+        # Mirror _handle_delegate lane/ttl resolution (incl. benchmark_lane for
+        # bench-enabled specialists) so the retry contends for the same pools.
+        lanes, ttl = self._registry_lanes_ttl("specialist")
+        from .specialist_profile import resolve_specialist_profile
+        if resolve_specialist_profile(retry_params).grants_bench_tool:
+            lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
+
+        # Stable base key across attempts: strip any prior ``-autoretryN``
+        # suffix (distinct from _handle_delegate's ``-retryN`` collision keys
+        # so the two mechanisms never share an idempotency namespace).
+        base_key = str(task.idempotency_key or task.task_id or "")
+        if "-autoretry" in base_key:
+            head, _, tail = base_key.rpartition("-autoretry")
+            if tail.isdigit():
+                base_key = head
+        retry_key = f"{base_key}-autoretry{next_attempt}"
+
+        new_task, was_existing = await self.tasks.create_or_return_existing(
+            kind="specialist",
+            params=retry_params,
+            idempotency_key=retry_key,
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+        )
+        if was_existing:
+            # Retry slot already taken (e.g. resume replay): let the normal
+            # bookkeeping record this attempt rather than silently dropping it.
+            return False
+        await self._record_observation(
+            "coordinator", "observation",
+            {
+                "kind": "specialist_auto_retry",
+                "task_id": task.task_id,
+                "retry_task_id": new_task.task_id,
+                "attempt": next_attempt,
+                "max_attempts": cap,
+                "failure_type": ftype.value,
+                "reason": error[:200],
+            },
+        )
+        log.info(
+            "specialist auto-retry: task=%s failure=%s attempt=%d/%d "
+            "re-enqueued as %s",
+            task.task_id, ftype.value, next_attempt, cap, new_task.task_id,
+        )
+        return True
 
     # specialist pre-dispatch warmup
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
@@ -6414,6 +6516,20 @@ class Coordinator:
                 )
                 continue
             result: SubAgentResult = maybe_result
+            # Bounded transient-failure auto-retry (infra only): on a subprocess
+            # timeout / crash / stale-heartbeat, re-enqueue a fresh specialist
+            # task and skip THIS attempt's delegated_result + bookkeeping so the
+            # flake neither pollutes the gaps ledger nor provokes a manual
+            # re-dispatch. Semantic empties fall through and are recorded.
+            if task.kind == "specialist":
+                try:
+                    if await self._maybe_auto_retry_specialist(task, result):
+                        continue
+                except Exception:  # noqa: BLE001 — never block the dispatch loop
+                    log.exception(
+                        "specialist auto-retry hook failed for task=%s",
+                        task.task_id,
+                    )
             try:
                 await self.bus.append_and_seq(Message.new(
                     "coordinator", "*", "delegated_result",

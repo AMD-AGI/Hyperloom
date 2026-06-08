@@ -12,6 +12,7 @@ outcome for the audit trail.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -150,6 +151,69 @@ class SpecialistRunResult:
     transcript_path: str = ""
     done_path: str = ""
     notes: list[str] = field(default_factory=list)
+
+
+class SpecialistFailureType(str, enum.Enum):
+    """Coarse failure taxonomy for a finished specialist run.
+
+    Only the *transient infrastructure* members (``TIMEOUT`` /
+    ``STALE_HEARTBEAT`` / ``CRASH``) are retry-eligible — a fresh re-dispatch
+    can plausibly fix a subprocess that never produced a clean result.
+    Semantic outcomes (``NO_OUTPUT`` empty findings, ``TOOL_VIOLATION``,
+    ``CONFIG`` bad domain / missing workspace) are left for the orchestrator to
+    act on; re-running them verbatim would just burn budget.
+    """
+
+    NONE = "none"                       # succeeded
+    TIMEOUT = "timeout"                 # subprocess wall-clock kill
+    STALE_HEARTBEAT = "stale_heartbeat" # heartbeat went silent (hang)
+    CRASH = "crash"                     # nonzero exit / backend error
+    NO_OUTPUT = "no_output"             # ran clean but emitted no done / empty
+    TOOL_VIOLATION = "tool_violation"   # emitted a forbidden intent
+    CONFIG = "config"                   # unknown domain / no workspace
+    UNKNOWN = "unknown"
+
+
+# Transient infra failures a bounded auto-retry may re-dispatch.
+RETRYABLE_SPECIALIST_FAILURES: frozenset[SpecialistFailureType] = frozenset({
+    SpecialistFailureType.TIMEOUT,
+    SpecialistFailureType.STALE_HEARTBEAT,
+    SpecialistFailureType.CRASH,
+})
+
+
+def classify_specialist_failure(
+    runner_status: str, error: str,
+) -> tuple[SpecialistFailureType, bool]:
+    """Map a :class:`SpecialistRunResult` ``(status, error)`` to a failure
+    type + retry-eligibility flag.
+
+    Pure helper (no I/O) so PolicyGate, the Coordinator auto-retry hook, and
+    tests share one taxonomy. ``status == 'stale'`` is the runner's marker for
+    a subprocess that died with a ``backend_error`` (timeout / stale-heartbeat
+    / crash); ``empty_synthesised`` means it exited cleanly without a usable
+    ``specialist_done`` (genuine empty, max-turns, or a config error encoded in
+    ``error``).
+    """
+    status = (runner_status or "").strip().lower()
+    err = (error or "").strip().lower()
+    if status == "succeeded":
+        return SpecialistFailureType.NONE, False
+    if status == "tool_violation":
+        return SpecialistFailureType.TOOL_VIOLATION, False
+    if status == "stale":
+        if "timeout" in err:
+            ftype = SpecialistFailureType.TIMEOUT
+        elif "stale_heartbeat" in err:
+            ftype = SpecialistFailureType.STALE_HEARTBEAT
+        else:  # subprocess_error / subprocess_exit_code / backend_error
+            ftype = SpecialistFailureType.CRASH
+        return ftype, True
+    if status == "empty_synthesised":
+        if "unknown_domain" in err or "no_workspace" in err:
+            return SpecialistFailureType.CONFIG, False
+        return SpecialistFailureType.NO_OUTPUT, False
+    return SpecialistFailureType.UNKNOWN, False
 
 
 def build_empty_specialist_done(
@@ -421,6 +485,9 @@ class SpecialistRunner:
                 bench=profile.bench,
                 lane=profile.lane,
                 task_description=task_description,
+                # Coordinator-injected note when this is a bounded auto-retry
+                # of a prior transient (timeout / crash / stale) attempt.
+                auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
                 # proposal_set self-curation target (policy.py is the
                 # source of truth); shapes the prompt, not a hard cap.
                 max_proposals=max(1, int(
@@ -959,9 +1026,12 @@ __all__ = [
     "CORTEX_KB_READONLY_MCP_TOOLS",
     "DEFAULT_SPECIALIST_TOOLS",
     "PR_MONITOR_MCP_TOOLS",
+    "RETRYABLE_SPECIALIST_FAILURES",
     "SPECIALIST_TOOL_DENYLIST",
+    "SpecialistFailureType",
     "SpecialistRunResult",
     "SpecialistRunner",
     "SpecialistSubprocessConfig",
     "build_empty_specialist_done",
+    "classify_specialist_failure",
 ]

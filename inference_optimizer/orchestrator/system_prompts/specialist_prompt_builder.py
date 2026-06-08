@@ -472,6 +472,10 @@ class SpecialistPromptInputs:
     # Free-form task description (only populated when scope == 'freeform').
     task_description: str = ""
 
+    # Coordinator-injected note for a bounded auto-retry of a prior transient
+    # (timeout / crash / stale-heartbeat) attempt; empty on the first attempt.
+    auto_retry_reason: str = ""
+
 
 # Section 1 — Identity & autonomy
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
@@ -529,7 +533,30 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.extend(_freeform_block(inp))
     if inp.bench and inp.mode == "patch":
         body.extend(_bench_block(inp))
+    if inp.auto_retry_reason.strip():
+        body.extend(_auto_retry_note_block(inp))
     return body
+
+
+def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
+    """Heads-up block when this dispatch is a bounded auto-retry of a prior
+    transient (timeout / crash / stale-heartbeat) attempt. Advisory only —
+    the mandate is unchanged; the note nudges the specialist to scope its work
+    so it finishes within budget this time."""
+    reason = inp.auto_retry_reason.strip()
+    return [
+        "",
+        "### Auto-retry notice",
+        "",
+        "Your previous attempt on this task did NOT finish cleanly — the "
+        f"Coordinator is re-dispatching you. Reason: ``{reason}``.",
+        "This is a transient infrastructure failure (a timeout, crash, or "
+        "silent hang), not a rejection of the approach. Scope your "
+        "investigation so you reach a single ``specialist_done`` within "
+        "``max_turns`` this time: prefer fewer, higher-confidence probes, "
+        "emit heartbeats, and avoid long-running shell that risks the same "
+        "timeout.",
+    ]
 
 
 def _bench_block(inp: SpecialistPromptInputs) -> list[str]:

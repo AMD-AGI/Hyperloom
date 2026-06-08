@@ -323,16 +323,39 @@ There is exactly ONE specialist worker. You shape every dispatch with four
 orthogonal dials on `delegate{action_name='specialist'}` params — there are
 no separate `dynamic_action` / `dynamic_specialist` actions:
 
-- **`scope`** — `domain` (one catalogue domain; the default), `domains`
-  (a cross-domain combination over ≥2 tags; the patch may span them and the
-  Critic applies the cross-domain rules), or `freeform` (no domain lock —
-  you write the whole task in natural language, no tags/gap required).
+- **`scope`** — `domain` (one catalogue domain), `domains` (a cross-domain
+  combination over ≥2 tags; the patch may span them and the Critic applies the
+  cross-domain rules), or `freeform` (no domain lock — you write the whole task
+  in natural language, no tags/gap required). `domain` and `freeform` are
+  **co-equal first-class entry points**, not default-vs-fallback — pick by fit
+  (see "When to pick which scope" below).
 - **`mode`** — `research` (read-only; produce findings) or `patch` (write a
-  real unified diff in an isolated worktree; the default).
+  real unified diff in an isolated worktree). Applies to **every** scope: a
+  `freeform` specialist can author patches just like a domain one.
 - **`bench`** — `true` grants the worktree-scoped `run_bench` micro-bench
   tool (only meaningful with `mode=patch`).
 - **`lane`** — `cpu` (research / freeform default) or `gpu` (patch / bench;
   acquires a GPU specialist lease, throttled by the GPU pool quota).
+
+### When to pick which scope (co-equal — choose by fit, not by default)
+
+- **`freeform`** — your default reach when the task is **exploratory,
+  cross-cutting, or doesn't map cleanly onto one catalogue domain**: cold-start
+  recon, "read the scheduler and tell me why prefill blocks decode", chasing a
+  symptom whose owning domain is unclear, or fanning a wide net of probes in
+  one wave. You write the full mandate in natural language; no gap/tags needed.
+- **`domain`** — when you have a **specific gap pinned to a known domain**
+  (you can name the `gap_canonical_id` and the owning specialist from the
+  bottleneck map above). It loads that domain's focus template, KB anchor, and
+  PR feed, so it goes deep fast on a well-scoped target.
+- **`domains`** — only when a single fix **must span ≥2 domains jointly**
+  (the cross-domain Critic rules apply). Use sparingly; most work is one or the
+  other above.
+
+Neither is "the normal one" — a session typically opens with `freeform` recon
+to map the territory, then switches to `domain` specialists to drive specific
+gaps once they are pinned, and reaches back to `freeform` whenever a new
+cross-cutting question appears.
 
 **Single domain-anchored specialist (default dials):**
 ```
@@ -356,26 +379,40 @@ emit_intent({
 })
 ```
 
-**Free-form recon wave (`scope=freeform`) — fan out N standard specialists:**
+**Free-form specialist (`scope=freeform`) — single task:**
+```
+emit_intent({
+  intent_type: "delegate",
+  payload: {action_name: "specialist", params: {
+    scope: "freeform",
+    task_description: "Read the sglang scheduler and find why prefill blocks decode; propose a fix.",
+    mode: "patch"   // optional — freeform can research (default) OR author a patch
+  }}
+})
+```
+
+**Free-form recon wave (`scope=freeform` + `tasks:[...]`) — fan out N at once:**
 ```
 emit_intent({
   intent_type: "delegate",
   payload: {action_name: "specialist", params: {
     scope: "freeform",
     tasks: [
-      {task_description: "...", task_summary: "..."},
-      {task_description: "...", task_summary: "..."},
+      {task_description: "...", task_summary: "...", mode: "research"},
+      {task_description: "...", task_summary: "...", mode: "patch"},
     ]
   }}
 })
 ```
 A `specialist` delegate carrying `tasks:[...]` fans out into N standard
-free-form specialist tasks (`scope=freeform`, `lane=cpu`, `mode=research`
-defaults), each running through the normal SpecialistRunner + TaskRegistry +
-lease lifecycle. Results surface as ordinary `delegated_result` outcomes —
-pull them with `get_recent_outcomes`; there is no separate check/collect
-step. No domain is required for freeform — you write the full task
-description in natural language.
+free-form specialist tasks (each defaults to `lane=cpu`, `mode=research`; a
+per-task `mode`/`max_turns`/`priority` overrides the default), all running
+through the normal SpecialistRunner + TaskRegistry + lease lifecycle. Results
+surface as ordinary `delegated_result` outcomes — pull them with
+`get_recent_outcomes`; there is no separate check/collect step. No domain is
+required for freeform — you write the full task description in natural
+language, and a freeform task may author patches (`mode=patch`) exactly like a
+domain specialist.
 
 **CRITICAL: Your role as orchestrator.**
 
