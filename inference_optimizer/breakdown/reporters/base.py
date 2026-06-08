@@ -1,27 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Shared data structures + registry for ``session_breakdown`` section
-renderers.
+"""Shared data structures + registry for ``session_breakdown`` section renderers.
 
-A *renderer* is a deterministic function that takes one section of the
-``session_breakdown.json`` dict and produces a :class:`RenderedSection`.
-The compose layer collects every renderer's output, optionally hands the
-``key_facts`` / ``decisions`` to an LLM for narrative connecting, and
-stitches the result back together with the deterministic markdown blocks
-unchanged.
-
-Why this layering exists:
-
-* The numbers (throughputs, gains, kernel counts, paths) MUST be
-  deterministic — the LLM has historically hallucinated them
-  (``715.2%`` gain attributed to GEAK on a session that never ran
-  GEAK, ``MI355X`` written into a report for an MI300X run, etc.).
-* The LLM is good at prose connecting / interpretation, so it is only
-  allowed to talk *about* the facts in ``key_facts``; the system
-  prompt enforces "do not invent numbers".
-* Every renderer is independently testable against a synthetic
-  ``session_breakdown.json`` fixture, and the compose layer is
-  testable with the LLM swapped out.
+A renderer is a deterministic function turning one breakdown section into
+a :class:`RenderedSection`. Numbers stay deterministic (the LLM has
+historically hallucinated them); the LLM only narrates ``key_facts``.
 """
 
 from __future__ import annotations
@@ -43,18 +26,8 @@ __all__ = [
 class Decision:
     """One structured verdict surfaced by a renderer.
 
-    ``kind`` is a small, well-known vocabulary so downstream consumers
-    (UI badges, dashboards, the LLM prompt) can render verdicts without
-    parsing free-form strings.
-
-    Vocabulary:
-
-    * ``"kept"``          — capability / action produced a promoted entry.
-    * ``"reverted"``      — applied + then rolled back (e.g. integrate REVERT).
-    * ``"rejected"``      — rejected without applying (e.g. patch fail).
-    * ``"partial"``       — passed compile / correctness but no speedup.
-    * ``"attempted"``     — ran but no decision recorded yet.
-    * ``"not_attempted"`` — capability never invoked this session.
+    ``kind`` vocabulary: ``kept`` / ``reverted`` / ``rejected`` /
+    ``partial`` / ``attempted`` / ``not_attempted``.
     """
 
     kind: str
@@ -67,15 +40,9 @@ class Decision:
 class RenderedSection:
     """A single section's render output.
 
-    The compose layer guarantees ``markdown_block`` is preserved
-    verbatim; the LLM only sees ``key_facts`` + ``decisions`` +
-    ``warnings`` and is forbidden from rewriting numbers.
-
-    ``skipped`` is the renderer's signal to "do not narrate this
-    section at all" — used for sections whose underlying capability
-    was not exercised (e.g. ``sweep`` when the session never ran a
-    sweep). The compose layer renders a one-line "not run this
-    session" note instead of a full section block.
+    ``markdown_block`` is preserved verbatim; the LLM only sees
+    ``key_facts`` / ``decisions`` / ``warnings``. ``skipped`` tells the
+    compose layer to emit a one-line "not run" note instead of the block.
     """
 
     section_id: str
@@ -90,19 +57,13 @@ class RenderedSection:
 RendererFn = Callable[[dict[str, Any]], RenderedSection]
 
 
-# Module-level registry. Renderers register themselves at import time
-# via the @register_renderer decorator; compose.py walks this list in
-# insertion order so the final report's section ordering is stable.
+# Renderers self-register at import time; compose.py walks this in
+# insertion order so section ordering is stable.
 REGISTRY: list[tuple[str, RendererFn]] = []
 
 
 def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
-    """Decorator: append ``fn`` to :data:`REGISTRY` under ``section_id``.
-
-    Re-registration replaces the prior entry (so reload-in-place during
-    development stays sane), which is why we walk + replace instead of
-    append-only.
-    """
+    """Decorator: register ``fn`` under ``section_id`` (re-registration replaces the prior entry)."""
 
     def _wrap(fn: RendererFn) -> RendererFn:
         for i, (sid, _) in enumerate(REGISTRY):
@@ -119,9 +80,7 @@ def renderer_names() -> list[str]:
     return [sid for sid, _ in REGISTRY]
 
 
-# ---------------------------------------------------------------------------
 # Small markdown helpers — kept here so individual renderers stay terse.
-# ---------------------------------------------------------------------------
 def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
     """Render a GitHub-flavored markdown table; empty rows yield ``""``."""
     rows = list(rows)
