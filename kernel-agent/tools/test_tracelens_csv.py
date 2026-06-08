@@ -449,6 +449,56 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
 
 
+def test_write_reports_does_not_run_rocprof_enrich_by_default(tmp_path, monkeypatch):
+    """Trace analysis must not synchronously profile every hot kernel by default."""
+    import json as _json
+    from argparse import Namespace
+    import rocprof_roofline as rr
+
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
+    analysis_md.parent.mkdir(parents=True, exist_ok=True)
+    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
+    candidate = {
+        "kernel_id": "k001",
+        "name": "paged_attention",
+        "duration_us": 100.0,
+        "call_count": 2,
+        "reusable_native_kernel": True,
+    }
+    args = Namespace(
+        trace_input=str(trace),
+        model_name="llama",
+        framework="sglang",
+        target_platform="MI300X",
+        analysis_mode="inference",
+        runtime_env="local",
+        dry_run=False,
+    )
+    called = {"value": False}
+
+    def _boom(*_args, **_kwargs):
+        called["value"] = True
+        raise AssertionError("batch enrich should be opt-in")
+
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    monkeypatch.setattr(rr, "enrich_kernel_roofline_sidecar", _boom)
+
+    artifacts = tla.write_reports(
+        tmp_path / "run",
+        trace_input_type="file",
+        trace_files=[trace],
+        candidates=[candidate],
+        args=args,
+        existing_report_path=analysis_md,
+    )
+
+    assert called["value"] is False
+    payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
+    assert payload["hot_kernels"][0]["kernel_id"] == "k001"
+
+
 def test_load_model_kernel_params_reads_head_dim(tmp_path):
     import json as _json
 
