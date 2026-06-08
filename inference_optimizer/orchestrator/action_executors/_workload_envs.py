@@ -512,6 +512,25 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
+    # ── Per-model MI300X baseline work-arounds ─────────────────────────
+    # A handful of flagship models SIGABRT during CUDA-graph capture on the
+    # sglang ROCm image because their DEFAULT fused kernels are buggy on
+    # gfx942. Inject the verified per-model work-around UNLESS the caller
+    # already pinned it (explore variants may legitimately re-try the fused
+    # path once the agent knows the model loads — hence setdefault/merge,
+    # never overwrite). Matched on the model basename so it fires for both
+    # the HF repo id and the /wekafs/models/<org>-<repo> local path.
+    _model_basename = Path(
+        str(model_path or os.environ.get("MODEL_PATH", ""))
+    ).name.lower()
+    if "kimi-k2" in _model_basename:
+        # Kimi K2.x at tp8 (8 heads/GPU) takes sglang's ROCm
+        # fused-decode-MLA path, whose RoPE kernel aborts during CUDA-graph
+        # capture (forward_mla_fused_rope_rocm.py: "cannot unpack
+        # non-iterable ForwardMetadata"). Disabling the fused decode
+        # pipeline keeps the configured tp8 + the clean aiter MLA path.
+        # Verified on MI300X: capture passes, decode correct.
+        envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
     # MI300X cold-compile guard: ensure sglang's scheduler watchdog is long
     # enough to survive the first-request aiter ``mha_batch_prefill`` JIT
     # compile. sglang's 300s default fires SIGQUIT mid-warmup on a cold aiter
