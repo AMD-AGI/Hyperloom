@@ -1,11 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for ``orchestrator/system_prompts/prompt_builder.py``.
-
-These tests pin the public contract of :func:`build_orchestration_prompt`
-without going through the CLI helpers so a future CLI rearrangement
-doesn't silently break the prompt structure.
-"""
+"""Unit tests pinning :func:`build_orchestration_prompt`'s public contract."""
 
 from __future__ import annotations
 
@@ -38,15 +33,11 @@ def rules_path() -> Path:
     return asset_system_prompts_dir() / "orchestration.md"
 
 
-# ---------------------------------------------------------------------------
 # Default enabled-action sets
-# ---------------------------------------------------------------------------
 def test_default_enabled_actions_full_includes_kernel_actions():
     full = default_enabled_actions(no_kernel=False)
     assert set(KERNEL_OWNED_ACTIONS) <= set(full)
-    # v0.8 M3 + KB_gaps/Gap-10: ``validate_stack`` is deprecated; the
-    # merged ``explore`` action carries the per-KEEP stack rebench
-    # inline, so the enabled set advertises ``explore`` instead.
+    # Gap-10: validate_stack is deprecated; the merged ``explore`` action replaces it.
     assert "explore" in full
     assert "report" in full
     assert "baseline" in full
@@ -56,8 +47,7 @@ def test_default_enabled_actions_no_kernel_excludes_all_kernel_actions():
     bare = default_enabled_actions(no_kernel=True)
     assert set(KERNEL_OWNED_ACTIONS).isdisjoint(set(bare))
     assert "profile" not in bare  # profile only feeds kernel-opt
-    # v0.8 M3 + KB_gaps/Gap-10: ``explore`` replaces the v0.6
-    # backends/params/validate_stack grid-runner triple.
+    # Gap-10: ``explore`` replaces the v0.6 backends/params/validate_stack triple.
     assert "explore" in bare
     assert "baseline" in bare
 
@@ -73,20 +63,7 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
 
 
 def test_recover_is_robustness_delegate_only_with_real_executor(registry):
-    """``recover`` is a ROBUSTNESS_DELEGATE_ONLY action.
-
-    It keeps a real executor + registry metadata for the robustness
-    ``gpu_memory_leaked`` ladder, but is intentionally removed from the
-    Orchestration prompt surface so Orchestration can neither propose nor
-    delegate it. Pin every leg so a future drift fires this test:
-
-    * registry metadata still loads (covered by parametrized check).
-    * ``recover`` is NOT in either enabled-action set (the Orchestration
-      prompt no longer advertises it).
-    * ``recover`` is the sole ROBUSTNESS_DELEGATE_ONLY_ACTIONS member.
-    * ``cli._REAL_EXECUTORS_FULL`` still binds it to a real callable
-      (:data:`recover_executor`) so the robustness delegate path works.
-    """
+    """``recover`` is ROBUSTNESS_DELEGATE_ONLY: real executor + metadata, but off the Orchestration prompt surface."""
     from inference_optimizer.cli import _REAL_EXECUTORS_FULL
     from inference_optimizer.orchestrator.action_executors.recover import (
         RecoverExecutor,
@@ -105,9 +82,7 @@ def test_recover_is_robustness_delegate_only_with_real_executor(registry):
     assert isinstance(recover_executor, RecoverExecutor)
 
 
-# ---------------------------------------------------------------------------
 # Output structure
-# ---------------------------------------------------------------------------
 def _section_headers(prompt: str) -> list[str]:
     return [
         line.strip() for line in prompt.splitlines()
@@ -116,12 +91,7 @@ def _section_headers(prompt: str) -> list[str]:
 
 
 def test_full_prompt_has_seven_sections(registry, rules_path):
-    """v0.8 §3.3 — original v0.6 seven-section contract is now eight
-    sections because the PHASE CONTRACT (§3a) is wedged between
-    PIPELINE & TIME BUDGET and ACTIONS YOU MAY USE. The legacy 1-7
-    headers are preserved verbatim so downstream LLM prompts that key
-    on the original numbering keep working.
-    """
+    """v0.8 §3.3 — eight sections now (PHASE CONTRACT §3a added); legacy 1-7 headers preserved verbatim."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -145,11 +115,10 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         # The v0.8 ``explore`` action covers the same surface
         # internally; no per-action grid catalogue is rendered.
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
-        # Supplementary EXPLORE channel
-        # declaration sits between the kernel-opt reference and the
-        # rules fragment so the LLM internalises the default
-        # decision flow before reading the §3 supplementary framing.
-        "## 6b. DYNAMIC ACTION (supplementary EXPLORE channel)",
+        # The former "## 6b. DYNAMIC ACTION (supplementary EXPLORE channel)"
+        # section was removed when dynamic_action was folded into the unified
+        # ``specialist`` (scope=domains). The cross-domain channel now lives
+        # entirely inside §4 ACTIONS / the specialist dial documentation.
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
     actual_top = [h for h in headers if h.startswith("## ")]
