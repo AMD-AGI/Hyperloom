@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Specialist sub-agent domain catalogue — v0.8 M5/M6.
 
 Specialists are an *LLM* sub-agent form factor (distinct from the
@@ -5,7 +7,7 @@ deterministic Python executors in ``action_executors/``). Each specialist
 is parameterized by a ``domain`` — a prompt-assembly dimension that maps
 to:
 
-* a Cortex KB sub-graph anchor (``kernel.*`` / ``framework.*`` / …),
+* a knowledge-domain tag for advisory RecipeKB / prompt context,
 * a PR Monitor repo subset (M4),
 * a default tool-call hint set,
 * a stable id used by PolicyGate R2 + breakdown ``specialist_runs``.
@@ -25,8 +27,8 @@ Field reference:
 * ``key`` — canonical id used in ``delegate{params.domain}`` and
   ``specialist_done{payload.domain}``.
 * ``layer`` — short human label (analysis layer the specialist cares about).
-* ``kb_anchor`` — Cortex KB top-level domain to traverse on prompt
-  assembly (M4/M5).
+* ``kb_anchor`` — legacy knowledge-domain label retained for prompt
+  grouping and old data compatibility.
 * ``pr_repos`` — repos the PR Monitor (M4) should pull recent PRs from
   for this domain.
 * ``available_in`` — ``"M5"`` for serving_specialist, ``"M6"`` for the
@@ -257,13 +259,11 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
             tags.append((dom.kb_anchor or domain) if dom else domain)
     return list(dict.fromkeys(tags))
 
-# M5 active set — domains whose prompt templates are fully wired
-# in the specialist_prompt_builder. PR-A6 (Arbor-into-Hyperloom)
-# added per-domain focus templates for ``kernel_switch_specialist`` /
-# ``comm_specialist`` / ``compiler_specialist`` / ``system_specialist`` /
-# ``pr_intel_specialist`` (previously M6-only fallbacks), so the M5
-# active set now matches the catalogue and Orchestration can dispatch
-# any of the six without falling through to the generic template.
+# Active set — domains whose prompt templates are fully wired in the
+# specialist_prompt_builder. All six domains have per-domain focus
+# templates, so the active set matches the catalogue and Orchestration
+# can dispatch any of them without falling through to the generic
+# template.
 SPECIALIST_DOMAINS_M5: frozenset[str] = frozenset(
     d.key for d in SPECIALIST_DOMAINS
 )
@@ -277,9 +277,9 @@ def get_domain(key: str) -> SpecialistDomain | None:
     return None
 
 
-# Maximum number of LLM turns a specialist may run. KB_design §3.5 §9
-# bounds the stale-detection threshold at ``max_turns × per_turn_max_min
-# × 1.5`` (default ~10 minutes). 8 is the M5 default per §3.13 M5 §5.
+# Maximum number of LLM turns a specialist may run. The stale-detection
+# threshold is bounded at ``max_turns × per_turn_max_min × 1.5``
+# (default ~10 minutes).
 DEFAULT_SPECIALIST_MAX_TURNS: int = 8
 
 # Hard cap so the LLM can't request ridiculous turn counts. PolicyGate

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P2-1 Objective + Coordinator.run() long-loop tests."""
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from inference_optimizer.orchestrator.coordinator import (
     Coordinator,
     effective_closing_grace_sec,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.objective import (
     ObjectiveError,
     TargetBaselineObjective,

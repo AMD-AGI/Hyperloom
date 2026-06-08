@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SpecialistRunner — v0.8 M5.
 
 The second sub-agent form factor. Whereas the deterministic
@@ -43,7 +45,7 @@ from typing import Any
 
 from ..session_paths import runs_dir
 from .backends.base import BackendError
-from .intent_parser import Intent, IntentType
+from ..protocol.intent import Intent, IntentType
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     SPECIALIST_DOMAINS_M5,
@@ -83,7 +85,7 @@ def _extra_focus_tags(
     return tuple(t for t in tags if t and t != primary_anchor)
 
 
-# v0.8 §3.11 R4 / R5 — canonical external tool registry lives in
+# R4 / R5 — canonical external tool registry lives in
 # :mod:`policy`. We re-export the tuples below so legacy importers
 # (and the runner itself) still see the historical names without a
 # code rewrite, but PolicyGate and SpecialistRunner now share a
@@ -104,46 +106,34 @@ PR_MONITOR_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_PR_MONITOR))
 CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
 
 
-# Default tool whitelist for specialists (KB_design §3.5 §10 / §3.11 R5;
-# PR-A2 (Arbor-into-Hyperloom) added Edit / Write / MultiEdit so specialists
-# can produce source patches into their per-task git worktree under
-# ``runs/specialist/<task_id>/worktree/``. The subprocess dispatcher's
-# ``--add-dir <worktree>`` scoping keeps them out of the main
-# framework_source_roots; the orchestrator's ``integrate_patch`` action
-# is the only place where worktree patches are physically applied.
+# Default tool whitelist for specialists. Write tools are scoped to the
+# per-task worktree via ``--add-dir <worktree>``; ``integrate_patch`` is the
+# only path that applies those patches to the serving workspace.
 #
 # Note these tool names follow the Claude / Cursor convention; the actual MCP
 # server names depend on operator config.
 #
-# Cortex KB has no MCP surface (REST only); its read context is
-# pre-warmed into Section 4 of the specialist prompt by
-# ``Coordinator._warm_specialist_params`` → ``select_kb_for_domain``.
-# The ``mcp__cortex_kb__{traverse,find_recipe,query}`` names therefore
-# stay out of the default whitelist — advertising tool names that no
-# MCP server backs caused specialists to attempt orphan calls and
-# silently fall back to ``WebSearch``. ``CORTEX_KB_READONLY_MCP_TOOLS``
-# remains importable for PolicyGate (denial validation) and tests.
+# Cortex KB has no live MCP surface. RecipeKB / PR feed / research hints
+# are warmed into prompt fields before dispatch. The
+# ``mcp__cortex_kb__{traverse,find_recipe,query}`` names stay out of the
+# default whitelist so specialists do not attempt orphan calls.
+# ``CORTEX_KB_READONLY_MCP_TOOLS`` remains importable for PolicyGate
+# denial validation and tests.
 DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     "emit_intent",
     "Read", "Grep", "Glob",
-    # PR-A2: write tools for patch authoring. Confined to the
-    # worktree via ``--add-dir`` at subprocess spawn time.
+    # Patch authoring tools, confined to the specialist worktree.
     "Edit", "Write", "MultiEdit",
     # Restricted Bash — runners may further filter via a callback. Keeping
     # ``Bash`` in the whitelist lets the LLM run rocm-smi / pgrep / cat /
-    # git diff > patches/<file>.patch; the runner's per-call hook (TODO M6)
+    # git diff > patches/<file>.patch; the runner's per-call hook (TODO)
     # will block destructive invocations.
     "Bash",
 ) + tuple(sorted(_WEB)) + PR_MONITOR_MCP_TOOLS
 
 
 # Tools explicitly denied even if the operator extends the whitelist.
-# PR-A2 lifted Edit / Write / MultiEdit out of the denylist (see
-# DEFAULT_SPECIALIST_TOOLS above); only the Cortex KB write surfaces
-# remain blocked because the KB lifecycle is Coordinator-owned (Inv-2
-# / Inv-6.1). The KB write set is sourced from
-# :data:`policy.KB_WRITE_TOOL_NAMES` so we never drift between the
-# policy and runner layers.
+# KB writes stay Coordinator-owned; the denylist mirrors PolicyGate.
 SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
@@ -313,9 +303,9 @@ class SpecialistRunner:
 
         Gated on:
 
-        * KnowledgePlane PR Monitor / Cortex KB availability — strips
-          ``mcp__pr_monitor__*`` / ``mcp__cortex_kb__*`` whenever the
-          corresponding surface is disabled.
+        * KnowledgePlane PR Monitor availability and the retired Cortex
+          MCP denylist — strips ``mcp__pr_monitor__*`` when PR Monitor is
+          disabled and always strips ``mcp__cortex_kb__*``.
         * Per-task ``Task.allowed_tools`` when the dispatcher supplied a
           narrower surface (research_scout is the canonical read-only case).
         * Always enforces :data:`SPECIALIST_TOOL_DENYLIST` last
@@ -425,7 +415,7 @@ class SpecialistRunner:
                 )
             )
 
-        # M5 scope guard: domains outside the M5 active set still get
+        # scope guard: domains outside the active set still get
         # dispatched (PolicyGate R2 already accepts them), but we log so
         # operators see we're using a generic prompt template.
         notes: list[str] = []
@@ -508,7 +498,7 @@ class SpecialistRunner:
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
-                # GAP 8 — runtime fingerprint surfaced to the prompt so
+                # runtime fingerprint surfaced to the prompt so
                 # ``_format_version_note`` can annotate version-mismatched
                 # lessons / pitfalls. Both empty when the Coordinator
                 # didn't warm them (legacy callers / pre-PR sessions).
@@ -550,7 +540,7 @@ class SpecialistRunner:
         )
 
     # ------------------------------------------------------------------
-    # In-process Backend path (v0.8 M5 / test path)
+    # In-process Backend path (test path)
     # ------------------------------------------------------------------
     async def _run_via_backend(
         self, ctx: RunnerContext, prep: "_PreparedRun",
@@ -671,7 +661,7 @@ class SpecialistRunner:
         )
 
     # ------------------------------------------------------------------
-    # Subprocess path (PR-A2 production)
+    # Subprocess path (production)
     # ------------------------------------------------------------------
     async def _run_via_subprocess(
         self, ctx: RunnerContext, prep: "_PreparedRun",
@@ -847,7 +837,7 @@ class SpecialistRunner:
             done_payload["summary"] = (
                 "specialist emitted done without summary"[:480]
             )
-        # PR-A2 + B4: reconcile the agent's self-reported ``patches_written``
+        # reconcile the agent's self-reported ``patches_written``
         # against the filesystem. The agent may list patches it intends to
         # apply (ordered by numeric prefix), but we must NEVER trust that
         # claim blindly: a worktree that was never materialised, a write

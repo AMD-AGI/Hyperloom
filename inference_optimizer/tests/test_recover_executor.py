@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for :class:`RecoverExecutor`.
 
 The executor coordinates three independently-failing side effects

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P0-2 agent role + PolicyGate tests.
 
 Covers:
@@ -28,7 +30,7 @@ from inference_optimizer.orchestrator.agent_role import (
     default_role_registry,
     roles_for_run,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
 )

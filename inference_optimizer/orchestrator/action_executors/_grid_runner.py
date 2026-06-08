@@ -1,11 +1,10 @@
-"""Shared helper for backends / params executors.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Each runner's job is essentially: take a base Magpie YAML + a list of
+"""Shared helper for the ``explore`` executor's grid runs.
+
+The job is essentially: take a base Magpie YAML + a list of
 (name, extra_server_args, extra_envs) variants, run Magpie once per
 variant, parse `benchmark_report.json`, return the winners.
-
-We share the "run one Magpie variant" loop here so backends.py / params.py
-stay tiny and only declare the grid (the marathon DFS playbook).
 """
 
 from __future__ import annotations
@@ -51,7 +50,7 @@ log = logging.getLogger(__name__)
 #     aggressive — two flag strings differing only in token order produce the
 #     same fingerprint. Real "later wins" overrides should be expressed as a
 #     single flag with the final value, not a re-emit in a different order;
-#     this is documented in the Orchestration IR-26 prompt.
+#     this is documented in the Orchestration prompt.
 #   * envs: ``(str(k), str(v))`` pairs sorted by key. ``str()`` matches the
 #     ``_baseline_params_fingerprint`` convention so ``"1"`` and ``1`` collide
 #     (Magpie ultimately sees the value as a shell-exported string anyway).
@@ -90,32 +89,57 @@ def variant_fingerprint(
 def _resolve_magpie_python() -> str:
     """Resolve the Python interpreter for Magpie subprocesses.
 
-    Order: $MAGPIE_PYTHON env > first `python3` on PATH that can
-    ``import Magpie`` > /opt/venv/bin/python (if it exists).
-    """
-    env_val = os.environ.get("MAGPIE_PYTHON", "").strip()
-    if env_val:
-        return env_val
+    Order: $MAGPIE_PYTHON env (only when it can actually ``import Magpie``)
+    > first `python3` on PATH that can ``import Magpie``
+    > /opt/venv/bin/python (the canonical Magpie venv baked into the
+    Hyperloom image) as the unconditional last resort.
 
+    A stale ``$MAGPIE_PYTHON`` that points at an interpreter WITHOUT Magpie
+    must NOT be trusted blindly: ``kernel-agent/scripts/install.sh`` resolves
+    the value BEFORE Magpie is pip-installed, so a fresh env can bake in e.g.
+    ``/usr/bin/python3`` — using it makes every Magpie benchmark fail with
+    ``ModuleNotFoundError: No module named 'Magpie'`` (surfaced as
+    ``subprocess_nonzero`` / baseline_failed). We validate the env value and
+    fall through to auto-detection instead.
+
+    The last resort is returned unconditionally — we never fall back to a
+    PATH ``python3`` we already proved cannot ``import Magpie``, since
+    returning it would just resurface ``ModuleNotFoundError`` at benchmark
+    time. If even the canonical interpreter lacks Magpie the subprocess
+    fails loudly on an actionable path rather than silently benchmarking
+    with a Magpie-less ``/usr/bin/python3``.
+    """
     def _can_import_magpie(py: str) -> bool:
         try:
+            # NB: ``run_with_session_kill`` always captures stdout/stderr via
+            # PIPE internally and does NOT accept ``capture_output`` — passing
+            # it raises TypeError, which the broad ``except`` would swallow as
+            # "cannot import", silently disabling the whole probe.
             proc = run_with_session_kill(
                 [py, "-c", "import Magpie"],
-                capture_output=True, timeout=10,
+                timeout=10,
             )
             return getattr(proc, "returncode", 1) == 0
         except Exception:
             return False
 
+    env_val = os.environ.get("MAGPIE_PYTHON", "").strip()
+    if env_val:
+        if _can_import_magpie(env_val):
+            return env_val
+        log.warning(
+            "MAGPIE_PYTHON=%s cannot import Magpie; ignoring it and "
+            "auto-detecting an interpreter that can. (A stale value is often "
+            "baked into kernel-agent.env.sh when install.sh resolved it "
+            "before Magpie was pip-installed.)",
+            env_val,
+        )
+
     candidate = shutil.which("python3")
     if candidate and _can_import_magpie(candidate):
         return candidate
 
-    fallback = Path("/opt/venv/bin/python")
-    if fallback.exists():
-        return str(fallback)
-
-    return candidate or "/opt/venv/bin/python"
+    return "/opt/venv/bin/python"
 
 
 def _resolve_session_dir() -> Path:
@@ -262,7 +286,7 @@ def apply_multi_node_invalid_variants(
 #   * mem_fraction — bumping mem-fraction-static unlocks KV-cache
 #     headroom for long-context workloads; cheap to test, sometimes
 #     big.
-#   * max_num_seqs — marathon KB validated +84% on Kimi-K2.5; tier-1
+#   * max_num_seqs — KB validated +84% on Kimi-K2.5; tier-1
 #     KV-cache class param.
 #   * decode_steps — continuous decode steps; modest leverage.
 #   * schedule / nccl — historically marginal or negative.
@@ -358,7 +382,7 @@ def apply_single_node_invalid_variants(
     bit-for-bit.
 
     The convention ``note="multi_node_only_*"`` is owned by the grid
-    library (``params.py`` / ``backends.py``); we never invent the
+    definitions in the ``explore`` executor; we never invent the
     classification here.
     """
     from ._multi_node_env import is_multi_node
@@ -902,6 +926,217 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+# ---------------------------------------------------------------------------
+# sglang scheduler watchdog timeout injection
+#
+# On MI300X with the aiter attention backend, the FIRST inference request
+# JIT-compiles the ``mha_batch_prefill`` kernel; that compile can take longer
+# than sglang's default ``--watchdog-timeout`` of 300s. When it does, the
+# scheduler fires ``SIGQUIT`` and the server dies mid-warmup -> the benchmark
+# reports ``baseline_failed`` with throughput 0 (non-deterministic across
+# models: same-arch models pass once the aiter cache is warm). InferenceX's
+# ``sglang_mi300x.sh`` appends ``$EXTRA_SGLANG_ARGS`` after its own
+# DEFAULT_ARGS and never sets ``--watchdog-timeout`` itself, so routing the
+# flag through ``EXTRA_SGLANG_ARGS`` reliably reaches
+# ``python -m sglang.launch_server``. We inject a longer timeout by default
+# unless the user already pinned one.
+# ---------------------------------------------------------------------------
+DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC = 1800
+SGLANG_WATCHDOG_TIMEOUT_ENV = "SGLANG_WATCHDOG_TIMEOUT"
+_SGLANG_WATCHDOG_FLAG = "--watchdog-timeout"
+# Matches the flag in space- or equals-separated form so a user-pinned
+# ``--watchdog-timeout 600`` / ``--watchdog-timeout=600`` both suppress
+# injection, while a longer flag (no such sglang flag today, but defensive)
+# does not false-match.
+_SGLANG_WATCHDOG_RE = re.compile(r"--watchdog-timeout(?:[=\s]|$)")
+
+
+def resolve_sglang_watchdog_timeout() -> int:
+    """Resolve the sglang scheduler watchdog timeout in seconds.
+
+    Reads ``$SGLANG_WATCHDOG_TIMEOUT`` (integer seconds) and falls back to
+    :data:`DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC` when the env var is unset,
+    empty, non-integer, or non-positive. A malformed value logs a warning
+    and uses the default rather than crashing the YAML materialization.
+    """
+    raw = os.environ.get(SGLANG_WATCHDOG_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
+    try:
+        val = int(raw)
+    except ValueError:
+        log.warning(
+            "%s=%r is not an integer; using default %ds.",
+            SGLANG_WATCHDOG_TIMEOUT_ENV, raw,
+            DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
+        )
+        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
+    if val <= 0:
+        log.warning(
+            "%s=%d is not positive; using default %ds.",
+            SGLANG_WATCHDOG_TIMEOUT_ENV, val,
+            DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
+        )
+        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
+    return val
+
+
+def inject_sglang_watchdog_timeout(
+    server_args: str | None, framework: str | None,
+) -> str:
+    """Append ``--watchdog-timeout <N>`` to ``server_args`` for sglang runs.
+
+    Returns ``server_args`` unchanged (coerced to a stripped string) when
+    either guard trips:
+
+    * ``framework`` does not route to ``EXTRA_SGLANG_ARGS`` — vllm / atom
+      have no such flag, so they are left untouched. Framework detection
+      reuses :func:`server_args_env_name`, so an empty/unknown framework is
+      treated as sglang (the default backend), matching how every other
+      arg-routing site in this module behaves.
+    * ``server_args`` already contains ``--watchdog-timeout`` (in space- or
+      equals-separated form) — a user/variant-supplied value wins and is
+      never doubled.
+
+    Otherwise it appends ``--watchdog-timeout <N>`` where ``N`` comes from
+    :func:`resolve_sglang_watchdog_timeout`. Only this flag is added; the
+    function never touches ``--context-length`` / ``MAX_MODEL_LEN`` or any
+    other existing flag.
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args
+    if _SGLANG_WATCHDOG_RE.search(args):
+        return args
+    timeout = resolve_sglang_watchdog_timeout()
+    return merge_server_args(args, f"{_SGLANG_WATCHDOG_FLAG} {timeout}")
+
+
+# ---------------------------------------------------------------------------
+# sglang ``--context-length`` cap injection
+#
+# sglang's ``launch_server`` defaults ``context_length`` to None, which makes
+# it size ``max_total_tokens`` from the model's ``max_position_embeddings``.
+# For a model that advertises a huge native window (e.g. Mistral-Nemo-12B =
+# ``max_position_embeddings=1024000``) sglang sizes ``max_total_tokens`` to
+# ~701062 and the aiter attention backend then allocates a ``workspace_buffer``
+# of >100 GiB -> ``torch.OutOfMemoryError: HIP out of memory`` -> the server
+# exits 1 and the benchmark reports ``baseline_failed`` with throughput 0.
+# InferenceX's ``vllm_*.sh`` scripts already cap their window via
+# ``--max-model-len $MAX_MODEL_LEN`` (default 4096), but ``sglang_*.sh`` passes
+# no ``--context-length`` and never consumes the YAML's ``MAX_MODEL_LEN``, so
+# the asymmetry only hurts sglang. We cap the context to the actual workload
+# (ISL+OSL+headroom, floored to a sane minimum) but NEVER above the model's
+# native window, and NEVER when the operator/YAML already pinned the flag.
+# Routing through ``EXTRA_SGLANG_ARGS`` (appended verbatim after the script's
+# DEFAULT_ARGS) reliably reaches ``python -m sglang.launch_server``.
+# ---------------------------------------------------------------------------
+DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS = 2048
+DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS = 8192
+SGLANG_CONTEXT_HEADROOM_ENV = "SGLANG_CONTEXT_HEADROOM_TOKENS"
+SGLANG_CONTEXT_FLOOR_ENV = "SGLANG_CONTEXT_FLOOR_TOKENS"
+_SGLANG_CONTEXT_LENGTH_FLAG = "--context-length"
+# Matches the flag in space- or equals-separated form so an operator-pinned
+# ``--context-length 6144`` / ``--context-length=6144`` both suppress
+# injection, while a longer flag never false-matches.
+_SGLANG_CONTEXT_LENGTH_RE = re.compile(r"--context-length(?:[=\s]|$)")
+
+
+def _resolve_nonneg_int_env(name: str, default: int) -> int:
+    """Read a non-negative integer env override, else return ``default``.
+
+    A blank/non-integer/negative value logs a warning and falls back to the
+    default rather than crashing the YAML materialization.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        log.warning(
+            "%s=%r is not an integer; using default %d.", name, raw, default,
+        )
+        return default
+    if val < 0:
+        log.warning(
+            "%s=%d is negative; using default %d.", name, val, default,
+        )
+        return default
+    return val
+
+
+def resolve_sglang_context_cap(isl: int, osl: int) -> int:
+    """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
+
+    Returns ``max(isl + osl + headroom, floor)`` where ``headroom`` and
+    ``floor`` come from :data:`DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS` /
+    :data:`DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS`, each operator-tunable via
+    ``$SGLANG_CONTEXT_HEADROOM_TOKENS`` / ``$SGLANG_CONTEXT_FLOOR_TOKENS``.
+    The headroom absorbs the BOS/chat-template tokens and random-dataset
+    length jitter on top of the nominal workload; the floor keeps short smoke
+    workloads from pinning the window absurdly low. The caller clamps the
+    result to the model's native window before injecting.
+    """
+    headroom = _resolve_nonneg_int_env(
+        SGLANG_CONTEXT_HEADROOM_ENV, DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
+    )
+    floor = _resolve_nonneg_int_env(
+        SGLANG_CONTEXT_FLOOR_ENV, DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
+    )
+    return max(int(isl) + int(osl) + headroom, floor)
+
+
+def inject_sglang_context_length(
+    server_args: str | None,
+    framework: str | None,
+    model_path: str | None,
+    isl: int,
+    osl: int,
+) -> str:
+    """Append ``--context-length <N>`` to ``server_args`` for sglang runs.
+
+    Returns ``server_args`` unchanged (coerced to a stripped string) when any
+    guard trips:
+
+    * ``framework`` does not route to ``EXTRA_SGLANG_ARGS`` -- vllm / atom
+      already cap their window via ``--max-model-len $MAX_MODEL_LEN`` in the
+      benchmark scripts, so they are left untouched. Framework detection
+      reuses :func:`server_args_env_name`, so an empty/unknown framework is
+      treated as sglang (the default backend), matching every other
+      arg-routing site in this module.
+    * ``server_args`` already contains ``--context-length`` (in space- or
+      equals-separated form) -- an operator/YAML/``extra_sglang_args`` value
+      wins and is never overridden or doubled.
+    * the model's ``max_position_embeddings`` cannot be read -- fail-safe to
+      today's behaviour (inject nothing) rather than guessing a window.
+
+    Otherwise it appends ``--context-length min(max_pos, cap)`` where ``cap``
+    comes from :func:`resolve_sglang_context_cap`. The clamp to ``max_pos``
+    means we never stretch the context above the model's native window (RoPE
+    extrapolation / learned-absolute-position breakage); the cap means we
+    never let sglang size ``max_total_tokens`` off a huge native window and
+    OOM the aiter ``workspace_buffer``. Only this flag is added.
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args
+    if _SGLANG_CONTEXT_LENGTH_RE.search(args):
+        return args
+    # Imported lazily: cli.py is the heavy top-level module and only imports
+    # this package lazily itself, so a module-level import here would risk a
+    # cycle. The loader handles nested ``text_config`` for multimodal configs.
+    from ...cli import _load_model_max_position_embeddings
+    max_pos = _load_model_max_position_embeddings(str(model_path or ""))
+    if not max_pos:
+        return args
+    cap = resolve_sglang_context_cap(isl, osl)
+    context_length = min(int(max_pos), cap)
+    return merge_server_args(
+        args, f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
+    )
+
+
 def apply_runtime_benchmark_overrides(
     bench: dict[str, Any],
     *,
@@ -1379,9 +1614,8 @@ async def run_grid(
         )
         try:
             # PD knobs auto-resolved by the helper from $PD_* env. The
-            # grid runner doesn't sweep PD ratio yet (see params.py for
-            # the grid surface), so PD config stays constant across
-            # variants within one run.
+            # grid runner doesn't sweep PD ratio yet, so PD config
+            # stays constant across variants within one run.
             await restart_server_for_round(
                 extra_server_args=merge_server_args(
                     base_extra_args, variant.extra_server_args,
@@ -1474,7 +1708,7 @@ async def run_grid(
                 break
             continue
 
-        # Fix E (Q3c): the soft overtime gate fired. Record a synthetic
+        # Soft overtime gate fired. Record a synthetic
         # ``killed_overtime=True`` VariantResult with no tput / report
         # so the ExploreExecutor can demote this variant to the
         # ``KILLED_OVERTIME`` ledger outcome (no fingerprint promotion,
@@ -1671,7 +1905,7 @@ def pick_winners(
     keep_threshold_pct: float | None = None,
 ) -> list[VariantResult]:
     """Filter variants whose throughput beats ``baseline_tput`` by
-    ``keep_threshold_pct`` percent (marathon §params: > 1% = KEEP).
+    ``keep_threshold_pct`` percent (> 1% = KEEP).
 
     Resolution order for ``keep_threshold_pct``:
 
@@ -1766,13 +2000,18 @@ def _write_variant_abort_marker(
 
 
 __all__ = [
+    "DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC",
     "GridVariant",
     "MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
+    "SGLANG_WATCHDOG_TIMEOUT_ENV",
     "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
     "apply_runtime_benchmark_overrides",
+    "inject_sglang_watchdog_timeout",
+    "merge_server_args",
     "pick_winners",
     "reorder_grid_for_multi_node",
+    "resolve_sglang_watchdog_timeout",
     "run_grid",
     "sanitize_result_dir",
     "sanitize_script_name",

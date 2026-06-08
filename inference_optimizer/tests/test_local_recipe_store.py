@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for :class:`LocalRecipeStore`.
 
 Covers the full surface of the on-disk recipe-snapshot store:
@@ -153,7 +155,7 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     assert archive["version"] == 1
     assert archive["snapshot"]["best_throughput"] == 1000.0
     # ``replaced_by`` MUST carry the triggering write's provenance —
-    # this is how an audit can trace which marathon wrote the
+    # this is how an audit can trace which session wrote the
     # supplanting row (boundary doc §4.2).
     assert archive["replaced_by"] == {
         "source": "second", "generator": "ut",

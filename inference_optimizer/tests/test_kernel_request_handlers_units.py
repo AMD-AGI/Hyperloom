@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the small helpers inside ``kernel_request_handlers``.
 
 The handler entry points are exercised by full Coordinator e2e tests, but

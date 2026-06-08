@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 C1: ``record_trace_analyze`` caches TraceLens analysis.md.
 
 These tests pin the contract the downstream ``roofline`` action (C4) and
@@ -22,6 +24,7 @@ the prompt renderer (C5) depend on:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from inference_optimizer.orchestrator.shared_state import SharedState
@@ -243,6 +246,16 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     """Kernel-roofline fields from TraceLens candidates survive caching."""
     analysis_md = tmp_path / "analysis.md"
     analysis_md.write_text("# hi", encoding="utf-8")
+    sidecar = tmp_path / "kernel_roofline.json"
+    sidecar.write_text(json.dumps({
+        "kernels": [{
+            "kernel_id": "k1",
+            "rocprof_roofline": {
+                "before_kernel_opt": {"status": "matched", "roofline_efficiency_pct": 31.2},
+                "after_kernel_opt": {"status": "matched", "roofline_efficiency_pct": 44.0},
+            },
+        }]
+    }), encoding="utf-8")
 
     state = SharedState()
     state.record_trace_analyze(
@@ -268,14 +281,14 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
                 },
             ],
             "candidates_path": "/some/kc.json",
-            "kernel_roofline_path": "/some/reports/kernel_roofline.json",
+            "kernel_roofline_path": str(sidecar),
             "trace_report_path": str(analysis_md),
             "trace_health_warnings": [],
         },
     )
 
     cached = state.last_trace_analyze
-    assert cached["kernel_roofline_path"] == "/some/reports/kernel_roofline.json"
+    assert cached["kernel_roofline_path"] == str(sidecar)
     row = cached["hot_kernels_top15"][0]
     assert row["bound_type"] == "memory"
     assert row["arithmetic_intensity"] == 0.45
@@ -284,6 +297,8 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     assert row["compute_utilization_pct"] == 9.1
     assert row["bandwidth_utilization_pct"] == 72.4
     assert row["suggestion"] == "reduce memory traffic"
+    assert row["rocprof_roofline"]["before_kernel_opt"]["roofline_efficiency_pct"] == 31.2
+    assert row["rocprof_roofline"]["after_kernel_opt"]["roofline_efficiency_pct"] == 44.0
     # kernel_category propagates from TraceLens hot_kernels so downstream
     # consumers (kernel_attempt_summary.by_kernel[].kernel_category) get
     # the bucket label instead of an empty string.

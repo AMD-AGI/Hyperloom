@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P0-0 scaffold smoke tests.
 
 Verifies:
@@ -5,7 +7,7 @@ Verifies:
 * Package importable + ``__version__`` set to v0.6.0
 * ``paths.make_session_dir`` creates all standard subdirs under env override
 * ``paths.db_path_for`` resolves to ``storage/coordinator.db`` under session
-* ``storage.SqliteConnection`` opens DB with WAL pragmas + 4 tables created
+* ``storage.SqliteConnection`` opens DB with WAL pragmas + managed tables created
 * Cross-table ``BEGIN IMMEDIATE`` transaction round-trips events + cursors
 """
 
@@ -87,7 +89,7 @@ def test_open_connection_applies_wal_and_schema(tmp_path):
         cur = conn.execute("PRAGMA journal_mode")
         (mode,) = cur.fetchone()
         assert mode.lower() == "wal"
-        # 4 core tables + schema_version exist
+        # core tables + schema_version exist
         cur = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         )

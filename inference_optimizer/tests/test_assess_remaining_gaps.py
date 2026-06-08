@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """IR-7 — session_steward_specialist + assess_remaining_gaps tests.
 
 Covers:

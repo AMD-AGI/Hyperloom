@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end smoke test for the breakdown exporter.
 
 Builds a synthetic but realistic session_dir tree (manifest + state +
@@ -313,6 +315,75 @@ def test_session_metadata(fixture_session: Path) -> None:
     assert s["max_minutes"] == 180
 
 
+def test_session_stop_reason_falls_back_to_close_phase(tmp_path: Path) -> None:
+    """Legacy states may close via phase_history without top-level stop_reason.
+
+    Regression: production artifacts had ``close_sequence_done=true`` and a
+    final ``to_phase=CLOSE`` row with ``reason=sweep_budget_exhausted``, while
+    ``state.stop_reason`` stayed blank. The breakdown session metadata should
+    still surface the terminal reason and close timestamp.
+    """
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {
+        "schema_version": 1,
+        "session_id": "closed-via-phase-history",
+        "created_at_utc": "2026-06-05T01:00:00+00:00",
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "closed-via-phase-history",
+        "stop_reason": "",
+        "close_sequence_done": True,
+        "phase_history": [
+            {
+                "from_phase": "KERNEL",
+                "to_phase": "SWEEP",
+                "reason": "kernel_phase_budget_exhausted",
+                "ts": "2026-06-05T02:00:00+00:00",
+                "ts_unix": 1780624800.0,
+            },
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "CLOSE",
+                "reason": "sweep_budget_exhausted",
+                "ts": "2026-06-05T03:04:05+00:00",
+                "ts_unix": 1780628645.0,
+            },
+        ],
+    })
+
+    s = build(sd)["session"]
+    assert s["stop_reason"] == "sweep_budget_exhausted"
+    assert s["ended_at_utc"] == "2026-06-05T03:04:05Z"
+
+
+def test_session_stop_reason_prefers_specific_close_reason(tmp_path: Path) -> None:
+    """A generic top-level timeout should not hide the terminal phase reason."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {
+        "schema_version": 1,
+        "session_id": "closed-with-generic-timeout",
+        "created_at_utc": "2026-06-05T01:00:00+00:00",
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "closed-with-generic-timeout",
+        "stop_reason": "time_exhausted",
+        "close_sequence_done": True,
+        "phase_history": [
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "CLOSE",
+                "reason": "sweep_budget_exhausted",
+                "ts": "2026-06-05T03:04:05+00:00",
+                "ts_unix": 1780628645.0,
+            },
+        ],
+    })
+
+    s = build(sd)["session"]
+    assert s["stop_reason"] == "sweep_budget_exhausted"
+    assert s["ended_at_utc"] == "2026-06-05T03:04:05Z"
+
+
 def test_keep_stamping_only_best_attempt(fixture_session: Path) -> None:
     """KEEP decision must land on the BEST attempt, not every attempt."""
     oob = build(fixture_session)["oob_invocations"]
@@ -471,6 +542,44 @@ def test_baseline_resolves_container_workspace_path(tmp_path: Path) -> None:
         "baseline workspace" in w and "does not resolve" in w
         for w in b["warnings"]
     ), b["warnings"]
+
+
+def test_baseline_resolves_measure_round_benchmark_workspace(tmp_path: Path) -> None:
+    """Double-run baseline records may point directly at the hot
+    ``measure_round/benchmark_*`` directory. The collector must read that
+    report instead of looking for another nested ``benchmark_*`` below it."""
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "dbl"})
+    bdir = sd / (
+        "runs/baseline/h1/measure_round/benchmark_sglang_20260605_014141"
+    )
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "throughput": {"output_throughput": 3789.33},
+        "latency": {
+            "ttft": {"mean_ms": 616.7},
+            "tpot": {"mean_ms": 16.29},
+            "e2el": {"mean_ms": 17285.09},
+        },
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "dbl",
+        "baseline_tput": 3789.33,
+        "last_baseline": {
+            "workspace": (
+                "/workspace/runs/baseline/h1/measure_round/"
+                "benchmark_sglang_20260605_014141"
+            ),
+        },
+    })
+
+    b = build(sd)
+    baseline = b["baseline"]
+    assert baseline["ttft_mean_ms"] == pytest.approx(616.7)
+    assert baseline["e2el_mean_ms"] == pytest.approx(17285.09)
+    assert baseline["ttft_e2el_source"] == "state_workspace"
+    assert "measure_round" in baseline["benchmark_report_path"]
 
 
 def test_baseline_unresolvable_workspace_emits_warning(tmp_path: Path) -> None:
@@ -2003,6 +2112,87 @@ def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:
     ), b["warnings"]
 
 
+def test_final_ttft_reconstructed_from_current_best_benchmark_dir(
+    tmp_path: Path,
+) -> None:
+    """``current_best.workspace`` can point directly at a double-run
+    ``measure_round/benchmark_*`` directory while latency remains only on
+    disk. Final reconstruction must read that report."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "cbdir"})
+    bdir = sd / (
+        "runs/baseline/h1/measure_round/benchmark_sglang_20260605_014141"
+    )
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "throughput": {"output_throughput": 3789.33},
+        "latency": {
+            "ttft": {"mean_ms": 616.7},
+            "tpot": {"mean_ms": 16.29},
+            "e2el": {"mean_ms": 17285.09},
+        },
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "cbdir",
+        "baseline_tput": 3789.33,
+        "current_best": {
+            "action": "baseline",
+            "tput": 3789.33,
+            "workspace": (
+                "/workspace/runs/baseline/h1/measure_round/"
+                "benchmark_sglang_20260605_014141"
+            ),
+        },
+    })
+
+    final = build(sd)["final"]
+    assert final["ttft_mean_ms"] == pytest.approx(616.7)
+    assert final["e2el_mean_ms"] == pytest.approx(17285.09)
+    assert final["ttft_e2el_source"] == "current_best_disk"
+
+
+def test_final_ttft_reconstructed_from_warm_replay_measure_round(
+    tmp_path: Path,
+) -> None:
+    """Warm-replay stack entries may have ``workspace = None``. Match the
+    report under ``runs/replay_warm_recipe`` by action/tput and recover
+    final latency from the hot measure round."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "wr"})
+    bdir = sd / (
+        "runs/replay_warm_recipe/f86b/measure_round/"
+        "benchmark_sglang_20260604_151328"
+    )
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "throughput": {"output_throughput": 4568.10},
+        "latency": {
+            "ttft": {"mean_ms": 2156.71},
+            "tpot": {"mean_ms": 11.91},
+            "e2el": {"mean_ms": 14335.65},
+        },
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "wr",
+        "baseline_tput": 1480.90,
+        "current_best": {"tput": 4568.10},
+        "optimization_stack": [
+            {
+                "action": "replay_warm_recipe",
+                "variant_name": "warm_replay",
+                "tput": 4568.10,
+                "workspace": None,
+            },
+        ],
+        "cumulative_gain_validated": 208.47,
+    })
+
+    final = build(sd)["final"]
+    assert final["ttft_mean_ms"] == pytest.approx(2156.71)
+    assert final["e2el_mean_ms"] == pytest.approx(14335.65)
+    assert final["ttft_e2el_source"] == "stack_top_disk"
+
+
 # ---------------------------------------------------------------------------
 # A3: baseline.attempts_history reconstruction
 # ---------------------------------------------------------------------------
@@ -2201,6 +2391,36 @@ def test_baseline_ttft_disk_walk_fallback(tmp_path: Path) -> None:
         "baseline.ttft_mean_ms reconstructed from runs/baseline/ disk walk" in w
         for w in b["warnings"]
     ), b["warnings"]
+
+
+def test_baseline_ttft_disk_walk_fallback_measure_round(tmp_path: Path) -> None:
+    """Disk-walk fallback must include double-run ``measure_round``
+    reports, not just legacy ``runs/baseline/<hash>/benchmark_*``."""
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True)
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "mrdw"})
+    bdir = sd / "runs/baseline/hash1/measure_round/benchmark_sglang_20260605_031230"
+    _write_json(bdir / "benchmark_report.json", {
+        "success": True,
+        "throughput": {"output_throughput": 2110.29},
+        "latency": {
+            "ttft": {"mean_ms": 2075.01},
+            "tpot": {"mean_ms": 28.32},
+            "e2el": {"mean_ms": 31045.42},
+        },
+    })
+    _write_json(sd / "state.json", {
+        "session_id": "mrdw",
+        "baseline_tput": 2110.29,
+        "last_baseline": {"workspace": "/workspace/runs/baseline/missing"},
+    })
+
+    b = build(sd)
+    baseline = b["baseline"]
+    assert baseline["ttft_mean_ms"] == pytest.approx(2075.01)
+    assert baseline["e2el_mean_ms"] == pytest.approx(31045.42)
+    assert baseline["ttft_e2el_source"] == "runs_baseline_disk"
+    assert "measure_round" in baseline["benchmark_report_path"]
 
 
 # ---------------------------------------------------------------------------
@@ -2733,6 +2953,35 @@ def test_action_timeline_mirrors_phase_timeline(tmp_path):
     ))
     b = build(sd)
     assert b["action_timeline"] == b["phase_timeline"]
+
+
+def test_roofline_attempts_are_in_phase_timeline(tmp_path):
+    """Roofline failures must be visible in breakdown timelines."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    _write_state(sd, _basic_state(
+        roofline_attempts=[
+            {
+                "ts": "2026-06-04T01:49:00+00:00",
+                "task_id": "t-roofline-fail",
+                "status": "failed",
+                "decision": "no_promote",
+                "key_metric": None,
+                "key_metric_kind": "snapshot_id",
+                "error_class": "trace_analyze_failed",
+                "extras": {"phase": "trace_analyze"},
+            },
+        ],
+    ))
+    timeline = build(sd)["phase_timeline"]
+
+    roofline_rows = [e for e in timeline if e.get("action") == "roofline"]
+    assert len(roofline_rows) == 1
+    row = roofline_rows[0]
+    assert row["task_id"] == "t-roofline-fail"
+    assert row["status"] == "failed"
+    assert row["decision"] == "no_promote"
+    assert row["error_class"] == "trace_analyze_failed"
 
 
 # ===========================================================================

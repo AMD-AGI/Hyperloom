@@ -1,6 +1,8 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``sweep`` ActionRunner sweep action.
 
-Mirrors marathon/skills/actions/sweep.md: full ISL/OSL/CONC sweep with
+Full ISL/OSL/CONC sweep with
 the optimized server config to map the Pareto frontier. P2-3 keeps the
 implementation simple — relaunches sglang once per (CONC, ISL, OSL)
 combo via the same Magpie shell. A future single-server mode (one
@@ -14,8 +16,8 @@ Inputs (task.params):
 * ``conc_values``      — list of int CONC, default [4, 16, 64]
 * ``isl_osl_configs``  — list of "<ISL>:<OSL>" str, default ["1024:1024",
                           "8192:1024", "1024:8192"]
-* ``num_prompts_factor`` — multiplier vs CONC (default 5; matches
-                            marathon's adaptive default for OSL ≤ 1024)
+* ``num_prompts_factor`` — multiplier vs CONC (default 5; adaptive
+                            default for OSL ≤ 1024)
 
 Result::
 
@@ -231,7 +233,6 @@ class SweepExecutor:
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
-        # See backends.py for rationale.
         try:
             override_script = sanitize_script_name(params.get("benchmark_script"))
             override_result_dir = sanitize_result_dir(params.get("result_dir"))

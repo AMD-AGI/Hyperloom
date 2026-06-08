@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SubAgentRunner
 
 Receives ``delegate{action_name, params}`` intents (after PolicyGate),
@@ -78,8 +80,8 @@ class SubAgentRunner:
 
         Returns the path so the caller can stash it on ``RunnerContext.extra``.
         Returns None when the task kind is not one of the known runs/
-        actions (e.g. setup / classify / kernel-owned actions which use
-        their own kernel-agent-workspace tree).
+        actions (e.g. kernel-owned actions which use their own
+        kernel-agent-workspace tree).
         """
         if self.session_dir is None:
             return None
@@ -150,7 +152,7 @@ class SubAgentRunner:
         # queued → running first (state machine constraint). Use the
         # resilient variant so a missing row doesn't kill the runner
         # before the executor has even started -- see
-        # _transition_resilient for the rationale (Bug N34 #1/#2).
+        # _transition_resilient for the rationale.
         await self._transition_resilient(
             task.task_id, "running", context="enter_running",
         )
@@ -212,7 +214,7 @@ class SubAgentRunner:
         finally:
             # Always release whoever acquired the lease — pre-bound or
             # owned. The dispatcher passes the lease in but trusts the
-            # runner's finally to release it (Inv-7.3 atomic release).
+            # runner's finally to release it (atomic release).
             if lease is not None:
                 await self.locks.release(lease)
 

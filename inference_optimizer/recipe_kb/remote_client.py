@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Read-only HTTP client for the central recipe-snapshot kb-service.
 
 The local store (:class:`recipe_kb.LocalRecipeStore`) is the source
@@ -459,13 +461,21 @@ class RemoteRecipeClient:
         updated_since: str | None = None,
         order_by: str = C.ORDER_BY_UPDATED_AT_DESC,
         limit: int = 50,
+        prefer: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """``POST /recipe-snapshot/recipes/search``.
 
         Server-side validates ``order_by`` against the 6-value
         whitelist; we forward whatever was passed and trust the
         server to reject. Disabled client returns ``[]``.
+
+        ``prefer`` (workload-similarity hints) is accepted for the
+        unified KB-interface signature. The central kb-service has no
+        server-side prefer ranking, so the dispatcher applies a
+        client-side rerank over the returned rows; this client only
+        forwards the ``required`` filter.
         """
+        del prefer  # client-side rerank lives in RecipeKB
         if not self.enabled:
             return []
         body: dict[str, Any] = {

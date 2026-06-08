@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Reactor: the heart of the robustness role.
 
 A single :meth:`Reactor.tick` runs the M1 pipeline:
@@ -58,8 +60,8 @@ class ReactorComponents:
     # per-instance ``_finalize_fired`` latch. Idempotency at disk
     # level is enforced by the finalizer's marker file.
     finalizer: PostmortemFinalizer | None = None
-    # Cross-tick state persistence. M1 subprocess transport spawns a
-    # fresh Python per tick — without this store, every detector /
+    # Cross-tick state persistence. The subprocess-per-tick transport
+    # spawns a fresh Python per tick — without this store, every detector /
     # ladder / throttle starts empty each tick and consecutive-tick
     # rules can never fire. The reactor flushes the store at the end
     # of every successful tick. ``None`` disables persistence (tests).

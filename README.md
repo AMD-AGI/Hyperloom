@@ -21,7 +21,7 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
 | **[Auth & Environment Guide](docs/ENV_AND_AUTH.md)** | Single authoritative auth/env reference; the inline tables in this README are a convenience excerpt |
 | **[Configuration Reference](docs/CONFIGURATION_REFERENCE.md)** | Every environment variable read by the runtime |
-| **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | How to obtain or skip `INFERENCE_OPTIMIZER_KB_ROOT` and the marathon KB |
+| **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | How to obtain or skip `INFERENCE_OPTIMIZER_KB_ROOT` |
 | **[`session_breakdown.json` Integration](docs/INTEGRATION_SESSION_BREAKDOWN.md)** | Stable contract for downstream consumers (`claw-stats-service`, dashboards) |
 | **[Operations & Self-Host Runbook](docs/OPERATIONS.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Auth-proxy 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
@@ -339,7 +339,7 @@ PrimusClaw tier:
 
 | Resource                          | Hosted default                                                                 |
 |-----------------------------------|---------------------------------------------------------------------------------|
-| Per-session GPU budget            | 1 ├ù MI300X / MI325X / MI355X for single-node runs; 2–8 GPUs via RayJob for multi-node |
+| Per-session GPU budget            | 1–8 × MI300X / MI325X / MI355X for single-node runs (matches TP); 16+ GPUs via RayJob for multi-node (nodes ≥ 2) |
 | Concurrent sessions per account   | 2                                                                               |
 | Session wall-clock                | 24 hours (extensible on request)                                                |
 | `USER_DATA_PATH` quota            | 200 GB per session, with daily snapshots                                        |

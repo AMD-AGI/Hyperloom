@@ -1,4 +1,6 @@
-"""Session manifest writer ().
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Session manifest writer.
 
 The manifest is the **first** file written to a session directory after
 ``make_session_dir()`` runs and is the canonical session-resume tag.
@@ -83,15 +85,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import paths as _paths
 from .session_paths import manifest_path
 
 log = logging.getLogger(__name__)
 
-# Schema bumped to 3 in the legacy release to add ``stack_fingerprint`` (rocm / aiter /
-# sglang / vllm versions, mandatory attrs for Cortex KB ``session begin``
-# per KB_design §3.6.5.1 + §3.13 M1) plus the ``dependencies`` provenance
-# block (Magpie / InferenceX commit + remote — bugs.md §C #1). Older v2
-# readers stay compatible because all new fields are additive.
+# Schema 3 adds ``stack_fingerprint`` (rocm / aiter / sglang / vllm
+# versions, mandatory attrs for Cortex KB ``session begin``) plus the
+# ``dependencies`` provenance block (Magpie / InferenceX commit +
+# remote). Older v2 readers stay compatible because all new fields are
+# additive.
 SCHEMA_VERSION = 3
 
 
@@ -206,6 +209,67 @@ def _git_remote_at(path: Path) -> str:
         return ""
 
 
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    """Return True when ``path`` is inside ``root`` after best-effort resolution."""
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except (OSError, ValueError, RuntimeError):
+        # RuntimeError: CPython's resolve() raises "Symlink loop from ..." on a
+        # self-referential symlink (ELOOP); OSError covers broken mounts. Treat
+        # either as "not provably inside root" rather than letting it escape and
+        # crash manifest generation.
+        return False
+
+
+# Pod-local, non-persistent roots. A dependency checkout under one of these
+# (e.g. the ``/workspace/hyperloom_runtime_*`` override seen in the wild) is
+# erased on pod recycle and is the real "artefacts disappeared" failure mode.
+# A persistent shared checkout outside USER_DATA_PATH (e.g. a WekaFS InferenceX
+# or TraceLens mirror under /wekafs or /hyperloom) is legitimate by design and
+# must NOT warn.
+_POD_LOCAL_PREFIXES = ("/workspace", "/tmp", "/root")
+
+
+def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
+    """Warn when a dependency checkout escapes USER_DATA_PATH into a
+    pod-local, non-persistent location.
+
+    Operators expect the Magpie / InferenceX runtime checkouts that
+    install.sh creates to live under USER_DATA_PATH. An override that
+    points them at a pod-local path (``/workspace/...``, ``/tmp/...``) is
+    erased on pod recycle — that is the failure mode worth a loud manifest
+    warning. A persistent shared checkout outside USER_DATA_PATH (a WekaFS
+    InferenceX / TraceLens mirror) is legitimate and does NOT warn.
+    """
+    user_data = (os.environ.get(_paths.ENV_USER_DATA_PATH) or "").strip()
+    if not user_data:
+        return
+    dep_path = Path(raw)
+    if _path_is_relative_to(dep_path, Path(user_data)):
+        return
+    try:
+        resolved = str(dep_path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        # Provenance capture must never raise out (see _describe_dep): an
+        # unresolvable dep path (broken mount -> OSError, symlink loop ->
+        # RuntimeError) cannot be proven pod-local, so skip the warning
+        # instead of crashing manifest writing.
+        return
+    is_pod_local = any(
+        resolved == p or resolved.startswith(p + "/")
+        for p in _POD_LOCAL_PREFIXES
+    )
+    if not is_pod_local:
+        return
+    log.warning(
+        "%s=%s is a pod-local path outside %s=%s; runtime artefacts there are "
+        "erased on pod recycle. install.sh writes dependencies under "
+        "%s/runtime by default — point %s back there to persist them.",
+        env_var, raw, _paths.ENV_USER_DATA_PATH, user_data, user_data, env_var,
+    )
+
+
 def _describe_dep(env_var: str) -> dict[str, str]:
     """Build a `{path, commit, remote}` provenance dict for one dependency
     pointed at by ``$env_var``. All fields default to empty string when
@@ -215,6 +279,7 @@ def _describe_dep(env_var: str) -> dict[str, str]:
     raw = (os.environ.get(env_var) or "").strip()
     if not raw:
         return {"path": "", "commit": "", "remote": ""}
+    _warn_if_dependency_escapes_user_data(env_var, raw)
     path = Path(raw)
     if not path.is_dir():
         return {"path": raw, "commit": "", "remote": ""}
@@ -384,7 +449,7 @@ def build_manifest(
         "pr_degraded_reason": (
             getattr(args, "pr_degraded_reason", None) if args is not None else None
         ),
-        # GAP 1 — Warm-recipe replay flags. Persisted into manifest so
+        # Warm-recipe replay flags. Persisted into manifest so
         # robustness_monitor.sh resume / cross-machine resume picks up
         # the same gate thresholds rather than reverting to defaults.
         # The ``warm_replay_enabled`` field is the inverted form of

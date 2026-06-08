@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """OOB (claude/codex/cursor) submission via Ray (preferred) or direct CLI fallback.
 
 Self-contained: does not depend on inference-optimization scripts.
@@ -66,7 +68,7 @@ def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
                extra_files: list[str] | None = None,
                kernel_repo: str = "", num_gpus: int = 1) -> list[str]:
     if not shutil.which("oob"):
-        raise FileNotFoundError("oob CLI not in PATH; run install.sh --with-oob")
+        raise FileNotFoundError("oob CLI not in PATH; run install.sh")
     cmd = [
         "oob", "run", "-a", agent,
         "--prompt-file", str(prompt_file),

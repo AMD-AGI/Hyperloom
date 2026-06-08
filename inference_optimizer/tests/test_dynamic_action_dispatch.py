@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``dynamic_action`` dispatch validation and round-cap accounting.
 
 PolicyGate is exercised against the real ``default_role_registry``;
@@ -15,7 +17,7 @@ from typing import Any
 import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     DYNAMIC_ACTION_NAME,
     MAX_DYNAMIC_PER_ROUND,

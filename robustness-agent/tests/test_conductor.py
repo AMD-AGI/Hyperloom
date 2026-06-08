@@ -1,4 +1,6 @@
-"""Tests for Conductor integration — event reading and intent emission."""
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Tests for Conductor integration — event reading from the SQLite DB."""
 
 from __future__ import annotations
 
@@ -8,8 +10,7 @@ import time
 from pathlib import Path
 
 
-from robustness_agent.conductor import ConductorReader, IntentEmitter
-from robustness_agent.models import Alert, Severity
+from robustness_agent.conductor import ConductorReader
 
 
 class TestConductorReader:
@@ -61,59 +62,3 @@ class TestConductorReader:
         reader = ConductorReader(tmp_path / "nonexistent.db")
         assert not reader.connect()
         assert reader.poll_events() == []
-
-
-class TestIntentEmitter:
-
-    def test_emit_alert(self, conductor_db: Path) -> None:
-        emitter = IntentEmitter(conductor_db)
-        emitter.connect()
-        emitter.emit_alert(Alert(
-            check_name="test_check",
-            severity=Severity.WARNING,
-            summary="test alert",
-            timestamp=time.time(),
-        ))
-        emitter.close()
-
-        conn = sqlite3.connect(str(conductor_db))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM events WHERE agent='robustness'").fetchall()
-        assert len(rows) == 1
-        payload = json.loads(rows[0]["payload"])
-        assert payload["severity"] == "warning"
-        assert payload["summary"] == "test alert"
-        conn.close()
-
-    def test_emit_kill_task(self, conductor_db: Path) -> None:
-        emitter = IntentEmitter(conductor_db)
-        emitter.connect()
-        emitter.emit_kill_task("task-123", "stuck for 10min")
-        emitter.close()
-
-        conn = sqlite3.connect(str(conductor_db))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM events WHERE intent_type='kill_task'",
-        ).fetchall()
-        assert len(rows) == 1
-        payload = json.loads(rows[0]["payload"])
-        assert payload["task_id"] == "task-123"
-        assert payload["scope"] == "task"
-        conn.close()
-
-    def test_emit_prune_branch(self, conductor_db: Path) -> None:
-        emitter = IntentEmitter(conductor_db)
-        emitter.connect()
-        emitter.emit_prune_branch("deep_kernel", "3+ failures")
-        emitter.close()
-
-        conn = sqlite3.connect(str(conductor_db))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM events WHERE intent_type='prune_branch'",
-        ).fetchall()
-        assert len(rows) == 1
-        payload = json.loads(rows[0]["payload"])
-        assert payload["family"] == "deep_kernel"
-        conn.close()

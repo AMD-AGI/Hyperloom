@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Red-line invariant tests for the ``dynamic_action`` channel.
 
 Each test constructs a hostile input and asserts the system blocks
@@ -58,7 +60,7 @@ from inference_optimizer.orchestrator.dynamic_action_tools import (
     BENCH_REGISTRY,
     read_session_artifact,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.policy import (

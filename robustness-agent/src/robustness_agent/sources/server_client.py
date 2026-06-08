@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """robustness-server client + Source adapter.
 
 The client wraps a small subset of the robustness-server REST API used
@@ -191,7 +193,7 @@ class RobustnessServerClient:
         )
         return body if isinstance(body, dict) else {}
 
-    # -- M2: cluster-physical proxies -----------------------------------
+    # -- cluster-physical proxies ---------------------------------------
 
     async def get_cluster_pod_metrics(
         self,

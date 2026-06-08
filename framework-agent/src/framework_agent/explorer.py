@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR/ref exploration engine.
 
 Adapted from zhenggong/framework-agent with two structural changes:

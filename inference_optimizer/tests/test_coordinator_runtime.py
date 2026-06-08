@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P0-3 Coordinator + MockBackend + SubAgentRunner tests.
 
 Covers:
@@ -38,10 +40,9 @@ from inference_optimizer.orchestrator.backends import (
 from inference_optimizer.orchestrator.coordinator import (
     _BASELINE_FINGERPRINT_KEYS,
     _baseline_params_fingerprint,
-    _resolve_silent_ticks_closing_threshold,
     Coordinator,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.sub_agent_runner import (
     SubAgentRunner,
@@ -1037,6 +1038,44 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_failed_initial_roofline_rearms_watermark_from_baseline(
+    session_dir,
+):
+    """A failed initial roofline must not suppress later refresh attempts."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.cumulative_gain_validated = 25.0
+        c.shared_state.last_roofline_tput = 0.0
+        c.shared_state.roofline_failure_streak = 1
+        c.shared_state.auto_roofline_pending_task_id = ""
+
+        assert c._needs_roofline_for_watermark() is True
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_unattempted_initial_roofline_does_not_watermark_rearm(
+    session_dir,
+):
+    """Before any failed/successful roofline, PRELUDE remains the only entry."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 100.0
+        c.shared_state.cumulative_gain_validated = 25.0
+        c.shared_state.last_roofline_tput = 0.0
+        c.shared_state.roofline_failure_streak = 0
+        c.shared_state.auto_roofline_pending_task_id = ""
+
+        assert c._needs_roofline_for_watermark() is False
+    finally:
+        await c.stop()
+
+
 # ===========================================================================
 # (formerly test_coordinator_baseline_fingerprint.py)
 # ===========================================================================
@@ -1303,52 +1342,14 @@ def _write_marker_target_baseline(session_dir: Path) -> None:
     )
 
 
-def test_resolve_silent_ticks_closing_threshold_default(monkeypatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", raising=False)
-    assert _resolve_silent_ticks_closing_threshold() == 120
-
-
-def test_resolve_silent_ticks_closing_threshold_override(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "5")
-    assert _resolve_silent_ticks_closing_threshold() == 5
-
-
-def test_resolve_silent_ticks_closing_threshold_disabled(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
-    assert _resolve_silent_ticks_closing_threshold() == 0
-
-
-def test_resolve_silent_ticks_closing_threshold_garbage(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "not-a-number")
-    assert _resolve_silent_ticks_closing_threshold() == 120
-
-
-def test_shared_state_default_consecutive_silent_ticks_is_zero():
-    s = SharedState()
-    assert s.consecutive_silent_ticks == 0
-
-
 @pytest.mark.asyncio
-async def test_silent_ticks_increment_when_run_is_idle(session_dir, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        await c.run(max_ticks=3, tick_interval_sec=0.0)
-        assert c.shared_state.consecutive_silent_ticks >= 3
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_silent_ticks_disabled_by_zero_threshold(
-    session_dir, monkeypatch,
-):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
+async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
+    """An idle run keeps ticking until the wall-clock deadline / max_ticks
+    rather than self-closing on silence (no idle early-close)."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
         assert reason == "max_ticks"
-        assert c.shared_state.consecutive_silent_ticks >= 5
         assert c.shared_state.closing_phase is False
     finally:
         await c.stop()

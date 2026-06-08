@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Local Mode bootstrap for a fresh Hyperloom checkout.
 
 set -euo pipefail
@@ -8,7 +10,14 @@ CHECK_ONLY=0
 
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../.." && pwd)}"
+# Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
+# can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
+# or empty, which is exactly the case the :- default below would absorb.
+_user_data_was_set="${USER_DATA_PATH:+1}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+if [ -z "${_user_data_was_set}" ]; then
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 DEPS_ROOT_EXPLICIT=0
 if [ -n "${HYPERLOOM_DEPS_ROOT:-}" ]; then
@@ -20,8 +29,9 @@ LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}
 
 PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
+INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
-TRACELENS_REF="${TRACELENS_REF:-release/hyperloom_integration_v0.5.0}"
+TRACELENS_REF="${TRACELENS_REF:-c35c787ef31f0425fa0028a605ffc8c60a737c2c}"
 # Preferred container-local checkout for the public repo when operators install
 # TraceLens manually. The internal extension is private: Hyperloom keeps NO
 # repo URL, ref, or default path for it. It is used only when an operator
@@ -48,7 +58,7 @@ Options:
 Advanced env overrides:
   REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
   OOB_SRC, INFERENCEX_PATH, TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT,
-  PRIMUS_CLAW_REPO, INFERENCEX_REPO,
+  PRIMUS_CLAW_REPO, INFERENCEX_REPO, INFERENCEX_REF,
   TRACELENS_REPO, TRACELENS_REF,
   TRACELENS_INTERNAL_ROOT (path to an existing internal extension checkout;
     set to enable it, otherwise open-source-only)
@@ -278,7 +288,7 @@ resolve_inferencex() {
   fi
 
   INFERENCEX_PATH="${HYPERLOOM_DEPS_ROOT}/InferenceX"
-  clone_or_update "InferenceX" "$INFERENCEX_REPO" "$INFERENCEX_PATH" ""
+  clone_or_update "InferenceX" "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF"
   export INFERENCEX_PATH
   log "INFERENCEX_PATH: ${INFERENCEX_PATH}"
 }

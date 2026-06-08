@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Bootstrap the BYOI toolchain inside the RayJob head pod.
 #
 # Submitted by ``inference_optimizer.multi_node bootstrap`` via the Ray

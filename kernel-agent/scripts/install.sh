@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Kernel Agent installer.
 #
 # Base install is intentionally small and deterministic:
@@ -24,10 +26,11 @@ export PATH="/opt/venv/bin:$PATH"
 #
 # REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
 # (this script lives at kernel-agent/scripts/install.sh, so its parent's
-# parent is the repo root). Read-only inputs (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT, OOB_SRC,
-# HYPERLOOM_BUNDLE, GEAK_MEMORY_STORE_PATH, RAG_INDEX_DIR) stay outside
-# USER_DATA_PATH for warm-start latency reasons (decision: keep GEAK
-# cross-session memory + RAG embedding cache shared across sessions).
+# parent is the repo root). Operator-provided read-only inputs
+# (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT, OOB_SRC, HYPERLOOM_BUNDLE,
+# GEAK_MEMORY_STORE_PATH, RAG_INDEX_DIR) may stay outside USER_DATA_PATH.
+# The default public TraceLens checkout is cloned under USER_DATA_PATH/runtime
+# like Magpie/InferenceX so its env path is safe across pods.
 #
 # Removed envs: WORKSPACE_PATH / WORKSPACE_ROOT (collapsed into the
 # USER_DATA_PATH-rooted defaults). If your launcher exported these,
@@ -35,7 +38,14 @@ export PATH="/opt/venv/bin:$PATH"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
+# Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
+# can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
+# or empty, which is exactly the case the :- default below would absorb.
+_user_data_was_set="${USER_DATA_PATH:+1}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+if [ -z "${_user_data_was_set}" ]; then
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
@@ -73,13 +83,16 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
 #   2. AMD-AGI/TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (internal: rehydration module)
-# Default base points at the shared cluster checkout (a complete TraceLens).
+# Default base clones the public repo into the workspace runtime tree,
+# matching Magpie / InferenceX rather than persisting pod-local mirrors.
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
-TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
+TRACELENS_REF="c35c787ef31f0425fa0028a605ffc8c60a737c2c"
+_tracelens_root_was_set="${TRACELENS_ROOT:+1}"
+TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors/TraceLens}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
-# Writable mirrors when source roots are on a read-only mount (e.g. /wekafs/...).
-TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"
+# Writable mirror when the optional internal extension is on a read-only mount.
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
 
 # Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
@@ -211,17 +224,13 @@ OOB_BASE_URL_VAL="${OOB_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}}"
 CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
 CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh}"
 
-# Install everything by default. The previous lazy `--with-geak / --with-oob`
-# scheme caused recurring "missing dependency discovered at request time"
-# issues — when the resident skill triggered a kernel-opt that needed
-# claude/codex but install.sh had only brought up GEAK, the CLI auth files
-# were missing and every request 401'd.
-# Per user direction: "kernel-agent skills do not differentiate, just install everything". The
-# old --with-* / --all-backends / --backend flags are accepted but no-op
-# for backwards compatibility with existing call sites.
-WITH_GEAK=1
-WITH_OOB=1
-WITH_LLM=1
+# install.sh always installs everything. A previous lazy
+# "install only the requested backend" scheme caused recurring
+# "missing dependency discovered at request time" issues — when the
+# resident skill triggered a kernel-opt that needed claude/codex but
+# install.sh had only brought up GEAK, the CLI auth files were missing
+# and every request 401'd. Per user direction: "kernel-agent skills do
+# not differentiate, just install everything".
 CHECK_ONLY=0
 DRY_RUN=0
 
@@ -229,11 +238,11 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [options]
 
-Always installs (no --with-* selectivity any more):
+Always installs:
   ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
   Node.js/npm, GEAK CLI/config, OOB + claude/codex CLI auth,
   and LLM gateway env/auth (claude/codex CLIs talk to the gateway
-  directly; the legacy auth-proxy on :4002 has been retired).
+  directly).
 
 Options:
   --check-only       Verify current environment, do not install
@@ -244,25 +253,11 @@ Environment (optional):
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
-
-Legacy options (accepted but no-op, kept for backwards compat):
-  --with-geak / --with-oob / --with-llm / --all-backends / --backend NAME
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --with-geak|--with-oob|--with-llm|--all-backends)
-      # No-op: install.sh always installs everything now. Accepted for
-      # backwards compat with older call sites / docs.
-      ;;
-    --backend)
-      shift
-      case "${1:-}" in
-        geak|oob|llm) ;;  # no-op, see above
-        *) echo "[kernel-agent] ERROR: unknown backend '${1:-}'" >&2; exit 2 ;;
-      esac
-      ;;
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -338,6 +333,38 @@ run() {
   log "$*"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
     "$@"
+  fi
+}
+
+# Serialize concurrent installs that share one $USER_DATA_PATH. Installs
+# pointed at the same data root also share $HYPERLOOM_ROOT (=
+# $HYPERLOOM_RUNTIME_DIR/source-mirrors): the GEAK / OOB / TraceLens
+# checkouts cloned/mirrored below. With no lock, two installs race and
+# corrupt each other's half-cloned trees. We hold an flock on
+# $HYPERLOOM_RUNTIME_DIR/.install.lock via fd 9 from the first
+# mirror-mutating step until this process exits (fd closes on exit), so it
+# guards every clone/mirror below and releases automatically at the end.
+# Skipped under --check-only / --dry-run (introspection only, no mutation).
+# When inference_optimizer's installer already holds the lock it exports
+# HYPERLOOM_INSTALL_LOCK_HELD=1; we honour that and do not re-acquire, which
+# would deadlock on a second open file description for the same path.
+acquire_install_lock() {
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "${HYPERLOOM_INSTALL_LOCK_HELD:-0}" = "1" ]; then
+    log "install lock already held by parent installer; not re-locking"
+    return 0
+  fi
+  mkdir -p "${HYPERLOOM_RUNTIME_DIR}"
+  exec 9>"${HYPERLOOM_RUNTIME_DIR}/.install.lock"
+  if command -v flock >/dev/null 2>&1; then
+    log "waiting for install lock: ${HYPERLOOM_RUNTIME_DIR}/.install.lock"
+    flock 9
+    log "acquired install lock"
+    export HYPERLOOM_INSTALL_LOCK_HELD=1
+  else
+    warn "flock not available; concurrent installs may race on source-mirrors"
   fi
 }
 
@@ -648,8 +675,34 @@ _tracelens_internal_enabled() {
 }
 
 ensure_tracelens() {
-  if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens" ]; then
-    TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens"
+  if [ -n "${_tracelens_root_was_set:-}" ]; then
+    if [ ! -d "$TRACELENS_ROOT" ]; then
+      if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+        warn "TraceLens root not found: $TRACELENS_ROOT"
+      else
+        die "TraceLens root not found: $TRACELENS_ROOT"
+      fi
+    fi
+  elif [ ! -d "$TRACELENS_ROOT/.git" ]; then
+    if [ -e "$TRACELENS_ROOT" ]; then
+      warn "TraceLens checkout at ${TRACELENS_ROOT} is not a git repo; preserving existing tree"
+    elif [ "$CHECK_ONLY" -eq 1 ]; then
+      warn "TraceLens checkout missing at ${TRACELENS_ROOT} (check-only mode, skipping clone)"
+    elif [ "$DRY_RUN" -eq 1 ]; then
+      log "would: git clone --depth 1 ${TRACELENS_REPO} ${TRACELENS_ROOT}"
+    else
+      mkdir -p "$(dirname "$TRACELENS_ROOT")"
+      run git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"
+    fi
+  fi
+  if [ -z "${_tracelens_root_was_set:-}" ] && [ -d "$TRACELENS_ROOT/.git" ]; then
+    if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+      run git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"
+      run git -C "$TRACELENS_ROOT" checkout -q FETCH_HEAD
+    elif [ "$DRY_RUN" -eq 1 ]; then
+      log "would: git -C ${TRACELENS_ROOT} fetch --depth 1 origin ${TRACELENS_REF}"
+      log "would: git -C ${TRACELENS_ROOT} checkout -q FETCH_HEAD"
+    fi
   fi
   # Internal extension is opt-in via TRACELENS_INTERNAL_ROOT only; no implicit
   # bundle/default path is probed (keeps internal location out of this repo).
@@ -659,22 +712,6 @@ ensure_tracelens() {
       warn "TraceLens root not found: $TRACELENS_ROOT"
     else
       die "TraceLens root not found: $TRACELENS_ROOT"
-    fi
-  fi
-  if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ -d "$TRACELENS_ROOT" ]; then
-    if ! ( : > "$TRACELENS_ROOT/.hl_write_test" ) 2>/dev/null; then
-      log "TraceLens root not writable ($TRACELENS_ROOT); mirroring to $TRACELENS_PUBLIC_MIRROR_DIR"
-      mkdir -p "$(dirname "$TRACELENS_PUBLIC_MIRROR_DIR")"
-      if [ ! -d "$TRACELENS_PUBLIC_MIRROR_DIR" ]; then
-        log "mirroring TraceLens to writable dir (large tree; may take minutes): $TRACELENS_ROOT -> $TRACELENS_PUBLIC_MIRROR_DIR"
-        run cp -r "$TRACELENS_ROOT" "$TRACELENS_PUBLIC_MIRROR_DIR"
-      else
-        log "TraceLens mirror already present: $TRACELENS_PUBLIC_MIRROR_DIR"
-      fi
-      TRACELENS_ROOT="$TRACELENS_PUBLIC_MIRROR_DIR"
-      export TRACELENS_ROOT
-    else
-      rm -f "$TRACELENS_ROOT/.hl_write_test"
     fi
   fi
   _pip_install_editable "$TRACELENS_ROOT" "TraceLens (public)" || {
@@ -1279,6 +1316,10 @@ main() {
   ensure_moreutils
   ensure_ray
   ensure_ray_started
+  # Hold the install lock for the whole source-mutating region (TraceLens /
+  # GEAK / OOB clones + mirrors). System-package steps above (apt/pip)
+  # do not touch source-mirrors, so they stay outside the lock.
+  acquire_install_lock
   ensure_tracelens
 
   # Always install everything; ensure_oob also calls ensure_llm_auth_files.

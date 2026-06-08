@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """External baseline comparison layer (report-only).
 
 This subpackage owns the path from the user's ``--compare-against-gpu``

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``CriticAgentBackend._run_reasoning_loop`` — issue #170 web
 tools (web_search / web_fetch) integration.
 

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Real ``report`` ActionRunner report action.
 
 Reads the session's SharedState + bus event log and produces:
@@ -47,7 +49,7 @@ def _build_summary_dict(
         "stop_reason":      state.stop_reason,
         "baseline_tput":    state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
-        # IR-7 — steward verdict + history. The final report's section
+        # steward verdict + history. The final report's section
         # 9.1 (remaining gaps) reads ``last_remaining_gaps_assessment``
         # rationale verbatim.
         "remaining_gaps_assessment": dict(
@@ -99,6 +101,9 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"- **Model**: {summary['model_name']}  (`{summary['model_path']}`)")
     lines.append(f"- **Stop reason**: `{summary['stop_reason']}`")
+    stop_detail = str(summary.get("stop_detail") or "").strip()
+    if stop_detail:
+        lines.append(f"- **Stop detail**: {stop_detail}")
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
@@ -162,7 +167,7 @@ def _format_md(summary: dict[str, Any]) -> str:
             )
     lines.append("")
 
-    # IR-7 — steward verdict transcript.
+    # steward verdict transcript.
     lines.extend(_format_steward_section(summary))
 
     roofline_cmp = summary.get("roofline_comparison")
@@ -225,7 +230,7 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
         text = Path(analysis_md_path).read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return f"(could not read {analysis_md_path}: {exc})"
-    # Strip N11 base64 image data URLs upfront so the report stays
+    # Strip base64 image data URLs upfront so the report stays
     # compact even if TraceLens regressed on inline images.
     import re
     text = re.sub(

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Schema (TypedDict shape) for ``session_breakdown.json``.
 
 This is the single contract between ``inference_optimizer`` (producer)
@@ -23,14 +25,14 @@ from typing import Any, TypedDict
 #: breakdown schema version. v2 adds the
 #: ``specialist_runs`` section, ``capability_summary.specialist``
 #: row, ``critic_robustness.kb_writes_summary`` sub-block, the
-#: top-level ``action_timeline`` / ``explore_search`` v1-reader
-#: aliases, and (additively) the ``kernel_optimization_summary`` /
+#: top-level ``action_timeline`` alias, the native ``explore_search``
+#: ledger (with ``param_search`` retained as a v1-reader alias), and
+#: (additively) the ``kernel_optimization_summary`` /
 #: ``conc_sweep_summary`` sections mirrored from
 #: ``reports/kernel_optimization_summary.json`` and
-#: ``reports/conc_sweep_summary.json`` (PR #399 lishuoshuo). Inv-12.1
-#: guarantees a v0.6 / v1 reader can still consume the file because v2
-#: only *adds* fields — the version string does not bump for additive
-#: sections.
+#: ``reports/conc_sweep_summary.json``. Additive-only: a v1 reader can
+#: still consume v2 because new versions only *add* fields — the version
+#: string does not bump for additive sections.
 SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 
 
@@ -161,6 +163,8 @@ class PhaseEvent(TypedDict, total=False):
     key_metric_kind: str | None
     workspace: str | None
     error_class: str | None
+    phase: str                    # declared phase (journal-sourced events); "" otherwise
+    change: str                   # human-readable change summary (journal) or action key
     extras: dict[str, Any]
 
 
@@ -168,13 +172,15 @@ class PhaseEvent(TypedDict, total=False):
 # §6 Capability summary — Capability cards in UI
 # ---------------------------------------------------------------------------
 class CapabilityEntry(TypedDict, total=False):
-    status: str                   # kept / tried / attempted / not_attempted / not_configured / failed / completed
+    status: str                   # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
     attempts: int
-    keeps: int
+    keeps: int                    # geak/oob: kernels adopted at integrate (NOT micro-only KEEP)
+    reverts: int                  # geak/oob: micro-KEPT kernels reverted at integrate (e2e regressed)
+    e2e_gain_pct: float | None    # geak/oob: best end-to-end integrate gain for this lane's kernel
     tested: int                   # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
     reason: str                   # human readable, e.g. "kernel-claude only this run"
-    # v0.8 M3 explore-specific:
+    # explore-specific:
     keep_unstable_count: int      # KEEP'd variants evicted by inlined stack rebench
     winners_history: int          # cumulative explore_search.winners_history length
     # specialist-row only — per-domain split. Keys are
@@ -191,7 +197,7 @@ class CapabilitySummary(TypedDict, total=False):
     geak: CapabilityEntry
     oob: CapabilityEntry
     # primary explore row; ``backends`` / ``params`` /
-    # ``validate_stack`` are kept as compatibility aliases (§3.12 §4.2).
+    # ``validate_stack`` are kept as compatibility aliases.
     explore: CapabilityEntry
     backends: CapabilityEntry
     params: CapabilityEntry
@@ -253,6 +259,13 @@ class DetectedKernel(TypedDict, total=False):
     source_file: str | None
     detected_from_task: str       # which profile task_id surfaced it
     benchmark_report_path: str
+    # lifecycle stamps (added by _collect_detected_kernels)
+    selected_for_optimization: bool
+    geak: dict[str, Any] | None   # {attempts, best_speedup, decision, last_status}
+    oob: dict[str, Any] | None
+    adopted_by: str | None        # geak / oob / kernel_agent / None
+    final_decision: str           # kept / reverted / rejected / attempted / not_optimized
+    integrate_gain_pct: float | None  # e2e (integrate) gain; negative => regressed -> reverted
 
 
 class RecommendedKernel(TypedDict, total=False):
@@ -539,7 +552,7 @@ class Attribution(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# §16 Phase segments — v0.8 M2 phase state machine
+# §16 Phase segments — phase state machine
 # ---------------------------------------------------------------------------
 class PhaseSegment(TypedDict, total=False):
     phase: str                 # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
@@ -547,47 +560,21 @@ class PhaseSegment(TypedDict, total=False):
     entered_ts: str            # iso UTC of entry
     entered_unix: float | None
     exit_ts: str               # iso UTC of next transition; "" for current segment
-    exit_reason: str           # KB_design §3.2 §6 vocab entry; "" for current segment
+    exit_unix: float | None    # unix epoch of next transition; None for current segment
+    exit_reason: str           # transition reason vocab entry; "" for current segment
     evidence: dict[str, Any]   # entry evidence (snapshot at transition time)
-    actions: list[PhaseEvent]  # events from phase_timeline whose ts ∈ [entered, exit)
+    events: list[dict[str, Any]]  # non-transition sub-events folded into this phase
+    actions: list[PhaseEvent]  # phase_timeline events attributed to this phase
     elapsed_seconds: float | None
 
 
 # ---------------------------------------------------------------------------
-# §15 KB Provenance — Cortex KB integration
+# §15 KB Provenance — RecipeKB / PR Monitor integration
 # ---------------------------------------------------------------------------
-class KBPendingEdge(TypedDict, total=False):
-    proposal_msg_id: str
-    edge_id: str
-    action: str
-    ts: str
-
-
 class KBQueueStats(TypedDict, total=False):
     pending_lines: int             # current depth of .kb_pending.ndjson
     flushed_bookmarks: int         # rows in .kb_flushed.ndjson (drain bookmarks)
     dead_letter_lines: int         # rows in .kb_dead_letter.ndjson
-
-
-class KBCommitSummary(TypedDict, total=False):
-    status: str                    # committed / commit_failed / skip_disabled / ...
-    promoted_edges: list[str]
-    derived_summary_id: str
-
-
-class KBPointCreated(TypedDict, total=False):
-    """One row in ``kb_provenance.points_created``.
-
-    ``kind`` ∈ {workload_node / issue_node / optimization_node /
-    pr_node / attempt_node / ...}. ``pr_node`` rows are the M4
-    contribution; everything else came from M1/M3 path.
-    """
-    canonical_id: str
-    kind: str
-    authority: str
-    source: str
-    status: str
-    ts: str
 
 
 class KBFlusherStatus(TypedDict, total=False):
@@ -633,25 +620,20 @@ class KBProvenance(TypedDict, total=False):
     warm_start_recipe_tier: str
     warm_start_pitfall_count: int
     warm_start_lesson_count: int
-    # GAP 1 — operator-visible warm-replay summary.
+    # operator-visible warm-replay summary.
     warm_replay: WarmReplayOutcome
     warm_replay_attempted: bool
     warm_history_injected: bool
     stack_fingerprint: dict[str, str]
-    pending_edges: list[KBPendingEdge]
     queue: KBQueueStats
     audit_tail_count: int
     audit_status_counts: dict[str, int]
-    # points created during this session.
-    points_created: list[KBPointCreated]
-    points_by_kind: dict[str, int]
-    commit_summary: KBCommitSummary
-    # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle marker.
+    # Cortex KB flusher daemon lifecycle marker.
     flusher_status: KBFlusherStatus
-    # IR-3 soft-degrade audit. Values:
-    # ``None`` (KB / PR Monitor reachable, no degrade), ``"explicit_flag"``
-    # (operator passed ``--degraded-{kb,pr}``), or ``"ir3_auto"`` (IR-3
-    # probe failed and cli auto-enabled the corresponding degrade).
+    # Soft-degrade audit. Values: ``None`` (KB / PR Monitor reachable,
+    # no degrade), ``"explicit_flag"`` (operator passed
+    # ``--degraded-{kb,pr}``), or ``"ir3_auto"`` (preflight probe failed
+    # and cli auto-enabled the corresponding degrade).
     kb_degraded_reason: str
     pr_degraded_reason: str
 
@@ -699,9 +681,9 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
-    # Retired field — was populated by the T2 hypothesize hook (now
-    # gone). Kept on the schema so claw-stats-service readers that
-    # destructure specialist_runs[] don't break; always empty.
+    # Retired field, kept on the schema (always empty) so
+    # claw-stats-service readers that destructure specialist_runs[]
+    # don't break.
     kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
@@ -1014,22 +996,20 @@ class SessionBreakdown(TypedDict, total=False):
     workload: Workload
     baseline: Baseline
     final: Final
-    # ``phase_timeline`` retained for v1-reader
-    # compat as the flat per-action timeline (``action_timeline`` is
-    # the canonical v2 name; see below). ``phase_segments`` carries
-    # the phase-boundary view (M2).
+    # ``phase_timeline`` retained for v1-reader compat as the flat
+    # per-action timeline (``action_timeline`` is the canonical v2 name;
+    # see below). ``phase_segments`` carries the phase-boundary view.
     phase_timeline: list[PhaseEvent]
     phase_segments: list[PhaseSegment]
-    # v0.8 §3.12 §4.2 / §5 — top-level action_timeline alias used by
-    # v0.6 readers that still expect a flat per-action list.
+    # top-level action_timeline alias used by older readers that still
+    # expect a flat per-action list.
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
     geak_invocations: list[Invocation]
     oob_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
-    # ``param_search`` is the v1-reader compat alias
-    # for the merged ``explore_search`` ledger; both fields carry
-    # identical data so an old reader doesn't see a missing key.
+    # ``explore_search`` is the native merged ledger. ``param_search`` is
+    # retained as a v1-reader compatibility alias with identical data.
     param_search: ParamSearch
     explore_search: ParamSearch
     sweep: Sweep

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 §3.5 §10 / M5 — specialist_done bookkeeping (KB_gaps/Gap-03).
 
 KB_gaps/Gap-03 root cause: PolicyGate R3 validates the specialist_done
@@ -38,7 +40,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
@@ -465,7 +467,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         MockBackend, MockTurn, ScriptedPlan,
     )
     from inference_optimizer.orchestrator.coordinator import Coordinator
-    from inference_optimizer.orchestrator.intent_parser import IntentType
+    from inference_optimizer.protocol.intent import IntentType
     from inference_optimizer.orchestrator.backends.mock_backend import (
         MockBackend as MockOrchBackend,
     )
@@ -486,7 +488,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
     ])])
 
-    import inference_optimizer.cli as cli_mod
+    import inference_optimizer.cli_executors as cli_mod
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-mock")
     try:
