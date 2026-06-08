@@ -190,8 +190,8 @@ async def _run(ticks: int, claude_model: str, codex_model: str) -> int:
         "kernel":        _KERNEL_PROMPT,
     }
 
-    print(f"3 real LLM agents wired: "
-          f"orchestration=Claude, kernel=Claude, critic=Codex")
+    print("3 real LLM agents wired: "
+          "orchestration=Claude, kernel=Claude, critic=Codex")
     print(f"Running {ticks} ticks")
     print()
 
