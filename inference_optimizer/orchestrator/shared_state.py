@@ -2736,21 +2736,50 @@ class SharedState:
             )
             # Per-op PerfModel breakdown for dashboard visualization.
             try:
+                from .roofline_ceiling import resolve_runtime_workload
+                runtime = resolve_runtime_workload(self)
                 meta = load_model_meta(
-                    getattr(self, "model_path", ""),
-                    precision_hint=str(getattr(self, "precision", "") or ""),
+                    runtime.model_path,
+                    precision_hint=runtime.precision,
                 )
                 if meta is not None:
-                    from .roofline_ceiling import _resolve_effective_concurrency
+                    from .roofline_ceiling import (
+                        apply_runtime_dtype,
+                        resolve_runtime_dtype,
+                    )
+                    eff_conc = runtime.concurrency
+                    # Use the dtype the run actually read (e.g. fp8 over a
+                    # float32 checkpoint), not the on-disk torch_dtype.
+                    rt = resolve_runtime_dtype(self, meta)
+                    meta = apply_runtime_dtype(meta, rt)
                     pm_bd = compute_roofline_from_perfmodel(
                         meta=meta,
-                        gpu_type=str(getattr(self, "gpu_type", "") or ""),
-                        concurrency=_resolve_effective_concurrency(self),
-                        isl=int(getattr(self, "isl", 0) or 0),
-                        osl=int(getattr(self, "osl", 0) or 0),
-                        num_gpus=int(getattr(self, "tp", 0) or 0),
-                        precision_tag=str(getattr(self, "precision", "") or "bf16") or "bf16",
+                        gpu_type=runtime.gpu_type,
+                        concurrency=eff_conc,
+                        isl=runtime.isl,
+                        osl=runtime.osl,
+                        num_gpus=runtime.tp,
+                        precision_tag=rt.compute_precision_tag
+                        or runtime.precision
+                        or "bf16",
                     )
+                    # Tag the formula by what actually produced the ceiling:
+                    # ``perfmodel`` only when the bottom-up model succeeded,
+                    # else ``legacy`` (fallback aggregate in the breakdown).
+                    history_entry["roofline_provenance"] = {
+                        "formula": "perfmodel" if pm_bd is not None else "legacy",
+                        "runtime_weight_dtype": rt.weight_dtype_tag,
+                        "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
+                        "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
+                        "quantization": rt.quantization,
+                        "dtype_source": rt.source,
+                        "effective_concurrency": eff_conc,
+                        "runtime_tp": runtime.tp,
+                        "runtime_isl": runtime.isl,
+                        "runtime_osl": runtime.osl,
+                        "runtime_precision": runtime.precision,
+                        "runtime_framework": runtime.framework,
+                    }
                     if pm_bd is not None:
                         history_entry["perfmodel_breakdown"] = {
                             "decode_tok_per_s": pm_bd.decode_tok_per_s,

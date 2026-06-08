@@ -28,12 +28,15 @@ from inference_optimizer.orchestrator.roofline_ceiling import (
     RooflineBreakdown,
     _resolve_dtype_bytes,
     _resolve_peak_tflops,
+    apply_runtime_dtype,
     compute_compute_bound_ceiling_tok_per_sec,
     compute_kv_bytes_per_token,
     compute_peak_from_state,
     compute_roofline_breakdown_from_state,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
+    resolve_runtime_dtype,
+    resolve_runtime_workload,
 )
 
 
@@ -1709,3 +1712,316 @@ class TestPerfModelTransparentReplacement:
         # verify the function returns without raising.
         br = compute_roofline_breakdown_from_state(state)
         assert br.peak_tok_per_sec >= 0.0
+
+
+class TestRuntimeDtypeResolution:
+    """Roofline ceiling must use the dtype the run actually read, not the
+    on-disk ``torch_dtype``. Covers the ``within_roofline_pct > 100`` bug
+    where a float32 checkpoint served with ``--quantization fp8`` produced
+    a ceiling below the measured throughput."""
+
+    def _dense_fp32_state(self, tmp_path, extra_args: str):
+        # float32 dense checkpoint (4 B/param on disk), served fp8 at runtime.
+        # Non-empty args model an accepted optimized variant, so current_best
+        # carries a tput (the arm the ceiling is compared against).
+        _write_synthetic_model(
+            tmp_path / "m",
+            total_size=32_000_000_000,
+            num_layers=48,
+            num_kv_heads=8,
+            hidden_size=5120,
+            num_attention_heads=40,
+            torch_dtype="float32",
+        )
+        current_best = {"extra_server_args": extra_args}
+        if extra_args:
+            current_best["tput"] = 1000.0
+        return SimpleNamespace(
+            model_path=str(tmp_path / "m"),
+            gpu_type="mi300x", tp=1, precision="fp8",
+            conc=64, isl=1024, osl=1024,
+            last_baseline={},
+            current_best=current_best,
+        )
+
+    def test_quantization_fp8_arg_scales_weight_to_one_byte(self, tmp_path):
+        state = self._dense_fp32_state(tmp_path, "--quantization fp8")
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.weight_dtype_bytes == 1.0
+        assert rt.quantization == "fp8"
+        assert rt.source == "server_args_quantization"
+        assert rt.compute_precision_tag == "fp8"
+
+    def test_weight_bytes_rescaled_by_runtime_dtype(self, tmp_path):
+        state = self._dense_fp32_state(tmp_path, "--quantization fp8")
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        scaled = apply_runtime_dtype(meta, rt)
+        # float32 (4 B) -> fp8 (1 B): weight bytes drop 4x.
+        assert scaled.weight_dtype_bytes == 1.0
+        assert scaled.weight_bytes == meta.weight_bytes // 4
+
+    def test_fp8_ceiling_exceeds_no_quant_ceiling(self, tmp_path):
+        """Runtime fp8 ceiling must be strictly higher than the no-quant
+        (bf16-weight) ceiling, so within% drops back below 100."""
+        st_fp8 = self._dense_fp32_state(tmp_path, "--quantization fp8")
+        st_cfg = self._dense_fp32_state(tmp_path, "")  # no quant -> bf16 weight
+        peak_fp8 = compute_roofline_breakdown_from_state(st_fp8).peak_tok_per_sec
+        peak_cfg = compute_roofline_breakdown_from_state(st_cfg).peak_tok_per_sec
+        assert peak_fp8 > peak_cfg > 0
+
+    def test_precision_fp8_without_quant_does_not_shrink_weight(self, tmp_path):
+        """A workload tagged precision=fp8 whose run did NOT pass
+        --quantization must NOT be modeled as fp8 weights: the server
+        serves bf16, so the weight term stays 2 B (regression for the
+        baseline within% under-report)."""
+        state = self._dense_fp32_state(tmp_path, "")  # no quant args
+        assert state.precision == "fp8"  # workload tag still fp8
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        # Weight floored at bf16 (fp32 downcast), NOT fp8.
+        assert rt.weight_dtype_bytes == 2.0
+        assert rt.quantization == "none"
+        assert rt.source == "config_torch_dtype"
+
+    def test_baseline_arm_ignores_optimized_quant_args(self, tmp_path):
+        """When achieved comes from the baseline arm (no current_best tput),
+        an optimized current_best's --quantization fp8 must NOT leak onto
+        the baseline ceiling."""
+        state = self._dense_fp32_state(tmp_path, "")
+        # current_best has fp8 args but no tput -> not the achieved arm.
+        state.current_best = {"extra_server_args": "--quantization fp8"}
+        state.last_baseline = {}
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.quantization == "none"
+        assert rt.weight_dtype_bytes == 2.0
+
+    def test_no_quantization_keeps_config_dtype(self, tmp_path):
+        # bf16 checkpoint, no quant args -> weight stays 2 B.
+        _write_synthetic_model(
+            tmp_path / "m",
+            total_size=16_000_000_000,
+            num_layers=48, num_kv_heads=8,
+            hidden_size=5120, num_attention_heads=40,
+            torch_dtype="bfloat16",
+        )
+        state = SimpleNamespace(
+            model_path=str(tmp_path / "m"),
+            gpu_type="mi300x", tp=1, precision="",
+            conc=64, isl=1024, osl=1024,
+            last_baseline={}, current_best={},
+        )
+        meta = load_model_meta(state.model_path)
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.weight_dtype_bytes == 2.0
+        assert rt.quantization == "none"
+
+    def test_prequantized_moe_fp8_not_double_scaled(self, tmp_path):
+        # On-disk fp8 MoE checkpoint: total_size already reflects fp8.
+        _write_synthetic_model(
+            tmp_path / "m",
+            total_size=480_000_000_000,
+            num_layers=62, num_kv_heads=8,
+            hidden_size=6144, num_attention_heads=48,
+            num_experts=256, num_experts_per_tok=8,
+            moe_intermediate_size=1536,
+            quant_method="fp8",
+        )
+        state = SimpleNamespace(
+            model_path=str(tmp_path / "m"),
+            gpu_type="mi300x", tp=4, precision="fp8",
+            conc=64, isl=1024, osl=1024,
+            last_baseline={}, current_best={},
+        )
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        assert meta.weight_dtype_bytes == 1.0  # quant_method already fp8
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.source == "quantization_config"
+        scaled = apply_runtime_dtype(meta, rt)
+        # No double-scaling: weight bytes unchanged.
+        assert scaled.weight_bytes == meta.weight_bytes
+
+    def test_dtype_arg_without_quant_sets_weight_dtype(self, tmp_path):
+        state = self._dense_fp32_state(tmp_path, "--dtype bfloat16")
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.weight_dtype_bytes == 2.0
+        assert rt.source == "server_args_dtype"
+        assert rt.activation_dtype_bytes == 2.0
+
+    def test_activation_dtype_floored_at_bf16(self, tmp_path):
+        # Even with fp8 weights, activations stay >= 2 B.
+        state = self._dense_fp32_state(tmp_path, "--quantization fp8")
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.activation_dtype_bytes >= 2.0
+
+    def test_eq_form_arg_parsing(self, tmp_path):
+        # --quantization=fp8 (= form) parses identically to space form.
+        state = self._dense_fp32_state(tmp_path, "--quantization=fp8")
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.weight_dtype_bytes == 1.0
+        assert rt.quantization == "fp8"
+
+    def _baseline_yaml(
+        self,
+        tmp_path,
+        env_key: str,
+        args: str,
+        *,
+        model: str = "",
+        precision: str = "fp8",
+        tp: int = 1,
+        conc: int = 64,
+        isl: int = 1024,
+        osl: int = 1024,
+        framework: str = "sglang",
+        runner_type: str = "mi300x",
+    ) -> str:
+        """Write a materialized baseline yaml carrying ``EXTRA_*_ARGS`` and
+        return its path (the shape the executor stamps post-baseline)."""
+        import yaml as _yaml
+        envs = {
+            "TP": tp,
+            "CONC": conc,
+            "ISL": isl,
+            "OSL": osl,
+            env_key: args,
+        }
+        benchmark = {
+            "framework": framework,
+            "precision": precision,
+            "runner_type": runner_type,
+            "envs": envs,
+        }
+        if model:
+            benchmark["model"] = model
+        cfg = {"benchmark": benchmark}
+        path = tmp_path / "baseline.yaml"
+        path.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+        return str(path)
+
+    def test_baseline_yaml_args_resolved_when_current_best_empty(self, tmp_path):
+        """Baseline-only run: --quantization fp8 lives only in the yaml's
+        EXTRA_SGLANG_ARGS (current_best carries no extra_server_args), so
+        dtype resolution must read it from the materialized config."""
+        cfg_path = self._baseline_yaml(
+            tmp_path, "EXTRA_SGLANG_ARGS", "--quantization fp8",
+        )
+        state = self._dense_fp32_state(tmp_path, "")  # no top-level args
+        state.current_best = {"action": "baseline", "tput": 100.0}
+        state.last_baseline = {"extras": {"materialized_config": cfg_path}}
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.weight_dtype_bytes == 1.0
+        assert rt.quantization == "fp8"
+        assert rt.source == "server_args_quantization"
+
+    def test_baseline_yaml_args_vllm_env_key(self, tmp_path):
+        # The vllm framework routes flags through EXTRA_VLLM_ARGS.
+        cfg_path = self._baseline_yaml(
+            tmp_path, "EXTRA_VLLM_ARGS", "--quantization fp8",
+        )
+        state = self._dense_fp32_state(tmp_path, "")
+        state.current_best = {}
+        state.last_baseline = {"extras": {"materialized_config": cfg_path}}
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.weight_dtype_bytes == 1.0
+
+    def test_top_level_args_win_over_baseline_yaml(self, tmp_path):
+        """An optimized current_best (real extra_server_args) takes
+        precedence over the baseline yaml fallback."""
+        cfg_path = self._baseline_yaml(
+            tmp_path, "EXTRA_SGLANG_ARGS", "--dtype bfloat16",
+        )
+        state = self._dense_fp32_state(tmp_path, "--quantization fp8")
+        state.last_baseline = {"extras": {"materialized_config": cfg_path}}
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        # current_best's fp8 wins; the yaml's bf16 is never consulted.
+        assert rt.weight_dtype_bytes == 1.0
+        assert rt.quantization == "fp8"
+
+    def test_optimized_overlay_overrides_same_baseline_flag(self, tmp_path):
+        """When both baseline and current_best set the same flag, the
+        optimized overlay must win."""
+        cfg_path = self._baseline_yaml(
+            tmp_path, "EXTRA_SGLANG_ARGS", "--dtype float16",
+        )
+        state = self._dense_fp32_state(tmp_path, "--dtype bfloat16")
+        state.last_baseline = {"extras": {"materialized_config": cfg_path}}
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.source == "server_args_dtype"
+        assert rt.weight_dtype_tag == "bfloat16"
+
+    def test_runtime_workload_uses_baseline_yaml_fields(self, tmp_path):
+        state = self._dense_fp32_state(tmp_path, "")
+        runtime_model = state.model_path
+        state.model_path = "/wrong/model"
+        state.tp = 99
+        state.conc = 8
+        state.isl = 1
+        state.osl = 1
+        cfg_path = self._baseline_yaml(
+            tmp_path,
+            "EXTRA_SGLANG_ARGS",
+            "--dtype bfloat16",
+            model=runtime_model,
+            precision="bf16",
+            tp=4,
+            conc=64,
+            isl=1024,
+            osl=2048,
+            framework="sglang",
+        )
+        state.last_baseline = {"extras": {"materialized_config": cfg_path}}
+
+        runtime = resolve_runtime_workload(state)
+        assert runtime.model_path == runtime_model
+        assert runtime.precision == "bf16"
+        assert runtime.framework == "sglang"
+        assert runtime.tp == 4
+        assert runtime.concurrency == 64
+        assert runtime.isl == 1024
+        assert runtime.osl == 2048
+        assert runtime.server_args == "--dtype bfloat16"
+
+    def test_ceiling_uses_baseline_yaml_model_when_state_is_stale(self, tmp_path):
+        state = self._dense_fp32_state(tmp_path, "")
+        runtime_model = state.model_path
+        state.model_path = "/wrong/model"
+        state.tp = 0
+        state.conc = 0
+        state.isl = 0
+        state.osl = 0
+        cfg_path = self._baseline_yaml(
+            tmp_path,
+            "EXTRA_SGLANG_ARGS",
+            "--dtype bfloat16",
+            model=runtime_model,
+            precision="bf16",
+            tp=1,
+            conc=32,
+            isl=512,
+            osl=512,
+        )
+        state.last_baseline = {"extras": {"materialized_config": cfg_path}}
+
+        bd = compute_roofline_breakdown_from_state(state)
+        assert bd.peak_tok_per_sec > 0
+        assert bd.bound_kind in {"memory", "compute"}
+
+    def test_missing_baseline_yaml_degrades_safely(self, tmp_path):
+        # Unreadable materialized_config -> no crash, falls back to config.
+        state = self._dense_fp32_state(tmp_path, "")
+        state.precision = ""
+        state.current_best = {}
+        state.last_baseline = {"extras": {"materialized_config": "/no/such.yaml"}}
+        meta = load_model_meta(state.model_path)
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.quantization == "none"
