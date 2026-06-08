@@ -54,9 +54,7 @@ from .specialist_subprocess import (
 )
 from .sub_agent_runner import RunnerContext
 from .system_prompts.dynamic_action_prompt_builder import (
-    INPUT_TOKEN_CAP,
     JournalTurn,
-    OUTPUT_TOKEN_CAP,
     PromptInputs,
     build_system_prompt,
     build_turn_prompt,

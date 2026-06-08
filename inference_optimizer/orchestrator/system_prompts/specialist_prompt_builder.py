@@ -640,7 +640,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "worktree**, and use as many of your ``max_turns`` LLM turns as you need",
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
         "are discouraged when a real bottleneck is on the table. Quality is",
-        f"scored over quantity: cap your final ``proposal_set`` at the",
+        "scored over quantity: cap your final ``proposal_set`` at the",
         f"**top-{inp.max_proposals}** ranked picks (see Section 8).",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",

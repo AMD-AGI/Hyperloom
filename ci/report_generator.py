@@ -434,7 +434,7 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
             continue
 
         if r["status"] == "timeout":
-            lines.append(f"**Status: timeout** (sandbox_timeout reached)")
+            lines.append("**Status: timeout** (sandbox_timeout reached)")
             lines.append("")
 
         lines.append("| Metric | Value |")

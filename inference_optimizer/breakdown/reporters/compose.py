@@ -323,9 +323,9 @@ def _render_global_facts_block(g: GlobalFacts) -> str:
         f"adopted={funnel['adopted']} (partial={funnel['partial']}, "
         f"reverted={funnel['reverted']}, rejected={funnel['rejected']})"
     )
-    out.append(f"- **Capabilities kept**: "
+    out.append("- **Capabilities kept**: "
                + (", ".join(f"`{c}`" for c in g.capabilities_kept) or "none"))
-    out.append(f"- **Capabilities not attempted**: "
+    out.append("- **Capabilities not attempted**: "
                + (", ".join(f"`{c}`" for c in g.capabilities_not_attempted) or "none"))
     out.append(f"- **Gain attribution** ({g.attribution_method}):")
     if g.gain_attribution_lines:

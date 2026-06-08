@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -15,8 +12,6 @@ from inference_optimizer.orchestrator.dynamic_action_tools import (
     BENCH_REGISTRY,
     MAX_BENCH_WALL_CLOCK_SEC,
     MAX_READ_SOURCE_CHARS,
-    SESSION_ARTIFACT_ALLOWED_PREFIXES,
-    SESSION_ARTIFACT_DENY_SEGMENTS,
     apply_patch_in_worktree,
     read_session_artifact,
     read_source,
