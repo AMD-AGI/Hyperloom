@@ -32,6 +32,9 @@ try:
 except ImportError:
     check_gpu_idle = None  # type: ignore[assignment,misc]
 
+MICROBENCH_WARMUP = 20
+MICROBENCH_REP = 50
+
 _VISIBLE_DEVICE_VARS = (
     "HIP_VISIBLE_DEVICES",
     "CUDA_VISIBLE_DEVICES",
@@ -131,11 +134,6 @@ def default_arch_output_path(tracelens_root: Path, platform: str) -> Path:
         / "TraceLens/Agent/Analysis/utils/arch"
         / f"{canonical}.json"
     )
-
-
-MICROBENCH_WARMUP = 20
-MICROBENCH_REP = 50
-
 
 def populate_gpu_arch_json(
     *,

@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-TOOLS_DIR = Path(__file__).resolve().parent
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-import tracelens_arch_benchmark as tab  # noqa: E402
+_TOOLS_DIR = Path(__file__).resolve().parent
+_spec = importlib.util.spec_from_file_location(
+    "tracelens_arch_benchmark",
+    _TOOLS_DIR / "tracelens_arch_benchmark.py",
+)
+tab = importlib.util.module_from_spec(_spec)
+assert _spec.loader is not None
+_spec.loader.exec_module(tab)
 
 _VISIBLE_DEVICE_VARS = (
     "HIP_VISIBLE_DEVICES",

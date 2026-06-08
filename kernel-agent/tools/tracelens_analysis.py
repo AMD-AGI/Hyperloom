@@ -2854,7 +2854,7 @@ def main() -> int:
                 int(
                     os.environ.get(
                         "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC",
-                        str(int(args.budget_minutes * 60 // 2)),
+                        0,
                     )
                 ),
             )
