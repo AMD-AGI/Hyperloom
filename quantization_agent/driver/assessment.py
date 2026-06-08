@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .eval import DEFAULT_ACCEPTABLE_GAP, decide as decide_eval
+from .eval import decide as decide_eval
 from .outcomes import (
     ASK,
     ASK_RETRYABLE,

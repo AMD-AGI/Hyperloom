@@ -32,10 +32,9 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from .assessment import (
-    ASK,
     ASK_RETRYABLE,
     AUTO_FAIL,
     AUTO_RECOVER,
@@ -46,7 +45,7 @@ from .assessment import (
 )
 from .outcomes import OutcomeId, SUCCESS_TAGS, UNCLASSIFIED_FAILURE
 from .result_collector import CollectedArtifacts, collect_artifacts
-from .runner import AttemptResult, RunOneAttemptFn, run_one_attempt
+from .runner import RunOneAttemptFn, run_one_attempt
 
 
 _COUNTER_FILE = "requantize_attempts.txt"

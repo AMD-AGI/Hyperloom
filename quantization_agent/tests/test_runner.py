@@ -5,8 +5,6 @@ Uses ``FakeSDK`` / ``FakeOptions`` from conftest to bypass the real SDK.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from quantization_agent.driver.runner import (
