@@ -39,6 +39,7 @@ from .specialist_subprocess import (
     _setup_worktree,
 )
 from .policy import DEFAULT_SPECIALIST_MAX_PROPOSALS
+from .specialist_profile import SpecialistProfile, resolve_specialist_profile
 from .sub_agent_runner import RunnerContext, SubAgentResult
 from .system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -113,6 +114,8 @@ class _PreparedRun:
     sub_kind: str = ""
     gap: str = ""
     max_turns: int = 0
+    # Resolved dispatch profile (scope / mode / bench / lane).
+    profile: "SpecialistProfile" = field(default_factory=lambda: SpecialistProfile())
     workspace: Path | None = None
     worktree: Path | None = None
     worktree_base: Path | None = None
@@ -288,6 +291,8 @@ class SpecialistRunner:
         max_turns = int(params.get("max_turns") or self.default_max_turns)
         domain = get_domain(domain_key)
         sub_kind = str(params.get("sub_kind") or "").strip()
+        profile = resolve_specialist_profile(params)
+        task_description = str(params.get("task_description") or "").strip()
 
         workspace = self._resolve_workspace(ctx)
 
@@ -391,6 +396,11 @@ class SpecialistRunner:
                     str(workspace_for_prompt) if workspace_for_prompt else ""
                 ),
                 notes=str(params.get("notes") or ""),
+                scope=profile.scope,
+                mode=profile.mode,
+                bench=profile.bench,
+                lane=profile.lane,
+                task_description=task_description,
                 # proposal_set self-curation target (policy.py is the
                 # source of truth); shapes the prompt, not a hard cap.
                 max_proposals=max(1, int(
@@ -410,6 +420,7 @@ class SpecialistRunner:
             sub_kind=sub_kind,
             gap=gap,
             max_turns=max_turns,
+            profile=profile,
             workspace=workspace,
             worktree=worktree,
             worktree_base=worktree_base,

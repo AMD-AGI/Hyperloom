@@ -462,6 +462,16 @@ class SpecialistPromptInputs:
     # Free-form notes from Orchestration (e.g. previous-round resid_qs)
     notes: str = ""
 
+    # Dispatch profile dials (see orchestrator.specialist_profile). Defaults
+    # preserve the legacy single-domain patch-authoring behaviour; later phases
+    # consume these to shape cross-domain / freeform / bench prompting.
+    scope: str = "domain"
+    mode: str = "patch"
+    bench: bool = False
+    lane: str = "gpu"
+    # Free-form task description (only populated when scope == 'freeform').
+    task_description: str = ""
+
 
 # Section 1 — Identity & autonomy
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
