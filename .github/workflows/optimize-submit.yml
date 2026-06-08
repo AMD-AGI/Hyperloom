@@ -97,6 +97,15 @@ on:
         description: 'Output sequence length'
         required: false
         default: '1024'
+      tp:
+        # Optional override for tensor parallelism. Empty (default) keeps the
+        # script's auto-detect (params -> tp). Set explicitly to spread a
+        # model's weights + KV cache across more GPUs — e.g. tp=2 rescues the
+        # 12B Mistral-Nemo merges that OOM at tp=1 because their ~1M native
+        # context blows the KV cache to ~127 GiB on a single GPU.
+        description: 'Tensor parallelism override (1/2/4/8/16/32). Leave empty to auto-detect from model size.'
+        required: false
+        default: ''
       mode:
         description: 'Execution mode forwarded to SaFE'
         required: false
@@ -281,6 +290,7 @@ jobs:
           MODEL_REPO:             ${{ matrix.model }}
           INPUT_ISL:              ${{ github.event.inputs.isl }}
           INPUT_OSL:              ${{ github.event.inputs.osl }}
+          INPUT_TP:               ${{ github.event.inputs.tp }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
@@ -314,6 +324,10 @@ jobs:
           set -euo pipefail
           ARGS=(--model "${MODEL_REPO}")
           ARGS+=(--isl "${INPUT_ISL:-1024}" --osl "${INPUT_OSL:-1024}")
+          # Optional tp override — empty keeps the script's auto-detect.
+          if [ -n "${INPUT_TP:-}" ]; then
+            ARGS+=(--tp "${INPUT_TP}")
+          fi
           ARGS+=(--mode "${INPUT_MODE:-local}")
           if [ -n "${INPUT_GPU_TYPE:-}" ]; then
             ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
@@ -464,30 +478,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p task-artifacts
-          if [ -f submit-output/submission_manifest.json ]; then
-            READY=$(python3 - <<'PY'
-          import json
-          with open("submit-output/submission_manifest.json", encoding="utf-8") as f:
-              data = json.load(f)
-          records = data.get("records") if isinstance(data.get("records"), list) else []
-          ok = any(
-              (
-                  r.get("final_status") == "Succeeded"
-                  or r.get("ci_success")
-                  or r.get("ci_status") == "Delivered"
-              )
-              for r in records
-              if isinstance(r, dict)
-          )
-          print("yes" if ok else "no")
-          PY
-            )
-            if [ "$READY" != "yes" ]; then
-              echo "::warning::no Succeeded or Delivered task in submission_manifest.json; skipping sbd-ingester publish"
-              echo "SKIP non-delivered-task" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
-              exit 0
-            fi
-          fi
+          # ALWAYS-PUBLISH policy (无论如何都要发): we deliberately DO NOT gate on
+          # final_status==Succeeded / ci_success / ci_status==Delivered here.
+          # Any session_breakdown that was collected — even for Timeout / Failed
+          # / Interrupted sessions — is pushed to the sbd-ingester so pulse never
+          # leaves a model stuck in `awaiting_collector`. The ingester still
+          # decides show_on_leaderboard from data quality (no-gain / non-final
+          # snapshots stay hidden), so this never pollutes the leaderboard.
+          # The only remaining natural guard is "a breakdown file must exist":
+          # the selection step below exits cleanly when there is nothing to send.
           # Select only within this matrix job's collected task directory. The
           # flat task-artifacts/<task_id>/ci_metrics.json is backfilled by
           # optimize_submit.py with current task/model metadata; nested
