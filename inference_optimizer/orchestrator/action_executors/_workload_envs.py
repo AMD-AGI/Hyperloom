@@ -531,6 +531,27 @@ def materialize_config_with_envs(
         # pipeline keeps the configured tp8 + the clean aiter MLA path.
         # Verified on MI300X: capture passes, decode correct.
         envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
+    if "mimo-v2" in _model_basename:
+        # MiMo-V2.x (moe_swa) loads MiMoV2ForCausalLM fine but its DEFAULT
+        # aiter attention backend SIGABRTs during CUDA-graph capture on
+        # gfx942 (mimo_v2.py forward -> GPU coredump -> "Rank N scheduler
+        # died during initialization (exit code: -6)"). Pin the triton
+        # attention backend, which sidesteps the buggy aiter fused-attention
+        # path. Pairs with the mimo-profilerfix image (the undated v0.5.11
+        # profilerfix base does not register MiMoV2ForCausalLM at all; the
+        # image picked in optimize_submit._sglang_image_for carries the
+        # dated 20260508 arch). Merge (never overwrite) and skip when the
+        # caller already pinned an --attention-backend so explore variants
+        # can re-test the fused path once the model is known to load.
+        from ._grid_runner import merge_server_args
+        _mimo_fw_env = server_args_env_name(bench.get("framework"))
+        _mimo_existing = str(envs.get(_mimo_fw_env, "")).strip()
+        if "attention-backend" not in _mimo_existing:
+            envs[_mimo_fw_env] = (
+                merge_server_args(_mimo_existing, "--attention-backend triton")
+                if _mimo_existing
+                else "--attention-backend triton"
+            )
     # MI300X cold-compile guard: ensure sglang's scheduler watchdog is long
     # enough to survive the first-request aiter ``mha_batch_prefill`` JIT
     # compile. sglang's 300s default fires SIGQUIT mid-warmup on a cold aiter
