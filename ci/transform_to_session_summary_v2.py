@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """
 Transform a (possibly-legacy) session_breakdown.json into the
 `session_summary_v2.json` shape that SessionBreakdownPage.vue reads via

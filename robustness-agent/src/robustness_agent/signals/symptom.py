@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Symptom data shape produced by signal rules and consumed by ActionLadder."""
 
 from __future__ import annotations

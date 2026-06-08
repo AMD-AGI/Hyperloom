@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tool whitelist for the dynamic_action sub-agent.
 
 * ``read_source``             — files inside ``framework_source_roots``

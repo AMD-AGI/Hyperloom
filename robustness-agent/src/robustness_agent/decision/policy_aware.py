@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Local payload-schema check matching upstream PolicyGate.
 
 The Coordinator's ``PolicyGate.validate_intent`` is the source of truth.

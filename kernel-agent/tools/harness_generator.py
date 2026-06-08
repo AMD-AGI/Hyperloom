@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Generate GEAK-compatible test harnesses from existing benchmark files.
 
 Given a benchmark .py file (e.g. an AITER op_test), this module:

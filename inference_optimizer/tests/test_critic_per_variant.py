@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-A7 (Arbor-into-Hyperloom): Critic gate over specialist patches.
 
 Pins three contracts:
@@ -27,7 +29,7 @@ from inference_optimizer.orchestrator.action_executors.integrate_patch import (
     IntegratePatchExecutor,
 )
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     INTEGRATE_PATCH_ACTION_NAME,
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,

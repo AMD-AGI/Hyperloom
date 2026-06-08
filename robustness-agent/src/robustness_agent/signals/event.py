@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Coordinator-event-driven signals.
 
 Two patterns the robustness role watches per:

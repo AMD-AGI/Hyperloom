@@ -1,6 +1,6 @@
 # Intent Envelope Schema (Critic side)
 
-The Coordinator (`inference_optimizer.orchestrator.intent_parser`)
+The Coordinator (`inference_optimizer.protocol.intent`)
 expects the following object — produced by the Critic for every turn:
 
 ```json

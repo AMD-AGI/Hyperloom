@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Canonical variant fingerprint — v0.8 M3.
 
 A single, content-addressed identity for any explore variant so that:

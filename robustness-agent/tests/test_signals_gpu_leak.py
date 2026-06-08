@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the ``gpu_memory_leaked`` signal."""
 
 from __future__ import annotations

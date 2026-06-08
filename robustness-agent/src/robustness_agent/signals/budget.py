@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Wall-clock budget signals.
 
 Two complementary axes of coverage live here:

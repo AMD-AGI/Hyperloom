@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``multi_node/scripts`` launch and kill helpers.
 
 The scripts depend on ``ray`` at import time (in-cluster runtime). Tests

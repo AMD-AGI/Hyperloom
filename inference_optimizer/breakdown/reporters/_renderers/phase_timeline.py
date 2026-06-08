@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Phase timeline renderer — chronological action events.
 
 We cap the table at 30 entries (newest last) to keep the report

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``gain_plateau`` and ``no_levers_found`` signals (B2 / B3)."""
 
 from __future__ import annotations

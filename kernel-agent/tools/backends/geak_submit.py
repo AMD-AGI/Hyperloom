@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """GEAK submission via Ray (preferred) or direct CLI fallback.
 
 This is a self-contained alternative to inference-optimization's
@@ -17,6 +19,7 @@ import time
 from pathlib import Path
 
 from ray_runtime import (
+    ensure_ray_cluster,
     quiet_ray_init,
 )
 
@@ -137,7 +140,8 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             ``gpu_ids``, ``elapsed_s``, and ``cmd``.
     """
     import ray
-    runtime_env = quiet_ray_init()
+    runtime_env = quiet_ray_init(
+        num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
 
     @ray.remote(num_gpus=num_gpus)
     def _task(prompt_file_str: str, output_dir_str: str, kernel_path: str,

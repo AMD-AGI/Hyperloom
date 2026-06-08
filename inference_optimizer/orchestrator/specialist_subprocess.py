@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Subprocess-based specialist dispatcher — PR-A2 (Arbor-into-Hyperloom).
 
 The original v0.8 M5 :class:`SpecialistRunner` invoked an in-process
@@ -284,6 +286,7 @@ class SpecialistSubprocessDispatcher:
         user_prompt: str,
         allowed_tools: tuple[str, ...],
         max_turns: int,
+        gpu_ids: tuple[int, ...] = (),
     ) -> SpecialistSubprocessResult:
         """Spawn a claude subprocess, reap it, return the parsed result.
 
@@ -368,13 +371,17 @@ class SpecialistSubprocessDispatcher:
         # 3. Compose the env. Pass through the parent env (so
         # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / CLAUDE_* propagate).
         env = os.environ.copy()
-        # The specialist subprocess must NOT inherit the orchestrator's
-        # HIP/CUDA_VISIBLE_DEVICES — Inv-3 (single tenant GPU) is
-        # preserved by never giving specialists serving GPUs (PR-A2
-        # decision: CPU-only specialists; PR-A3+ may add a GPU pool).
-        for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
-                    "ROCR_VISIBLE_DEVICES"):
-            env.pop(var, None)
+        if gpu_ids:
+            visible = ",".join(str(g) for g in gpu_ids)
+            env["HIP_VISIBLE_DEVICES"] = visible
+            env["CUDA_VISIBLE_DEVICES"] = visible
+            env["ROCR_VISIBLE_DEVICES"] = visible
+            env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
+        else:
+            # CPU specialists must not inherit serving GPU visibility.
+            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
+                        "ROCR_VISIBLE_DEVICES"):
+                env.pop(var, None)
 
         # 4. Spawn.
         proc_started = time.monotonic()

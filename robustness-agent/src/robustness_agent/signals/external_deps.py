@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """External-dependency signals (J1 / J2 / J3).
 
 These three signals cover failure modes that **originate outside
@@ -10,7 +12,8 @@ session:
   now fail with HTTP 401 at the gateway level.
 
 * **J2 ``wekafs_degraded``** — ``stat`` on any of
-  ``$TRACELENS_ROOT`` / ``$INFERENCEX_PATH`` / ``$OOB_SRC`` either
+  ``$TRACELENS_ROOT`` / ``$TRACELENS_INTERNAL_ROOT`` /
+  ``$INFERENCEX_PATH`` / ``$OOB_SRC`` either
   errored or took longer than the configured budget. WekaFS is the
   read-only source mount Hyperloom relies on for source-code, traces,
   and benchmark scripts; ``trace_analyze`` and the OOB CLI hang

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Static guard: only the explicit back-compat surfaces are allowed to
 mention ``extra_sglang_args``.
 
@@ -71,8 +73,19 @@ ALLOWED_FILES: dict[str, str] = {
         "roofline filter reads canonical extra_server_args with a "
         "read-only legacy extra_sglang_args fallback for pre-rename "
         "variant objects",
+    "inference_optimizer/orchestrator/research_hints.py":
+        "priors-match scorer builds a token blob from variant fields and "
+        "reads the legacy extra_sglang_args key alongside the canonical "
+        "extra_server_args so pre-rename variant dicts still match",
     "inference_optimizer/orchestrator/optimization_journal.py":
         "journal classification reads existing stack/variant args fields",
+    # Legacy v0.6 breakdown reconstruction reads the pre-rename
+    # candidate_extra_sglang_args from raw (un-migrated) optimization_stack
+    # entries; the emitted key is the canonical extra_server_args.
+    "inference_optimizer/breakdown/legacy_collectors.py":
+        "legacy v0.6 reader: raw optimization_stack carries pre-rename "
+        "candidate_extra_sglang_args (breakdown loads state without the "
+        "SharedState key migration)",
     # The materializer keeps the legacy name in its env-routing docstring
     # because the per-framework env names (EXTRA_SGLANG_ARGS / VLLM_ /
     # ATOM_) are intentionally unchanged.
@@ -85,10 +98,6 @@ ALLOWED_FILES: dict[str, str] = {
     # Prompt / orientation text that names both keys explicitly so the
     # LLM and any human reader of the prompt knows the alias exists
     # for one release.
-    "inference_optimizer/cli.py":
-        "warm-replay executor registration comment names RecipeKB "
-        "best_config field names",
-
     # Pytest marker registration mentions the legacy name in the
     # marker's description.
     "pyproject.toml":
@@ -126,6 +135,9 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/orchestrator/coordinator.py":
         "comments explain the read_extra_server_args call at the LLM "
         "intent / sub-agent envelope read boundaries",
+    "inference_optimizer/orchestrator/coordinator_helpers.py":
+        "holds the extracted _merge_cumulative_extra_sglang_args helper "
+        "that merges the legacy KB best_config arg stacks",
     "inference_optimizer/orchestrator/kernel_request_handlers.py":
         "comments explain the read_extra_server_args call at the "
         "integrate_patch sub-agent envelope read boundary",
@@ -164,8 +176,10 @@ ALLOWED_FILES: dict[str, str] = {
 
 # Files under these top-level prefixes are skipped entirely.
 _SKIP_DIRECTORIES: tuple[str, ...] = (
-    # Plan / migration narrative tree (slated for deletion).
+    # Plan / migration narrative trees (slated for deletion). These describe
+    # the legacy key as a removal target, not a live writer site.
     "atom_plan/",
+    "code_cleansing_plan/",
     ".git/",
     "node_modules/",
     "__pycache__/",

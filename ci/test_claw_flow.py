@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smoke test: validate the full Claw API call sequence with a trivial prompt."""
 
 import json

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """High-level KB write façade used by the decision reviewer.
 
 This module never raises to the caller for transport / 4xx errors — it

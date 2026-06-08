@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """End-to-end Kernel Agent runner for real model/profile/backend testing.
 
 Flow:
@@ -14,8 +16,7 @@ The runner does not fabricate patch effectiveness. If no patchable source or
 valid benchmark harness exists, it records that as the experiment outcome.
 
 The legacy ``run_baseline_profile`` step (which shelled out to an external
-``marathon/skills/scripts/run_baseline.sh``) was removed when Hyperloom
-dropped its marathon dependency. Use ``inference_optimizer optimize`` to
+baseline script) was removed. Use ``inference_optimizer optimize`` to
 produce a baseline + profile trace, then pass that trace into this runner
 via ``--trace-path``.
 """
@@ -44,6 +45,7 @@ OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 # tools dir.
 sys.path.insert(0, str(ROOT / "tools"))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+from _paths import workspace_root  # noqa: E402
 sys.path.pop(0)
 
 
@@ -410,7 +412,7 @@ def main() -> int:
     parser.add_argument("--model-path", default="/wekafs/models/Qwen3-30B-A3B")
     parser.add_argument(
         "--workspace-path",
-        default=os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"),
+        default=workspace_root(),
         help="Root the tool writes under; defaults to $USER_DATA_PATH.",
     )
     parser.add_argument("--session-id", default=f"qwen3-30b-{int(time.time())}")
@@ -472,9 +474,7 @@ def main() -> int:
         help=(
             "Path to a pre-generated trace (``.json`` / ``.json.gz``) or a "
             "torch_trace dir. Use ``inference_optimizer optimize`` to "
-            "produce baseline+profile traces; the legacy auto-baseline "
-            "step that shelled out to marathon/skills/scripts/run_baseline.sh "
-            "was removed."
+            "produce baseline+profile traces."
         ),
     )
     parser.add_argument("--kernel-name", default="",
@@ -521,9 +521,7 @@ def main() -> int:
         if not trace_path or not Path(trace_path).exists():
             raise RuntimeError(
                 f"--trace-path missing or does not exist: {trace_path}. "
-                "Produce a trace with ``inference_optimizer optimize`` first "
-                "(the legacy in-runner auto-baseline step was removed when "
-                "Hyperloom dropped its marathon dependency)."
+                "Produce a trace with ``inference_optimizer optimize`` first."
             )
         summary["baseline"] = baseline
         summary["trace_path"] = trace_path

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Decision journal renderer (v1.1).
 
 One markdown block per params/backends round: round-level promotion

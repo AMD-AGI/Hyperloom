@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """CriticAgentBackend — bridges the standalone ``critic-agent`` skill runtime
 into the ``inference_optimizer`` Coordinator as a real Critic Backend.
 
@@ -47,7 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from ..intent_parser import (
+from ...protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
@@ -409,14 +411,13 @@ class CriticAgentBackend:
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
     static_context: dict[str, Any] | None = None
     known_actions: tuple[str, ...] = ()
-    # N38 (May 2026) — per-action verdict policy map (action_name ->
-    # one of "archival" / "exploration" / "promotion"). When non-empty,
-    # the backend enriches ``judge_bundle.review_constraints.
-    # action_verdict_policy`` with this mapping right after the
-    # runtime's ``prepare-review`` returns. The LLM-critic then uses
-    # the lookup as its primary per-proposal rule (see critic.md),
-    # replacing the hard-coded carve-out lists that N33 / N35 / N37
-    # had to patch one action at a time. Wire from CLI by passing
+    # per-action verdict policy map (action_name -> one of "archival" /
+    # "exploration" / "promotion"). When non-empty, the backend enriches
+    # ``judge_bundle.review_constraints.action_verdict_policy`` with this
+    # mapping right after the runtime's ``prepare-review`` returns. The
+    # LLM-critic then uses the lookup as its primary per-proposal rule
+    # (see critic.md), instead of hard-coded carve-out lists. Wire from
+    # CLI by passing
     # ``{a.name: a.verdict_class for a in ActionRegistry().all()}``.
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
     name: str = "critic-agent"
@@ -725,12 +726,11 @@ class CriticAgentBackend:
                 f"{judge_path}: {exc}"
             ) from exc
 
-        # N38 (May 2026) — enrich review_constraints with per-action
-        # verdict policy so the LLM-critic can look up each proposal's
-        # class (archival / exploration / promotion) and apply the
-        # correct rule. Replaces the prompt-hardcoded carve-out lists
-        # N33/N35/N37 had to patch one action at a time. Critic
-        # runtime owns ``review_constraints.approve_requires`` /
+        # enrich review_constraints with per-action verdict policy so the
+        # LLM-critic can look up each proposal's class (archival /
+        # exploration / promotion) and apply the correct rule, instead of
+        # prompt-hardcoded carve-out lists. Critic runtime owns
+        # ``review_constraints.approve_requires`` /
         # ``allowed_verdicts`` / etc.; we layer
         # ``action_verdict_policy`` on top.
         if self.action_verdict_policy:
@@ -989,7 +989,7 @@ class CriticAgentBackend:
         env = dict(os.environ)
         # Co-locate session memory inside the Coordinator session so it's
         # cleaned up with the session and follows the per-session lifecycle
-        # contract (DESIGN ADR-42 — SQLite per-session, KB centralized).
+        # contract (SQLite per-session, KB centralized).
         memory_dir = self.session_dir / "critic-session-memory"
         memory_dir.mkdir(parents=True, exist_ok=True)
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))

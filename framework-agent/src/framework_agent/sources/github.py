@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Anonymous GitHub Search backend for perf PR candidate discovery.
 
 Best-effort, zero-deps fallback used when ``primus_cortex`` is unavailable

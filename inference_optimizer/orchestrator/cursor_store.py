@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """CursorStore
 
 Per-agent ``last_processed_seq`` cursor. Single SQL UPSERT replaces the

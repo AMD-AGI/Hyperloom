@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Pure-function tests for the FRAMEWORK_PR phase routing and exit
 conditions (Stage 2a coverage).
 """
