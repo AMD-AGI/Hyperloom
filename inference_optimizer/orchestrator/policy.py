@@ -589,6 +589,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "warm_start_pitfalls",
     "warm_start_lessons",
     "warm_start_ts",
+    "warm_start_context",
     # KB tag completeness — populated by Coordinator from
     # manifest + baseline materialized config. LLM agents can read
     # them via prompt sections, but only Coordinator writes.
