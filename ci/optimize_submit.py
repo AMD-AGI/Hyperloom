@@ -331,11 +331,13 @@ def _proxy() -> str:
 
 
 def _default_sglang_image() -> str:
-    # v0.5.11 (2026-05-05): Spec V2 by default + DFLASH on ROCm + all-reduce/RMSNorm fusion.
-    # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures kernels under
-    # HipGraphLaunch (issue #352). Drop the suffix once the fix lands in upstream ROCm.
-    # Pre-profilerfix image (restore when reverting): lmsysorg/sglang:v0.5.11-rocm720-mi30x
-    return "primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
+    # TEMP MiMo-image probe (REVERT AFTER): swapped to the DATED sglang-rocm daily
+    # build, which should carry the MiMoV2 day-0 arch that the undated v0.5.11 tag
+    # (the profilerfix base) lacks. proxy/ = Docker Hub pull-through. No profilerfix
+    # patch here => baseline-validation only (optimize-phase rocprofiler kernel
+    # capture under HipGraphLaunch may be degraded).
+    # RESTORE TO: return "primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
+    return "harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang-rocm:v0.5.11-rocm720-mi30x-20260508"
 
 
 def _default_vllm_image() -> str:
