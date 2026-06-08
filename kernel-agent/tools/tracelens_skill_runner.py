@@ -1219,12 +1219,60 @@ def _resolve_source_target(
     }
 
 
+_NATIVE_SOURCE_SUFFIXES = (
+    ".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c",
+)
+
+
+def _is_native_source(path: str) -> bool:
+    """True for C/C++/HIP/CUDA source files (#420).
+
+    Native sources have no Python AST to resolve a stable ``def`` line, so
+    TraceLens reports the call-site ``#L<line>`` which differs per call —
+    keying a task_group on that line splits one device kernel across
+    groups. Callers therefore drop the line/function key components for
+    these files.
+    """
+    return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
+
+
+def _normalize_operation_key(operation: str) -> str:
+    """Canonicalize a TraceLens operation name for task-group keying (#420).
+
+    Strips balanced ``<...>`` template-argument lists (nested-safe) so the
+    SAME kernel profiled at different dtypes/shapes — e.g.
+    ``rmsnorm_kernel<bf16>`` vs ``rmsnorm_kernel<fp16>`` — groups together,
+    while DISTINCT kernels (different base names) stay separate (the Q1
+    invariant). Returns the original string when stripping leaves nothing.
+    """
+    s = str(operation).strip()
+    if "<" not in s:
+        return s
+    out: list[str] = []
+    depth = 0
+    for ch in s:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            if depth > 0:
+                depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    normalized = "".join(out).strip()
+    return normalized or s
+
+
 def aggregate_by_source_function(
     candidates: list[dict[str, Any]],
     *,
     source_root: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Group TraceLens candidates by AST-resolved ``(path, line, fn)``.
+    """Group TraceLens candidates by normalized operation + source.
+
+    Python sources key on the AST-resolved ``(operation, path, line, fn)``;
+    native (.cu/.hip/.cpp) sources key on ``(operation, path)`` only since
+    they have no stable AST def-line (#420). ``operation`` is normalized to
+    drop C++ template/dtype args so one kernel is not split by dtype.
 
     Returns a list of ``task_group`` dicts, sorted by aggregate kernel
     time (descending). Each group carries:
@@ -1266,7 +1314,19 @@ def aggregate_by_source_function(
     # "rewrite forward" task. Including ``operation`` keeps each kernel
     # identity intact while still collapsing the same kernel called at
     # different shapes (the Q1 case from the user screenshots).
-    groups: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+    #
+    # #420 refinements so the SAME device kernel is not over-split into
+    # redundant task_groups (one wasted GEAK dispatch each):
+    #   * ``operation`` is normalized (``_normalize_operation_key``) to
+    #     drop C++ template/dtype args, so ``rmsnorm_kernel<bf16>`` and
+    #     ``rmsnorm_kernel<fp16>`` collapse into one group.
+    #   * ``source_path`` is ``os.path.normpath``-canonicalized so the
+    #     same file reached via different path spellings does not split.
+    #   * Native (.cu/.hip/.cpp) sources have no Python AST def-line;
+    #     TraceLens reports the per-call ``#L`` line, so we key on
+    #     ``(normalized_op, source_path)`` ONLY and drop the line/function
+    #     components that would otherwise fragment one kernel.
+    groups: dict[tuple, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
@@ -1274,18 +1334,24 @@ def aggregate_by_source_function(
         if target is None:
             continue
         operation = str(cand.get("name") or "").strip()
-        key = (
-            operation,
-            target["source_path"],
-            int(target["definition_line"]),
-            str(target["function_name"]),
-        )
+        norm_op = _normalize_operation_key(operation)
+        src_norm = os.path.normpath(str(target["source_path"]))
+        if _is_native_source(src_norm):
+            key: tuple = ("native", norm_op, src_norm)
+        else:
+            key = (
+                "py",
+                norm_op,
+                src_norm,
+                int(target["definition_line"]),
+                str(target["function_name"]),
+            )
         bucket = groups.get(key)
         if bucket is None:
             bucket = {
                 "task_group_id":          "",  # filled below after sorting
                 "operation":              operation,
-                "source_path":            target["source_path"],
+                "source_path":            src_norm,
                 "definition_line":        target["definition_line"],
                 "function_name":          target["function_name"],
                 "ast_resolved":           bool(target.get("ast_resolved")),
