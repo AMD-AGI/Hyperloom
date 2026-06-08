@@ -293,25 +293,6 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "keep_threshold_pct?=1.0, "
             "accuracy_baseline?={task: {metric: score}}}}"
         )
-    # dynamic_specialist — free-form CPU-only specialist dispatch (open payload).
-    if meta.name == "dynamic_specialist":
-        return (
-            "delegate{action_name='dynamic_specialist', params={"
-            "tasks=[{task_description=<full natural-language task>, "
-            "task_summary=<short label>, role?=<str>, "
-            "priority?=<critical|high|normal|low>}, ...], "
-            "timeout_minutes?=120}}. "
-            "Specialists are CPU-only and launch immediately; the "
-            "Coordinator auto-surfaces dynamic_specialist_completed "
-            "observations each tick."
-        )
-    if meta.name == "dynamic_specialist_check":
-        return "delegate{action_name='dynamic_specialist_check', params={}}"
-    if meta.name == "dynamic_specialist_collect":
-        return (
-            "delegate{action_name='dynamic_specialist_collect', params={"
-            "agent_id=<id from a dispatch / completed observation>}}"
-        )
     return (
         f"propose_action{{action_name='{meta.name}', "
         f"predicted_gain_pct=<your estimate>}}"

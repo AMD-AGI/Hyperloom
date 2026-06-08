@@ -44,11 +44,6 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "specialist",
     "integrate_patch",
     "framework_pr",
-    # PR #461: Coordinator-handled (no runs/ workspace) but pipeline_phase=
-    # explore, so they appear in the registry set; keep the fallback aligned.
-    "dynamic_specialist",
-    "dynamic_specialist_check",
-    "dynamic_specialist_collect",
     "integrate", "kernel_opt", "deep_kernel_analysis", "gemm_tuning",
     "operator_tuning", "vendor_kernel_config",
     "recover",

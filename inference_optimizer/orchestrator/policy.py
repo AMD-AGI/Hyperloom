@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,7 @@ from .specialist_domains import (
 from .specialist_profile import (
     SCOPE_DOMAIN as SPECIALIST_SCOPE_DOMAIN,
     SCOPE_DOMAINS as SPECIALIST_SCOPE_DOMAINS,
+    SCOPE_FREEFORM as SPECIALIST_SCOPE_FREEFORM,
     SCOPE_VALUES as SPECIALIST_SCOPE_VALUES,
 )
 
@@ -187,6 +189,23 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset({
 
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
 SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
+
+# Free-form (``scope='freeform'``) sanity-gate limits (absorbed from the
+# retired dynamic_specialist wave channel).
+SPECIALIST_FREEFORM_WAVE_MAX: int = 8
+SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
+# Lightweight mechanical red-line tripwire over free-form task descriptions:
+# obviously-destructive host commands a dispatch must never embed. This is a
+# fail-fast sanity check, NOT a security boundary — the isolated worktree, the
+# Critic review, and the integrate_patch gate remain the real boundaries.
+_FREEFORM_REDLINE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\brm\s+-rf?\s+(?:/|~|\$HOME|\*)", re.IGNORECASE),
+    re.compile(r"\bmkfs\.", re.IGNORECASE),
+    re.compile(r"\bdd\s+if=.*\bof=/dev/", re.IGNORECASE),
+    re.compile(r">\s*/dev/sd[a-z]"),
+    re.compile(r":\(\)\s*\{.*\};\s*:"),  # fork bomb
+    re.compile(r"\bshutdown\b|\breboot\b", re.IGNORECASE),
+)
 
 # Prefix the SubAgentRunner stamps on specialist emit-intents (``from_agent='specialist:<task_id>'``).
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
@@ -1154,6 +1173,14 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
 
+        # scope='freeform' (absorbed dynamic_specialist) has no domain anchor:
+        # it skips the tag / gap vocabulary checks and runs a lightweight
+        # mechanical sanity gate instead.
+        if str(params.get("scope") or "").strip().lower() == \
+                SPECIALIST_SCOPE_FREEFORM:
+            self._validate_freeform_specialist_dispatch(params)
+            return
+
         # ``params.tags`` is canonical; a single ``params.domain`` is a backward-compatible alias.
         tags = normalize_dispatch_tags(params)
         if not tags:
@@ -1291,6 +1318,92 @@ class PolicyGate:
                     hint=(
                         "Lower params.gpu_count or start a session with a "
                         "larger GPU specialist pool."
+                    ),
+                )
+
+    def _validate_freeform_specialist_dispatch(
+        self, params: dict[str, Any],
+    ) -> None:
+        """Lightweight mechanical sanity gate for ``scope='freeform'``
+        specialists (absorbed from the retired dynamic_specialist wave
+        channel). Free-form dispatches carry no domain/tag/gap anchor, so this
+        validates only structural shape: a single ``task_description`` or a
+        ``tasks=[...]`` wave (bounded by SPECIALIST_FREEFORM_WAVE_MAX), each
+        with a non-empty, length-bounded description that survives the
+        red-line tripwire."""
+        wave = params.get("tasks")
+        if wave is not None:
+            if not isinstance(wave, list) or not wave:
+                raise PolicyDenied(
+                    "delegate{action='specialist',scope='freeform'}: "
+                    "params.tasks must be a non-empty list",
+                    rule="specialist_freeform_wave_invalid",
+                    hint=(
+                        "Pass tasks=[{task_description: ...}, ...] or a single "
+                        "params.task_description for a one-off freeform "
+                        "specialist."
+                    ),
+                )
+            if len(wave) > SPECIALIST_FREEFORM_WAVE_MAX:
+                raise PolicyDenied(
+                    f"delegate{{action='specialist',scope='freeform'}}: wave "
+                    f"size={len(wave)} exceeds cap "
+                    f"{SPECIALIST_FREEFORM_WAVE_MAX}",
+                    rule="specialist_freeform_wave_too_large",
+                    hint=(
+                        f"Split the wave into batches of at most "
+                        f"{SPECIALIST_FREEFORM_WAVE_MAX} tasks."
+                    ),
+                )
+            for i, task in enumerate(wave):
+                if not isinstance(task, dict):
+                    raise PolicyDenied(
+                        f"delegate{{action='specialist',scope='freeform'}}: "
+                        f"tasks[{i}] must be an object",
+                        rule="specialist_freeform_task_invalid",
+                    )
+                desc = str(
+                    task.get("task_description")
+                    or task.get("task_summary")
+                    or ""
+                ).strip()
+                self._check_freeform_task_description(desc, where=f"tasks[{i}]")
+            return
+        desc = str(params.get("task_description") or "").strip()
+        self._check_freeform_task_description(desc, where="params")
+
+    @staticmethod
+    def _check_freeform_task_description(desc: str, *, where: str) -> None:
+        """Per-task structural checks for a free-form ``task_description``:
+        non-empty, length-bounded, and clear of the red-line tripwire."""
+        if not desc:
+            raise PolicyDenied(
+                f"delegate{{action='specialist',scope='freeform'}}: "
+                f"{where} task_description must be non-empty",
+                rule="specialist_freeform_empty_description",
+                hint=(
+                    "Each freeform task needs a natural-language "
+                    "task_description (the whole mandate)."
+                ),
+            )
+        if len(desc) > SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS:
+            raise PolicyDenied(
+                f"delegate{{action='specialist',scope='freeform'}}: "
+                f"{where} task_description is {len(desc)} chars > cap "
+                f"{SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS}",
+                rule="specialist_freeform_description_too_long",
+            )
+        for pat in _FREEFORM_REDLINE_PATTERNS:
+            if pat.search(desc):
+                raise PolicyDenied(
+                    f"delegate{{action='specialist',scope='freeform'}}: "
+                    f"{where} task_description tripped the red-line scan "
+                    f"(pattern={pat.pattern!r})",
+                    rule="specialist_freeform_redline",
+                    hint=(
+                        "Free-form mandates must not embed destructive host "
+                        "commands. Describe the investigation, not raw "
+                        "destructive shell."
                     ),
                 )
 

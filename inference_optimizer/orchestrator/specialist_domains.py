@@ -215,6 +215,23 @@ def get_domain(key: str) -> SpecialistDomain | None:
     return None
 
 
+# Synthetic domain for ``scope='freeform'`` dispatches (absorbed from the
+# retired dynamic_specialist wave channel). It is intentionally NOT part of
+# SPECIALIST_DOMAINS / the knowledge-domain vocabulary — it exists only to
+# satisfy the runner's Domain contract. The real mandate is carried by
+# ``params.task_description`` and rendered by the free-form prompt block.
+FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
+    key="freeform_specialist",
+    layer="(free-form — not bound to the domain catalogue)",
+    kb_anchor="framework",
+    available_in="M6",
+    description=(
+        "Free-form specialist: not bound to the domain catalogue. The "
+        "Orchestration task_description is the whole mandate."
+    ),
+)
+
+
 # Default number of LLM turns a specialist may run.
 DEFAULT_SPECIALIST_MAX_TURNS: int = 12
 
@@ -225,6 +242,7 @@ SPECIALIST_MAX_TURNS_HARD_CAP: int = 16
 __all__ = [
     "DEFAULT_SPECIALIST_MAX_TURNS",
     "EXTRA_KNOWLEDGE_DOMAIN_TAGS",
+    "FREEFORM_DOMAIN",
     "KNOWLEDGE_DOMAIN_TAGS",
     "KNOWLEDGE_DOMAIN_TAG_SET",
     "SPECIALIST_DOMAINS",

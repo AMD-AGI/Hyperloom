@@ -58,9 +58,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         "explore", "specialist",
         # Specialist source patches apply only through integrate_patch.
         "integrate_patch",
-        # Free-form CPU-only specialist dispatch (not domain-locked).
-        "dynamic_specialist",
-        "dynamic_specialist_check", "dynamic_specialist_collect",
         # roofline/profile auto-enqueued on cumulative_gain_validated watermark.
         "roofline", "profile",
         "recover",

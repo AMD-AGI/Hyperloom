@@ -26,6 +26,7 @@ from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
+    FREEFORM_DOMAIN,
     SPECIALIST_DOMAINS_M5,
     SpecialistDomain,
     get_domain,
@@ -296,6 +297,12 @@ class SpecialistRunner:
         task_description = str(params.get("task_description") or "").strip()
 
         workspace = self._resolve_workspace(ctx)
+
+        # scope='freeform' (absorbed dynamic_specialist) is not bound to the
+        # domain catalogue: use the synthetic freeform domain so dispatch can
+        # proceed on the task_description mandate alone.
+        if domain is None and profile.is_freeform:
+            domain = FREEFORM_DOMAIN
 
         if domain is None:
             done = build_empty_specialist_done(

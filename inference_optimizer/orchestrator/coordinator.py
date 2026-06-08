@@ -622,10 +622,9 @@ class Coordinator:
         lines.extend(_format_inbox_event(m) for m in msgs)
         return "\n".join(lines)
 
-    # Inline fast-action execution (Path A / A3); deny dynamic_specialist* (bespoke dispatch) and report/session_breakdown (CLOSE artifacts).
+    # Inline fast-action execution (Path A / A3); deny report/session_breakdown (CLOSE artifacts).
     _INLINE_ACTION_DENY: frozenset[str] = frozenset({
-        "dynamic_specialist", "dynamic_specialist_check",
-        "dynamic_specialist_collect", "report", "session_breakdown",
+        "report", "session_breakdown",
     })
 
     def _inline_action_whitelist(self) -> frozenset[str]:
@@ -3248,11 +3247,6 @@ class Coordinator:
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
-            # Dynamic specialist lifecycle: poll completions + surface results as observations.
-            try:
-                await self._poll_dynamic_specialists()
-            except Exception:  # noqa: BLE001 — defensive
-                log.debug("dynamic specialist poll failed", exc_info=True)
             # FRAMEWORK_PR phase pump: enqueue next candidate / fetch next batch. Best-effort.
             await self._pump_framework_pr_phase_safely(caller="tick")
             # phase machine advance at tick boundary.
@@ -4572,31 +4566,20 @@ class Coordinator:
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
                 else getattr(self.shared_state, "baseline_tput", 0.0)
             params.setdefault("base_tput", float(base or 0.0))
+        # Wave sugar: a specialist delegate carrying params.tasks=[...] fans
+        # out into N standard freeform specialist tasks (scope=freeform,
+        # lane=cpu, mode=research defaults), each dispatched through the
+        # normal SpecialistRunner + TaskRegistry + lease + reap path. This
+        # preserves the low-cost wide-net recon that the retired
+        # dynamic_specialist channel provided.
+        if action_name == "specialist" and isinstance(
+            params.get("tasks"), list,
+        ) and params["tasks"]:
+            await self._fan_out_specialist_wave(source, intent, params)
+            return
         # Specialist pre-dispatch warmup: warm external-knowledge sections via KnowledgePlane (setdefault fills gaps).
         if action_name == "specialist":
             await self._warm_specialist_params(params)
-        # dynamic_specialist — free-form CPU-only dispatch; bypasses SpecialistRunner/TaskRegistry.
-        if action_name == "dynamic_specialist":
-            await self._handle_dynamic_specialist_dispatch(source, intent, params)
-            return
-        # dynamic_specialist_check — poll status of running specialists.
-        if action_name == "dynamic_specialist_check":
-            status = await self._handle_dynamic_specialist_check(source)
-            await self._record_observation(
-                source, "dynamic_specialist_status", status,
-            )
-            return
-        # dynamic_specialist_collect — read results from a completed agent.
-        if action_name == "dynamic_specialist_collect":
-            agent_id = params.get("agent_id", "")
-            if agent_id:
-                results = await self._handle_dynamic_specialist_collect(
-                    source, agent_id,
-                )
-                await self._record_observation(
-                    source, "dynamic_specialist_results", results,
-                )
-            return
         # Idempotency-key chain: top-level → nested compat alias → content-fingerprint auto-key.
         # Terminal collisions retry with -retry<N> (up to 5); non-terminal collisions → policy_denied.
         raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
@@ -4742,6 +4725,48 @@ class Coordinator:
             "status=%s gain=%.2f%%",
             cand_id, batch_id, status, gain,
         )
+
+    async def _fan_out_specialist_wave(
+        self, source: str, intent: Intent, params: dict[str, Any],
+    ) -> None:
+        """Fan a specialist delegate carrying ``params.tasks=[...]`` into N
+        standard free-form specialist dispatches (scope=freeform, lane=cpu,
+        mode=research defaults). Each fanned task is re-dispatched through the
+        normal ``_handle_delegate`` path (warm + idempotency + TaskRegistry +
+        lease + reap), preserving the low-cost wide-net recon the retired
+        dynamic_specialist channel provided. Per-task idempotency keys derive
+        from the wave key; non-dict / empty-description entries are skipped."""
+        tasks = params.get("tasks") or []
+        shared = {k: v for k, v in params.items() if k != "tasks"}
+        base_key = str(intent.payload.get("idempotency_key") or "").strip()
+        for idx, task in enumerate(tasks):
+            if not isinstance(task, dict):
+                continue
+            desc = str(
+                task.get("task_description") or task.get("task_summary") or ""
+            ).strip()
+            if not desc:
+                continue
+            sub_params = dict(shared)
+            sub_params["scope"] = "freeform"
+            sub_params.setdefault("mode", "research")
+            sub_params.setdefault("lane", "cpu")
+            sub_params["task_description"] = desc
+            summary = str(task.get("task_summary") or "").strip()
+            if summary:
+                sub_params["task_summary"] = summary
+            for carry in ("model", "priority", "timeout_minutes", "max_turns"):
+                if carry in task and carry not in sub_params:
+                    sub_params[carry] = task[carry]
+            sub_payload = dict(intent.payload)
+            sub_payload["params"] = sub_params
+            if base_key:
+                sub_payload["idempotency_key"] = f"{base_key}-w{idx}"
+            else:
+                sub_payload.pop("idempotency_key", None)
+            await self._handle_delegate(
+                source, Intent(type=intent.type, payload=sub_payload),
+            )
 
     # specialist pre-dispatch warmup
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
@@ -5133,205 +5158,6 @@ class Coordinator:
                 "outcome": str(outcome.get("outcome") or "").upper(),
                 "gain_pct": outcome.get("gain_pct"),
             })
-
-    # Dynamic specialist dispatch (free-form CPU-only agents)
-    async def _handle_dynamic_specialist_dispatch(
-        self, source: str, intent: Intent, params: dict[str, Any],
-    ) -> None:
-        """Handle delegate{action_name='dynamic_specialist'} via dynamic_dispatch (bypasses SpecialistRunner)."""
-        from .dynamic_dispatch_tools import execute_dynamic_dispatch_tool
-
-        tasks = params.get("tasks", [])
-        if not tasks:
-            await self._record_observation(
-                source, "dynamic_specialist_error",
-                {"error": "No tasks provided in dynamic_specialist params"},
-            )
-            return
-
-        # Model resolution is authoritative here: override the PR-461 hardcoded model with the CLI-wired one.
-        model = (
-            getattr(self, "_dynamic_specialist_model", "")
-            or params.get("model")
-            or "claude-opus-4-7"
-        )
-        tool_input = {
-            "tasks": tasks,
-            "model": model,
-            "timeout_minutes": params.get("timeout_minutes", 120),
-        }
-        result_text = execute_dynamic_dispatch_tool(
-            "dispatch_specialists", tool_input, str(self.session_dir),
-        )
-        await self._record_observation(
-            source, "dynamic_specialist_dispatched",
-            {"result": result_text, "task_count": len(tasks)},
-        )
-        log.info(
-            "dynamic_specialist dispatch: %d tasks from %s",
-            len(tasks), source,
-        )
-
-    async def _handle_dynamic_specialist_check(
-        self, source: str,
-    ) -> dict[str, Any]:
-        """Poll status of all dynamically dispatched specialists."""
-        from .dynamic_dispatch_tools import execute_dynamic_dispatch_tool
-
-        result_text = execute_dynamic_dispatch_tool(
-            "check_specialists", {}, str(self.session_dir),
-        )
-        return {"status_report": result_text}
-
-    async def _handle_dynamic_specialist_collect(
-        self, source: str, agent_id: str,
-    ) -> dict[str, Any]:
-        """Collect results from a completed dynamic specialist."""
-        from .dynamic_dispatch_tools import execute_dynamic_dispatch_tool
-
-        result_text = execute_dynamic_dispatch_tool(
-            "collect_specialist_results", {"agent_id": agent_id},
-            str(self.session_dir),
-        )
-        return {"results": result_text}
-
-    async def _poll_dynamic_specialists(self) -> None:
-        """Auto-poll dynamic specialists each tick: reap overdue/stale subprocesses (write synthetic completion), then surface newly completed agents as observations."""
-        from .dynamic_dispatch_comms import get_agent_status_summary, read_completion
-
-        # Liveness reap runs unconditionally — independent of whether any
-        # agent has produced a done.json — so a hung subprocess is killed.
-        self._reap_dynamic_specialists()
-
-        summary = get_agent_status_summary(str(self.session_dir))
-        newly_done = summary.get("completed", [])
-        if not newly_done:
-            return
-
-        collected_key = "_dynamic_specialist_collected"
-        if not hasattr(self, collected_key):
-            setattr(self, collected_key, set())
-        already_collected: set = getattr(self, collected_key)
-
-        for agent_id in newly_done:
-            if agent_id in already_collected:
-                continue
-            already_collected.add(agent_id)
-            report = read_completion(str(self.session_dir), agent_id)
-            if report:
-                await self._record_observation(
-                    "coordinator", "dynamic_specialist_completed",
-                    {
-                        "agent_id": agent_id,
-                        "status": report.status,
-                        "summary": report.summary[:500],
-                        "patches": report.patches_written or [],
-                        "config_changes": report.config_changes or {},
-                    },
-                )
-
-        active = summary.get("active", [])
-        dead = summary.get("dead", [])
-        if active or dead:
-            await self._record_observation(
-                "coordinator", "dynamic_specialist_status",
-                {
-                    "active_count": len(active),
-                    "completed_count": len(newly_done),
-                    "dead_count": len(dead),
-                    "active_ids": active[:10],
-                },
-            )
-
-    # Staleness threshold (sec) past which an agent with no done.json is killed (mirrors dispatcher 600s).
-    _DYNAMIC_SPECIALIST_STALE_SEC: float = 600.0
-
-    def _reap_dynamic_specialists(self) -> None:
-        """Kill overdue / stale dynamic specialist subprocesses.
-
-        For each agent without a completion report that exceeded timeout_minutes or whose process.log went
-        stale: kill by pid and write a synthetic done.json so the surface path reports it as timeout/dead.
-        """
-        import time as _time
-        from datetime import datetime, timezone
-
-        from .dynamic_dispatch import kill_agent
-        from .dynamic_dispatch_comms import (
-            CompletionReport,
-            read_completion,
-            read_manifest,
-            write_completion,
-        )
-
-        session_dir = str(self.session_dir)
-        agents_dir = self.session_dir / "agents"
-        if not agents_dir.is_dir():
-            return
-
-        now = _time.time()
-        for agent_dir in agents_dir.iterdir():
-            if not agent_dir.is_dir():
-                continue
-            agent_id = agent_dir.name
-            # Already completed — nothing to reap.
-            if read_completion(session_dir, agent_id) is not None:
-                continue
-            manifest = read_manifest(session_dir, agent_id)
-            if manifest is None:
-                continue
-
-            reason = ""
-            # Wall-clock budget exceeded.
-            try:
-                dispatched = datetime.fromisoformat(manifest.dispatched_at)
-                age_sec = (datetime.now(timezone.utc) - dispatched).total_seconds()
-            except (TypeError, ValueError):
-                age_sec = 0.0
-            timeout_sec = float(manifest.timeout_minutes or 0) * 60.0
-            if timeout_sec > 0 and age_sec > timeout_sec:
-                reason = (
-                    f"exceeded timeout_minutes={manifest.timeout_minutes} "
-                    f"(age={age_sec:.0f}s)"
-                )
-
-            # Log staleness (no output for the stale window).
-            if not reason:
-                log_path = agent_dir / "process.log"
-                if log_path.exists():
-                    try:
-                        stale_for = now - log_path.stat().st_mtime
-                    except OSError:
-                        stale_for = 0.0
-                    if stale_for > self._DYNAMIC_SPECIALIST_STALE_SEC:
-                        reason = (
-                            f"process.log stale for {stale_for:.0f}s "
-                            f"(> {self._DYNAMIC_SPECIALIST_STALE_SEC:.0f}s)"
-                        )
-
-            if not reason:
-                continue
-
-            killed = kill_agent(manifest.pid)
-            log.warning(
-                "reaping dynamic specialist %s: %s (killed=%s pid=%s)",
-                agent_id, reason, killed, manifest.pid,
-            )
-            try:
-                write_completion(
-                    session_dir,
-                    CompletionReport(
-                        agent_id=agent_id,
-                        status="timeout",
-                        summary=f"reaped by coordinator: {reason}",
-                        error=reason,
-                        completed_at=datetime.now(timezone.utc).isoformat(),
-                    ),
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.debug(
-                    "failed to write synthetic done.json for reaped agent %s",
-                    agent_id, exc_info=True,
-                )
 
     # specialist_done bookkeeping
     async def _handle_specialist_done(

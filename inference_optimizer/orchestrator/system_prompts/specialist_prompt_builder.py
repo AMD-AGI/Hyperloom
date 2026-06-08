@@ -525,7 +525,35 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         rendered_focus_keys.add(tag_domain.key)
     if inp.scope == "domains":
         body.extend(_cross_domain_block(inp))
+    elif inp.scope == "freeform":
+        body.extend(_freeform_block(inp))
     return body
+
+
+def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
+    """Free-form mandate appended when ``scope == 'freeform'`` (absorbed from
+    the retired dynamic_specialist wave channel). The specialist is NOT bound
+    to the domain catalogue — the Orchestration ``task_description`` is the
+    whole mandate. The single deliverable is still ONE ``specialist_done``."""
+    desc = (inp.task_description or "").strip() or "(no task description provided)"
+    return [
+        "",
+        "### Free-form mandate (scope = freeform)",
+        "",
+        "You are dispatched as a **free-form** specialist: you are NOT bound to "
+        "the domain catalogue above. The Orchestration mandate below is your "
+        "whole task — investigate it wherever it leads (framework internals, "
+        "upstream PRs, host probing, source patches).",
+        "",
+        "Mandate from Orchestration:",
+        "",
+        f"> {desc}",
+        "",
+        "Set ``scope='freeform'`` on each proposal. Your single deliverable is "
+        "still ONE ``specialist_done`` carrying ``proposal_set`` + "
+        "``patches_written``. Never self-report numeric speedups — the "
+        "Coordinator measures gain.",
+    ]
 
 
 def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:

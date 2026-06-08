@@ -3341,11 +3341,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     except (TypeError, ValueError):
         coordinator.framework_pr_discover_timeout_sec = 0.0
-    # Free-form dynamic specialist dispatch (PR #461): override per-dispatch model with the blessed
-    # --specialist-model (else --claude-model) so the subprocess uses a model in the gateway catalog.
-    coordinator._dynamic_specialist_model = (
-        getattr(args, "specialist_model", None) or args.claude_model
-    ).strip()
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 0
