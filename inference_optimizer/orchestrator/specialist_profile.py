@@ -66,6 +66,13 @@ class SpecialistProfile:
     def is_cross_domain(self) -> bool:
         return self.scope == SCOPE_DOMAINS
 
+    @property
+    def grants_bench_tool(self) -> bool:
+        """True iff this dispatch may use the in-loop ``run_bench`` tool. Only
+        patch-authoring specialists with ``bench=True`` qualify (bench has no
+        meaning for read-only research)."""
+        return self.mode == MODE_PATCH and self.bench
+
 
 def _coerce_bool(value: Any, default: bool) -> bool:
     if value is None:

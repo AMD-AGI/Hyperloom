@@ -527,7 +527,40 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.extend(_cross_domain_block(inp))
     elif inp.scope == "freeform":
         body.extend(_freeform_block(inp))
+    if inp.bench and inp.mode == "patch":
+        body.extend(_bench_block(inp))
     return body
+
+
+def _bench_block(inp: SpecialistPromptInputs) -> list[str]:
+    """In-loop micro-bench mandate appended for bench-enabled specialists
+    (``mode=patch`` & ``bench=true``). Lists the whitelisted ``bench_id``s and
+    the worktree-scoped contract; the ``run_bench`` tool executes them."""
+    from ..specialist_bench import BENCH_REGISTRY, MAX_BENCH_WALL_CLOCK_SEC
+    if not BENCH_REGISTRY:
+        return []
+    lines = [
+        "",
+        "### In-loop micro-bench (run_bench)",
+        "",
+        "You have the worktree-scoped ``run_bench`` tool to micro-measure the "
+        "impact of a patch BEFORE you finalize it. Each bench runs a "
+        "whitelisted probe inside your worktree, writes under "
+        "``scratch/bench/<bench_id>/`` (destroyed with the worktree), and is "
+        f"hard-capped at {int(MAX_BENCH_WALL_CLOCK_SEC)}s. Benches never start "
+        "a serving process and never write outside the worktree.",
+        "",
+        "Allowed bench_ids:",
+    ]
+    for spec in BENCH_REGISTRY.values():
+        lines.append(f"- ``{spec.bench_id}`` — {spec.description}")
+    lines.extend([
+        "",
+        "run_bench is advisory: the Coordinator still owns the authoritative "
+        "E2E benchmark and the KEEP/REVERT decision. Never self-report numeric "
+        "speedups in ``specialist_done`` based on a micro-bench.",
+    ])
+    return lines
 
 
 def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:

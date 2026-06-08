@@ -4602,6 +4602,13 @@ class Coordinator:
                 str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
             )
             lanes, ttl = self._registry_lanes_ttl(action_name)
+            # Bench-enabled specialists serialize against the other GPU
+            # benchmark/profile/server work via benchmark_lane (research_lane
+            # alone conflicts with nothing).
+            if action_name == "specialist":
+                from .specialist_profile import resolve_specialist_profile
+                if resolve_specialist_profile(params).grants_bench_tool:
+                    lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
                 params=params,
@@ -4775,6 +4782,14 @@ class Coordinator:
         plane = self.knowledge_plane
 
         from .specialist_domains import normalize_dispatch_tags
+        from .specialist_profile import resolve_specialist_profile
+
+        # Bench-enabled (mode=patch & bench=true) specialists run worktree
+        # micro-benchmarks, so they must hold a GPU lease: default needs_gpu so
+        # the dispatcher routes them through the gpu_specialist_pool quota +
+        # TTL throttle (operator/LLM may still override explicitly).
+        if resolve_specialist_profile(params).grants_bench_tool:
+            params.setdefault("needs_gpu", True)
 
         domain = str(params.get("domain") or "").strip()
         # Knowledge-domain tags drive multi-anchor prompt assembly; a single ``domain`` is the legacy single-tag alias.

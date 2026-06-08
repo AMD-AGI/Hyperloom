@@ -24,6 +24,7 @@ from typing import Any
 from ..session_paths import runs_dir
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
+from .specialist_bench import BENCH_TOOL_ENABLED, TOOL_RUN_BENCH
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     FREEFORM_DOMAIN,
@@ -224,19 +225,30 @@ class SpecialistRunner:
         self.knowledge_plane = knowledge_plane
 
     def _resolve_tools(
-        self, task_allowed_tools: list[str] | tuple[str, ...] | None = None,
+        self,
+        task_allowed_tools: list[str] | tuple[str, ...] | None = None,
+        *,
+        grant_bench: bool = False,
     ) -> tuple[str, ...]:
         """Return the per-task tool whitelist.
 
         Strips ``mcp__pr_monitor__*`` when PR Monitor is disabled (and
         ``mcp__cortex_kb__*`` when Cortex disabled); honors a narrower
-        ``Task.allowed_tools``; enforces :data:`SPECIALIST_TOOL_DENYLIST` last.
+        ``Task.allowed_tools``; grants the worktree-scoped ``run_bench`` tool
+        only to bench-enabled specialists (``grant_bench`` and the bench tool
+        globally enabled); enforces :data:`SPECIALIST_TOOL_DENYLIST` last.
         """
         tools = (
             list(task_allowed_tools)
             if task_allowed_tools
             else list(self.default_tools)
         )
+        # run_bench is granted only to bench-enabled (mode=patch & bench=true)
+        # specialists, and never via the operator-narrowed allowlist.
+        if grant_bench and BENCH_TOOL_ENABLED and TOOL_RUN_BENCH not in tools:
+            tools.append(TOOL_RUN_BENCH)
+        elif not grant_bench:
+            tools = [t for t in tools if t != TOOL_RUN_BENCH]
         plane = self.knowledge_plane
         if plane is not None:
             try:
@@ -437,6 +449,7 @@ class SpecialistRunner:
             notes=notes,
             resolved_tools=self._resolve_tools(
                 getattr(ctx.task, "allowed_tools", None),
+                grant_bench=profile.grants_bench_tool,
             ),
         )
 

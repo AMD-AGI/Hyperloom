@@ -27,9 +27,10 @@ from typing import Any
 TOOL_RUN_BENCH: str = "run_bench"
 
 # When False, ``run_bench`` is excluded from the tool surface and
-# ``BENCH_REGISTRY`` is empty; flipped together with real probe bodies in the
-# bench-enable phase.
-BENCH_TOOL_ENABLED: bool = False
+# ``BENCH_REGISTRY`` is empty. Enabled now that the bench probe scripts +
+# GPU-lane throttle are wired; the probe bodies under ``benches/`` are still
+# lightweight placeholders that emit a result.json without starting a server.
+BENCH_TOOL_ENABLED: bool = True
 
 
 @dataclass(frozen=True)
@@ -43,9 +44,47 @@ class BenchSpec:
     script_path: str
 
 
-# Populated alongside real probe implementations; the gate above guards the
-# empty case.
-BENCH_REGISTRY: dict[str, BenchSpec] = {}
+# Bench whitelist. Each entry maps a stable ``bench_id`` to a script under the
+# package ``benches/`` directory. Scripts are worktree-scoped probes that read
+# the ``SPECIALIST_BENCH_*`` env contract and must never start a serving
+# process (see benches/README.md).
+BENCH_REGISTRY: dict[str, BenchSpec] = {
+    spec.bench_id: spec
+    for spec in (
+        BenchSpec(
+            bench_id="kernel_attention_timing",
+            description=(
+                "Micro-time the attention kernel path in the worktree "
+                "(prefill + decode shapes)."
+            ),
+            wall_clock_sec=45.0,
+            script_path="kernel_attention_timing.sh",
+        ),
+        BenchSpec(
+            bench_id="kernel_gemm_timing",
+            description="Micro-time representative GEMM shapes in the worktree.",
+            wall_clock_sec=45.0,
+            script_path="kernel_gemm_timing.sh",
+        ),
+        BenchSpec(
+            bench_id="kernel_kvcache_layout",
+            description=(
+                "Probe KV-cache layout / paging cost for the worktree build."
+            ),
+            wall_clock_sec=45.0,
+            script_path="kernel_kvcache_layout.sh",
+        ),
+        BenchSpec(
+            bench_id="inference_short_prompt",
+            description=(
+                "Short-prompt single-process inference micro-bench (no served "
+                "endpoint)."
+            ),
+            wall_clock_sec=60.0,
+            script_path="inference_short_prompt.sh",
+        ),
+    )
+}
 
 # Hard ceiling on a single ``run_bench`` invocation.
 MAX_BENCH_WALL_CLOCK_SEC: float = 60.0
