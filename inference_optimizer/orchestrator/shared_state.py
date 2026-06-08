@@ -2348,8 +2348,8 @@ class SharedState:
         Uniform entry schema (see audit-trail plan):
 
             {ts, task_id, status, decision, key_metric, key_metric_kind,
-             workspace, error_class, error_excerpt, raw_result_path,
-             reported_success, extras}
+             workspace, error_class, error_excerpt, stderr_tail,
+             raw_result_path, reported_success, extras}
 
         ``status`` is ``"succeeded"`` or ``"failed"``; ``decision`` is the
         Coordinator's interpretation of what it did with the result
@@ -2399,6 +2399,14 @@ class SharedState:
                 if result.get("error_class") else None
             ),
             "error_excerpt": self._truncate_excerpt(result.get("error")),
+            # stderr_tail mirrors record_action_failure: only for subprocess
+            # failures, so the breakdown exporter can surface the raw crash.
+            "stderr_tail": (
+                self._stderr_tail(result.get("error"))
+                if str(result.get("error_class") or "")
+                in {"subprocess_nonzero", "timeout"}
+                else None
+            ),
             "raw_result_path": (
                 str(result.get("raw_result_path"))
                 if result.get("raw_result_path") else None
