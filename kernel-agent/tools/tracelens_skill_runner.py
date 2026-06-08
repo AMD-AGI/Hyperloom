@@ -1219,12 +1219,63 @@ def _resolve_source_target(
     }
 
 
+_NATIVE_SOURCE_SUFFIXES = (
+    ".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c",
+)
+
+
+def _is_native_source(path: str) -> bool:
+    """True for C/C++/HIP/CUDA source files (#420).
+
+    Native sources have no Python AST to resolve a stable ``def`` line, so
+    TraceLens reports the call-site ``#L<line>`` which differs per call —
+    keying a task_group on that line splits one device kernel across
+    groups. Callers therefore drop the line/function key components for
+    these files.
+    """
+    return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
+
+
+def _normalize_operation_key(operation: str) -> str:
+    """Canonicalize a TraceLens operation name for task-group keying (#420).
+
+    Strips balanced ``<...>`` template-argument lists (nested-safe) so the
+    SAME kernel profiled at different dtypes/shapes — e.g.
+    ``rmsnorm_kernel<bf16>`` vs ``rmsnorm_kernel<fp16>`` — groups together,
+    while DISTINCT kernels (different base names) stay separate (the Q1
+    invariant). Returns the original string when stripping leaves nothing.
+    """
+    s = str(operation).strip()
+    if "<" not in s:
+        return s
+    out: list[str] = []
+    depth = 0
+    for ch in s:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            if depth > 0:
+                depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    normalized = "".join(out).strip()
+    return normalized or s
+
+
 def aggregate_by_source_function(
     candidates: list[dict[str, Any]],
     *,
     source_root: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Group TraceLens candidates by AST-resolved ``(path, line, fn)``.
+    """Group TraceLens candidates into per-kernel task_groups.
+
+    Native (.cu/.hip/.cpp) sources key on ``(source_path, function)`` ONLY:
+    one ``__global__`` instantiated at many dtypes/shapes emits different
+    mangled operation symbols + per-call lines but is ONE kernel, so both
+    are dropped and the instances collapse into one composite job (#420).
+    Python sources key on ``(operation, path, line, function)`` because one
+    caller frame can launch distinct kernels (Q1); ``operation`` is
+    normalized to fold a kernel seen at multiple dtypes.
 
     Returns a list of ``task_group`` dicts, sorted by aggregate kernel
     time (descending). Each group carries:
@@ -1266,7 +1317,31 @@ def aggregate_by_source_function(
     # "rewrite forward" task. Including ``operation`` keeps each kernel
     # identity intact while still collapsing the same kernel called at
     # different shapes (the Q1 case from the user screenshots).
-    groups: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+    #
+    # #420 — collapse the instantiations of ONE device kernel that
+    # TraceLens otherwise over-splits into redundant task_groups (one
+    # wasted GEAK dispatch each). Two tracks:
+    #   * Native (.cu/.hip/.cpp): a single ``__global__`` template
+    #     instantiated at many dtypes/shapes/modes emits DIFFERENT mangled
+    #     ``operation`` symbols (Itanium ABI, e.g.
+    #     ``_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256E...`` — a
+    #     mangled symbol, NOT a ``<...>`` spelling) and a different per-call
+    #     ``#L`` line, yet it is ONE kernel body in ONE translation unit.
+    #     We therefore key on ``(source_path, function)`` ONLY and DROP both
+    #     the mangled operation and the volatile call-site line, so every
+    #     instance collapses into one composite job carrying all member
+    #     (op/mode, shape, quant) rows (issue #420; the GEAK side that
+    #     synthesizes a single-metric harness is AMD-AGI/GEAK#258). For
+    #     native sources ``function`` is the file stem (no C++ AST), so this
+    #     is effectively per-source-file aggregation.
+    #   * Python wrappers: TraceLens's "Kernel Path" reports the calling
+    #     Python frame (e.g. ``.../gpt_oss.py(283): forward``), and ONE
+    #     caller can launch DISTINCT kernels — ``vllm::rocm_unquantized_gemm``
+    #     (GEMM) and ``vllm::rocm_aiter_triton_add_rmsnorm_pad`` (RMSNorm)
+    #     under one ``forward``. So ``operation`` MUST stay in the key (Q1
+    #     invariant), normalized to fold a kernel seen at multiple dtypes.
+    #     ``source_path`` is ``os.path.normpath``-canonicalized either way.
+    groups: dict[tuple, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
@@ -1274,18 +1349,29 @@ def aggregate_by_source_function(
         if target is None:
             continue
         operation = str(cand.get("name") or "").strip()
-        key = (
-            operation,
-            target["source_path"],
-            int(target["definition_line"]),
-            str(target["function_name"]),
-        )
+        src_norm = os.path.normpath(str(target["source_path"]))
+        function_name = str(target["function_name"])
+        if _is_native_source(src_norm):
+            # Drop the mangled operation + per-call line: one __global__
+            # template == one composite job, keyed on its source TU.
+            key: tuple = ("native", src_norm, function_name)
+        else:
+            # Keep the (normalized) operation so distinct kernels sharing
+            # one Python caller frame stay separate (Q1 invariant).
+            norm_op = _normalize_operation_key(operation)
+            key = (
+                "py",
+                norm_op,
+                src_norm,
+                int(target["definition_line"]),
+                function_name,
+            )
         bucket = groups.get(key)
         if bucket is None:
             bucket = {
                 "task_group_id":          "",  # filled below after sorting
                 "operation":              operation,
-                "source_path":            target["source_path"],
+                "source_path":            src_norm,
                 "definition_line":        target["definition_line"],
                 "function_name":          target["function_name"],
                 "ast_resolved":           bool(target.get("ast_resolved")),
