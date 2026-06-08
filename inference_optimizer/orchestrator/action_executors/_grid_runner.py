@@ -110,13 +110,21 @@ def _resolve_magpie_python() -> str:
     with a Magpie-less ``/usr/bin/python3``.
     """
     def _can_import_magpie(py: str) -> bool:
+        # Probe Magpie AND its top-level runtime dep ``yaml``: an editable
+        # install puts Magpie on sys.path via a .pth regardless of whether
+        # the interpreter has PyYAML, so ``import Magpie`` alone can succeed
+        # on an interpreter that then dies at Magpie startup with
+        # ``ModuleNotFoundError: No module named 'yaml'`` (surfaced as
+        # subprocess_nonzero / baseline_failed). Requiring yaml here makes
+        # the resolver skip such interpreters and fall through to the
+        # canonical /opt/venv that has the full dependency set.
         try:
             # NB: ``run_with_session_kill`` always captures stdout/stderr via
             # PIPE internally and does NOT accept ``capture_output`` — passing
             # it raises TypeError, which the broad ``except`` would swallow as
             # "cannot import", silently disabling the whole probe.
             proc = run_with_session_kill(
-                [py, "-c", "import Magpie"],
+                [py, "-c", "import Magpie, yaml"],
                 timeout=10,
             )
             return getattr(proc, "returncode", 1) == 0
