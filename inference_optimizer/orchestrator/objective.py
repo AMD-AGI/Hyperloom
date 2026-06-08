@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Objective abstraction
 
 The Objective is the goal that drives early-stop, pressure scoring, and

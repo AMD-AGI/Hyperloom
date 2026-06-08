@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """IR-8 tests: --framework atom validates multi-node guard and does
 not auto-flip any kernel / framework phase knobs.
 

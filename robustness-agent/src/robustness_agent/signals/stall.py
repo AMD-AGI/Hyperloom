@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Agent-stall detection.
 
 : the robustness role is expected to detect "agent

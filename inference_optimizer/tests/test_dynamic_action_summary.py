@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the ``dynamic_actions`` SharedState aggregate view +
 state machine.
 Auxiliary tests pin the transition table invariants, the prompt
@@ -29,7 +31,7 @@ from inference_optimizer.orchestrator.dynamic_action_proposal import (
     TERMINAL_LIFECYCLE_STATUSES,
     can_transition,
 )
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     PolicyDenied,
     PolicyGate,

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Kill the previous vllm/sglang server on the RayJob head pod.
 #
 # Submitted via Ray Dashboard REST by ``multi_node restart-server`` as

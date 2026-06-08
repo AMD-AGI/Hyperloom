@@ -30,7 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [v0.2] - 2026-04-22
 ### Added
-- Hardened marathon protocol with deep kernel analysis, KM feed pipeline improvements, micro-benchmarking, and GPU time-share handling.
+- Hardened optimization protocol with deep kernel analysis, KM feed pipeline improvements, micro-benchmarking, and GPU time-share handling.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 

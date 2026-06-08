@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Session identification + lifecycle renderer.
 
 Surfaces just enough of the ``session`` section so the report header

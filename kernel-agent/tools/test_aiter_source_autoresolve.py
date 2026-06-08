@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Table-free aiter source resolution via aiter's OWN build registry.
 
 The legacy ``_AITER_COMPILE_OPS_PROMOTIONS`` table only covered a fixed

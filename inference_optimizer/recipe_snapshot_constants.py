@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """recipe-snapshot v2 HTTP wire constants — single source of truth.
 
 Mirrors the contract documented in
@@ -229,8 +231,8 @@ DEFAULT_GENERATOR:  Final[str] = "hyperloom"
 SMOKE_GENERATOR:    Final[str] = "hyperloom-smoke"
 
 # Default ``confidence`` when caller doesn't override. Spec accepts
-# ``[0.0, 1.0]``; the optimizer's marathon-winner default in the prior
-# system was 0.85, kept here for continuity.
+# ``[0.0, 1.0]``; the default in the prior system was 0.85, kept here
+# for continuity.
 DEFAULT_CONFIDENCE: Final[float] = 0.85
 
 

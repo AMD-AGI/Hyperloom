@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-K — aiter JIT cache invalidation around .cu/.cuh rebuilds.
 
 Background

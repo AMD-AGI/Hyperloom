@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline comparison renderer.
 
 Surfaces the ``roofline`` section of the breakdown — one block per

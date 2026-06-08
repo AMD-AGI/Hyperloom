@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Per-candidate isolation primitives — git worktree + venv lifecycle.
 
 Split out of ``explorer.py`` per merged-design §2.2 so the explorer

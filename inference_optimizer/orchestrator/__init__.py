@@ -1,4 +1,6 @@
-"""Coordinator + protocol layer ().
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Coordinator + protocol layer.
 
 The orchestrator package owns:
 

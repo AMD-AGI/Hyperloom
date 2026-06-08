@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-aware variant filter (opt-in, off by default).
 
 Today the EXPLORE phase fans every specialist / default-grid variant out

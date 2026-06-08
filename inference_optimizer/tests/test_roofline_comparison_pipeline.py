@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline Comparison pipeline tests — `report.py` ↔ `roofline_snapshots`.
 
 Covers the data path that produces ``final.json["roofline_comparison"]``
@@ -750,7 +752,7 @@ class TestBuildSnapshotTwoSidedRoofline:
         assert snap["roofline_mem_ceiling_tok_per_sec"] == 8000.0
         assert snap["roofline_cmp_ceiling_tok_per_sec"] == 40_000.0
         assert snap["roofline_bound_kind"] == "memory"
-        # Theoretical peak stays == min(mem, cmp).
+        # Caller-provided primary ceiling is persisted separately from sides.
         assert snap["theoretical_peak_tok_per_sec"] == 8000.0
 
     def test_zero_mem_cmp_serialize_as_none(self):
@@ -853,3 +855,38 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         assert snap["roofline_cmp_ceiling_tok_per_sec"] is None
         assert snap["roofline_bound_kind"] == "unknown"
         assert snap["within_roofline_pct"] is None
+
+    def test_perfmodel_breakdown_persists_decode_sides_and_bound(
+        self, tmp_path, monkeypatch,
+    ):
+        from inference_optimizer.orchestrator import roofline_ceiling
+        from inference_optimizer.orchestrator.shared_state import SharedState
+
+        self._mock_breakdown(
+            monkeypatch, mem=8000.0, cmp=40_000.0, peak=7900.0,
+            kind="memory",
+        )
+        monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: object())
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_roofline_from_perfmodel",
+            lambda **kw: SimpleNamespace(
+                decode_tok_per_s=7900.0,
+                prefill_tok_per_s=123.0,
+                decode_mem_tok_per_s=8000.0,
+                decode_cmp_tok_per_s=40_000.0,
+                bound_kind="memory",
+                hbm_bw_gbps=5300.0,
+                peak_achievable_tflops=708.0,
+                ops=[],
+            ),
+        )
+        state = SharedState()
+        state.baseline_tput = 1000.0
+        snap = self._record(tmp_path, state)
+        perf = snap["perfmodel_breakdown"]
+
+        assert perf["decode_tok_per_s"] == 7900.0
+        assert perf["decode_mem_tok_per_s"] == 8000.0
+        assert perf["decode_cmp_tok_per_s"] == 40_000.0
+        assert perf["bound_kind"] == "memory"

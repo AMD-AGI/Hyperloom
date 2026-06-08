@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Roofline-v2 N7: baseline vs exp verification per design §10.5.
 
 Compares two Hyperloom session_dirs (typically a `main` baseline and
@@ -55,7 +57,7 @@ class SessionMetrics:
     analysis_md_text: str = ""
 
     # Cache metrics (sum across all backend.calls if surfaced in
-    # state.json; otherwise 0 — v2.0 N6 emits these to backend.calls
+    # state.json; otherwise 0 — the backend emits these to backend.calls
     # only, so verify can't read them unless an audit hook pushes them
     # to SharedState; tracked here for forward-compatibility).
     cache_creation_input_tokens: int = 0
@@ -71,9 +73,8 @@ class SessionMetrics:
 
 
 # Keywords the LLM is likely to quote from analysis.md when grounding
-# a PRUNE_BRANCH reason or propose-action note. §8.7 orchestration.md
-# instructs the LLM to quote the report; we count how often that
-# happened.
+# a PRUNE_BRANCH reason or propose-action note. The LLM is instructed
+# to quote the report; we count how often that happened.
 _ANALYSIS_MD_KEYWORDS = (
     "analysis.md",
     "saturated",
@@ -346,7 +347,7 @@ def extract(session_dir: Path) -> SessionMetrics:
 
     # roofline action counter — derived from attempts_history (the
     # roofline composite action joins the standard audit-attempts
-    # mechanism via cli registration in N2).
+    # mechanism via cli registration).
     m.roofline_action_count = _count_action_attempts(state, "roofline")
     m.profile_action_count = _count_action_attempts(state, "profile")
 
@@ -367,10 +368,10 @@ def extract(session_dir: Path) -> SessionMetrics:
         )
     m.analysis_md_referenced_count = _count_analysis_md_references(state)
 
-    # Cache metrics — N6 surfaces these to backend.calls per-call.
-    # Coordinator does not aggregate to SharedState (deferred to
-    # N6b / next PR per §7.2). For now read pre-aggregated values
-    # if a future hook writes them; otherwise leave at 0.
+    # Cache metrics — the backend surfaces these to backend.calls
+    # per-call. Coordinator does not aggregate to SharedState. For now
+    # read pre-aggregated values if a future hook writes them; otherwise
+    # leave at 0.
     cache_metrics = state.get("tick_cache_metrics") or {}
     if isinstance(cache_metrics, dict):
         m.cache_creation_input_tokens = int(
