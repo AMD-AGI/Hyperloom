@@ -210,10 +210,9 @@ def build_roofline_snapshot(
 ) -> dict[str, Any]:
     """Materialise one side (baseline or latest) of the comparison.
 
-    ``theoretical_peak_tok_per_sec`` is the two-sided roofline ceiling
-    ``min(T_mem, T_cmp)`` produced by
-    ``roofline_ceiling.compute_roofline_breakdown_from_state``; constant
-    across all snapshots in a session. The decomposition is also
+    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling
+    produced by ``roofline_ceiling.compute_roofline_breakdown_from_state``.
+    The decomposition is also
     persisted via ``roofline_mem_ceiling_tok_per_sec`` /
     ``roofline_cmp_ceiling_tok_per_sec`` / ``roofline_bound_kind`` so
     reports can show which side dominated (``"memory"`` / ``"compute"``
@@ -240,12 +239,8 @@ def build_roofline_snapshot(
         "comm_pct": None,
         "top_bottleneck": None,
         "top_kernel": None,
-        # Two-sided roofline ceiling. ``theoretical_peak_tok_per_sec``
-        # stays as min(mem, cmp) for backward-compat with the existing
-        # dashboard renderer; the two new ``roofline_*_ceiling_*``
-        # fields and ``roofline_bound_kind`` surface T_mem / T_cmp /
-        # the dominant side independently. All ``None`` when ceiling
-        # is unavailable (see ``roofline_ceiling`` safe-degrade paths).
+        # Primary decode roofline ceiling plus its memory/compute sides.
+        # All ``None`` when the ceiling is unavailable.
         "theoretical_peak_tok_per_sec": (
             float(theoretical_peak_tok_per_sec)
             if theoretical_peak_tok_per_sec > 0 else None

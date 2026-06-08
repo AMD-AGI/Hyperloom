@@ -843,6 +843,48 @@ _NON_PATCHABLE_NAME_MARKERS: tuple[str, ...] = (
     "aten::copy",
 )
 
+# Vendor BLAS / closed-source compute backends. A candidate whose runtime
+# implementation is one of these has *no rewritable source* regardless of
+# which Python file the symbol resolves to: the device body lives in a
+# precompiled vendor binary (Tensile/hipBLASLt/rocBLAS/CK kernels), and the
+# attributed ``source_file`` is only the framework dispatch site. Matched
+# against the candidate's ``library`` field (case-insensitive).
+_VENDOR_BACKEND_LIBRARIES: frozenset[str] = frozenset(
+    {
+        "tensile",
+        "hipblas",
+        "hipblaslt",
+        "rocblas",
+        "rocblaslt",
+        "ck",
+        "composable_kernel",
+        "ck_kernels",
+        "miopen",
+    }
+)
+
+# torch ``__torch_function__`` / ``__torch_dispatch__`` interception shims.
+# These files intercept a tensor op and forward it to a vendor backend
+# (e.g. vLLM ``parameter.py`` forwards ``rocm_unquantized_gemm`` to Tensile);
+# the file itself contains no rewritable device kernel, so a symbol that
+# resolves here is a dispatch stub, not an editable kernel. Matched as a
+# POSIX path suffix against the resolved ``source_file``.
+_TORCH_DISPATCH_SHIM_SOURCES: tuple[str, ...] = (
+    "vllm/model_executor/parameter.py",
+)
+
+
+def is_torch_dispatch_shim_source(source_file: str) -> bool:
+    """True when ``source_file`` is a known torch-dispatch interception shim.
+
+    These ``__torch_function__`` / ``__torch_dispatch__`` files forward a
+    tensor op to a vendor backend and hold no rewritable device kernel, so a
+    symbol attributed here must be treated as a non-reusable dispatch stub
+    (same handling as ``@compile_ops`` JIT stubs in ``aiter/ops/moe_op.py``).
+    """
+    posix = str(source_file or "").replace("\\", "/")
+    return any(posix.endswith(suffix) for suffix in _TORCH_DISPATCH_SHIM_SOURCES)
+
 
 def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     """Return True for torch.compile / Inductor / cache-generated kernels.
@@ -888,13 +930,22 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, "vendor binary (no rewritable source)"
     if candidate.get("vendor_dispatch_wrapper"):
         return False, f"vendor dispatch wrapper at {source_file}"
+    if is_torch_dispatch_shim_source(source_file):
+        return False, (
+            f"torch dispatch shim (no rewritable kernel body): {source_file}"
+        )
     for marker in _NON_PATCHABLE_NAME_MARKERS:
         if marker in lower_name:
             return False, (
                 f"non-patchable kernel name marker '{marker}' in {name!r}"
             )
+    library = str(candidate.get("library") or "").strip().lower()
+    if library in _VENDOR_BACKEND_LIBRARIES:
+        return False, (
+            f"vendor backend library {candidate.get('library')!r} "
+            "(precompiled binary, no rewritable source)"
+        )
     if name.startswith("aten::"):
-        library = str(candidate.get("library") or "").strip().lower()
         if not library or library in {"tensile", "pytorch native"}:
             return False, (
                 f"PyTorch native op {name!r} backed by "
@@ -1928,7 +1979,7 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "roofline_name": candidate.get("roofline_name"),
         "recommended_actions": list(candidate.get("recommended_actions") or []),
         "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
-    }
+        "rocprof_roofline": candidate.get("rocprof_roofline"),    }
 
 
 def build_kernel_roofline_payload(
@@ -2483,6 +2534,34 @@ def write_reports(
         candidates=candidates,
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
+
+    # Batch rocprof-compute enrichment is opt-in because it can profile many kernels.
+    # Kernel-opt still profiles the selected kernel on demand.
+    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
+    if enrich_value in {"1", "true", "yes", "on"}:
+        try:
+            tools_dir = str(Path(__file__).resolve().parent)
+            if tools_dir not in sys.path:
+                sys.path.insert(0, tools_dir)
+            from rocprof_roofline import enrich_kernel_roofline_sidecar  # noqa: WPS433
+            enrich_summary = enrich_kernel_roofline_sidecar(
+                sidecar_path=str(kernel_roofline_path),
+                candidates_path=str(kernel_candidates_path),
+                workdir=str(run_dir),
+                timeout_sec_per_kernel=int(
+                    os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800
+                ),
+                log_fn=None,
+            )
+            print(
+                "[rocprof_enrich] "
+                f"matched={enrich_summary.get('matched', 0)} "
+                f"skipped={enrich_summary.get('skipped', 0)} "
+                f"failed={enrich_summary.get('failed', 0)} "
+                f"rows={enrich_summary.get('rows', 0)}"
+            )
+        except Exception as exc:  # pragma: no cover - guard against import cycles
+            print(f"[rocprof_enrich] skipped: {type(exc).__name__}: {exc}")
 
     artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
