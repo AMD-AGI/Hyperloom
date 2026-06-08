@@ -2930,7 +2930,10 @@ def _preflight(
             file=sys.stderr,
         )
         sys.exit(2)
-    os.environ.setdefault("INFERENCEX_PATH", inferencex_path)
+    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH that
+    # triggered the clone above must not survive into the child env, or Magpie
+    # still reads the bad path. The validated value wins.
+    os.environ["INFERENCEX_PATH"] = inferencex_path
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()

@@ -91,3 +91,16 @@ def test_detection_candidates_exclude_wekafs_host_mounts():
         'Path("/wekafs/fully-local/inference_optimization/InferenceX")'
         not in src
     )
+
+
+# ---------------------------------------------------------------------------
+# validated path overwrites a stale/broken INFERENCEX_PATH env
+# ---------------------------------------------------------------------------
+def test_validated_inferencex_path_overwrites_env_not_setdefault():
+    """A stale/broken INFERENCEX_PATH that triggers the clone must be
+    overwritten with the validated path. ``setdefault`` would leave the bad
+    value in place, so Magpie would still read the broken mount."""
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    # The final export must be an unconditional assignment, never setdefault.
+    assert 'os.environ["INFERENCEX_PATH"] = inferencex_path' in src
+    assert 'os.environ.setdefault("INFERENCEX_PATH"' not in src

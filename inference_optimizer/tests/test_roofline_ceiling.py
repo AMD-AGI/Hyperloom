@@ -1883,7 +1883,7 @@ class TestRuntimeDtypeResolution:
     ) -> str:
         """Write a materialized baseline yaml carrying ``EXTRA_*_ARGS`` and
         return its path (the shape the executor stamps post-baseline)."""
-        import yaml as _yaml
+        import yaml as _yaml  # type: ignore[reportMissingModuleSource]
         envs = {
             "TP": tp,
             "CONC": conc,
@@ -1958,6 +1958,29 @@ class TestRuntimeDtypeResolution:
         rt = resolve_runtime_dtype(state, meta)
         assert rt.source == "server_args_dtype"
         assert rt.weight_dtype_tag == "bfloat16"
+
+    def test_optimized_extra_envs_server_args_are_resolved(self, tmp_path):
+        """Accepted env-only configs can carry server args in EXTRA_*_ARGS."""
+        state = self._dense_fp32_state(tmp_path, "")
+        state.current_best = {
+            "tput": 1000.0,
+            "extra_envs": {"EXTRA_SGLANG_ARGS": "--quantization fp8"},
+        }
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.weight_dtype_bytes == 1.0
+        assert rt.quantization == "fp8"
+        assert rt.source == "server_args_quantization"
+
+    def test_optimized_extra_envs_override_top_level_server_args(self, tmp_path):
+        """materialize_config_with_envs applies extra_envs after
+        extra_server_args, so an EXTRA_*_ARGS env wins for dtype resolution."""
+        state = self._dense_fp32_state(tmp_path, "--dtype bfloat16")
+        state.current_best["extra_envs"] = {"EXTRA_SGLANG_ARGS": "--quantization fp8"}
+        meta = load_model_meta(state.model_path, precision_hint="fp8")
+        rt = resolve_runtime_dtype(state, meta)
+        assert rt.weight_dtype_bytes == 1.0
+        assert rt.quantization == "fp8"
 
     def test_runtime_workload_uses_baseline_yaml_fields(self, tmp_path):
         state = self._dense_fp32_state(tmp_path, "")

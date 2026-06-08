@@ -246,6 +246,11 @@ def _server_args_from(entry: Any) -> str:
     """Extract the server-args string from a ``current_best`` / baseline dict."""
     if not isinstance(entry, dict):
         return ""
+    envs = entry.get("extra_envs") or {}
+    if isinstance(envs, dict):
+        env_args = _server_args_from_envs(envs)
+        if env_args:
+            return env_args
     for key in ("candidate_extra_server_args", "extra_server_args", "extra_args"):
         val = entry.get(key)
         if isinstance(val, str) and val.strip():
