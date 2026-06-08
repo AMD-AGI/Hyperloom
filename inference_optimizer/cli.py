@@ -4295,7 +4295,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # --no-proposal-scoring or an empty model list; otherwise scores
         # each proposal_set and surfaces the results to Orchestration as
         # one reference among many (never gates anything).
-        proposal_scorer=_build_proposal_scorer(args),
+        proposal_scorer=_build_proposal_scorer(args, session_dir),
         # Warm-recipe replay controls. Default ON, fires when
         # warm_start_recipe.confidence >= min_confidence and the
         # measured gain reproduces at least min_reproduce_pct of the

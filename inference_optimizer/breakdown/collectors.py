@@ -4897,11 +4897,363 @@ def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Full-trace: unified token + decision timeline (FULL_TRACE_DESIGN §6)
+# ---------------------------------------------------------------------------
+# Token-counter keys, shared with orchestrator.trace.llm_trace. Re-declared
+# here (not imported) so the breakdown package stays free of orchestrator
+# deps — collectors must run offline against a session_dir tarball.
+_TOKEN_IN_KEY = "input_tokens"
+_TOKEN_OUT_KEY = "output_tokens"
+_TOKEN_CACHE_CREATE_KEY = "cache_creation_input_tokens"
+_TOKEN_CACHE_READ_KEY = "cache_read_input_tokens"
+_TOKEN_KEYS_ALL: tuple[str, ...] = (
+    _TOKEN_IN_KEY, _TOKEN_OUT_KEY,
+    _TOKEN_CACHE_CREATE_KEY, _TOKEN_CACHE_READ_KEY,
+)
+
+
+def _coerce_token(value: Any) -> int:
+    """Coerce a token counter to int, treating ``None`` / bad as 0.
+
+    The rollup sums tokens, so a missing counter contributes 0 here (the
+    ``None``-vs-0 distinction matters only on the raw per-call rows, which
+    we preserve verbatim in ``decision_trace.jsonl``).
+    """
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _empty_token_bucket() -> dict[str, int]:
+    return {
+        "total_in": 0,
+        "total_out": 0,
+        "total_cache_creation": 0,
+        "total_cache_read": 0,
+        "calls": 0,
+    }
+
+
+def _fold_call_into_bucket(bucket: dict[str, int], call: dict[str, Any]) -> None:
+    bucket["total_in"] += _coerce_token(call.get(_TOKEN_IN_KEY))
+    bucket["total_out"] += _coerce_token(call.get(_TOKEN_OUT_KEY))
+    bucket["total_cache_creation"] += _coerce_token(
+        call.get(_TOKEN_CACHE_CREATE_KEY)
+    )
+    bucket["total_cache_read"] += _coerce_token(call.get(_TOKEN_CACHE_READ_KEY))
+    bucket["calls"] += 1
+
+
+def _load_llm_calls(
+    session_dir: Path, warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Read every LLM-call row: the in-process ledger + all ext shards.
+
+    Merges ``reports/trace/llm_calls.jsonl`` with every
+    ``reports/trace/ext/*.jsonl`` shard written by out-of-process children.
+    Best-effort: missing files / dirs yield ``[]``; malformed lines are
+    skipped by :func:`_load_jsonl_safe`.
+    """
+    trace_root = session_dir / "reports" / "trace"
+    rows: list[dict[str, Any]] = list(
+        _load_jsonl_safe(trace_root / "llm_calls.jsonl", warnings)
+    )
+    ext_dir = trace_root / "ext"
+    if ext_dir.is_dir():
+        try:
+            shards = sorted(ext_dir.glob("*.jsonl"))
+        except OSError as exc:
+            warnings.append(f"decision_trace: failed to scan {ext_dir}: {exc!r}")
+            shards = []
+        for shard in shards:
+            rows.extend(_load_jsonl_safe(shard, warnings))
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _load_dispatch_history_all(
+    session_dir: Path, warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Read every dynamic_action ``dispatch_history.jsonl`` row.
+
+    Walks ``agents/orchestration/dynamic_actions/<dyn_id>/`` and stamps
+    each row with its owning ``dyn_id`` so the join can key on it. Returns
+    ``[]`` when the dynamic_actions tree is absent (no dynamic actions ran).
+    """
+    root = session_dir / "agents" / "orchestration" / "dynamic_actions"
+    if not root.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        dyn_dirs = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError as exc:
+        warnings.append(f"decision_trace: failed to scan {root}: {exc!r}")
+        return []
+    for dyn_dir in dyn_dirs:
+        rows = _load_jsonl_safe(dyn_dir / "dispatch_history.jsonl", warnings)
+        for row in rows:
+            if isinstance(row, dict):
+                row = dict(row)
+                row.setdefault("dyn_id", dyn_dir.name)
+                out.append(row)
+    return out
+
+
+def _build_phase_windows(
+    state: dict[str, Any],
+) -> list[tuple[float, str]]:
+    """Build a sorted ``[(entered_unix, phase), ...]`` timeline.
+
+    Derived from ``state.phase_history`` rows that carry a ``to_phase``
+    (real transitions). Used to backfill a call's / decision's phase from
+    its ``ts`` when the producer didn't stamp one (out-of-process children,
+    sub-agent runners). Empty when phase_history is missing.
+    """
+    history = state.get("phase_history") or []
+    if not isinstance(history, list):
+        return []
+    windows: list[tuple[float, str]] = []
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        to_phase = str(row.get("to_phase") or "").strip()
+        if not to_phase:
+            continue
+        ts_unix = row.get("ts_unix")
+        if ts_unix is None:
+            ts_unix = _parse_iso_unix(row.get("ts"))
+        if ts_unix is None:
+            continue
+        windows.append((float(ts_unix), to_phase))
+    windows.sort(key=lambda w: w[0])
+    return windows
+
+
+def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
+    """Return the phase active at ``ts`` per ``windows`` (latest <= ts)."""
+    unix = _parse_iso_unix(ts)
+    if unix is None or not windows:
+        return ""
+    phase = ""
+    for entered, name in windows:
+        if entered <= unix:
+            phase = name
+        else:
+            break
+    return phase
+
+
+def _decision_key(task_id: str, dyn_id: str) -> str | None:
+    """Canonical join key for a decision / call: ``dyn_id`` wins over
+    ``task_id`` (a dynamic_action dispatch owns both). ``None`` when
+    neither is present (the call can only be ts-window bucketed)."""
+    d = (dyn_id or "").strip()
+    if d:
+        return f"dyn:{d}"
+    t = (task_id or "").strip()
+    if t:
+        return f"task:{t}"
+    return None
+
+
+def collect_decision_trace(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Join the token ledger to the decision streams into one timeline.
+
+    Implements FULL_TRACE_DESIGN §6: read the per-call token rows
+    (``reports/trace/llm_calls.jsonl`` + ``ext/*.jsonl``), read the
+    decision rows (``optimization_journal.json`` KEEP/REVERT entries +
+    every dynamic_action ``dispatch_history.jsonl``), then attach each
+    decision's LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a
+    ``ts``-window phase fallback for calls that carry neither.
+
+    Side effect (best-effort): writes the joined timeline to
+    ``reports/trace/decision_trace.jsonl``. A write failure is swallowed —
+    the in-breakdown section is the authoritative product and must not be
+    lost to a disk error.
+
+    Returns ``{"decision_trace": [...], "token_rollup": {...},
+    "unattributed_tokens": {...}}``. All-empty (zeroed rollup) when no
+    trace files exist, so a session that ran before the trace subsystem
+    landed degrades cleanly.
+    """
+    calls = _load_llm_calls(session_dir, warnings)
+    phase_windows = _build_phase_windows(state)
+
+    # ── Index calls by decision key; orphans (no key) go to a ts list ──
+    calls_by_key: dict[str, list[dict[str, Any]]] = {}
+    orphan_calls: list[dict[str, Any]] = []
+    for call in calls:
+        key = _decision_key(
+            str(call.get("task_id") or ""), str(call.get("dyn_id") or ""),
+        )
+        if key is None:
+            orphan_calls.append(call)
+        else:
+            calls_by_key.setdefault(key, []).append(call)
+
+    # ── Gather decisions from the journal + dispatch_history ──
+    decisions: list[dict[str, Any]] = []
+    for e in _load_optimization_journal(session_dir, warnings):
+        if not isinstance(e, dict):
+            continue
+        task_id = str(e.get("task_id") or "")
+        key = _decision_key(task_id, "")
+        ts = _iso_z(e.get("ts"))
+        phase = str(e.get("phase") or "").strip() or _phase_at(ts, phase_windows)
+        decisions.append({
+            "kind": "keep_revert",
+            "key": key,
+            "phase": phase,
+            "tick": e.get("tick"),
+            "ts": ts,
+            "decision": {
+                "component": "orchestration",
+                "change": str(e.get("change") or ""),
+                "outcome": str(e.get("outcome") or ""),
+                "gain_pct": _to_float(e.get("gain_pct")),
+                "task_id": task_id,
+            },
+        })
+    for row in _load_dispatch_history_all(session_dir, warnings):
+        dyn_id = str(row.get("dyn_id") or "")
+        key = _decision_key(str(row.get("task_id") or ""), dyn_id)
+        ts = _iso_z(row.get("ts"))
+        phase = _phase_at(ts, phase_windows)
+        decisions.append({
+            "kind": "dynamic_action",
+            "key": key,
+            "phase": phase,
+            "tick": row.get("tick"),
+            "ts": ts,
+            "decision": {
+                "component": "dynamic_action",
+                "event": str(row.get("event") or ""),
+                "dyn_id": dyn_id,
+                "verdict": row.get("verdict"),
+                "outcome": str(row.get("integrate_status") or row.get("terminal_state") or ""),
+                "gain_pct": _to_float(row.get("delta_pct")),
+            },
+        })
+
+    # ── Attach calls to decisions; build the joined trace ──
+    # A given key's calls attach to exactly ONE decision — the first by ts
+    # (e.g. a dynamic_action's DISPATCHED event anchors all its sub-agent
+    # turns). Later same-key events (CRITIC_VERDICT / INTEGRATE_RESULT) get
+    # empty token buckets so the per-decision sums don't double-count.
+    consumed_keys: set[str] = set()
+    decision_trace: list[dict[str, Any]] = []
+    for dec in sorted(decisions, key=lambda d: (d.get("ts") or "")):
+        key = dec.get("key")
+        if key and key in calls_by_key and key not in consumed_keys:
+            attached = calls_by_key[key]
+            consumed_keys.add(key)
+        else:
+            attached = []
+        by_component: dict[str, dict[str, int]] = {}
+        agg = _empty_token_bucket()
+        for call in attached:
+            comp = str(call.get("component") or "unknown")
+            comp_bucket = by_component.setdefault(comp, _empty_token_bucket())
+            _fold_call_into_bucket(comp_bucket, call)
+            _fold_call_into_bucket(agg, call)
+        decision_trace.append({
+            "phase": dec.get("phase") or "",
+            "tick": dec.get("tick"),
+            "ts": dec.get("ts") or "",
+            "decision": dec.get("decision") or {},
+            "tokens": {
+                "by_component": by_component,
+                "total_in": agg["total_in"],
+                "total_out": agg["total_out"],
+                "total_cache": agg["total_cache_creation"] + agg["total_cache_read"],
+                "calls": agg["calls"],
+            },
+        })
+
+    # ── Unjoined calls: keyed calls with no matching decision + orphans ──
+    # These still count toward the session total + phase/component rollup so
+    # the books balance, but they don't anchor to a decision row.
+    unattributed = _empty_token_bucket()
+    for key, key_calls in calls_by_key.items():
+        if key in consumed_keys:
+            continue
+        for call in key_calls:
+            _fold_call_into_bucket(unattributed, call)
+    for call in orphan_calls:
+        _fold_call_into_bucket(unattributed, call)
+
+    # ── Rollups: by_phase + by_component + session_total (ALL calls) ──
+    by_phase: dict[str, dict[str, int]] = {}
+    by_component_roll: dict[str, dict[str, int]] = {}
+    session_total = _empty_token_bucket()
+    for call in calls:
+        comp = str(call.get("component") or "unknown")
+        # Phase: prefer the call's own phase, else ts-window backfill.
+        phase = str(call.get("phase") or "").strip() or _phase_at(
+            call.get("ts"), phase_windows
+        ) or "unattributed"
+        _fold_call_into_bucket(
+            by_phase.setdefault(phase, _empty_token_bucket()), call
+        )
+        _fold_call_into_bucket(
+            by_component_roll.setdefault(comp, _empty_token_bucket()), call
+        )
+        _fold_call_into_bucket(session_total, call)
+
+    token_rollup = {
+        "by_phase": by_phase,
+        "by_component": by_component_roll,
+        "session_total": session_total,
+    }
+
+    # ── Best-effort side write of the joined timeline (design §6.4) ──
+    _write_decision_trace_jsonl(session_dir, decision_trace, warnings)
+
+    return {
+        "decision_trace": decision_trace,
+        "token_rollup": token_rollup,
+        "unattributed_tokens": unattributed,
+    }
+
+
+def _write_decision_trace_jsonl(
+    session_dir: Path,
+    decision_trace: list[dict[str, Any]],
+    warnings: list[str],
+) -> None:
+    """Append-free atomic-ish write of ``reports/trace/decision_trace.jsonl``.
+
+    Rewrites the whole file (one JSON object per decision) on each export;
+    the collector is the single producer, so a full rewrite is simpler than
+    append + dedup and stays consistent with the latest join. Best-effort:
+    OSError is recorded in ``warnings`` and swallowed.
+    """
+    target = session_dir / "reports" / "trace" / "decision_trace.jsonl"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps(row, sort_keys=True) for row in decision_trace]
+        target.write_text(
+            ("\n".join(lines) + "\n") if lines else "", encoding="utf-8",
+        )
+    except OSError as exc:
+        warnings.append(
+            f"decision_trace: failed to write {target}: {exc!r}"
+        )
+
+
 __all__ = [
     "collect_attribution",
     "collect_baseline",
     "collect_capability_summary",
     "collect_critic_robustness",
+    "collect_decision_trace",
     "collect_final",
     "collect_explore_search",
     "collect_kb_provenance",
