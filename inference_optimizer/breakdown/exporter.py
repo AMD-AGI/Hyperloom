@@ -489,7 +489,7 @@ def write_minimal_final_report(
         sw_line = "(none)"
 
     lines = [
-        f"# Inference Optimizer — emergency final report",
+        "# Inference Optimizer — emergency final report",
         "",
         "> **Auto-generated safety-net.** The CLOSE phase 5-step "
         "sequencer did not run to completion (process exited before "
@@ -517,7 +517,7 @@ def write_minimal_final_report(
         _fmt_attempt(getattr(state, "last_explore", None), "last_explore"),
         _fmt_attempt(state.last_sweep, "last_sweep"),
         "",
-        f"## Structured detail",
+        "## Structured detail",
         "",
         f"See `{breakdown_link.name}` (sibling of session root) for the "
         f"complete `phase_history` / `critic_robustness` / "

@@ -410,7 +410,7 @@ def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> st
         f"- Models: {n} (Delivered: {delivered}, SaFE Succeeded: {safe_succeeded}, with gain: {with_gain}, compare against the baseline: {beat_infx})",
         f"- ISL/OSL: {isl} / {osl}",
         f"- InferenceX reference GPU: `{target_gpu}`",
-        f"- Sort: by Gain% (desc); failures last",
+        "- Sort: by Gain% (desc); failures last",
         "",
         "| # | Model | Frm | Prec | TP | Params | Baseline tok/s/GPU | "
         "Optimized tok/s/GPU | Gain | InfX | vs InfX |",
