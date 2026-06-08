@@ -1,11 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for :class:`runtime.web_tools.search_client.WebSearchClient`.
-
-Providers are simulated with tiny in-process classes that record their
-inputs and return canned hits, so tests stay deterministic and never go
-near httpx.
-"""
+"""Tests for :class:`runtime.web_tools.search_client.WebSearchClient`, using in-process recording providers (no httpx)."""
 
 from __future__ import annotations
 
