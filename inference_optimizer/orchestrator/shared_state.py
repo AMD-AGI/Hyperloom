@@ -1052,6 +1052,15 @@ class SharedState:
     # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
     # bypassed (``--degraded-kb``) or T0 failed.
     warm_start_ts: str = ""
+    # Model-facing WarmStartContext built by ``cortex_t0`` from the KB
+    # recipe row. PARALLEL to ``warm_start_recipe`` (which stays the raw
+    # KB envelope that breakdown / kb_explorer read). Carries an explicit
+    # ``status`` (``hit`` / ``seed_only`` / ``miss`` / ``error``) plus a
+    # ready-to-replay ``recommended_replay`` champion and the experiential
+    # lists, so warm-replay / specialist / ledger consumers branch on
+    # status without re-deriving it from tier+confidence. Empty dict when
+    # T0 was bypassed or failed.
+    warm_start_context: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # structured gaps ledger: a dedup'd list of unresolved bottlenecks
