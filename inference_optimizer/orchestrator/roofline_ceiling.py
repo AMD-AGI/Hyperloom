@@ -691,6 +691,10 @@ class RooflineBreakdown:
 _EMPTY_BREAKDOWN = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
 
 
+def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
+    return max(float(meta.weight_dtype_bytes or 2.0), 2.0)
+
+
 def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
     """Compute T_mem + T_cmp + min(T_mem, T_cmp) + bound_kind in one shot.
 
@@ -699,9 +703,8 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
     source when model config is complete; falls back to the legacy top-down
     formula (T_mem / T_cmp aggregate) when PerfModel metadata is unavailable.
 
-    The legacy ``mem_tok_per_sec`` and ``cmp_tok_per_sec`` fields are always
-    populated from the aggregate formula so dashboards can display them even
-    when PerfModel drives ``peak_tok_per_sec``.
+    When PerfModel is available, all three ceiling fields come from the same
+    bottom-up model. Legacy aggregate T_mem/T_cmp are used only as fallback.
 
     Safe degrade: never raises; returns ``_EMPTY_BREAKDOWN`` on any
     missing-field path so the caller can stamp the result into history
@@ -731,7 +734,7 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
         num_layers=meta.num_layers,
         num_kv_heads=meta.num_kv_heads,
         head_dim=meta.head_dim,
-        kv_dtype_bytes=meta.weight_dtype_bytes,
+        kv_dtype_bytes=_activation_kv_dtype_bytes(meta),
         isl=int(getattr(state, "isl", 0) or 0),
         osl=int(getattr(state, "osl", 0) or 0),
         concurrency=concurrency,
@@ -773,8 +776,8 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
         )
         if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
             return RooflineBreakdown(
-                mem_tok_per_sec=legacy.mem_tok_per_sec,
-                cmp_tok_per_sec=legacy.cmp_tok_per_sec,
+                mem_tok_per_sec=pm_bd.decode_mem_tok_per_s,
+                cmp_tok_per_sec=pm_bd.decode_cmp_tok_per_s,
                 peak_tok_per_sec=pm_bd.decode_tok_per_s,
                 bound_kind=pm_bd.bound_kind,
             )
@@ -913,8 +916,8 @@ class PerfModelBreakdown:
 
     ``decode_tok_per_s`` and ``prefill_tok_per_s`` are derived from the
     sum of per-op times over one forward pass at the given batch size.
-    Both use **max-achievable** (sustained) TFLOPS from
-    ``HW_SPECS_ACHIEVABLE``, not the vendor-quoted peak in ``HW_SPECS``.
+    ``decode_mem_tok_per_s`` / ``decode_cmp_tok_per_s`` expose the same
+    bottom-up formulas under memory-only and compute-only assumptions.
 
     ``ops`` lists every GEMM / SDPA, one row per logical operator
     (already summed over the layer repetitions encoded in ``rep``).
@@ -922,6 +925,8 @@ class PerfModelBreakdown:
     """
     decode_tok_per_s: float
     prefill_tok_per_s: float
+    decode_mem_tok_per_s: float
+    decode_cmp_tok_per_s: float
     ops: list[OpBreakdown]
     bound_kind: str     # "compute" | "memory" | "unknown"
     hbm_bw_gbps: float
@@ -1074,20 +1079,24 @@ def compute_roofline_from_perfmodel(
     if vocab:
         linears.append(("lm_head", hidden, vocab, 1))
 
-    def _roofline_time(fl: float, by: float) -> tuple[float, str]:
+    def _roofline_time(fl: float, by: float) -> tuple[float, str, float, float]:
         t_cmp = fl / f_peak if f_peak > 0 else 1e30
         t_mem = by / bw_bps if bw_bps > 0 else 1e30
-        return (max(t_cmp, t_mem), "compute" if t_cmp >= t_mem else "memory")
+        return max(t_cmp, t_mem), "compute" if t_cmp >= t_mem else "memory", t_mem, t_cmp
 
-    def _forward(batch: int, s_q: int, s_kv: int) -> tuple[float, list[OpBreakdown]]:
+    def _forward(batch: int, s_q: int, s_kv: int) -> tuple[float, float, float, list[OpBreakdown]]:
         total_t = 0.0
+        total_mem_t = 0.0
+        total_cmp_t = 0.0
         op_rows: list[OpBreakdown] = []
         M = batch * s_q
         for name, K, N, rep in linears:
             fl = _gemm_flops(M, N, K)
             by = _gemm_bytes(M, N, K, bpe, act_bpe)
-            t, side = _roofline_time(fl, by)
+            t, side, t_mem, t_cmp = _roofline_time(fl, by)
             total_t += t * rep
+            total_mem_t += t_mem * rep
+            total_cmp_t += t_cmp * rep
             op_rows.append(OpBreakdown(
                 name=name,
                 flops=fl * rep,
@@ -1106,8 +1115,10 @@ def compute_roofline_from_perfmodel(
                 M, hidden, meta.moe_intermediate_size,
                 meta.num_experts, meta.experts_per_tok, bpe, act_bpe,
             )
-            t_moe, side_moe = _roofline_time(fl_moe, by_moe)
+            t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)
             total_t += t_moe * n_layers
+            total_mem_t += t_mem_moe * n_layers
+            total_cmp_t += t_cmp_moe * n_layers
             op_rows.append(OpBreakdown(
                 name="moe_fused",
                 flops=fl_moe * n_layers,
@@ -1121,8 +1132,10 @@ def compute_roofline_from_perfmodel(
         causal = (s_q == s_kv)
         fl_s = _sdpa_flops(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal)
         by_s = _sdpa_bytes(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal, act_bpe)
-        t_s, side_s = _roofline_time(fl_s, by_s)
+        t_s, side_s, t_mem_s, t_cmp_s = _roofline_time(fl_s, by_s)
         total_t += t_s * n_layers
+        total_mem_t += t_mem_s * n_layers
+        total_cmp_t += t_cmp_s * n_layers
         op_rows.append(OpBreakdown(
             name="sdpa",
             flops=fl_s * n_layers,
@@ -1138,26 +1151,28 @@ def compute_roofline_from_perfmodel(
                 _dc.replace(op, pct_time=op.time_s / total_t)
                 for op in op_rows
             ]
-        return total_t, op_rows
+        return total_t, total_mem_t, total_cmp_t, op_rows
 
     batch = max(concurrency, 1)
     kv_seq = max(int(isl) + int(osl) // 2, 1)
-    t_dec, ops_dec = _forward(batch, 1, kv_seq)
-    t_pre, _ = _forward(1, max(int(isl), 1), max(int(isl), 1))
+    t_dec, t_dec_mem, t_dec_cmp, ops_dec = _forward(batch, 1, kv_seq)
+    t_pre, _, _, _ = _forward(1, max(int(isl), 1), max(int(isl), 1))
 
     decode_tok = batch / t_dec if t_dec > 0 else 0.0
     prefill_tok = max(int(isl), 1) / t_pre if t_pre > 0 else 0.0
+    decode_mem_tok = batch / t_dec_mem if t_dec_mem > 0 else 0.0
+    decode_cmp_tok = batch / t_dec_cmp if t_dec_cmp > 0 else 0.0
 
     # dominant bound in decode
-    total_mem = sum(op.time_s for op in ops_dec if op.bound == "memory")
-    total_cmp = sum(op.time_s for op in ops_dec if op.bound == "compute")
-    bound_kind = "memory" if total_mem >= total_cmp else "compute"
+    bound_kind = "memory" if t_dec_mem >= t_dec_cmp else "compute"
     if t_dec <= 0:
         bound_kind = "unknown"
 
     return PerfModelBreakdown(
         decode_tok_per_s=decode_tok,
         prefill_tok_per_s=prefill_tok,
+        decode_mem_tok_per_s=decode_mem_tok,
+        decode_cmp_tok_per_s=decode_cmp_tok,
         ops=ops_dec,
         bound_kind=bound_kind,
         hbm_bw_gbps=bw_gbps,
@@ -1169,10 +1184,9 @@ def compute_roofline_breakdown_from_state_v2(state: Any) -> "tuple[RooflineBreak
     """Return the primary roofline breakdown AND the per-op PerfModel breakdown.
 
     The first element is a ``RooflineBreakdown`` from
-    ``compute_roofline_breakdown_from_state``: ``mem_tok_per_sec`` and
-    ``cmp_tok_per_sec`` come from the aggregate top-down formula (preserved for
-    dashboard compatibility), while ``peak_tok_per_sec`` and ``bound_kind`` are
-    driven by the bottom-up PerfModel when the model config is complete.
+    ``compute_roofline_breakdown_from_state``: when the model config is
+    complete, ``mem_tok_per_sec`` / ``cmp_tok_per_sec`` / ``peak_tok_per_sec``
+    all come from the bottom-up PerfModel. Legacy aggregate values are fallback.
 
     The second element is the full per-op ``PerfModelBreakdown`` (``None`` when
     the GPU or model config is unsupported).  Its ``decode_tok_per_s`` equals

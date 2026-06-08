@@ -2523,6 +2523,16 @@ class SharedState:
         summary: list[dict[str, Any]] = []
         kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
+        rocprof_by_kernel_id: dict[str, Any] = {}
+        if kernel_roofline_path:
+            try:
+                roofline_payload = json.loads(Path(kernel_roofline_path).read_text(encoding="utf-8"))
+                for row in roofline_payload.get("kernels") or []:
+                    if not isinstance(row, dict) or not row.get("kernel_id"):
+                        continue
+                    rocprof_by_kernel_id[str(row["kernel_id"])] = row.get("rocprof_roofline")
+            except Exception:  # noqa: BLE001 — sidecar merge is best-effort
+                rocprof_by_kernel_id = {}
         for entry in hot[:15] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
@@ -2534,6 +2544,9 @@ class SharedState:
             efficiency_percent = entry.get("efficiency_percent")
             if efficiency_percent is None:
                 efficiency_percent = entry.get("efficiency_pct")
+            rocprof_roofline = entry.get("rocprof_roofline")
+            if rocprof_roofline is None and kid is not None:
+                rocprof_roofline = rocprof_by_kernel_id.get(str(kid))
             summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
@@ -2551,6 +2564,7 @@ class SharedState:
                 "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
                 "suggestion": entry.get("suggestion") or "",
                 "roofline_name": entry.get("roofline_name"),
+                "rocprof_roofline": rocprof_roofline,
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
                 "recommended_backends": entry.get("recommended_backends") or [],
@@ -2568,6 +2582,7 @@ class SharedState:
                     "bandwidth_utilization_pct",
                     "suggestion",
                     "roofline_name",
+                    "rocprof_roofline",
                 )
             ):
                 kernel_roofline.append(dict(summary_entry))
@@ -2677,10 +2692,8 @@ class SharedState:
                 compute_roofline_from_perfmodel,
                 load_model_meta,
             )
-            # Two-sided roofline (T_mem + T_cmp + min) — see formula
-            # change in roofline_ceiling.py. ``peak_tput`` continues to
-            # equal ``min(mem, cmp)`` so the existing dashboard
-            # ``theoretical_peak_tok_per_sec`` field stays meaningful.
+            # Primary decode ceiling plus matching memory/compute sides.
+            # PerfModel uses one bottom-up formula; legacy is fallback only.
             breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
             try:
                 breakdown = compute_roofline_breakdown_from_state(self)

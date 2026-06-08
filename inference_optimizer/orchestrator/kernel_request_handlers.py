@@ -51,6 +51,7 @@ from typing import Any, Awaitable, Callable
 
 
 log = logging.getLogger(__name__)
+_BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
 
 
 # Where Hyperloom/kernel-agent's shell tools live. Env is set by
@@ -2341,6 +2342,48 @@ async def _run_after_kernel_opt_rocprof(
     }
 
 
+def _schedule_after_kernel_opt_rocprof(
+    *,
+    kernel_id: str,
+    session_dir: Path,
+    log: logging.Logger,
+) -> dict[str, Any]:
+    rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
+    if rocprof_env in {"0", "false", "no", "off"}:
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason="disabled_by_env",
+            log=log,
+        )
+        return {"status": "skipped", "reason": "disabled_by_env"}
+
+    _record_after_kernel_opt_rocprof_status(
+        session_dir=session_dir,
+        kernel_id=kernel_id,
+        status="scheduled",
+        reason="background_task",
+        log=log,
+    )
+    task = asyncio.create_task(_run_after_kernel_opt_rocprof(
+        kernel_id=kernel_id,
+        session_dir=session_dir,
+        log=log,
+    ))
+    _BACKGROUND_ROCPROF_TASKS.add(task)
+
+    def _done(done_task: asyncio.Task[Any]) -> None:
+        _BACKGROUND_ROCPROF_TASKS.discard(done_task)
+        try:
+            done_task.result()
+        except Exception as exc:  # noqa: BLE001 — best-effort background task
+            log.warning("integrate: after_kernel_opt rocprof background failed: %s", exc)
+
+    task.add_done_callback(_done)
+    return {"status": "scheduled", "reason": "background_task"}
+
+
 async def integrate_handler(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
@@ -2544,12 +2587,11 @@ async def integrate_handler(
         else _maybe_revert_kernel_patch(apply_result)
     )
 
-    # After KEEP (patch is live in source), run rocprof on the optimised kernel
-    # and record the after_kernel_opt snapshot in kernel_roofline.json so the
-    # dashboard can display the before → after efficiency delta.
+    # After KEEP, schedule rocprof so integrate returns without waiting
+    # up to the profiling timeout.
     rocprof_after_info: dict[str, Any] = {}
     if decision == "KEEP" and kernel_id:
-        rocprof_after_info = await _run_after_kernel_opt_rocprof(
+        rocprof_after_info = _schedule_after_kernel_opt_rocprof(
             kernel_id=kernel_id,
             session_dir=session_dir,
             log=log,

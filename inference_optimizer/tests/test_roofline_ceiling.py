@@ -1144,6 +1144,40 @@ class TestRooflineBreakdownClassification:
         assert br.peak_tok_per_sec == 2000.0
         assert br.bound_kind == "compute"
 
+    def test_quantized_legacy_fallback_uses_activation_kv_dtype(self, monkeypatch):
+        from inference_optimizer.orchestrator import roofline_ceiling
+        meta = ModelMeta(
+            weight_bytes=10_000_000_000, num_layers=48, num_kv_heads=4,
+            head_dim=128, weight_dtype_bytes=1.0,
+            active_weight_bytes=5_000_000_000,
+        )
+        captured: dict[str, float] = {}
+
+        def _fake_mem(**kw):
+            captured["kv_dtype_bytes"] = kw["kv_dtype_bytes"]
+            return 8000.0
+
+        monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: meta)
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_theoretical_peak_output_tok_per_sec",
+            _fake_mem,
+        )
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_compute_bound_ceiling_tok_per_sec",
+            lambda **kw: 40_000.0,
+        )
+        state = SimpleNamespace(
+            model_path="/fake", gpu_type="mi355x", tp=1,
+            precision="fp8", conc=8, isl=256, osl=256,
+            last_baseline={},
+        )
+        br = compute_roofline_breakdown_from_state(state)
+
+        assert br.peak_tok_per_sec == 8000.0
+        assert captured["kv_dtype_bytes"] == 2.0
+
     def test_backward_compat_compute_peak_from_state_returns_min(
         self, monkeypatch,
     ):
@@ -1612,6 +1646,8 @@ class TestPerfModelTransparentReplacement:
         )
         assert pm_bd is not None
         assert br.peak_tok_per_sec == pytest.approx(pm_bd.decode_tok_per_s, rel=1e-6)
+        assert br.mem_tok_per_sec == pytest.approx(pm_bd.decode_mem_tok_per_s, rel=1e-6)
+        assert br.cmp_tok_per_sec == pytest.approx(pm_bd.decode_cmp_tok_per_s, rel=1e-6)
         assert br.bound_kind == pm_bd.bound_kind
 
     def test_moe_uses_perfmodel_peak(self, tmp_path):
@@ -1641,6 +1677,8 @@ class TestPerfModelTransparentReplacement:
         )
         assert pm_bd is not None
         assert br.peak_tok_per_sec == pytest.approx(pm_bd.decode_tok_per_s, rel=1e-6)
+        assert br.mem_tok_per_sec == pytest.approx(pm_bd.decode_mem_tok_per_s, rel=1e-6)
+        assert br.cmp_tok_per_sec == pytest.approx(pm_bd.decode_cmp_tok_per_s, rel=1e-6)
         # FusedMoE ceiling must remain above the measured 6244.3 tok/s
         assert br.peak_tok_per_sec >= 6244.3, (
             f"MoE PerfModel ceiling {br.peak_tok_per_sec:.1f} < measured 6244.3 tok/s"
@@ -1671,4 +1709,3 @@ class TestPerfModelTransparentReplacement:
         # verify the function returns without raising.
         br = compute_roofline_breakdown_from_state(state)
         assert br.peak_tok_per_sec >= 0.0
-
