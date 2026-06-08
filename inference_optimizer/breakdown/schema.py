@@ -415,9 +415,14 @@ class PhaseBreakdownExplore(TypedDict, total=False):
     ``by_domain`` keys are normalized to the bare SpecialistDomain.key;
     non-specialist provenance is ``default_grid`` / ``llm_direct``, v1
     resumes are ``legacy_<action>``, empty falls back to ``unknown``.
+
+    ``by_scope`` is the additive specialist-dial split (``domain`` /
+    ``domains`` / ``freeform``); sessions that never recorded a ``scope``
+    collapse into ``unspecified``. Omitted on pre-scope breakdowns.
     """
     total_gain_pct: float
     by_domain: dict[str, float]
+    by_scope: dict[str, float]
 
 
 class PhaseBreakdownKernel(TypedDict, total=False):

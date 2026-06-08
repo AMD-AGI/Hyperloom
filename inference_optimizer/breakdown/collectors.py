@@ -3064,8 +3064,11 @@ def _collect_phase_breakdown(
         return current
 
     # explore provenance: map fingerprint → provenance from winners_history.
+    # ``scope_by_fp`` carries the orthogonal specialist dial (domain / domains
+    # / freeform) as an additive analytics tag; absent on legacy sessions.
     explore_search = state.get("explore_search") or {}
     provenance_by_fp: dict[str, str] = {}
+    scope_by_fp: dict[str, str] = {}
     if isinstance(explore_search, dict):
         for w in explore_search.get("winners_history") or []:
             if not isinstance(w, dict):
@@ -3074,6 +3077,9 @@ def _collect_phase_breakdown(
             prov = str(w.get("provenance") or "").strip()
             if fp and prov:
                 provenance_by_fp[fp] = prov
+            sc = str(w.get("scope") or "").strip()
+            if fp and sc:
+                scope_by_fp[fp] = sc
 
     phase_buckets: dict[str, dict[str, Any]] = {
         "prelude": {"total_gain_pct": 0.0},
@@ -3144,6 +3150,18 @@ def _collect_phase_breakdown(
             domain = _normalize_specialist_key(raw_prov)
             by_domain[domain] = round(
                 float(by_domain.get(domain, 0.0)) + float(delta), 2,
+            )
+            # Additive scope split (specialist dial); legacy sessions with no
+            # ``scope`` recorded collapse into the ``unspecified`` bucket so
+            # the totals still reconcile against ``total_gain_pct``.
+            by_scope = bucket.setdefault("by_scope", {})
+            scope_key = (
+                scope_by_fp.get(fp)
+                or str(e.get("scope") or "")
+                or "unspecified"
+            )
+            by_scope[scope_key] = round(
+                float(by_scope.get(scope_key, 0.0)) + float(delta), 2,
             )
         elif phase == "kernel":
             by_kid = bucket.setdefault("by_kernel_id", {})

@@ -43,7 +43,7 @@ Per-phase orientation:
   have already blocked it), `advise` with a phase hint rather than
   reject.
 - **EXPLORE**: typical proposals are `explore`, `specialist`,
-  `integrate_patch`, `dynamic_action`. Specialist-style
+  `integrate_patch`. Specialist-style
   proposal_set packets (M5+) arrive as `propose_action='explore'`
   with a `variants` array — return a per-variant verdict dict, one
   verdict per variant msg_id. Missing entries are treated as
@@ -92,20 +92,20 @@ in-phase kernel patch would.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
 
-### Cross-domain proposal review (dynamic_action)
+### Cross-domain proposal review (scope=domains)
 
 This block fires only when `judge_bundle.review_constraints.cross_domain
-== true` — the runtime sets the flag when the proposal carries
-`provenance == "dynamic"` (P3 runner output schema). For specialist
-proposals (`provenance == "specialist:<domain>"`) skip this block
-entirely.
+== true` — the runtime sets the flag when any proposal was authored by a
+specialist running the cross-domain dial (`scope == "domains"`). For
+single-domain (`scope == "domain"`) or freeform (`scope == "freeform"`)
+specialist proposals skip this block entirely.
 
 Severity contract:
 
-* `patch_landing` four-checklist applies **unchanged**. Dynamic
+* `patch_landing` four-checklist applies **unchanged**. Cross-domain
   patches are not held to a weaker bar — the "higher authority" of a
-  dynamic action lives on the input side (cross-domain KB, full
-  roofline / profile, multi-turn ReAct), never on the output review
+  cross-domain specialist lives on the input side (multi-tag KB, full
+  roofline / profile, multi-turn research), never on the output review
   side.
 * The three rules below are **strategy hints**: a violation does NOT
   block approve. Surface it via `advise` (or in the `notes` of the
@@ -130,8 +130,8 @@ so the audit trail is searchable:
 3. **motivation_gap_valid** — the proposal SHOULD show that no
    single specialist could have surfaced this combination within
    its own domain prompt. "Stack specialist A's proposal on top of
-   specialist B's" is a `explore.params.grid` combo, not a dynamic
-   action; emit `advise` with
+   specialist B's" is a `explore.params.grid` combo, not a
+   cross-domain proposal; emit `advise` with
    `reason="cross_domain_motivation_invalid"` when the rationale
    degenerates this way. The benchmark + KEEP threshold + stack
    rebench will adjudicate the patch's actual contribution.
@@ -141,16 +141,11 @@ upstream by the runtime safety layer; replay here as the last line
 of defence — if any of these reach you, the upstream layer has
 regressed and the dispatch must die):
 
-* `provenance == "dynamic"` is a literal; any composite form
-  (`dynamic:foo`, `specialist:dynamic`) → `reject` with
-  `reason="dynamic_provenance_violation"`.
 * `proposal_set[*]` MUST NOT carry `expected_gain` / `bench_evidence`
   / `confidence` / `score` / `rank` / `force_provenance` (§1.2 red
-  lines). Reject with `reason="dynamic_quantitative_claim_violation"`.
-
-`verdict_map` is NOT used for dynamic_action — the proposal is a
-single patch (`MAX_PROPOSAL_SET_LEN = 1`). Emit the single-verdict
-shape.
+  lines). Reject with `reason="specialist_quantitative_claim_violation"`.
+  This guard is scope-agnostic — it applies to every specialist
+  proposal, not just `scope=domains`.
 
 `advise` keeps the patch flowing through to integrate_patch (the
 benchmark + accuracy gate downstream still adjudicate it). Use it

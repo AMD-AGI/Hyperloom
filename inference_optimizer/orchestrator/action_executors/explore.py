@@ -111,7 +111,8 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
           "extra_args" | "extra_server_args": str,
           "extra_envs": dict[str,str],
           "note": str,
-          "provenance": str,            # llm_direct / default_grid / specialist:<tag> / dynamic
+          "provenance": str,            # llm_direct / default_grid / specialist:<tag>
+          "scope": str,                 # specialist dial: domain / domains / freeform (advisory)
           "kb_evidence": list,          # passthrough
           "pr_evidence": list,          # passthrough
           "source_evidence": list,      # passthrough
@@ -136,6 +137,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         # Stash extra metadata on the GridVariant so the ledger writer can
         # pull provenance/evidence; safe on the plain dataclass.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
+        gv.scope = str(raw.get("scope") or "")                       # type: ignore[attr-defined]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])         # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])         # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or []) # type: ignore[attr-defined]
@@ -698,6 +700,7 @@ class ExploreExecutor:
             for idx, gv in enumerate(runnable):
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
+                scope = str(getattr(gv, "scope", "") or "")
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # 1. Run the single variant on the running stack.
@@ -1010,6 +1013,7 @@ class ExploreExecutor:
                         "extra_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         "provenance": provenance,
+                        "scope": scope,
                         "ts": _now_iso(),
                     })
                     continue

@@ -72,12 +72,12 @@ EXPLORE searches configuration and source-patch levers through the
 canonical `explore` ledger:
 
 - `explore` runs server-argument and environment variants.
-- `specialist` delegates targeted research or patch proposals to
-  specialist domains.
+- `specialist` delegates targeted research or patch proposals. A single
+  unified specialist covers single-domain, cross-domain (`scope=domains`),
+  and free-form (`scope=freeform`) investigations via its dispatch dials
+  (`scope` / `mode` / `bench` / `lane`).
 - `integrate_patch` applies Critic-reviewed specialist patches and
   benchmarks them.
-- `dynamic_action` can dispatch bounded ad-hoc investigations when the
-  policy contract allows it.
 
 The old `backends` and `params` action names are compatibility aliases
 for archived reporting only. New sessions write the merged
