@@ -834,7 +834,7 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
             + (f" at {location}" if location else "")
             + (", AST-resolved" if ast_resolved else "")
             + "). Optimize the source function once; the patch applies "
-            f"to all rows below. Use the first row as the primary",
+            "to all rows below. Use the first row as the primary",
             "benchmark case; treat the rest as supplementary shape coverage.",
             "",
         ])

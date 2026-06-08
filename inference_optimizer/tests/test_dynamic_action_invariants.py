@@ -11,10 +11,8 @@ green.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,16 +29,11 @@ from inference_optimizer.orchestrator.dynamic_action_critic import (
     run_mechanical_cross_domain_checks,
 )
 from inference_optimizer.orchestrator.dynamic_action_pipeline import (
-    DYNAMIC_SPECIALIST_TASK_ID_PREFIX,
     integrate_status_to_lifecycle,
-    is_dynamic_specialist_task_id,
 )
 from inference_optimizer.orchestrator.dynamic_action_proposal import (
     DynamicActionStatus,
-    DynamicRunnerTerminalState,
-    EXPECTED_PROVENANCE,
     FORBIDDEN_PROPOSAL_FIELDS,
-    LAST_OUTCOME_BY_STATUS,
     TERMINAL_LIFECYCLE_STATUSES,
     validate_proposal,
 )
@@ -52,7 +45,6 @@ from inference_optimizer.orchestrator.dynamic_action_runner import (
 )
 from inference_optimizer.orchestrator.dynamic_action_seed_kit import (
     SEED_KIT_FIELDS,
-    assemble_seed_kit,
 )
 from inference_optimizer.orchestrator.dynamic_action_tools import (
     BENCH_REGISTRY,
@@ -62,9 +54,7 @@ from inference_optimizer.orchestrator.intent_parser import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.policy import (
-    ALL_KNOWN_EXTERNAL_TOOL_NAMES,
     CORE_STATE_FIELDS,
-    DYNAMIC_ACTION_BUDGET_HINTS,
     DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL,
     DYNAMIC_ACTION_NAME,
     DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES,
@@ -80,7 +70,6 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.session_paths import (
     dynamic_action_artifact_dir,
-    dynamic_action_proposal_set_path,
     dynamic_action_spec_path,
 )
 
