@@ -40,6 +40,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -2661,6 +2662,46 @@ def _smoke_test_codex_model(
     )
 
 
+# InferenceX clone defaults — kept in sync with
+# inference_optimizer/scripts/install.sh (INFERENCEX_REPO / INFERENCEX_REF).
+_INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
+_INFERENCEX_REF_DEFAULT = "2035a2117ad22403376359be0064dfa2c078c59b"
+
+
+def _clone_inferencex(dest: Path) -> str | None:
+    """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF.
+
+    Mirrors install.sh ``git_fetch_pinned``: a 7-40 hex ref triggers a
+    shallow fetch-checkout (GitHub serves SHA fetches), otherwise a
+    ``--branch`` clone. Returns the path on success, ``None`` on failure
+    (caller decides how to surface it). Never raises out.
+    """
+    repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
+    ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+    dest_str = str(dest)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
+            subprocess.run(["git", "init", "-q", dest_str], check=True, timeout=60)
+            subprocess.run(
+                ["git", "-C", dest_str, "fetch", "-q", "--depth", "1", repo, ref],
+                check=True, timeout=600,
+            )
+            subprocess.run(
+                ["git", "-C", dest_str, "checkout", "-q", "FETCH_HEAD"],
+                check=True, timeout=120,
+            )
+        else:
+            subprocess.run(
+                ["git", "clone", "-q", "--depth", "1", "--branch", ref, repo, dest_str],
+                check=True, timeout=600,
+            )
+        return dest_str
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("InferenceX clone into %s failed: %s", dest_str, exc)
+        return None
+
+
 def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
@@ -2845,24 +2886,51 @@ def _preflight(
         )
         # InferenceX detection order: Magpie's own InferenceX submodule
         # first (the canonical layout after install.sh), then the
-        # standalone runtime checkout, then legacy host-level mounts so
-        # existing pre-migration pods keep working.
+        # standalone runtime checkout. Legacy host-level mounts
+        # (/wekafs/hyperloom/InferenceX, ...) were removed: they are
+        # read-only shared mounts, and selecting one made Magpie's
+        # _prepare_benchmark_scripts mkstemp fail with [Errno 30] before
+        # the server even booted (the only on-disk source of those
+        # baseline failures). We clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
             runtime_root / "InferenceX",
-            Path("/wekafs/hyperloom/InferenceX"),
-            Path("/opt/hyperloom/InferenceX"),
-            Path("/wekafs/fully-local/inference_optimization/InferenceX"),
         ):
             if candidate.is_dir():
                 inferencex_path = str(candidate)
                 break
-    if inferencex_path and Path(inferencex_path).is_dir():
-        os.environ.setdefault("INFERENCEX_PATH", inferencex_path)
-    else:
-        print("Preflight: WARNING — InferenceX not found. GSM8K accuracy "
-              "eval will fail. Set INFERENCEX_PATH or clone Magpie with "
-              "InferenceX submodule.")
+    # When no writable checkout was found (e.g. a brain-launched run that
+    # skipped install.sh's ensure_inferencex), clone one ourselves rather
+    # than falling back to a read-only host mount. baseline cannot run
+    # without InferenceX, so a clone failure is a hard error.
+    if not (inferencex_path and Path(inferencex_path).is_dir()):
+        from .paths import runtime_dir as _runtime_default
+        dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
+        print(f"Preflight: InferenceX not found; cloning into {dest} ...")
+        inferencex_path = _clone_inferencex(dest)
+        if not (inferencex_path and Path(inferencex_path).is_dir()):
+            print(
+                "Preflight: ERROR — InferenceX checkout missing and clone "
+                "failed. baseline cannot run without it. Set INFERENCEX_PATH "
+                "to a writable checkout or re-run "
+                "inference_optimizer/scripts/install.sh.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    # Guard against a read-only selection (shared mount handed to us via
+    # INFERENCEX_PATH): Magpie stages benchmark scripts there, so a
+    # non-writable tree fails the run before server boot.
+    if not os.access(inferencex_path, os.W_OK):
+        print(
+            f"Preflight: ERROR — INFERENCEX_PATH={inferencex_path} is not "
+            f"writable. Magpie stages benchmark scripts into it and will "
+            f"fail with [Errno 30] Read-only file system. Point "
+            f"INFERENCEX_PATH at a writable checkout (unset it to let "
+            f"Hyperloom clone a fresh one).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    os.environ.setdefault("INFERENCEX_PATH", inferencex_path)
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
