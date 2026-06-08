@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for ``profile._validate_trace_structure`` (#210 / Deval's
 ``check_torch_trace.py`` guidance).
 
@@ -426,3 +428,67 @@ def test_validator_never_raises_even_on_unreadable_trace(tmp_path, caplog):
     (trace_dir / "broken.trace.json.gz").write_bytes(b"\x1f\x8b")
     # Should not raise:
     _validate_trace_structure(trace_dir, "sglang")
+
+
+# ---------------------------------------------------------------------------
+# Issue #431: structured trace_health return (basis for the eager-mode
+# re-profile fallback when CUDA-graph folding zeroes out hot kernels)
+# ---------------------------------------------------------------------------
+def test_trace_health_healthy_layout(tmp_path):
+    """Healthy layout: per-kernel attribution intact, capture traces
+    present, no issues — so the kernel pipeline keeps the cuda-graph
+    profile and does NOT trigger an eager re-profile."""
+    trace_dir = _build_healthy_layout(tmp_path)
+    health = _validate_trace_structure(trace_dir, "sglang")
+    assert health["per_kernel_attribution_degraded"] is False
+    assert health["capture_traces_present"] is True
+    assert health["issues"] == []
+
+
+def test_trace_health_flags_degraded_attribution_cuda_graph(tmp_path):
+    """#431 core symptom: the main trace carries NO execute_* /
+    user_annotation events (per-kernel device activity folded into
+    hipGraphLaunch wrappers under cuda-graph capture). trace_health must
+    flag ``per_kernel_attribution_degraded=True`` so the kernel pipeline
+    can route to an eager-mode re-profile instead of silently producing
+    hot_kernels=0."""
+    trace_dir = _build_healthy_layout(tmp_path)
+    # Overwrite the main trace with one carrying no annotations.
+    for p in trace_dir.glob("*.trace.json.gz"):
+        p.unlink()
+    _write_minimal_sglang_trace(
+        trace_dir / "1776409856.2485812-TP-0.trace.json.gz",
+        with_kernel_shape_profiler=True,
+        with_user_annotation=False,
+        with_execute_star=False,
+    )
+    health = _validate_trace_structure(trace_dir, "sglang")
+    assert health["per_kernel_attribution_degraded"] is True
+    # capture_traces/ is still intact — a capture-fold fallback (#431
+    # proper fix) would have data to mine even though the live trace lost
+    # per-kernel attribution.
+    assert health["capture_traces_present"] is True
+    assert any("execute_* / user_annotation" in m for m in health["issues"]), health["issues"]
+
+
+def test_trace_health_capture_traces_absent(tmp_path):
+    """When ``capture_traces/`` is empty, ``capture_traces_present`` must
+    be False (a capture-fold fallback would have nothing to mine)."""
+    trace_dir = _build_healthy_layout(tmp_path)
+    capture = trace_dir / "capture_traces"
+    for p in list(capture.iterdir()):
+        p.unlink()
+    health = _validate_trace_structure(trace_dir, "sglang")
+    assert health["capture_traces_present"] is False
+
+
+def test_trace_health_return_shape_backward_compatible(tmp_path):
+    """Validator now returns a structured dict (issue #431) while staying
+    backward compatible: existing callers that ignore the return value are
+    unaffected (it never raises)."""
+    trace_dir = _build_healthy_layout(tmp_path)
+    health = _validate_trace_structure(trace_dir, "sglang")
+    assert isinstance(health, dict)
+    assert {"issues", "per_kernel_attribution_degraded",
+            "capture_traces_present"} <= set(health)
+    assert isinstance(health["issues"], list)

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-node-only: per-round sglang/vllm restart helper.
 
 Why this exists
@@ -490,7 +492,7 @@ async def restart_server_for_round(
     # error, version unsupported, ...) we log a warning and proceed with
     # the restart anyway. The trace will be unannotated and tracelens
     # analysis will surface the splitter warning, but every other phase
-    # (baseline / grid / validate_stack / kernel) keeps working — far
+    # (baseline / explore / kernel) keeps working — far
     # better than blocking the entire restart on what is supposed to be
     # an opt-in profiling enhancement.
     try:

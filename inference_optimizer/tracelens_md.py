@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared TraceLens markdown sanitizers for LLM prompt injection.
 
 Roofline-v2 N11: TraceLens ``analysis.md`` often embeds charts as

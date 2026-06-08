@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Top-level builder for ``session_breakdown.json``.
 
 Three entrypoints share this builder:
@@ -132,7 +134,7 @@ def build(
                                        lambda: collectors.collect_final(sd, state, warnings),
                                        warnings)
     phase_timeline    = _safe_collect("phase_timeline",
-                                       lambda: collectors.collect_phase_timeline(state, warnings),
+                                       lambda: collectors.collect_phase_timeline(sd, state, warnings),
                                        warnings)
     phase_segments    = _safe_collect("phase_segments",
                                        lambda: collectors.collect_phase_segments(
@@ -156,8 +158,8 @@ def build(
                                             sd, state, geak_invocations, oob_invocations, warnings,
                                         ),
                                         warnings)
-    param_search       = _safe_collect("param_search",
-                                        lambda: collectors.collect_param_search(state, warnings),
+    explore_search     = _safe_collect("explore_search",
+                                        lambda: collectors.collect_explore_search(state, warnings),
                                         warnings)
     sweep              = _safe_collect("sweep",
                                         lambda: collectors.collect_sweep(sd, state, warnings),
@@ -183,7 +185,7 @@ def build(
     # specialist sub-agent dispatch records. Built
     # from ``state.specialist_rounds`` + the on-disk transcripts so
     # capability_summary.specialist and specialist_runs always agree
-    # (Inv-12.2 single source).
+    # (single source).
     specialist_runs    = _safe_collect("specialist_runs",
                                         lambda: collectors.collect_specialist_runs(
                                             sd, state, warnings,
@@ -208,6 +210,24 @@ def build(
                                         ),
                                         warnings,
                                         default={})
+    # Kernel-agent attempt outcome summary (Breakdown 面板对接文档 §A1).
+    # Mirrors ``<sd>/reports/kernel_optimization_summary.json`` (written
+    # by the report action at CLOSE step 1, before this export at step
+    # 2). Empty dict when absent → dashboard hides Block 1.
+    kernel_optimization_summary = _safe_collect(
+        "kernel_optimization_summary",
+        lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
+        warnings,
+        default={})
+    # Post-optimization concurrency sweep (Breakdown 面板对接文档 §A2).
+    # Mirrors ``<sd>/reports/conc_sweep_summary.json`` (written by the
+    # conc_sweep action during SWEEP). Empty dict when absent →
+    # dashboard hides Block 2.
+    conc_sweep_summary = _safe_collect(
+        "conc_sweep_summary",
+        lambda: collectors.collect_conc_sweep_summary(sd, warnings),
+        warnings,
+        default={})
     # Per-snapshot roofline comparison list driving the markdown-
     # report ``## Roofline`` section. Built from
     # ``state.roofline_snapshots`` history.
@@ -262,18 +282,18 @@ def build(
         "geak_invocations":    geak_invocations,
         "oob_invocations":     oob_invocations,
         "kernel_lifecycle":    kernel_lifecycle,
-        "param_search":        param_search,
+        "param_search":        explore_search,
         # ``explore_search`` is the v2-native name for
         # the merged ledger. Mirror of
         # ``param_search`` so v2 readers can switch with a one-line
         # rename + v1 readers don't break.
-        "explore_search":      param_search,
+        "explore_search":      explore_search,
         "sweep":               sweep,
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
         "attribution":         attribution,
-        # Cortex KB integration audit (KB_design §3.13 M1 §4
-        # "kb_provenance"). Added as a new top-level section rather than
+        # Cortex KB integration audit ("kb_provenance"). Added as a new
+        # top-level section rather than
         # bumping ``schema_version`` because every field is optional; the
         # v1 reader simply ignores it.
         "kb_provenance":       kb_provenance,
@@ -287,6 +307,14 @@ def build(
         # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
         # absent — the dashboard hides the table on empty.
         "kernel_roofline":     kernel_roofline,
+        # Kernel-agent attempt outcome summary (Breakdown 面板对接文档
+        # §A1). Mirror of ``reports/kernel_optimization_summary.json``;
+        # empty dict on absence (dashboard hides Block 1).
+        "kernel_optimization_summary": kernel_optimization_summary,
+        # Post-optimization concurrency sweep (Breakdown 面板对接文档
+        # §A2). Mirror of ``reports/conc_sweep_summary.json``; empty
+        # dict on absence (dashboard hides Block 2).
+        "conc_sweep_summary":  conc_sweep_summary,
         # Per-snapshot roofline comparison list (markdown-report
         # source). Built from ``state.roofline_snapshots``.
         "roofline":            roofline,

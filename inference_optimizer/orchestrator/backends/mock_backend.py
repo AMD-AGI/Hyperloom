@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """MockBackend — scripted-turn LLM stub for P0 / unit / e2e tests.
 
 Avoids burning tokens during dev, makes tests deterministic and offline.
@@ -23,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from ..intent_parser import Intent
+from ...protocol.intent import Intent
 from .base import BackendTurnResult
 
 
@@ -141,8 +143,8 @@ class MockBackend:
             return MockTurn(intents=[self.plan.default_intent])
         # Out of script and no fallback → silently emit a heartbeat so the
         # reactor can keep ticking without exploding mid-test.
-        from ..intent_parser import Intent as _Intent
-        from ..intent_parser import IntentType as _IT
+        from ...protocol.intent import Intent as _Intent
+        from ...protocol.intent import IntentType as _IT
         return MockTurn(intents=[
             _Intent(type=_IT.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
         ])

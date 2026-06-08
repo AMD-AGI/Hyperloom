@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Two-phase orchestration for the Critic decision pipeline.
 
 The Critic SKILL is hosted by an A2A chat server (Codex). Each turn looks

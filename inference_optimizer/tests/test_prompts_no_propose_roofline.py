@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Blocker #3 guard — LLM-facing prompts must not instruct the model to
 propose ``roofline`` / ``profile``.
 

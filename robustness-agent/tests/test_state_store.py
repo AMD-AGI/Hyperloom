@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the disk-backed DetectorStateStore."""
 
 from __future__ import annotations

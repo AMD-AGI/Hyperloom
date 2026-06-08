@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """P5 decision-framework regression tests.
 
 The v0.6 ``backends`` / ``params`` promote-threshold tests were
@@ -23,7 +25,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
@@ -52,9 +54,17 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     # work even when the host env var is unset.
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
-    # Skip the `python3 -c "import Magpie"` probe inside _resolve_magpie_python
-    # so subprocess.run mocks only see the actual Magpie launch command.
+    # Keep the unit test hermetic: stub the interpreter resolver so it never
+    # spawns a real ``python3 -c "import Magpie"`` probe. (Setting
+    # MAGPIE_PYTHON alone no longer short-circuits the probe — the resolver
+    # validates the env value via run_with_session_kill since the
+    # stale-interpreter self-heal landed.) The mocked Magpie launch only ever
+    # sees this fixed interpreter as ``cmd[0]``.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
+    from inference_optimizer.orchestrator.action_executors import _grid_runner
+    monkeypatch.setattr(
+        _grid_runner, "_resolve_magpie_python", lambda: "/usr/bin/python3",
+    )
     return make_session_dir()
 
 
@@ -618,3 +628,42 @@ def test_record_kernel_opt_prompt_summary_surfaces_history():
     assert "kernel_id=k007" in summary
     assert "history=attempts=2/partial=2" in summary
     assert "retired=max_partial_attempts_2_without_keep" in summary
+
+
+def test_record_kernel_opt_persists_test_command():
+    """test_command from backend_paths must survive into kernel_opt_attempts
+    so that after_kernel_opt rocprof can retrieve it without re-deriving."""
+    state = SharedState()
+    state.record_kernel_opt({
+        "status": "ok",
+        "kernel_id": "k_tc",
+        "source_file": "/src/kernel.cu",
+        "proposal": {"decision": "KEEP", "reasons": []},
+        "verification": {
+            "micro_speedup": 1.25,
+            "best_artifact_path": "/tmp/k_tc.hip",
+            "compile_passed": True,
+            "correctness_passed": True,
+        },
+        "attempts": [
+            {
+                "backend": "geak",
+                "status": "ok",
+                "backend_paths": {
+                    "test_command": "timeout 600 python /sgl-workspace/aiter/tests/test_moe.py",
+                    "output_dir": "/tmp/geak_out",
+                },
+            }
+        ],
+    })
+    entry = state.kernel_opt_attempts.get("k_tc") or {}
+    assert entry.get("test_command") == "timeout 600 python /sgl-workspace/aiter/tests/test_moe.py"
+
+
+def test_record_kernel_opt_test_command_missing_does_not_error():
+    """When no attempt has a test_command, the entry must still be written
+    without raising and without setting test_command."""
+    state = SharedState()
+    state.record_kernel_opt(_partial_kernel_opt_result("k_notc"))
+    entry = state.kernel_opt_attempts.get("k_notc") or {}
+    assert "test_command" not in entry  # must be absent, not an empty string

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """F2-5 — KB writeback adapters for specialist outcomes.
 
 Each helper appends a structured record to a known KB sub-graph so

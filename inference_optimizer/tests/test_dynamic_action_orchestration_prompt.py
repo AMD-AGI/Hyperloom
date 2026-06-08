@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the orchestration prompt's ``dynamic_action`` entry +
 the emit-hint catalogue row.
 Auxiliary tests pin the §1.7 design-philosophy guards (no

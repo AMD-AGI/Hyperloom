@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared data models used across providers, monitors, and checks."""
 
 from __future__ import annotations

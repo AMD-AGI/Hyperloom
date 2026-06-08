@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Log tailer — streams application log files and extracts error patterns."""
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from ..models import Alert, Severity
 
 log = logging.getLogger(__name__)
 
-# Common error patterns from marathon optimization error signature database
+# Common error patterns from optimization error signature database
 ERROR_PATTERNS: list[tuple[str, str, Severity]] = [
     (r"OutOfMemoryError|CUDA out of memory|HIP out of memory|oom-kill", "oom", Severity.CRITICAL),
     (r"NCCL\s+error|RCCL\s+error|collective.*timeout", "collective_error", Severity.CRITICAL),

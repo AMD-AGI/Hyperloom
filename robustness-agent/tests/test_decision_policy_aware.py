@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for :class:`robustness_agent.decision.PolicyAware`.
 
 The validator mirrors upstream PolicyGate.  These tests pin the

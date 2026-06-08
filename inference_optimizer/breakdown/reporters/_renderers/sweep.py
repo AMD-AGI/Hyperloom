@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Sweep matrix renderer.
 
 Sweeps are concurrency / ISL-OSL grids run on the final stack so users

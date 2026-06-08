@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """WebSearchClient — facade over multiple :mod:`providers`.
 
 Responsibilities:

@@ -1,0 +1,50 @@
+name: conc_sweep
+family: shallow
+cost_minutes_p50: 30.0
+cost_minutes_p75: 90.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.05
+prerequisites:
+  - sweep
+requires_lanes:
+  - server_lifecycle
+  - benchmark_lane
+allowed_tools:
+  - emit_intent
+  - Read
+  - Bash
+side_effects:
+  - launches_server
+  - writes_results
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 1
+lease_ttl_sec: 9000
+description: "Post-sweep concurrency comparison: benchmark baseline vs current_best across a CONC ladder. On by default; opt out via --no-enable-conc-sweep; bounded by --conc-sweep-total-budget-sec (default 2.5h)."
+pipeline_phase: explore
+typical_runtime_min: 30.0
+applicable_when:
+  - "baseline_tput > 0"
+  - "isl > 0"
+  - "osl > 0"
+  - "enable_conc_sweep"
+verdict_class: exploration
+params_schema:
+  concs:
+    type: list
+    description: |
+      CONC ladder. Defaults to [1,2,4,8,16,32,64,128]. Each CONC is
+      benchmarked twice (baseline arm with empty overrides + optimized
+      arm with current_best.extra_server_args/extra_envs).
+  variant_timeout_sec:
+    type: integer
+    description: |
+      Per-variant Magpie timeout. Default 1800.
+  total_budget_sec:
+    type: integer
+    description: |
+      Total wall-clock budget across all variants. Once exhausted,
+      remaining variants are recorded as status=skipped /
+      error_class=budget_exhausted. Default 9000 (~2.5h); set to 0 to
+      disable the gate.

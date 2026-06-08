@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """PR-A6 (Arbor-into-Hyperloom): per-domain specialist prompt templates.
 
 The v0.8 M5 ``specialist_prompt_builder`` shipped one template
@@ -66,12 +68,13 @@ def test_specialist_domains_m5_covers_all_six():
     logs ``generic prompt template`` notes for M6-only domains.
 
     IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow. We
-    keep the assertion shape (M5 still covers the full catalogue) but
-    bump the expected count.
+    ``session_steward_specialist`` for the honest self-stop flow; the
+    read-only ``research_scout_specialist`` is the 8th. We keep the
+    assertion shape (M5 still covers the full catalogue) but bump the
+    expected count.
     """
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 7
+    assert len(SPECIALIST_DOMAINS_M5) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +160,7 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
     from inference_optimizer.orchestrator.backends.mock_backend import (
         MockBackend, MockTurn, ScriptedPlan,
     )
-    from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+    from inference_optimizer.protocol.intent import Intent, IntentType
     from inference_optimizer.orchestrator.specialist_runner import SpecialistRunner
     from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
     from inference_optimizer.orchestrator.task_registry import Task
@@ -236,7 +239,7 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
     IntentValidationError,
@@ -318,11 +321,12 @@ def _valid_done_payload(
 # ===========================================================================
 def test_specialist_domains_catalogue_has_six_entries():
     """IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow.
-    The test name stays for git-blame continuity but the assertion
-    tracks the actual count.
+    ``session_steward_specialist`` for the honest self-stop flow; the
+    read-only ``research_scout_specialist`` is the 8th. The test name
+    stays for git-blame continuity but the assertion tracks the actual
+    count.
     """
-    assert len(SPECIALIST_DOMAINS) == 7
+    assert len(SPECIALIST_DOMAINS) == 8
     assert SPECIALIST_DOMAIN_KEYS == frozenset(
         d.key for d in SPECIALIST_DOMAINS
     )
@@ -415,8 +419,8 @@ def test_R2_unknown_domain_denied(gate):
                 },
             },
         ))
-    assert exc.value.rule == "specialist_dispatch_source"
-    assert "domain" in (exc.value.hint or "")
+    assert exc.value.rule == "specialist_unknown_domain"
+    assert "tag" in (exc.value.hint or "")
 
 
 def test_R2_missing_gap_denied(gate):
@@ -643,7 +647,7 @@ def test_prompt_builder_emits_nine_sections():
     # User sections (2-7)
     assert "## 2. HARDWARE CONTEXT" in usr_p
     assert "## 3. GAP STATEMENT" in usr_p
-    assert "## 4. CORTEX KB SUB-GRAPH" in usr_p
+    assert "## 4. KB CONTEXT (optional, advisory)" in usr_p
     assert "## 5. WARM-START RECIPE SUMMARY" in usr_p
     assert "## 6. PR FEED" in usr_p
     assert "## 7. LOCAL SOURCE NAVIGATION HINT" in usr_p
@@ -919,5 +923,6 @@ def test_research_lane_capacity_is_core_state_field():
     """LLM cannot raise research_lane_capacity mid-flight."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
     assert "research_lane_capacity" in CORE_STATE_FIELDS
+    assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
     assert "specialist_rounds" in CORE_STATE_FIELDS
     assert "last_specialist" in CORE_STATE_FIELDS

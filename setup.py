@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Setuptools bridge for project metadata in ``pyproject.toml``."""
 
 from __future__ import annotations

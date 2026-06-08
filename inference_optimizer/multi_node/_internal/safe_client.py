@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Thin SaFE REST client used by the rayjob CLIs.
 
 Endpoints (verified against
