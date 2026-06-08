@@ -628,3 +628,42 @@ def test_record_kernel_opt_prompt_summary_surfaces_history():
     assert "kernel_id=k007" in summary
     assert "history=attempts=2/partial=2" in summary
     assert "retired=max_partial_attempts_2_without_keep" in summary
+
+
+def test_record_kernel_opt_persists_test_command():
+    """test_command from backend_paths must survive into kernel_opt_attempts
+    so that after_kernel_opt rocprof can retrieve it without re-deriving."""
+    state = SharedState()
+    state.record_kernel_opt({
+        "status": "ok",
+        "kernel_id": "k_tc",
+        "source_file": "/src/kernel.cu",
+        "proposal": {"decision": "KEEP", "reasons": []},
+        "verification": {
+            "micro_speedup": 1.25,
+            "best_artifact_path": "/tmp/k_tc.hip",
+            "compile_passed": True,
+            "correctness_passed": True,
+        },
+        "attempts": [
+            {
+                "backend": "geak",
+                "status": "ok",
+                "backend_paths": {
+                    "test_command": "timeout 600 python /sgl-workspace/aiter/tests/test_moe.py",
+                    "output_dir": "/tmp/geak_out",
+                },
+            }
+        ],
+    })
+    entry = state.kernel_opt_attempts.get("k_tc") or {}
+    assert entry.get("test_command") == "timeout 600 python /sgl-workspace/aiter/tests/test_moe.py"
+
+
+def test_record_kernel_opt_test_command_missing_does_not_error():
+    """When no attempt has a test_command, the entry must still be written
+    without raising and without setting test_command."""
+    state = SharedState()
+    state.record_kernel_opt(_partial_kernel_opt_result("k_notc"))
+    entry = state.kernel_opt_attempts.get("k_notc") or {}
+    assert "test_command" not in entry  # must be absent, not an empty string
