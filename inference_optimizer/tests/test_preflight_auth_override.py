@@ -31,7 +31,7 @@ from inference_optimizer import cli
 # _preflight() override semantics
 # ---------------------------------------------------------------------------
 @pytest.fixture
-def stub_install_steps(monkeypatch):
+def stub_install_steps(monkeypatch, tmp_path):
     """Stub out heavyweight install steps so _preflight() is fast."""
     monkeypatch.setattr(cli, "_load_dotenv_fallback", lambda: None)
     # N24: _load_kernel_agent_env_fallback now hard-fails (sys.exit 2)
@@ -41,6 +41,22 @@ def stub_install_steps(monkeypatch):
     # stub it out alongside _load_dotenv_fallback. The real fail-loud
     # behaviour is exercised by test_n24_kernel_agent_env_hardfail.
     monkeypatch.setattr(cli, "_load_kernel_agent_env_fallback", lambda: None)
+
+    # InferenceX setup is orthogonal to the auth block under test. On a CI
+    # runner the auto-detect finds no checkout and the clone path is a real
+    # ``git fetch`` against GitHub (no network / no writable runtime dir),
+    # so _preflight() would hit ``sys.exit(2)`` before reaching the auth
+    # logic. Point INFERENCEX_PATH at a writable dir so detection short-
+    # circuits, and stub the clone as a belt-and-braces fallback.
+    inferencex_dir = tmp_path / "InferenceX"
+    (inferencex_dir / "benchmarks").mkdir(parents=True)
+    (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text(
+        "# stub", encoding="utf-8"
+    )
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
+    monkeypatch.setattr(
+        cli, "_clone_inferencex", lambda dest: str(inferencex_dir)
+    )
 
     def _fake_which(name: str):
         return f"/usr/bin/{name}"  # pretend ray + python3 are present
