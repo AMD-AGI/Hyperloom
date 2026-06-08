@@ -106,10 +106,8 @@ class ClawClient:
             "tools": tools if tools is not None else self.default_tools,
             "workspaceId": self.sandbox_workspace or os.environ.get("SANDBOX_WORKSPACE", ""),
         }
-        # pluginId is optional. Omit entirely when caller passes None so the
-        # Claw backend uses whatever default the agent_id implies (matches
-        # the GUI behavior for remote-mode multi-node sessions, where no
-        # plugin is selected by the user).
+        # Omit pluginId when None so the Claw backend uses the agent_id default
+        # (matches GUI behavior for remote-mode multi-node sessions).
         if plugin_id is not None:
             body["pluginId"] = plugin_id
         if resource:
@@ -132,8 +130,7 @@ class ClawClient:
         ))["data"]
 
     def download_file(self, session_id: str, file_path: str) -> bytes:
-        # Percent-encode the full path (including leading slash if present).
-        # This matches the proven behavior in download_ab_stitched_session_logs.py.
+        # Percent-encode the full path including any leading slash.
         encoded = quote(file_path, safe="")
         resp = self._session.get(
             self._url(f"/sessions/{session_id}/files/{encoded}/stream"),
@@ -199,7 +196,6 @@ class ClawClient:
                 log.debug("Non-JSON SSE event: %s", event.data[:100])
                 continue
 
-            # Track last event ID for resume-on-reconnect
             if event.id:
                 self._last_event_id = event.id
 
@@ -278,7 +274,6 @@ class ClawClient:
         start = time.time()
         poll_interval = 30
 
-        # Start SSE in background for real-time events
         stop_sse = threading.Event()
         sse_thread = threading.Thread(
             target=self._sse_background,
@@ -289,7 +284,6 @@ class ClawClient:
         log.info("Session %s monitoring started (SSE background + polling every %ds)",
                  session_id, poll_interval)
 
-        # Main loop: poll session status API
         poll_count = 0
         agent_ever_ran = False
         try:

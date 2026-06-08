@@ -150,12 +150,7 @@ def derive_image(framework_name: str, session_image: Optional[str]) -> str:
 
 
 def derive_image_short(image: str) -> str:
-    """
-    Strip version tag, then take the last 2 path components.
-    e.g. harbor.../proxy/lmsysorg/sglang:v0.5.11 -> lmsysorg/sglang
-         harbor.../proxy/vllm/vllm-openai-rocm:v0.19 -> vllm/vllm-openai-rocm
-    If only one path component is present, return that single name.
-    """
+    """Strip version tag/digest, return the last 2 path components (or 1 if only one)."""
     img = image.split("@")[0]            # strip digest
     img = img.split(":")[0]              # strip tag
     parts = [p for p in img.split("/") if p]
@@ -165,11 +160,8 @@ def derive_image_short(image: str) -> str:
 
 
 def derive_unique_key(model_name: str, image: str) -> str:
-    """
-    BASE64-encoded "<model_name>+<image_short>".
-    Matches the POST /perf-leaderboard/api/v1/perf-runs unique_key contract,
-    so dev rows can be promoted to prod without rekeying.
-    """
+    """BASE64("<model_name>+<image_short>"); matches the perf-runs API unique_key
+    contract so dev rows promote to prod without rekeying."""
     raw = f"{model_name}+{derive_image_short(image)}"
     return base64.b64encode(raw.encode("utf-8")).decode("ascii")
 
@@ -178,15 +170,8 @@ _STOP_REASON_FAILED_TOKENS = ("timeout", "killed", "error", "failed", "abort", "
 
 
 def derive_status(session: Dict) -> str:
-    """
-    Map session.stop_reason to {success, running, failed}.
-
-    - empty / null stop_reason => "running" (session still in flight)
-    - any failure-flavoured token => "failed"
-    - anything else (including report_emitted / finished / max_minutes_reached_*)
-      => "success" (report was emitted, so the session terminated cleanly even
-      if it didn't reach the gain target)
-    """
+    """Map session.stop_reason to {success, running, failed}: empty=>running,
+    failure token=>failed, else success (report emitted = clean termination)."""
     stop = (session.get("stop_reason") or "").strip().lower()
     if not stop:
         return "running"
@@ -196,11 +181,8 @@ def derive_status(session: Dict) -> str:
 
 
 def detect_category(data: Dict) -> str:
-    """
-    Heuristic: MoE if any detected kernel category/name contains 'moe',
-    or model name has MoE markers; VLM if model name has vision markers;
-    else Dense.
-    """
+    """MoE if a kernel category/name or model name has MoE markers; VLM for
+    vision markers; else Dense."""
     kernels = safe_get(data, "kernel_lifecycle", "detected", default=[]) or []
     if isinstance(kernels, list):
         for k in kernels:
@@ -236,15 +218,9 @@ def reshape_snapshot(snap: Optional[Dict]) -> Optional[Dict]:
 
 
 def extract_roofline(data: Dict) -> Optional[Dict]:
-    """
-    Pass-through the first roofline entry verbatim so the API caller / frontend
-    can see every nested field (top_kernel.bound_type, gpu_pct, tflops_achieved,
-    delta sub-structure, etc.). The user explicitly requested full fidelity.
-
-    Backward compatibility: the previously reshaped fields (compute / idle /
-    comm / top_kernel name+efficiency / snapshot_id / ts) are still reachable
-    by reading entry.baseline.* / entry.latest.* — no field has been removed.
-    """
+    """Pass through the first roofline entry verbatim for full fidelity (every
+    nested field). Previously reshaped fields remain under entry.baseline.* /
+    entry.latest.* — nothing removed."""
     rl_list = safe_get(data, "roofline", default=[]) or []
     if isinstance(rl_list, list) and rl_list and isinstance(rl_list[0], dict):
         return copy.deepcopy(rl_list[0])
@@ -273,11 +249,8 @@ def compute_kernel_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_param_gain(attribution_src: Dict) -> Optional[float]:
-    """Param-attribution gain = direct params choice + sweep variant search.
-
-    The sweep stage is a parameter-space search (e.g. --num-continuous-decode-steps),
-    so its contribution belongs in the 'param' category for leaderboard display.
-    """
+    """Param-attribution gain = params choice + sweep variant search (sweep is a
+    parameter-space search, so it belongs in the 'param' category)."""
     params = attribution_src.get("params_pct_of_total")
     sweep = attribution_src.get("sweep_pct_of_total")
     if params is None and sweep is None:
@@ -311,11 +284,8 @@ def compute_oob_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_framework_gain(attribution: Dict) -> Optional[float]:
-    """Framework-source gain = SUM(delta_pct) over attribution.gain_per_stack_entry[]
-    where action='framework_pr'. Returns None when no such entry exists, so the
-    later normalisation step can collapse it to 0.00 alongside the other
-    *_gain columns.
-    """
+    """Framework-source gain = SUM(delta_pct) over gain_per_stack_entry[] where
+    action='framework_pr'. None when absent so normalisation collapses it to 0.00."""
     entries = attribution.get("gain_per_stack_entry")
     if not isinstance(entries, list):
         return None
@@ -335,10 +305,9 @@ def compute_framework_gain(attribution: Dict) -> Optional[float]:
 # ---------------------------------------------------------------------------
 # Workload-dim defaults and framework_args parsing
 #
-# Most session_breakdown JSONs leave workload.tp / workload.isl / ... as null
-# (the launcher arg string is the real source of truth). We parse that string
-# below and fall back to platform defaults so the leaderboard never shows blank
-# columns. These rules duplicate scripts/fix_null_fields.py:derive_fields().
+# Most JSONs leave workload.tp/isl/... null (launcher arg string is the real
+# source of truth); we parse it and fall back to platform defaults. Duplicates
+# scripts/fix_null_fields.py:derive_fields().
 # ---------------------------------------------------------------------------
 
 DEFAULT_DURATION_SECONDS = 10800  # 3 hours
@@ -498,10 +467,8 @@ def extract_row(data: Dict) -> Dict[str, Any]:
     attribution = data.get("attribution") or {}
     attribution_src = attribution.get("source_breakdown") or {}
 
-    # workload.model_name occasionally arrives as a filesystem path (e.g.
-    # "/wekafs/models/Qwen-Qwen3-30B-A3B"). Clean those prefixes so the
-    # leaderboard shows a HuggingFace-style "<org>-<repo>" name and
-    # unique_key stays comparable across runs that used different launchers.
+    # model_name sometimes arrives as a filesystem path; clean prefixes so the
+    # leaderboard shows a HF-style name and unique_key stays comparable.
     model_name = (_clean_model_name(workload.get("model_name"))
                   or (workload.get("model_name") or "").strip())
     framework_name = (workload.get("framework") or "").strip()
@@ -513,18 +480,14 @@ def extract_row(data: Dict) -> Dict[str, Any]:
     baseline_tput = baseline.get("throughput_tok_s_per_gpu")
     opt_tput = final.get("throughput_tok_s_per_gpu")
 
-    # Resolve every leaderboard column that is normally null in legacy JSONs
-    # (prec/tp/isl/osl/conc/duration) by re-parsing the launcher args and
-    # falling back to platform defaults. This eliminates the post-import
-    # patch step that scripts/fix_null_fields.py used to do.
+    # Resolve normally-null columns (prec/tp/isl/osl/conc/duration) by parsing
+    # launcher args + platform defaults; replaces scripts/fix_null_fields.py.
     dims = resolve_workload_dims(data)
 
     code_rev = session.get("code_revision") or ""
 
-    # gain: prefer final.cumulative_gain_pct_validated (the spec's "trusted
-    # end-to-end" metric used for leaderboard ranking). Fall back to the raw
-    # throughput delta % so we never lose ordering on legacy sessions that
-    # never ran validate_stack.
+    # gain: prefer final.cumulative_gain_pct_validated (trusted end-to-end metric
+    # for ranking); fall back to raw throughput delta % for legacy sessions.
     validated_gain = final.get("cumulative_gain_pct_validated")
     throughput_delta_pct = compute_gain_pct(baseline_tput, opt_tput)
     if isinstance(validated_gain, (int, float)):
@@ -558,25 +521,22 @@ def extract_row(data: Dict) -> Dict[str, Any]:
         "isl":                       dims["isl"],
         "osl":                       dims["osl"],
         "conc":                      dims["conc"],
-        # The build_body filter in post_perf_runs.py rejects incomplete /
-        # baseline-failed sessions, so anything we POST is effectively a
-        # successful run regardless of session.stop_reason -- the leaderboard
-        # consumer only cares about completed-and-validated rows.
+        # post_perf_runs.py's build_body rejects incomplete/baseline-failed
+        # sessions, so anything POSTed is effectively a successful run.
         "status":                    "success",
         "version":                   truncate(code_rev, 64),
         "unique_key":                truncate(derive_unique_key(model_name, image), 128),
         "claw_session_id":           truncate(session.get("claw_session_id"), 128),
     }
 
-    # Stash the derivation provenance so enrich_raw_data can persist it.
+    # Derivation provenance, persisted by enrich_raw_data.
     row["_meta"] = {
         "gain_source":           gain_source,
         "validated_gain_pct":    float(validated_gain) if isinstance(validated_gain, (int, float)) else None,
         "throughput_delta_pct":  throughput_delta_pct,
     }
 
-    # Force missing attribution gains to 0.00 instead of NULL (per user
-    # request: leaderboard column should never be empty). round to 2dp for
+    # Force missing attribution gains to 0.00 (never NULL) and round to 2dp for
     # the NUMERIC(8,2) target column.
     for key in ("kernel_gain", "param_gain", "backend_gain",
                 "geak_gain", "oob_gain", "framework_gain"):
@@ -586,21 +546,16 @@ def extract_row(data: Dict) -> Dict[str, Any]:
         elif isinstance(v, (int, float)):
             row[key] = round(float(v), 2)
 
-    # Clip negative gain values to 0 across every column. Only triggers when
-    # the field is present AND < 0 (per request: "only act when gain
-    # exists and is less than 0"). Process-history paths inside raw_data (e.g.
-    # optimization_stack[].delta_pct, unified_log[].key_metric) are NOT
-    # touched -- negative there is meaningful (a "REVERT"/"NEEDS_REVIEW"
-    # attempt). enrich_raw_data() mirrors this clip only on the
-    # display-facing nested paths to keep the column and raw_data in sync.
+    # Clip negative gains to 0 (only when present and < 0). Process-history paths
+    # in raw_data keep negatives (meaningful for REVERT/NEEDS_REVIEW);
+    # enrich_raw_data() mirrors this clip only on display-facing nested paths.
     for key in ("gain", "kernel_gain", "param_gain", "backend_gain",
                 "geak_gain", "oob_gain", "framework_gain"):
         v = row.get(key)
         if isinstance(v, (int, float)) and v < 0:
             row[key] = 0.0
 
-    # raw_data is the original JSON + a `_enrichment` block of inferred values.
-    # We pop `_meta` so it never reaches the SQL stage.
+    # raw_data = original JSON + `_enrichment`; pop `_meta` before the SQL stage.
     meta = row.pop("_meta", {}) or {}
     row["raw_data"] = enrich_raw_data(data, row, meta=meta)
 
@@ -617,20 +572,9 @@ def format_duration_pretty(seconds: Optional[int]) -> str:
 
 
 def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = None) -> Dict:
-    """
-    Build the JSON we will persist into perf_runs.raw_data.
-
-    Strategy:
-    - Keep the original session breakdown JSON intact (deep-copied).
-    - Backfill `session.image` directly inside the JSON when it is missing,
-      so downstream consumers can read raw_data.session.image without
-      falling back to the column or to `_enrichment.image_used`.
-    - Add a top-level `_enrichment` block with every value we *inferred* or
-      *computed* so future consumers can read them directly without re-doing
-      the derivation work.
-    - `meta` carries per-session derivation provenance (where `gain` came
-      from, what the alternative metric value was, etc).
-    """
+    """Build the JSON persisted into perf_runs.raw_data: deep-copy the original,
+    backfill session.image when missing, and add a top-level `_enrichment` block
+    of inferred/computed values (`meta` carries derivation provenance)."""
     enriched = copy.deepcopy(original)
 
     session = enriched.get("session")
@@ -661,13 +605,9 @@ def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = 
             workload[wl_key] = row[row_key]
             workload_fallbacks_applied[wl_key] = row[row_key]
 
-    # Mirror the column-level gain clip into display-facing raw_data paths so
-    # downstream UIs that read `raw_data->'final'->>'cumulative_gain_pct_validated'`
-    # or `raw_data->'attribution'->'source_breakdown'->>'oob_pct_of_total'`
-    # see the same non-negative number as the matching column. Only triggers
-    # when the field is present and < 0. Process-history paths
-    # (optimization_stack[], gain_per_stack_entry[], unified_log[], kernels[],
-    # subagent_status.*.best_gain_pct) are intentionally left untouched.
+    # Mirror the column-level gain clip into display-facing raw_data paths so UIs
+    # see the same non-negative number as the column (only when present and < 0).
+    # Process-history paths are intentionally left untouched.
     raw_clip_applied: Dict[str, Any] = {}
 
     def _clip_neg(container: Dict, key: str, full_path: str) -> None:
@@ -868,7 +808,7 @@ def _sql_jsonb_literal(obj: Any) -> str:
 
 
 def build_upsert_statement_inline(row: Dict[str, Any], table: str) -> str:
-    """Build a single SQL statement with all values inlined (dollar-quoted)."""
+    """Build one SQL statement with all values inlined (dollar-quoted)."""
     table = safe_table(table)
     parts = (
         f"INSERT INTO {table} (\n"
@@ -936,11 +876,7 @@ def build_upsert_statement_inline(row: Dict[str, Any], table: str) -> str:
 
 
 def build_ssh_kubectl_psql(hop1: str, namespace: str, user: str, dbname: str) -> List[str]:
-    """
-    Returns argv to invoke psql on the master postgres pod via SSH+kubectl.
-    Stdin is piped to psql.
-    """
-    # Use single quotes inside double quotes for the kubectl pod-selector subshell.
+    """Return argv to invoke psql on the master postgres pod via SSH+kubectl (stdin piped)."""
     remote_cmd = (
         f"kubectl exec -i -n {namespace} "
         f"$(kubectl get pod -n {namespace} "
@@ -1005,14 +941,8 @@ def looks_like_session_breakdown(data: Any) -> bool:
 
 
 def looks_like_v1_flat_schema(data: Any) -> bool:
-    """
-    Recognise the legacy 'V1 flat' session_breakdown layout written by older
-    claw / OOB / manual fallback agents.
-
-    Required signals:
-      * top-level dict (not nested under 'workload'/'baseline')
-      * 'model', 'framework', 'baseline_tput' and 'best_tput' all at the top
-    """
+    """Recognise the legacy 'V1 flat' layout: top-level dict with model,
+    framework, baseline_tput and best_tput (not nested under workload/baseline)."""
     if not isinstance(data, dict):
         return False
     return (
@@ -1385,7 +1315,7 @@ def parse_file(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
     if not looks_like_session_breakdown(data):
-        # Also accept the v2 wrapper {"source": ..., "data": <breakdown>}
+        # Also accept the v2 wrapper {"source": ..., "data": <breakdown>}.
         if isinstance(data, dict) and isinstance(data.get("data"), dict) and looks_like_session_breakdown(data["data"]):
             data = data["data"]
         else:
@@ -1451,7 +1381,7 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate table name early so we don't waste a connection
+    # Validate table name early so we don't waste a connection.
     try:
         safe_table(args.table)
     except ValueError as e:
@@ -1538,7 +1468,7 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
         f"== ssh-kubectl mode: hop1={args.hop1} ns={args.namespace} "
         f"db={args.dbname} table={args.table} ==")
 
-    # Optionally ensure unique index. One round trip.
+    # Optionally ensure the unique index (one round trip).
     if not args.skip_index_check:
         try:
             execute_remote_sql(
@@ -1552,7 +1482,7 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
                 f"[WARN] could not ensure unique index on {args.table}(unique_key): {e}\n"
             )
 
-    # Parse all files first; collect (path, row) pairs that are valid.
+    # Parse all files first; collect valid (path, row) pairs.
     parsed: List[Tuple[Path, Dict[str, Any]]] = []
     for f in files:
         row = parse_file(f)
@@ -1563,7 +1493,7 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
         print("== Done: 0 files to import ==")
         return
 
-    # Batch upserts into chunks to amortize SSH/kubectl startup cost.
+    # Batch upserts to amortize SSH/kubectl startup cost.
     batch_size = max(1, int(args.batch_size))
     ok = 0
     for i in range(0, len(parsed), batch_size):
@@ -1588,7 +1518,7 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
             sys.stderr.write(
                 f"[ERROR] batch {i // batch_size} ({len(chunk)} files) failed: {e}\n"
             )
-            # Best effort: retry one-by-one to identify the bad file
+            # Retry one-by-one to identify the bad file.
             for f, row in chunk:
                 try:
                     single_sql = "BEGIN;\n" + build_upsert_statement_inline(row, args.table) + "COMMIT;\n"

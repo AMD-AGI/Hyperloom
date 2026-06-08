@@ -62,9 +62,8 @@ def fetch_inferenceX_ref(
 ) -> float | None:
     """Look up InferenceX output_tput_per_gpu for repo_id on target_gpu.
 
-    Returns None if the repo isn't in our HF→InferenceX map, the API has no
-    benchmarks, or none match the (hardware, ISL, OSL) we want. None means
-    'no comparison available for this row' — the column stays blank.
+    Returns None when no comparison is available (unmapped repo, no benchmarks,
+    or no (hardware, ISL, OSL) match) — the column stays blank.
     """
     api_name = hf_to_ifx.get(repo_id)
     if not api_name:
@@ -402,8 +401,7 @@ def main() -> int:
     )
     log.info("wrote summary and normalized results under %s", out)
 
-    # Print the table to stdout too, so the GitHub Actions log shows it
-    # without having to download the artifact.
+    # Echo the table to stdout so the GitHub Actions log shows it.
     print(md)
     return 0
 
