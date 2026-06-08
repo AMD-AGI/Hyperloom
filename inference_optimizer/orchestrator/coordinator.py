@@ -73,6 +73,7 @@ from .resource_lock import (
 from .shared_state import SharedState
 from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
+from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .action_executors.benchmark_result import is_valid_measurement
 from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _BASELINE_FINGERPRINT_KEYS,
@@ -2578,6 +2579,7 @@ class Coordinator:
                     gain_pct=round(measured_gain, 3),
                     throughput_after=tput,
                     task_id=str(task.task_id if task is not None else ""),
+                    tick=int(state.tick or 0),
                 ))
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("warm-replay journal append failed")
@@ -4410,8 +4412,58 @@ class Coordinator:
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
+        # Full-trace A1: record this reactor turn's token spend on the
+        # unified ledger. One call site covers every in-process reactor
+        # role (orchestration / kernel) whose backend reports usage on
+        # metadata (ClaudeBackend + CodexBackend). Best-effort: a trace
+        # failure must never affect intent routing.
+        self._trace_reactor_llm_call(agent_name, result)
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
+
+    def _trace_reactor_llm_call(
+        self, agent_name: str, result: BackendTurnResult,
+    ) -> None:
+        """Append one ``llm_calls.jsonl`` row for a reactor turn.
+
+        The reactor role name (``orchestration`` / ``kernel`` / ``critic`` /
+        ``robustness``) doubles as both the trace ``component`` and
+        ``role``. Only rows carrying real token counters are written, so
+        subprocess-backed reactors (critic / robustness) that don't report
+        usage here don't pollute the ledger with empty rows — their token
+        spend is captured by the dedicated agent collectors instead.
+
+        Wrapped in a broad ``try`` so any unexpected error in trace
+        assembly degrades to a logged warning rather than breaking the
+        tick loop.
+        """
+        try:
+            metadata = result.metadata or {}
+            has_tokens = any(
+                metadata.get(k) is not None
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                )
+            )
+            if not has_tokens:
+                return
+            record = LLMCallRecord.from_metadata(
+                session_id=self.session_dir.name,
+                component=agent_name,
+                role=agent_name,
+                metadata=metadata,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: reactor llm_call append failed for %s",
+                agent_name, exc_info=True,
+            )
 
     async def _track_backend_error_streak(
         self, agent_name: str, exc: BackendError,
@@ -6718,6 +6770,7 @@ class Coordinator:
                         "degraded_dispatch": bool(spec["degraded_dispatch"]),
                         "seed_kit_tokens": int(spec["seed_kit_tokens"]),
                     },
+                    tick=int(self.shared_state.tick or 0),
                 )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
@@ -7057,6 +7110,7 @@ class Coordinator:
                         ),
                         "proposal_count": 0,
                     },
+                    tick=int(self.shared_state.tick or 0),
                 )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
@@ -7126,6 +7180,7 @@ class Coordinator:
                     ),
                     "proposal_count": len(proposal_set),
                 },
+                tick=int(self.shared_state.tick or 0),
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
@@ -7213,6 +7268,7 @@ class Coordinator:
                         ),
                         "mechanical_floor_blocked": True,
                     },
+                    tick=int(self.shared_state.tick or 0),
                 )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
@@ -7397,6 +7453,7 @@ class Coordinator:
                     "cross_domain_flag": bool(envelope["cross_domain_flag"]),
                     "mechanical_floor_blocked": False,
                 },
+                tick=int(self.shared_state.tick or 0),
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
@@ -7524,6 +7581,7 @@ class Coordinator:
                         result_dict.get("patches_reverted") or (),
                     ),
                 },
+                tick=int(self.shared_state.tick or 0),
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
@@ -10462,6 +10520,7 @@ class Coordinator:
             error_class=error_class,
             reason=reason,
             task_id=task.task_id,
+            tick=int(self.shared_state.tick or 0),
         ))
 
         if self.cortex_kb is None:
@@ -10702,6 +10761,7 @@ class Coordinator:
             reason=reason,
             task_id=task.task_id,
             variant_name=variant_name,
+            tick=int(self.shared_state.tick or 0),
         ))
 
         if self.cortex_kb is None:
