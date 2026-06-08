@@ -1,0 +1,29 @@
+{
+  "schema_version": "hyperloom.production_corpus.v1",
+  "pool_id": "mimo-image-probe",
+  "source": "manual",
+  "_readme": [
+    "TEMPORARY MiMo image probe (core42-top8). Re-run ONLY MiMo-V2.5-Pro to test",
+    "whether the DATED sglang-rocm daily build carries the MiMoV2 day-0 arch that",
+    "the undated v0.5.11 tag (profilerfix base) lacks. The image override is done",
+    "via a TEMP edit to optimize_submit._default_sglang_image() ->",
+    "harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang-rocm:v0.5.11-rocm720-mi30x-20260508",
+    "(the daily workflow has no per-model --image knob). Baseline-validation only",
+    "(no profilerfix patch). Delete this file + revert the image edit after dispatch."
+  ],
+  "policy": {"rotation": "none", "refresh_mode": "manual"},
+  "candidates": [
+    {
+      "pool_id": "mimo-image-probe",
+      "pool_index": 0,
+      "label": "MiMo V2.5 Pro",
+      "repo_id": "XiaomiMiMo/MiMo-V2.5-Pro",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "note": "image via TEMP _default_sglang_image -> sglang-rocm:...-20260508; verify MiMoV2 arch loads + ROCm baseline starts"
+    }
+  ]
+}
