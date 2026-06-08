@@ -6,7 +6,7 @@ When ``TraceLens/Agent/Analysis/utils/arch/<platform>.json`` (and any
 suite to produce a measured arch spec. Selects an unoccupied GPU and passes
 ``HIP_VISIBLE_DEVICES`` / ``CUDA_VISIBLE_DEVICES`` / ``ROCR_VISIBLE_DEVICES``
 only to the microbenchmark subprocess. The microbenchmark runs with
-``--warmup 20 --rep 50 --allow-busy``.
+``--warmup 20 --rep 50``.
 """
 
 from __future__ import annotations
@@ -175,7 +175,6 @@ def populate_gpu_arch_json(
             str(MICROBENCH_WARMUP),
             "--rep",
             str(MICROBENCH_REP),
-            "--allow-busy",
             "--output",
             str(out_path),
         ],

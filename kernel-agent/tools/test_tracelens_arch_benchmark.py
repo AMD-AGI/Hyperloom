@@ -160,7 +160,6 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
     assert "TraceLens.PerfModel.benchmarking.microbench" in calls[0]
     assert "--warmup" in calls[0] and "20" in calls[0]
     assert "--rep" in calls[0] and "50" in calls[0]
-    assert "--allow-busy" in calls[0]
     assert calls[0][calls[0].index("--output") + 1].endswith(
         "TraceLens/Agent/Analysis/utils/arch/MI355X.json"
     )
