@@ -19,6 +19,7 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | Scoring heuristics, stack mechanics, dynamic branching, and the self-evolving knowledge base |
 | **[GLM-5 — Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
 | **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
+| **[Requesting Access](docs/REQUESTING_ACCESS.md)** | Primus-SaFE access request, provisioning, and AMD SSO sign-in flow for Hyperloom |
 | **[Auth & Environment Guide](docs/ENV_AND_AUTH.md)** | Single authoritative auth/env reference; the inline tables in this README are a convenience excerpt |
 | **[Configuration Reference](docs/CONFIGURATION_REFERENCE.md)** | Every environment variable read by the runtime |
 | **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | How to obtain or skip `INFERENCE_OPTIMIZER_KB_ROOT` |
@@ -26,6 +27,25 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | **[Operations & Self-Host Runbook](docs/OPERATIONS.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Auth-proxy 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
 | **[Upgrading](docs/UPGRADING.md)** | Per-version migration steps (companion to [`CHANGELOG.md`](CHANGELOG.md)) |
+
+---
+
+## Requesting Access (Hyperloom Web UI)
+
+Before using the hosted [Hyperloom UI](https://core42.primus-safe.amd.com/hyperloom/),
+request access to the Primus-SaFE cluster you plan to use. The same flow applies
+to the Core42 and TensorWeave (TW) clusters: submit an AISE access request, wait
+for administrator provisioning and account sync, then sign in with AMD SSO.
+
+<!-- Screenshot placeholder: add the access request screenshot at slides/primus_safe_access_request.png, then replace this paragraph with:
+<p align="center"><img width="500" alt="Primus-SaFE access request form" src="slides/primus_safe_access_request.png" /></p>
+-->
+
+_Screenshot: Primus-SaFE access request form (to be added)._
+
+For the full step-by-step flow, including cluster URLs and what to include in
+the access request, see [Requesting Access](docs/REQUESTING_ACCESS.md). Internal
+reference: [TensorWeave MI325 cluster with Primus-SaFE](https://amd.atlassian.net/wiki/spaces/~712020ea4fade82ae94a95b7c0ba1cb554d2a8/pages/1178771460/TensorWeave+MI325+cluster+with+Primus-SaFE).
 
 ---
 
