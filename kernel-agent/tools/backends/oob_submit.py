@@ -14,7 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ray_runtime import ensure_ray_cluster, quiet_ray_init, safe_runtime_env
+from ray_runtime import ensure_ray_cluster, quiet_ray_init
 
 
 def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,
@@ -257,7 +257,10 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
                 and ``cmd``.
         """
         # Self-contained: workers don't share driver sys.path.
-        import os as _os, shutil as _shutil, subprocess as _sp, time as _t
+        import os as _os
+        import shutil as _shutil
+        import subprocess as _sp
+        import time as _t
         if not _shutil.which("oob"):
             return {
                 "returncode": 127, "stdout_tail": "", "stdout": "",

@@ -610,7 +610,8 @@ def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
 
 
 def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path):
-    import gzip, json as _json
+    import gzip
+    import json as _json
     cpu_only = tmp_path / "cpu_only.json.gz"
     with gzip.open(cpu_only, "wt") as f:
         _json.dump({"traceEvents": [
