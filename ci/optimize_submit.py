@@ -684,9 +684,11 @@ class SafeOptimizeClient:
         self._sess.verify = os.environ.get(
             "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True))
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, body: dict | None = None,
+                 timeout: float | None = None) -> dict:
         url = f"{self.base_url}/{path.lstrip('/')}"
-        resp = self._sess.request(method, url, json=body, timeout=self.timeout)
+        resp = self._sess.request(method, url, json=body,
+                                  timeout=timeout or self.timeout)
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:300]}")
@@ -894,14 +896,23 @@ class SafeOptimizeClient:
         attempts = 8
         for attempt in range(1, attempts + 1):
             try:
-                return self._request("POST", "api/v1/optimization/tasks", body)
-            except RuntimeError as e:
+                # The submit POST can be slow when the core42 apiserver is
+                # under load from many parallel daily jobs. Give it a generous
+                # read timeout so a busy-but-alive backend doesn't trip the
+                # default 30s and get misreported as a hard submit failure.
+                return self._request(
+                    "POST", "api/v1/optimization/tasks", body, timeout=120)
+            except Exception as e:
                 msg = str(e)
+                low = msg.lower()
                 transient = (
                     "HTTP 500" in msg
                     or "HTTP 502" in msg
                     or "HTTP 503" in msg
                     or "HTTP 504" in msg
+                    or "timed out" in low      # requests ReadTimeout/ConnectTimeout
+                    or "timeout" in low
+                    or "connection" in low     # ConnectionError / HTTPSConnectionPool
                 )
                 if not transient or attempt >= attempts:
                     raise
