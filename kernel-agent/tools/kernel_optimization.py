@@ -96,6 +96,46 @@ def update_status(
     atomic_write_json(status_path, payload)
 
 
+def resolve_candidates_path(run_dir: Path) -> Path:
+    """Locate the ``kernel_candidates.json`` TraceLens wrote for this session.
+
+    PR-C (``tracelens_analysis.py``) moved every TraceLens invocation's
+    outputs into a per-run sub-directory
+    ``runs/<session_id>/<compact_ts>_<run_id>/`` so successive watermark
+    refreshes no longer overwrite each other. ``kernel_optimization.py``
+    still keys its own artifacts off the flat ``runs/<session_id>/`` root,
+    so the candidates file is no longer where the pre-PR-C lookup expected
+    it. Resolve it here with the same "latest pointer" semantics the
+    roofline sidecar uses:
+
+    * honour the flat legacy path (``run_dir/kernel_candidates.json``) when
+      present so pre-PR-C sessions / callers that drop the file at the
+      session root keep working;
+    * otherwise descend into the newest ``<ts>_<run_id>`` sub-directory that
+      actually carries a ``kernel_candidates.json`` — the compact-timestamp
+      prefix sorts chronologically, so ``max()`` is the most recent run.
+
+    Falls back to the flat path (which ``load_candidates`` will surface as a
+    clean ``FileNotFoundError``) when nothing matches, preserving the
+    "no fabricated target" failure mode for genuinely missing analyses.
+    """
+    flat = run_dir / "kernel_candidates.json"
+    if flat.is_file():
+        return flat
+    if run_dir.is_dir():
+        sub_candidates = [
+            child / "kernel_candidates.json"
+            for child in run_dir.iterdir()
+            if child.is_dir() and (child / "kernel_candidates.json").is_file()
+        ]
+        if sub_candidates:
+            # Sort by the parent sub-dir name (``<compact_ts>_<run_id>``);
+            # the zero-padded timestamp prefix makes lexical order == time
+            # order, so the last element is the most recent TraceLens run.
+            return max(sub_candidates, key=lambda p: p.parent.name)
+    return flat
+
+
 def load_candidates(path: Path) -> list[dict[str, Any]]:
     """Load kernel candidates from JSON, normalizing legacy shapes.
 
@@ -2974,7 +3014,11 @@ def main() -> int:
         update_status(status_path, state="running", current_step="load_candidate",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at)
-        candidates_path = Path(args.candidates_path) if args.candidates_path else run_dir / "kernel_candidates.json"
+        candidates_path = (
+            Path(args.candidates_path)
+            if args.candidates_path
+            else resolve_candidates_path(run_dir)
+        )
         all_candidates = load_candidates(candidates_path)
         candidate = find_candidate(all_candidates, args.kernel_id)
         if candidate is None:
