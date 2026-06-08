@@ -26,7 +26,6 @@ from typing import Any
 
 from ..session_paths import (
     dynamic_action_artifact_dir,
-    dynamic_action_dispatch_history_path,
     dynamic_action_spec_path,
     dynamic_actions_root,
 )

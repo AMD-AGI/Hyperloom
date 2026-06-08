@@ -210,7 +210,6 @@ class TestWriter:
         self, tmp_path, monkeypatch, caplog,
     ):
         """OSError on disk → log warning + continue; never raise out."""
-        from inference_optimizer.orchestrator import dynamic_action_history as h
         def _boom(self, *a, **k):
             raise OSError("disk full")
         monkeypatch.setattr(Path, "mkdir", _boom)

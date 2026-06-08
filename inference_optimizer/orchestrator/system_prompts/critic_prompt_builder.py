@@ -232,7 +232,7 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
         "- `accuracy_risk == 0` → `approve` unless duplicate proposal or",
         "  `judge_bundle.required_context` is non-empty.",
         "- `0 < accuracy_risk <= 0.30` → `approve` with `predicted_gain_pct` set.",
-        f"- `accuracy_risk > 0.30` → `reject` unless `notes` justify the risk.",
+        "- `accuracy_risk > 0.30` → `reject` unless `notes` justify the risk.",
         f"  High-risk actions this run: {high_risk_line}.",
         "- `family == \"deep_kernel\"` → `approve` (Orchestration sends these",
         "  via REQUEST; you OK the proposal flow).",
