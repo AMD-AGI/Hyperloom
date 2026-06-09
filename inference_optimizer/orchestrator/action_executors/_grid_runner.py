@@ -806,6 +806,40 @@ def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
     return _SGLANG_DUAL_CHUNK_BACKEND
 
 
+# Command-A checkpoints declare Cohere2VisionForConditionalGeneration at the
+# top level. vLLM resolves that path and hits CONFIG_MAPPING["cohere2_moe"]
+# KeyError on transformers builds that do not register cohere2_moe. Pin
+# Cohere2MoeForCausalLM via hf-overrides unless the operator already supplied
+# one (explore variants may legitimately re-test the vision path).
+_COHERE2_HF_OVERRIDES = (
+    '--hf-overrides {"architectures":["Cohere2MoeForCausalLM"],'
+    '"model_type":"cohere2"}'
+)
+_HF_OVERRIDES_RE = re.compile(r"--hf-overrides(?:[=\s]|$)")
+
+
+def inject_vllm_cohere2_hf_overrides(
+    server_args: str | None,
+    framework: str | None,
+    model_path: str | None,
+) -> str:
+    """Append ``--hf-overrides`` for Command-A vLLM loads.
+
+    Returns ``server_args`` unchanged when: framework is not vLLM, an
+    ``--hf-overrides`` is already pinned (operator wins), or the model
+    basename does not look like Command-A.
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_VLLM_ARGS":
+        return args
+    if _HF_OVERRIDES_RE.search(args):
+        return args
+    basename = Path(str(model_path or "")).name.lower()
+    if "command-a" not in basename:
+        return args
+    return merge_server_args(args, _COHERE2_HF_OVERRIDES)
+
+
 def inject_sglang_attention_backend(
     server_args: str | None,
     framework: str | None,
@@ -1619,6 +1653,7 @@ __all__ = [
     "inject_sglang_attention_backend",
     "inject_sglang_context_length",
     "inject_sglang_watchdog_timeout",
+    "inject_vllm_cohere2_hf_overrides",
     "merge_server_args",
     "pick_winners",
     "resolve_sglang_watchdog_timeout",
