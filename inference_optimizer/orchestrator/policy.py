@@ -609,6 +609,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
+    # operator-facing lifecycle event log (#266). Coordinator-only writer
+    # (SharedState.record_lifecycle_event); LLM update_state must not be
+    # able to forge "phase X finished, outputs at <path>" events.
+    "lifecycle",
     # specialist sub-agent ledger. Coordinator-only writes; LLM cannot inject
     # arbitrary entries via update_state (specialist_done carries
     # proposals through the dedicated R3 path instead).

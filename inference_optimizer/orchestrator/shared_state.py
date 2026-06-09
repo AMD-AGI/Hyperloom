@@ -140,6 +140,12 @@ _DEFAULT_LAST_FAILURES = 10
 # in :meth:`SharedState.record_phase_transition`.
 _PHASE_HISTORY_CAP = 100
 
+# Lifecycle-event log cap (#266). Unlike phase_history (≤6 transitions),
+# lifecycle events fire at every step boundary (trace_analyze /
+# run_optimization / integrate / report, ×N kernels ×M rounds), so the cap
+# is generous but still bounds state.json growth on a long run.
+_LIFECYCLE_CAP = 500
+
 # roofline_snapshots history cap. PRELUDE bootstrap writes #1; every
 # +10% watermark crossing writes a refresh. Even a pathological run
 # with 50 watermark crossings would stay well under this cap; the
@@ -1003,6 +1009,13 @@ class SharedState:
     # ``_PHASE_HISTORY_CAP`` so a runaway transition never bloats
     # state.json (unlikely — at most ~6 phases in the chain — but defensive).
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    # Append-only operator-facing lifecycle log (#266). Each row is built
+    # by :func:`phase_state.make_lifecycle_event` and records a phase/step
+    # boundary (START / END / ERROR) plus the artifact paths it produced,
+    # so a launcher can surface "phase X ran, outputs at <path>" in chat.
+    # Coordinator-only writer (PolicyGate adds it to ``CORE_STATE_FIELDS``);
+    # capped at ``_LIFECYCLE_CAP``.
+    lifecycle: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase.
     # Coordinator populates from CLI flags / defaults at construction
     # time; persisted so resume picks up the exact split the original
@@ -1626,6 +1639,58 @@ class SharedState:
         self.phase_started_ts = now_ts
         self.phase_started_unix = now_unix
         return row
+
+    def record_lifecycle_event(
+        self,
+        *,
+        step: str,
+        status: str,
+        phase: str | None = None,
+        label: str | None = None,
+        artifacts: dict[str, str] | None = None,
+        detail: str = "",
+        duration_s: float | None = None,
+        ts: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a structured lifecycle event (#266, method 1).
+
+        Each event marks a phase/step boundary so operators can see — in
+        state.json, and via the launcher in chat — that a phase ran, where
+        its outputs went, and which artifact feeds the next phase.
+
+        ``step`` is the machine step/handler name (e.g. ``trace_analyze``);
+        ``label`` defaults to the human-friendly name from
+        :data:`phase_state.LIFECYCLE_STEP_LABELS` so both naming dimensions
+        are carried. ``phase`` defaults to the current coordinator phase.
+        ``seq`` is monotonic across the cap so consumers can order events
+        even after the oldest rows are trimmed.
+
+        Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards
+        ``lifecycle`` so an LLM ``update_state`` cannot forge events).
+        Returns the inserted row.
+        """
+        # Lazy import to avoid an import-time cycle with the orchestrator
+        # package (phase_state imports nothing from SharedState).
+        from .phase_state import make_lifecycle_event
+
+        events = list(self.lifecycle or [])
+        next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
+        event = make_lifecycle_event(
+            step=step,
+            status=status,
+            phase=(phase if phase is not None else (self.phase or "")),
+            label=label,
+            artifacts=artifacts,
+            detail=detail,
+            duration_s=duration_s,
+            seq=next_seq,
+            ts=ts or _now_iso(),
+        )
+        events.append(event)
+        if len(events) > _LIFECYCLE_CAP:
+            events = events[-_LIFECYCLE_CAP:]
+        self.lifecycle = events
+        return event
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         if not self.policy_denial_history:
