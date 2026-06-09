@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for framework_agent.runtime.cli.main.
-
-Hermetic - exercises argv-only paths. The ``candidates`` and ``explore``
-subcommands are tested via stubs that replace
-``sources.enumerate_candidates`` / ``explorer.explore`` so no network
-or git is required.
-"""
+"""Tests for framework_agent.runtime.cli.main. Hermetic - argv-only; ``candidates`` / ``explore`` subcommands stub ``sources.enumerate_candidates`` / ``explorer.explore`` so no network or git is required."""
 
 from __future__ import annotations
 
@@ -51,7 +45,6 @@ def test_main_candidates_happy_path(monkeypatch, tmp_path: Path, capsys) -> None
     req_path = tmp_path / "req.json"
     req_path.write_text(json.dumps(req_payload), encoding="utf-8")
 
-    # Stub the dispatcher so the CLI never tries the network.
     import framework_agent.sources as src
 
     def fake_enum(r):
@@ -112,10 +105,7 @@ def test_main_explore_plan_happy_path(monkeypatch, tmp_path: Path, capsys) -> No
 
 
 def test_main_candidates_accepts_atom_framework(monkeypatch, tmp_path: Path, capsys) -> None:
-    """``fa candidates`` must accept ``framework=atom`` (free-form
-    string, no enum validation) and forward the request through
-    enumerate_candidates unchanged. Smoke-tests that atom is a
-    first-class framework name in the fa CLI surface."""
+    """``fa candidates`` accepts ``framework=atom`` (free-form, no enum) and forwards it through enumerate_candidates unchanged."""
     req_payload = {
         "framework": "atom",
         "repo_url": "https://github.com/ROCm/ATOM.git",

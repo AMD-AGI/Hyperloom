@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the FRAMEWORK_PR phase-discover subcommand.
-
-Hermetic - stubs ``sources.enumerate_candidates`` so no network/git is
-required.
-"""
+"""Tests for the FRAMEWORK_PR phase-discover subcommand. Hermetic - stubs ``sources.enumerate_candidates`` so no network/git is required."""
 
 from __future__ import annotations
 
@@ -39,8 +35,7 @@ def test_phase_discover_happy_path(monkeypatch, tmp_path: Path, capsys) -> None:
     import framework_agent.sources as src
 
     def fake_enum(r):
-        # Mimic per-gap candidates; the second gap returns a duplicate ref
-        # to validate dedup.
+        # Second gap returns a duplicate ref to validate dedup.
         if "decode" in (r.gap_description or ""):
             return [
                 Candidate(
@@ -82,7 +77,6 @@ def test_phase_discover_happy_path(monkeypatch, tmp_path: Path, capsys) -> None:
     assert payload["candidate_count"] == 2  # dedup across gaps
     refs = sorted(c["ref"] for c in payload["candidates"])
     assert refs == ["PR:1234", "PR:5678"]
-    # diff_url constructed correctly from html_url
     pr1 = next(c for c in payload["candidates"] if c["ref"] == "PR:1234")
     assert pr1["diff_url"].endswith("/pull/1234.diff")
     assert pr1["pr_number"] == 1234
