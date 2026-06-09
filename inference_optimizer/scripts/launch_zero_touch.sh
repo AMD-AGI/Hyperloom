@@ -75,6 +75,14 @@ export GEAK_BASE_URL="http://127.0.0.1:4002/v1"
 
 mkdir -p "$USER_DATA_PATH" "${USER_DATA_PATH}/optimizer_runs"
 
+# install.sh clones Magpie/GEAK/TraceLens into USER_DATA_PATH/runtime. When the
+# container runs as root but USER_DATA_PATH lives on a host-user-owned mount,
+# git refuses to operate on those repos ("detected dubious ownership" ->
+# "remote did not send all necessary objects"), aborting the Magpie clone.
+# Trust any path so the cross-owner clones/fetches succeed (idempotent).
+git config --global --get-all safe.directory 2>/dev/null | grep -qx '\*' \
+  || git config --global --add safe.directory '*'
+
 log "USER_DATA_PATH=$USER_DATA_PATH"
 log "running install.sh"
 bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
