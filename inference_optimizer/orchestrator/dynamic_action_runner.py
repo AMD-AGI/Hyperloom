@@ -611,6 +611,7 @@ class DynamicActionRunner:
                     timeout=20.0, check=False,
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired):
+                # Best-effort worktree teardown; git missing or slow is non-fatal.
                 pass
 
     async def _dispatch_tool(

@@ -47,7 +47,6 @@ class RcaEngine(Protocol):
         Returns:
             str: Root-cause summary text, or an empty string when none.
         """
-        ...
 
 
 @dataclass

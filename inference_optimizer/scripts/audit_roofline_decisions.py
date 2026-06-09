@@ -229,6 +229,7 @@ def extract(session_dir: Path) -> AuditReport:
             state.get("cumulative_gain_validated", 0.0)
         )
     except (TypeError, ValueError):
+        # Missing/non-numeric gain field: leave the default and keep auditing.
         pass
     cached_ta = state.get("last_trace_analyze") or {}
     if isinstance(cached_ta, dict):

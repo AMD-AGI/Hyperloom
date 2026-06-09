@@ -1703,10 +1703,12 @@ def _kill_stale_servers() -> None:
                 if pgid not in (my_pgid, 0):
                     os.killpg(pgid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
+                # Group already gone or not ours to signal; fall through to per-pid kill.
                 pass
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
+                # Process already exited or owned by another user; nothing to kill.
                 pass
 
     # Clear /dev/shm vllm/nccl/cuda/torch segments that prevent re-binding.
@@ -1716,6 +1718,7 @@ def _kill_stale_servers() -> None:
             try:
                 os.remove(f)
             except OSError:
+                # Segment already removed or held by another process; safe to skip.
                 pass
 
     # Brief pause for KFD (ROCm kernel driver) async VRAM release. Atom workers

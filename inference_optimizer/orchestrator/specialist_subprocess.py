@@ -345,7 +345,6 @@ class SpecialistSubprocessDispatcher:
         done_candidates.append(workspace / "specialist_done.json")
         # Primary path is what the prompt advertises; the reap loop
         # falls back to the workspace copy below.
-        done_file = done_candidates[0]
         heartbeat_file = workspace / "heartbeat.json"
 
         # 1. Write the prompt file. We collapse system + user into a
@@ -432,7 +431,6 @@ class SpecialistSubprocessDispatcher:
             if cand.exists():
                 done_payload = self._read_done(cand)
                 if done_payload is not None:
-                    done_file = cand
                     break
 
         return SpecialistSubprocessResult(

@@ -73,7 +73,6 @@ class KBClient(Protocol):
         Returns:
             dict[str, Any]: The decoded JSON response body.
         """
-        ...
 
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Insert or update a single entry via ``POST /api/kb/upsert``.
@@ -84,7 +83,6 @@ class KBClient(Protocol):
         Returns:
             dict[str, Any]: The decoded JSON response body.
         """
-        ...
 
     def batch_insert(
         self,
@@ -101,7 +99,6 @@ class KBClient(Protocol):
         Returns:
             dict[str, Any]: The decoded JSON response body.
         """
-        ...
 
     def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]:
         """Create graph edges via ``POST /api/kb/edges/add``.
@@ -112,7 +109,6 @@ class KBClient(Protocol):
         Returns:
             dict[str, Any]: The decoded JSON response body.
         """
-        ...
 
 
 # ---------------------------------------------------------------------------

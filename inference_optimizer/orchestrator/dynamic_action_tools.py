@@ -395,6 +395,7 @@ async def run_bench(
         try:
             await proc.wait()
         except ProcessLookupError:
+            # Process already reaped after kill(); nothing to wait on.
             pass
         return _error(
             "timed_out", bench_id=bench_id, wall_clock_sec=timeout,
@@ -535,6 +536,7 @@ def reset_worktree(worktree: Path) -> None:
             timeout=20.0, check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        # Best-effort worktree cleanup; git missing or slow is non-fatal here.
         pass
 
 

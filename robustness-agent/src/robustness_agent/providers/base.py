@@ -28,7 +28,6 @@ class MetricsProvider(ABC):
         Returns:
             list[GpuSnapshot]: The current GPU snapshots.
         """
-        ...
 
     @abstractmethod
     async def get_gpu_history(self, gpu_id: int, window_seconds: int) -> list[GpuSnapshot]:
@@ -41,7 +40,6 @@ class MetricsProvider(ABC):
         Returns:
             list[GpuSnapshot]: Snapshots within the window.
         """
-        ...
 
     @abstractmethod
     async def get_process_list(self) -> list[ProcessInfo]:
@@ -50,7 +48,6 @@ class MetricsProvider(ABC):
         Returns:
             list[ProcessInfo]: One entry per tracked process.
         """
-        ...
 
     @abstractmethod
     async def get_disk_usage(self, path: str = "/") -> list[DiskSnapshot]:
@@ -62,7 +59,6 @@ class MetricsProvider(ABC):
         Returns:
             list[DiskSnapshot]: One entry per relevant mount.
         """
-        ...
 
     @abstractmethod
     async def get_fault_events(self, since: float) -> list[FaultEvent]:
@@ -74,9 +70,7 @@ class MetricsProvider(ABC):
         Returns:
             list[FaultEvent]: The matching fault events.
         """
-        ...
 
     @abstractmethod
     async def check_available(self) -> bool:
         """Return True if this provider is operational."""
-        ...
