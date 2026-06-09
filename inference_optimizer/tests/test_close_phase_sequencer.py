@@ -297,19 +297,26 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     await coord._on_enter_close(from_phase="SWEEP")
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
-    # Step sequence post T2/T3 retirement (cortex_commit removed).
+    # Step sequence post T2/T3 retirement (cortex_commit removed); the
+    # artifact_package bundle (step 2.6) sits between session_breakdown and
+    # fact_finalize.
     steps = [r["step"] for r in rows]
     assert steps == [
         "sequencer_started", "report", "session_breakdown",
-        "fact_finalize", "ndjson_drain", "done",
+        "artifact_package", "fact_finalize", "ndjson_drain", "done",
     ]
-    # All effective steps succeeded.
-    assert rows[1]["status"] == "done"     # report
-    assert rows[2]["status"] == "done"     # session_breakdown
-    assert rows[3]["status"] == "done"     # fact_finalize
+    # All effective steps succeeded. Index by step name so the assertions
+    # don't drift if the sequence grows again.
+    by_step = {r["step"]: r for r in rows}
+    assert by_step["report"]["status"] == "done"
+    assert by_step["session_breakdown"]["status"] == "done"
+    # tmp_path session dir holds no curated artifacts, so packaging matches
+    # nothing and records "skipped" (best-effort; never blocks close).
+    assert by_step["artifact_package"]["status"] == "skipped"
+    assert by_step["fact_finalize"]["status"] == "done"
     # ndjson_drain retired with the v1 cortex_kb_client; stub-emits "skipped".
-    assert rows[4]["status"] == "skipped"  # ndjson_drain (retired)
-    assert rows[5]["status"] == "done"     # done
+    assert by_step["ndjson_drain"]["status"] == "skipped"
+    assert by_step["done"]["status"] == "done"
     assert coord.shared_state.close_sequence_done is True
     # A normal SWEEP completion's sweep_done reason must be preserved (not time_exhausted).
     assert coord.shared_state.stop_reason == "sweep_done"
