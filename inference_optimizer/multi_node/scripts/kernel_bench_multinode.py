@@ -1,44 +1,13 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Multi-node-aware kernel micro-benchmark runner.
+"""Multi-node-aware kernel micro-benchmark runner (runs inside the head pod, not the sandbox).
 
-Counterpart to ``kill_multinode.py`` and ``kernel_patch_multinode.py``.
-Submitted via Ray Dashboard REST by ``inference_optimizer.multi_node
-kernel-bench`` when the workload has ``nodes >= 2``. The sandbox-side
-caller is ``kernel_optimization.py`` running on a CPU-only sandbox, so
-it cannot itself compile or execute GPU code; we delegate to a single
-GPU-bearing Ray actor on the head pod (rank 0) which mirrors how
-single-node kernel-agent works locally.
-
-Algorithm:
-
-  1. ``ray.init()`` (no address; in-pod).
-  2. Pick THIS pod (the head) as the bench host so the run lands on
-     real GPUs; spawn ``@ray.remote(num_gpus=1)`` actor pinned to it
-     via ``NodeAffinitySchedulingStrategy(node_id, soft=False)``.
-  3. The actor:
-     a. ``cd`` into the workspace dir provided by the caller.
-     b. base64-decode the bench script + any extra files (test data,
-        helper modules) into that workspace; preserve directory
-        structure under the workspace root.
-     c. Run ``bash bench_command`` with the workspace as CWD, capturing
-        stdout/stderr and the exit code.
-     d. Glob the workspace for result JSON files matching
-        ``result_glob`` and read them back (small artifacts only;
-        anything > 1 MiB is skipped with a note so we don't OOM the
-        dashboard stdout buffer).
-  4. Emit a single JSON document on stdout summarising stdout tail,
-     stderr tail, exit code, and the read-back artifact contents.
-
-Why GPU=1 actor instead of GPU=N: kernel micro-benchmarks are by design
-single-rank — the per-kernel optimization loop scales by *parallel*
-candidate count (handled at a higher layer), not by sharding one bench
-across multiple GPUs. ``num_gpus=1`` keeps Ray's scheduler honest and
-prevents the bench from being co-scheduled with sglang's TP ranks.
-
-ADDENDUM: runs INSIDE the head pod (sglang/vllm image), not in the Claw
-sandbox.
+Submitted via Ray Dashboard REST when ``nodes >= 2``: a single
+``num_gpus=1`` actor pinned to the head node stages the base64 bench
+files into the workspace, runs ``bash bench_command``, and reads back
+``result_glob`` artifacts (>1 MiB skipped). GPU=1 (not N) because kernel
+micro-benchmarks are single-rank. Emits one JSON summary on stdout.
 """
 
 from __future__ import annotations
@@ -58,8 +27,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
-# Per-artifact read-back cap so a runaway script can't blow up the
-# dashboard stdout buffer with massive JSON dumps.
+# Per-artifact read-back cap so a runaway script can't blow up the stdout buffer.
 _MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 # Stdout/stderr tail size returned to the caller.
 _STREAM_TAIL_BYTES = 32 * 1024
@@ -95,22 +63,7 @@ def _tail_bytes(s: str | None, limit: int) -> str:
 
 
 def _stage_files(workspace: Path, files_b64: dict[str, str]) -> list[str]:
-    """Decode each ``{relative_path: base64_content}`` into the workspace.
-
-    Relative paths starting with ``/`` or containing ``..`` are rejected
-    so the staging cannot write outside the workspace dir.
-
-    Args:
-        workspace (Path): Root directory into which files are written.
-        files_b64 (dict[str, str]): Mapping of relative path to
-            base64-encoded file content.
-
-    Returns:
-        list[str]: Absolute paths of the files that were written.
-
-    Raises:
-        ValueError: If any relative path is absolute or contains ``..``.
-    """
+    """Decode each ``{relative_path: base64_content}`` into the workspace (rejecting ``/`` or ``..`` paths)."""
     staged: list[str] = []
     for rel, b64 in (files_b64 or {}).items():
         if rel.startswith("/") or ".." in Path(rel).parts:
@@ -131,29 +84,7 @@ def _bench_remote(
     result_glob: str,
     timeout_sec: int,
 ) -> dict:
-    """Run a kernel micro-benchmark on THIS pod (head).
-
-    The caller pre-pins us to a GPU-bearing node via
-    NodeAffinitySchedulingStrategy and ``num_gpus=1``; we don't need to
-    query Ray for resources here. Stages helper files, runs the bench
-    command in the workspace, and reads back matching result artifacts.
-
-    Args:
-        workspace (str): Absolute directory used as the bench CWD.
-        bench_command (str): Shell command run via ``bash -lc``.
-        files_b64_json (str): JSON object mapping relative paths to
-            base64-encoded helper file content.
-        result_glob (str): Glob (relative to workspace) of result files to
-            read back.
-        timeout_sec (int): Hard timeout for the bench command, in seconds.
-
-    Returns:
-        dict: Summary with host, workspace, staged files, return code,
-        elapsed time, stdout/stderr tails, and read-back artifacts.
-
-    Raises:
-        ValueError: If ``files_b64_json`` is not valid JSON.
-    """
+    """Run a kernel micro-benchmark on this (head) pod; the caller already pinned us to a GPU node."""
     host = socket.gethostname()
     ws = Path(workspace)
     ws.mkdir(parents=True, exist_ok=True)
@@ -199,8 +130,7 @@ def _bench_remote(
                 "skipped_reason": f"read failed: {exc!r}",
             })
             continue
-        # Best-effort JSON parse for nicer downstream consumption; fall
-        # back to raw text if not JSON.
+        # Best-effort JSON parse, falling back to raw text.
         parsed: Any = None
         try:
             parsed = json.loads(content)
@@ -224,24 +154,11 @@ def _bench_remote(
 
 
 def _pick_gpu_node() -> str:
-    """Return the head-pod node id to run the bench on.
-
-    Prefers the head pod because (a) it has GPUs and (b) it co-locates
-    with the dashboard caller's context. Falls back to any alive GPU node
-    if head detection fails.
-
-    Returns:
-        str: The Ray ``NodeID`` to pin the bench actor to.
-
-    Raises:
-        RuntimeError: If there are no alive nodes, or no alive node with
-            at least one GPU when falling back.
-    """
+    """Return the head-pod node id (GPU-bearing, co-located with the caller); fall back to any alive GPU node."""
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:
         raise RuntimeError("no alive Ray nodes for kernel bench")
-    # Head pod hosts the dashboard which dispatched us, so the actor
-    # running this script IS on the head — its node id matches.
+    # The actor runs on the head pod, so its node id matches our IP.
     my_ip = ""
     try:
         my_ip = ray.util.get_node_ip_address()
@@ -250,7 +167,7 @@ def _pick_gpu_node() -> str:
     for n in nodes:
         if (n.get("NodeManagerAddress") or "") == my_ip:
             return n["NodeID"]
-    # Fallback: any alive node with GPUs > 0.
+    # Fallback: any alive node with GPUs.
     for n in nodes:
         if int(n.get("Resources", {}).get("GPU", 0) or 0) >= 1:
             return n["NodeID"]

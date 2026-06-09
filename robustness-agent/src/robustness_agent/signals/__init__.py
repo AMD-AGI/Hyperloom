@@ -3,19 +3,8 @@
 """Signal rules.
 
 Each rule consumes :class:`ReactorContext` plus :class:`SourceData` and
-yields zero or more :class:`Symptom` records. The classifier composes
+yields zero or more :class:`Symptom` records; the classifier composes
 the rules and de-duplicates by ``(name, subject_key)``.
-
-M1 implements four rules:
-
-* :func:`evaluate_stall_signals` — agent reactor went silent
-* :func:`evaluate_crash_signals` — repeated session crashes
-* :func:`evaluate_event_signals` — policy_denied / delegated_result
-  patterns from the inbox and Coordinator events
-* :func:`evaluate_health_signals` — pod-level phase failures from the
-  robustness-server snapshot
-
-The full GPU / disk / log rule set lands in M2.
 """
 
 from .aiter_jit import (

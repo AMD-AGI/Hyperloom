@@ -46,11 +46,30 @@ def _bound_type(bound: str) -> str:
     return "unknown"
 
 
+def _resolve_rocprof_compute() -> str | None:
+    configured = (
+        os.environ.get("HYPERLOOM_ROCPROF_COMPUTE_PATH", "").strip()
+        or os.environ.get("ROCPROF_COMPUTE_PATH", "").strip()
+    )
+    candidates = [configured, shutil.which("rocprof-compute"), "/opt/rocm/bin/rocprof-compute"]
+    for raw in candidates:
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        resolved = shutil.which(raw)
+        if resolved:
+            return resolved
+    return None
+
+
 def _check_rocprof_compute() -> str | None:
-    if not shutil.which("rocprof-compute"):
+    tool = _resolve_rocprof_compute()
+    if not tool:
         return None
     proc = subprocess.run(
-        ["rocprof-compute", "--version"],
+        [tool, "--version"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -263,15 +282,17 @@ class RocprofRooflineAnalyzer:
         analyze_blocks: str = "0 1 2 4 7 10 11 16 17",
         timeout_sec: int = 21600,
     ) -> tuple[bool, str | None]:
-        version = _check_rocprof_compute()
-        if version is None:
+        tool = _resolve_rocprof_compute()
+        if tool is None:
+            return False, "rocprof-compute is not installed or not on PATH"
+        if _check_rocprof_compute() is None:
             return False, "rocprof-compute is not installed or not on PATH"
         self.output_path.mkdir(parents=True, exist_ok=True)
         name = Path(workdir).name or "rocprof_roofline"
         kernel_filter = f" -k {shlex.quote(target_kernel)}" if target_kernel else ""
         profile_cmd = (
-            f"rocprof-compute profile -n {name}{kernel_filter} "
-            f"--path {self.output_path} -- {cmd}"
+            f"{shlex.quote(tool)} profile -n {name}{kernel_filter} "
+            f"--path {shlex.quote(str(self.output_path))} -- {cmd}"
         )
         proc = subprocess.run(
             [profile_cmd],
@@ -285,7 +306,7 @@ class RocprofRooflineAnalyzer:
         )
         if proc.returncode != 0:
             return False, proc.stdout.strip()
-        analyze_cmd = f"rocprof-compute analyze -p {self.output_path} -b {analyze_blocks}"
+        analyze_cmd = f"{shlex.quote(tool)} analyze -p {shlex.quote(str(self.output_path))} -b {analyze_blocks}"
         proc = subprocess.run(
             [analyze_cmd],
             shell=True,
@@ -624,7 +645,7 @@ def enrich_kernel_roofline_sidecar(
             row["efficiency_percent"] = row_payload["roofline_efficiency_pct"]
         summary["matched"] += 1
 
-    if summary["matched"] or summary["skipped"] or summary["failed"]:
+    if summary["matched"]:
         sidecar["source"] = "tracelens_analysis+rocprof_roofline"
     _atomic_write_json(sidecar_p, sidecar)
     summary["status"] = "ok"

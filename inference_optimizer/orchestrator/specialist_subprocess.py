@@ -2,36 +2,12 @@
 
 """Subprocess-based specialist dispatcher — PR-A2 (Arbor-into-Hyperloom).
 
-The original v0.8 M5 :class:`SpecialistRunner` invoked an in-process
-``Backend`` (:class:`ClaudeBackend`) to drive the specialist LLM loop.
-That shape:
-
-* couples the specialist's claude-agent-sdk subprocess to the
-  orchestrator reactor — a hung agent stalls the coordinator;
-* shares filesystem access with the orchestrator's CWD, so a misbehaving
-  specialist could write into the main framework_source_roots;
-* offers no per-agent process.log / heartbeat granularity.
-
-This module ports Arbor's per-specialist subprocess dispatch shape
-(``arbor/src/arbor/dispatch.py::_dispatch_via_cli``) to Hyperloom:
-
-1. The runner creates a per-task git worktree under
-   ``runs/specialist/<task_id>/worktree/`` (rooted at
-   ``INFERENCEX_PATH`` / the first framework source root).
-2. Spawns ``claude --print --output-format stream-json --verbose ...``
-   with ``--add-dir <worktree>`` and ``--add-dir <session_dir>`` so the
-   agent's write tools are scoped to its own workspace.
-3. The agent writes ``specialist_done.json`` + optional patches under
-   ``worktree/patches/`` as its exit signal (in addition to / instead of
-   the in-process ``emit_intent`` MCP path).
-4. SpecialistRunner harvests either signal — done-file OR captured
-   ``specialist_done`` intent — to build the final
-   :class:`SpecialistRunResult`.
-
-The runner keeps the in-process Backend path (``backend_factory`` arg)
-intact for unit tests that drive specialists with ``MockBackend``;
-production cli wiring uses the subprocess path via
-:class:`SpecialistSubprocessConfig`.
+Per-task git worktree under ``runs/specialist/<task_id>/worktree/``, a
+``claude --print --output-format stream-json`` subprocess scoped via
+``--add-dir``, and a ``specialist_done.json`` (+ ``worktree/patches/``) exit
+signal harvested into the final :class:`SpecialistRunResult`. The in-process
+Backend path (``backend_factory``) stays for unit tests; production uses the
+subprocess path.
 """
 
 from __future__ import annotations
@@ -48,20 +24,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .trace.parse_usage import parse_claude_stream_json_usage
+
 
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Configuration
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SpecialistSubprocessConfig:
     """Static config for spawning claude subprocesses per specialist.
 
-    Captured once at CLI boot from operator flags / env; the same instance
-    is reused for every specialist dispatch in the session. Per-task
-    state (workspace, worktree, gap, domain) is passed at run time via
+    Captured once at CLI boot; the same instance is reused for every
+    specialist dispatch. Per-task state is passed at run time via
     :meth:`SpecialistSubprocessDispatcher.run`.
     """
 
@@ -78,25 +53,21 @@ class SpecialistSubprocessConfig:
     """Roots used to seed ``git worktree add`` and as ``--add-dir`` parents.
 
     The first existing root becomes the worktree base; the rest are
-    surfaced as additional ``--add-dir`` entries so the agent can read
-    them (Read / Grep / Glob) without being able to write through them
-    (writes still need the worktree).
+    read-only ``--add-dir`` entries (writes still need the worktree).
     """
 
     mcp_config_path: str | None = None
     """Optional path to a JSON file holding ``{"mcpServers": {...}}``."""
 
     output_format: str = "stream-json"
-    """``--output-format`` flag. ``stream-json`` matches Arbor + lets
-    a future reaper inspect tool_use blocks if needed."""
+    """``--output-format`` flag; ``stream-json`` matches Arbor."""
 
     extra_claude_args: tuple[str, ...] = ()
     """Operator escape hatch — appended verbatim to the claude command."""
 
     per_turn_max_seconds: float = 600.0
-    """Wall-clock cap PER LLM turn. Multiplied by ``max_turns`` to get
-    the per-task hard timeout; the dispatcher kills the subprocess past
-    that wall-clock."""
+    """Wall-clock cap PER LLM turn; multiplied by ``max_turns`` to get the
+    per-task hard timeout."""
 
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
@@ -106,16 +77,13 @@ class SpecialistSubprocessConfig:
     it as stale and kill the subprocess (matches Arbor's 5-min cap)."""
 
 
-# ---------------------------------------------------------------------------
 # Result
-# ---------------------------------------------------------------------------
 @dataclass
 class SpecialistSubprocessResult:
     """Outcome of one specialist subprocess invocation.
 
     The SpecialistRunner translates this into its own
-    :class:`SpecialistRunResult`; this type stays internal to the
-    subprocess dispatch shape so the per-protocol bits don't leak.
+    :class:`SpecialistRunResult`.
     """
 
     done_payload: dict[str, Any] | None = None
@@ -141,31 +109,31 @@ class SpecialistSubprocessResult:
     """Worktree-relative patch paths discovered under
     ``runs/specialist/<task_id>/worktree/patches/``."""
 
+    usage: dict[str, Any] | None = None
+    """Token usage recovered from the Claude CLI ``stream-json`` log
+    (full-trace B1). Carries the four canonical counters
+    (``input_tokens`` / ``output_tokens`` /
+    ``cache_creation_input_tokens`` / ``cache_read_input_tokens``); the
+    two ``cache_*`` may be ``None``. ``None`` when no result row carried
+    a ``usage`` block (e.g. the subprocess crashed before completing).
+    This is how the *production-default* specialist path's token spend —
+    otherwise invisible to the parent — re-enters the unified ledger."""
+
     error: str = ""
 
 
-# ---------------------------------------------------------------------------
 # Worktree management
-# ---------------------------------------------------------------------------
 def _pick_worktree_base(roots: tuple[str, ...]) -> Path | None:
     """Return the first ``roots`` entry that looks like a git checkout.
 
-    Args:
-        roots (tuple[str, ...]): Candidate directory paths to probe, in
-            priority order.
-
-    Returns:
-        Path | None: The first existing directory with a ``.git`` marker,
-            or None when none qualify — the runner then runs the specialist
-            without an isolated worktree (``--add-dir <workspace>`` only,
-            still safer than the in-process path).
+    Falls back to None when none exist — the runner then runs the
+    specialist without an isolated worktree.
     """
     for r in roots:
         p = Path(r)
         if not p.is_dir():
             continue
-        # Either a worktree (``.git`` is a file pointing to gitdir) or a
-        # bare-ish repo (``.git`` is a dir).
+        # ``.git`` may be a file (worktree) or a dir (repo).
         git_marker = p / ".git"
         if git_marker.exists():
             return p
@@ -178,25 +146,11 @@ def _setup_worktree(
     """Create a fresh git worktree at ``worktree_path`` branched off
     ``base``'s HEAD.
 
-    Best-effort: on any git error we return ``(None, err)`` so the caller
-    can decide whether to abort (PR-A2 default: proceed without isolation)
-    or hard-fail. An existing path is logged and reused.
-
-    Args:
-        base (Path): Git checkout the worktree is branched off.
-        worktree_path (Path): Target directory for the new worktree.
-        branch (str): Branch name to create with ``git worktree add -b``.
-
-    Returns:
-        tuple[Path | None, str]: ``(worktree_dir, error_message)`` —
-            ``worktree_dir`` is None on failure with the reason in the
-            string; on success the string is empty.
+    Best-effort: on git error returns ``(None, err)`` so the caller can
+    proceed without isolation (PR-A2 default) or hard-fail.
     """
     if worktree_path.exists():
-        # Resume / retry: try to remove if stale; safer to just reuse
-        # if it's already a worktree. The agent's iron rules tell it
-        # to start fresh, so a stale worktree from a previous attempt
-        # is rare. We log + reuse.
+        # Resume / retry: reuse an existing worktree (stale ones are rare).
         log.warning(
             "specialist worktree already exists at %s; reusing",
             worktree_path,
@@ -224,15 +178,8 @@ def _setup_worktree(
 def _teardown_worktree(base: Path | None, worktree_path: Path) -> None:
     """Best-effort cleanup of a specialist worktree.
 
-    Called only by the runner on the REVERT / synth-empty path. The
-    KEEP path leaves the worktree in place so ``integrate_patch`` can
-    pull patches out of it. Tries ``git worktree remove`` first, then
-    falls back to ``rmtree`` if the directory survives.
-
-    Args:
-        base (Path | None): The base git checkout, used for
-            ``git worktree remove``; None / missing repo skips the git step.
-        worktree_path (Path): The worktree directory to remove.
+    Called only on the REVERT / synth-empty path; the KEEP path leaves the
+    worktree in place so ``integrate_patch`` can pull patches out of it.
     """
     if not worktree_path.exists():
         return
@@ -245,22 +192,16 @@ def _teardown_worktree(base: Path | None, worktree_path: Path) -> None:
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-    # Fall back to plain rm -rf if the worktree dir survived (e.g.
-    # base repo went away).
+    # Fall back to plain rm -rf if the worktree dir survived.
     if worktree_path.exists():
         shutil.rmtree(worktree_path, ignore_errors=True)
 
 
-# ---------------------------------------------------------------------------
 # Dispatcher
-# ---------------------------------------------------------------------------
 class SpecialistSubprocessDispatcher:
     """Spawn + reap one claude subprocess for a specialist task.
 
-    Designed to be reusable across many specialist tasks in a session.
-    The dispatcher owns no per-task state — every :meth:`run` call
-    receives the task's workspace + prompts and returns a
-    :class:`SpecialistSubprocessResult`.
+    Reusable across many specialist tasks; owns no per-task state.
     """
 
     def __init__(self, config: SpecialistSubprocessConfig):
@@ -272,9 +213,7 @@ class SpecialistSubprocessDispatcher:
         """
         self.config = config
 
-    # ------------------------------------------------------------------
     # Public entry point
-    # ------------------------------------------------------------------
     async def run(
         self,
         *,
@@ -318,39 +257,17 @@ class SpecialistSubprocessDispatcher:
         workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = workspace / "prompt.md"
         process_log = workspace / "process.log"
-        # Where to look for ``specialist_done.json``.
-        #
-        # The specialist prompt
-        # (``specialist_prompt_builder._section_output_protocol``) tells
-        # the agent to ``Write {workspace_path}/specialist_done.json``,
-        # and ``SpecialistRunner._prepare`` sets
-        # ``workspace_path = worktree or workspace``. So when a per-task
-        # git worktree was provisioned, the canonical write target is
-        # ``<worktree>/specialist_done.json``; without a worktree it
-        # collapses to ``<workspace>/specialist_done.json``.
-        #
-        # We poll both locations (worktree first when set, workspace as
-        # a fallback) so:
-        #   * production runs with a worktree (the path advertised in
-        #     the prompt) are picked up — the original bug was that
-        #     the dispatcher only polled the parent workspace and timed
-        #     out into a spurious ``empty=true`` synth even though the
-        #     specialist had written a full proposal_set into the
-        #     worktree;
-        #   * legacy / test fakes that still write the done-file at the
-        #     workspace root keep working without changes.
+        # specialist_done.json write target is ``worktree or workspace``;
+        # poll worktree first (prompt-advertised path), workspace as
+        # fallback for legacy/test fakes that write at the workspace root.
         done_candidates: list[Path] = []
         if worktree is not None:
             done_candidates.append(worktree / "specialist_done.json")
         done_candidates.append(workspace / "specialist_done.json")
-        # Primary path is what the prompt advertises; the reap loop
-        # falls back to the workspace copy below.
         heartbeat_file = workspace / "heartbeat.json"
 
-        # 1. Write the prompt file. We collapse system + user into a
-        # single system-prompt-file because the claude CLI's
-        # ``--system-prompt-file`` flag overrides the default system
-        # message. The ``-p`` argument carries the "go execute" kickoff.
+        # Write the prompt file (system + user collapsed into one
+        # --system-prompt-file; -p carries the kickoff).
         combined = (
             "<!-- system_prompt -->\n"
             + system_prompt
@@ -359,7 +276,6 @@ class SpecialistSubprocessDispatcher:
         )
         prompt_file.write_text(combined, encoding="utf-8")
 
-        # 2. Compose the claude command.
         cmd = self._build_claude_cmd(
             prompt_file=prompt_file,
             workspace=workspace,
@@ -367,8 +283,7 @@ class SpecialistSubprocessDispatcher:
             allowed_tools=allowed_tools,
         )
 
-        # 3. Compose the env. Pass through the parent env (so
-        # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / CLAUDE_* propagate).
+        # Compose the env (pass through parent so API keys propagate).
         env = os.environ.copy()
         if gpu_ids:
             visible = ",".join(str(g) for g in gpu_ids)
@@ -382,7 +297,6 @@ class SpecialistSubprocessDispatcher:
                         "ROCR_VISIBLE_DEVICES"):
                 env.pop(var, None)
 
-        # 4. Spawn.
         proc_started = time.monotonic()
         log_fh = process_log.open("w", encoding="utf-8")
         try:
@@ -404,8 +318,7 @@ class SpecialistSubprocessDispatcher:
                 error=f"failed to spawn claude subprocess: {exc!r}",
             )
 
-        # 5. Reap loop — poll done-file / exit / heartbeat staleness /
-        #    overall timeout.
+        # Reap loop — poll done-file / exit / heartbeat staleness / timeout.
         max_seconds = float(max_turns) * float(self.config.per_turn_max_seconds)
         try:
             outcome = await self._reap_loop(
@@ -419,19 +332,24 @@ class SpecialistSubprocessDispatcher:
         finally:
             log_fh.close()
 
-        # 6. Patches: scan worktree/patches/ (Arbor convention).
+        # Patches: scan worktree/patches/ (Arbor convention).
         patches = self._collect_patches(worktree, workspace)
 
-        # 7. Parse done.json (best-effort) — pick the first candidate
-        #    that exists. Agents listening to the prompt write to the
-        #    worktree; legacy fakes / the no-worktree fallback write to
-        #    the workspace root.
+        # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
         for cand in done_candidates:
             if cand.exists():
                 done_payload = self._read_done(cand)
                 if done_payload is not None:
                     break
+
+        # 8. Token usage (full-trace B1): the Claude CLI's terminal
+        #    ``stream-json`` result row carries the cumulative session
+        #    ``usage``. Recover it from process.log so the production
+        #    specialist's token spend — which never touches the parent's
+        #    memory — re-enters the unified ledger. Best-effort: a missing
+        #    / truncated log yields ``None`` (parser swallows its own I/O).
+        usage = parse_claude_stream_json_usage(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -441,12 +359,11 @@ class SpecialistSubprocessDispatcher:
             stale_heartbeat=outcome["stale_heartbeat"],
             process_log_path=str(process_log),
             patches=patches,
+            usage=usage,
             error=outcome["error"],
         )
 
-    # ------------------------------------------------------------------
     # Internals
-    # ------------------------------------------------------------------
     def _build_claude_cmd(
         self, *,
         prompt_file: Path,
@@ -482,13 +399,12 @@ class SpecialistSubprocessDispatcher:
             "--system-prompt-file", str(prompt_file),
             "-p",
             "Execute the task in your system prompt. Work autonomously. "
-            "Write specialist_done.json as your absolute last action.",
+            + "Write specialist_done.json as your absolute last action.",
         ]
         if cfg.model:
             cmd.extend(["--model", cfg.model])
-        # Tool whitelist. Drop bare ``emit_intent`` because the
-        # subprocess has no in-process MCP server; the agent
-        # exits via writing specialist_done.json.
+        # Drop ``emit_intent``: the subprocess has no in-process MCP server
+        # and exits via writing specialist_done.json instead.
         tools_filtered = [t for t in allowed_tools if t != "emit_intent"]
         if tools_filtered:
             cmd.extend(["--allowedTools", ",".join(tools_filtered)])
@@ -547,6 +463,10 @@ class SpecialistSubprocessDispatcher:
             "error": "",
         }
         last_heartbeat_seen: float = started
+        # The subprocess streams stream-json (model tokens / tool calls) to
+        # process.log; its mtime is a reliable "still working" signal even
+        # when the agent never self-writes heartbeat.json.
+        process_log = workspace / "process.log"
 
         while True:
             await asyncio.sleep(cfg.poll_interval_seconds)
@@ -554,11 +474,9 @@ class SpecialistSubprocessDispatcher:
             elapsed = now - started
             outcome["elapsed"] = elapsed
 
-            # done.json appeared at any candidate path — graceful exit
-            # even if the subprocess is still cleaning up. Give it a
-            # few seconds to terminate cleanly, then move on.
+            # done.json appeared — graceful exit with up to 30s grace for
+            # the agent to terminate cleanly.
             if any(p.exists() for p in done_files):
-                # Allow up to 30s grace for the agent to finalise output.
                 grace_until = now + 30.0
                 while time.monotonic() < grace_until and proc.poll() is None:
                     await asyncio.sleep(2.0)
@@ -572,17 +490,24 @@ class SpecialistSubprocessDispatcher:
                 outcome["elapsed"] = elapsed
                 break
 
-            # Heartbeat staleness check (advisory — only fires after the
-            # agent has at least once written a heartbeat).
-            if heartbeat_file.exists():
+            # Liveness check. The subprocess counts as alive if EITHER the
+            # agent refreshed heartbeat.json OR it is still streaming output
+            # to process.log (model tokens / tool calls). Relying on
+            # heartbeat.json alone reaps productive specialists that stay in
+            # a single long tool-call turn without self-writing a heartbeat
+            # (common under gateway latency) — the original cause of
+            # 100%-stale_heartbeat specialist failures. The hard wall-clock
+            # cap below still bounds genuinely hung / runaway subprocesses.
+            for activity_file in (heartbeat_file, process_log):
                 try:
-                    hb_mtime = heartbeat_file.stat().st_mtime
+                    if not activity_file.exists():
+                        continue
+                    a_mtime = activity_file.stat().st_mtime
                 except OSError:
-                    hb_mtime = 0.0
-                # convert mtime to monotonic-equivalent age in wall seconds
-                age = max(0.0, time.time() - hb_mtime)
-                if age <= cfg.heartbeat_stale_seconds:
+                    continue
+                if max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
                     last_heartbeat_seen = now
+                    break
 
             if (now - last_heartbeat_seen) > cfg.heartbeat_stale_seconds:
                 outcome["stale_heartbeat"] = True

@@ -2,16 +2,11 @@
 
 """Map Critic confidence / verdict signals to KB ``importance`` floats.
 
-Critic is forbidden from writing the top tier (``>= 0.85``) — that range is
-reserved for Alchemist promotion (contract §2.3). The service additionally
-guards against downgrades (G-2 ``max(existing, incoming)``), so we never
-have to special-case "do not downgrade" client-side; we just emit honest
-values within Critic's allowed range.
-
-The two helpers cover the two write triggers we care about today:
-
-* :func:`importance_for_verdict` — Trigger A (review_verdict 落地后).
-* :func:`importance_for_kb_draft` — Trigger B (session close kb_draft).
+Critic may not write the top tier (``>= 0.85``), reserved for Alchemist
+promotion (contract §2.3); the service guards downgrades (G-2
+``max(existing, incoming)``) so we just emit honest in-range values via
+:func:`importance_for_verdict` (Trigger A) and :func:`importance_for_kb_draft`
+(Trigger B).
 """
 
 from __future__ import annotations

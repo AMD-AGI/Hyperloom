@@ -1,20 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the per-concurrency roofline ceiling block in conc_sweep.
-
-Pins the contract for ``orchestrator.conc_sweep._build_roofline_ceiling``:
-
-* Happy path on a Qwen3-30B-A3B-shaped MoE returns a row per requested
-  CONC, ``t_mem`` is strictly increasing in CONC, ``t_cmp`` is constant
-  (B-independent), ``t_peak = min(t_mem, t_cmp)`` and ``bound_kind`` is
-  resolved consistently with that pick.
-* MBU% is computed against the matched measured throughput for each
-  arm; missing/failed points produce ``None`` rather than 0% so the
-  renderer can show ``"—"`` without sentinel-value confusion.
-* Safe-degrade returns ``None`` when model meta cannot be loaded or
-  GPU type / TP is missing — caller omits the field.
-* Dense fallback (num_experts == 0) still produces a valid block.
-"""
+"""Tests pinning ``orchestrator.conc_sweep._build_roofline_ceiling`` (MoE/dense ceiling + MBU + safe-degrade)."""
 
 from __future__ import annotations
 
@@ -23,10 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-# Imported first to break a pre-existing circular dependency between
-# ``conc_sweep`` and ``action_executors.conc_sweep`` (the test module
-# would otherwise fail to collect in isolation; see test_conc_sweep.py
-# for the same workaround).
+# Imported first to break a circular dependency between conc_sweep and
+# action_executors.conc_sweep (else the module fails to collect in isolation).
 from inference_optimizer.orchestrator.action_executors._grid_runner import (  # noqa: F401
     VariantResult,
 )
@@ -58,8 +42,7 @@ def _make_state(
 
 def _qwen3_30b_a3b_meta() -> ModelMeta:
     """ModelMeta shaped like Qwen3-30B-A3B (real config values)."""
-    # Geometry pinned to the Qwen3-MoE config.json on disk so the test
-    # exercises real MoE branching, not synthetic numbers.
+    # Geometry pinned to the Qwen3-MoE config.json to exercise real MoE branching.
     num_layers = 48
     num_kv_heads = 4
     head_dim = 128
@@ -72,9 +55,7 @@ def _qwen3_30b_a3b_meta() -> ModelMeta:
         num_experts * 3 * hidden_size * moe_inter * dtype_bytes
     )
     expert_weight_bytes = num_layers * expert_bytes_per_layer
-    # 30.5B params total * 2 bytes/param ≈ 60GB; pick a value large
-    # enough that subtracting expert_weight_bytes leaves a positive
-    # non-expert remainder.
+    # ~60GB; large enough that subtracting expert_weight_bytes stays positive.
     weight_bytes = 60 * 1024**3
     non_expert_bytes = weight_bytes - expert_weight_bytes
     active_weight_bytes = (
@@ -102,11 +83,7 @@ def stub_meta() -> Any:
         yield meta
 
 
-# ---------------------------------------------------------------------------
 # Happy path
-# ---------------------------------------------------------------------------
-
-
 def test_happy_path_moe_qwen3_30b_a3b_mi355x(stub_meta: ModelMeta) -> None:
     state = _make_state()
     concs = [1, 2, 4, 8, 16, 32, 64, 128]
@@ -249,11 +226,7 @@ def test_dense_fallback_no_moe_fields() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # Safe degrade
-# ---------------------------------------------------------------------------
-
-
 def test_returns_none_when_meta_unavailable() -> None:
     state = _make_state()
     with patch(_LOAD_META_PATH, return_value=None):

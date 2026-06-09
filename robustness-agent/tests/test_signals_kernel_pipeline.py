@@ -117,9 +117,8 @@ def test_f2_silent_when_marker_missing():
 
 
 # ---------------------------------------------------------------------------
-# F3 (auth_proxy_unhealthy) was retired with the auth-proxy itself; the
-# AMD primus-safe gateway now accepts ``x-api-key`` directly, so the
-# proxy is no longer needed and the matching detector was removed.
+# F3 (auth_proxy_unhealthy) was retired with the auth-proxy; the gateway
+# now accepts ``x-api-key`` directly, so the detector was removed.
 # ---------------------------------------------------------------------------
 
 

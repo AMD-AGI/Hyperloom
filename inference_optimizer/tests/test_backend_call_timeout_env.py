@@ -1,26 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Per-backend ``call_timeout_s`` env-var override tests.
-
-``parse_call_timeout_env`` (orchestrator/backends/base.py) reads
-``INFERENCE_OPTIMIZER_*_CALL_TIMEOUT_SEC`` so operators can bump the
-asyncio wall-clock cap on a ``ClaudeBackend`` / ``CodexBackend`` call
-without code changes. The helper returns ``default`` for unset / empty
-/ malformed / non-positive / non-finite values so a typo in the env can
-never crash backend boot.
-
-These tests pin both contracts:
-
-1. Helper-level: unset/empty/garbage/negative/nan -> default; happy path
-   returns the parsed float verbatim.
-2. Backend-level: ``ClaudeBackend()`` and ``CodexBackend()`` instantiated
-   under a chosen env value pick up that value as ``call_timeout_s``,
-   and instantiated without the env fall back to 120.0.
-
-Backend tests use ``dataclasses.fields(...).default_factory`` -- the
-``call_timeout_s`` value is read at instantiation, not at import, so
-``monkeypatch.setenv`` after the module is already imported still wins.
-"""
+"""Per-backend ``call_timeout_s`` env-var override tests."""
 
 from __future__ import annotations
 
@@ -83,10 +63,7 @@ class TestParseCallTimeoutEnv:
 
     @pytest.mark.parametrize("raw", ["inf", "-inf", "infinity"])
     def test_infinity_returns_default(self, monkeypatch, caplog, raw):
-        """``math.isfinite`` rejects both ``+inf`` and ``-inf`` -- a wall-clock
-        timeout can never be infinite. This pins the CodeQL fix that swapped
-        the NaN-only ``value != value`` check for ``not math.isfinite(value)``.
-        """
+        """``math.isfinite`` rejects both ``+inf`` and ``-inf`` (CodeQL fix)."""
         monkeypatch.setenv(PROBE_ENV, raw)
         with caplog.at_level("WARNING"):
             result = parse_call_timeout_env(PROBE_ENV, default=120.0)
@@ -148,12 +125,7 @@ class TestCodexBackendHonoursEnv:
 
 
 def _new_claude_backend_with_seams():
-    """Build a ClaudeBackend that skips real SDK import + MCP server.
-
-    ``__post_init__`` accepts ``enable_mcp_emit_intent=False`` and a
-    minimal pair of seams to skip both the real SDK import and the MCP
-    server build (mirroring ``test_claude_backend.py``'s pattern).
-    """
+    """Build a ClaudeBackend that skips real SDK import + MCP server."""
     from inference_optimizer.orchestrator.backends.claude import ClaudeBackend
 
     return ClaudeBackend(

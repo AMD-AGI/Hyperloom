@@ -2,31 +2,15 @@
 
 """Canonical variant fingerprint — v0.8 M3.
 
-A single, content-addressed identity for any explore variant so that:
+A single content-addressed identity for any explore variant so the
+``explore_search`` ledger has one canonical key per variant and dedup across
+specialist / LLM / default_grid proposals collapses to the same row.
 
-* the ``explore_search`` ledger has exactly one canonical key per variant,
-  and
-* dedup across specialist / LLM / default_grid proposals collapses to
-  the same row regardless of origin.
-
-Design rationale
-----------------
-
-KB_design §3.4 §4.2 (Inv-4.2) specifies:
-
-    canonical_fingerprint = sha1(sorted(extra_args) + sorted(extra_envs)
-                                 + framework + tp + workload_signature)
-
-For M3, we intentionally keep the on-disk fingerprint **content-only**
-(``sorted(extra_args)`` + ``sorted(extra_envs)``). The optional
-framework / tp / workload discriminators are stored as **side metadata**
-on each ledger entry
-(``framework``, ``tp``, ``workload_signature``) so context is preserved
-without re-hashing the existing universe.
-
-Future milestones (M5/M6 with specialist provenance, M7 with workload
-sweeps) MAY tighten this to include workload_signature in the hash; at
-that point a second migration step will re-key old rows.
+KB_design §3.4 §4.2 (Inv-4.2): the canonical hash could include framework / tp
+/ workload_signature, but for M3 the on-disk fingerprint is content-only
+(``sorted(extra_args)`` + ``sorted(extra_envs)``); the discriminators are kept
+as side metadata. Future milestones may fold workload_signature into the hash
+(with a re-key migration).
 """
 
 from __future__ import annotations
@@ -50,36 +34,17 @@ def canonical_fingerprint(
 ) -> str:
     """Return the canonical 16-char fingerprint for a variant.
 
-    Identical in shape to ``_grid_runner.variant_fingerprint`` — kept as
-    a separate symbol so call-sites in ``explore.py`` / SharedState
-    migration depend on the legacy canonical identity rather than the
-    v0.6 helper. Both functions intentionally produce the SAME hash
-    for the SAME inputs so the legacy → ledger merge is lossless.
-
-    Normalization
-    -------------
-    * args: ``shlex.split`` → sorted token tuple.
-    * envs: ``(str(k), str(v))`` pairs sorted by key.
-    * 16-char SHA-1 prefix (collision-resistant for per-session ledger).
-
-    Args:
-        extra_args (str | None): The variant's server args; ``shlex.split`` +
-            sorted before hashing.
-        extra_envs (dict[str, Any] | None): The variant's env overrides;
-            stringified and sorted by key before hashing.
-
-    Returns:
-        str: The 16-char SHA-1 prefix fingerprint for the variant.
+    Produces the SAME hash as ``_grid_runner.variant_fingerprint`` for the same
+    inputs (lossless legacy → ledger merge); kept separate so call-sites depend
+    on the legacy canonical identity. Normalization: args ``shlex.split`` →
+    sorted tokens; envs ``(str(k), str(v))`` sorted by key; 16-char SHA-1.
     """
     args_text = str(extra_args or "")
     try:
         args_tokens = sorted(shlex.split(args_text))
     except ValueError:
-        # Unbalanced quotes / shell-parse failure: fall back to a stable
-        # whitespace split so we still produce *some* fingerprint
-        # instead of crashing a propose pre-flight. Two identically
-        # malformed strings still collide; differently malformed
-        # strings stay distinguishable.
+        # Shell-parse failure: fall back to whitespace split so we still
+        # produce a fingerprint (identical bad strings still collide).
         args_tokens = sorted(args_text.split())
     env_pairs = sorted(
         (str(k), str(v)) for k, v in (extra_envs or {}).items()
@@ -102,23 +67,9 @@ def workload_signature(
     """Return a stable 12-char digest of the workload contract.
 
     Stored as side metadata on each ``explore_search.tested`` entry so a
-    cross-workload resume can warn when an old KEEP came from a
-    different (CONC, ISL, OSL, precision, TP). Not part of the
-    fingerprint hash today (see module docstring).
-
-    Args default to the corresponding process env vars (``CONC`` / ``ISL``
-    / ``OSL`` / ``PRECISION`` / ``TP``) when omitted, matching the
-    Magpie ``benchmark.envs`` materialization path.
-
-    Args:
-        conc (int | str | None): Concurrency; defaults to env ``CONC``.
-        isl (int | str | None): Input sequence length; defaults to env ``ISL``.
-        osl (int | str | None): Output sequence length; defaults to env ``OSL``.
-        precision (str | None): Precision tag; defaults to env ``PRECISION``.
-        tp (int | str | None): Tensor-parallel degree; defaults to env ``TP``.
-
-    Returns:
-        str: A stable 12-char SHA-1 prefix digest of the workload contract.
+    cross-workload resume can warn when an old KEEP came from a different
+    (CONC, ISL, OSL, precision, TP). Not part of the fingerprint hash today.
+    Args default to the corresponding process env vars when omitted.
     """
     fields = {
         "conc": str(conc if conc is not None else os.environ.get("CONC", "")).strip(),
