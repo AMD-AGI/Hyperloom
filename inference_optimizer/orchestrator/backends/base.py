@@ -113,7 +113,6 @@ class Backend(Protocol):
             BackendTurnResult: The intents emitted this turn plus any raw text
             and metadata.
         """
-        ...
 
 
 __all__ = ["Backend", "BackendError", "BackendTurnResult", "parse_call_timeout_env"]
