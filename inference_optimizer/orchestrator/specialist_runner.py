@@ -2,38 +2,17 @@
 
 """SpecialistRunner — v0.8 M5.
 
-The second sub-agent form factor. Whereas the deterministic
-:class:`SubAgentRunner` dispatches Python executors (BaselineExecutor,
-ExploreExecutor, …) for ``delegate{action_name='<action>'}``, the
-SpecialistRunner drives an *LLM* sub-agent for
-``delegate{action_name='specialist', params={domain, gap, ...}}``.
+LLM sub-agent runner for ``delegate{action_name='specialist', ...}``
+(vs the deterministic Python executors of :class:`SubAgentRunner`).
 
-Both runners share the TaskRegistry state machine + lane lease
-mechanism + idempotency_key contract. They differ in:
-
-* execution: SpecialistRunner spawns an :class:`Backend.run` loop over
-  up to ``max_turns`` turns instead of calling a Python executor.
-* tool surface: the runner passes a tightly-scoped tool whitelist into
-  the Backend.
-* output: the runner harvests exactly one ``specialist_done`` intent
-  from the transcript; any other intent type is logged and ignored.
-* workspace: per ``runs/specialist/<task_id>/``:
-  ``prompt.md`` / ``transcript.jsonl`` / ``heartbeat.json`` /
-  ``tool_calls.jsonl`` / ``specialist_done.json``.
-
-Failure modes are folded into one
-recovery primitive: every exit path synthesises a ``specialist_done``
-payload so the upstream EXPLORE round never blocks on a missing
-result. ``status`` carries the original outcome
-(``"succeeded" / "stale" / "empty_synthesised"``) for the audit trail.
-
-Inv enforcement: PolicyGate R2/R3 sit on the Coordinator side; the
-runner doesn't re-validate the dispatch payload but does refuse to
-emit non-specialist intents from the transcript (defense in depth).
+Inv-5.3 single-exit: every exit path synthesises a ``specialist_done``
+payload so the EXPLORE round never blocks; ``status`` carries the original
+outcome for the audit trail.
 """
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -46,10 +25,12 @@ from typing import Any
 from ..session_paths import runs_dir
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
+from .specialist_bench import BENCH_TOOL_ENABLED, TOOL_RUN_BENCH
 from .trace.conversation_trace import ConversationRecord, append_conversation
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
+    FREEFORM_DOMAIN,
     SPECIALIST_DOMAINS_M5,
     SpecialistDomain,
     get_domain,
@@ -62,7 +43,9 @@ from .specialist_subprocess import (
     _pick_worktree_base,
     _setup_worktree,
 )
+from . import specialist_patch_safety as _patch_safety
 from .policy import DEFAULT_SPECIALIST_MAX_PROPOSALS
+from .specialist_profile import SpecialistProfile, resolve_specialist_profile
 from .sub_agent_runner import RunnerContext, SubAgentResult
 from .system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -76,22 +59,13 @@ log = logging.getLogger(__name__)
 def _extra_focus_tags(
     params: dict[str, Any], domain: "SpecialistDomain",
 ) -> tuple[str, ...]:
-    """Knowledge-domain tags beyond the primary domain's own anchor.
-
-    Used to append extra per-domain focus blocks for a multi-tag
-    dispatch. The primary domain's anchor is dropped so its focus block
-    is not rendered twice.
-    """
+    """Knowledge-domain tags beyond the primary domain's anchor (anchor dropped to avoid double-rendering)."""
     tags = normalize_dispatch_tags(params)
     primary_anchor = (domain.kb_anchor or "").strip()
     return tuple(t for t in tags if t and t != primary_anchor)
 
 
-# R4 / R5 — canonical external tool registry lives in
-# :mod:`policy`. We re-export the tuples below so legacy importers
-# (and the runner itself) still see the historical names without a
-# code rewrite, but PolicyGate and SpecialistRunner now share a
-# single source of truth.
+# R4/R5 — canonical external tool registry lives in :mod:`policy`; re-exported here for legacy importers.
 from .policy import (
     CORTEX_KB_READ_TOOL_NAMES as _CORTEX_KB_READ,
     KB_WRITE_TOOL_NAMES as _KB_WRITE,
@@ -99,43 +73,28 @@ from .policy import (
     WEB_TOOL_NAMES as _WEB,
 )
 
-#: Back-compat tuple alias for the PR Monitor MCP readonly tools.
-#: Kept tuple-typed because the original constant was a tuple; some
-#: external scripts iterate it positionally.
+#: Back-compat tuple alias for the PR Monitor MCP readonly tools (tuple-typed for positional iteration).
 PR_MONITOR_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_PR_MONITOR))
 
 #: Back-compat tuple alias for the Cortex KB readonly MCP tools.
 CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
 
 
-# Default tool whitelist for specialists. Write tools are scoped to the
-# per-task worktree via ``--add-dir <worktree>``; ``integrate_patch`` is the
-# only path that applies those patches to the serving workspace.
-#
-# Note these tool names follow the Claude / Cursor convention; the actual MCP
-# server names depend on operator config.
-#
-# Cortex KB has no live MCP surface. RecipeKB / PR feed / research hints
-# are warmed into prompt fields before dispatch. The
-# ``mcp__cortex_kb__{traverse,find_recipe,query}`` names stay out of the
-# default whitelist so specialists do not attempt orphan calls.
-# ``CORTEX_KB_READONLY_MCP_TOOLS`` remains importable for PolicyGate
-# denial validation and tests.
+# Default tool whitelist for specialists. Write tools are worktree-scoped
+# via ``--add-dir <worktree>``; ``integrate_patch`` is the only path that
+# applies patches to the serving workspace.
 DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     "emit_intent",
     "Read", "Grep", "Glob",
     # Patch authoring tools, confined to the specialist worktree.
     "Edit", "Write", "MultiEdit",
-    # Restricted Bash — runners may further filter via a callback. Keeping
-    # ``Bash`` in the whitelist lets the LLM run rocm-smi / pgrep / cat /
-    # git diff > patches/<file>.patch; the runner's per-call hook (TODO)
-    # will block destructive invocations.
+    # Restricted Bash — runners may further filter via a callback. The
+    # runner's per-call hook (TODO) will block destructive invocations.
     "Bash",
 ) + tuple(sorted(_WEB)) + PR_MONITOR_MCP_TOOLS
 
 
 # Tools explicitly denied even if the operator extends the whitelist.
-# KB writes stay Coordinator-owned; the denylist mirrors PolicyGate.
 SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
@@ -148,24 +107,21 @@ def _safe_redact(s: str) -> str:
     out = s
     for needle in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
         if needle in out:
-            # Keep the env name visible; strip the actual value (when
-            # logged as KEY=...). Conservative regex-less replacement.
             out = out.replace(needle, f"{needle}[REDACTED]")
     return out
 
 
 @dataclass
 class _PreparedRun:
-    """Shared setup-phase output threaded into both the in-process and
-    subprocess execution paths. Internal to :class:`SpecialistRunner`."""
+    """Shared setup-phase output threaded into both execution paths."""
 
     domain: SpecialistDomain | None = None
-    # Per-domain sub_kind selected at dispatch time. Empty string =
-    # default per-domain prompt. Threaded through so domain-specific
-    # focus helpers can specialise when needed.
+    # Per-domain sub_kind selected at dispatch (empty = default prompt).
     sub_kind: str = ""
     gap: str = ""
     max_turns: int = 0
+    # Resolved dispatch profile (scope / mode / bench / lane).
+    profile: "SpecialistProfile" = field(default_factory=lambda: SpecialistProfile())
     workspace: Path | None = None
     worktree: Path | None = None
     worktree_base: Path | None = None
@@ -173,8 +129,8 @@ class _PreparedRun:
     user_prompt: str = ""
     notes: list[str] = field(default_factory=list)
     resolved_tools: tuple[str, ...] = ()
-    # When set, the caller skips the execute phase and returns this
-    # result verbatim (e.g. unknown domain / missing workspace).
+    # When set, the caller returns this verbatim and skips execute
+    # (e.g. unknown domain / missing workspace).
     early_return: "SpecialistRunResult | None" = None
 
 
@@ -182,9 +138,8 @@ class _PreparedRun:
 class SpecialistRunResult:
     """Internal record of one SpecialistRunner invocation.
 
-    Distinct from :class:`SubAgentResult` because the Coordinator may
-    want to inspect the runner-level status (succeeded / stale /
-    empty_synthesised) separately from the task state.
+    Distinct from :class:`SubAgentResult` so the runner-level status is
+    separable from the task state.
     """
 
     task_id: str
@@ -200,6 +155,69 @@ class SpecialistRunResult:
     notes: list[str] = field(default_factory=list)
 
 
+class SpecialistFailureType(str, enum.Enum):
+    """Coarse failure taxonomy for a finished specialist run.
+
+    Only the *transient infrastructure* members (``TIMEOUT`` /
+    ``STALE_HEARTBEAT`` / ``CRASH``) are retry-eligible — a fresh re-dispatch
+    can plausibly fix a subprocess that never produced a clean result.
+    Semantic outcomes (``NO_OUTPUT`` empty findings, ``TOOL_VIOLATION``,
+    ``CONFIG`` bad domain / missing workspace) are left for the orchestrator to
+    act on; re-running them verbatim would just burn budget.
+    """
+
+    NONE = "none"                       # succeeded
+    TIMEOUT = "timeout"                 # subprocess wall-clock kill
+    STALE_HEARTBEAT = "stale_heartbeat" # heartbeat went silent (hang)
+    CRASH = "crash"                     # nonzero exit / backend error
+    NO_OUTPUT = "no_output"             # ran clean but emitted no done / empty
+    TOOL_VIOLATION = "tool_violation"   # emitted a forbidden intent
+    CONFIG = "config"                   # unknown domain / no workspace
+    UNKNOWN = "unknown"
+
+
+# Transient infra failures a bounded auto-retry may re-dispatch.
+RETRYABLE_SPECIALIST_FAILURES: frozenset[SpecialistFailureType] = frozenset({
+    SpecialistFailureType.TIMEOUT,
+    SpecialistFailureType.STALE_HEARTBEAT,
+    SpecialistFailureType.CRASH,
+})
+
+
+def classify_specialist_failure(
+    runner_status: str, error: str,
+) -> tuple[SpecialistFailureType, bool]:
+    """Map a :class:`SpecialistRunResult` ``(status, error)`` to a failure
+    type + retry-eligibility flag.
+
+    Pure helper (no I/O) so PolicyGate, the Coordinator auto-retry hook, and
+    tests share one taxonomy. ``status == 'stale'`` is the runner's marker for
+    a subprocess that died with a ``backend_error`` (timeout / stale-heartbeat
+    / crash); ``empty_synthesised`` means it exited cleanly without a usable
+    ``specialist_done`` (genuine empty, max-turns, or a config error encoded in
+    ``error``).
+    """
+    status = (runner_status or "").strip().lower()
+    err = (error or "").strip().lower()
+    if status == "succeeded":
+        return SpecialistFailureType.NONE, False
+    if status == "tool_violation":
+        return SpecialistFailureType.TOOL_VIOLATION, False
+    if status == "stale":
+        if "timeout" in err:
+            ftype = SpecialistFailureType.TIMEOUT
+        elif "stale_heartbeat" in err:
+            ftype = SpecialistFailureType.STALE_HEARTBEAT
+        else:  # subprocess_error / subprocess_exit_code / backend_error
+            ftype = SpecialistFailureType.CRASH
+        return ftype, True
+    if status == "empty_synthesised":
+        if "unknown_domain" in err or "no_workspace" in err:
+            return SpecialistFailureType.CONFIG, False
+        return SpecialistFailureType.NO_OUTPUT, False
+    return SpecialistFailureType.UNKNOWN, False
+
+
 def build_empty_specialist_done(
     *,
     gap_canonical_id: str,
@@ -209,10 +227,8 @@ def build_empty_specialist_done(
 ) -> dict[str, Any]:
     """Return the canonical empty ``specialist_done`` payload.
 
-    Used by every failure path in this module + by the Coordinator's
-    ``kill_task`` synth path. Guarantees
-    the payload satisfies PolicyGate R3 schema (``empty=true``,
-    ``proposal_set=[]``, non-empty summary).
+    Satisfies PolicyGate R3 schema (``empty=true``, ``proposal_set=[]``,
+    non-empty summary).
     """
     return {
         "gap_canonical_id": gap_canonical_id,
@@ -230,13 +246,8 @@ def build_empty_specialist_done(
 class SpecialistRunner:
     """LLM-driven sub-agent runner for the merged ``specialist`` action.
 
-    Wire-up (in the dispatcher) parallels ``SubAgentRunner.run_task`` but
-    branches on ``task.kind == 'specialist'`` and routes here.
-
-    The runner is deliberately *generic over the Backend protocol* — the
-    same code drives MockBackend (tests), ClaudeBackend (production), or
-    any future Cursor / Codex specialist driver. Operator policy (which
-    backend handles specialists) sits in the CLI wiring.
+    Generic over the Backend protocol (MockBackend in tests, ClaudeBackend
+    in production).
     """
 
     def __init__(
@@ -252,28 +263,9 @@ class SpecialistRunner:
     ):
         """Create a runner.
 
-        Exactly one of ``backend_factory`` / ``subprocess_config`` must
-        be supplied:
-
-        * ``backend_factory`` (legacy, v0.8 M5) is a callable
-          ``(domain: SpecialistDomain) -> Backend``. The factory pattern
-          lets the CLI inject a per-domain Claude / Codex / Mock backend
-          without baking the choice into the runner itself. The
-          specialist runs **in-process** via :meth:`Backend.run`.
-        * ``subprocess_config`` (PR-A2, Arbor-into-Hyperloom) configures
-          a :class:`SpecialistSubprocessDispatcher` that spawns a fresh
-          ``claude`` subprocess per task with ``--add-dir <worktree>``
-          isolation. Production cli boot uses this path; tests keep the
-          in-process backend for speed.
-
-        ``knowledge_plane`` (optional, v0.8 M4) lets the runner consult
-        the :class:`KnowledgePlane` at task dispatch to gate the
-        ``mcp__pr_monitor__*`` tool block — when PR Monitor is
-        disabled (``--degraded-pr``) the runner strips those tool
-        names from the per-task whitelist so the LLM doesn't get
-        offered an absent endpoint. ``None`` leaves the default tool
-        list untouched (back-compat for callers / tests that don't
-        wire a plane yet).
+        Exactly one of ``backend_factory`` (in-process, tests) /
+        ``subprocess_config`` (PR-A2 ``claude`` subprocess, production) must
+        be supplied. ``knowledge_plane`` gates ``mcp__pr_monitor__*`` tools.
         """
         if backend_factory is None and subprocess_config is None:
             raise ValueError(
@@ -299,26 +291,30 @@ class SpecialistRunner:
         self.knowledge_plane = knowledge_plane
 
     def _resolve_tools(
-        self, task_allowed_tools: list[str] | tuple[str, ...] | None = None,
+        self,
+        task_allowed_tools: list[str] | tuple[str, ...] | None = None,
+        *,
+        grant_bench: bool = False,
     ) -> tuple[str, ...]:
         """Return the per-task tool whitelist.
 
-        Gated on:
-
-        * KnowledgePlane PR Monitor availability and the retired Cortex
-          MCP denylist — strips ``mcp__pr_monitor__*`` when PR Monitor is
-          disabled and always strips ``mcp__cortex_kb__*``.
-        * Per-task ``Task.allowed_tools`` when the dispatcher supplied a
-          narrower surface (research_scout is the canonical read-only case).
-        * Always enforces :data:`SPECIALIST_TOOL_DENYLIST` last
-          (defense in depth — caller may have extended ``default_tools``
-          carelessly).
+        Strips ``mcp__pr_monitor__*`` when PR Monitor is disabled (and
+        ``mcp__cortex_kb__*`` when Cortex disabled); honors a narrower
+        ``Task.allowed_tools``; grants the worktree-scoped ``run_bench`` tool
+        only to bench-enabled specialists (``grant_bench`` and the bench tool
+        globally enabled); enforces :data:`SPECIALIST_TOOL_DENYLIST` last.
         """
         tools = (
             list(task_allowed_tools)
             if task_allowed_tools
             else list(self.default_tools)
         )
+        # run_bench is granted only to bench-enabled (mode=patch & bench=true)
+        # specialists, and never via the operator-narrowed allowlist.
+        if grant_bench and BENCH_TOOL_ENABLED and TOOL_RUN_BENCH not in tools:
+            tools.append(TOOL_RUN_BENCH)
+        elif not grant_bench:
+            tools = [t for t in tools if t != TOOL_RUN_BENCH]
         plane = self.knowledge_plane
         if plane is not None:
             try:
@@ -340,9 +336,7 @@ class SpecialistRunner:
         tools = [t for t in tools if t not in SPECIALIST_TOOL_DENYLIST]
         return tuple(tools)
 
-    # ------------------------------------------------------------------
     # Public entry point — dispatches to in-process or subprocess path
-    # ------------------------------------------------------------------
     async def run(
         self,
         ctx: RunnerContext,
@@ -351,20 +345,8 @@ class SpecialistRunner:
     ) -> SpecialistRunResult:
         """Run a specialist task to completion (or synthesise an empty done).
 
-        Returns a :class:`SpecialistRunResult`; the caller is expected to
-        translate it into the standard :class:`SubAgentResult` for the
-        TaskRegistry. The runner never raises a Backend error past the
-        function boundary — every failure ends with a valid
-        specialist_done payload (Inv-5.3 single exit protocol).
-
-        Two execution paths share the setup + finalize halves:
-
-        * ``subprocess_dispatcher`` is configured (PR-A2 production
-          path) — spawn a ``claude`` subprocess in an isolated git
-          worktree.
-        * ``backend_factory`` is configured (v0.8 M5 in-process path,
-          retained for tests + the MockBackend path) — drive
-          ``Backend.run`` in the same process via a per-turn loop.
+        Never raises a Backend error past the boundary — every failure ends
+        with a valid specialist_done payload (Inv-5.3 single exit).
         """
         prep = await self._prepare(ctx, prompt_inputs=prompt_inputs)
         if prep.early_return is not None:
@@ -374,9 +356,7 @@ class SpecialistRunner:
             return await self._run_via_subprocess(ctx, prep)
         return await self._run_via_backend(ctx, prep)
 
-    # ------------------------------------------------------------------
     # Setup phase (shared)
-    # ------------------------------------------------------------------
     async def _prepare(
         self,
         ctx: RunnerContext,
@@ -390,11 +370,17 @@ class SpecialistRunner:
         ).strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
         domain = get_domain(domain_key)
-        # propagate sub_kind from the dispatch params for per-domain
-        # focus helpers. Empty = default per-domain prompt.
         sub_kind = str(params.get("sub_kind") or "").strip()
+        profile = resolve_specialist_profile(params)
+        task_description = str(params.get("task_description") or "").strip()
 
         workspace = self._resolve_workspace(ctx)
+
+        # scope='freeform' (absorbed dynamic_specialist) is not bound to the
+        # domain catalogue: use the synthetic freeform domain so dispatch can
+        # proceed on the task_description mandate alone.
+        if domain is None and profile.is_freeform:
+            domain = FREEFORM_DOMAIN
 
         if domain is None:
             done = build_empty_specialist_done(
@@ -417,9 +403,7 @@ class SpecialistRunner:
                 )
             )
 
-        # scope guard: domains outside the active set still get
-        # dispatched (PolicyGate R2 already accepts them), but we log so
-        # operators see we're using a generic prompt template.
+        # Post-M5 domains still dispatch but use the generic prompt template.
         notes: list[str] = []
         if domain.key not in SPECIALIST_DOMAINS_M5:
             notes.append(
@@ -427,9 +411,8 @@ class SpecialistRunner:
                 f"{domain.available_in!r}); using generic prompt template"
             )
 
-        # Worktree — created only when subprocess dispatch is wired.
-        # The worktree path is surfaced via ``workspace_path`` in the
-        # prompt so the agent learns where to write patches.
+        # Worktree — created only under subprocess dispatch; surfaced via
+        # ``workspace_path`` so the agent knows where to write patches.
         worktree, worktree_base, worktree_err = self._maybe_setup_worktree(
             ctx, workspace=workspace,
         )
@@ -441,7 +424,6 @@ class SpecialistRunner:
             int(g) for g in ((ctx.extra or {}).get("gpu_ids") or [])
         )
 
-        # Assemble prompts.
         if prompt_inputs is None:
             prompt_inputs = SpecialistPromptInputs(
                 task_id=ctx.task.task_id,
@@ -452,10 +434,7 @@ class SpecialistRunner:
                 gap_layer=str(params.get("gap_layer") or ""),
                 gap_evidence=dict(params.get("gap_evidence") or {}),
                 kb_subgraph=dict(params.get("kb_subgraph") or {}),
-                # Coordinator-populated roofline / fa pre-fetch payloads
-                # (see Coordinator._warm_specialist_params). Both
-                # default to empty so non-warmed dispatches still build
-                # a valid SpecialistPromptInputs.
+                # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
@@ -466,7 +445,6 @@ class SpecialistRunner:
                 warm_start_lessons=list(
                     params.get("warm_start_lessons") or []
                 ),
-                session_snapshot=dict(params.get("session_snapshot") or {}),
                 pr_feed=list(params.get("pr_feed") or []),
                 pr_monitor_available=bool(
                     params.get("pr_monitor_available", True)
@@ -490,32 +468,33 @@ class SpecialistRunner:
                     if isinstance(p, dict)
                 ],
                 research_hints=str(params.get("research_hints") or ""),
-                # Workload context — populated by
-                # Coordinator._warm_specialist_params from SharedState.
-                # Zero/empty means "Coordinator did not plumb this
-                # field"; the prompt section 2 renderer treats those
-                # as "(none)" rather than fabricating a default.
+                # Workload context warmed from SharedState; zero/empty
+                # renders as "(none)" rather than a fabricated default.
                 precision=str(params.get("precision") or ""),
                 conc=int(params.get("conc") or 0),
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
-                # runtime fingerprint surfaced to the prompt so
-                # ``_format_version_note`` can annotate version-mismatched
-                # lessons / pitfalls. Both empty when the Coordinator
-                # didn't warm them (legacy callers / pre-PR sessions).
+                # runtime fingerprint for ``_format_version_note`` to flag
+                # version-mismatched lessons; empty when not warmed.
                 framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(
                     str(workspace_for_prompt) if workspace_for_prompt else ""
                 ),
                 notes=str(params.get("notes") or ""),
-                # proposal_set cap (single source of truth: policy.py).
-                # Coordinator._warm_specialist_params seeds this; clamp
-                # defensively in case a caller passes a larger value.
-                max_proposals=max(1, min(
-                    DEFAULT_SPECIALIST_MAX_PROPOSALS,
-                    int(params.get("max_proposals") or
-                        DEFAULT_SPECIALIST_MAX_PROPOSALS),
+                scope=profile.scope,
+                mode=profile.mode,
+                bench=profile.bench,
+                lane=profile.lane,
+                task_description=task_description,
+                # Coordinator-injected note when this is a bounded auto-retry
+                # of a prior transient (timeout / crash / stale) attempt.
+                auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
+                # proposal_set self-curation target (policy.py is the
+                # source of truth); shapes the prompt, not a hard cap.
+                max_proposals=max(1, int(
+                    params.get("max_proposals")
+                    or DEFAULT_SPECIALIST_MAX_PROPOSALS
                 )),
             )
 
@@ -530,6 +509,7 @@ class SpecialistRunner:
             sub_kind=sub_kind,
             gap=gap,
             max_turns=max_turns,
+            profile=profile,
             workspace=workspace,
             worktree=worktree,
             worktree_base=worktree_base,
@@ -538,6 +518,7 @@ class SpecialistRunner:
             notes=notes,
             resolved_tools=self._resolve_tools(
                 getattr(ctx.task, "allowed_tools", None),
+                grant_bench=profile.grants_bench_tool,
             ),
         )
 
@@ -620,13 +601,11 @@ class SpecialistRunner:
 
     # ------------------------------------------------------------------
     # In-process Backend path (test path)
-    # ------------------------------------------------------------------
     async def _run_via_backend(
         self, ctx: RunnerContext, prep: "_PreparedRun",
     ) -> SpecialistRunResult:
-        """Drive ``Backend.run`` in the same Python process, one turn at
-        a time, until a specialist_done intent shows up. Used by tests +
-        the MockBackend fast path."""
+        """Drive ``Backend.run`` one turn at a time until a specialist_done
+        intent shows up."""
         assert self.backend_factory is not None  # narrowed by run()
         domain = prep.domain
         gap = prep.gap
@@ -655,10 +634,8 @@ class SpecialistRunner:
                 notes=notes + ["backend_init_failed"],
             )
 
-        # Combined prompt — backends that don't honor ``system_prompt`` as
-        # a separate field still see the system content inline. The
-        # Backend protocol's ``system_prompt`` parameter takes precedence
-        # when present.
+        # Combined prompt so backends that ignore the separate
+        # ``system_prompt`` field still see the system content inline.
         combined_prompt = prep.system_prompt + "\n---\n" + prep.user_prompt
 
         specialist_done_intent: Intent | None = None
@@ -719,9 +696,7 @@ class SpecialistRunner:
                 metadata=turn_result.metadata,
             )
 
-            # Tool-violation check (defense in depth — backend already
-            # gates whitelist, but if a backend ignored the whitelist
-            # we still scrub the result).
+            # Tool-violation check (defense in depth).
             for intent in turn_result.intents:
                 if intent.type == IntentType.SPECIALIST_DONE:
                     specialist_done_intent = intent
@@ -754,9 +729,7 @@ class SpecialistRunner:
             patches_written=[],
         )
 
-    # ------------------------------------------------------------------
     # Subprocess path (production)
-    # ------------------------------------------------------------------
     async def _run_via_subprocess(
         self, ctx: RunnerContext, prep: "_PreparedRun",
     ) -> SpecialistRunResult:
@@ -828,9 +801,8 @@ class SpecialistRunner:
             workspace, turn=1, max_turns=prep.max_turns, status="finished",
         )
 
-        # Decode the subprocess error into either a backend_error
-        # (sets ``status='stale'``) or a clean miss (sets
-        # ``empty_synthesised``).
+        # Decode subprocess error: backend_error → 'stale', clean miss →
+        # empty_synthesised.
         backend_error = ""
         if sub_result.timed_out:
             backend_error = "subprocess_timeout"
@@ -852,9 +824,7 @@ class SpecialistRunner:
             patches_written=list(sub_result.patches),
         )
 
-    # ------------------------------------------------------------------
     # Finalize phase (shared)
-    # ------------------------------------------------------------------
     def _finalize(
         self,
         *,
@@ -904,9 +874,8 @@ class SpecialistRunner:
 
         # Have a specialist_done payload — sanitise and persist.
         done_payload = dict(specialist_done_payload)
-        # Defensive: ensure gap_canonical_id/domain match dispatch
-        # (PolicyGate R3 enforces this on the inbox side; we re-stamp here
-        # so the on-disk artifact is authoritative).
+        # Re-stamp gap_canonical_id/domain so the on-disk artifact is
+        # authoritative.
         done_payload["gap_canonical_id"] = gap or done_payload.get(
             "gap_canonical_id", ""
         )
@@ -915,45 +884,17 @@ class SpecialistRunner:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
-        # Hard truncate proposal_set to the single-source-of-truth cap.
-        # The prompt asks the specialist to self-curate, but we never
-        # trust LLM output for size limits — anything beyond the cap is
-        # dropped before persist so the on-disk artifact, Coordinator
-        # bookkeeping, Critic review and explore-grid materialisation
-        # all see the same N≤cap shape. ``proposals_truncated_from`` is
-        # picked up by ``coordinator._build_specialist_round_entry`` for
-        # the session_breakdown audit trail.
-        _proposals = done_payload["proposal_set"]
-        if (
-            isinstance(_proposals, list)
-            and len(_proposals) > DEFAULT_SPECIALIST_MAX_PROPOSALS
-        ):
-            _original_len = len(_proposals)
-            done_payload["proposal_set"] = (
-                _proposals[:DEFAULT_SPECIALIST_MAX_PROPOSALS]
-            )
-            done_payload["proposals_truncated_from"] = _original_len
-            notes.append(
-                f"proposal_set_truncated:{_original_len}->"
-                f"{DEFAULT_SPECIALIST_MAX_PROPOSALS}"
-            )
+        # ``max_proposals`` is a prompt-side target, not a hard cap: the
+        # full proposal_set is carried back unmodified.
         if "empty" not in done_payload:
             done_payload["empty"] = not bool(done_payload["proposal_set"])
         if "summary" not in done_payload:
             done_payload["summary"] = (
                 "specialist emitted done without summary"[:480]
             )
-        # reconcile the agent's self-reported ``patches_written``
-        # against the filesystem. The agent may list patches it intends to
-        # apply (ordered by numeric prefix), but we must NEVER trust that
-        # claim blindly: a worktree that was never materialised, a write
-        # that did not land, or an LLM that reported a path without creating
-        # the file would otherwise propagate a DANGLING ``patches_written``
-        # entry downstream — ``integrate_patch`` then finds nothing under
-        # ``worktree/patches/`` and the "patch" is silently a no-op. So we
-        # keep only claimed paths that actually exist on disk (resolved
-        # against the worktree first, then the workspace) and union them
-        # with the verified filesystem scan, preserving the agent's order.
+        # Reconcile self-reported ``patches_written`` against the filesystem:
+        # keep only claimed paths that exist on disk (so a dangling claim
+        # can't make integrate_patch a silent no-op), then union with the scan.
         claimed = done_payload.get("patches_written") or []
         if not isinstance(claimed, list):
             claimed = []
@@ -980,25 +921,52 @@ class SpecialistRunner:
                 validated.append(resolved)
             else:
                 missing.append(str(p))
-        # Union with the filesystem scan (already verified-existing abs paths).
         for p in patches_written:
             if p not in validated:
                 validated.append(p)
-        # Dedupe while preserving order.
         _seen: set[str] = set()
         deduped: list[str] = []
         for p in validated:
             if p not in _seen:
                 _seen.add(p)
                 deduped.append(p)
-        done_payload["patches_written"] = deduped
         if missing:
-            # The agent claimed patches that never materialised on disk;
-            # record it so the session_breakdown audit + operators can see
-            # the dangling claim instead of a phantom integrate_patch.
+            # Record dangling patch claims for the session_breakdown audit.
             notes.append(
                 "patches_claimed_but_missing:" + ",".join(missing[:8])
             )
+
+        # Stamp the dispatch scope onto every proposal so the cross-domain
+        # Critic enrichment fires deterministically for scope=domains (not
+        # dependent on the sub-agent self-reporting it).
+        for _proposal in done_payload.get("proposal_set") or []:
+            if isinstance(_proposal, dict):
+                _proposal.setdefault("scope", prep.profile.scope)
+
+        # Universal patch-safety gate (applies to every scope): drop patches
+        # that are not real unified diffs / escape the tree, git-ground the
+        # rest against the clean base checkout, and scan for smuggled
+        # quantitative claims. Stale-but-valid patches are kept (integrate_patch
+        # + Critic adjudicate) with a grounding note.
+        base_checkout = prep.worktree_base or prep.worktree
+        kept, dropped, grounding = _patch_safety.vet_patches(
+            deduped, base_checkout=base_checkout,
+        )
+        forbidden_fields, numeric_warnings = _patch_safety.scan_quantitative_claims(
+            done_payload,
+        )
+        safety = _patch_safety.PatchSafetyReport(
+            kept_patches=kept,
+            dropped=dropped,
+            grounding=grounding,
+            numeric_warnings=numeric_warnings,
+            forbidden_fields=forbidden_fields,
+        )
+        done_payload["patches_written"] = kept
+        done_payload["patch_grounding"] = grounding
+        if not kept:
+            done_payload["empty"] = not bool(done_payload.get("proposal_set"))
+        notes.extend(safety.notes())
 
         self._write_specialist_done(workspace, done_payload)
         status = "succeeded"
@@ -1020,27 +988,15 @@ class SpecialistRunner:
             notes=notes,
         )
 
-    # ------------------------------------------------------------------
     # Worktree helpers
-    # ------------------------------------------------------------------
     def _maybe_setup_worktree(
         self, ctx: RunnerContext, *, workspace: Path | None,
     ) -> tuple[Path | None, Path | None, str]:
         """Provision a per-task git worktree when in subprocess mode.
 
-        Returns ``(worktree_dir, worktree_base, error)``. All three are
-        empty / None when:
-
-        * the runner is in in-process Backend mode (worktree is not
-          needed), OR
-        * the configured ``framework_source_roots`` don't contain a
-          git checkout, OR
-        * ``git worktree add`` fails.
-
-        Failures are best-effort: the runner still dispatches the
-        specialist, only without worktree isolation. The reason ends
-        up in the ``notes`` of the returned SpecialistRunResult so
-        downstream collectors can surface it.
+        Returns ``(worktree_dir, worktree_base, error)``; empty/None in
+        in-process mode or on git failure. Best-effort: the specialist still
+        dispatches without isolation and the reason lands in ``notes``.
         """
         if self.subprocess_config is None or workspace is None:
             return None, None, ""
@@ -1060,9 +1016,7 @@ class SpecialistRunner:
             return None, base, err
         return wt, base, ""
 
-    # ------------------------------------------------------------------
     # Coordinator-facing convenience: produce a SubAgentResult shape.
-    # ------------------------------------------------------------------
     @staticmethod
     def to_sub_agent_result(run_result: SpecialistRunResult) -> SubAgentResult:
         """Translate the rich runner result into the dispatcher contract."""
@@ -1084,12 +1038,10 @@ class SpecialistRunner:
             error=run_result.error or None,
         )
 
-    # ------------------------------------------------------------------
     # Workspace file protocol
-    # ------------------------------------------------------------------
     def _resolve_workspace(self, ctx: RunnerContext) -> Path | None:
-        # Prefer the workspace SubAgentRunner pre-mkdir'd, fall back to
-        # the conventional ``runs/specialist/<task_id>/``.
+        # Prefer the SubAgentRunner-premkdir'd workspace, else
+        # ``runs/specialist/<task_id>/``.
         extra = getattr(ctx, "extra", None) or {}
         ws = extra.get("workspace")
         if ws:
@@ -1181,9 +1133,12 @@ __all__ = [
     "CORTEX_KB_READONLY_MCP_TOOLS",
     "DEFAULT_SPECIALIST_TOOLS",
     "PR_MONITOR_MCP_TOOLS",
+    "RETRYABLE_SPECIALIST_FAILURES",
     "SPECIALIST_TOOL_DENYLIST",
+    "SpecialistFailureType",
     "SpecialistRunResult",
     "SpecialistRunner",
     "SpecialistSubprocessConfig",
     "build_empty_specialist_done",
+    "classify_specialist_failure",
 ]

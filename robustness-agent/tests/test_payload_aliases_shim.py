@@ -1,14 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Smoke tests for the robustness-agent payload-aliases compat shim.
-
-Mirrors the contract surface of
-:mod:`inference_optimizer.compat.payload_aliases`. The shim is a
-duplicated copy (sub-agents are standalone packages by design — see
-``framework_agent.repo_map`` for the same isolation pattern), so the
-tests here pin the shim's behaviour against drift from the Hyperloom
-helper.
-"""
+"""Smoke tests for the payload-aliases compat shim: pin its behaviour against drift from ``inference_optimizer.compat.payload_aliases`` (the shim is a duplicated copy by design)."""
 
 from __future__ import annotations
 

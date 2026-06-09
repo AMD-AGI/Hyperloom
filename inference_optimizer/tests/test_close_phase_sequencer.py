@@ -1,37 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — CLOSE phase 5-step sequencer tests.
-
-KB_gaps/Gap-06 root cause: CLOSE phase had three uncoordinated exit
-paths (``_enter_closing_phase`` wall-clock deadline, cli.finally
-emergency breakdown, ``Coordinator.stop()::_cortex_t4_hook``) with
-no guaranteed ordering and no shared "done" flag. The design (KB_design
-§3.2 §5.5) wants a fixed 5-step sequence with breadcrumbs:
-
-  1. ``report``
-  2. ``session_breakdown``
-  3. NDJSON drain
-  4. Cortex ``session commit``
-  5. mark ``close_sequence_done``
-
-This file covers:
-
-* Each step in isolation (status='done' on happy path; correct skip /
-  failure status on each error branch).
-* End-to-end 5-step ordering — every row in
-  ``phase_history[-1].evidence.close_steps`` is present in the right
-  sequence.
-* Idempotence: report task already enqueued by wall-clock path → CLOSE
-  sequencer reuses it.
-* Single Cortex commit: stop()'s _cortex_t4_hook short-circuits when
-  ``close_sequence_done=True``.
-* cli.finally short-circuit when the sequencer wrote the breakdown.
-* ``close_sequence_done`` is locked in CORE_STATE_FIELDS.
-* ``_record_close_step`` helper edge cases (missing evidence dict /
-  non-list close_steps / empty history).
-* ``_wait_for_task_terminal`` polling helper (terminal states / timeout
-  / unknown task).
-"""
+"""v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — CLOSE phase 5-step sequencer tests."""
 
 from __future__ import annotations
 
@@ -49,13 +18,10 @@ from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
 
 
-# ===========================================================================
 # Fixtures
-# ===========================================================================
 @dataclass
 class _BareState:
-    """SharedState stand-in covering every attribute the CLOSE sequencer
-    + helpers read / write."""
+    """SharedState stand-in covering every attribute the CLOSE sequencer reads/writes."""
 
     closing_report_task_id: str = ""
     cortex_session_id: str = ""
@@ -69,8 +35,7 @@ class _BareState:
         self.save_count += 1
 
     def set_stop_reason(self, reason: str) -> None:
-        # Mirror SharedState.set_stop_reason ENUM-validated writer
-        # signature; tests pass valid v0.8 vocab values.
+        # Mirror SharedState.set_stop_reason writer signature.
         self.stop_reason = reason
 
 
@@ -84,9 +49,7 @@ class _StubTaskRow:
 
 
 class _StubTaskRegistry:
-    """create_or_return_existing + get double for CLOSE sequencer
-    tests. Tracks insertion order so we can assert step 1 enqueued
-    before step 2."""
+    """Task registry double; tracks insertion order to assert step 1 before step 2."""
 
     def __init__(self):
         self._by_key: dict[str, _StubTaskRow] = {}
@@ -132,9 +95,7 @@ class _StubTaskRegistry:
 
 
 class _StubCortex:
-    """Cortex KB double with controllable behaviour for the CLOSE
-    NDJSON drain step (session_commit was retired alongside the
-    T2/T3 hypothesize/verify protocol)."""
+    """Cortex KB double for the CLOSE NDJSON drain step (session_commit retired with T2/T3)."""
 
     enabled: bool = True
 
@@ -154,12 +115,7 @@ class _StubCortex:
             raise self._drain_raises
         return {"remaining": self._drain_remaining}
 
-    # cortex_finalize_recipe_and_journal calls these on the read-modify-
-    # write path; tests using this stub set ``cortex_kb=None`` or omit
-    # ``model_name`` on SharedState so the finalize helper short-circuits
-    # before it gets here, but the methods are wired so adding new
-    # close-phase tests with a populated SharedState doesn't blow up
-    # with AttributeError.
+    # Wired so close-phase tests with a populated SharedState don't AttributeError.
     def read_recipe_exact(self, *, model: str, hardware: str) -> dict:
         return {}
 
@@ -168,18 +124,14 @@ class _StubCortex:
 
 
 class _StubSubResult:
-    """Minimal sub-agent run result: only ``.state`` is read by the
-    CLOSE sequencer (terminal 'succeeded' → step marked done)."""
+    """Minimal sub-agent run result: only ``.state`` is read by the CLOSE sequencer."""
 
     def __init__(self, state: str = "succeeded"):
         self.state = state
 
 
 class _StubSubAgentRunner:
-    """``Coordinator.sub`` double. The CLOSE sequencer awaits
-    ``self.sub.run_task(task)`` for the report / session_breakdown steps;
-    return a terminal-succeeded result so the happy-path sequencer
-    advances without a real sub-agent."""
+    """``Coordinator.sub`` double returning terminal-succeeded so the sequencer advances."""
 
     def __init__(self):
         self.run_calls: list[Any] = []
@@ -207,9 +159,7 @@ def _close_phase_history_row() -> dict[str, Any]:
     return {"to_phase": "CLOSE", "reason": "sweep_done", "evidence": {}}
 
 
-# ===========================================================================
 # 1. _record_close_step helper edges
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_record_close_step_appends_to_evidence_close_steps(coord):
     coord.shared_state.phase_history = [_close_phase_history_row()]
@@ -247,8 +197,7 @@ async def test_record_close_step_creates_missing_evidence_dict(coord):
 
 @pytest.mark.asyncio
 async def test_record_close_step_replaces_non_list_close_steps(coord):
-    """Defensive: malformed pre-existing close_steps (not a list)
-    gets replaced with a fresh list before appending."""
+    """Defensive: malformed pre-existing close_steps (not a list) gets replaced."""
     coord.shared_state.phase_history = [{
         "to_phase": "CLOSE", "evidence": {"close_steps": "broken"},
     }]
@@ -261,19 +210,14 @@ async def test_record_close_step_replaces_non_list_close_steps(coord):
 @pytest.mark.asyncio
 async def test_record_close_step_no_op_when_history_empty(coord):
     coord.shared_state.phase_history = []
-    # Must not raise:
     await coord._record_close_step("report", status="done")
 
 
-# ===========================================================================
 # 2. _wait_for_task_terminal helper
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_wait_for_task_terminal_returns_immediately_when_succeeded(
     coord,
 ):
-    # _StubTaskRegistry inserts rows with state='succeeded' so the very
-    # first poll wins.
     await coord.tasks.create_or_return_existing(
         kind="report", params={}, idempotency_key="k1", task_id="t-x",
     )
@@ -301,9 +245,7 @@ async def test_wait_for_task_terminal_timeout(coord):
     assert state is None
 
 
-# ===========================================================================
 # 3. Step 1: report task enqueue
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_enqueue_internal_report_task_fresh(coord):
     task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
@@ -318,9 +260,7 @@ async def test_enqueue_internal_report_task_fresh(coord):
 
 @pytest.mark.asyncio
 async def test_enqueue_internal_report_task_reuses_existing(coord):
-    """When wall-clock deadline already enqueued a report task, the
-    sequencer must reuse it instead of inserting a duplicate."""
-    # Pre-seed: a report task from the wall-clock path.
+    """When the wall-clock deadline already enqueued a report task, reuse it."""
     existing = _StubTaskRow(
         task_id="wallclock-report", kind="report", state="succeeded",
         params={}, idempotency_key="closing-report-1234",
@@ -334,9 +274,7 @@ async def test_enqueue_internal_report_task_reuses_existing(coord):
     assert "internal-report-close_phase_entry" not in coord.tasks._by_key
 
 
-# ===========================================================================
 # 4. Step 2: session_breakdown task enqueue
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_enqueue_internal_session_breakdown_task(coord):
     task = await coord._enqueue_internal_session_breakdown_task(
@@ -347,9 +285,7 @@ async def test_enqueue_internal_session_breakdown_task(coord):
     assert task.params["source"] == "coordinator_internal"
 
 
-# ===========================================================================
 # 5. End-to-end 5-step sequencer ordering
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord,
@@ -361,11 +297,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     await coord._on_enter_close(from_phase="SWEEP")
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
-    # Step sequence (post T2/T3 retirement — step 4 cortex_commit
-    # removed alongside the hypothesize/verify protocol):
-    # sequencer_started, report, session_breakdown,
-    # fact_finalize (step 2.5 — recipe + journal),
-    # ndjson_drain, done.
+    # Step sequence post T2/T3 retirement (cortex_commit removed).
     steps = [r["step"] for r in rows]
     assert steps == [
         "sequencer_started", "report", "session_breakdown",
@@ -375,28 +307,17 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     assert rows[1]["status"] == "done"     # report
     assert rows[2]["status"] == "done"     # session_breakdown
     assert rows[3]["status"] == "done"     # fact_finalize
-    # ndjson_drain was retired alongside the v1 cortex_kb_client; the
-    # sequencer stub-emits "skipped" so close-step ledger consumers
-    # don't break on a missing entry.
+    # ndjson_drain retired with the v1 cortex_kb_client; stub-emits "skipped".
     assert rows[4]["status"] == "skipped"  # ndjson_drain (retired)
     assert rows[5]["status"] == "done"     # done
-    # close_sequence_done flag set.
     assert coord.shared_state.close_sequence_done is True
-    # v0.8 §3.2 §5.5 — sequencer must set stop_reason so the main loop
-    # terminates on the next tick. A normal SWEEP completion carries a
-    # ``sweep_done`` phase-exit reason, which must be preserved (NOT
-    # mislabelled ``time_exhausted``).
+    # A normal SWEEP completion's sweep_done reason must be preserved (not time_exhausted).
     assert coord.shared_state.stop_reason == "sweep_done"
 
 
 @pytest.mark.asyncio
 async def test_close_sequencer_falls_back_to_time_exhausted(coord):
-    """The sequencer falls back to ``stop_reason='time_exhausted'`` only
-    when the run reached CLOSE with no usable phase-exit reason (the
-    wall-clock-deadline path is the common case). ``time_exhausted`` is
-    the canonical fallback vocab term in :data:`STOP_REASON_VOCAB`.
-    """
-    # CLOSE-bound row with no recorded reason → genuine fallback.
+    """Falls back to ``stop_reason='time_exhausted'`` when CLOSE had no usable phase-exit reason."""
     coord.shared_state.phase_history = [
         {"to_phase": "CLOSE", "reason": "", "evidence": {}},
     ]
@@ -409,11 +330,7 @@ async def test_close_sequencer_falls_back_to_time_exhausted(coord):
 
 @pytest.mark.asyncio
 async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
-    """A normal SWEEP → CLOSE transition records ``reason='sweep_done'``
-    (a valid STOP_REASON_VOCAB term) on the latest phase_history row.
-    The sequencer must derive that reason rather than blanket-stamping
-    ``time_exhausted`` — otherwise a clean run is mislabelled a timeout
-    in session_breakdown.json / downstream dashboards (P1 regression)."""
+    """P1 regression: sequencer derives the phase_history reason rather than blanket-stamping time_exhausted."""
     coord.shared_state.phase_history = [
         {"to_phase": "CLOSE", "reason": "conc_sweep_done", "evidence": {}},
     ]
@@ -428,17 +345,12 @@ async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
 async def test_close_sequencer_does_not_overwrite_existing_stop_reason(
     coord,
 ):
-    """An operator-set ``stop_reason`` (set before the sequencer ran,
-    e.g. ``cortex_drain_failed`` stamped by the wall-clock path) must
-    survive the final step's setter — the earlier observation carries
-    the more diagnostic information."""
+    """An operator-set ``stop_reason`` must survive the final step's setter."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.shared_state.set_stop_reason("cortex_drain_failed")
 
     await coord._on_enter_close(from_phase="SWEEP")
 
-    # Pre-set stop_reason survived; final step must NOT overwrite to
-    # time_exhausted.
     assert coord.shared_state.stop_reason == "cortex_drain_failed"
 
 
@@ -446,8 +358,7 @@ async def test_close_sequencer_does_not_overwrite_existing_stop_reason(
 async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     coord,
 ):
-    """An operator-set ``stop_reason`` (e.g. ``signal`` from a
-    SIGTERM that arrived during the sequencer) must survive step 5."""
+    """An operator-set ``stop_reason`` (e.g. ``signal``) must survive step 5."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.shared_state.stop_reason = "signal"
 
@@ -458,8 +369,7 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
 
 @pytest.mark.asyncio
 async def test_close_sequencer_report_before_session_breakdown(coord):
-    """Step 1 (report) MUST be enqueued before step 2
-    (session_breakdown). Asserted via TaskRegistry insertion order."""
+    """Step 1 (report) MUST be enqueued before step 2 (session_breakdown)."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
     await coord._on_enter_close(from_phase="SWEEP")
     insertion = coord.tasks.insertion_order
@@ -470,31 +380,22 @@ async def test_close_sequencer_report_before_session_breakdown(coord):
 
 @pytest.mark.asyncio
 async def test_close_sequencer_skips_cortex_steps_when_no_cortex(coord):
-    """``--degraded-kb`` runs have cortex_kb=None: the NDJSON drain
-    step must be explicitly recorded as 'skipped' (not silent no-op,
-    so operators can see the run was Cortex-less)."""
+    """``--degraded-kb`` runs (cortex_kb=None): NDJSON drain recorded 'skipped', not silent."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
     await coord._on_enter_close(from_phase="SWEEP")
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
     assert drain_row["status"] == "skipped"
-    # close_sequence_done still set so cli.finally short-circuits.
     assert coord.shared_state.close_sequence_done is True
 
 
-# Tests for ``ndjson_drain`` status=incomplete / failed were removed
-# alongside the v1 cortex_kb_client retirement: the new RecipeKB
-# dispatcher writes are local-only, so there's no remote-write fan-out
-# queue to drain, and the sequencer always emits "skipped".
+# ndjson_drain status=incomplete/failed tests removed with the v1 cortex_kb_client
+# (RecipeKB writes are local-only, so the sequencer always emits "skipped").
 
 
-# ===========================================================================
 # 6. CORE_STATE_FIELDS lock
-# ===========================================================================
 def test_close_sequence_done_in_core_state_fields():
-    """LLM update_state must not be able to flip close_sequence_done
-    and trick cli.finally into skipping its safety net for a non-CLOSE
-    termination."""
+    """LLM update_state must not flip close_sequence_done and bypass cli.finally's safety net."""
     assert "close_sequence_done" in CORE_STATE_FIELDS
 
 
@@ -517,15 +418,10 @@ def test_policy_blocks_llm_close_sequence_done_write():
         gate.validate_intent("orchestration", intent)
 
 
-# ===========================================================================
 # 7. End-to-end via real Coordinator (real TaskRegistry + bus)
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
-    """End-to-end: real Coordinator + real TaskRegistry. After
-    transitioning to CLOSE + invoking the hook dispatcher, the
-    sequencer enqueues both internal tasks under the v0.8 keys and
-    flips ``close_sequence_done=True``."""
+    """End-to-end: real Coordinator + TaskRegistry enqueue both internal tasks and flip close_sequence_done."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -542,10 +438,7 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         cortex_kb=None,
         knowledge_plane=None,
     )
-    # Shrink wait timeouts — real dispatcher isn't ticking in this
-    # test so the queued tasks never reach a terminal state; we want
-    # the sequencer to record 'failed' (timeout) and move on, not
-    # hang on the production 5-10 min defaults.
+    # Shrink wait timeouts — dispatcher isn't ticking, so don't hang on prod defaults.
     coord.CLOSE_REPORT_TIMEOUT_SEC = 0.1
     coord.CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC = 0.1
 
@@ -561,7 +454,6 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     )
     await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
 
-    # Both internal tasks were inserted into the real registry.
     rows_report = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
         ("internal-report-close_phase_entry",),
@@ -573,23 +465,17 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     assert len(rows_report) == 1
     assert len(rows_bd) == 1
 
-    # close_sequence_done flipped despite the queued tasks (steps 3+4
-    # skipped because no cortex_kb; step 5 always sets the flag).
     assert coord.shared_state.close_sequence_done is True
-    # Evidence section recorded steps.
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     steps = [r["step"] for r in evidence.get("close_steps", [])]
     assert "sequencer_started" in steps
     assert "done" in steps
 
 
-# ===========================================================================
 # 8. stop()'s _cortex_t4_hook short-circuits when sequencer already ran
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_cortex_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path):
-    """If the CLOSE sequencer already drained, stop()'s
-    ``_cortex_t4_hook`` safety-net must skip (avoids a double drain)."""
+    """If the CLOSE sequencer already drained, ``_cortex_t4_hook`` must skip (no double drain)."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -610,23 +496,12 @@ async def test_cortex_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path)
     coord.shared_state.close_sequence_done = True
 
     await coord._cortex_t4_hook()
-    # Drain untouched (commit was retired alongside T2/T3).
     assert coord.cortex_kb.drain_calls == 0
 
 
 @pytest.mark.asyncio
 async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path):
-    """Crash / Ctrl-C path: sequencer didn't run, so stop()'s
-    ``_cortex_t4_hook`` MUST still call recipe-finalize as a
-    safety net.
-
-    History note: under the v1 cortex_kb_client this test asserted
-    ``drain_calls == 1``. The v1 NDJSON pending queue is retired
-    under the local-write design, so the safety-net is now the
-    recipe-finalize path; the drain assertion would always fail.
-    The hook still needs to be invoked, so we instead assert
-    ``finalize_calls == 1`` on the stub.
-    """
+    """Crash / Ctrl-C path: sequencer didn't run, so ``_cortex_t4_hook`` MUST call recipe-finalize."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])

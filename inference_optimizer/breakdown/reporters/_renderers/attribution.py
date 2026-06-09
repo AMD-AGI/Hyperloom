@@ -1,15 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Attribution renderer — gain split across optimization sources.
-
-Splits gain among explore / sweep / geak / oob and retained legacy
-aliases. Surfaces:
-
-* the source_breakdown table (kept from the collector verbatim),
-* explicit "validated vs. reconstructed" call-out so report consumers
-  know how much to trust the split,
-* any collector ``notes`` (assumption breadcrumbs).
-"""
+"""Attribution renderer — gain split across optimization sources (explore/sweep/geak/oob + legacy aliases)."""
 
 from __future__ import annotations
 
@@ -23,12 +14,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     a = breakdown.get("attribution") or {}
     sb = a.get("source_breakdown") or {}
     notes = a.get("notes") or []
-    # ``attribution.method`` is the collector's authoritative provenance
-    # label (validated / single_source / reconstructed / missing). Render
-    # it verbatim — never substitute a more-confident-sounding string,
-    # otherwise we re-introduce the very hallucination this field exists
-    # to prevent. Empty / "missing" surfaces as "unknown attribution
-    # method" so the audit trail is explicit.
+    # Render ``attribution.method`` verbatim; never substitute a more
+    # confident label or we reintroduce the hallucination it prevents.
     method_raw = a.get("method")
     method = str(method_raw) if isinstance(method_raw, str) else ""
     if method in ("", "missing"):
@@ -38,8 +25,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     total_v = sb.get("validated_total_pct")
     rows = [
-        # explore subsumes the old backends+params split on current
-        # sessions; legacy rows remain for archived reports.
+        # explore subsumes the old backends+params split; legacy rows kept for archived reports.
         ["explore",  sb.get("explore_pct_of_total"),  sb.get("explore_share_pct")],
         ["backends", sb.get("backends_pct_of_total"), sb.get("backends_share_pct")],
         ["params",   sb.get("params_pct_of_total"),   sb.get("params_share_pct")],
@@ -79,15 +65,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 rationale="contributed positive validated gain",
             ))
 
-    # Only emit the per-source table when at least one source has a
-    # non-zero attribution. Otherwise the table is five rows of zeros
-    # which is misleading: callers can't tell "no attribution mined yet"
-    # from "every source contributed zero".
+    # Only emit the table when some source is non-zero; all-zero rows can't
+    # distinguish "not mined yet" from "every source contributed zero".
     md = md_table(["source", "pct_of_total", "share_pct"], rows) if has_any_split else ""
-    # If we have no per-source breakdown and only the headline number
-    # was recorded, skip the section entirely — the headline is already
-    # in the executive summary, so a one-row "validated_total_pct = ..."
-    # block would be redundant noise.
+    # Skip when only the headline number exists; it's already in the summary.
     skipped = not has_any_split
     return RenderedSection(
         section_id="attribution",

@@ -240,7 +240,7 @@ class _CidLock:
         # ``a+`` so the file is created if missing and the position
         # is at the end (we don't actually write to it; the lock is
         # advisory and the file's contents are irrelevant).
-        self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         except OSError:
@@ -638,8 +638,14 @@ class LocalRecipeStore:
         updated_since: str | None = None,
         order_by: str = "updated_at DESC",
         limit: int = 50,
+        prefer: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Filter live recipes by labels / metrics / updated_at.
+
+        ``prefer`` (workload-similarity hints) is accepted for the
+        unified KB-interface signature; the dispatcher reranks the
+        returned rows, so the local store only honours the ``required``
+        (``label_match`` / metric / updated_since) filter.
 
         Mirrors the central server's ``POST /recipes/search``:
 
@@ -658,6 +664,7 @@ class LocalRecipeStore:
           server constant. Anything else raises ValueError.
         * ``limit``: ``[1, 1000]`` clamp.
         """
+        del prefer  # client-side rerank lives in RecipeKB
         if order_by not in _ORDER_BY_KEYS:
             raise ValueError(
                 f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, "

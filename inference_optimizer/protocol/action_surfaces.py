@@ -49,6 +49,15 @@ PHASE_ALLOWLIST_BYPASS_ACTIONS: frozenset[str] = frozenset({
 })
 
 
+# Robustness-only actions (driven via its action-ladder): in
+# PHASE_ALLOWED_ACTIONS but excluded from PHASE_LLM_PROPOSABLE_ACTIONS + the
+# prompt catalogue, so Orchestration must ALERT instead. ``recover`` walks
+# SIGTERM/SIGKILL against server owners (robustness gpu_memory_leaked ladder).
+ROBUSTNESS_DELEGATE_ONLY_ACTIONS: frozenset[str] = frozenset({
+    "recover",
+})
+
+
 # Actions whose prompt catalogue should advertise LLM-supplied grids.
 GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
     "explore",
@@ -64,13 +73,11 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "roofline", "deep_kernel_analysis",
     "explore",
     "specialist",
-    "dynamic_action",
     "integrate_patch",
     "sweep",
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
     "gemm_tuning",
     "report",
-    "recover",
 )
 
 
@@ -80,11 +87,9 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis", "baseline",
     "explore",
     "specialist",
-    "dynamic_action",
     "integrate_patch",
     "sweep",
     "report",
-    "recover",
 )
 
 
@@ -97,4 +102,5 @@ __all__ = [
     "KERNEL_OWNED_ACTIONS",
     "NO_KERNEL_ENABLED_ACTIONS",
     "PHASE_ALLOWLIST_BYPASS_ACTIONS",
+    "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]
