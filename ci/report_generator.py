@@ -81,13 +81,7 @@ def _first_of(d: dict, *keys: str) -> Any | None:
 
 
 def _parse_metrics_from_report(content: str) -> dict:
-    """Fallback: extract baseline/optimized throughput from optimization_report.md.
-
-    Parses the Executive Summary table:
-        | Output Throughput (tok/s) | 2313.52 | ~2497 (avg) | **+7.9%** |
-        | tok/s/GPU | 289.19 | ~312 (avg) | **+7.9%** |
-    Prefers total throughput over per-GPU.
-    """
+    """Fallback: extract baseline/optimized throughput from the optimization_report.md Executive Summary table (prefers total over per-GPU)."""
     import re
 
     result: dict[str, Any] = {}

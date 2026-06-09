@@ -2,18 +2,10 @@
 
 """Agent-stall detection.
 
-: the robustness role is expected to detect "agent
-stalls (>3min no message processed)" and emit medium-severity alerts.
-
-We compute the "last activity" timestamp per agent from
-:attr:`SourceData.coordinator_events` (newest first) and compare to
-``ctx.now_unix``. Inbox tail entries (rendered into the prompt) are
-also folded in because they may be more recent than what the local
-SQLite probe sees.
-
-Activity criterion is intentionally lenient: any event from the agent
-counts as activity, including heartbeats. That matches the upstream
-reactor protocol where every tick must emit at least one intent.
+Computes each agent's last-activity timestamp from
+:attr:`SourceData.coordinator_events` (plus inbox tail, which may be more
+recent than the local SQLite probe) and alerts when idle past the
+threshold. Any event counts as activity, including heartbeats.
 """
 
 from __future__ import annotations
@@ -26,8 +18,7 @@ from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
 
-# Agents we care about for stall detection. The robustness role itself
-# is excluded because it is the one running the rule.
+# Agents tracked for stall detection; robustness excludes itself.
 _TRACKED_AGENTS: frozenset[str] = frozenset({
     "orchestration",
     "kernel",
@@ -55,8 +46,7 @@ def evaluate_stall_signals(
     for agent in _TRACKED_AGENTS:
         ts = last_seen.get(agent)
         if ts is None:
-            # Without ground truth we cannot accuse the agent of being
-            # stalled; the very-first tick will always look empty.
+            # No ground truth (e.g. first tick) — can't accuse of a stall.
             continue
         idle_s = max(0.0, ctx.now_unix - ts)
         if idle_s < cfg.stall_timeout_s:

@@ -22,36 +22,21 @@ from typing import Final
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Default endpoint
-# ---------------------------------------------------------------------------
-# NOTE: there is intentionally NO ``DEFAULT_KB_URL`` constant. The old
-# central kb-service default (``kb-service.primus-cortex.svc.cluster.local``)
-# was retired — the optimizer never silently connects to a remote KB.
-# A remote read source is consulted ONLY when an operator explicitly
-# passes ``--cortex-kb-url`` / ``$CORTEX_KB_URL``; otherwise the store
-# is local-only (see ``recipe_kb.RemoteRecipeClient`` / ``cli``).
+# No DEFAULT_KB_URL by design: the optimizer never silently connects to a
+# remote KB; a remote source is used only with --cortex-kb-url / $CORTEX_KB_URL.
 
-# Mount prefix per the spec (``Conventions`` section). Every endpoint
-# path below is the suffix after this prefix. The client concatenates
-# ``base_url + MOUNT + endpoint`` once and never substring-matches on
-# the prefix again.
+# Mount prefix per spec; client concatenates base_url + MOUNT + endpoint.
 MOUNT_PREFIX: Final[str] = "/recipe-snapshot"
 
 
-# ---------------------------------------------------------------------------
 # Endpoint paths
-# ---------------------------------------------------------------------------
 PATH_HEALTH:           Final[str] = "/health"  # same service binary, no mount prefix
 PATH_OPENAPI:          Final[str] = "/openapi.json"
 
-# Recipe rows
+# Recipe rows. {canonical_id} templates MUST be formatted via
+# format_recipe_path so slash-in-id stems (Qwen/Qwen3-30B-A3B) stay verbatim.
 PATH_RECIPES_LIST:     Final[str] = MOUNT_PREFIX + "/recipes"
 PATH_RECIPES_SEARCH:   Final[str] = MOUNT_PREFIX + "/recipes/search"
-# Templates carry ``{canonical_id}`` placeholders — callers MUST format
-# them via :func:`format_recipe_path` so the slash-in-id case (HF stems
-# like ``Qwen/Qwen3-30B-A3B``) is preserved verbatim instead of being
-# percent-encoded.
 PATH_RECIPE_TPL:           Final[str] = MOUNT_PREFIX + "/recipes/{canonical_id}"
 PATH_RECIPE_HISTORY_TPL:   Final[str] = MOUNT_PREFIX + "/recipes/{canonical_id}/history"
 PATH_RECIPE_ATTEMPTS_TPL:  Final[str] = MOUNT_PREFIX + "/recipes/{canonical_id}/attempts"
@@ -61,12 +46,8 @@ PATH_SESSION_ATTEMPTS_TPL: Final[str] = MOUNT_PREFIX + "/sessions/{session_id}/a
 PATH_SESSION_SUMMARY_TPL:  Final[str] = MOUNT_PREFIX + "/sessions/{session_id}/summary"
 
 
-# ---------------------------------------------------------------------------
-# Request body field names — PUT /recipes/{canonical_id}
-# ---------------------------------------------------------------------------
-# Top-level fields. ``labels`` / ``body`` / ``metrics`` / experience
-# arrays are caller-defined dicts; the server does NOT validate their
-# inner shape. Only ``authority`` + ``provenance`` are required.
+# Request body field names — PUT /recipes/{canonical_id}. Top-level fields;
+# server validates only authority + provenance (rest are caller-defined).
 F_LABELS:        Final[str] = "labels"
 F_BODY:          Final[str] = "body"
 F_METRICS:       Final[str] = "metrics"
@@ -80,12 +61,8 @@ F_CONFIDENCE:    Final[str] = "confidence"
 F_EVIDENCE_REFS: Final[str] = "evidence_refs"
 F_PROVENANCE:    Final[str] = "provenance"
 
-# Canonical identity dimensions — caller-defined keys inside ``labels``
-# that mirror the five components of :func:`recipe_canonical_id`. Server
-# does not enforce these (labels are caller-defined under v2), but every
-# inference-optimizer caller MUST stamp them so ``/recipes/search`` can
-# locate rows by individual dimensions even when the canonical_id format
-# evolves (e.g. when a new dimension is appended).
+# Canonical identity dimensions inside ``labels`` mirroring
+# recipe_canonical_id; stamp them so /recipes/search can filter by dimension.
 F_LABEL_MODEL:             Final[str] = "model"
 F_LABEL_HARDWARE:          Final[str] = "hardware"
 F_LABEL_FRAMEWORK:         Final[str] = "framework"
@@ -103,10 +80,7 @@ F_ARCHIVED_AT:   Final[str] = "archived_at"
 F_REPLACED_BY:   Final[str] = "replaced_by"
 F_SNAPSHOT:      Final[str] = "snapshot"
 
-# Attempts (POST + GET) — kept here even though Phase 1 doesn't use
-# them yet (caller chose ``no_summary_only`` mapping). They land in
-# this constants module so the Phase 3 NDJSON flusher / breakdown
-# collector can reference them without re-introducing string literals.
+# Attempts (POST + GET).
 F_SESSION_ID:        Final[str] = "session_id"
 F_DIFF:              Final[str] = "diff"
 F_PREDICTED_DELTA:   Final[str] = "predicted_delta"
@@ -140,11 +114,7 @@ F_PV_GENERATED_AT: Final[str] = "generated_at"
 F_PV_DETAILS:      Final[str] = "details"
 
 
-# ---------------------------------------------------------------------------
-# Enum literals
-# ---------------------------------------------------------------------------
-# Authority (strict enum on the server side; pydantic rejects unknown
-# values with ``422`` ``type=enum`` and the value list).
+# Enum literals (strict server-side enums; unknown values -> 422).
 AUTHORITY_AUTHORITATIVE: Final[str] = "AUTHORITATIVE"
 AUTHORITY_EXPERIENTIAL:  Final[str] = "EXPERIENTIAL"
 AUTHORITY_HYPOTHESIZED:  Final[str] = "HYPOTHESIZED"
@@ -180,34 +150,14 @@ ORDER_BY_WHITELIST: Final[frozenset[str]] = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
-# NDJSON envelope ops
-# ---------------------------------------------------------------------------
-# Phase 1 only writes ``put_recipe``. The other ops are reserved for
-# Phase 3 (attempts append on a flag, history backfill, search-driven
-# warm-start). Defining the full set up-front keeps the flusher and
-# breakdown collector free of string literals.
+# NDJSON envelope ops.
 OP_PUT_RECIPE:    Final[str] = "put_recipe"
 OP_APPEND_ATTEMPT: Final[str] = "append_attempt"
 
 
-# ---------------------------------------------------------------------------
-# Defaults — bypass-mode semantics
-# ---------------------------------------------------------------------------
-# Two timeout / retry profiles depending on the caller's tolerance for
-# being blocked on a slow / unreachable KB:
-#
-# * **foreground** — Coordinator on the main event loop. Every PUT
-#   (one per KEEP / REVERT, ~10 / EXPLORE round) is a sync HTTP call.
-#   Operator requirement: "KB is a side-channel — if it's unavailable
-#   / slow, do NOT slow the main logic." So the foreground profile
-#   fails fast (2s + 1 retry ≈ ~2.5s worst case) and the write falls
-#   through to NDJSON on the very first transport hiccup.
-#
-# * **background** — kb_flusher daemon + CLOSE-time drain. These run
-#   outside the main loop so they can afford the legacy retry budget
-#   (10s × 3) to maximise the chance a transient KB blip still
-#   commits without dead-lettering the row.
+# Defaults — two timeout/retry profiles. Foreground (Coordinator main loop)
+# fails fast (2s + 1 retry) and falls through to NDJSON; background (flusher /
+# CLOSE drain) uses the larger 10s x 3 budget.
 DEFAULT_HTTP_TIMEOUT_SEC:    Final[float] = 10.0  # background / flusher
 DEFAULT_MAX_CONCURRENCY:     Final[int]   = 8     # aligned with asyncpg pool
 DEFAULT_RETRY_ATTEMPTS:      Final[int]   = 3
@@ -215,35 +165,22 @@ DEFAULT_RETRY_BASE_MS:       Final[int]   = 200   # 200ms × {1, 1.4, 4}
 FOREGROUND_HTTP_TIMEOUT_SEC: Final[float] = 2.0   # Coordinator main loop
 FOREGROUND_RETRY_ATTEMPTS:   Final[int]   = 1     # fail fast → NDJSON
 
-# Maximum number of times a single NDJSON row may be re-attempted by
-# the drain loop before it is treated as permanent and moved to the
-# dead-letter file. Protects against infinite retry loops when an
-# input the server permanently rejects (422 unknown top-level field,
-# etc.) keeps coming back through the flusher.
+# Max re-attempts for one NDJSON row before it dead-letters (guards against
+# infinite retry on permanently-rejected rows, e.g. 422 unknown field).
 MAX_FLUSH_ATTEMPTS: Final[int] = 5
 
-# Default ``provenance.source`` / ``provenance.generator`` stamped on
-# every PUT when the caller doesn't supply one. Smoke tests override
-# the generator to ``SMOKE_GENERATOR`` so probe writes never collide
-# with production data in observability dashboards.
+# Default provenance.source / generator stamped on PUTs; smoke tests use
+# SMOKE_GENERATOR so probe writes don't collide with production data.
 DEFAULT_SOURCE:     Final[str] = "hyperloom-inference-optimizer"
 DEFAULT_GENERATOR:  Final[str] = "hyperloom"
 SMOKE_GENERATOR:    Final[str] = "hyperloom-smoke"
 
-# Default ``confidence`` when caller doesn't override. Spec accepts
-# ``[0.0, 1.0]``; the default in the prior system was 0.85, kept here
-# for continuity.
+# Default confidence when caller doesn't override (spec [0.0, 1.0]).
 DEFAULT_CONFIDENCE: Final[float] = 0.85
 
 
-# ---------------------------------------------------------------------------
-# Canonical id derivation
-# ---------------------------------------------------------------------------
-# Default-slug constants for missing identity components. Kept as named
-# constants (rather than literals scattered across helpers) so the audit
-# log and the `/search` corpus stay consistent — operators can grep for
-# ``unknown_framework_version`` to find rows where auto-detect failed,
-# for example, instead of guessing every spelling variant.
+# Canonical id derivation. Default-slug constants for missing identity
+# components, named so the audit log + /search corpus stay grep-stable.
 DEFAULT_MODEL_SLUG:             Final[str] = "unknown_model"
 DEFAULT_HARDWARE_SLUG:          Final[str] = "unknown_hw"
 DEFAULT_FRAMEWORK_SLUG:         Final[str] = "unknown_framework"
@@ -252,39 +189,17 @@ DEFAULT_PRECISION_SLUG:         Final[str] = "unknown_precision"
 
 
 def _slug(value: str, default: str) -> str:
-    """Lowercase + basename + space/dot/colon→underscore.
+    """Lowercase + basename + space/tab/slash -> underscore.
 
-    Recipe ``canonical_id`` is caller-defined under v2 (the path
-    accepts forward slashes raw) so we are no longer subject to the
-    strict ``[a-z0-9_-]`` regex the pre-v2 ``/v1/points`` server
-    enforced. We still slug here for three reasons:
-
-    1. Lookup stability — two CLI invocations supplying
-       ``--model /wekafs/models/Qwen3-30B-A3B`` and
-       ``--model qwen3-30b-a3b`` must converge on the same recipe row.
-    2. Filesystem safety — the local KB store (Commit 2) maps each
-       canonical_id component to a directory level; characters that
-       would split a slug across directories (``/``) or that are
-       awkward in filenames (``:``, ``.``, whitespace) are normalised
-       to ``_`` so ``Qwen/Qwen3`` cannot collide with ``Qwen_Qwen3``.
-       NOTE: ``/`` is still resolved to the basename FIRST (so HF
-       paths like ``meta-llama/Llama-3.1-8B`` collapse to
-       ``llama-3.1-8b``), and only embedded ``/`` survives that step
-       in pathological inputs.
-    3. Versions like ``0.4.5+abcdef0`` — common for editable installs
-       — keep their ``+``/digits but lose dots-as-path-separators on
-       Windows-ish filesystems.
+    Slugged for lookup stability (``--model /path/Qwen3`` and ``qwen3`` must
+    converge) and filesystem safety in the local KB store. ``/`` resolves to
+    the basename first (HF paths collapse to the stem).
     """
     raw = (value or "").strip()
     if not raw:
         return default
-    # Path-style → basename (last path component, then forward-slash
-    # fallback). Matches the prior helper in ``cortex_kb_client``.
     if "/" in raw:
         raw = raw.rstrip("/").rsplit("/", 1)[-1] or raw
-    # Replace each problematic char individually rather than doing a
-    # blanket regex strip — keeps useful chars like '-', '+', '_'
-    # untouched while normalising the rest.
     cleaned = raw.lower()
     for ch in (" ", "\t", "/"):
         cleaned = cleaned.replace(ch, "_")
@@ -299,35 +214,13 @@ def recipe_canonical_id(
     framework_version: str,
     precision: str,
 ) -> str:
-    """Build the recipe ``canonical_id``.
+    """Build the recipe ``canonical_id``:
+    ``inference:{model}:{hardware}:{framework}:{framework_version}:{precision}``.
 
-    Shape:
-        ``inference:{model}:{hardware}:{framework}:{framework_version}:{precision}``
-
-    Identity-strength order (strongest → weakest) so the prefix sorts
-    nicely and partial-string queries are useful even before five
-    components are known:
-
-    1. ``model``             — the workload — ties the row to a
-       distinct model architecture / weights.
-    2. ``hardware``          — the platform — ties it to one GPU
-       generation (mi300x vs mi355x have different tile sizes,
-       different best-tp).
-    3. ``framework``         — sglang vs vLLM vs atom — different
-       schedulers / ``best_config.extra_*_args`` shapes.
-    4. ``framework_version`` — same framework can change scheduler
-       internals across releases (e.g. sglang 0.4 → 0.5 RadixAttention
-       defaults), so two versions deserve separate recipe rows.
-    5. ``precision``         — fp8 / fp16 / bf16 / fp4 / int8 —
-       changes the optimal tp / ep / kv_cache_dtype because memory
-       footprint shifts.
-
-    All five components are ``keyword-only`` to prevent accidental
-    positional re-ordering; an empty / missing component falls back
-    to the matching ``DEFAULT_*_SLUG`` so the canonical_id is always
-    well-formed (5 colons, 6 segments). Callers are encouraged to
-    use :func:`detect_framework_version` to fill ``framework_version``
-    when the operator did not pass ``--framework-version`` explicitly.
+    Identity-strength order (strongest -> weakest) so prefix queries are
+    useful before all components are known. Keyword-only to prevent
+    positional re-ordering; missing components fall back to ``DEFAULT_*_SLUG``
+    so the id is always well-formed (6 colon-separated segments).
     """
     return (
         f"inference:"
@@ -347,14 +240,9 @@ def canonical_labels(
     framework_version: str,
     precision: str,
 ) -> dict[str, str]:
-    """Return the five-key ``labels`` dict that mirrors the canonical id.
-
-    Stamping these into ``labels`` on every PUT lets ``/recipes/search``
-    use ``label_match`` to filter by individual dimensions (e.g. "all
-    sglang recipes regardless of model") without parsing the
-    canonical_id string. Slug values match the ones used in
-    :func:`recipe_canonical_id` so a search round-trip never disagrees
-    with the id derivation.
+    """Return the five-key ``labels`` dict mirroring the canonical id, so
+    ``/recipes/search`` can ``label_match`` by individual dimension. Slug
+    values match :func:`recipe_canonical_id`.
     """
     return {
         F_LABEL_MODEL:             _slug(model,             DEFAULT_MODEL_SLUG),
@@ -365,33 +253,21 @@ def canonical_labels(
     }
 
 
-# Mapping from ``framework`` slug → top-level python package whose
-# ``__version__`` attribute is treated as authoritative. Keep narrow:
-# adding a new framework is a one-line append, but every entry has to
-# be a package the optimizer process is allowed to import at boot
-# (we MUST NOT trigger a sglang import inside a vLLM-only run, etc.).
+# framework slug -> python package whose __version__ is authoritative. Keep
+# narrow: every entry must be safe to import at boot (don't import sglang in a
+# vLLM-only run).
 _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
     "sglang": "sglang",
     "vllm":   "vllm",
-    # ``atom`` is a vendor-internal framework whose ``__version__`` is
-    # typically a git short-hash rather than a SemVer tag; we still
-    # try the import and fall back to ``unknown_version`` on miss.
-    "atom":   "atom",
+    "atom":   "atom",  # vendor-internal; __version__ is often a git hash
 }
 
 
 def detect_framework_version(framework: str) -> str:
-    """Best-effort: return the installed version of ``framework``.
-
-    Auto-detect path used when the operator didn't pass
-    ``--framework-version`` (most common case). Tries to ``import``
-    the framework's top-level package and read ``__version__``.
-    Failures degrade to :data:`DEFAULT_FRAMEWORK_VERSION_SLUG`
-    rather than raising — the optimizer must boot even when the
-    framework module isn't importable in the current venv (e.g.
-    a dry-run on a CI box without GPU stacks). Callers should treat
-    a result equal to the default slug as "operator should pass
-    ``--framework-version`` explicitly to scope the recipe row".
+    """Best-effort installed version of ``framework`` via importing its
+    top-level package and reading ``__version__``. Failures degrade to
+    :data:`DEFAULT_FRAMEWORK_VERSION_SLUG` (the optimizer must boot without
+    the framework importable).
     """
     fw_slug = _slug(framework, "")
     if not fw_slug:
@@ -411,24 +287,15 @@ def detect_framework_version(framework: str) -> str:
         )
         return DEFAULT_FRAMEWORK_VERSION_SLUG
     raw = getattr(mod, "__version__", "") or ""
-    # Some frameworks expose ``VERSION`` instead. Tried second so
-    # ``__version__`` (the PEP 396 standard) wins when both exist.
-    if not raw:
+    if not raw:  # fall back to VERSION; __version__ (PEP 396) wins
         raw = getattr(mod, "VERSION", "") or ""
     return _slug(str(raw), DEFAULT_FRAMEWORK_VERSION_SLUG)
 
 
 def format_recipe_path(template: str, canonical_id: str) -> str:
-    """Substitute ``{canonical_id}`` into a path template **without**
-    percent-encoding the slashes inside the id.
-
-    ``canonical_id`` is ``:path``-typed on the server side (per spec
-    Conventions) so a HF stem like ``Qwen/Qwen3-30B-A3B`` must reach
-    the server verbatim. ``urllib.parse.quote`` with
-    ``safe="/"`` would still encode ``:``, ``@``, etc. — but the
-    server accepts those raw too, so this helper does a flat
-    substitution and trusts the caller to have already chosen a
-    canonical_id from ``recipe_canonical_id``.
+    """Substitute ``{canonical_id}`` into a path template without
+    percent-encoding (server treats canonical_id as ``:path``-typed, so HF
+    stems like ``Qwen/Qwen3-30B-A3B`` must reach it verbatim).
     """
     return template.replace("{canonical_id}", canonical_id)
 

@@ -2,29 +2,9 @@
 
 """GEAK parameter resolution — TraceLens-first + profiling timeout.
 
-Pins the contract for three latent bugs surfaced on DeepSeek-R1 +
-AITER ``fmha_v3_varlen_fwd`` (Step-5 stall, wrong source override,
-PA-benchmark for an MHA kernel):
-
-1. ``_resolve_source_file`` — TraceLens (candidate) wins over the
-   Orchestration LLM's ``--source-file`` payload. The LLM occasionally
-   confuses kernel IDs (e.g. fmoe k001 vs fmha k003) and supplies a
-   path that no longer matches the kernel being optimized; defending
-   against this at the kernel-agent boundary keeps the upstream prompt
-   surface unchanged.
-
-2. ``_match_benchmark_for_kernel`` — kernel-name-aware reorder of
-   ``candidate.benchmark_files`` so semantically-matching tests (e.g.
-   ``test_mha*`` for an fmha kernel) head the list. TraceLens lists
-   every benchmark known under the repo; without semantic match,
-   ``invoke_backend`` picks ``[0]`` and may run a benchmark that
-   doesn't even exercise the kernel.
-
-3. ``_profile_timeout_sec`` — bounds each GEAK profiling/benchmark
-   subprocess via a ``timeout <N>`` prefix on the rendered
-   ``test_command``. Without this, an aiter ``test_pa.py`` no-arg run
-   spawns 90 configs × 3 Metrix replays and stalls Step 5 for hours,
-   burning the entire GEAK budget before any patch is attempted.
+Pins three contracts (latent bugs on DeepSeek-R1 + AITER fmha_v3_varlen_fwd):
+TraceLens candidate wins for source_file, semantic benchmark reordering,
+and a ``timeout <N>`` prefix bounding each profiling subprocess.
 """
 
 from __future__ import annotations
@@ -38,9 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import kernel_optimization as ko  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
 # 1. source_file consistency
-# ---------------------------------------------------------------------------
 
 
 def test_source_file_candidate_wins_when_llm_disagrees(tmp_path):
@@ -118,9 +96,7 @@ def test_source_file_log_path_optional():
     assert resolved == "/a/b/mha.py"
 
 
-# ---------------------------------------------------------------------------
 # 2. benchmark semantic match
-# ---------------------------------------------------------------------------
 
 
 def test_benchmark_match_fmha_prefers_mha_over_pa():
@@ -205,9 +181,7 @@ def test_benchmark_match_rmsnorm_prefers_norm_bench():
     assert "norm" in Path(ordered[0]).name.lower()
 
 
-# ---------------------------------------------------------------------------
 # 3. profile timeout
-# ---------------------------------------------------------------------------
 
 
 def test_profile_timeout_default(monkeypatch):

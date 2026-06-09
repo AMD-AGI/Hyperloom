@@ -1,23 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``orchestrator.action_executors.benchmark_result``.
-
-Combines three previously-separate suites:
-
-* **Unit helpers** (``test_benchmark_result_units``) — ``_to_float`` /
-  ``_to_int`` / ``_first_*`` / ``_load_json`` / ``_candidate_raw_jsons``
-  / ``_rescue_candidate_paths`` env handling.
-* **Rescue end-to-end** (``test_benchmark_result_rescue``) — the
-  ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` second-chance salvage path
-  surrounding :func:`extract_benchmark_measurement`, including the
-  ``copy-into-workspace`` materialisation and fallback when the copy
-  fails.
-* **Harvest pass** (``test_harvest_leaked_artifacts``) — the broader
-  ``harvest_leaked_artifacts`` pass that copies wrapper-side
-  diagnostics (``server.log`` / ``gpu_metrics.csv`` / profile traces /
-  rescue results) from ``$INFERENCE_OPTIMIZER_LEAK_ROOTS`` into the
-  per-task workspace so the NFS clone is self-contained.
-"""
+"""Tests for ``orchestrator.action_executors.benchmark_result``."""
 
 from __future__ import annotations
 
@@ -35,15 +18,9 @@ from inference_optimizer.orchestrator.action_executors.benchmark_result import (
 )
 
 
-# ===========================================================================
 # Unit helpers (formerly test_benchmark_result_units.py)
-# ===========================================================================
 
-
-# ---------------------------------------------------------------------------
 # scalar coercion helpers
-# ---------------------------------------------------------------------------
-
 class TestScalarHelpers:
     @pytest.mark.parametrize(
         "value, expected",
@@ -87,10 +64,7 @@ class TestScalarHelpers:
         assert br._first_int(True, None) is None
 
 
-# ---------------------------------------------------------------------------
 # _load_json
-# ---------------------------------------------------------------------------
-
 class TestLoadJson:
     def test_returns_dict_on_valid_json(self, tmp_path):
         path = tmp_path / "x.json"
@@ -111,10 +85,7 @@ class TestLoadJson:
         assert br._load_json(path) is None
 
 
-# ---------------------------------------------------------------------------
 # _candidate_raw_jsons ordering
-# ---------------------------------------------------------------------------
-
 class TestCandidateRawJsons:
     def test_orders_non_profile_first(self, tmp_path):
         ws = tmp_path / "ws"
@@ -135,10 +106,7 @@ class TestCandidateRawJsons:
         assert br._candidate_raw_jsons(ws) == []
 
 
-# ---------------------------------------------------------------------------
 # _rescue_candidate_paths — env handling + workspace filter
-# ---------------------------------------------------------------------------
-
 class TestRescueCandidatePaths:
     def test_no_env_no_default_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", raising=False)
@@ -202,24 +170,7 @@ class TestRescueCandidatePaths:
         assert out == []
 
 
-# ===========================================================================
-# Rescue end-to-end (formerly test_benchmark_result_rescue.py)
-#
-# The Magpie ``dsr1_fp8_mi300x.sh`` script hardcodes
-# ``--result-dir /workspace/`` so a benchmark that *numerically* succeeds
-# can still leave the per-task workspace empty (no ``inferencex_result.json``).
-# The optimizer's second-chance salvage:
-#
-# * honours ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` (files or dirs).
-# * gates by ``subprocess_started_unix`` mtime so stale leaks from a
-#   previous run cannot be misattributed to this run.
-# * tags the adopted path in the ``nonfatal_warnings`` list as
-#   ``rescued_from_leaked_path:<path>``.
-# * COPIES the leaked file into the task workspace (best-effort) so the
-#   canonical NFS-clone of ``<session>/runs/<action>/<task_id>/`` is
-#   self-contained and ``raw_result_path`` points at the in-workspace
-#   copy rather than the leak location.
-# ===========================================================================
+# Rescue end-to-end (formerly test_benchmark_result_rescue.py): salvage adopts mtime-gated leaked results into the workspace.
 
 
 def _write_inferencex(path: Path, tput: float = 1761.6, completed: int = 640) -> None:
@@ -373,7 +324,6 @@ def test_subprocess_started_unix_none_disables_mtime_gate(
     measurement = extract_benchmark_measurement(
         report={"success": False},
         workspace=workspace,
-        # No subprocess_started_unix → mtime gate disabled → adopt.
     )
     assert measurement["valid_measurement"] is True
     copied = workspace / leak_path.name
@@ -382,10 +332,7 @@ def test_subprocess_started_unix_none_disables_mtime_gate(
 
 
 def test_rescue_copies_leaked_file_into_workspace(tmp_path, monkeypatch):
-    """Salvage must materialise the rescued file inside the workspace so
-    downstream NFS clones of ``<session>/runs/<action>/<task_id>/`` carry
-    the canonical artifact instead of a path pointing at ``/workspace/``.
-    """
+    """Salvage must materialise the rescued file inside the workspace."""
     workspace = tmp_path / "session" / "runs" / "baseline" / "task-7" / "bench_run"
     workspace.mkdir(parents=True)
     leak_path = tmp_path / "workspace_leak" / "inferencex_result.json"
@@ -417,10 +364,7 @@ def test_rescue_copies_leaked_file_into_workspace(tmp_path, monkeypatch):
 def test_rescue_copy_failure_falls_back_to_leak_path(
     tmp_path, monkeypatch,
 ):
-    """If the copy step fails, salvage must still advertise the leaked
-    measurement so a usable baseline isn't discarded just because the
-    artifact couldn't be materialised into the workspace.
-    """
+    """If the copy step fails, salvage must still advertise the leaked measurement."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     leak_path = tmp_path / "leak" / "inferencex_result.json"
@@ -448,16 +392,7 @@ def test_rescue_copy_failure_falls_back_to_leak_path(
     )
 
 
-# ===========================================================================
-# Harvest pass (formerly test_harvest_leaked_artifacts.py)
-#
-# Magpie's shell wrappers hardcode multiple output destinations under
-# ``/workspace/`` (``server.log`` / ``gpu_metrics.csv`` /
-# ``profile_*.trace.json.gz`` / ``inferencex_result*.json``). Without
-# harvesting these into the per-task workspace the NFS clone of
-# ``<session>/runs/<action>/<task_id>/`` is missing wrapper-side
-# diagnostics even when the run succeeded numerically.
-# ===========================================================================
+# Harvest pass (formerly test_harvest_leaked_artifacts.py): copy diagnostics leaked under /workspace/ into the per-task workspace.
 
 
 def _touch(path: Path, content: str = "x", *, mtime: float | None = None) -> Path:
