@@ -221,6 +221,7 @@ def materialize_config_with_envs(
     benchmark_script: str | None = None,
     reference_server_args: str = "",
     reference_envs: dict[str, Any] | None = None,
+    mm_mode: bool = False,
     out_name: str = "baseline_config.with_envs.yaml",
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
@@ -238,7 +239,9 @@ def materialize_config_with_envs(
     into the framework env; ``extra_envs`` overrides any of the above.
     ``reference_server_args`` / ``reference_envs`` seed a lowest-priority base
     from a reference recipe (below the YAML base and extra_server_args; empty =
-    no-op, byte-for-byte identical to omitting them).
+    no-op, byte-for-byte identical to omitting them). ``mm_mode`` (or
+    ``DATASET=random-mm``) switches to the multimodal benchmark script and
+    injects image dimension env vars (vllm only).
 
     Args:
         config_path: Path to the source Magpie YAML to render.
@@ -249,6 +252,9 @@ def materialize_config_with_envs(
         gpu_type: GPU type; sets ``runner_type`` and pins the generic script.
         inferencex_path: Explicit InferenceX checkout to pin into the YAML.
         benchmark_script: Pre-sanitized benchmark script name to re-pin.
+        reference_server_args: Lowest-priority server args from a reference recipe.
+        reference_envs: Lowest-priority env overrides from a reference recipe.
+        mm_mode: Enable multimodal benchmark script and image env injection (vllm only).
         out_name: File name for the materialized YAML.
 
     Returns:
@@ -300,6 +306,26 @@ def materialize_config_with_envs(
                 f"benchmark_script={_script!r} targets {_other[0]!r}; refusing "
                 f"to boot server (would launch the wrong framework's entrypoint)"
             )
+
+    # Multimodal (VL) mode: switch to the mm benchmark script and inject
+    # image dimension env vars.  Activated by the mm_mode arg OR by
+    # DATASET=random-mm in the process environment.
+    _mm_active = mm_mode or os.environ.get("DATASET", "").strip().lower() == "random-mm"
+    if _mm_active:
+        framework = str(bench.get("framework") or "").lower()
+        if "vllm" in framework:
+            _gpu_type = gpu_type or os.environ.get("GPU_TYPE", "").strip().lower() or "mi300x"
+            _mm_script = f"vllm_{_gpu_type}_mm.sh"
+            bench["benchmark_script"] = _mm_script
+            log.info("mm_mode: switched benchmark_script to %s", _mm_script)
+        else:
+            log.warning(
+                "mm_mode requested but framework=%r is not vllm; "
+                "random-mm dataset is not supported for this framework. "
+                "Falling back to text-only benchmark.", framework,
+            )
+            _mm_active = False
+
     effective_inferencex_path = str(inferencex_path or "").strip() or os.environ.get("INFERENCEX_PATH", "").strip()
     if effective_inferencex_path:
         # Persist the resolved InferenceX checkout into the YAML so Magpie's
@@ -323,6 +349,16 @@ def materialize_config_with_envs(
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
     if r_env:
         envs["RANDOM_RANGE_RATIO"] = float(r_env)
+    if _mm_active:
+        envs["DATASET"] = "random-mm"
+        for _mm_key, _mm_default in (
+            ("IMAGE_HEIGHT", "512"),
+            ("IMAGE_WIDTH", "512"),
+            ("MM_MAX_IMAGES", "1"),
+            ("SEED", "5678"),
+        ):
+            _mm_val = os.environ.get(_mm_key, "").strip() or _mm_default
+            envs[_mm_key] = int(_mm_val)
     rocr_env = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
     if rocr_env:
         envs["ROCR_VISIBLE_DEVICES"] = rocr_env

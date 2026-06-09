@@ -135,9 +135,9 @@ def test_detect_gemma3_conditional_generation_rejected(tmp_path):
 
 
 def test_detect_unknown_arch_rejected(tmp_path):
-    """An unknown architecture not matching text-generation markers -> rejected."""
+    """An unknown architecture with no recognised model_type -> rejected."""
     m = tmp_path / "custom"
-    _write_config(m, {"architectures": ["SomeCustomArch"], "model_type": "qwen2_vl"})
+    _write_config(m, {"architectures": ["SomeCustomArch"], "model_type": "some_exotic_vl"})
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["architecture"] == "SomeCustomArch"
@@ -229,22 +229,31 @@ def test_detect_known_text_model_type_with_nonstandard_arch_allowed(tmp_path):
     assert cli._detect_unsupported_model(str(m)) is None
 
 
-def test_detect_causal_lm_with_vision_config_is_text_coercible(tmp_path):
-    """A generic ForCausalLM arch carrying vision_config is text-coercible:
-    a text decoder exists, so we degrade to the text path (not fail-fast)."""
+def test_detect_causal_lm_with_vision_config_allowed(tmp_path):
+    """vision_config alone no longer rejects a model — the VL Qwen family has it.
+    The model_type / architecture allowlists are the primary gate; config-key
+    checks are secondary signals for models that slip past both."""
     m = tmp_path / "visioncausal"
-    _write_config(
-        m,
-        {
-            "architectures": ["LlamaForCausalLM"],
-            "model_type": "llama",
-            "vision_config": {"hidden_size": 1024},
-        },
-    )
+    _write_config(m, {
+        "architectures": ["LlamaForCausalLM"],
+        "model_type": "llama",
+        "vision_config": {"hidden_size": 1024},
+    })
+    assert cli._detect_unsupported_model(str(m)) is None
+
+
+def test_detect_other_mm_config_keys_still_rejected(tmp_path):
+    """Non-vision_config multimodal keys (mm_config, projector_config, etc.)
+    still reject a model that slips past the model_type / architecture checks."""
+    m = tmp_path / "mm_config_model"
+    _write_config(m, {
+        "architectures": ["UnknownArch"],
+        "model_type": "some_unknown_vl",
+        "mm_config": {"foo": "bar"},
+    })
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
-    assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
-    assert "vision_config" in hit["signal"]
+    assert "mm_config" in hit["signal"]
 
 
 def test_detect_kimi_k25_text_coercible(tmp_path):
@@ -391,7 +400,7 @@ def test_preflight_blocks_gemma3(tmp_path, monkeypatch):
 
 def test_preflight_blocks_unknown_arch(tmp_path, monkeypatch):
     model = tmp_path / "custom"
-    _write_config(model, {"architectures": ["X"], "model_type": "qwen2_vl"})
+    _write_config(model, {"architectures": ["X"], "model_type": "some_exotic_vl"})
     sd = tmp_path / "session_custom"
     _seed_state(sd, monkeypatch)
     assert cli._preflight_unsupported_model_arch(_args(str(model)), sd) is True
@@ -452,7 +461,68 @@ def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
     assert state["stop_reason"] == "unsupported_model_arch"
 
 
-# 4. text_coercible — multimodal signal but a text path exists
+# ---------------------------------------------------------------------------
+# 4. Qwen VL family — admitted via _SUPPORTED_MODEL_TYPES
+# ---------------------------------------------------------------------------
+def test_detect_qwen2_vl_allowed(tmp_path):
+    """qwen2_vl is now in _SUPPORTED_MODEL_TYPES; vision_config no longer blocks."""
+    m = tmp_path / "qwen2vl"
+    _write_config(m, {
+        "architectures": ["Qwen2VLForConditionalGeneration"],
+        "model_type": "qwen2_vl",
+        "vision_config": {"hidden_size": 1280},
+    })
+    assert cli._detect_unsupported_model(str(m)) is None
+
+
+def test_detect_qwen2_5_vl_allowed(tmp_path):
+    """qwen2_5_vl is now in _SUPPORTED_MODEL_TYPES."""
+    m = tmp_path / "qwen25vl"
+    _write_config(m, {
+        "architectures": ["Qwen2_5_VLForConditionalGeneration"],
+        "model_type": "qwen2_5_vl",
+        "vision_config": {"hidden_size": 1280},
+    })
+    assert cli._detect_unsupported_model(str(m)) is None
+
+
+def test_detect_qwen3_vl_allowed(tmp_path):
+    """qwen3_vl (incl. MoE variant) is now in _SUPPORTED_MODEL_TYPES."""
+    for arch in [
+        "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3VLForConditionalGeneration",
+    ]:
+        m = tmp_path / arch
+        _write_config(m, {
+            "architectures": [arch],
+            "model_type": "qwen3_vl",
+            "vision_config": {"hidden_size": 1280},
+        })
+        assert cli._detect_unsupported_model(str(m)) is None, arch
+
+
+def test_preflight_allows_qwen3_vl(tmp_path, monkeypatch):
+    """End-to-end: Qwen3-VL model passes the preflight gate without blocking."""
+    model = tmp_path / "qwen3vl"
+    _write_config(model, {
+        "architectures": ["Qwen3VLMoeForConditionalGeneration"],
+        "model_type": "qwen3_vl",
+        "vision_config": {"hidden_size": 1280},
+        "text_config": {
+            "num_hidden_layers": 94,
+            "hidden_size": 7168,
+            "num_experts": 128,
+        },
+    })
+    sd = tmp_path / "session_qwen3vl"
+    _seed_state(sd, monkeypatch)
+    assert cli._preflight_unsupported_model_arch(_args(str(model)), sd) is False
+    assert not (sd / "reports" / "final.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# 5. text_coercible — multimodal signal but a text path exists
+# ---------------------------------------------------------------------------
 def _coercible_model(tmp_path: Path) -> Path:
     m = tmp_path / "kimi_k25"
     _write_config(
@@ -531,7 +601,7 @@ def test_preflight_vision_only_ignores_fallback_flag(tmp_path, monkeypatch):
     assert state["stop_reason"] == "unsupported_model_arch"
 
 
-# 5. report rendering of the degraded-mode section
+# 6. report rendering of the degraded-mode section
 def test_report_renders_degraded_mode_section():
     from inference_optimizer.orchestrator.action_executors import report
     from inference_optimizer.orchestrator.shared_state import SharedState
