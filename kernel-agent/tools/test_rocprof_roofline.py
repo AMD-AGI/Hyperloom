@@ -66,6 +66,19 @@ def test_rocprof_compute_resolver_uses_configured_absolute_path(tmp_path: Path, 
     assert seen["cmd"] == [str(tool), "--version"]
 
 
+def test_rocprof_compute_resolver_accepts_legacy_path_override(tmp_path: Path, monkeypatch):
+    import rocprof_roofline as rr
+
+    tool = tmp_path / "legacy-rocprof-compute"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_COMPUTE_PATH", raising=False)
+    monkeypatch.setenv("ROCPROF_COMPUTE_PATH", str(tool))
+    monkeypatch.setattr(rr.shutil, "which", lambda _name: None)
+
+    assert rr._resolve_rocprof_compute() == str(tool)
+
+
 def test_rocprof_run_uses_resolved_absolute_path(tmp_path: Path, monkeypatch):
     import rocprof_roofline as rr
 

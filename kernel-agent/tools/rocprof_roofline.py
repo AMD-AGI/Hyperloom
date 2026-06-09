@@ -47,7 +47,10 @@ def _bound_type(bound: str) -> str:
 
 
 def _resolve_rocprof_compute() -> str | None:
-    configured = os.environ.get("HYPERLOOM_ROCPROF_COMPUTE_PATH", "").strip()
+    configured = (
+        os.environ.get("HYPERLOOM_ROCPROF_COMPUTE_PATH", "").strip()
+        or os.environ.get("ROCPROF_COMPUTE_PATH", "").strip()
+    )
     candidates = [configured, shutil.which("rocprof-compute"), "/opt/rocm/bin/rocprof-compute"]
     for raw in candidates:
         if not raw:
