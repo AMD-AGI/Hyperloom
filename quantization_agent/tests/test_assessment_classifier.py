@@ -8,9 +8,7 @@ blocked.md outcome-id parser.
 
 from __future__ import annotations
 
-import pytest
-
-from quantization_agent.driver.assessment import Assessment, build_assessment, classify_attempt, derive_status
+from quantization_agent.driver.assessment import build_assessment, classify_attempt, derive_status
 from quantization_agent.driver.outcomes import OutcomeId
 from quantization_agent.driver.result_collector import collect_artifacts
 

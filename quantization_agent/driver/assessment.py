@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .eval import DEFAULT_ACCEPTABLE_GAP, decide as decide_eval
+from .eval import decide as decide_eval
 from .outcomes import (
     ASK,
     ASK_RETRYABLE,
@@ -60,7 +60,7 @@ _GAP_NARRATIVE_EPSILON = 1e-4  # gaps smaller than this are "clean success"
 class Assessment:
     """Public summary of a (possibly multi-attempt) quantize call.
 
-    Mirrors ``docs/DESIGN.zh-CN.md §3.2``:
+    Fields:
 
     * ``final`` — primary verdict. ``None`` = clean success; otherwise an
       ``OutcomeId``.
