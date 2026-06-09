@@ -2,7 +2,7 @@ Before optimizing, run this shell prelude exactly:
 
   export HYPERLOOM_SOURCE_REPO="${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}"
   export HYPERLOOM_SOURCE_REF="${HYPERLOOM_SOURCE_REF:-main}"
-  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/workspace/Hyperloom-main}"
+  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/tmp/Hyperloom-main}"
   mkdir -p "$(dirname "$HYPERLOOM_SOURCE_DIR")"
   rm -rf "$HYPERLOOM_SOURCE_DIR"
   if ! git clone --depth 1 --branch main "$HYPERLOOM_SOURCE_REPO" "$HYPERLOOM_SOURCE_DIR"; then

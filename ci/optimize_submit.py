@@ -52,7 +52,6 @@ import logging
 import os
 import random
 import re
-import shlex
 import shutil
 import sys
 import time
@@ -207,21 +206,6 @@ def _load_default_prompt_prefix() -> str:
     except OSError:
         pass
     return ""
-
-
-def _with_image_env_prompt_prefix(prompt_prefix: str | None, image: str | None) -> str | None:
-    """Append per-task image exports so V2 writes manifest.image at startup."""
-    image = (image or "").strip()
-    if not image:
-        return prompt_prefix
-    block = "\n".join([
-        "CI SANDBOX IMAGE (export before launching `inference_optimizer optimize`):",
-        f"  export HYPERLOOM_IMAGE={shlex.quote(image)}",
-        "  export CONTAINER_IMAGE=\"${CONTAINER_IMAGE:-$HYPERLOOM_IMAGE}\"",
-        "  export KERNEL_OPT_IMAGE=\"${KERNEL_OPT_IMAGE:-$HYPERLOOM_IMAGE}\"",
-    ])
-    prefix = (prompt_prefix or "").rstrip()
-    return f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
 
 
 # RDMA bnxt_re tar package staged on WekaFS — same path the validated
@@ -1423,7 +1407,7 @@ def process_model(
             return rec
 
     try:
-        task_prompt_prefix = _with_image_env_prompt_prefix(prompt_prefix, image)
+        task_prompt_prefix = prompt_prefix
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
             mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
