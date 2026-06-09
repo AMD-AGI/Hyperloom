@@ -5,7 +5,8 @@
 Routes calls between the local store and the central kb-service
 according to the design fixed in 2026-05-28:
 
-Writes — local-only:
+Writes — local-only::
+
     :meth:`put_recipe`, :meth:`append_attempt`,
     :meth:`delete_recipe` are forwarded verbatim to
     :class:`LocalRecipeStore`. The remote client never sees a
@@ -14,7 +15,8 @@ Writes — local-only:
     new rows land.
 
 Reads — remote-first via the SINGLE ``/recipes/search`` route, fall
-through to local on absence / failure:
+through to local on absence / failure::
+
     The remote half is reached ONLY through ``/recipes/search``.
     ``get_recipe`` decodes the 5-tuple from the canonical_id into
     ``label_match`` and issues ONE search — the server decides
@@ -43,7 +45,8 @@ through to local on absence / failure:
        local store. Callers therefore never have to unwrap remote
        errors.
 
-Reads — local-only mode:
+Reads — local-only mode::
+
     A dispatcher constructed with ``remote=None`` (e.g.
     ``--degraded-kb`` or no ``--cortex-kb-url``) skips step 1
     entirely; reads go directly to the local store. A
@@ -522,8 +525,8 @@ class RecipeKB:
                 stamped when ``None``.
 
         Returns:
-            dict[str, Any]: ``{"id", "recipe_canonical_id",
-                "attempt_at"}``.
+            dict[str, Any]: A dict with keys ``id``,
+                ``recipe_canonical_id`` and ``attempt_at``.
         """
         return self.local.append_attempt(
             canonical_id=canonical_id,
@@ -651,8 +654,8 @@ class RecipeKB:
             limit (int): Maximum number of recipes to return.
 
         Returns:
-            list[dict[str, Any]]: Recent live recipes (``updated_at
-                DESC``).
+            list[dict[str, Any]]: Recent live recipes, ordered
+                ``updated_at DESC``.
         """
         return self.local.list_recent(limit=limit)
 

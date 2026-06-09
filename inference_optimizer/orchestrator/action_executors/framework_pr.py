@@ -4,7 +4,7 @@
 
 Counterpart to :class:`IntegratePatchExecutor`. The Coordinator pump
 enumerates PR candidates via ``fa phase-discover``, gates each through
-the Critic, and dispatches this executor per approved candidate to:
+the Critic, and dispatches this executor per approved candidate to::
 
   1. Fetch the unified diff (explicit ``params.patches`` or
      ``curl candidate.diff_url``; apply happens in the live source root).
@@ -18,7 +18,8 @@ the Critic, and dispatches this executor per approved candidate to:
 Coordinator-internal: ``framework_pr`` is absent from
 ``PHASE_LLM_PROPOSABLE_ACTIONS`` so PolicyGate R1 denies LLM proposals.
 
-Inputs (``ctx.task.params``):
+Inputs (``ctx.task.params``)::
+
     candidate (dict, required) — PR metadata row:
         ``{repo, pr_number, ref, title, diff_url, pr_url?, framework?}``
     framework (str, optional) — ``"sglang"`` / ``"vllm"``. Falls back to
@@ -39,7 +40,8 @@ Inputs (``ctx.task.params``):
         defaults to first existing entry of ``resolve_source_file_allowlist()``.
     apply_only (bool, optional) — skip the bench step (test / smoke).
 
-Outputs (dict returned to the bus as ``delegated_result.result``):
+Outputs (dict returned to the bus as ``delegated_result.result``)::
+
     status: "kept" | "reverted" | "apply_failed" | "no_patch" |
             "fetch_failed" | "applied_no_bench" | "failed"
     output_throughput: float | None
