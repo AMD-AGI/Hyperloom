@@ -55,6 +55,7 @@ from .specialist_subprocess import (
     _teardown_worktree,
 )
 from .sub_agent_runner import RunnerContext
+from .trace.conversation_trace import ConversationRecord, append_conversation
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .system_prompts.dynamic_action_prompt_builder import (
     INPUT_TOKEN_CAP,
@@ -224,6 +225,41 @@ class DynamicActionRunner:
                 "dyn_id=%s turn=%s", dyn_id, turn, exc_info=True,
             )
 
+    @staticmethod
+    def _record_dynamic_action_conversation(
+        *,
+        session_dir: Path,
+        dyn_id: str,
+        turn: int,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a dynamic_action turn.
+
+        Persists the full (redacted) prompt + completion the backend put on
+        ``metadata``. Best-effort; mirrors :meth:`_trace_dynamic_action_llm_call`.
+        """
+        try:
+            md = metadata or {}
+            prompt = md.get("prompt")
+            response = md.get("response")
+            if not prompt and not response:
+                return
+            record = ConversationRecord(
+                session_id=session_dir.name,
+                component="dynamic_action",
+                dyn_id=dyn_id,
+                turn=turn,
+                model=md.get("model"),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break dispatch
+            log.debug(
+                "full-trace: dynamic_action conversation append failed for "
+                "dyn_id=%s turn=%s", dyn_id, turn, exc_info=True,
+            )
+
     # ------------------------------------------------------------------
     # Public entry — one dispatch
     # ------------------------------------------------------------------
@@ -305,6 +341,12 @@ class DynamicActionRunner:
                 # the sub-agent runner — the collector backfills them from
                 # the ts window. Best-effort; never breaks the turn loop.
                 self._trace_dynamic_action_llm_call(
+                    session_dir=session_dir,
+                    dyn_id=dyn_id,
+                    turn=turn,
+                    metadata=backend_result.metadata,
+                )
+                self._record_dynamic_action_conversation(
                     session_dir=session_dir,
                     dyn_id=dyn_id,
                     turn=turn,

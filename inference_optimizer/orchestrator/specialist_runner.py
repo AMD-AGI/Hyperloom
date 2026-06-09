@@ -46,6 +46,7 @@ from typing import Any
 from ..session_paths import runs_dir
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
+from .trace.conversation_trace import ConversationRecord, append_conversation
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -582,6 +583,41 @@ class SpecialistRunner:
                 "task_id=%s turn=%s", task_id, turn, exc_info=True,
             )
 
+    def _record_specialist_conversation(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for an in-process specialist
+        turn. Persists the full (redacted) prompt + completion the backend put
+        on ``metadata``. No-op without a session dir; best-effort otherwise.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            md = metadata or {}
+            prompt = md.get("prompt")
+            response = md.get("response")
+            if not prompt and not response:
+                return
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component="specialist",
+                task_id=task_id,
+                turn=turn,
+                model=md.get("model"),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the run
+            log.debug(
+                "full-trace: specialist conversation append failed for "
+                "task_id=%s turn=%s", task_id, turn, exc_info=True,
+            )
+
     # ------------------------------------------------------------------
     # In-process Backend path (test path)
     # ------------------------------------------------------------------
@@ -673,6 +709,11 @@ class SpecialistRunner:
             # collector can join it to the EXPLORE decision. The production
             # default (subprocess) path is covered separately by B1.
             self._trace_specialist_llm_call(
+                task_id=ctx.task.task_id,
+                turn=turn_idx,
+                metadata=turn_result.metadata,
+            )
+            self._record_specialist_conversation(
                 task_id=ctx.task.task_id,
                 turn=turn_idx,
                 metadata=turn_result.metadata,
