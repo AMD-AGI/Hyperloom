@@ -34,12 +34,14 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Production large-B pool: 100 models twice a day, firing at UTC
-  # 00:00 / 12:00 (Beijing 08:00 / 20:00). The matrix generator rotates
-  # deterministically by UTC 12-hour slot — these hours map cleanly to
-  # hour//12 -> 0 / 1 so the rotation stays continuous.
+  # Rolling un-run pool: 100 models three times a day, firing at UTC
+  # 04:00 / 12:00 / 20:00 (Beijing 12:00 / 20:00 / 04:00). Each run submits the
+  # next 100 models from ci/candidates/unrun_excluding_manual_100.json that are
+  # NOT yet on the leaderboard AND not already running (exclude_leaderboard +
+  # exclude_active below), so the priority pool drains toward empty. Manual
+  # workflow_dispatch is unaffected.
   schedule:
-    - cron: '0 0,12 * * *'
+    - cron: '0 4,12,20 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
@@ -206,22 +208,24 @@ jobs:
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      # Production cron rotates over a fixed pool of models that already have
-      # real leaderboard data, so we can compare week-over-week. The file is
-      # generated manually via ci/build_production_leaderboard_pool.py and
-      # refreshed only when we want to bring in newly-published models.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_hf_2026-05-25.json' || github.event.inputs.candidates_file }}
-      INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
+      # Rolling cron prioritizes the current not-on-leaderboard pool generated
+      # by ci/build_rolling_pool.py. The full merged corpus lives in
+      # ci/candidates/production_1000_from_hf_2026-05-25.json; the top-100 are
+      # reserved in manual_100.json for operator-triggered dispatch.
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/unrun_excluding_manual_100.json' || github.event.inputs.candidates_file }}
+      # Schedule pins batch_index=0: every cron pulls the FIRST 100 of the
+      # (dynamically shrinking) un-run + not-active list, so rotation is driven
+      # by the leaderboard/active exclusions instead of a clock slot.
+      INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '0' || github.event.inputs.batch_index }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '100' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
-      # Schedule no longer excludes leaderboard-known models — that was for
-      # the discovery cron. We now WANT to re-run the production pool.
-      # Batch index for schedule is computed by generate_hf_matrix.py from the
-      # UTC 00:00/12:00 half-day slot, not GITHUB_RUN_NUMBER, so manual
-      # dispatches do not perturb cron rotation. We still exclude active
-      # workflows so cron does not double-submit a model already running.
-      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
+      # Schedule EXCLUDES leaderboard-known models: the rolling cron only
+      # submits models with no leaderboard data yet, so each run makes forward
+      # progress and the pool drains to empty. We also exclude active workflows
+      # so cron never double-submits a model already running — the two
+      # exclusions together advance the "first 100" window every run.
+      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_leaderboard }}
       INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
