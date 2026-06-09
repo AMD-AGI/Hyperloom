@@ -2,22 +2,10 @@
 
 """Parity tests: gbrain vs cortex recipe-KB backends on the 5-tuple.
 
-Both remote backends (:class:`recipe_kb.RemoteRecipeClient` = cortex
-kb-service, :class:`recipe_kb.gbrain_remote_client.GbrainRemoteRecipeClient`
-= gbrain page store) plug into the SAME ``recipe_kb.RecipeKB`` dispatcher
-``remote`` slot. They are read-interchangeable: given the same logical
-recipe keyed by the same 5-tuple canonical id
-(``inference:model:hardware:framework:framework_version:precision``) a
-warm-start read through the dispatcher must surface the SAME champion.
-
-Equivalence criterion is *champion-level* (not byte-identical rows): the
-two backends carry different auxiliary fields (gbrain adds
-``validated_gain_pct`` and stores the raw model string; cortex stamps the
-slugged label), so we compare only the dimensions that drive warm-start —
-the canonical id, ``best_config``, ``best_throughput`` (within tolerance)
-and the presence of the experiential lists.
-
-No network: gbrain is fed a fake MCP, cortex a fake HTTP transport.
+Both remote backends plug into the same ``RecipeKB`` dispatcher and must
+surface the SAME champion for a given canonical id. Equivalence is
+champion-level (canonical id, best_config, best_throughput, experiential-list
+presence). No network: gbrain gets a fake MCP, cortex a fake HTTP transport.
 """
 from __future__ import annotations
 
@@ -40,13 +28,10 @@ from inference_optimizer.recipe_kb.gbrain_remote_client import (
     GbrainRemoteRecipeClient,
 )
 
-# Sglang champion args land under this stable key in both backends.
 _ARGS_KEY = "extra_server_args"
 
 
-# ---------------------------------------------------------------------------
 # Source-of-truth recipe specs (one logical recipe per 5-tuple)
-# ---------------------------------------------------------------------------
 class _Spec:
     """A single logical recipe expressed once, rendered into both shapes."""
 
@@ -89,8 +74,6 @@ class _Spec:
 
     @property
     def best_config(self) -> dict[str, Any]:
-        # Canonical warm-replay shape: launch args under ``extra_server_args``
-        # and the env map NESTED under ``extra_envs`` (not flattened).
         cfg: dict[str, Any] = {}
         if self.args:
             cfg[_ARGS_KEY] = self.args
@@ -177,9 +160,7 @@ SPECS = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Fakes (no network)
-# ---------------------------------------------------------------------------
 class _FakeMcp:
     """Stand-in for the gbrain MCP: canned list_pages / get_page."""
 
@@ -199,8 +180,7 @@ class _FakeMcp:
 
 
 class _FakeCortexTransport:
-    """Stand-in for the cortex kb-service HTTP transport: filters v2 rows
-    by ``label_match`` on the single ``/recipes/search`` route."""
+    """Stand-in for the cortex kb-service HTTP transport: filters v2 rows by ``label_match``."""
 
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
@@ -229,7 +209,7 @@ class _FakeCortexTransport:
             return {C.F_RECIPES: matched[: limit if limit > 0 else None]}
         return {}
 
-    def close(self) -> None:  # symmetry with _HttpTransport
+    def close(self) -> None:
         pass
 
 
@@ -267,9 +247,7 @@ def _champion(row: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-# ---------------------------------------------------------------------------
 # Tests
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.cid)
 def test_get_recipe_champion_parity(spec: _Spec, tmp_path) -> None:
     """Same 5-tuple → identical champion through both backends."""
@@ -283,7 +261,6 @@ def test_get_recipe_champion_parity(spec: _Spec, tmp_path) -> None:
     assert row_g is not None, "gbrain dispatcher missed an exact 5-tuple"
     assert row_c is not None, "cortex dispatcher missed an exact 5-tuple"
     assert _champion(row_g) == _champion(row_c)
-    # Anchor against the source-of-truth so a same-but-wrong drift fails.
     assert _champion(row_g) == {
         "canonical_id": spec.cid,
         "best_config": spec.best_config,
@@ -300,7 +277,7 @@ def test_search_subset_label_parity(tmp_path) -> None:
     kb_g = _gbrain_dispatcher(local)
     kb_c = _cortex_dispatcher(local)
 
-    model_slug = cid_to_path_components(SPECS[0].cid)[0]  # "qwen3-32b"
+    model_slug = cid_to_path_components(SPECS[0].cid)[0]
     rows_g = kb_g.search(label_match={"model": model_slug})
     rows_c = kb_c.search(label_match={"model": model_slug})
 
@@ -310,7 +287,6 @@ def test_search_subset_label_parity(tmp_path) -> None:
         s.cid for s in SPECS if cid_to_path_components(s.cid)[0] == model_slug
     )
     assert cids_g == cids_c == expected
-    # Champions for each shared cid must match between backends.
     by_g = {r["canonical_id"]: _champion(r) for r in rows_g}
     by_c = {r["canonical_id"]: _champion(r) for r in rows_c}
     assert by_g == by_c
@@ -328,22 +304,13 @@ def test_miss_parity(tmp_path) -> None:
 
 
 def test_gbrain_dispatcher_preserves_champion_regression(tmp_path) -> None:
-    """Regression lock for the _v2_to_arbor double-translation bug.
-
-    The gbrain client pre-translates pages into arbor shape and advertises
-    ``returns_arbor_shape=True``; the dispatcher must NOT re-run the
-    v2->arbor projection on it (which would null out best_config /
-    best_throughput / what_worked while leaving canonical_id intact, so the
-    hit still mis-reports as ``exact``). Assert the champion config
-    survives the dispatcher.
-    """
+    """Regression lock for the _v2_to_arbor double-translation bug: the champion config survives the dispatcher."""
     spec = SPECS[0]
     local = LocalRecipeStore(root=tmp_path)
     row = _gbrain_dispatcher(local).get_recipe(canonical_id=spec.cid)
 
     assert row is not None
     assert row.get("canonical_id") == spec.cid
-    # The bug manifested as these being emptied:
     assert row.get("best_config") == spec.best_config
     assert row["best_config"], "champion best_config was wiped by the dispatcher"
     assert float(row.get("best_throughput") or 0.0) == pytest.approx(spec.throughput)
@@ -351,22 +318,13 @@ def test_gbrain_dispatcher_preserves_champion_regression(tmp_path) -> None:
 
 
 def test_gbrain_best_config_is_warm_replay_consumable(tmp_path) -> None:
-    """The gbrain round-trip champion must survive
-    ``_maybe_enqueue_warm_replay``'s extraction (else a high-confidence
-    warm recipe is skipped as ``best_config_empty``).
-
-    Mirrors the consumer's exact arg/env read so a future shape drift on
-    either side trips here.
-    """
+    """The gbrain round-trip champion survives ``_maybe_enqueue_warm_replay``'s extraction."""
     spec = SPECS[0]
     local = LocalRecipeStore(root=tmp_path)
     row = _gbrain_dispatcher(local).get_recipe(canonical_id=spec.cid)
     assert row is not None
     best_config = row["best_config"]
 
-    # Mirror coordinator._maybe_enqueue_warm_replay's extraction. The gbrain
-    # round-trip emits the canonical args key + nested envs; the consumer
-    # also accepts the legacy key (covered by test_payload_aliases).
     bc_args = str(
         best_config.get("extra_server_args")
         or best_config.get("args")
@@ -381,11 +339,7 @@ def test_gbrain_best_config_is_warm_replay_consumable(tmp_path) -> None:
 
 
 def test_gbrain_transport_error_falls_back_to_local(tmp_path) -> None:
-    """A gbrain MCP failure (``GbrainRemoteError``) must degrade to the
-    local store, not bubble up the warm-start path. Guards the
-    ``GbrainRemoteError -> RemoteRecipeClientError`` subclassing that the
-    dispatcher's ``except RemoteRecipeClientError`` fall-through relies on.
-    """
+    """A gbrain MCP failure degrades to the local store via the ``GbrainRemoteError -> RemoteRecipeClientError`` subclassing."""
     from inference_optimizer.recipe_kb.gbrain_remote_client import (
         GbrainRemoteError,
         GbrainRemoteRecipeClient,
@@ -411,6 +365,6 @@ def test_gbrain_transport_error_falls_back_to_local(tmp_path) -> None:
     client._mcp = _BoomMcp()  # type: ignore[assignment]
     kb = RecipeKB(local=local, remote=client)
 
-    row = kb.get_recipe(canonical_id=spec.cid)  # must NOT raise
+    row = kb.get_recipe(canonical_id=spec.cid)
     assert row is not None
-    assert row["canonical_id"] == spec.cid  # served from local fallback
+    assert row["canonical_id"] == spec.cid
