@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Focused unit tests for ``SharedState`` helpers / audit trails.
-
-Covers pure-data helpers that only had integration coverage (policy-denial
-bookkeeping, kernel-patch identity resolution, prune-family mutators) plus
-the per-action attempt audit trail and the global ``last_action_failures``
-rolling log.
-"""
+"""Focused unit tests for ``SharedState`` helpers / audit trails (policy-denial bookkeeping, kernel-patch identity, prune families, attempt + failure logs)."""
 
 from __future__ import annotations
 
@@ -19,9 +13,7 @@ from inference_optimizer.orchestrator.shared_state import (
 )
 
 
-# ---------------------------------------------------------------------------
 # pruned families + policy denial book-keeping
-# ---------------------------------------------------------------------------
 
 class TestPolicyDenialAndPruned:
     def test_add_pruned_family_is_idempotent(self):
@@ -95,9 +87,7 @@ class TestPolicyDenialAndPruned:
         assert "a3" in summary
 
 
-# ---------------------------------------------------------------------------
 # apply_changes
-# ---------------------------------------------------------------------------
 
 class TestApplyChanges:
     def test_empty_changes_returns_empty(self):
@@ -115,9 +105,7 @@ class TestApplyChanges:
         assert s.model_name == "foo"
 
 
-# ---------------------------------------------------------------------------
 # kernel-patch identity helpers
-# ---------------------------------------------------------------------------
 
 class TestKernelPatchIdentity:
     def test_resolves_explicit_payload(self):
@@ -174,9 +162,7 @@ class TestKernelPatchIdentity:
         assert SharedState().find_rejected_kernel_patch({"kernel_id": "x"}) is None
 
 
-# ---------------------------------------------------------------------------
 # load_or_init / save round-trip
-# ---------------------------------------------------------------------------
 
 class TestPersistence:
     def test_load_or_init_returns_default_when_missing(self, tmp_path):
@@ -202,9 +188,7 @@ class TestPersistence:
         assert not hasattr(s, "unknown_field")
 
 
-# ---------------------------------------------------------------------------
 # Per-action attempt audit trail (record_action_attempt + <action>_attempts)
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "action,metric_key,metric_kind",
@@ -366,9 +350,7 @@ def test_save_load_round_trips_attempt_fields(tmp_path):
     assert s2.profile_attempts[-1]["extras"]["trace_path"] == "/tmp/trace.json"
 
 
-# ---------------------------------------------------------------------------
 # Global last_action_failures rolling log
-# ---------------------------------------------------------------------------
 
 def test_record_action_failure_basic_fields():
     s = SharedState()

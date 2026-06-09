@@ -2,26 +2,9 @@
 
 """Pin the Orchestration system prompt's specialist / integrate_patch visibility.
 
-Empirical evidence from a v0.8 12h DeepSeek-R1-0528 run showed that
-``storage/coordinator.db tasks`` carried 0 rows of ``kind='specialist'``
-for an entire session. Root cause: the orchestration system prompt's
-ACTIONS catalogue did not render an entry for ``specialist`` because
-no ``actions/_meta/specialist.yaml`` existed for ActionRegistry to load.
-The synthetic action was wired into PolicyGate / SpecialistRunner / phase
-allowlist, but the LLM literally did not know how to emit it.
-
-PR-A1 (Arbor-into-Hyperloom) adds:
-
-* ``actions/_meta/specialist.yaml`` + ``actions/specialist.md``
-* ``actions/_meta/integrate_patch.yaml`` + ``actions/integrate_patch.md``
-* ``_format_emit_hint`` clauses for both names in prompt_builder
-* ``specialist`` / ``integrate_patch`` in
-  ``FULL_ENABLED_ACTIONS`` / ``NO_KERNEL_ENABLED_ACTIONS``
-* ``integrate_patch`` in ``PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE]``
-* EXPLORE specialist-informed contract in ``orchestration.md``
-
-These tests enforce that those changes hold so a future refactor cannot
-silently regress the visibility.
+Regression: a v0.8 run emitted 0 ``kind='specialist'`` tasks because the
+prompt catalogue rendered no entry for the synthetic ``specialist`` action.
+PR-A1 added the yaml/md + emit hints + enabled/phase entries pinned here.
 """
 
 from __future__ import annotations
@@ -72,9 +55,7 @@ def _build_prompt(
     )
 
 
-# ---------------------------------------------------------------------------
 # Registry side: both yaml files must load cleanly
-# ---------------------------------------------------------------------------
 def test_specialist_yaml_loads_into_registry(registry: ActionRegistry) -> None:
     meta = registry.get("specialist")
     assert meta is not None, (
@@ -101,9 +82,7 @@ def test_integrate_patch_yaml_loads_into_registry(registry: ActionRegistry) -> N
     assert "workspace_mutation" in meta.requires_lanes
 
 
-# ---------------------------------------------------------------------------
 # Enabled-actions visibility
-# ---------------------------------------------------------------------------
 def test_full_enabled_actions_contains_specialist_and_integrate_patch() -> None:
     assert "specialist" in FULL_ENABLED_ACTIONS
     assert "integrate_patch" in FULL_ENABLED_ACTIONS
@@ -114,20 +93,15 @@ def test_no_kernel_enabled_actions_contains_specialist_and_integrate_patch() -> 
     assert "integrate_patch" in NO_KERNEL_ENABLED_ACTIONS
 
 
-# ---------------------------------------------------------------------------
 # Phase allowlist visibility (PolicyGate R1)
-# ---------------------------------------------------------------------------
 def test_integrate_patch_allowed_in_explore_phase() -> None:
     allowed = PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE]
     assert "integrate_patch" in allowed
-    # ``specialist`` should already be there from v0.8 M5; assert that
-    # to anchor the EXPLORE specialist-informed contract.
+    # ``specialist`` is there from v0.8 M5 (anchors the EXPLORE specialist-informed contract).
     assert "specialist" in allowed
 
 
-# ---------------------------------------------------------------------------
 # Rendered prompt: EMIT hints must be present in both kernel + no_kernel modes
-# ---------------------------------------------------------------------------
 def test_specialist_emit_hint_in_full_prompt(
     registry: ActionRegistry, rules_path: Path,
 ) -> None:
@@ -139,9 +113,7 @@ def test_specialist_emit_hint_in_full_prompt(
         "Orchestration prompt missing the specialist EMIT hint — the LLM "
         "will not learn how to fan out specialists."
     )
-    # Required payload fields must be advertised so the LLM does not
-    # produce a payload PolicyGate's ``specialist_dispatch_source`` rule
-    # rejects.
+    # Required payload fields must be advertised so the LLM doesn't trip ``specialist_dispatch_source``.
     assert "domain=" in prompt
     assert "gap_canonical_id" in prompt
 
@@ -168,16 +140,12 @@ def test_specialist_emit_hint_in_no_kernel_prompt(
     assert "EMIT: delegate{action_name='integrate_patch'" in prompt
 
 
-# ---------------------------------------------------------------------------
 # Orchestration rules fragment: EXPLORE specialist-informed contract
-# ---------------------------------------------------------------------------
 def test_orchestration_rules_mentions_explore_specialist_informed(
     rules_path: Path,
 ) -> None:
     text = rules_path.read_text(encoding="utf-8")
-    # The fragment must explicitly enumerate ``specialist`` and
-    # ``integrate_patch`` in the EXPLORE phase, otherwise the rendered
-    # prompt's prose contradicts the catalogue.
+    # The fragment must enumerate ``specialist`` / ``integrate_patch`` in EXPLORE so the prose matches the catalogue.
     assert "EXPLORE" in text
     assert "specialist" in text
     assert "integrate_patch" in text

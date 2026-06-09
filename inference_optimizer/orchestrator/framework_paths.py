@@ -2,22 +2,10 @@
 
 """Framework source-root resolution for PolicyGate and flag discovery.
 
-Containers may ship framework code under ``/sgl-workspace/{aiter,sglang,vllm}``
-or ``/app/ATOM/atom`` (atom editable install), or under ``site-packages`` /
-``dist-packages`` when only pip wheels are present. This module centralises
-probe order so PolicyGate, AST discovery, install.sh, and
-``apply_kernel_patch`` all agree.
-
-Three frameworks are first-class today (alphabetical):
-
-* atom    — ``/app/ATOM/atom/`` editable install layout, ``arg_utils.py``
-  under ``model_engine/``.
-* sglang  — ``/sgl-workspace/sglang/python/sglang/srt/server_args.py``.
-* vllm    — ``/sgl-workspace/vllm/vllm/engine/arg_utils.py``.
-
-aiter is included in the source-roots allowlist because it's a kernel
-library shared across all three frameworks (atom imports it for fused
-MoE / MLA paths the same way sglang/vllm do).
+Centralises probe order across container layouts (``/sgl-workspace/...``,
+``/app/ATOM/atom``, site/dist-packages) so PolicyGate, AST discovery,
+install.sh, and ``apply_kernel_patch`` all agree. First-class frameworks:
+atom, sglang, vllm; aiter is in the allowlist as a shared kernel library.
 """
 
 from __future__ import annotations
@@ -41,10 +29,8 @@ _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
-    # atom's editable-install layout. Production atom boxes also expose
-    # atom under ``/opt/venv/lib/pythonX.Y/site-packages/atom/`` — that
-    # path is picked up dynamically by ``probe_framework_source_roots_for_env``
-    # via the VIRTUAL_ENV glob below, mirroring the sglang/vllm pattern.
+    # atom's editable-install layout; site-packages path picked up via the
+    # VIRTUAL_ENV glob in ``probe_framework_source_roots_for_env``.
     "/app/ATOM/atom/",
 )
 
@@ -260,19 +246,8 @@ def resolve_vllm_arg_utils_path() -> tuple[Path, str]:
 def resolve_atom_arg_utils_path() -> tuple[Path, str]:
     """Resolve atom ``model_engine/arg_utils.py`` for AST discovery.
 
-    Symmetric with ``resolve_sglang_server_args_path()`` and
-    ``resolve_vllm_arg_utils_path()``:
-
-    1. Honour ``$INFERENCE_OPTIMIZER_ATOM_ARG_UTILS`` if set (operator
-       override for non-default layouts).
-    2. Check the default editable-install location
-       ``/app/ATOM/atom/model_engine/arg_utils.py``.
-    3. Fall back to ``importlib.util.find_spec("atom")`` and walk to
-       ``<origin>/model_engine/arg_utils.py``.
-
-    Returns ``(Path, str)`` where the str is the file path on success or
-    a diagnostic message on failure (same contract as the sister
-    helpers).
+    Returns ``(Path, str)`` where the str is the file path on success or a
+    diagnostic message on failure.
     """
     override = os.environ.get("INFERENCE_OPTIMIZER_ATOM_ARG_UTILS", "").strip()
     if override:
@@ -307,36 +282,18 @@ def probe_framework_source_roots_for_env() -> str:
     return ":".join(found)
 
 
-# ---------------------------------------------------------------------------
-# Discovery summary — operator-facing log helper.
-# install.sh consumes this to emit a one-line ``sglang=ok atom=ok ...``
-# summary after the colon-separated probe. Preflight greps the line, so
-# keep its format stable.
-# ---------------------------------------------------------------------------
+# Discovery summary — operator-facing log helper (install.sh greps; keep format stable).
 
-# Buckets are ordered so substring matching is deterministic — atom is
-# checked BEFORE vllm/sglang to keep parity with
-# ``server_args_env_name``'s ordering convention (atom paths never contain
-# vllm/sglang substrings today, but the explicit ordering keeps a future
-# framework name like "atom-vllm" from accidentally falling into the
-# wrong bucket).
+# Ordered for deterministic substring matching (atom before vllm/sglang).
 _FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter")
 
 
 def summarise_framework_root_discovery(roots: str) -> str:
     """Return ``"sglang=ok atom=missing ..."``-style one-line summary.
 
-    Input is the colon-separated string emitted by
-    ``probe_framework_source_roots_for_env``. Output is a single
-    space-separated line where each framework reports ``=ok`` if any
-    discovered root path contains the framework name and ``=missing``
-    otherwise. Buckets are emitted in the order declared by
-    ``_FRAMEWORK_BUCKETS`` so the line is stable across runs.
-
-    Used by ``install.sh`` to give operators a one-line "did atom get
-    picked up" answer; tested via the matching pytest case rather than
-    via install.sh shell smoke (the helper is operator-visible
-    observability, not a control-flow boundary).
+    Input is the colon-separated string from
+    ``probe_framework_source_roots_for_env``; emitted in ``_FRAMEWORK_BUCKETS``
+    order for stable output.
     """
     parts: list[str] = []
     items = [p.strip().lower() for p in (roots or "").split(":") if p.strip()]

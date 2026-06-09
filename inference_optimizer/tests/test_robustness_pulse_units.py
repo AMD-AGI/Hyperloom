@@ -2,11 +2,8 @@
 
 """Unit tests for ``action_executors._robustness_pulse``.
 
-The pulse is a best-effort subprocess shim; the autouse fixture sets
-``PYTEST_CURRENT_TEST`` so the production code refuses to spawn a real
-subprocess. We exercise the gating and request-shaping helpers, plus
-the ``pulse()`` coroutine via dependency injection over ``asyncio``
-subprocess primitives.
+Exercises the gating and request-shaping helpers plus the ``pulse()`` coroutine
+via dependency injection over ``asyncio`` subprocess primitives.
 """
 
 from __future__ import annotations
@@ -20,13 +17,10 @@ import pytest
 from inference_optimizer.orchestrator.action_executors import _robustness_pulse as rp
 
 
-# ---------------------------------------------------------------------------
 # _enabled()
-# ---------------------------------------------------------------------------
 
 class TestEnabled:
     def test_disabled_inside_pytest_by_default(self):
-        # PYTEST_CURRENT_TEST is always set by pytest, so the gate is False.
         assert rp._enabled() is False
 
     def test_disabled_when_env_flag_off(self, monkeypatch):
@@ -43,9 +37,7 @@ class TestEnabled:
         assert rp._enabled() is True
 
 
-# ---------------------------------------------------------------------------
 # _resolve_session_dir()
-# ---------------------------------------------------------------------------
 
 class TestResolveSessionDir:
     def test_returns_none_when_no_env(self, monkeypatch):
@@ -75,9 +67,7 @@ class TestResolveSessionDir:
         assert rp._resolve_session_dir() is None
 
 
-# ---------------------------------------------------------------------------
 # _build_request()
-# ---------------------------------------------------------------------------
 
 class TestBuildRequest:
     def test_request_carries_session_dir_and_disables_llm_rca(self, tmp_path):
@@ -92,14 +82,11 @@ class TestBuildRequest:
         assert req["options"]["llm_rca_enabled"] is False
 
     def test_request_falls_back_to_default_session_id(self, tmp_path):
-        # Path("") .name == "" so the helper substitutes "default".
         req = rp._build_request(Path(""), tick_index=0)
         assert req["session_id"] == "default"
 
 
-# ---------------------------------------------------------------------------
 # pulse()
-# ---------------------------------------------------------------------------
 
 class _FakeProc:
     def __init__(self, *, returncode: int = 0, stderr: bytes = b""):
@@ -126,7 +113,6 @@ class _SlowProc(_FakeProc):
 
 def _spawn_factory(proc):
     async def _spawn(*args, **kwargs):
-        # Stash captured args on the proc for assertions.
         proc.captured_args = args
         proc.captured_kwargs = kwargs
         return proc
@@ -174,9 +160,7 @@ class TestPulse:
 
         monkeypatch.setattr(rp.os, "unlink", tracking_unlink)
         assert await rp.pulse(tick_index=3) is True
-        # Request file path is deleted in `finally`.
         assert observed and observed[0].endswith(".json")
-        # The subprocess command targets the runtime CLI.
         cmd = proc.captured_args
         assert cmd[1:5] == ("-m", "robustness_agent.runtime.cli", "tick", "--request")
 
