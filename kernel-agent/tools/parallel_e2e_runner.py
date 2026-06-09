@@ -3,22 +3,10 @@
 
 """End-to-end Kernel Agent runner for real model/profile/backend testing.
 
-Flow:
-1. Caller supplies a pre-generated trace via ``--trace-path`` (e.g. from a
-   prior ``inference_optimizer optimize`` profile, a Magpie run, or a
-   hand-collected ``torch.profiler`` export).
-2. Analyze the trace and pick a hot kernel.
-3. Launch backend optimization attempts in parallel: backend x replicas.
-4. Summarize attempts and, when safe evidence exists, emit patch/retest
-   status.
-
-The runner does not fabricate patch effectiveness. If no patchable source or
-valid benchmark harness exists, it records that as the experiment outcome.
-
-The legacy ``run_baseline_profile`` step (which shelled out to an external
-baseline script) was removed. Use ``inference_optimizer optimize`` to
-produce a baseline + profile trace, then pass that trace into this runner
-via ``--trace-path``.
+Takes a pre-generated trace (``--trace-path``), picks a hot kernel, launches
+backend optimization attempts in parallel (backend x replicas), and summarizes.
+Does not fabricate patch effectiveness; records absence of patchable source /
+benchmark harness as the outcome.
 """
 
 from __future__ import annotations
@@ -39,10 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TRACE_TOOL = ROOT / "tools" / "tracelens_analysis.py"
 OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 
-# Local sibling import for the collective-name fallback. tools/ is on
-# sys.path when this file is run via `python -m` / direct subprocess from
-# the kernel_optimization handler; use a relative-style import via the
-# tools dir.
+# Local sibling import for the collective-name fallback (tools/ on sys.path).
 sys.path.insert(0, str(ROOT / "tools"))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
 from _paths import workspace_root  # noqa: E402
@@ -281,42 +266,10 @@ def run_one_attempt(
     harness_path: str,
     num_gpus: int = 1,
 ) -> dict[str, Any]:
-    """Run a single backend optimization attempt via kernel_optimization.py.
-
-    Builds and runs the per-attempt ``kernel_optimization.py`` command
-    (with the resolved workspace, kernel, budgets, and GPU count) and
-    captures its result, never raising on subprocess failure.
-
-    Args:
-        backend (str): Backend name (e.g. ``geak`` / ``claude``).
-            Keyword-only.
-        replica (int): Replica index for this backend. Keyword-only.
-        gpu_id (int): GPU id label for reporting (Ray assigns real
-            devices). Keyword-only.
-        args (argparse.Namespace): Parsed runner args. Keyword-only.
-        run_dir (Path): Session run directory for logs. Keyword-only.
-        env (dict[str, str]): Base environment for the subprocess.
-            Keyword-only.
-        kernel_id (str): Kernel id to optimize. Keyword-only.
-        source_file (str): Optional source file path. Keyword-only.
-        harness_path (str): Optional test-harness path. Keyword-only.
-        num_gpus (int): GPUs to request for this attempt. Keyword-only.
-
-    Returns:
-        dict[str, Any]: An attempt record with ``backend``, ``replica``,
-            ``gpu_id``, ``num_gpus``, ``status``, ``elapsed_s``,
-            ``log_path``, and the nested ``result`` payload.
-    """
-    # Do NOT set HIP/ROCR/CUDA_VISIBLE_DEVICES here. Ray assigns them inside
-    # workers; forcing them on the driver clashes with set_visible_accelerator_ids.
+    # Do NOT set HIP/ROCR/CUDA_VISIBLE_DEVICES here; Ray assigns them in workers.
     local_env = {
         **env,
-        # Push the resolved workspace-path through as USER_DATA_PATH so the
-        # nested kernel_optimization.py / tracelens_analysis.py subprocess
-        # picks the same artefact root (their --workspace-path defaults to
-        # $USER_DATA_PATH). Keep WORKSPACE_PATH around as a legacy alias for
-        # any in-flight launcher that still exports it; production paths
-        # only consume USER_DATA_PATH.
+        # Forward workspace-path as USER_DATA_PATH so nested subprocesses share the artefact root.
         "USER_DATA_PATH": str(args.workspace_path),
         "KERNEL_AGENT_NUM_GPUS": str(num_gpus),
     }
@@ -428,9 +381,7 @@ def main() -> int:
                              "soon as they hit >=1.50x with passing correctness; "
                              "otherwise they iterate up to ~85%% of this budget "
                              "and SIGTERM at 100%%.")
-    # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
-    # quick -> 70 min, full -> 130 min. Both aligned with yaml
-    # run.budgets.<mode>.total_s + finalize_grace + kill_buffer + safety.
+    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 130 min.
     _geak_budget_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130
     parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
@@ -449,10 +400,7 @@ def main() -> int:
                              "'llm' single-shot backend was removed (max_tokens=2048 "
                              "truncated >4KB kernels).")
     parser.add_argument("--oob-max-turns", type=int, default=100)
-    # Mirror kernel_optimization.py's default: 0.0 = unlimited, aligning with
-    # GEAK's geak.yaml `cost_limit: 0.` contract. GEAK's sub-agent fallback
-    # path would otherwise cap each attempt at $3.0 (the dataclass default in
-    # ``minisweagent/agents/default.py``), killing sub-agents after ~50 steps.
+    # Mirror kernel_optimization.py's default: 0.0 = unlimited (GEAK geak.yaml cost_limit: 0.).
     parser.add_argument(
         "--geak-cost-limit",
         type=float,
@@ -488,11 +436,7 @@ def main() -> int:
                              "instead of re-running the trace analysis.")
     args = parser.parse_args()
 
-    # Auto-derive --backends when caller did not pass one. Cursor needs
-    # CURSOR_API_KEY (separate Cursor gateway, not the AMD LiteLLM gateway);
-    # skip it from the default set when no key is provisioned to avoid
-    # spending replica slots on guaranteed 401s. Explicit --backends always
-    # wins (failure surfaces in the attempt log).
+    # Auto-derive --backends: skip cursor from the default set when CURSOR_API_KEY is unset.
     if args.backends is None:
         if os.environ.get("CURSOR_API_KEY", "").strip():
             args.backends = "geak,claude,codex,cursor"
@@ -505,8 +449,7 @@ def main() -> int:
     env = {
         **os.environ,
         **load_env_file(Path(args.env_file)),
-        # Forward the resolved workspace-path as USER_DATA_PATH so children
-        # default to the same artefact root.
+        # Forward workspace-path as USER_DATA_PATH so children share the artefact root.
         "USER_DATA_PATH": str(workspace),
     }
 
@@ -533,8 +476,7 @@ def main() -> int:
             data = json.loads(src.read_text())
             candidates = data if isinstance(data, list) else (
                 data.get("hot_kernels") or data.get("kernel_candidates") or [])
-            # Mirror to this session's expected location so kernel_optimization
-            # can find it via the default candidates_path.
+            # Mirror to this session's default candidates_path so kernel_optimization finds it.
             (run_dir / "kernel_candidates.json").write_text(json.dumps(candidates, indent=2))
             analysis = {"trace_report_path": str(src), "reused": True}
         else:
@@ -555,16 +497,9 @@ def main() -> int:
         summary["selected_kernel"] = selected
 
         source_file = str(selected.get("source_file") or "")
-        # tracelens_analysis writes `benchmark_files` (plural list); the older
-        # `test_harness_path` / `benchmark_file` (singular) keys were never
-        # populated, which silently disabled patch_retest. Pick a multi-GPU
-        # safe single test: prefer `bench`-style scripts, then `test_*` files.
+        # Use `benchmark_files` (plural); prefer `bench`-style scripts then `test_*`.
         bench_files = list(selected.get("benchmark_files") or [])
-        # is_multigpu has two paths into True: TraceLens flagged it OR the
-        # leaf kernel name matches a known collective (all_reduce /
-        # all_gather / reduce_scatter / all_to_all / broadcast / nccl_* /
-        # rccl_*). The latter is a fallback for the r24 custom_allreduce
-        # case where TraceLens reported is_multigpu=False / num_gpus=1.
+        # is_multigpu := TraceLens flag OR kernel name matches a known collective (fallback for r24 custom_allreduce).
         selected_name = str(selected.get("name") or "")
         name_says_collective = kernel_name_implies_multigpu(selected_name)
         is_multigpu = bool(selected.get("is_multigpu")) or name_says_collective
@@ -584,17 +519,13 @@ def main() -> int:
         if not harness_path:
             summary["benchmark_resolution"] = "no benchmark/test harness resolved; GEAK may be slower or fail"
 
-        # GPU budgeting: communication kernels need >=2 GPUs; computation
-        # kernels run on 1. Total concurrency is capped by total_gpus.
+        # GPU budgeting: collectives need >=2 GPUs; compute kernels run on 1 (concurrency capped by total_gpus).
         if args.num_gpus_override > 0:
             per_task_gpus = args.num_gpus_override
         else:
             per_task_gpus = int(selected.get("num_gpus_recommended") or 1)
             if is_multigpu and per_task_gpus < 2:
-                # The kernel is a collective (per is_multigpu) but
-                # TraceLens reported num_gpus_recommended < 2. Force-bump
-                # to args.tp (or 2 floor) so the GEAK drop below fires
-                # and so torchrun --nproc>=2 is required by the harness.
+                # Collective but TraceLens reported <2; force-bump to args.tp (or 2 floor).
                 per_task_gpus = max(2, int(getattr(args, "tp", 0) or 2))
                 summary.setdefault(
                     "per_task_gpus_inferred",
@@ -602,17 +533,7 @@ def main() -> int:
                     "pattern; TraceLens reported num_gpus_recommended<2",
                 )
         backends = [b.strip() for b in args.backends.split(",") if b.strip()]
-        # GEAK is fundamentally a SINGLE-GPU patch evaluator (its sub-agent
-        # framework spawns nested ray.remote(num_gpus=1) tasks for patch
-        # validation). On multi-GPU collective kernels the nested ray task
-        # only sees 1 GPU even when the parent has 2+, so any test that
-        # calls torch.cuda.set_device(rank>=1) inside torchrun fails with
-        # "HIP error: invalid device ordinal" (observed in r20/r22). Drop
-        # GEAK from the backend list when per_task_gpus >= 2; let claude /
-        # codex / cursor handle multi-GPU collectives via standalone HIP /
-        # torchrun.
-        # Set ALLOW_GEAK_MULTIGPU=1 to bypass this guard (e.g. when verifying
-        # whether an upstream GEAK fix has lifted the limitation).
+        # GEAK is single-GPU only; drop it for per_task_gpus>=2 collectives (r20/r22). ALLOW_GEAK_MULTIGPU=1 bypasses.
         backends_dropped: list[str] = []
         if (per_task_gpus >= 2
                 and "geak" in backends
@@ -638,8 +559,7 @@ def main() -> int:
         ray_log = run_dir / "logs" / "ray.log"
         ray_started_by_runner = _ensure_ray_via_helper(args.tp, ray_log)
         summary["ray_started_by_runner"] = ray_started_by_runner
-        # ThreadPool fan-out is just for issuing Ray submissions; Ray itself
-        # serialises GPU contention via num_gpus reservations.
+        # ThreadPool only issues Ray submissions; Ray serialises GPU contention via num_gpus.
         with ThreadPoolExecutor(max_workers=min(total_jobs, max_concurrent)) as pool:
             for backend in backends:
                 for replica in range(args.replicas_per_backend):

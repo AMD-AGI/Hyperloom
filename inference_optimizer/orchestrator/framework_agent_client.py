@@ -3,16 +3,10 @@
 """Coordinator-side thin client for the framework-agent
 ``fa phase-discover`` subcommand.
 
-``fa phase-discover`` is the only framework-agent entry point wired into
-the Coordinator pump: the pump calls it to obtain a batch of candidate
-PRs, then the Coordinator's own Critic gate + ``FrameworkPrExecutor``
-(which curls ``candidate.diff_url`` directly and runs ``git apply``)
-handles the rest.
-
-``phase_discover`` is invoked via ``asyncio.to_thread`` so the
-Coordinator reactor loop never blocks on the CLI; failures degrade to
-empty / raised ``RuntimeError`` results that the pump's retry counter
-absorbs.
+The only framework-agent entry point wired into the Coordinator pump:
+returns a batch of candidate PRs; the Critic gate + ``FrameworkPrExecutor``
+handle the rest. Invoked via ``asyncio.to_thread`` so the reactor never
+blocks; failures degrade to empty / ``RuntimeError`` that the pump absorbs.
 """
 
 from __future__ import annotations
@@ -32,16 +26,8 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-# Repo URL table — keyed by framework name. Mirrors
-# ``specialist_domains.SpecialistDomain.pr_repos`` for serving_specialist
-# but flattens it to the single repo URL each ``fa phase-*`` request
-# carries (the request schema accepts one ``repo_url`` per call).
-#
-# The canonical mapping lives in ``framework_agent.repo_map`` so the
-# standalone ``fa`` CLI can resolve repo URLs without reverse-importing
-# inference_optimizer. We delegate to that module when available
-# (the normal install path puts framework-agent on the same venv) and
-# fall back to an inline copy for IO-only test environments.
+# Repo URL table; delegate to canonical ``framework_agent.repo_map``, with an
+# inline fallback copy for IO-only test environments.
 try:
     from framework_agent.repo_map import (  # type: ignore[import-not-found]
         repo_url_for_framework,
@@ -49,9 +35,7 @@ try:
 except ImportError:  # pragma: no cover — exercised only in IO-only test envs
 
     # MUST stay byte-for-byte identical to
-    # ``framework_agent.repo_map._FRAMEWORK_TO_REPO_URL``. A cross-
-    # module sync test in ``framework-agent/tests/test_repo_map.py``
-    # enforces equality whenever both packages are on the test path.
+    # ``framework_agent.repo_map._FRAMEWORK_TO_REPO_URL`` (sync test enforced).
     _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
         "sglang": "https://github.com/sgl-project/sglang.git",
         "vllm":   "https://github.com/ROCm/vllm.git",
@@ -59,38 +43,17 @@ except ImportError:  # pragma: no cover — exercised only in IO-only test envs
     }
 
     def repo_url_for_framework(framework: str) -> str:
-        """Return the canonical GitHub repo URL for ``framework``.
-
-        Args:
-            framework (str): Framework name (e.g. ``"sglang"``); matched
-                case-insensitively after stripping.
-
-        Returns:
-            str: The repo URL, or an empty string for unknown frameworks
-                (the caller is expected to bail out / log when this
-                happens).
-        """
+        """Return the canonical GitHub repo URL for ``framework`` ("" if unknown)."""
         return _FRAMEWORK_TO_REPO_URL.get(
             (framework or "").strip().lower(), "",
         )
 
 
 def _resolve_fa_binary() -> str | None:
-    """Return the absolute path to the ``fa`` binary, or ``None`` if
-    it cannot be located.
+    """Return the absolute path to the ``fa`` binary, or ``None``.
 
-    Resolution order:
-
-    1. ``$FA_BIN`` env var (operator pin / unit-test injection).
-    2. ``shutil.which('fa')`` — the production path after
-       ``framework-agent/scripts/install.sh`` ran.
-    3. ``$FRAMEWORK_AGENT_ROOT/scripts/fa`` — repo-local fallback for
-       sessions that source the repo's runtime env but don't have the
-       global ``fa`` symlink on $PATH yet.
-
-    Returns:
-        str | None: The resolved path to the ``fa`` binary, or ``None``
-            when none of the resolution steps locate it.
+    Resolution order: ``$FA_BIN``; ``shutil.which('fa')``;
+    ``$FRAMEWORK_AGENT_ROOT/scripts/fa``.
     """
     explicit = (os.environ.get("FA_BIN") or "").strip()
     if explicit and Path(explicit).exists():
@@ -107,11 +70,7 @@ def _resolve_fa_binary() -> str | None:
 
 
 DEFAULT_FA_PHASE_TIMEOUT_SEC: float = 180.0
-# Number of consecutive ``fa phase-discover`` failures the Coordinator
-# tolerates before marking ``framework_pr_phase_done = True`` and
-# advancing to EXPLORE. Bumped from the implicit-1 of the original
-# silent-collapse behaviour so a transient timeout or a slow PR scan
-# doesn't kill the whole phase.
+# Consecutive ``fa phase-discover`` failures tolerated before advancing to EXPLORE.
 DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
@@ -121,12 +80,7 @@ def _run_fa_subcommand_sync(
     request_path: Path,
     timeout_sec: float,
 ) -> "tuple[int, str, str]":
-    """Sync helper: run ``fa <subcommand> --request <path> --out -``.
-
-    Only ``phase-discover`` calls into here today; the function stays
-    subcommand-agnostic so adding a second wired subcommand later does
-    not require touching it. Never raises.
-    """
+    """Sync helper: run ``fa <subcommand> --request <path> --out -``. Never raises."""
     cmd = [fa_bin, subcommand, "--request", str(request_path), "--out", "-"]
     try:
         cp = subprocess.run(
@@ -152,23 +106,9 @@ async def _invoke_fa_phase(
 ) -> dict[str, Any]:
     """Generic async runner for ``fa phase-*`` subcommands.
 
-    Writes ``request`` as a temp JSON, runs the subcommand off the event
-    loop, returns the parsed JSON output, and cleans up the temp file.
-
-    Args:
-        subcommand (str): The ``fa`` subcommand to run.
-        request (dict[str, Any]): Request payload serialised to the temp
-            JSON file.
-        session_dir (Path): Session directory under which the ``.fa-tmp``
-            scratch dir is created.
-        timeout_sec (float): Wall-clock timeout for the subprocess.
-
-    Returns:
-        dict[str, Any]: The parsed JSON object emitted by the subcommand.
-
-    Raises:
-        RuntimeError: If the ``fa`` binary is missing, the subcommand
-            exits non-zero, or its stdout is not valid JSON.
+    Writes ``request`` as temp JSON, runs the subcommand, returns parsed
+    JSON. Raises :class:`RuntimeError` on missing binary / non-zero exit /
+    parse failure.
     """
     fa_bin = _resolve_fa_binary()
     if not fa_bin:
@@ -219,35 +159,10 @@ async def phase_discover(
 ) -> dict[str, Any]:
     """FRAMEWORK_PR-phase batch discovery shim.
 
-    ``keywords`` (when non-empty) is an explicit keyword override the
-    composer derives from the workload taxonomy + profile bottleneck; fa
-    uses it verbatim for the primus-cortex AND-search and skips its own
-    ``extract_keywords`` step. Empty / ``None`` preserves the legacy
-    behaviour (fa extracts keywords from the gap text).
-
-    Args:
-        model (str): Target serving model id.
-        framework (str): Framework name; defaults to ``"sglang"`` when
-            blank and is lowercased for the request.
-        gpu_type (str): GPU type tag forwarded to fa.
-        gaps (list[dict[str, str]]): Gap descriptors fa searches against.
-        session_dir (Path): Session directory for the ``.fa-tmp`` scratch
-            tree.
-        repo_url (str): Explicit repo URL override; falls back to
-            :func:`repo_url_for_framework` when empty.
-        keywords (list[str] | None): Optional explicit keyword override
-            (deduplicated, order-preserving) for the AND-search.
-        max_candidates (int): Max candidate PRs fa should return.
-        batch_id (str): Caller-supplied batch identifier echoed back.
-        timeout_sec (float): Wall-clock timeout for the subcommand.
-
-    Returns:
-        dict[str, Any]: The parsed payload from ``fa phase-discover``:
-            ``{batch_id, framework, repo_url, candidates: [...]}``.
-
-    Raises:
-        RuntimeError: Propagated from :func:`_invoke_fa_phase` on binary
-            missing / non-zero exit / JSON parse failure.
+    Non-empty ``keywords`` is used verbatim for the primus-cortex AND-search
+    (fa skips its own ``extract_keywords``); empty/``None`` keeps the legacy
+    behaviour. Returns the ``fa phase-discover`` payload
+    ``{batch_id, framework, repo_url, candidates: [...]}``.
     """
     resolved_repo_url = (repo_url or repo_url_for_framework(framework)).strip()
     request = {
@@ -262,7 +177,7 @@ async def phase_discover(
     }
     kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
     if kw:
-        # Dedup preserving order so the request stays deterministic.
+        # Dedup preserving order for a deterministic request.
         seen: set[str] = set()
         request["keywords"] = [k for k in kw if not (k in seen or seen.add(k))]
     return await _invoke_fa_phase(
@@ -273,14 +188,8 @@ async def phase_discover(
     )
 
 
-# NOTE: ``phase_fetch`` / ``phase_emit_proposal`` shims used to live
-# here but had zero callers in inference_optimizer (the Coordinator
-# pump only calls ``phase_discover``; ``FrameworkPrExecutor`` curls
-# ``candidate.diff_url`` directly via ``git apply``). They were removed
-# as dead API that misleads readers.
-# The standalone ``fa`` CLI still ships both subcommands for ad-hoc /
-# external use — re-add wrappers here only when the Coordinator
-# actually wires a new caller.
+# NOTE: ``phase_fetch`` / ``phase_emit_proposal`` shims were removed as dead
+# API (zero callers); re-add only when the Coordinator wires a new caller.
 
 
 __all__ = [

@@ -115,13 +115,8 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # F3-4 — saturation per direction (soft advisory feed)
-# ---------------------------------------------------------------------------
-#: Direction → list of Executive Summary table label aliases. The
-#: aliases mirror what TraceLens' analyzer emits today; missing labels
-#: degrade silently to ``0.0`` so a partial / experimental analysis.md
-#: never produces a false saturation hint.
+#: Direction → Executive Summary label aliases; missing labels degrade to ``0.0``.
 _SATURATION_LABEL_MAP: dict[str, tuple[str, ...]] = {
     "compute": ("Compute %", "Compute Bound %", "Compute Bound"),
     "memory": ("Memory %", "Memory Bound %", "Memory Bound"),
@@ -129,36 +124,12 @@ _SATURATION_LABEL_MAP: dict[str, tuple[str, ...]] = {
     "comm": ("Exposed Communication %", "Communication %", "Comm %"),
 }
 
-#: Saturation threshold (%) above which the prompt-side advisory
-#: surfaces a direction. Single source of truth for the threshold so
-#: the SharedState advisory renderer + tests share one constant.
+#: Saturation threshold (%) above which the advisory surfaces a direction (single source for renderer + tests).
 SATURATION_ADVISORY_THRESHOLD_PCT: float = 80.0
 
 
 def derive_saturation_per_direction(analysis_md_text: str) -> dict[str, float]:
-    """Parse Executive Summary cells from analysis.md and return
-    ``{direction: saturation_pct}`` for the four canonical directions
-    (compute / memory / host_overhead / comm).
-
-    F3-4 (Roofline-v2): the resulting dict is appended to
-    :attr:`SharedState.roofline_saturation_history` after every
-    successful ``roofline`` action so the prompt advisory renderer can
-    flag directions ≥ :data:`SATURATION_ADVISORY_THRESHOLD_PCT` as
-    "diminishing returns" hints.
-
-    Soft contract: any direction whose label is missing from the
-    Executive Summary (or whose value cannot be parsed as a percentage)
-    degrades silently to ``0.0`` — an empty / partial analysis.md must
-    never produce a false saturation hint that could mis-steer the
-    LLM toward dropping a direction.
-
-    Args:
-        analysis_md_text (str): The raw ``analysis.md`` text.
-
-    Returns:
-        dict[str, float]: Mapping of each canonical direction to its
-            saturation percentage; missing/unparseable directions are ``0.0``.
-    """
+    """Return ``{direction: saturation_pct}`` for the four canonical directions (F3-4 Roofline-v2; missing/unparseable degrades to ``0.0``)."""
     out: dict[str, float] = {k: 0.0 for k in _SATURATION_LABEL_MAP}
     if not analysis_md_text:
         return out
@@ -251,19 +222,7 @@ def _compute_within_and_gap(
     peak: float,
     achieved: float,
 ) -> tuple[float | None, float | None]:
-    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both
-    ``None`` when either input is non-positive so the renderer stays
-    placeholder-friendly.
-
-    Args:
-        peak (float): The theoretical roofline ceiling (tok/s).
-        achieved (float): The achieved throughput (tok/s).
-
-    Returns:
-        tuple[float | None, float | None]: The within-roofline and
-            gap-to-roofline percentages, or ``(None, None)`` when either input
-            is non-positive.
-    """
+    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive."""
     if peak <= 0 or achieved <= 0:
         return None, None
     within = round(achieved / peak * 100.0, 2)
@@ -283,38 +242,7 @@ def build_roofline_snapshot(
 ) -> dict[str, Any]:
     """Materialise one side (baseline or latest) of the comparison.
 
-    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling
-    produced by ``roofline_ceiling.compute_roofline_breakdown_from_state``.
-    The decomposition is also
-    persisted via ``roofline_mem_ceiling_tok_per_sec`` /
-    ``roofline_cmp_ceiling_tok_per_sec`` / ``roofline_bound_kind`` so
-    reports can show which side dominated (``"memory"`` / ``"compute"``
-    / ``"unknown"``). ``achieved_tok_per_sec`` is the benchmark
-    ``output_throughput`` measured at the time the snapshot was recorded
-    (baseline_tput for snapshot #1, current_best.tput afterwards).
-    All five default to 0/"unknown" so legacy callers that don't pass
-    them produce ``None`` in the derived percentage fields, preserving
-    the existing placeholder-friendly renderer contract.
-
-    Args:
-        snapshot_id (int | None): Monotonic snapshot id, or ``None``.
-        ts (str): ISO timestamp the snapshot was recorded.
-        analysis_md_path (str): Path to the TraceLens ``analysis.md``; empty
-            skips workload/kernel extraction.
-        theoretical_peak_tok_per_sec (float): Two-sided roofline ceiling
-            ``min(T_mem, T_cmp)``. Defaults to ``0.0``.
-        achieved_tok_per_sec (float): Measured output throughput. Defaults to
-            ``0.0``.
-        mem_ceiling_tok_per_sec (float): Memory-bound ceiling. Defaults to
-            ``0.0``.
-        cmp_ceiling_tok_per_sec (float): Compute-bound ceiling. Defaults to
-            ``0.0``.
-        bound_kind (str): Dominant side (``"memory"`` / ``"compute"`` /
-            ``"unknown"``). Defaults to ``"unknown"``.
-
-    Returns:
-        dict[str, Any]: The assembled snapshot dict; derived percentage fields
-            are ``None`` when their inputs are non-positive.
+    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling (from ``roofline_ceiling.compute_roofline_breakdown_from_state``); mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
     """
     within, gap = _compute_within_and_gap(
         peak=theoretical_peak_tok_per_sec,
@@ -323,17 +251,14 @@ def build_roofline_snapshot(
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
         "ts": ts or "",
-        # 9fe4609 sidecar pointer — caller (SharedState.record_trace_analyze)
-        # overwrites with the real path; stays empty for offline /
-        # synthetic callers that only have an analysis.md.
+        # 9fe4609 sidecar pointer — overwritten by record_trace_analyze; empty for offline callers.
         "kernel_roofline_path": "",
         "compute_pct": None,
         "idle_pct": None,
         "comm_pct": None,
         "top_bottleneck": None,
         "top_kernel": None,
-        # Primary decode roofline ceiling plus its memory/compute sides.
-        # All ``None`` when the ceiling is unavailable.
+        # Primary decode roofline ceiling plus its memory/compute sides; all None when the ceiling is unavailable.
         "theoretical_peak_tok_per_sec": (
             float(theoretical_peak_tok_per_sec)
             if theoretical_peak_tok_per_sec > 0 else None
@@ -409,28 +334,10 @@ def _num_delta(latest: float | None, baseline: float | None) -> float | None:
 def build_roofline_comparison_from_history(
     snapshots: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    """Build the ``roofline_comparison`` block straight from
-    :attr:`SharedState.roofline_snapshots` (preferred entry point post
-    PR #321).
+    """Build the ``roofline_comparison`` block from :attr:`SharedState.roofline_snapshots` (preferred entry point post PR #321).
 
-    Each entry in ``snapshots`` is the already-parsed dict written by
-    :meth:`SharedState.record_trace_analyze` (shape:
-    ``snapshot_id`` / ``ts`` / ``analysis_md_path`` / ``trace_input``
-    / ``compute_pct`` / ``idle_pct`` / ``comm_pct`` / ``top_bottleneck``
-    / ``top_kernel``). Returns ``None`` when history is empty so the
-    report-side caller can omit the section.
-
-    The list is append-only with ``snapshots[0]`` carrying the baseline
-    snapshot; ``snapshots[-1]`` carries the most recent watermark
-    refresh. Same snapshot_id (i.e. history length 1) → single_snapshot
-    mode; distinct ids → before_after with a populated ``delta`` block.
-
-    Args:
-        snapshots (list[dict[str, Any]] | None): Append-only snapshot history.
-
-    Returns:
-        dict[str, Any] | None: The ``roofline_comparison`` block, or ``None``
-            when history is empty.
+    Append-only: ``snapshots[0]`` is baseline, ``snapshots[-1]`` the latest refresh.
+    Same snapshot_id → single_snapshot mode; distinct ids → before_after with ``delta``. ``None`` when history empty.
     """
     snapshots = list(snapshots or [])
     if not snapshots:
@@ -468,8 +375,7 @@ def build_roofline_comparison_from_history(
                 latest.get("within_roofline_pct"),
                 baseline.get("within_roofline_pct"),
             ),
-            # Dashboard surfaces gap-to-roofline shrinkage as the main
-            # "X% within roofline" delta (negative = closer to ceiling).
+            # Dashboard's main "X% within roofline" delta (negative = closer to ceiling).
             "gap_to_roofline_pct": _num_delta(
                 latest.get("gap_to_roofline_pct"),
                 baseline.get("gap_to_roofline_pct"),
@@ -537,8 +443,7 @@ def build_roofline_comparison(
                 latest.get("within_roofline_pct"),
                 baseline.get("within_roofline_pct"),
             ),
-            # Dashboard surfaces gap-to-roofline shrinkage as the main
-            # "X% within roofline" delta (negative = closer to ceiling).
+            # Dashboard's main "X% within roofline" delta (negative = closer to ceiling).
             "gap_to_roofline_pct": _num_delta(
                 latest.get("gap_to_roofline_pct"),
                 baseline.get("gap_to_roofline_pct"),
@@ -591,21 +496,7 @@ def _fmt_pct_cell(v: float | None) -> str:
 
 
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
-    """Render the compact Base / Opt / Δ markdown table.
-
-    The decode-roofline ceiling (``theoretical_peak_tok_per_sec``) is a
-    session-level constant — same value on every history snapshot — so
-    we render it once as a single full-width row above the Base/Opt
-    columns. Achieved / within / gap then vary across snapshots and
-    use the regular Base/Opt/Δ layout.
-
-    Args:
-        cmp (dict[str, Any]): A ``roofline_comparison`` block (``mode`` /
-            ``baseline`` / ``latest`` / optional ``delta``).
-
-    Returns:
-        list[str]: The rendered markdown lines for the metrics table.
-    """
+    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns)."""
 
     def cell(v: float | None) -> str:
         """Format a percentage value for a table cell.
@@ -623,8 +514,7 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     delta = cmp.get("delta") or {}
     mode = cmp.get("mode") or "single_snapshot"
 
-    # Ceiling stays constant across snapshots; surface once before the
-    # Base/Opt table. Fall back to whichever side carries it.
+    # Ceiling is session-constant; surface once before the Base/Opt table.
     peak = baseline.get("theoretical_peak_tok_per_sec")
     if not isinstance(peak, (int, float)) or peak <= 0:
         peak = latest.get("theoretical_peak_tok_per_sec")
