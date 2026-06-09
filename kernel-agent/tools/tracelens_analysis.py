@@ -23,6 +23,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1459,6 +1460,304 @@ def load_op_category_map(
     return out
 
 
+# ── #514: high-GPU-time "other"-bucket candidate recovery (defense-in-depth) ──
+#
+# Hyperloom builds candidates EXCLUSIVELY from analysis.md reasoning-candidate
+# (P-item) blocks (parse_analysis_md), and the driver refuses any
+# priority_data/category_data/CSV fallback ("analysis.md is the single source
+# of truth"). TraceLens never emits a reasoning-candidate block for a kernel it
+# files under the un-roofline'd "other" category, so a dominant editable kernel
+# (e.g. the Triton fused-MoE GEMM at ~67% GPU time) lands in neither
+# hot_kernels nor skipped_kernels and GEAK never sees it.
+#
+# This is the Hyperloom-side defense-in-depth net: it recovers a HIGH-GPU-time
+# "other"-bucket op that is MISSING from the analysis.md candidates from the
+# per-op ranking TraceLens already writes (ops_summary.csv /
+# unified_perf_summary.csv / priority_data.json), so the op flows through the
+# normal _finalize_candidates -> classify_patchability path and is routed to
+# GEAK iff it is a reusable native kernel. analysis.md stays PRIMARY; this only
+# fires for high-time ops with no reasoning-candidate block. The TraceLens-side
+# categorization gap is fixed separately upstream.
+
+_OTHER_BUCKET_MIN_GPU_PCT_ENV = "HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT"
+_DEFAULT_OTHER_BUCKET_MIN_GPU_PCT = 10.0
+
+# Raw/normalized category labels that mean "TraceLens did not roofline this op"
+# (no P-item block). Compared case-insensitively against both the raw category
+# and normalize_upstream_category() output.
+_OTHER_LIKE_CATEGORIES = frozenset({
+    "", "other", "others", "misc", "miscellaneous", "uncategorized",
+    "uncategorised", "unknown", "n/a", "na", "none", "null",
+})
+
+# Per-op ranking sidecars in preference order, relative to the skill output dir.
+_OPS_RANKING_CSV_RELPATHS = (
+    "ops_summary.csv",
+    "perf_report_csvs/ops_summary.csv",
+    "perf_report_csvs/unified_perf_summary.csv",
+    "unified_perf_summary.csv",
+)
+_OPS_RANKING_JSON_RELPATHS = (
+    "priority_data.json",
+    "perf_report_csvs/priority_data.json",
+)
+
+_RANK_NAME_KEYS = ("name", "operation", "op", "kernel", "kernel_name", "op_name")
+_RANK_CATEGORY_KEYS = (
+    "op category", "op_category", "category", "tracelens_category",
+)
+# GPU-time column/field names → multiplier to microseconds (most specific first).
+_RANK_TIME_MS_KEYS = (
+    "gpu time total (ms)", "total gpu time (ms)", "gpu time (ms)",
+    "self gpu time (ms)", "gpu_time_ms", "gpu_time_total_ms", "duration (ms)",
+    "dur (ms)", "time (ms)", "time_ms", "duration_ms",
+)
+_RANK_TIME_US_KEYS = (
+    "gpu time (us)", "self gpu time (us)", "gpu_time_us", "gpu_time_total_us",
+    "duration_us", "dur (us)", "time (us)", "time_us", "dur",
+)
+_RANK_PCT_KEYS = (
+    "% gpu time", "gpu time %", "gpu %", "gpu_pct", "gpu_time_pct",
+    "% of compute time", "% of compute", "%e2e", "% e2e", "percent", "pct",
+)
+
+
+def _coerce_float(value: Any) -> float | None:
+    """Parse a CSV/JSON cell to float (strips ``%`` / commas); ``None`` if not numeric."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip().rstrip("%").replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _lower_keyed(row: dict) -> dict[str, Any]:
+    return {str(k).strip().lower(): v for k, v in row.items()}
+
+
+def _first_present(low: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for k in keys:
+        v = low.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
+def _record_gpu_us(low: dict[str, Any]) -> float | None:
+    """Best-effort GPU time in microseconds from a per-op ranking record."""
+    for k in _RANK_TIME_MS_KEYS:
+        if k in low:
+            val = _coerce_float(low[k])
+            if val is not None:
+                return val * 1000.0
+    for k in _RANK_TIME_US_KEYS:
+        if k in low:
+            val = _coerce_float(low[k])
+            if val is not None:
+                return val
+    return None
+
+
+def _record_gpu_pct(low: dict[str, Any]) -> float | None:
+    for k in _RANK_PCT_KEYS:
+        if k in low:
+            val = _coerce_float(low[k])
+            if val is not None:
+                return val
+    return None
+
+
+def _ranking_record(raw: dict) -> dict[str, Any] | None:
+    low = _lower_keyed(raw)
+    name = _first_present(low, _RANK_NAME_KEYS)
+    if not name:
+        return None
+    return {
+        "name": name,
+        "category": _first_present(low, _RANK_CATEGORY_KEYS),
+        "gpu_us": _record_gpu_us(low),
+        "gpu_pct": _record_gpu_pct(low),
+    }
+
+
+def _load_ops_ranking_csv(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                rec = _ranking_record(row)
+                if rec is not None:
+                    out.append(rec)
+    except (OSError, csv.Error):
+        return []
+    return out
+
+
+def _iter_json_ranking_records(data: Any) -> list[dict]:
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    if isinstance(data, dict):
+        for key in (
+            "findings", "operations", "ops", "priorities", "candidates",
+            "kernels", "items", "rows",
+        ):
+            v = data.get(key)
+            if isinstance(v, list):
+                return [r for r in v if isinstance(r, dict)]
+    return []
+
+
+def _load_ops_ranking_json(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out: list[dict[str, Any]] = []
+    for rec_raw in _iter_json_ranking_records(data):
+        rec = _ranking_record(rec_raw)
+        if rec is not None:
+            out.append(rec)
+    return out
+
+
+def load_ops_ranking(
+    skill_output_dir: Path | str | None,
+) -> list[dict[str, Any]]:
+    """Load a per-op GPU-time ranking from TraceLens sidecars (schema-tolerant).
+
+    Returns ``[{name, category, gpu_us, gpu_pct}]`` from the first sidecar that
+    yields rows (ops_summary.csv / unified_perf_summary.csv /
+    priority_data.json, under the output dir or its ``perf_report_csvs/``);
+    ``[]`` when none is present/parseable. Used only by the ``other``-bucket
+    recovery fallback — the contracted candidate source remains analysis.md.
+    """
+    if not skill_output_dir:
+        return []
+    root = Path(skill_output_dir)
+    for rel in _OPS_RANKING_CSV_RELPATHS:
+        rows = _load_ops_ranking_csv(root / rel)
+        if rows:
+            return rows
+    for rel in _OPS_RANKING_JSON_RELPATHS:
+        rows = _load_ops_ranking_json(root / rel)
+        if rows:
+            return rows
+    return []
+
+
+def _resolve_other_bucket_min_gpu_pct() -> float:
+    raw = os.environ.get(_OTHER_BUCKET_MIN_GPU_PCT_ENV, "").strip()
+    if raw:
+        val = _coerce_float(raw)
+        if val is not None and val >= 0:
+            return val
+    return _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT
+
+
+def _is_other_like_category(category: str) -> bool:
+    raw_l = str(category or "").strip().lower()
+    if raw_l in _OTHER_LIKE_CATEGORIES:
+        return True
+    return str(
+        normalize_upstream_category(category or "")
+    ).strip().lower() in _OTHER_LIKE_CATEGORIES
+
+
+def recover_other_bucket_candidates(
+    skill_output_dir: Path | str | None,
+    existing_candidates: list[dict[str, Any]],
+    *,
+    top_k: int = 10,
+    min_gpu_pct: float | None = None,
+    log: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Recover HIGH-GPU-time ``other``-bucket ops missing from analysis.md.
+
+    Defense-in-depth fallback for the candidate-extraction gap: surfaces ops
+    TraceLens filed under the un-roofline'd ``other`` category (no
+    reasoning-candidate block, so ``parse_analysis_md`` drops them) as raw
+    candidates, ranked by the per-op sidecar GPU time, so each flows through
+    ``_finalize_candidates`` -> ``classify_patchability``. Only fires for ops
+    that are (a) absent from ``existing_candidates`` by name, (b) in an
+    ``other``/unknown category, and (c) at or above ``min_gpu_pct`` of total
+    GPU time (env ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT``, default 10%). Returns
+    ``[]`` when no sidecar is available or nothing qualifies, so analysis.md
+    stays the primary source.
+    """
+    ranking = load_ops_ranking(skill_output_dir)
+    if not ranking:
+        return []
+    if min_gpu_pct is None:
+        min_gpu_pct = _resolve_other_bucket_min_gpu_pct()
+
+    have = {
+        str(c.get("name") or "").strip().lower()
+        for c in existing_candidates
+        if isinstance(c, dict)
+    }
+    total_us = sum(
+        r["gpu_us"] for r in ranking if r.get("gpu_us") is not None
+    ) or 0.0
+
+    def _pct(rec: dict[str, Any]) -> float | None:
+        if rec.get("gpu_pct") is not None:
+            return float(rec["gpu_pct"])
+        if total_us > 0 and rec.get("gpu_us") is not None:
+            return rec["gpu_us"] / total_us * 100.0
+        return None
+
+    qualifying: list[tuple[float, dict[str, Any]]] = []
+    for rec in ranking:
+        name_l = str(rec.get("name") or "").strip().lower()
+        if not name_l or name_l in have:
+            continue
+        if not _is_other_like_category(rec.get("category") or ""):
+            continue
+        pct = _pct(rec)
+        if pct is None or pct < min_gpu_pct:
+            continue
+        qualifying.append((pct, rec))
+
+    if not qualifying:
+        return []
+    qualifying.sort(key=lambda t: t[0], reverse=True)
+
+    out: list[dict[str, Any]] = []
+    for pct, rec in qualifying[: max(1, top_k)]:
+        gpu_us = rec.get("gpu_us")
+        out.append({
+            "name": rec["name"],
+            "duration_us": float(gpu_us) if gpu_us is not None else 0.0,
+            "call_count": 0,
+            "source_file": "",
+            "source_type": "unknown",
+            "shapes": [],
+            "tracelens_category": rec.get("category") or "other",
+            "gpu_pct": round(pct, 3),
+            "candidate_source": "other_bucket_fallback",
+        })
+        if log is not None:
+            log(
+                f"other-bucket fallback (#514): recovered high-GPU-time op "
+                f"{rec['name']!r} (~{pct:.1f}% GPU time, category="
+                f"{rec.get('category') or 'other'!r}) that has no analysis.md "
+                f"reasoning-candidate block; routing through "
+                f"classify_patchability so a reusable native kernel still "
+                f"reaches GEAK"
+            )
+    return out
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]], *, total_dur: float | None = None,
     perf_report_csv_dir: Path | str | None = None,
@@ -2790,9 +3089,27 @@ def main() -> int:
                         report_cands = parse_analysis_md(
                             skill_result.report_path, args.top_k,
                         )
+                        # #514 defense-in-depth: recover any HIGH-GPU-time
+                        # "other"-bucket op that TraceLens filed without a
+                        # reasoning-candidate block (so parse_analysis_md
+                        # dropped it) from the per-op ranking sidecar, so the
+                        # dominant editable kernel still reaches GEAK. No-op
+                        # when the sidecars are absent or nothing qualifies;
+                        # analysis.md stays the primary source.
+                        fallback_cands = recover_other_bucket_candidates(
+                            skill_result.output_dir,
+                            report_cands,
+                            top_k=args.top_k,
+                            log=lambda msg: append_log(log_path, msg),
+                        )
+                        if fallback_cands:
+                            report_cands = report_cands + fallback_cands
                         if report_cands:
                             raw_agent_candidates = report_cands
-                            report_source = "analysis.md"
+                            report_source = (
+                                "analysis.md+other_bucket_fallback"
+                                if fallback_cands else "analysis.md"
+                            )
                         else:
                             agent_candidates = []
                             allow_empty_candidates = True
@@ -2801,8 +3118,9 @@ def main() -> int:
                                 "TraceLens analysis.md had no Detailed "
                                 "Analysis compute candidate blocks "
                                 "(v0.3 contract: analysis.md is the single "
-                                "source of truth)."
-                                " Producing empty hot_kernels[] — "
+                                "source of truth) and the other-bucket "
+                                "fallback found no high-GPU-time op to "
+                                "recover. Producing empty hot_kernels[] — "
                                 "downstream Coordinator will route to "
                                 "params/backends.",
                             )
