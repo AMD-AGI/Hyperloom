@@ -78,11 +78,11 @@ def test_canonical_id_basenames_path_style_model() -> None:
 
 def test_canonical_id_is_keyword_only() -> None:
     """Positional args must raise ``TypeError`` — prevents accidental re-ordering."""
-    # Indirect call (``fn`` alias) so the intentional bad arity stays a runtime
-    # check without tripping static arity analysis.
-    fn = recipe_canonical_id
+    # Splat a runtime-built arg list so the intentional positional drift stays a
+    # runtime check; CodeQL can't statically count *args, so no false arity alert.
+    bad_positional_args = ["m", "h", "f", "v", "p"]
     with pytest.raises(TypeError):
-        fn("m", "h", "f", "v", "p")  # type: ignore[misc]
+        recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
 
 
 def test_canonical_id_normalises_whitespace_and_slashes() -> None:

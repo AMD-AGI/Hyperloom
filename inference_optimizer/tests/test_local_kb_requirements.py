@@ -68,11 +68,11 @@ def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
 
 def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
     """Positional args must raise so a future caller can't re-order the 5-tuple."""
-    # Indirect call (``fn`` alias) so the intentional bad arity stays a runtime
-    # check without tripping static arity analysis.
-    fn = recipe_canonical_id
+    # Splat a runtime-built arg list so the intentional positional drift stays a
+    # runtime check; CodeQL can't statically count *args, so no false arity alert.
+    bad_positional_args = ["m", "h", "fw", "v", "p"]
     with pytest.raises(TypeError):
-        fn("m", "h", "fw", "v", "p")  # type: ignore[misc]
+        recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
 
 
 # §4 Item 2 — Local KB root is ${USER_DATA_PATH}/kb
