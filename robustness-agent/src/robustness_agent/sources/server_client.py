@@ -2,21 +2,12 @@
 
 """robustness-server client + Source adapter.
 
-The client wraps a small subset of the robustness-server REST API used
-by the M1 reactor:
-
-* ``GET  /healthz``
-* ``GET  /api/v1/sessions``
-* ``GET  /api/v1/sessions/{session_id}``
-* ``GET  /api/v1/sessions/{session_id}/pods``
-* ``GET  /api/v1/sessions/{session_id}/events``
-* ``GET  /api/v1/sessions/{session_id}/metrics``
-* ``GET  /api/v1/sessions/{session_id}/summary``
-
-Networking errors (timeout / connect refused / 5xx) are translated to
-:class:`SourceUnavailable` so :class:`DegradeRouter` can count failures
-and degrade to the local fallback. 4xx responses are returned to the
-caller as parsed JSON because they typically encode "no data for this
+The client wraps a small subset of the robustness-server REST API
+(``/healthz`` and the ``/api/v1/sessions/...`` pods/events/metrics/
+summary endpoints). Networking errors (timeout / connect refused / 5xx)
+are translated to :class:`SourceUnavailable` so :class:`DegradeRouter`
+counts failures and degrades to the local fallback. 4xx responses are
+returned as parsed JSON since they usually mean "no data for this
 session" rather than an upstream outage.
 """
 
@@ -37,12 +28,8 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class _MetricsWindow:
-    """Optional override for the ``/metrics`` and ``/summary`` window.
-
-    The robustness-server requires explicit ``start`` / ``end`` Unix
-    seconds. The reactor decides which window to ask for; M1 defaults
-    to "last 5 minutes" computed from the context clock.
-    """
+    """Explicit ``start`` / ``end`` Unix-second window for ``/metrics``
+    and ``/summary``. M1 defaults to the last 5 minutes."""
 
     start_unix: int
     end_unix: int
@@ -315,17 +302,11 @@ def _to_iso(unix_seconds: int) -> str:
 class RobustnessServerSource:
     """Adapter wrapping :class:`RobustnessServerClient` as a :class:`Source`.
 
-    Per tick we fetch session-scoped data (``pods`` + ``events`` +
-    ``summary``) for the session referenced by
-    ``ctx.shared_state.session_id``, plus cluster-physical signals
-    (``cluster_faults``) introduced in M2 so the agent reacts to node
-    isolation events even when the local probe sees nothing wrong.
-
-    Cluster fetches are best-effort: a 4xx / 5xx on the cluster
-    endpoints does not invalidate the session-scoped snapshot. A
-    transport failure does, since it strongly suggests the server is
-    unreachable and the DegradeRouter should switch to the local
-    probe.
+    Per tick fetches session-scoped data (``pods`` + ``events`` +
+    ``summary``) for ``ctx.shared_state.session_id`` plus cluster
+    ``cluster_faults``. Cluster fetches are best-effort: a 4xx / 5xx
+    does not invalidate the session snapshot, but a transport failure
+    does (server unreachable → DegradeRouter switches to local probe).
     """
 
     name = "robustness-server"
@@ -350,19 +331,15 @@ class RobustnessServerSource:
         self._faults_lookback_s = max(0, int(faults_lookback_s))
         self._faults_page_size = max(1, min(500, int(faults_page_size)))
         self._enable_cluster_faults = bool(enable_cluster_faults)
-        # Cluster pod metrics are off by default: they fan out one
-        # HTTP call per pod per tick, so callers need to opt in once
-        # they are happy with the cost. Setting the flag is what
-        # makes signals/local_health.py prefer server-decoded GPU
-        # data over LocalProbe rocm-smi.
+        # Off by default: fans out one HTTP call per pod per tick. Enabling
+        # makes signals/local_health.py prefer server-decoded GPU data over
+        # LocalProbe rocm-smi.
         self._enable_cluster_pod_metrics = bool(enable_cluster_pod_metrics)
         self._pod_metrics_categories = tuple(pod_metrics_categories)
         self._max_pods_per_tick = max(1, int(max_pods_per_tick))
         # ``workload_uid`` opts into hierarchy-based pod discovery so
-        # multi-node RayJobs reconcile the full pod set (head + workers)
-        # even before the session has registered every pod. Empty
-        # string disables it and keeps the legacy ``list_session_pods``
-        # path.
+        # multi-node RayJobs reconcile the full pod set (head + workers).
+        # Empty string keeps the legacy ``list_session_pods`` path.
         self._workload_uid = (workload_uid or "").strip()
 
     async def fetch(self, ctx: Any) -> SourceData:
@@ -391,12 +368,9 @@ class RobustnessServerSource:
         if window.start_unix and window.end_unix:
             summary = await self._client.get_session_summary(session_id, window)
 
-        # Resolve the full pod set the agent should observe. When a
-        # workload_uid is configured we call the cluster hierarchy
-        # endpoint and merge its pods with whatever the session view
-        # already exposes — that way the fan-out covers Ray workers
-        # the session has not yet seen, and the resulting ``session_pods``
-        # gives downstream signals a consistent multi-node view.
+        # When workload_uid is configured, merge cluster-hierarchy pods with
+        # the session view so the fan-out covers Ray workers the session has
+        # not yet seen (consistent multi-node view for downstream signals).
         hierarchy_pods: list[dict[str, Any]] = []
         if self._workload_uid:
             try:
@@ -421,10 +395,8 @@ class RobustnessServerSource:
                     page_size=self._faults_page_size,
                 )
             except SourceUnavailable:
-                # Transport-level failure: re-raise so the DegradeRouter
-                # can count it. _get_json already wraps timeouts / 5xx
-                # into SourceUnavailable, so reaching here means the
-                # server is genuinely unreachable.
+                # Transport-level failure (timeouts / 5xx wrapped by
+                # _get_json): re-raise so DegradeRouter counts it.
                 raise
 
         local_gpu: dict[str, Any] = {}
@@ -453,15 +425,9 @@ class RobustnessServerSource:
         """Fan out cluster pod metrics across the session's pods.
 
         Decodes each per-pod response into the LocalProbe ``local_gpu``
-        schema and merges them so a single ``SourceData.local_gpu``
-        carries every device the session is using. Server-decoded
-        snapshots win over what LocalProbe might have produced
-        because we only fill ``local_gpu`` from this path when the
-        primary source is healthy.
-
-        A 5xx / transport failure on any pod re-raises as
-        :class:`SourceUnavailable` so the DegradeRouter degrades —
-        exactly the same policy as ``list_cluster_faults`` above.
+        schema and merges them into one snapshot. A 5xx / transport
+        failure on any pod re-raises :class:`SourceUnavailable` so the
+        DegradeRouter degrades.
         """
 
         refs = _unique_pod_refs(pods)
@@ -493,13 +459,11 @@ def _extract_session_id(ctx: Any) -> str:
 
 
 def _unique_pod_refs(pods: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Distinct (namespace, name) tuples extracted from session_pods.
+    """Distinct (namespace, name) tuples from session_pods.
 
-    ``session_pods`` rows shaped by robustness-server carry the
-    pod under ``pod.namespace`` / ``pod.name`` (mirrors
-    ``list_session_pods``). Same pod may appear in multiple
-    open/close cycles; we collapse to the unique set so the
-    cluster-metrics fan-out is not duplicated.
+    Rows carry the pod under ``pod.namespace`` / ``pod.name``; a pod may
+    recur across open/close cycles so we collapse to the unique set to
+    avoid duplicating the cluster-metrics fan-out.
     """
 
     seen: set[tuple[str, str]] = set()
@@ -525,12 +489,9 @@ def _extract_hierarchy_pods(
 ) -> list[dict[str, Any]]:
     """Pluck pod rows from a workload hierarchy response.
 
-    The server returns
-    ``{"workload_id": ..., "pods": [{"namespace": ..., "name": ...}, ...]}``
-    in the documented case, but mirrors of the same data sometimes
-    nest under ``children`` / ``items`` while a single-pod degraded
-    response uses ``pod`` directly. We accept all three so a schema
-    nudge upstream does not silently disable multi-node fan-out.
+    Accepts ``pods`` (documented), ``children`` / ``items`` (mirrors),
+    and a single ``pod`` (degraded response) so an upstream schema nudge
+    does not silently disable multi-node fan-out.
     """
 
     if not isinstance(hierarchy, dict):
@@ -551,11 +512,9 @@ def _merge_pods(
 ) -> list[dict[str, Any]]:
     """Combine session_pods with hierarchy-derived pods, deduping by ref.
 
-    Hierarchy rows carry only ``namespace`` / ``name`` so we wrap them
-    in the session-pod envelope (``{"pod": {...}}``) when appending so
-    downstream consumers (signals, cluster_decoder) see a uniform
-    shape. Session entries always win on conflicts because they carry
-    the richer phase / role metadata.
+    Hierarchy rows are wrapped in the session-pod envelope
+    (``{"pod": {...}}``) so downstream consumers see a uniform shape.
+    Session entries win on conflicts (richer phase / role metadata).
     """
 
     out: list[dict[str, Any]] = list(session_pods or [])

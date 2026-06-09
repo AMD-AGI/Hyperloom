@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **feat(orchestrator)**: absorb PR #461 free-form dynamic specialist
+  dispatch. The orchestration agent can `delegate{action_name='dynamic_specialist'}`
+  to spawn CPU-only, non-domain-locked specialist sub-agents (claude CLI
+  subprocesses) in waves, plus `dynamic_specialist_check` / `_collect`.
+  Adds the ActionRegistry `_meta` registration PR #461 omitted (so the
+  delegate is no longer denied with `unknown_action` and renders in the
+  prompt catalogue), wires the dispatch model to the blessed specialist /
+  orchestration model, and adds a liveness reaper that kills timed-out /
+  stale subprocesses (process-group SIGTERM/SIGKILL) so the run never
+  leaks zombie agents.
 - Add repository governance docs (LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md).
 - Add documentation guides under `docs/`: `ENV_AND_AUTH.md`, `KB_GUIDE.md`, `CONFIGURATION_REFERENCE.md`, `INTEGRATION_SESSION_BREAKDOWN.md`, `OPERATIONS.md`, `OPERATOR_SCRIPTS.md`, `TROUBLESHOOTING.md`, `UPGRADING.md`.
 - Refresh `docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md` and add `inference_optimizer/README.md` as a package-level entry point.

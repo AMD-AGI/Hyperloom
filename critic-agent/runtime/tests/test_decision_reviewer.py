@@ -1,11 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Integration tests for the prepare/commit lifecycle.
-
-These tests use :class:`InMemoryKBClient` and a temp session-memory root,
-so they cover the deterministic side of the Critic agent end-to-end (no
-LLM involvement needed).
-"""
+"""Integration tests for the prepare/commit lifecycle via :class:`InMemoryKBClient`."""
 
 from __future__ import annotations
 
@@ -210,9 +205,7 @@ def test_prepare_review_unknown_action_falls_back_to_evidence_producer(reviewer)
 
 
 def test_prepare_review_no_proposals_uses_strict_default(reviewer):
-    """``critic_decision_request`` carries no inbox proposals — the
-    legacy strict checklist remains the safe default for those callers
-    (kernel-patch landing dialogue review)."""
+    """``critic_decision_request`` has no inbox proposals, so the legacy strict checklist stays the safe default."""
     rev, _, _ = reviewer
     bundle = rev.prepare_review({
         "kind": "critic_decision_request",
@@ -312,7 +305,6 @@ def test_commit_review_for_coordinator_inbox_emits_intent_envelope(reviewer):
     verdicts = [i["payload"]["verdict"] for i in intents]
     assert types == ["review_verdict", "review_verdict"]
     assert sorted(verdicts) == ["approve", "reject"]
-    # Reviewed msg_ids tracked
     assert sm.is_msg_already_reviewed("sess_c", "aaa1")
     assert sm.is_msg_already_reviewed("sess_c", "bbb2")
 
@@ -473,9 +465,7 @@ def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
         "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
     )
     rev.prepare_review(_coordinator_request(prompt, "sess_cache_e2e"))
-    # Now flush KB to ensure the second call uses cache.
     kb.reset()
     bundle = rev.prepare_review(_coordinator_request(prompt, "sess_cache_e2e"))
-    # First call cached the result; KB is now empty but bundle still
-    # contains priors because of cache hit.
+    # KB is now empty, but the bundle still has priors from the cache hit.
     assert bundle.kb_priors_by_proposal["aaa"]

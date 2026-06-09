@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for framework_agent.runtime.tools_api.
-
-Hermetic - patches sources.primus_cortex / sources.github helpers so
-no real HTTP traffic is involved.
-"""
+"""Tests for framework_agent.runtime.tools_api. Hermetic - patches sources.primus_cortex / sources.github helpers so no real HTTP traffic is involved."""
 
 from __future__ import annotations
 

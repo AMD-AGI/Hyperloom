@@ -32,8 +32,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Reuse HuggingFaceClient from the existing script — single source of truth
-# for the pool-then-filter logic.
+# Reuse HuggingFaceClient for the pool-then-filter logic.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient   # noqa: E402
 
@@ -163,7 +162,6 @@ def _dashboard_task_ids() -> set[str]:
         new_count = len(page_tids - tids)
         tids.update(page_tids)
         pages_seen += 1
-        # 500-row pages; stop when we've drained
         if new_count == 0 or pages_seen >= 20:
             break
         offset += 500
@@ -332,13 +330,10 @@ def _apply_exclusions(repos: list[str]) -> list[str]:
 
 
 def _load_candidate_entries(cands_path: Path) -> list[dict]:
-    """Load candidates.json (built by build_candidates.py) and take a batch
-    slice based on INPUT_BATCH_INDEX (0-based) + INPUT_BATCH_SIZE.
+    """Load candidates.json and take an INPUT_BATCH_INDEX/INPUT_BATCH_SIZE slice.
 
-    If INPUT_BATCH_SIZE is unset or 0, returns all candidates (whole-batch
-    run). The slice is ordered as the candidates list appears in the JSON
-    (which is HF download rank). Use this for deterministic, reproducible
-    batch dispatch.
+    BATCH_SIZE unset/0 returns all candidates. Slice order follows the JSON
+    (HF download rank) for deterministic batch dispatch.
     """
     try:
         data = json.loads(cands_path.read_text(encoding="utf-8"))
@@ -376,8 +371,7 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
     except ValueError:
         return 0
     batches = max((pool_size + batch_size - 1) // batch_size, 1)
-    # GITHUB_RUN_NUMBER is 1-based; subtract one so the first run maps to
-    # slice 0 rather than slice 1.
+    # GITHUB_RUN_NUMBER is 1-based; subtract one so run 1 maps to slice 0.
     return (rn - 1) % batches
 
 
@@ -519,8 +513,7 @@ def collect_entries() -> list[dict | str]:
     if cands_file:
         cands_path = Path(cands_file)
         if not cands_path.is_absolute():
-            # Relative to repo root (workflow `working-directory: ci` means
-            # CWD = ci/, so resolve from there's parent).
+            # Resolve relative to CWD and its parent (workflow CWD is ci/).
             cwd = Path.cwd()
             for base in [cwd, cwd.parent]:
                 p = base / cands_file
@@ -538,8 +531,7 @@ def collect_entries() -> list[dict | str]:
         exclude_leaderboard = _truthy(os.environ.get("INPUT_EXCLUDE_LEADERBOARD"))
         exclude_active = _truthy(os.environ.get("INPUT_EXCLUDE_ACTIVE_WORKFLOWS"))
         if exclude_leaderboard:
-            # Leaderboard exclusion is only for discovery mode; production
-            # reruns set this false. Apply globally when requested.
+            # Discovery mode only; production reruns set this false.
             excluded_models = _leaderboard_models()
             print(f"leaderboard exclusion: {len(excluded_models)} models",
                   file=sys.stderr)
@@ -598,8 +590,7 @@ def main() -> int:
     entries = collect_entries()
     if not entries:
         print("no models selected — empty matrix", file=sys.stderr)
-        # GitHub Actions errors on empty matrix; emit a sentinel that the
-        # downstream job can detect and skip.
+        # Empty include sentinel; GitHub Actions errors on a truly empty matrix.
         matrix = {"include": []}
     else:
         matrix = {"include": [_matrix_entry(e) for e in entries]}

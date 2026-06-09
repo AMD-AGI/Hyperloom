@@ -2,12 +2,10 @@
 
 """Shell helpers for trusted framework exploration commands.
 
-Pure subprocess + template rendering with no external deps. The
-template renderer accepts an optional ``shell_quote`` flag that
-wraps each substituted value in ``shlex.quote`` so an attacker who
-managed to seed a candidate ref or path with shell metacharacters
-cannot break out of the rendered command string. Callers that
-render *paths* (not shell commands) keep ``shell_quote=False``.
+Pure subprocess + template rendering, no external deps. The renderer's
+optional ``shell_quote`` flag wraps each substituted value in ``shlex.quote``
+so a candidate ref/path seeded with shell metacharacters can't break out of
+the command string. Callers rendering paths (not commands) keep it False.
 """
 
 from __future__ import annotations
@@ -63,15 +61,9 @@ def render_template(
 ) -> str:
     """Render known ``{var}`` placeholders, raise on unknown placeholders.
 
-    Does not touch JSON-style ``{...}`` braces that don't match the
-    ``[A-Za-z_][A-Za-z0-9_]*`` identifier pattern.
-
-    When ``shell_quote=True`` each substituted value is wrapped with
-    :func:`shlex.quote`. Use this when the rendered string will be
-    handed to a shell (e.g. ``subprocess.run(shell=True)``); the
-    quoting is a no-op for plain alphanumeric / path-safe values
-    and transparently neutralises shell metacharacters in any
-    untrusted input.
+    Leaves JSON-style ``{...}`` braces that don't match the
+    ``[A-Za-z_][A-Za-z0-9_]*`` identifier pattern untouched. ``shell_quote=True``
+    wraps each value in :func:`shlex.quote` for shell-bound strings.
     """
     rendered = template
     for key, value in variables.items():

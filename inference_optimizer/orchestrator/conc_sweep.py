@@ -2,42 +2,9 @@
 
 """Post-optimization concurrency sweep.
 
-Runs the *same* Magpie benchmark machinery used by ``baseline`` /
-``sweep`` over a fixed grid of CONC values, once with the baseline
-server (no extra args / envs) and once with the final ``current_best``
-config. The output is a JSON/CSV report that the frontend pairs with
-the roofline ceiling to show "baseline vs optimized" curves across
-concurrency.
-
-Trigger
--------
-This is a post-hook invoked from ``cli.py`` after the close-sequence
-report has been written and right before ``_print_final_summary``. It
-is **on by default** (operator opts out via ``--no-enable-conc-sweep``
-or ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``); each concurrency point
-relaunches sglang and the full grid can take ~30 min on a single
-8xMI300 box, so the total wall-clock is bounded by
-``--conc-sweep-total-budget-sec`` (default 2.5h) and the remaining
-session deadline.
-
-Skip rules (return ``status="skipped"`` without launching anything):
-
-* ``state.baseline_tput <= 0``     — no baseline to compare against.
-* ``state.isl <= 0 or state.osl <= 0`` — workload shape unknown.
-* ``current_best`` has no extra args **and** no extra envs — nothing
-  was actually optimized; running this would just re-measure baseline
-  twice.
-
-Outputs
--------
-* ``<sd>/runs/conc_sweep/<task_id>/`` — per-variant Magpie workspaces
-  (same on-disk layout as ``runs/sweep/...``).
-* ``<sd>/reports/conc_sweep_summary.json`` — frontend-friendly summary
-  with both curves and a per-conc comparison.
-* ``<sd>/reports/conc_sweep_raw.csv``      — one row per benchmark
-  point for ad-hoc analysis.
-* ``<sd>/reports/final.json`` gains a ``conc_sweep_summary`` pointer
-  (see ``action_executors/report.py``).
+Runs the Magpie grid over CONC values for baseline vs ``current_best``,
+producing JSON/CSV curves. cli.py post-hook (opt out via
+``--no-enable-conc-sweep``).
 """
 
 from __future__ import annotations
@@ -73,38 +40,21 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1.0"
 
-# Frontend-friendly default ladder. Operators can override with
-# ``--conc-sweep-concs``. We deliberately span 1 → 128 in powers of 2
-# so the curve covers both latency-bound (low CONC) and saturation
-# (high CONC) regimes.
+# Default ladder (override via ``--conc-sweep-concs``).
 DEFAULT_CONCS: list[int] = [1, 2, 4, 8, 16, 32, 64, 128]
 
 # Mirrors ``sweep.py``'s adaptive NUM_PROMPTS heuristic.
 DEFAULT_NUM_PROMPTS_FACTOR = 5
 
-# Per-variant timeout (seconds). Baseline + optimized each get one
-# subprocess per CONC, so 30 min/point bounds the full sweep at
-# 30min × 8 × 2 = 8h in the worst case. Operator override via
-# ``--conc-sweep-timeout-sec``.
+# Per-variant timeout (seconds); override via ``--conc-sweep-timeout-sec``.
 DEFAULT_VARIANT_TIMEOUT_SEC = 1800
 
-# Total wall-clock budget (seconds) across the whole conc_sweep
-# action. Caps how long the action itself may run before stopping
-# the remaining variants and writing whatever data was collected.
-# Default 9000 (~2.5h); operator override via
-# ``--conc-sweep-total-budget-sec``. Set to 0 or negative to disable
-# (run unbounded until per-variant timeouts trip). conc_sweep runs
-# as a SWEEP-phase action so it is also bounded above by the main
-# session wall-clock deadline.
+# Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``, <=0 disables.
 DEFAULT_TOTAL_BUDGET_SEC = 9000
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
-    """Return ``(has_opt, args, envs)`` based on ``state.current_best``.
-
-    Either non-empty side counts as "optimized" — operators sometimes
-    accept env-only or arg-only wins.
-    """
+    """Return ``(has_opt, args, envs)`` from ``state.current_best`` (either non-empty side counts as optimized)."""
     cb = state.current_best or {}
     args = str(cb.get("extra_server_args") or "").strip()
     envs_raw = cb.get("extra_envs") or {}
@@ -121,8 +71,7 @@ def _build_grid(
     optimized_args: str,
     optimized_envs: dict[str, str],
 ) -> list[GridVariant]:
-    """Two-arm grid: ``baseline`` (empty overrides) × ``optimized``
-    (current_best) crossed with every requested CONC."""
+    """Two-arm grid: ``baseline`` × ``optimized`` crossed with every requested CONC."""
     arms: list[tuple[str, str, dict[str, str]]] = [
         ("baseline",  "",              {}),
         ("optimized", optimized_args,  dict(optimized_envs)),
@@ -148,11 +97,7 @@ def _build_grid(
 
 
 def _budget_skip_result(variant: GridVariant) -> VariantResult:
-    """Synthetic VariantResult for a variant that never ran because the
-    total wall-clock budget was already exhausted. Status ``skipped`` is
-    new in conc_sweep (vs the grid_runner's ``succeeded`` / ``failed``)
-    so the frontend can tell "we ran out of time" apart from "Magpie
-    crashed". Speedup aggregation treats null throughput uniformly."""
+    """Synthetic VariantResult for a budget-exhausted variant; ``skipped`` status distinguishes "out of time" from "Magpie crashed"."""
     return VariantResult(
         name=variant.name,
         extra_server_args=variant.extra_server_args,
@@ -292,22 +237,7 @@ def _build_roofline_ceiling(
     baseline_points: list[dict[str, Any]],
     optimized_points: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Per-conc decode roofline alongside the measured curves.
-
-    Reuses :mod:`orchestrator.roofline_ceiling` (the same module that
-    powers ``compute_roofline_breakdown_from_state``) so the ceiling
-    here matches the one already surfaced in the rest of the run
-    (e.g. ``state.history_snapshots``). T_cmp is batch-independent so
-    we compute it once; T_mem and binding are re-derived per CONC.
-
-    MBU% is the headline number: ``measured / T_peak × 100``. Both
-    baseline and optimized arms get one when the corresponding point
-    succeeded; otherwise ``None`` so renderers can show ``"—"``.
-
-    Safe degrade: returns ``None`` when model meta or GPU spec is
-    unavailable so the caller can omit the field, mirroring the rest
-    of the conc_sweep payload's no-placeholder policy.
-    """
+    """Per-conc decode roofline alongside the measured curves (T_cmp once, T_mem per CONC; MBU% = measured/T_peak×100). ``None`` when model meta / GPU spec is unavailable."""
     model_path = str(getattr(state, "model_path", "") or "")
     precision = str(getattr(state, "precision", "") or "") or "bf16"
     meta = load_model_meta(model_path, precision_hint=precision)
@@ -348,8 +278,7 @@ def _build_roofline_ceiling(
             osl=osl,
             concurrency=c,
         )
-        # Resolve T_peak / binding — mirrors the branching used by
-        # compute_roofline_breakdown_from_state.
+        # Resolve T_peak / binding (mirrors compute_roofline_breakdown_from_state).
         if t_mem <= 0 and t_cmp <= 0:
             bound_kind = "unknown"
             t_peak = 0.0
@@ -429,17 +358,9 @@ async def run_conc_sweep(
     num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
     write_reports: bool = True,
 ) -> dict[str, Any]:
-    """Run the full conc-sweep post-hook end-to-end.
-
-    Always returns a dict (never raises). When skipped, no files are
-    written. When executed, both ``conc_sweep_summary.json`` and
-    ``conc_sweep_raw.csv`` are written to ``<sd>/reports/`` and the
-    summary dict is returned (and also serialized).
-    """
+    """Run the full conc-sweep post-hook end-to-end (always returns a dict; never raises; no files written when skipped)."""
     session_dir = Path(session_dir)
-    # ``None`` → fall back to the documented default ladder. An explicit
-    # empty list is treated as a caller intent ("nothing to sweep") and
-    # short-circuits via ``empty_conc_list`` below.
+    # ``None`` → default ladder; an explicit empty list short-circuits via ``empty_conc_list`` below.
     concs = list(concs) if concs is not None else list(DEFAULT_CONCS)
     isl = int(getattr(state, "isl", 0) or 0)
     osl = int(getattr(state, "osl", 0) or 0)
@@ -456,9 +377,7 @@ async def run_conc_sweep(
     if not concs:
         return _skip("empty_conc_list")
 
-    # Resolve the base YAML. Prefer the session's materialized baseline
-    # config (already pinned to TP/MAX_MODEL_LEN/PRECISION/...). Fall
-    # back to the shipped baseline asset when missing.
+    # Prefer the session's materialized baseline config; fall back to the shipped asset.
     base_yaml_raw = (
         str(getattr(state, "baseline_config_path", "") or "").strip()
         or str(default_baseline_config())
@@ -471,9 +390,7 @@ async def run_conc_sweep(
     workspace = runs_root(session_dir) / "conc_sweep" / task_id
     workspace.mkdir(parents=True, exist_ok=True)
 
-    # Workload envs were already baked into ``baseline_config_path`` at
-    # baseline time, so we only need to re-materialize if we're falling
-    # back to the shipped asset. Idempotent either way.
+    # Re-materialize (idempotent) in case we fell back to the shipped asset.
     resolved_model = (
         str(getattr(state, "model_path", "") or "").strip()
         or os.environ.get("MODEL_PATH", "").strip()
@@ -499,12 +416,7 @@ async def run_conc_sweep(
         optimized_envs=opt_envs,
     )
 
-    # Independent total wall-clock budget for the post-hook itself.
-    # ``<=0`` disables the gate (legacy unbounded behaviour, only
-    # per-variant timeouts trip). We run variants one at a time so we
-    # can stop cleanly the moment the budget is exhausted — cold-start
-    # cost per variant is the same as the underlying sweep executor,
-    # which also relaunches Magpie per (CONC, ISL, OSL) combo.
+    # Independent total wall-clock budget (<=0 disables); variants run one at a time so we can stop cleanly when exhausted.
     has_budget = total_budget_sec > 0
     started_at = time.time()
     deadline = started_at + total_budget_sec if has_budget else None
@@ -531,9 +443,7 @@ async def run_conc_sweep(
                 results.append(_budget_skip_result(v))
             break
 
-        # Per-variant cap = min(per-variant timeout, remaining budget),
-        # so the last variant doesn't blow the wall-clock by another
-        # full ``variant_timeout_sec``.
+        # Per-variant cap = min(timeout, remaining budget) so the last variant doesn't blow the wall-clock.
         effective_timeout = variant_timeout_sec
         if has_budget and remaining is not None:
             effective_timeout = max(1, min(variant_timeout_sec, int(remaining)))
@@ -605,10 +515,7 @@ async def run_conc_sweep(
         rdir.mkdir(parents=True, exist_ok=True)
         json_path = rdir / "conc_sweep_summary.json"
         csv_path = rdir / "conc_sweep_raw.csv"
-        # Self-referential paths must be set BEFORE the dump so the
-        # on-disk JSON carries them; downstream consumers (frontend
-        # "download CSV" button, report.py pointer) read the file,
-        # not the in-memory payload.
+        # Set self-referential paths BEFORE the dump so the on-disk JSON carries them (consumers read the file, not the in-memory payload).
         payload["report_json_path"] = json_path.as_posix()
         payload["report_csv_path"] = csv_path.as_posix()
         json_path.write_text(
@@ -616,9 +523,7 @@ async def run_conc_sweep(
             encoding="utf-8",
         )
         _write_csv(csv_path, baseline_points + optimized_points)
-        # final.json pointer is added by report.py at CLOSE -- the
-        # action runs strictly before CLOSE so report.py can read
-        # this file freshly. See ``_write_conc_sweep_pointer`` there.
+        # final.json pointer is added by report.py at CLOSE (this action runs before CLOSE).
 
     log.info(
         "conc_sweep: done — successful_pairs=%d failed_pairs=%d best_speedup=%s",

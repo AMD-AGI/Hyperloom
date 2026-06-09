@@ -26,10 +26,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             skipped=True,
         )
 
-    # The collector historically wrote two shapes:
-    #   * V2: list[dict] with structured payload keys
-    #   * V1: list[str] (just the prompt body, no decision)
-    # Normalize both into dicts so the rest of this function is uniform.
+    # Normalize both historical shapes (V2 list[dict], V1 list[str]) into dicts.
     cr_norm: list[dict[str, Any]] = []
     for c in cr:
         if isinstance(c, dict):

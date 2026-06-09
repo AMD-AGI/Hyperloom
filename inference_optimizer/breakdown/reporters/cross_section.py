@@ -1,21 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Cross-section fact synthesis used by the executive summary + LLM
-prompt.
+"""Cross-section fact synthesis for the executive summary + LLM prompt.
 
-Every fact this module surfaces is computed deterministically from the
-``session_breakdown.json`` dict (and the renderer outputs already
-produced for each section). The LLM is forbidden from inventing
-numbers; the user prompt only contains:
-
-* the ``key_facts`` from each renderer,
-* the ``decisions`` from each renderer,
-* the ``GlobalFacts`` produced here.
-
-If you find yourself wanting the LLM to "figure something out across
-sections" (gain attribution, capability gating, data-quality flags),
-add it here instead. The numerical guard rails are this module's
-responsibility.
+All facts are computed deterministically here (the LLM never invents
+numbers); any cross-section reasoning belongs in this module.
 """
 
 from __future__ import annotations
@@ -30,12 +18,7 @@ __all__ = ["GlobalFacts", "build_global_facts"]
 
 @dataclass(frozen=True)
 class GlobalFacts:
-    """One-shot fact pack that the LLM uses to build the executive summary.
-
-    Field naming follows the dashboard / handover-doc taxonomy so an
-    LLM that has never seen this codebase still understands what
-    "kernel_pipeline_funnel" or "attribution_method" mean.
-    """
+    """One-shot fact pack the LLM uses to build the executive summary."""
 
     headline: str                       # 1-line "baseline X → final Y = +Z%"
     stop_reason: str
@@ -86,14 +69,10 @@ def _workload_summary(workload: dict[str, Any]) -> str:
 def _gain_attribution_lines(
     breakdown: dict[str, Any],
 ) -> tuple[list[str], str]:
-    """Compute per-source gain attribution + which method we used.
+    """Compute per-source gain attribution + the method used.
 
-    Priority:
-    1. ``attribution.source_breakdown.*_pct_of_total`` when populated
-       and the sum is non-zero (validated split).
-    2. ``final.action_path`` walked sequentially when only one entry
-       exists (single-source attribution is unambiguous).
-    3. ``optimization_stack`` reconstruction (best-effort) — flagged.
+    Priority: validated ``source_breakdown`` split, then single-entry
+    ``final.action_path``, then best-effort ``optimization_stack``.
     """
     attribution = breakdown.get("attribution") or {}
     sb = attribution.get("source_breakdown") or {}
@@ -114,7 +93,6 @@ def _gain_attribution_lines(
         ]
         return lines, "validated"
 
-    # Fall back to final.action_path single-source statement.
     final = breakdown.get("final") or {}
     path = final.get("action_path") or []
     gain_v = _to_float(final.get("cumulative_gain_pct_validated"))
@@ -156,13 +134,7 @@ def _data_quality_flags(
     breakdown: dict[str, Any],
     rendered: list[RenderedSection],
 ) -> list[str]:
-    """Collect data-quality warnings from every renderer + a few global
-    cross-section checks the renderers can't easily see.
-
-    Returns de-duplicated flags (renderer-level warnings sometimes
-    overlap with global-level checks, which used to produce 3 copies
-    of the same telemetry note).
-    """
+    """Collect de-duplicated data-quality warnings from renderers + global cross-section checks."""
     flags: list[str] = []
     seen: set[str] = set()
 
@@ -173,23 +145,19 @@ def _data_quality_flags(
         flags.append(line)
 
     for sec in rendered:
-        # Suppress warnings on sections we'll drop from the report
-        # anyway — no point flagging them globally if the user never
-        # sees the section.
+        # Skip dropped sections; no point flagging what the user won't see.
         if sec.skipped:
             continue
         for w in sec.warnings:
             _push(f"[{sec.section_id}] {w}")
 
-    # Global cross-section checks.
     if (breakdown.get("attribution") or {}).get("notes"):
         for n in breakdown["attribution"]["notes"]:
             _push(f"[attribution] {n}")
     cap = breakdown.get("capability_summary") or {}
     val = cap.get("validate_stack") or {}
     if val.get("status") == "not_attempted":
-        # Validated cumulative gain still gets reported elsewhere, so be
-        # explicit that this archived action did not re-run in-session.
+        # Be explicit that this archived action did not re-run in-session.
         _push(
             "[legacy validate_stack] never ran — cumulative_gain_pct_validated "
             "comes from state, not a final archived-action re-run."

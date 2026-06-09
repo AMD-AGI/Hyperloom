@@ -1,11 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Phase timeline renderer — chronological action events.
-
-We cap the table at 30 entries (newest last) to keep the report
-readable. The deterministic markdown block still shows total count so
-operators know the table is truncated.
-"""
+"""Phase timeline renderer — chronological action events (table capped at 30, newest last)."""
 
 from __future__ import annotations
 
@@ -55,7 +50,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if len(pt) > _MAX_ROWS:
         md = f"_Showing last {_MAX_ROWS} of {len(pt)} events._\n\n" + md
 
-    # Per-decision histogram, useful at a glance.
     histo: dict[str, int] = {}
     for ev in pt:
         d = str(ev.get("decision") or "(none)")

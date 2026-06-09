@@ -2,15 +2,8 @@
 
 """Mock Robustness backend — heartbeat-only, non-intervening.
 
-Used in P0 main-path tests. Real Robustness (§7.4 / §19) implements
-Robustness monitoring / RCA / recovery / scheduling-police; the mock just keeps the
-reactor loop alive without taking any disruptive action.
-
-Behaviour:
-
-* Every tick: emit ``send_message{topic="heartbeat", body_md="ok"}``.
-* Optionally configurable to emit one ``alert`` after N ticks (testing
-  the Coordinator's alert pipe without hand-rolling a new mock).
+Used in P0 main-path tests. Emits a heartbeat every tick, optionally one
+``alert`` after N ticks (``alert_after_ticks``) to exercise the alert pipe.
 """
 
 from __future__ import annotations

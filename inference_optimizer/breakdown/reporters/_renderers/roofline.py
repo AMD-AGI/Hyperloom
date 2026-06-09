@@ -1,15 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Roofline comparison renderer.
+"""Roofline comparison renderer — one block per discovered ``final.json``.
 
-Surfaces the ``roofline`` section of the breakdown — one block per
-discovered ``final.json``. Each block lists the source path, comparison
-mode, baseline + latest snapshot percentages and top-kernel, and any
-``delta`` values the new tool emitted.
-
-The section is silently skipped when the breakdown has no ``roofline``
-key or it is an empty list, so older breakdowns built before P3-roofline
-keep rendering identically.
+Silently skipped when ``roofline`` is absent/empty (pre-P3-roofline JSONs).
 """
 
 from __future__ import annotations
@@ -90,9 +83,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         if delta_md:
             parts.append(delta_md)
             parts.append("")
-        # Surface a one-liner fact so the executive summary / LLM prompt
-        # can mention the most actionable signal without reading the
-        # markdown block.
+        # One-liner fact so the summary can cite the signal without the table.
         if isinstance(baseline, dict):
             tk = baseline.get("top_kernel") or {}
             facts.append(

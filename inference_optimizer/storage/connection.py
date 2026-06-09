@@ -2,18 +2,10 @@
 
 """SQLite connection wrapper.
 
-Design choices:
-
-* Pure stdlib ``sqlite3`` — no extra dependency
-* Mode = WAL with ``synchronous=FULL`` and ``busy_timeout=30s``
-  (``FULL`` keeps writes crash-safe across WAL checkpoints; see issue #242)
-* Async surface uses ``asyncio.to_thread`` so the rest of the codebase can
-  ``await`` calls without rewiring; SQLite ops are short and IO-bound, so
-  the thread-hop is negligible compared to actual I/O
-* ``transaction()`` runs ``BEGIN IMMEDIATE`` so concurrent writers don't
-  deadlock the way deferred transactions can. This is what gives us the
-  cross-table atomicity that ADR-42 promises (one txn covering events +
-  cursors + tasks + leases)
+Stdlib ``sqlite3``, WAL + ``synchronous=FULL`` (crash-safe across checkpoints,
+issue #242). Async surface wraps sync ops in ``asyncio.to_thread``.
+``transaction()`` uses ``BEGIN IMMEDIATE`` for cross-table atomicity (ADR-42:
+events + cursors + tasks + leases) without deferred-txn deadlocks.
 """
 
 from __future__ import annotations
@@ -66,10 +58,9 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
 class SqliteConnection:
     """Async-friendly wrapper over a single SQLite connection.
 
-    The underlying connection is *single*; concurrent callers serialize
-    through ``self._async_lock``. SQLite WAL gives multi-reader/single-writer
-    at the file level anyway, so a writer-pool would only add lock
-    contention without throughput gain for our workload.
+    Single underlying connection; concurrent callers serialize through
+    ``self._async_lock`` (WAL is single-writer anyway, so a pool would only
+    add contention).
     """
 
     def __init__(self, db_path: str | Path):
@@ -78,9 +69,7 @@ class SqliteConnection:
         self._async_lock = asyncio.Lock()
         self._sync_lock = threading.RLock()
 
-    # ------------------------------------------------------------------
     # sync helpers (tests / boot / migrations)
-    # ------------------------------------------------------------------
     @property
     def raw(self) -> sqlite3.Connection:
         return self._conn
@@ -120,9 +109,7 @@ class SqliteConnection:
             finally:
                 cur.close()
 
-    # ------------------------------------------------------------------
     # async surface
-    # ------------------------------------------------------------------
     async def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         async with self._async_lock:
             await asyncio.to_thread(self._exec_and_commit, sql, params)

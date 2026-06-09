@@ -1,14 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Lightweight GPU micro-benchmark for the explore --execute e2e path.
-
-Runs sglang's RMSNorm kernel on a fixed (N=4096, H=8192, bf16) input and
-emits a benchmark.json compatible with framework_agent.explorer's
-``_evaluate_candidate``. The numbers are real (timed via cuda.synchronize),
-but identical across candidates because we don't rebuild sglang from the
-PR's worktree in this sandbox - this exercises the full --execute code
-path and the winner gate without needing the full framework build chain.
-"""
+"""GPU micro-benchmark exercising the explore --execute e2e path: times sglang RMSNorm (N=4096, H=8192, bf16) and emits an ``explorer._evaluate_candidate``-compatible benchmark.json."""
 
 from __future__ import annotations
 

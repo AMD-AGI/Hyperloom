@@ -2,22 +2,8 @@
 
 """PR-A6 (Arbor-into-Hyperloom): per-domain specialist prompt templates.
 
-The v0.8 M5 ``specialist_prompt_builder`` shipped one template
-(``serving_specialist``) and let the other five domains fall back
-to the generic identity. PR-A6 ports Arbor's "agent expertise" table
-into per-domain focus templates so each specialist starts with the
-right corner of the search space (KB anchor, source roots, winning
-techniques, pitfalls) baked into Section 1 of the system prompt.
-
-These tests pin three contracts:
-
-* All six domains have a per-domain focus template.
-* The rendered prompt for each domain mentions the domain's
-  characteristic KB anchor + signature techniques (a coarse "have we
-  actually customised this template?" check; not a snapshot diff).
-* The M5 active set has been widened to cover all six domains, so
-  ``SpecialistRunner`` no longer logs a "generic template" note for
-  the kernel / comm / compiler / system / pr_intel domains.
+Pins that every domain has a focus template, each rendered prompt mentions
+its signature techniques, and the M5 active set covers all domains.
 """
 
 from __future__ import annotations
@@ -53,9 +39,7 @@ def _build(domain_key: str) -> str:
     return system + "\n" + user
 
 
-# ---------------------------------------------------------------------------
 # 1. Coverage — every catalogue domain has a focus template
-# ---------------------------------------------------------------------------
 def test_every_domain_has_focus_template():
     for domain in SPECIALIST_DOMAINS:
         assert domain.key in _DOMAIN_FOCUS_TEMPLATES, (
@@ -63,23 +47,13 @@ def test_every_domain_has_focus_template():
         )
 
 
-def test_specialist_domains_m5_covers_all_six():
-    """PR-A6 widened the M5 active set so SpecialistRunner no longer
-    logs ``generic prompt template`` notes for M6-only domains.
-
-    IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow; the
-    read-only ``research_scout_specialist`` is the 8th. We keep the
-    assertion shape (M5 still covers the full catalogue) but bump the
-    expected count.
-    """
+def test_specialist_domains_m5_covers_all_active_domains():
+    """The M5 active set covers the full catalogue (seven entries after P3_17 retired session_steward_specialist)."""
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 8
+    assert len(SPECIALIST_DOMAINS_M5) == 7
 
 
-# ---------------------------------------------------------------------------
 # 2. Per-domain content checks — each template mentions its signature
-# ---------------------------------------------------------------------------
 def test_serving_specialist_mentions_scheduler_and_kv_cache():
     text = _build("serving_specialist")
     for marker in (
@@ -90,9 +64,7 @@ def test_serving_specialist_mentions_scheduler_and_kv_cache():
 
 
 def test_serving_specialist_has_source_patch_playbook():
-    """Capability layer (Arbor-into-Hyperloom): the serving focus must
-    guide AUTHORING source patches (not just config flags) and carry the
-    distilled framework safety priors (ALWAYS_ON / NEVER_TOUCH)."""
+    """The serving focus must guide authoring source patches and carry the framework safety priors (ALWAYS_ON / NEVER_TOUCH)."""
     text = _build("serving_specialist")
     for marker in (
         "Source-patch playbook",   # the code-authoring section
@@ -149,14 +121,10 @@ def test_pr_intel_specialist_mentions_cross_repo_research():
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
-# ---------------------------------------------------------------------------
 # 3. SpecialistRunner no longer marks any domain as "generic template"
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
-    """Defensive: when the M5 active set covers a domain, the runner
-    must NOT add a ``post-M5 ... generic prompt template`` note to its
-    SpecialistRunResult.notes."""
+    """When the M5 active set covers a domain, the runner must NOT add a generic-template note."""
     from inference_optimizer.orchestrator.backends.mock_backend import (
         MockBackend, MockTurn, ScriptedPlan,
     )
@@ -205,28 +173,9 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
         )
 
 
-# ============================================================================
 # Merged from test_v08_m5_specialist.py
-# ============================================================================
 
-"""v0.8 M5 — Specialist sub-agent framework tests.
-
-Covers KB_design §3.5 + §3.13 M5:
-
-* Intent layer: ``SPECIALIST_DONE`` parses through the standard envelope
-  validator (intent_parser).
-* PolicyGate R2 (``specialist_dispatch_source``): only Orchestration
-  dispatches, domain ∈ SPECIALIST_DOMAIN_KEYS, gap_canonical_id
-  required, max_turns bounded.
-* PolicyGate R3 (``specialist_done_source``): only ``specialist:<task_id>``
-  from_agent may emit specialist_done, payload schema enforced.
-* Specialist prompt builder: 9 sections present, system / user split.
-* SpecialistRunner: happy path (Mock backend emits specialist_done) +
-  failure synthesis (no done → empty done synthesised).
-* SharedState round bookkeeping (record_specialist_round /
-  bump_specialist_domain_empty_streak / update_last_specialist).
-* research_lane lane registration + LANE_CONFLICTS empty.
-"""
+"""v0.8 M5 — Specialist sub-agent framework tests (KB_design §3.5 + §3.13 M5)."""
 
 
 from dataclasses import dataclass
@@ -277,9 +226,7 @@ from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder i
 )
 
 
-# ---------------------------------------------------------------------------
 # Test fixtures
-# ---------------------------------------------------------------------------
 @pytest.fixture
 def gate() -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry())
@@ -316,28 +263,17 @@ def _valid_done_payload(
     return payload
 
 
-# ===========================================================================
 # 1. specialist_domains catalogue
-# ===========================================================================
-def test_specialist_domains_catalogue_has_six_entries():
-    """IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow; the
-    read-only ``research_scout_specialist`` is the 8th. The test name
-    stays for git-blame continuity but the assertion tracks the actual
-    count.
-    """
-    assert len(SPECIALIST_DOMAINS) == 8
+def test_specialist_domains_catalogue_has_seven_entries():
+    """P3_17 retired session_steward_specialist; the active catalogue has seven entries."""
+    assert len(SPECIALIST_DOMAINS) == 7
     assert SPECIALIST_DOMAIN_KEYS == frozenset(
         d.key for d in SPECIALIST_DOMAINS
     )
 
 
 def test_serving_specialist_is_M5_active():
-    """PR-A6 (Arbor-into-Hyperloom) widened ``SPECIALIST_DOMAINS_M5``
-    to cover all six domains because each now has a per-domain prompt
-    template (``_DOMAIN_FOCUS_TEMPLATES``). serving_specialist
-    remains active; the other five are now also active.
-    """
+    """PR-A6 widened ``SPECIALIST_DOMAINS_M5`` to the full catalogue (every domain now has a focus template)."""
     assert "serving_specialist" in SPECIALIST_DOMAINS_M5
     # PR-A6: M5 active set now equals the full catalogue.
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
@@ -348,9 +284,7 @@ def test_get_domain_returns_none_for_unknown():
     assert get_domain("serving_specialist").kb_anchor == "framework"
 
 
-# ===========================================================================
 # 2. intent_parser — SPECIALIST_DONE envelope round-trip
-# ===========================================================================
 def test_specialist_done_envelope_passes_validation():
     envelope = {
         "intents": [{
@@ -374,9 +308,7 @@ def test_specialist_done_envelope_missing_required_field():
         validate_envelope(envelope)
 
 
-# ===========================================================================
 # 3. PolicyGate R2 — specialist_dispatch_source
-# ===========================================================================
 def test_R2_orchestration_can_dispatch_specialist(gate):
     gate.validate_intent("orchestration", Intent(
         type=IntentType.DELEGATE,
@@ -470,12 +402,8 @@ def test_R2_max_turns_zero_denied(gate):
 
 
 def test_R2_specialist_action_skips_unknown_action_registry_path(gate):
-    """``specialist`` has no yaml meta; the synthetic action_name must
-    bypass the standard ActionRegistry lookup that would otherwise
-    deny it as ``unknown_action``."""
-    # Even when an ActionRegistry is wired, specialist still passes
-    # (the registry-lookup path is guarded by the specialist branch
-    # before the unknown_action gate fires).
+    """The synthetic ``specialist`` action_name bypasses the ActionRegistry lookup that would deny it as ``unknown_action``."""
+    # Even with an ActionRegistry wired, the specialist branch is checked before the unknown_action gate.
     from inference_optimizer.orchestrator.action_registry import ActionRegistry
     gate_with_registry = PolicyGate(
         role_registry=default_role_registry(),
@@ -493,9 +421,7 @@ def test_R2_specialist_action_skips_unknown_action_registry_path(gate):
     ))
 
 
-# ===========================================================================
 # 4. PolicyGate R3 — specialist_done_source
-# ===========================================================================
 def test_R3_specialist_done_from_specialist_agent_ok(gate):
     gate.validate_intent(
         f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
@@ -504,9 +430,7 @@ def test_R3_specialist_done_from_specialist_agent_ok(gate):
 
 
 def test_R3_specialist_done_from_orchestration_denied(gate):
-    """Non-``specialist:*`` agents cannot emit specialist_done — the
-    orchestration role's allowed_intents set doesn't include
-    SPECIALIST_DONE so the standard role-matrix gate fires."""
+    """Non-``specialist:*`` agents cannot emit specialist_done (the role-matrix gate fires)."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", Intent(
             type=IntentType.SPECIALIST_DONE,
@@ -612,9 +536,7 @@ def test_R3_specialist_done_confidence_out_of_range_denied(gate):
     assert exc.value.rule == "specialist_done_source"
 
 
-# ===========================================================================
 # 5. research_lane lane registration (KB_design §3.7)
-# ===========================================================================
 def test_research_lane_in_known_lanes():
     assert "research_lane" in KNOWN_LANES
 
@@ -629,9 +551,7 @@ def test_research_lane_has_no_conflicts():
         )
 
 
-# ===========================================================================
 # 6. specialist_prompt_builder — 9-section assembly
-# ===========================================================================
 def test_prompt_builder_emits_nine_sections():
     sys_p, usr_p = build_specialist_prompts_for_domain(
         task_id="task-001",
@@ -678,9 +598,7 @@ def test_prompt_builder_unknown_domain_raises():
         )
 
 
-# ===========================================================================
 # 7. SpecialistRunner — happy path + failure synth
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_specialist_runner_happy_path(tmp_path):
     """MockBackend emits a valid specialist_done; runner persists files."""
@@ -728,9 +646,7 @@ async def test_specialist_runner_happy_path(tmp_path):
 
 @pytest.mark.asyncio
 async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
-    """When the backend never emits specialist_done, the runner caps at
-    max_turns and synthesises an empty done so the EXPLORE round
-    can proceed (Inv-5.3)."""
+    """When the backend never emits specialist_done, the runner caps at max_turns and synthesises an empty done (Inv-5.3)."""
     # Plan keeps emitting heartbeats; never produces a done.
     heartbeat_intent = Intent(
         type=IntentType.SEND_MESSAGE,
@@ -819,32 +735,20 @@ async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
 
 
 def test_specialist_tool_denylist_excludes_kb_write_paths():
-    """The denylist must still capture every cortex_kb write surface
-    listed in KB_design §3.11 R4 — the Coordinator is the sole writer
-    of the KB (Inv-2 / Inv-6.1).
-
-    PR-A2 (Arbor-into-Hyperloom) lifted Edit/Write/MultiEdit out of the
-    denylist so EXPLORE specialists can write source patches into their
-    per-task ``runs/specialist/<task_id>/worktree/`` (the worktree
-    isolation + ``--add-dir`` scoping in the subprocess dispatcher
-    keeps them out of the main framework_source_roots). KB writes
-    remain blocked because the KB lifecycle is Coordinator-owned.
-    """
+    """The denylist still captures every cortex_kb write surface (Coordinator is the sole KB writer); PR-A2 lifted Edit/Write/MultiEdit out so specialists can patch their isolated worktree."""
     for forbidden in (
         "mcp__cortex_kb__propose_point",
     ):
         assert forbidden in SPECIALIST_TOOL_DENYLIST
         assert forbidden not in DEFAULT_SPECIALIST_TOOLS
-    # PR-A2: write tools are now part of the default whitelist; they
-    # are NOT in the denylist.
+    # PR-A2: write tools are in the default whitelist, not the denylist.
     for write_tool in ("Edit", "Write", "MultiEdit"):
         assert write_tool not in SPECIALIST_TOOL_DENYLIST
         assert write_tool in DEFAULT_SPECIALIST_TOOLS
 
 
 def test_build_empty_specialist_done_is_R3_valid():
-    """Helper used by every failure path must always produce a payload
-    PolicyGate R3 will accept."""
+    """The failure-path helper must always produce a payload PolicyGate R3 accepts."""
     done = build_empty_specialist_done(
         gap_canonical_id="gap.x",
         domain="serving_specialist",
@@ -857,9 +761,7 @@ def test_build_empty_specialist_done_is_R3_valid():
     )
 
 
-# ===========================================================================
 # 8. SharedState specialist round bookkeeping
-# ===========================================================================
 def test_shared_state_specialist_rounds_default_empty():
     s = SharedState()
     assert s.specialist_rounds == []

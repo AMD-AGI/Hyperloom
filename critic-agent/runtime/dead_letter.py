@@ -2,15 +2,11 @@
 
 """Append-only KB dead-letter queue (contract §6 / G-5).
 
-Failed KB writes go into ``KB_DEAD_LETTER_DIR/<endpoint>.jsonl`` so a cron
-or operator can replay them later. The format is one JSON record per
-line, with the *intent* fields necessary to retry the operation
-(``endpoint``, ``payload``, ``attempts``, ``last_error``, ``ts``).
-
-The replay helper is provided for tests / cron jobs; it walks every
-``*.jsonl`` file in the directory and feeds rows back into a callable
-that knows how to dispatch by ``endpoint``. Successful rows are dropped;
-failed rows are preserved.
+Failed KB writes go into ``KB_DEAD_LETTER_DIR/<endpoint>.jsonl`` (one JSON
+record per line: ``endpoint``, ``payload``, ``attempts``, ``last_error``,
+``ts``) so a cron/operator can replay them. The replay helper walks every
+``*.jsonl`` and dispatches by ``endpoint``, dropping successes and
+preserving failures.
 """
 
 from __future__ import annotations

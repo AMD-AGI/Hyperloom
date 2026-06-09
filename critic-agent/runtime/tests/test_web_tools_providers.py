@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for :class:`runtime.web_tools.providers.TavilyProvider` and
-:class:`runtime.web_tools.providers.SerperProvider`.
-
-We use ``httpx.MockTransport`` to capture outgoing requests and return
-canned bodies; no network IO. Each test asserts the request mapping
-(URL, body, headers) and the response normalization.
-"""
+"""Tests for :class:`TavilyProvider` and :class:`SerperProvider`, asserting request mapping and response normalization via ``httpx.MockTransport``."""
 
 from __future__ import annotations
 

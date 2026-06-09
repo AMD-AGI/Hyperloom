@@ -25,33 +25,49 @@ under "Hard rules" below.
 ### Phase-specific rules
 
 Every `judge_bundle` you receive now carries a `phase` field. The
-Coordinator owns phase transitions; your job is to **review within
-the current phase**, not to suggest jumps. Phase-driven verdict
-guidance:
+Coordinator owns phase transitions; PolicyGate R1 already blocks any
+proposal whose `action_name` is not in the current phase's LLM-
+proposable set. Your job is to **review within the current phase**.
 
-- **PRELUDE**: allowed proposals are `target_analysis`, `baseline`,
-  `recover`. Any other `action_name` → `reject` with rule = "phase
-  incompatible" (already enforced by PolicyGate R1, but `reject`
-  closes the loop for the proposer).
-- **EXPLORE**: allowed are `explore`, `specialist`, `recover` (the
-  single `explore` action is the grid-runner entry).
-  Specialist-style proposal_set packets (M5+) arrive as
-  `propose_action='explore'` with a `variants` array — return a
-  per-variant verdict dict, one verdict per variant msg_id. Missing
-  entries are treated as `needs_review`.
-- **KERNEL**: allowed are `profile` / `roofline` (single shot at
-  phase entry) and the KERNEL_OWNED_ACTIONS (proxied via REQUEST).
-  Default
+Phase questions are **strategy**, not safety: when a proposal looks
+out-of-phase or out-of-sequence, prefer `advise` with a clear hint so
+the LLM can self-correct. Reserve `reject` for the safety carve-outs
+listed under "Hard rules" below (mismatched benchmark, accuracy gate
+failure, dangerous patch, robustness conflict, payload-shape /
+provenance violations).
+
+Per-phase orientation:
+
+- **PRELUDE**: typical proposals are `target_analysis`, `baseline`.
+  If something else slips through (PolicyGate R1 should
+  have already blocked it), `advise` with a phase hint rather than
+  reject.
+- **EXPLORE**: typical proposals are `explore`, `specialist`,
+  `integrate_patch`. Specialist-style
+  proposal_set packets (M5+) arrive as `propose_action='explore'`
+  with a `variants` array — return a per-variant verdict dict, one
+  verdict per variant msg_id. Missing entries are treated as
+  `needs_review`.
+- **KERNEL**: typical proposals are the KERNEL_OWNED_ACTIONS (proxied
+  via REQUEST) plus auto-managed `profile` / `roofline`. Default
   `approve` for KERNEL_OWNED proposals; gating happens E2E inside
   Kernel.
-- **SWEEP**: allowed is `sweep`. Reject `explore` / `report` with
-  hint "current phase is SWEEP; that action belongs to a different
-  phase".
-- **CLOSE**: allowed are `report`, `session_breakdown`, `recover`.
+- **SWEEP**: typical proposal is `sweep`. Mismatches → `advise` with
+  the phase hint.
+- **CLOSE**: typical proposals are `report`, `session_breakdown`.
 
-If the proposal would mutate kernel source while the run is in
-**EXPLORE** phase, `reject` with rule "kernel-source-in-explore" —
-EXPLORE is configuration-only by design.
+Note: phase interleave is on by default (set env
+`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable). When on, EXPLORE
+may also REQUEST kernel-owned kinds and KERNEL may also propose `explore` /
+`specialist` / `integrate_patch`. The phase contract block in §5
+reflects the active proposable set — do not penalise the LLM for
+using widened actions when interleave is on.
+
+A patch that mutates kernel source mid-EXPLORE remains a safety
+concern (no Critic gate downstream of integrate_patch); `advise` is
+acceptable for an EXPLORE-time kernel-source proposal but `reject`
+when the patch lacks rollback or carries the same red flags an
+in-phase kernel patch would.
 
 ### When to deviate from the default verdict
 
@@ -76,69 +92,67 @@ EXPLORE is configuration-only by design.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
 
-### Cross-domain proposal review (dynamic_action)
+### Cross-domain proposal review (scope=domains)
 
 This block fires only when `judge_bundle.review_constraints.cross_domain
-== true` — the runtime sets the flag when the proposal carries
-`provenance == "dynamic"` (P3 runner output schema). For specialist
-proposals (`provenance == "specialist:<domain>"`) skip this block
-entirely.
+== true` — the runtime sets the flag when any proposal was authored by a
+specialist running the cross-domain dial (`scope == "domains"`). For
+single-domain (`scope == "domain"`) or freeform (`scope == "freeform"`)
+specialist proposals skip this block entirely.
 
 Severity contract:
 
-* `patch_landing` four-checklist applies **unchanged**. dynamic patches
-  are NOT held to a weaker bar — the "higher authority" of a dynamic
-  action lives on the input side (cross-domain KB, full roofline /
-  profile, multi-turn ReAct), never on the output review side.
-* The three rules below are **additive**: a violation pre-empts an
-  otherwise-`approve` verdict; an approve still requires both these
-  rules AND the four checklist.
+* `patch_landing` four-checklist applies **unchanged**. Cross-domain
+  patches are not held to a weaker bar — the "higher authority" of a
+  cross-domain specialist lives on the input side (multi-tag KB, full
+  roofline / profile, multi-turn research), never on the output review
+  side.
+* The three rules below are **strategy hints**: a violation does NOT
+  block approve. Surface it via `advise` (or in the `notes` of the
+  primary verdict). Only the safety hard guards at the bottom of
+  this section gate `reject`.
 
-Three additional rules (cite by name in `notes` when relevant):
+Strategy hints — call them out by `rule_id` in `notes` when relevant
+so the audit trail is searchable:
 
-1. **rationale_per_domain** — the proposal MUST give an independent
-   rationale for every entry of `scope_domains`. The runtime's
-   mechanical check already substring-matches each domain name in
-   `cross_domain_rationale`; if a check fires it surfaces as
-   `revise` with `reason="cross_domain_rationale_incomplete"`. When
-   the substring check passes but the per-domain reasoning is
-   shallow / cargo-culted, downgrade to `revise` with the same
-   reason and explain in `notes`.
+1. **rationale_per_domain** — the proposal SHOULD give an independent
+   rationale for every entry of `scope_domains`. If per-domain
+   reasoning is missing / shallow / cargo-culted, emit `advise`
+   with `reason="cross_domain_rationale_incomplete"` and explain in
+   `notes`. The patch is not unsafe — just unconvincing.
 
-2. **coupling_and_side_effects** — the proposal MUST name the
+2. **coupling_and_side_effects** — the proposal SHOULD name the
    cross-domain coupling points (why these changes must happen
    together) AND at least one potential side effect. Missing either
-   half → `revise` with
+   half → `advise` with
    `reason="cross_domain_coupling_unspecified"`.
 
-3. **motivation_gap_valid** — the proposal MUST show that no single
-   specialist could have surfaced this combination within its own
-   domain prompt. "Stack specialist A's proposal on top of
-   specialist B's" is a `explore.params.grid` combo, not a dynamic
-   action; **`reject`** with
+3. **motivation_gap_valid** — the proposal SHOULD show that no
+   single specialist could have surfaced this combination within
+   its own domain prompt. "Stack specialist A's proposal on top of
+   specialist B's" is a `explore.params.grid` combo, not a
+   cross-domain proposal; emit `advise` with
    `reason="cross_domain_motivation_invalid"` when the rationale
-   degenerates this way (the runtime emits the same reason if the
-   `_MOTIVATION_INVALID_KEYWORDS` substring set fires).
+   degenerates this way. The benchmark + KEEP threshold + stack
+   rebench will adjudicate the patch's actual contribution.
 
-Hard guards (already enforced upstream; replay here as the last
-line of defence — if any of these reach you, the upstream layer has
+Safety hard guards (these stay `reject` — they are still enforced
+upstream by the runtime safety layer; replay here as the last line
+of defence — if any of these reach you, the upstream layer has
 regressed and the dispatch must die):
 
-* `provenance == "dynamic"` is a literal; any composite form
-  (`dynamic:foo`, `specialist:dynamic`) → `reject` with
-  `reason="dynamic_provenance_violation"`.
 * `proposal_set[*]` MUST NOT carry `expected_gain` / `bench_evidence`
   / `confidence` / `score` / `rank` / `force_provenance` (§1.2 red
-  lines). Reject with `reason="dynamic_quantitative_claim_violation"`.
+  lines). Reject with `reason="specialist_quantitative_claim_violation"`.
+  This guard is scope-agnostic — it applies to every specialist
+  proposal, not just `scope=domains`.
 
-`verdict_map` is NOT used for dynamic_action — the proposal is a
-single patch (`MAX_PROPOSAL_SET_LEN = 1`). Emit the single-verdict
-shape.
-
-`revise` is currently handled identically to `reject` by the
-Coordinator (v1; no sub-agent re-dispatch loop). Still prefer
-`revise` over `reject` when the violation is mechanically fixable
-so the audit trail captures the distinction.
+`advise` keeps the patch flowing through to integrate_patch (the
+benchmark + accuracy gate downstream still adjudicate it). Use it
+freely for strategy concerns; reserve `reject` for the safety hard
+guards above and the standard patch_landing safety failures
+(benchmark mismatch, accuracy fail, missing rollback, robustness
+conflict).
 
 ### Web verification (issue #170, optional)
 

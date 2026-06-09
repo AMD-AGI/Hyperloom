@@ -12,9 +12,6 @@ Public surface:
 * :const:`BREAKDOWN_FILENAME` — canonical filename under ``session_dir``
 * :const:`SCHEMA_VERSION` — the wire-shape version string
 * :const:`EXPORTER_VERSION` — this exporter implementation version
-
-See ``SKILL.md`` for usage guidance for both LLM orchestrators and
-human operators.
 """
 
 from __future__ import annotations
