@@ -937,7 +937,7 @@ run:
       kill_buffer_s: 60
     full:
       total_s: ${GEAK_FULL_TOTAL_S:-10800}
-      preprocess_soft_cap_s: 180
+      preprocess_soft_cap_s: ${GEAK_PREPROCESS_SOFT_CAP_S:-900}
       preprocess_hard_cap_fraction: 0.25
       finalize_grace_s: 600
       kill_buffer_s: 120
