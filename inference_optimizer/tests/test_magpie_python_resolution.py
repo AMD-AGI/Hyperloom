@@ -1,15 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for `_resolve_magpie_python` robustness.
-
-`kernel-agent/scripts/install.sh` resolves `MAGPIE_PYTHON` BEFORE Magpie is
-pip-installed, so a freshly-generated `kernel-agent.env.sh` can bake in an
-interpreter that cannot `import Magpie` (observed: `/usr/bin/python3`). Trusting
-that value blindly made every Magpie benchmark fail with
-`ModuleNotFoundError: No module named 'Magpie'` (surfaced as
-`subprocess_nonzero` / baseline_failed). The resolver must validate the env
-value and fall through to auto-detection.
-"""
+"""Tests for `_resolve_magpie_python` robustness: validate a stale `MAGPIE_PYTHON` and fall through to auto-detection."""
 
 from __future__ import annotations
 
@@ -31,22 +22,7 @@ def test_env_magpie_python_used_when_it_can_import(monkeypatch):
 
 
 def test_can_import_probe_uses_only_supported_run_kwargs(monkeypatch):
-    """Regression guard: the ``import Magpie`` probe must call
-    ``run_with_session_kill`` with ONLY kwargs that function accepts.
-
-    The probe previously passed ``capture_output=True`` — a kwarg
-    ``run_with_session_kill`` does NOT accept (it always captures via PIPE
-    internally). Every probe therefore raised ``TypeError`` (swallowed by the
-    broad ``except`` -> ``return False``), so a perfectly valid
-    ``$MAGPIE_PYTHON`` was always rejected and the whole stale-interpreter
-    self-heal degraded to "always fall through to the hard-coded fallback".
-
-    The other tests in this module hide that bug because they patch
-    ``run_with_session_kill`` with ``lambda *a, **k`` (which swallows any
-    kwarg). This test patches it with a mock that mirrors the REAL signature,
-    so passing an unsupported kwarg raises ``TypeError`` here just like in
-    production.
-    """
+    """Regression guard: the ``import Magpie`` probe calls ``run_with_session_kill`` with only accepted kwargs (no ``capture_output``)."""
     monkeypatch.setenv("MAGPIE_PYTHON", "/good/python")
     probe_cmds: list[list[str]] = []
 
@@ -54,9 +30,7 @@ def test_can_import_probe_uses_only_supported_run_kwargs(monkeypatch):
         cmd, *, env=None, cwd=None, timeout=None, text=True,
         soft_deadline_sec=None,
     ):
-        # Mirror run_with_session_kill's real signature exactly — no
-        # ``capture_output``. A buggy probe that passes it raises TypeError
-        # at call-binding time (before this body runs).
+        # Mirror run_with_session_kill's real signature exactly — no ``capture_output``.
         probe_cmds.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -68,14 +42,12 @@ def test_can_import_probe_uses_only_supported_run_kwargs(monkeypatch):
 
 
 def test_stale_env_magpie_python_ignored_and_autodetected(monkeypatch, caplog):
-    """A MAGPIE_PYTHON that cannot import Magpie is ignored; resolver falls
-    through to a PATH python3 that can."""
+    """A MAGPIE_PYTHON that cannot import Magpie is ignored; resolver falls through to a PATH python3 that can."""
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
 
     def fake_run(cmd, *a, **k):
         py = cmd[0]
-        # Only the auto-detected PATH python can import Magpie; the stale
-        # env value cannot.
+        # Only the auto-detected PATH python can import Magpie.
         rc = 0 if py == "/opt/venv/bin/python3" else 1
         return type("P", (), {"returncode": rc})()
 
@@ -124,16 +96,7 @@ def test_probe_requires_yaml_dependency(monkeypatch):
 
 
 def test_falls_back_to_opt_venv_when_path_python_cannot_import(monkeypatch, tmp_path):
-    """When neither the (stale) env value nor PATH python3 can import Magpie,
-    return /opt/venv/bin/python as the unconditional last resort.
-
-    The resolver must NOT fall back to the PATH python3 it just proved cannot
-    import Magpie (that would silently benchmark with a Magpie-less
-    interpreter). It returns the canonical Magpie venv path regardless of
-    whether that file physically exists on this box — so the assertion is
-    deterministic in CI (where /opt/venv/bin/python may be absent) and a
-    truly broken image fails loudly on an actionable path instead.
-    """
+    """When neither the env value nor PATH python3 can import Magpie, return /opt/venv/bin/python as the last resort."""
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     monkeypatch.setattr(
         _grid_runner, "run_with_session_kill",

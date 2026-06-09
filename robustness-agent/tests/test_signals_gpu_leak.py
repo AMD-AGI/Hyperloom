@@ -118,7 +118,7 @@ def test_full_but_live_engine_core_owner_is_silent():
         },
     ]
     assert det.evaluate(_ctx(0), _data(_full_gpus(), procs)) == []
-    # Even a second tick keeps quiet because the owner is alive.
+    # Live owner keeps it quiet even on a second tick.
     assert det.evaluate(_ctx(1), _data(_full_gpus(), procs)) == []
     assert det.consecutive_hits == 0
 
@@ -139,7 +139,6 @@ def test_partial_full_is_silent():
     """Only some GPUs full -> not a leak."""
     det = GpuLeakDetector(GpuLeakConfig(min_consecutive_ticks=2))
     snap = _full_gpus(4)
-    # Mark gpu_id=2 as not full
     snap["gpus"][2] = {
         "gpu_id": 2,
         "util_mem_pct": 25.0,

@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the gbrain read-side recipe-snapshot client.
-
-Exercises the page->Recipe adaptation + the RemoteRecipeClient-compatible
-read surface against a fake MCP (no network).
-"""
+"""Unit tests for the gbrain read-side recipe-snapshot client (page->Recipe adaptation + read surface)."""
 from __future__ import annotations
 
 import json
