@@ -81,6 +81,17 @@ on:
         description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 100 to match the 100-model batch).'
         required: false
         default: '60'
+      submit_jitter_sec:
+        # Anti-thundering-herd. When the whole matrix fans out at once, every
+        # job hits SaFE register/submit (Claw-session creation) in the same
+        # instant and the backend sheds load with HTTP 500 'failed to create
+        # Claw session' / 504. Each job instead sleeps random(0..N) seconds
+        # before submitting, spreading the herd across an N-second window. The
+        # optimize task runs for hours, so a worst-case N-second head start is
+        # negligible. 0 = off.
+        description: 'Per-job random pre-submit delay window in seconds (random(0..N)) to de-sync the matrix and avoid Claw-session HTTP 500/504 herds. 0=off.'
+        required: false
+        default: '600'
       submit_workspaces:
         # Comma-separated round-robin pool. Default spreads the batch across
         # hyperloom + sandbox instead of sending every task to sandbox. Set
@@ -291,6 +302,7 @@ jobs:
           INPUT_ISL:              ${{ github.event.inputs.isl }}
           INPUT_OSL:              ${{ github.event.inputs.osl }}
           INPUT_TP:               ${{ github.event.inputs.tp }}
+          INPUT_SUBMIT_JITTER_SEC: ${{ github.event.inputs.submit_jitter_sec }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
@@ -324,6 +336,10 @@ jobs:
           set -euo pipefail
           ARGS=(--model "${MODEL_REPO}")
           ARGS+=(--isl "${INPUT_ISL:-1024}" --osl "${INPUT_OSL:-1024}")
+          # Anti-herd: spread parallel submits across a random window so the
+          # backend's Claw-session creation isn't hit by the whole matrix at
+          # once. Schedule passes no input -> falls back to the 600s default.
+          ARGS+=(--submit-jitter-sec "${INPUT_SUBMIT_JITTER_SEC:-600}")
           # Optional tp override — empty keeps the script's auto-detect.
           if [ -n "${INPUT_TP:-}" ]; then
             ARGS+=(--tp "${INPUT_TP}")
