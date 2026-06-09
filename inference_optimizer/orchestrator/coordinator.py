@@ -3420,6 +3420,36 @@ class Coordinator:
                 detail=repr(exc)[:240],
             )
 
+        # ---------------- Step 2.6: artifact package -> /workspace -------
+        # Bundle the curated result/report/analysis files (incl. the
+        # session_breakdown just written in step 2) into a single zip
+        # placed under ``/workspace`` so the Claw sandbox sync ships it
+        # to object storage even when ``$USER_DATA_PATH`` points at a
+        # wekafs path outside ``/workspace`` (the common production case).
+        # Best-effort: failures are recorded but never abort the close
+        # sequence. The zip carries its own PACKAGE_MANIFEST log of what
+        # went in / what was missing.
+        try:
+            from ..breakdown import package_session_artifacts
+            pkg_path = package_session_artifacts(
+                self.session_dir,
+                session_id=str(getattr(self.shared_state, "session_id", "") or ""),
+            )
+            if pkg_path is not None:
+                await self._record_close_step(
+                    "artifact_package", status="done", detail=str(pkg_path),
+                )
+            else:
+                await self._record_close_step(
+                    "artifact_package", status="skipped",
+                    detail="no artifacts matched or dest unwritable",
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 2.6 (artifact_package) failed")
+            await self._record_close_step(
+                "artifact_package", status="failed", detail=repr(exc)[:240],
+            )
+
         # ---------------- Step 4: fact finalize (Cortex commit) ----------
         # The canonical step-4 "Cortex session commit": writes
         # update_recipe + finalises the local journal (final_throughput /
