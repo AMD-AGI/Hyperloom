@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
-
 """OOB (claude/codex/cursor) submission via Ray (preferred) or direct CLI fallback.
 
 Self-contained: does not depend on inference-optimization scripts.
@@ -16,7 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ray_runtime import ensure_ray_cluster, quiet_ray_init, safe_runtime_env
+from ray_runtime import ensure_ray_cluster, bootstrap_ray_cluster, quiet_ray_init, safe_runtime_env
 
 
 def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,
@@ -68,7 +66,7 @@ def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
                extra_files: list[str] | None = None,
                kernel_repo: str = "", num_gpus: int = 1) -> list[str]:
     if not shutil.which("oob"):
-        raise FileNotFoundError("oob CLI not in PATH; run install.sh")
+        raise FileNotFoundError("oob CLI not in PATH; run install.sh --with-oob")
     cmd = [
         "oob", "run", "-a", agent,
         "--prompt-file", str(prompt_file),
@@ -88,12 +86,21 @@ def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
 
 
 def _parse_oob_init(stdout: str) -> dict[str, str]:
-    """Extract cwd / session_id / thread_id from oob run --json output (trailing summary, else ndjson init)."""
+    """Extract cwd / session_id / thread_id from oob run --json output.
+
+    `oob run --json` prints a final summary block of the form
+        {"task_id": "...", "status": "completed",
+         "workspace": "...tasks/cli/<uuid>/workspace",
+         "log_file": "...", "usage": ...}
+    Parse the trailing JSON object first; fall back to scanning ndjson
+    `system/init` events if the trailing block is missing (e.g. when the
+    run was killed mid-stream).
+    """
     info = {"cli_workspace": "", "session_id": "", "thread_id": ""}
     if not stdout:
         return info
 
-    # Try the trailing oob-run JSON summary.
+    # 1) Try the trailing oob-run JSON summary.
     end = stdout.rfind("}")
     if end != -1:
         depth = 0
@@ -127,7 +134,7 @@ def _parse_oob_init(stdout: str) -> dict[str, str]:
                         return info
                     break
 
-    # Fall back to ndjson init line (raw stream from claude-code-sdk).
+    # 2) Fall back to ndjson init line (raw stream from claude-code-sdk).
     for line in stdout.splitlines()[:200]:
         line = line.strip()
         if not line.startswith("{"):
@@ -150,8 +157,7 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
                 extra_files: list[str] | None = None,
                 kernel_repo: str = "") -> dict:
     import ray
-    runtime_env = quiet_ray_init(
-        num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
+    runtime_env = quiet_ray_init()
     system_prompt_text = _safety_system_prompt(
         kernel_repo, budget_minutes=timeout_s / 60.0, num_gpus=num_gpus)
 
@@ -159,7 +165,7 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
     def _task(agent: str, prompt_file_str: str, output_dir_str: str,
               source_file: str, max_turns: int, timeout_s: int,
               extra_files: list[str], system_prompt: str) -> dict:
-        # Self-contained: workers don't share the driver sys.path.
+        # Self-contained: workers don't share driver sys.path.
         import os as _os, shutil as _shutil, subprocess as _sp, time as _t
         if not _shutil.which("oob"):
             return {
@@ -195,7 +201,8 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
                 "cmd": cmd,
             }
         except _sp.TimeoutExpired as exc:
-            # Capture partial output so the driver can scan for partial artifacts.
+            # Capture whatever oob already wrote so the driver can scan the
+            # workspace for partial outputs (optimized_versions/ etc.).
             partial_out = ""
             try:
                 partial_out = (exc.stdout or "").decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -216,7 +223,8 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
         list(extra_files or []), system_prompt_text,
     )
     result = ray.get(ref)
-    # Parse the oob init line for exact workspace attribution (no mtime races).
+    # Attribution: parse the oob ndjson init line so the driver knows exactly
+    # which tasks/cli/<uuid>/workspace this attempt produced (no mtime races).
     result.update(_parse_oob_init(result.get("stdout", "")))
     return result
 
@@ -269,9 +277,14 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
     if prefer_ray:
         try:
             import ray  # noqa: F401
-            # ensure_ray_cluster starts a fresh head if `ray status` fails (no-op when healthy).
-            ensure_ray_cluster(num_gpus=num_gpus,
-                               log_path=output_dir / "ray_lifecycle.log")
+            # Don't burn 30 s of ray.init retries on a wedged cluster. If
+            # `ray status` fails, ``ensure_ray_cluster`` will start a fresh
+            # head node here (safe no-op when the cluster is already healthy).
+            bootstrap_ray_cluster(
+                num_gpus=num_gpus,
+                log_path=output_dir / "ray_lifecycle.log",
+                force_restart=False,
+            )
             return run_via_ray(agent, prompt_file, output_dir, source_file,
                                max_turns, num_gpus, timeout_s,
                                extra_files=extra_files, kernel_repo=kernel_repo)

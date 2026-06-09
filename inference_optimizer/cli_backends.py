@@ -118,7 +118,12 @@ def _build_backends(
         if kernel_codex:
             backends["kernel"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=5)
+            kernel_max_turns = int(
+                os.environ.get("HYPERLOOM_KERNEL_MAX_TURNS", "40") or "40"
+            )
+            backends["kernel"] = ClaudeBackend(
+                model=claude_model, max_turns_default=kernel_max_turns
+            )
     return backends
 
 

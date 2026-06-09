@@ -1368,3 +1368,50 @@ def test_make_proposal_empty_artifact_error_falls_back_to_compile_failed():
     proposal = ko.make_proposal(verification)
     assert proposal["decision"] == "REVERT"
     assert proposal["reasons"] == ["compile failed"]
+
+
+def test_geak_verified_stdout_beats_agent_neutral_final_report(tmp_path):
+    """Run10 regression: final_report clamped to 1.0x must not mask verified stdout."""
+    out = tmp_path / "geak-out"
+    out.mkdir()
+    final = out / "final_report.json"
+    final.write_text(json.dumps({
+        "status": "incremental_after_round_2",
+        "best_speedup": 1.0,
+        "best_speedup_verified": 1.0,
+        "speedup_source": (
+            "agent-reported benchmark (no FULL_BENCHMARK verified result available)"
+        ),
+    }), encoding="utf-8")
+    stdout = tmp_path / "geak_stdout.log"
+    stdout.write_text(
+        "minisweagent.run.postprocess.evaluation: INFO: CORRECTNESS: PASS\n"
+        "minisweagent.run.postprocess.evaluation: INFO:   Verified speedup: 1.0051x\n"
+        "minisweagent.run.postprocess.evaluation: INFO: FULL_BENCHMARK: PASS\n",
+        encoding="utf-8",
+    )
+    src = out / "salvaged_best_source.py"
+    src.write_text("def get_default_config(*a, **k):\n    return {}\n", encoding="utf-8")
+    attempt = {
+        "status": "partial",
+        "attempt_id": "geak-run10",
+        "backend": "geak",
+        "optimized_path": str(stdout),
+        "backend_paths": {
+            "output_dir": str(out),
+            "geak_final_report": str(final),
+            "geak_per_task_best_speedup": "1.0",
+            "geak_salvaged_source": str(src),
+        },
+    }
+    verification = ko.build_verification(
+        _args(source_file=str(out / "fused_moe_triton_config.py")),
+        [attempt],
+        benchmark_available=True,
+    )
+    assert verification["micro_speedup"] == pytest.approx(1.0051)
+    assert verification["micro_speedup_source"] == "geak_stdout_verified"
+    assert verification["full_benchmark_verified"] is True
+    assert verification["correctness_passed"] is True
+    proposal = ko.make_proposal(verification, high_impact=True)
+    assert proposal["decision"] == "DEFER_TO_E2E"

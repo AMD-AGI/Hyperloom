@@ -75,7 +75,17 @@ def test_existing_source_path_passes(tmp_path: Path):
     ) is None
 
 
-def test_escape_flag_allows_empty_shape(tmp_path: Path):
+def test_workload_config_provenance_passes(tmp_path: Path):
+    payload = {
+        "kernel_id": "k001",
+        "candidate": _candidate(
+            shape_provenance="workload_config",
+            shapes=["prefill token-count M up to >=4096"],
+        ),
+    }
+    assert krh._validate_kernel_shape_and_paths(
+        payload, session_dir=tmp_path,
+    ) is None
     payload = {
         "kernel_id": "k001",
         "allow_empty_kernel_shape": True,

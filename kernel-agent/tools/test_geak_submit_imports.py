@@ -17,3 +17,12 @@ def test_ensure_ray_cluster_is_in_scope():
         "geak_submit calls ensure_ray_cluster() but never imported it"
     )
     assert callable(geak_submit.ensure_ray_cluster)
+
+
+def test_safe_runtime_env_includes_backends_on_pythonpath(monkeypatch):
+    import ray_runtime  # noqa: E402
+
+    backends = Path(__file__).resolve().parent / "backends"
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(backends.parent.parent))
+    env = ray_runtime.safe_runtime_env()
+    assert backends.as_posix() in env["env_vars"]["PYTHONPATH"]

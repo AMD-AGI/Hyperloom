@@ -819,6 +819,19 @@ def exit_normal_kernel(
             "evidence": "no_more_leverage",
             "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
         }
+    ray_healthy = True
+    try:
+        import subprocess
+        ray_healthy = subprocess.run(
+            ["ray", "status"],
+            capture_output=True,
+            timeout=15,
+        ).returncode == 0
+    except Exception:
+        ray_healthy = False
+    blocked_fn = getattr(state, "kernel_phase_blocked_on_ray_unresolved", None)
+    if callable(blocked_fn) and blocked_fn(ray_healthy=ray_healthy):
+        return None
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
     remaining = phase_budget_remaining_seconds(

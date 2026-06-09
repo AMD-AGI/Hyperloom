@@ -124,6 +124,171 @@ def _build_high_idle_warning(
     }
 
 
+class _TraceSplitBlocked(RuntimeError):
+    """Steady-state splitter produced no usable chunk.
+
+    Subclasses ``RuntimeError`` so existing callers/tests that catch
+    ``RuntimeError`` keep working. ``main()``'s outer handler intercepts this
+    specific type to attempt a deterministic, annotation-independent raw-trace
+    kernel fallback (env-gated) before failing. This breaks the circular
+    dependency where a degraded eager trace (no TraceLens annotations -> no
+    steady-state split -> no category_data -> empty hot_kernels) leaves the
+    Coordinator with no kernel_id, so it can never propose ``run_optimization``
+    and idles on cheap params/backends instead.
+    """
+
+
+def _raw_trace_fallback_enabled() -> bool:
+    """Gate for the raw-trace hot-kernel fallback (default OFF).
+
+    Enabled by ``HYPERLOOM_KERNELOPT_RAW_TRACE_FALLBACK=1`` (set by the
+    autonomous repro launcher). When off, a ``trace_split_no_steady_state``
+    stays a hard failure exactly as before (preserving the original "don't
+    analyze a raw trace / misleading idle" contract for unrelated runs).
+    """
+    raw = os.environ.get("HYPERLOOM_KERNELOPT_RAW_TRACE_FALLBACK", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _try_load_hf_config(model_name: str) -> dict[str, Any]:
+    """Best-effort load of HuggingFace config.json for shape derivation."""
+    if not model_name:
+        return {}
+    path = Path(str(model_name)).expanduser()
+    candidates = [path / "config.json"]
+    if path.is_dir():
+        candidates.append(path)
+    for cfg_path in candidates:
+        if cfg_path.is_file():
+            try:
+                return json.loads(cfg_path.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+    return {}
+
+
+def _is_moe_candidate(candidate: dict[str, Any]) -> bool:
+    name = str(candidate.get("name") or "").lower()
+    src = str(candidate.get("source_file") or "").lower()
+    return "fused_moe" in name or "fused_moe" in src or "moe" in name
+
+
+def derive_shapes_from_workload(
+    *,
+    workload: dict[str, Any],
+    model_name: str = "",
+    candidate: dict[str, Any] | None = None,
+) -> list[str]:
+    """Populate kernel shapes from materialized workload + optional HF config.
+
+    Generic fallback when TraceLens trace extraction yields empty shapes[]
+    (steady-state split miss, raw-trace fallback, missing Input Dims).
+    """
+    cand = candidate or {}
+    isl = int(workload.get("isl") or 0)
+    osl = int(workload.get("osl") or 0)
+    conc = int(workload.get("conc") or 0)
+    tp = max(1, int(workload.get("tp") or 1))
+    m_prefill = max(isl, conc) if (isl or conc) else 4096
+
+    shapes: list[str] = []
+    cfg = _try_load_hf_config(model_name)
+    if cfg and _is_moe_candidate(cand):
+        hidden = int(cfg.get("hidden_size") or 0)
+        inter = int(
+            cfg.get("moe_intermediate_size")
+            or cfg.get("intermediate_size")
+            or 0
+        )
+        experts = int(
+            cfg.get("num_local_experts")
+            or cfg.get("num_experts")
+            or 0
+        )
+        topk = int(
+            cfg.get("experts_per_token")
+            or cfg.get("num_experts_per_tok")
+            or cfg.get("top_k")
+            or 0
+        )
+        if hidden and inter:
+            shard_inter = max(1, inter // tp)
+            w2_n = max(1, inter // max(1, 4 // min(tp, 4)))
+            shapes.append(
+                f"up-GEMM [M, {hidden}] x [{hidden}, {shard_inter}] per-expert bf16"
+            )
+            shapes.append(
+                f"down-GEMM [M, {w2_n}] x [{w2_n}, {hidden}] per-expert bf16"
+            )
+        if experts and topk:
+            shapes.append(
+                f"E={experts} experts, topk={topk}, "
+                f"prefill token-count M up to >={m_prefill}"
+            )
+        elif hidden:
+            shapes.append(
+                f"MoE prefill token-count M up to >={m_prefill} "
+                f"(hidden={hidden}, TP={tp})"
+            )
+    if not shapes:
+        shapes.append(
+            f"prefill token-count M up to >={m_prefill} "
+            f"(ISL={isl or 'n/a'}, CONC={conc or 'n/a'}, TP={tp})"
+        )
+        if osl:
+            shapes.append(f"decode token-count per-step OSL={osl}")
+    return shapes
+
+
+def enrich_candidates_with_workload_shapes(
+    candidates: list[Any],
+    *,
+    workload: dict[str, Any],
+    model_name: str = "",
+) -> None:
+    """Fill empty candidate shapes[] from workload metadata (in-place)."""
+    if not isinstance(candidates, list):
+        return
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        shapes = item.get("shapes")
+        if isinstance(shapes, list) and shapes:
+            continue
+        derived = derive_shapes_from_workload(
+            workload=workload if isinstance(workload, dict) else {},
+            model_name=model_name,
+            candidate=item,
+        )
+        if derived:
+            item["shapes"] = derived
+            item["shape_provenance"] = "workload_config"
+
+
+# Collective-communication kernels (all-reduce / all-gather / reduce-scatter,
+# vendor custom-AR / quickreduce, NCCL/RCCL) are NOT GEAK tile-config retune
+# targets — they're bandwidth-bound collectives owned by the dedicated
+# ``comm_optimization`` action. They also over-represent on a RAW (un-split)
+# trace because spin/wait + warmup all-reduces inflate their GPU share (e.g.
+# cross_device_reduce can read ~58% on the raw trace vs a small steady-state
+# share), which is precisely the "misleading raw trace" hazard the splitter
+# guard warns about. The raw-trace fallback therefore drops them so kernel_opt
+# focuses on the editable COMPUTE kernel that actually carries the tile-config
+# win (the Triton ``fused_moe``).
+_FALLBACK_COMM_PATTERNS = (
+    "all_reduce", "allreduce", "all-reduce", "reduce_scatter", "reducescatter",
+    "all_gather", "allgather", "cross_device_reduce", "quickreduce",
+    "quick_all_reduce", "custom_ar", "nccl", "rccl",
+)
+
+
+def _is_collective_comm_kernel(cand: dict[str, Any]) -> bool:
+    blob = (
+        f"{cand.get('name', '')} {cand.get('source_file', '')}"
+    ).lower()
+    return any(pat in blob for pat in _FALLBACK_COMM_PATTERNS)
+
+
 def _build_trace_split_warning(
     *, trace_input: Path, split_dir: Path, split_rc: int,
     mixed_count: int, decode_count: int, prefilldecode_count: int,
@@ -1459,6 +1624,163 @@ def load_op_category_map(
     return out
 
 
+PROMOTE_MIN_E2E_PCT_DEFAULT = 3.0
+PROMOTE_MIN_E2E_PCT_ENV = "HYPERLOOM_PROMOTE_MIN_E2E_PCT"
+
+
+def _resolve_promote_min_e2e_pct() -> float:
+    raw = os.environ.get(PROMOTE_MIN_E2E_PCT_ENV, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return PROMOTE_MIN_E2E_PCT_DEFAULT
+
+
+def _norm_kernel_name(name: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
+
+
+def _metrics_op_is_editable(op: dict[str, Any]) -> bool:
+    """Loose editable pre-filter for metrics ops.
+
+    The authoritative check is :func:`classify_patchability` after source
+    resolution in :func:`_finalize_candidates`; this only keeps vendor
+    Tensile/CK/rocBLAS/aten GEMMs from being promoted in the first place.
+    """
+    lib = str(op.get("library") or "").strip().lower()
+    if lib in {"triton", "hip"}:
+        return True
+    return "triton" in str(op.get("name") or "").lower()
+
+
+def _shapes_from_metrics_op(op: dict[str, Any]) -> list[str]:
+    args = str(op.get("args") or "").replace("<br>", "\n")
+    return [
+        s.strip()
+        for s in args.split("\n")
+        if s.strip() and s.strip() not in {"-", "—"}
+    ]
+
+
+def promote_hot_editable_kernels(
+    tracelens_dir: str | Path,
+    existing: list[dict[str, Any]] | None = None,
+    *,
+    log=lambda _m: None,
+    min_e2e_pct: float | None = None,
+) -> list[dict[str, Any]]:
+    """Admit hot, editable kernels that the analysis.md report omitted.
+
+    Reads ``<tracelens_dir>/category_data/*_metrics.json::operations[]`` (always
+    written by TraceLens) and returns minimal candidate rows — ``name`` +
+    ``duration_us`` + ``shapes`` — for kernels that are (a) hot (aggregate
+    ``percent_of_total`` >= ``min_e2e_pct``), (b) editable Triton/HIP, and (c)
+    not already in ``existing``. Rows are aggregated per kernel name (one kernel,
+    many launch shapes); to stay robust against overlapping category views (e.g.
+    a cross-cutting ``triton`` sidecar), the per-name E2E share is the MAX of the
+    per-file sums rather than a global sum. :func:`_finalize_candidates` does the
+    authoritative source resolution + patchability classification afterwards.
+
+    This is the PRIMARY, model-agnostic surfacing path for hot editable kernels
+    (e.g. sglang's ``fused_moe_kernel``) that the OSS report classifies
+    ``other``/unmodeled and omits. The gpt-oss-specific
+    ``_specialize_fused_moe_target`` in kernel_optimization.py is only a thin
+    shape/test-command layer applied AFTER a candidate is surfaced here.
+    """
+    if min_e2e_pct is None:
+        min_e2e_pct = _resolve_promote_min_e2e_pct()
+    base = Path(tracelens_dir)
+    cat_dir = base / "category_data"
+    metrics_files = sorted(cat_dir.glob("*_metrics.json")) if cat_dir.is_dir() else []
+    if not metrics_files:
+        metrics_files = sorted(base.glob("**/category_data/*_metrics.json"))
+    if not metrics_files:
+        return []
+
+    existing_names = {
+        _norm_kernel_name(c.get("name"))
+        for c in (existing or [])
+        if isinstance(c, dict)
+    }
+
+    # Per kernel name: keep the per-file aggregate that maximizes E2E share, plus
+    # the shapes/time of the single hottest launch (drives the GEAK harness).
+    agg: dict[str, dict[str, Any]] = {}
+    for mf in metrics_files:
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            log(f"promote_hot_editable_kernels: skip {mf.name}: {exc}")
+            continue
+        per_file: dict[str, dict[str, Any]] = {}
+        for op in data.get("operations", []) or []:
+            if not isinstance(op, dict) or op.get("fusion_flagged"):
+                continue
+            if not _metrics_op_is_editable(op):
+                continue
+            name = str(op.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                pct = float(op.get("percent_of_total") or 0.0)
+            except (TypeError, ValueError):
+                pct = 0.0
+            try:
+                t_ms = float(op.get("time_ms") or 0.0)
+            except (TypeError, ValueError):
+                t_ms = 0.0
+            key = _norm_kernel_name(name)
+            entry = per_file.setdefault(
+                key,
+                {
+                    "name": name,
+                    "pct": 0.0,
+                    "time_ms": 0.0,
+                    "library": op.get("library"),
+                    "shapes": [],
+                    "hottest_pct": -1.0,
+                },
+            )
+            entry["pct"] += pct
+            entry["time_ms"] += t_ms
+            if pct > entry["hottest_pct"]:
+                entry["hottest_pct"] = pct
+                entry["shapes"] = _shapes_from_metrics_op(op)
+        for key, entry in per_file.items():
+            cur = agg.get(key)
+            if cur is None or entry["pct"] > cur["pct"]:
+                agg[key] = entry
+
+    promoted: list[dict[str, Any]] = []
+    for key, entry in agg.items():
+        if key in existing_names:
+            continue
+        if entry["pct"] < min_e2e_pct:
+            continue
+        promoted.append(
+            {
+                "name": entry["name"],
+                "duration_us": round(entry["time_ms"] * 1000.0, 3),
+                "gpu_pct": round(entry["pct"], 3),
+                "shapes": entry["shapes"],
+                "library": entry["library"],
+                "tracelens_category": "compute",
+                "promotion_reason": "hot_editable_unmodeled",
+            }
+        )
+    promoted.sort(key=lambda c: float(c.get("gpu_pct") or 0.0), reverse=True)
+    if promoted:
+        log(
+            "promote_hot_editable_kernels: admitted "
+            + ", ".join(
+                f"{c['name']} ({float(c['gpu_pct']):.2f}% E2E)" for c in promoted
+            )
+        )
+    return promoted
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]], *, total_dur: float | None = None,
     perf_report_csv_dir: Path | str | None = None,
@@ -2036,6 +2358,48 @@ def build_audit_summary(
     }
 
 
+def _write_raw_fallback_analysis_md(
+    tracelens_dir: Path,
+    candidates: list[dict[str, Any]],
+) -> Path:
+    """Synthesize a minimal ``analysis.md`` from raw-fallback hot kernels.
+
+    Used only when steady-state split fails and the SDK orchestrator did
+    not run. The table is intentionally generic (no fabricated efficiency
+    or bound columns) so operators have a Markdown artifact without
+    misleading TraceLens prose.
+    """
+    lines = [
+        "# TraceLens raw-fallback analysis (steady-state split unavailable)",
+        "",
+        "Hyperloom generated this minimal report from the raw-trace hot-kernel",
+        "table because ``trace_split_no_steady_state`` blocked the SDK",
+        "analysis-orchestrator path.",
+        "",
+        "<!-- impact-begin kind=p_item rank=1 category=Compute -->",
+        "## P1 — Hot editable kernels (raw trace)",
+        "",
+        "| Operation | Args | Kernel path | Time (ms) | %E2E | Count | "
+        "FLOPs/Byte | Efficiency | Bound |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        name = str(cand.get("name") or cand.get("kernel_name") or "")
+        src = str(cand.get("source_file") or cand.get("kernel_path") or "")
+        time_ms = cand.get("time_ms", cand.get("duration_ms", ""))
+        pct = cand.get("pct_e2e", cand.get("gpu_pct", ""))
+        count = cand.get("count", "")
+        lines.append(
+            f"| {name} | | {src} | {time_ms} | {pct} | {count} | | | |"
+        )
+    lines.extend(["", "<!-- impact-end -->", ""])
+    out = tracelens_dir / "analysis.md"
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return out
+
+
 def write_reports(
     run_dir: Path,
     *,
@@ -2122,8 +2486,15 @@ def write_reports(
     if missing_trace_report:
         if not getattr(args, "dry_run", False):
             if trace_quality_blocked:
-                # Intentionally refused to run on a raw/non-steady trace; leave trace_report_path empty.
-                existing_report_path = None
+                # Steady-state split failed: emit a minimal, factual
+                # analysis.md from the raw-fallback hot-kernel table when
+                # we have candidates (env-gated raw fallback path).
+                if candidates and _raw_trace_fallback_enabled():
+                    existing_report_path = _write_raw_fallback_analysis_md(
+                        tracelens_dir, candidates,
+                    )
+                else:
+                    existing_report_path = None
             else:
                 raise RuntimeError(
                     "TraceLens SDK orchestrator did not produce analysis.md "
@@ -2463,13 +2834,42 @@ def main() -> int:
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))
-            # TraceLens v0.3 (#148): analysis-orchestrator.md under Agent/Analysis/, with the legacy path as fallback below.
-            skill = tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
-            if not skill.exists():
-                skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
-            if not skill.exists():
-                raise FileNotFoundError(f"TraceLens standalone skill not found (tried Agent/Analysis and AgenticMode/Standalone paths): {skill}")
-            append_log(log_path, f"TraceLens skill: {skill}")
+            # TraceLens v0.3 (#148): the standalone analysis skill lives
+            # under TraceLens/Agent/Analysis/ with the shorter file name
+            # `analysis-orchestrator.md` (renamed from
+            # `standalone-analysis-orchestrator.md` and moved out of the old
+            # `AgenticMode/Standalone/` tree). Override by setting
+            # TRACELENS_ROOT / --tracelens-root for older release branches.
+            skill: Path | None = None
+            if args.use_llm_orchestrator:
+                skill = (
+                    tl_root
+                    / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
+                )
+                if not skill.exists():
+                    skill = (
+                        tl_root
+                        / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
+                    )
+                if not skill.exists():
+                    if _raw_trace_fallback_enabled():
+                        append_log(
+                            log_path,
+                            "TraceLens LLM skill not found; "
+                            "HYPERLOOM_KERNELOPT_RAW_TRACE_FALLBACK=1 — "
+                            "disabling LLM orchestrator and using "
+                            "split/raw-trace fallback path",
+                        )
+                        args.use_llm_orchestrator = False
+                        skill = None
+                    else:
+                        raise FileNotFoundError(
+                            "TraceLens standalone skill not found "
+                            "(tried Agent/Analysis and AgenticMode/Standalone "
+                            f"paths): {skill}",
+                        )
+                else:
+                    append_log(log_path, f"TraceLens skill: {skill}")
 
             tracelens_dir = run_dir / "tracelens"
             tracelens_dir.mkdir(parents=True, exist_ok=True)
@@ -2583,6 +2983,31 @@ def main() -> int:
                         prefilldecode_count=len(prefill_chunks),
                     )
                     trace_health_warnings.append(warning)
+                    if _raw_trace_fallback_enabled():
+                        # Raw-trace fallback armed
+                        # (HYPERLOOM_KERNELOPT_RAW_TRACE_FALLBACK): raise the
+                        # typed _TraceSplitBlocked so main()'s exception path can
+                        # deterministically surface the hot, EDITABLE native
+                        # kernels straight from the raw trace instead of leaving
+                        # the Coordinator with no kernel_id (and idling on
+                        # params/backends). Mirrors the validated reference path.
+                        append_log(
+                            log_path,
+                            f"WARNING: trace split unavailable "
+                            f"(rc={split_rc}, mixed={len(mixed_chunks)}, "
+                            f"decode_only={len(decode_chunks)}, "
+                            f"prefilldecode={len(prefill_chunks)}); "
+                            "raising trace_split_no_steady_state (raw-trace "
+                            "kernel fallback handled in main()'s exception path "
+                            "when HYPERLOOM_KERNELOPT_RAW_TRACE_FALLBACK=1)",
+                        )
+                        raise _TraceSplitBlocked(
+                            "trace_split_no_steady_state: TraceLens splitter "
+                            "produced no steady-state chunks"
+                        )
+                    # Flag OFF: preserve v0.5's strict refuse behavior unchanged
+                    # (the raw trace can report misleading high idle; analysis.md
+                    # is the single source of truth).
                     append_log(
                         log_path,
                         f"WARNING: trace split unavailable "
@@ -2790,9 +3215,30 @@ def main() -> int:
                         report_cands = parse_analysis_md(
                             skill_result.report_path, args.top_k,
                         )
+                        had_report_cands = bool(report_cands)
+                        # G2: deterministically promote hot, editable kernels
+                        # the LLM report omitted (e.g. the editable Triton
+                        # ``fused_moe``, rendered as "already-fused" prose and
+                        # excluded for lacking a perf model). LLM-independent:
+                        # reads the category_data/*_metrics.json sidecars
+                        # TraceLens always writes. _finalize_candidates then
+                        # source-resolves + classifies patchability, so any
+                        # non-editable op that slips through is still dropped.
+                        promoted_cands = promote_hot_editable_kernels(
+                            tracelens_dir,
+                            existing=report_cands,
+                            log=lambda msg: append_log(log_path, msg),
+                        )
+                        if promoted_cands:
+                            report_cands = list(report_cands or []) + promoted_cands
                         if report_cands:
                             raw_agent_candidates = report_cands
-                            report_source = "analysis.md"
+                            if had_report_cands and promoted_cands:
+                                report_source = "analysis.md+promoted_hot_editable"
+                            elif promoted_cands:
+                                report_source = "promoted_hot_editable"
+                            else:
+                                report_source = "analysis.md"
                         else:
                             agent_candidates = []
                             allow_empty_candidates = True
@@ -2931,6 +3377,106 @@ def main() -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except Exception as exc:
+        # Routing-robustness fallback (env-gated): a degraded eager trace
+        # (TraceLens annotation patch unavailable -> no iteration markers) makes
+        # the steady-state splitter yield zero chunks, so the normal
+        # analysis.md / category_data path can't run and hot_kernels stays empty
+        # -> the Coordinator never gets a kernel_id and idles. When THIS
+        # specific failure fires, deterministically surface the hot, EDITABLE
+        # native kernels (e.g. the Triton fused_moe) straight from the raw
+        # profile trace so kernel_opt can still dispatch. Reuses
+        # analyze_trace_files (-> _finalize_candidates source-resolution +
+        # patchability) and write_reports so kernel_candidates.json /
+        # reusable_native schema is identical to the normal path.
+        if isinstance(exc, _TraceSplitBlocked) and _raw_trace_fallback_enabled():
+            try:
+                fb_all = analyze_trace_files(trace_files, args.top_k)
+            except Exception as fb_exc:  # noqa: BLE001
+                fb_all = []
+                append_log(
+                    log_path,
+                    f"raw-trace fallback extraction failed: "
+                    f"{type(fb_exc).__name__}: {fb_exc}",
+                )
+            # Restrict the raw-trace fallback to source-only Triton (.py)
+            # kernels. A C++/.cu candidate (e.g. an sgl-kernel op) would force
+            # ``apply_kernel_patch`` to rebuild sgl-kernel via ``pip install -e``
+            # at integrate time, which on this ROCm box (a) needs nvcc and
+            # fails, and (b) leaves a stray ``*_editable.pth`` that redirects the
+            # global ``sgl_kernel`` import into a transient GEAK worktree —
+            # poisoning EVERY subsequent serve (it crashed the fused_moe
+            # integrate benchmark). The +23% target (Triton ``fused_moe``) and
+            # all reusable Triton kernels are ``.py`` source-only patches: no
+            # rebuild, no contamination. comm collectives are dropped as above.
+            fb = [
+                c for c in fb_all
+                if isinstance(c, dict)
+                and c.get("reusable_native_kernel")
+                and not _is_collective_comm_kernel(c)
+                and str(c.get("source_file") or "").endswith(".py")
+            ]
+            if fb:
+                enrich_candidates_with_workload_shapes(
+                    fb,
+                    workload={
+                        "isl": int(getattr(args, "isl", 0) or os.environ.get("ISL", "0") or 0),
+                        "osl": int(getattr(args, "osl", 0) or os.environ.get("OSL", "0") or 0),
+                        "conc": int(getattr(args, "conc", 0) or os.environ.get("CONC", "0") or 0),
+                        "tp": int(getattr(args, "tp", 0) or os.environ.get("TP", "1") or 1),
+                    },
+                    model_name=str(args.model_name or ""),
+                )
+                names = ", ".join(str(c.get("name")) for c in fb[:5])
+                append_log(
+                    log_path,
+                    f"raw-trace fallback: trace_split_no_steady_state but "
+                    f"admitted {len(fb)} hot editable reusable-native kernel(s) "
+                    f"from raw trace: {names}. Breaking the trace_analyze "
+                    f"circular dependency so the Coordinator gets a kernel_id.",
+                )
+                roofline_by_name = load_roofline_results(args.roofline_json)
+                merge_roofline_into_candidates(fb, roofline_by_name)
+                artifacts.update(write_reports(
+                    run_dir, trace_input_type=trace_input_type,
+                    trace_files=trace_files, candidates=fb, args=args,
+                    existing_report_path=agent_report_path,
+                    trace_health_warnings=trace_health_warnings))
+                artifacts["cli_log_path"] = str(log_path)
+                artifacts["status_path"] = str(status_path)
+                result = {
+                    "tool": "tracelens_analysis",
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "trace_input_type": trace_input_type,
+                    "hot_kernels": fb,
+                    "trace_report_path": artifacts.get("trace_report_path", ""),
+                    "analysis_report_path": "",
+                    "cli_log_path": str(log_path),
+                    "status_path": str(status_path),
+                    "artifact_paths": artifacts,
+                    "orchestrator_mode": "raw_trace_fallback",
+                    "orchestrator_error": "",
+                    "report_source": "raw_trace_fallback",
+                    "trace_health_warnings": trace_health_warnings,
+                }
+                atomic_write_json(run_dir / "session_state.json", {
+                    "session_id": session_id,
+                    "last_tool": "tracelens_analysis",
+                    "last_run_id": run_id,
+                    "updated_at": utc_now(),
+                    "model_name": args.model_name,
+                    "framework": args.framework,
+                })
+                update_status(status_path, state="succeeded", current_step="done",
+                              log_path=log_path, artifact_paths=artifacts,
+                              run_id=run_id, started_at=started_at)
+                print(json.dumps(result, indent=2, sort_keys=True))
+                return 0
+            append_log(
+                log_path,
+                "raw-trace fallback enabled but produced no editable "
+                "reusable-native kernels; failing as usual",
+            )
         append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
         update_status(status_path, state="failed", current_step="failed",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,

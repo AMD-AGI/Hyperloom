@@ -225,6 +225,59 @@ async def test_run_stops_on_objective_reached(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_run_defers_target_reached_for_kernel_work(session_dir, monkeypatch):
+    """Explore-only target must not stop before KERNEL / kernel_opt."""
+    monkeypatch.setenv("HYPERLOOM_AUTO_INTEGRATE", "0")
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 1000.0
+    c.shared_state.cumulative_gain = 50.0
+    c.shared_state.phase = "EXPLORE"
+    c.shared_state.last_profile_trace = "/tmp/profile.trace"
+    c.shared_state.save(session_dir)
+    try:
+        reason = await c.run(
+            objective=TargetGainObjective(target_gain_pct=10.0),
+            max_ticks=5,
+            tick_interval_sec=0,
+        )
+        assert reason == "max_ticks"
+        assert c.shared_state.stop_reason == "max_ticks"
+        assert (c.shared_state.phase or "").upper() == "KERNEL"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_target_reached_finalizes_journal(session_dir, tmp_path, monkeypatch):
+    """Early target_reached must populate optimization_journal totals."""
+    monkeypatch.setenv("HYPERLOOM_AUTO_INTEGRATE", "0")
+    c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 1000.0
+    c.shared_state.cumulative_gain = 50.0
+    c.shared_state.current_best = {"tput": 1500.0, "action": "explore"}
+    c.shared_state.kernel_enabled = False
+    c.role_registry = {
+        k: v for k, v in c.role_registry.items() if k != "kernel"
+    }
+    c.shared_state.save(session_dir)
+    try:
+        reason = await c.run(
+            objective=TargetGainObjective(target_gain_pct=10.0),
+            max_ticks=10,
+            tick_interval_sec=0,
+        )
+        assert reason == "target_reached"
+        journal_path = session_dir / "reports" / "optimization_journal.json"
+        assert journal_path.is_file()
+        data = json.loads(journal_path.read_text(encoding="utf-8"))
+        assert data.get("final_throughput") == pytest.approx(1500.0)
+        assert data.get("total_gain_pct") == pytest.approx(50.0)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_run_stops_on_time_exhausted(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:

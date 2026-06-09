@@ -159,6 +159,10 @@ esac
 # LLM-parsed task hints), but this is the yaml-default operators can set
 # at install time without hand-editing $GEAK_CONFIG.
 GEAK_RUN_MODE_VAL="${GEAK_RUN_MODE:-full}"
+KERNEL_AGENT_NUM_GPUS_VAL="${KERNEL_AGENT_NUM_GPUS:-4}"
+GEAK_MIN_PARALLEL_WORKERS_VAL="${GEAK_MIN_PARALLEL_WORKERS:-4}"
+GEAK_WORKERS_PER_GPU_VAL="${GEAK_WORKERS_PER_GPU:-3}"
+GEAK_FULL_MAX_ROUNDS_VAL="${GEAK_FULL_MAX_ROUNDS:-5}"
 # Validate inline (the ``die`` helper is defined further down; calling it
 # from this top-level scope would error with "die: command not found").
 case "$GEAK_RUN_MODE_VAL" in
@@ -629,12 +633,18 @@ ensure_ray_started() {
     warn "ray CLI missing; cannot start ray head"
     return 0
   fi
+  # Ray head + GEAK Ray tasks exhaust FDs on default ulimit (1024).
+  ulimit -n 65536 2>/dev/null || warn "could not raise ulimit -n to 65536"
   if ray status >/dev/null 2>&1; then
     log "ray head already running"
+    export RAY_ADDRESS="${RAY_ADDRESS:-auto}"
     return 0
   fi
   log "no live ray head detected; starting one"
   ray stop --force >/dev/null 2>&1 || true
+  sleep 2
+  # Stale GCS session dirs cause AssertionError on ray start (session name mismatch).
+  rm -rf /tmp/ray/session_* 2>/dev/null || true
   local num_gpus
   num_gpus="$(python3 - <<'PY' 2>/dev/null || echo 0
 try:
@@ -648,12 +658,23 @@ PY
     num_gpus="$RAY_NUM_GPUS"
   fi
   log "starting ray head with --num-gpus=${num_gpus}"
-  if ! ray start --head --disable-usage-stats \
-       --num-gpus="$num_gpus" --include-dashboard=false >/dev/null; then
-    warn "ray start failed; kernel optimization will hang. Check ROCm visibility."
+  local attempt
+  for attempt in 1 2 3; do
+    if ray start --head --disable-usage-stats \
+         --num-gpus="$num_gpus" --include-dashboard=false >/dev/null; then
+      break
+    fi
+    warn "ray start attempt ${attempt} failed; retrying after cleanup"
+    ray stop --force >/dev/null 2>&1 || true
+    sleep 2
+    rm -rf /tmp/ray/session_* 2>/dev/null || true
+  done
+  if ! ray status >/dev/null 2>&1; then
+    warn "ray status reports no live head after start; kernel optimization will hang"
     return 0
   fi
-  ray status >/dev/null 2>&1 || warn "ray status reports no live head after start"
+  export RAY_ADDRESS="${RAY_ADDRESS:-auto}"
+  log "ray head healthy (RAY_ADDRESS=${RAY_ADDRESS})"
 }
 
 _pip_install_editable() {
@@ -786,11 +807,12 @@ ensure_geak() {
     mkdir -p "${HYPERLOOM_ROOT}" "$(dirname "$GEAK_CONFIG")" "$(dirname "$GEAK_MEMORY_STORE_PATH_VAL")"
   fi
   if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
-    # ``git clone --branch`` only accepts tags / branches, not SHAs. Detect
-    # a 7-40 hex char SHA and use a fetch-checkout dance instead so the
-    # SHA pin above stays shallow. GitHub serves shallow SHA fetches
-    # (uploadpack.allowReachableSHA1InWant=true).
-    if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    # Local dev trees (``GEAK_REPO=/path/to/GEAK``) cannot be shallow-cloned
+    # when git safe.directory blocks cross-user ownership; mirror with cp -a.
+    if [ -d "$GEAK_REPO/.git" ] && [[ "$GEAK_REPO" != http* ]] && [[ "$GEAK_REPO" != git@* ]]; then
+      log "mirroring local GEAK tree from $GEAK_REPO -> ${HYPERLOOM_ROOT}/geak"
+      run cp -a "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
+    elif [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
       run git init -q "${HYPERLOOM_ROOT}/geak"
       run git -C "${HYPERLOOM_ROOT}/geak" remote add origin "$GEAK_REPO"
       run git -C "${HYPERLOOM_ROOT}/geak" fetch --depth 1 origin "$GEAK_REF"
@@ -800,6 +822,15 @@ ensure_geak() {
     fi
   else
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
+  fi
+  # Hyperloom-owned GEAK hotfixes: PROFILE skip after FULL_BENCHMARK pass (G1/#263).
+  _HYPERLOOM_GEAK_EVAL="${KERNEL_AGENT_ROOT:-${HYPERLOOM_ROOT}/../Hyperloom/kernel-agent}/../GEAK/src/minisweagent/run/postprocess/evaluation.py"
+  _GEAK_EVAL_DST="${HYPERLOOM_ROOT}/geak/src/minisweagent/run/postprocess/evaluation.py"
+  if [ -f "$_HYPERLOOM_GEAK_EVAL" ] && [ -f "$_GEAK_EVAL_DST" ]; then
+    if ! cmp -s "$_HYPERLOOM_GEAK_EVAL" "$_GEAK_EVAL_DST"; then
+      run cp "$_HYPERLOOM_GEAK_EVAL" "$_GEAK_EVAL_DST"
+      log "overlay Hyperloom GEAK evaluation.py (PROFILE skip + advisory)"
+    fi
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     # Pin the pip flag set so we work in both venv installs (main upstream
@@ -813,6 +844,10 @@ ensure_geak() {
       _PIP_CONSTRAINT_ARGS="--constraint ${GEAK_PIP_CONSTRAINT_FILE}"
     fi
     run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${HYPERLOOM_ROOT}/geak"
+    # mini-swe-agent declares litellm/fastmcp but editable installs do not
+    # always pull transitive deps into the driver venv (repro blocker #3).
+    run python3 -m pip install ${_PIP_FLAGS} \
+      'litellm>=1.75.5' 'fastmcp>=2.0.0' 'markdownify>=0.11.0'
     # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
     # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
@@ -843,6 +878,18 @@ ensure_geak() {
     else
       warn "geak prompt patcher missing at $_geak_patcher; skip"
     fi
+    _geak_preprocess_patcher="${KERNEL_AGENT_ROOT}/tools/geak_preprocess_fastpath_patcher.py"
+    if [ -f "$_geak_preprocess_patcher" ]; then
+      run python3 "$_geak_preprocess_patcher"
+    else
+      warn "geak preprocess fast-path patcher missing at $_geak_preprocess_patcher; skip"
+    fi
+    _geak_dispatch_patcher="${KERNEL_AGENT_ROOT}/tools/geak_dispatch_subagent_patcher.py"
+    if [ -f "$_geak_dispatch_patcher" ]; then
+      run python3 "$_geak_dispatch_patcher"
+    else
+      warn "geak dispatch subagent patcher missing at $_geak_dispatch_patcher; skip"
+    fi
   else
     log "check-only: skipping GEAK and mcp_tools installation"
   fi
@@ -871,18 +918,24 @@ run:
       finalize_grace_s: 300
       kill_buffer_s: 60
     full:
-      total_s: 7200
-      preprocess_soft_cap_s: 900
-      preprocess_hard_cap_fraction: 0.5
-      finalize_grace_s: 300
-      kill_buffer_s: 60
+      total_s: ${GEAK_FULL_TOTAL_S:-10800}
+      preprocess_soft_cap_s: 180
+      preprocess_hard_cap_fraction: 0.25
+      finalize_grace_s: 600
+      kill_buffer_s: 120
   presets:
     quick:
       orchestrator:
         max_rounds: 2
     full:
       orchestrator:
-        max_rounds: 5
+        max_rounds: ${GEAK_FULL_MAX_ROUNDS_VAL}
+parallel:
+  num_parallel: null
+  min_parallel: ${GEAK_MIN_PARALLEL_WORKERS_VAL}
+  workers_per_gpu: ${GEAK_WORKERS_PER_GPU_VAL}
+  gpu_oversubscribe: 1.0
+  max_concurrent_llm: null
 env:
   env:
     PAGER: cat
@@ -1225,6 +1278,10 @@ write_env_file() {
     fi
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
+    echo "export KERNEL_AGENT_NUM_GPUS='${KERNEL_AGENT_NUM_GPUS_VAL}'"
+    echo "export GEAK_MIN_PARALLEL_WORKERS='${GEAK_MIN_PARALLEL_WORKERS_VAL}'"
+    echo "export GEAK_WORKERS_PER_GPU='${GEAK_WORKERS_PER_GPU_VAL}'"
+    echo "export GEAK_FULL_MAX_ROUNDS='${GEAK_FULL_MAX_ROUNDS_VAL}'"
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
     [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
     [ -n "${GEAK_BASE_URL_VAL}" ] && echo "export GEAK_BASE_URL='${GEAK_BASE_URL_VAL}'"

@@ -340,3 +340,96 @@ def test_closing_phase_denies_non_report_proposals():
             payload={"action_name": "report", "predicted_gain_pct": 0.0},
         ),
     )
+
+
+# ===========================================================================
+# KERNEL-before-target gate (zero-touch GEAK-required path)
+# ===========================================================================
+def test_kernel_required_before_target_stop_in_explore(session_dir):
+    """Explore-only early target must defer when kernel agent is active."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.cumulative_gain = 25.0
+    assert coord._kernel_required_before_target_stop() is True
+
+
+def test_kernel_required_before_target_stop_hot_kernels(session_dir):
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/cands.json",
+        "roofline_snapshot_id": 1,
+        "hot_kernels_top15": [
+            {
+                "kernel_id": "k001",
+                "gpu_pct": 24.0,
+                "reusable_native_kernel": True,
+                "source_file": "/p/moe.py",
+            },
+        ],
+    }
+    assert coord._kernel_required_before_target_stop() is True
+
+
+def test_kernel_required_before_target_stop_clears_after_attempt(session_dir):
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.kernel_opt_attempts = {
+        "k001": {"attempts": 1, "last_decision": "REVERT"},
+    }
+    assert coord._kernel_required_before_target_stop() is True
+
+
+def test_kernel_required_before_target_stop_clears_after_integrate_keep(
+    session_dir,
+):
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    coord.shared_state.phase = "KERNEL"
+    coord.shared_state.kernel_opt_attempts = {
+        "k001": {
+            "attempts": 1,
+            "last_decision": "KEEP",
+            "last_micro_speedup": 1.5,
+            "last_source_file": "/p/moe.py",
+        },
+    }
+    coord.shared_state.optimization_stack = [{
+        "action": "integrate",
+        "kernel_id": "k001",
+        "gain_pct": 22.0,
+        "tput": 1050.0,
+    }]
+    assert coord._kernel_required_before_target_stop() is False
+
+
+def test_kernel_required_before_target_stop_blocks_keep_pending_integrate(
+    session_dir,
+):
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    coord.shared_state.phase = "KERNEL"
+    coord.shared_state.kernel_opt_attempts = {
+        "k001": {
+            "attempts": 1,
+            "last_decision": "KEEP",
+            "last_micro_speedup": 1.5,
+            "last_source_file": "/p/moe.py",
+        },
+    }
+    assert coord._kernel_required_before_target_stop() is True
+
+
+def test_kernel_required_before_target_stop_respects_no_kernel(session_dir):
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.kernel_enabled = False
+    coord.role_registry = {
+        k: v for k, v in coord.role_registry.items() if k != "kernel"
+    }
+    assert coord._kernel_required_before_target_stop() is False
