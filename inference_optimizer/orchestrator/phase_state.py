@@ -279,6 +279,13 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     # models, so we fail fast before booting a server that would die ~5min in
     # with a cryptic image-processor load error.
     "unsupported_model_arch",
+    # Pre-run model-config compatibility preflight
+    # (``cli._preflight_model_config_compat``): config.json is present but
+    # corrupt/non-dict, or declares RoPE scaling without any max-position
+    # field — both make vLLM/transformers crash at config load (e.g.
+    # "'PreTrainedConfig' object has no attribute 'max_position_embeddings'").
+    # Fail fast instead of booting a server that dies in engine init.
+    "model_config_incompatible",
 })
 
 

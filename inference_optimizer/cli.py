@@ -1279,6 +1279,126 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     return True
 
 
+# RoPE-config signals: their presence means the model uses extended/scaled
+# positions, so transformers/vLLM read a max-position field during rope init.
+# A config that ships these but no max-position key (DeepSeek-V3.2-Exp shape)
+# crashes with "'PreTrainedConfig' object has no attribute
+# 'max_position_embeddings'" deep in engine init.
+_ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
+
+
+def _detect_incompatible_model_config(model_path: str) -> str | None:
+    """Detect a statically-knowable model-config incompatibility.
+
+    Returns a human-readable reason string when the model's ``config.json``
+    will crash vLLM/transformers at load time, else ``None``. Two cases,
+    both conservative (no false positives on healthy configs):
+
+    * ``config.json`` is present but corrupt / not a JSON object — the loader
+      soft-degrades to ``None``, but a present-yet-unparseable file means the
+      framework will fail at config load, so block early.
+    * the config (top level or ``text_config``) declares a RoPE block but has
+      no max-position key at all — the rope init then dereferences a missing
+      ``max_position_embeddings``.
+
+    A fully absent ``config.json`` is NOT blocked (kept soft-degrade): the
+    upstream submission filter + downstream loader still apply.
+    """
+    if not model_path:
+        return None
+    cfg_path = Path(model_path) / "config.json"
+    if not cfg_path.is_file():
+        return None
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        # File exists but did not parse into a dict (corrupt / non-object).
+        return (
+            f"config.json at {cfg_path} is present but unparseable "
+            f"(corrupt JSON or not a JSON object); the framework would crash "
+            f"at config load."
+        )
+    scopes = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append(nested)
+    has_rope = any(
+        s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS
+    )
+    has_maxpos = any(
+        isinstance(s.get(k), int) and not isinstance(s.get(k), bool)
+        and s.get(k) > 0
+        for s in scopes for k in _MAXPOS_CONFIG_KEYS
+    )
+    if has_rope and not has_maxpos:
+        return (
+            "config.json declares a RoPE block "
+            f"({', '.join(_ROPE_CONFIG_KEYS)}) but no max-position field "
+            f"({', '.join(_MAXPOS_CONFIG_KEYS)}); transformers/vLLM rope "
+            "init dereferences a missing max_position_embeddings and crashes "
+            "in engine init (DeepSeek-V3.2-Exp class)."
+        )
+    return None
+
+
+def _preflight_model_config_compat(
+    args: argparse.Namespace, session_dir: Path,
+) -> bool:
+    """Fail fast when the model config is statically known to be incompatible.
+
+    Catches configs that crash vLLM/transformers at load (corrupt config.json,
+    or a RoPE block without any max-position field) so we persist a clear stop
+    reason instead of booting a server that dies cryptically in engine init.
+
+    Returns True when incompatible (caller should exit); False otherwise.
+    """
+    model = str(getattr(args, "model", "") or "")
+    detail = _detect_incompatible_model_config(model)
+    if detail is None:
+        return False
+    name = Path(model).name or model
+    reason = (
+        f"Model '{name}' has an incompatible config: {detail} Refusing to run "
+        f"before the heavy server bring-up. Upgrade the framework/transformers "
+        f"to a version that supports this model, or skip it on this hardware."
+    )
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        state.set_stop_reason("model_config_incompatible")
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist model-config stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on config "
+            f"fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
+
+
 def _preflight_unsupported_model_arch(
     args: argparse.Namespace, session_dir: Path,
 ) -> bool:
@@ -4151,6 +4271,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # rejection) and, like the context-window gate, after the SharedState
         # seed but before the heavy Cortex / backend / Coordinator bring-up.
         if _preflight_unsupported_model_arch(args, session_dir):
+            sys.exit(2)
+        # Model-config compatibility preflight: refuse to run when config.json
+        # is statically known to crash the framework at load (corrupt config,
+        # or RoPE block without any max-position field). Runs after the arch
+        # gate but before the context-window gate and the heavy bring-up.
+        if _preflight_model_config_compat(args, session_dir):
             sys.exit(2)
         # Context-window preflight: refuse to run (with a persisted stop
         # reason) when ISL+OSL+headroom exceeds the model's
