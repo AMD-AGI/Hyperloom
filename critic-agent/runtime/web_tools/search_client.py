@@ -2,19 +2,11 @@
 
 """WebSearchClient — facade over multiple :mod:`providers`.
 
-Responsibilities:
-
-* rate-limit (in-memory leaky bucket, 30 req/min default)
-* normalize / validate :class:`WebSearchInput` (min query length,
-  allowed/blocked mutual-exclusion, max_results clamp)
-* try the configured provider chain; fall back to the next provider on
-  :class:`ProviderError`
-* apply the global ``WEB_SEARCH_DOMAIN_DENYLIST`` to every returned hit
-* format the final string so the LLM sees the same shape regardless of
-  which provider answered, and ALWAYS prepend the cite-source reminder.
-
-The output format mirrors Primus-Claw's ``formatThirdPartyResults`` so
-prompt engineering carried over between the two stacks stays valid.
+Rate-limits (leaky bucket, 30 req/min default), validates
+:class:`WebSearchInput`, tries the provider chain (falling back on
+:class:`ProviderError`), applies the global ``WEB_SEARCH_DOMAIN_DENYLIST``,
+and formats one provider-agnostic string (always with the cite-source
+reminder). Output mirrors Primus-Claw's ``formatThirdPartyResults``.
 """
 
 from __future__ import annotations

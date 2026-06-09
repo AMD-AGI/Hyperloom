@@ -1,9 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for framework_agent.sources.enumerate_candidates dispatch.
-
-Hermetic - monkeypatches the backend functions directly.
-"""
+"""Tests for framework_agent.sources.enumerate_candidates dispatch. Hermetic - monkeypatches the backend functions directly."""
 
 from __future__ import annotations
 
@@ -26,12 +23,8 @@ def _minimal_request(**overrides) -> ExploreRequest:
     return ExploreRequest.from_dict(base)
 
 
-# Per-framework repo URLs used to parametrise the dispatch tests over
-# every framework the framework-agent CLI accepts. This map plus the
-# parametrize decorator below ensure every dispatch path is exercised
-# for sglang AND vllm AND atom so a
-# future regression that silently routes only one framework correctly
-# fails the suite.
+# Per-framework repo URLs to parametrise dispatch tests over every framework
+# the CLI accepts (sglang/vllm/atom), so a single-framework regression fails.
 _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "sglang": "https://github.com/sgl-project/sglang.git",
     "vllm":   "https://github.com/ROCm/vllm.git",
@@ -49,16 +42,9 @@ def test_dispatch_explicit_refs_only() -> None:
     assert sources == {"explicit"}
 
 
-# Parametrise the dispatch path over every framework the CLI accepts
-# so a future regression that silently routes only one framework
-# correctly fails the suite. The
-# parametrised guard below covers sglang / vllm / atom.
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
 def test_dispatch_explicit_refs_only_across_frameworks(framework: str) -> None:
-    """Explicit candidate_refs must come out untouched for every
-    framework — there's no framework-specific filtering at the
-    dispatch layer.
-    """
+    """Explicit candidate_refs come out untouched for every framework (no framework-specific filtering at the dispatch layer)."""
     req = _minimal_request(
         framework=framework,
         repo_url=_FRAMEWORK_TO_REPO_URL[framework],
@@ -377,26 +363,16 @@ def test_rank_by_keyword_overlap_empty_keywords_is_identity() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B3 fix: anti-correlation rerank lands at the dispatcher boundary.
-#
-# These tests pin the end-to-end behaviour through enumerate_candidates so a
-# regression in _rank_by_keyword_overlap or the keywords.py scorer surfaces
-# in the dispatcher's contract test, not just in the keywords unit tests.
+# B3 fix: anti-correlation rerank at the dispatcher boundary. These pin the
+# end-to-end behaviour through enumerate_candidates so a rerank/scorer
+# regression surfaces in the dispatcher contract test too.
 # ---------------------------------------------------------------------------
 
 
 def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch) -> None:
-    """Regression for session f219629b on Qwen-Qwen3-32B (dense, bf16, mi300x).
-
-    Before the anti-correlation fix, fa picked PR:25769 ("Enable MegaMoE for
-    NextN with TP attn A2A scatter padding") because positive-only overlap
-    matched ``throughput`` while the PR's MoE / NVIDIA-H20 signals were
-    invisible to the ranker. With the fix, a relevant dense+mi300x PR must
-    rank ahead at the enumerate_candidates boundary.
-    """
+    """Regression (session f219629b, dense/bf16/mi300x): positive-only overlap wrongly picked PR:25769 MegaMoE; the fix must rank a dense+mi300x PR ahead at the enumerate_candidates boundary."""
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
-        # Return the real PR:25769 title alongside a hypothetical relevant PR.
         return [
             GitHubPr(
                 number=25769,
@@ -437,14 +413,7 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
 
 
 def test_candidate_score_field_populated_for_primus_path(monkeypatch) -> None:
-    """The dispatcher must transport the anti-aware rerank score on every
-    Candidate it returns from the primus_cortex path with non-empty keywords.
-
-    This is the data plane that lets the downstream framework_pr arm
-    (inference_optimizer) persist "why we picked this PR" into state.json
-    without re-running the scorer. Order of candidates must match score
-    descending (stable on ties).
-    """
+    """The dispatcher transports the anti-aware rerank score on every primus_cortex Candidate (so IO can persist "why we picked this PR"); order is score-descending, stable on ties."""
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
         return [
@@ -476,10 +445,7 @@ def test_candidate_score_field_populated_for_primus_path(monkeypatch) -> None:
 
 
 def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> None:
-    """When gap_description / keywords are empty, the dispatcher takes the
-    label-only cheap path. Candidate.score must default to 0.0 then — the
-    field is opt-in semantics: 0.0 means "no gap-driven ranking happened".
-    """
+    """Empty gap/keywords -> label-only cheap path; Candidate.score defaults to 0.0 (opt-in: 0.0 means "no gap-driven ranking happened")."""
 
     def fake_search(*a, **kw):  # would never be called when keywords empty
         raise AssertionError("search must not be called on the no-keyword path")
@@ -504,12 +470,7 @@ def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> No
 
 
 def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) -> None:
-    """Anti rerank must be a no-op when the gap has no anti-trigger keyword.
-
-    Pins the ``additive only`` contract at the dispatcher boundary so this
-    fix can never regress callers whose gaps happen to not carry any of the
-    orthogonal-axis triggers (dense / mi300x / bf16 / ...).
-    """
+    """Anti rerank is a no-op when the gap carries no anti-trigger keyword (pins the additive-only contract at the dispatcher boundary)."""
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
         return [
@@ -521,8 +482,7 @@ def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) 
     monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", lambda *a, **kw: [])
 
-    # Gap with NO anti-trigger (no dense / no mi300x / no bf16 / no rocm / ...).
-    # extract_keywords("improve fp8 attention") -> ['attention', 'fp8'].
+    # Gap with NO anti-trigger; extract_keywords -> ['attention', 'fp8'].
     req = _minimal_request(
         search_perf_prs=True,
         search_modes=["primus_cortex"],
@@ -532,12 +492,6 @@ def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) 
     )
     out = src.enumerate_candidates(req)
     refs = [c.ref for c in out]
-    # Positive-only scoring (no anti-trigger fires):
-    #   PR:11 "fp8 attention fusion"   -> 2 (fp8 + attention)
-    #   PR:10 "fp8 moe perf improvement" -> 1 (fp8 only; moe not penalised
-    #     because gap has no ``dense`` trigger to activate the anti set)
-    #   PR:12 "random doc edit"        -> 0
-    # The key contract pinned here is: PR:10 keeps its positive overlap
-    # of 1 even though it contains ``moe``, proving anti is fully gated
-    # on the gap-side trigger.
+    # Key contract: PR:10 keeps its positive overlap (1) despite containing
+    # ``moe``, proving anti is fully gated on the gap-side trigger.
     assert refs == ["PR:11", "PR:10", "PR:12"]

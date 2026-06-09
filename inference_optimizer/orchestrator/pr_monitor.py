@@ -2,35 +2,8 @@
 
 """PR Monitor REST client — v0.8 M4.
 
-Stdlib-only (``urllib``) client for the
-``primus-cortex-pr-api`` REST surface (see
-``primus-cortex-pr-monitor-access.md``). Used by the
-:class:`KnowledgePlane` facade to warm specialist prompts with recent PR
-summaries from the repos a given domain cares about.
-
-Design priorities:
-
-1. **Stdlib-only** so the client works in stripped sandboxes that
-   don't have ``requests`` or ``httpx``. ``urllib`` is enough for the
-   small GET surface this milestone needs.
-2. **Fail-soft**: any HTTP / network / parse failure surfaces as an
-   empty result + a warning entry, never an exception in the
-   prompt-assembly path. The whole point of M4 is "PR feed is a
-   bonus, not a critical path"; Inv-6.3 covers this.
-3. **No mutation**: PR Monitor itself is read-only; this client
-   reflects that — no POST / PUT / DELETE methods are exposed.
-4. **Cross-cluster aware**: production deploys put the
-   ``primus-cortex-pr-api`` service in a different cluster from the
-   optimizer pod. The default URL hits the in-cluster DNS name; the
-   ``--pr-monitor-url`` CLI flag overrides for ad-hoc port-forwarded
-   debug. KB_design §3.14 R-02 acknowledges the unreachable case is
-   the dominant failure mode.
-
-The PR Monitor's full tool surface is documented in
-``primus-cortex-pr-monitor-access.md``; this client only ships the
-endpoints M4 needs (list-repos, list-PRs). The MCP surface for
-specialists is configured separately (a URL + tool whitelist passed to
-the LLM backend, not Python code).
+Stdlib-only client for the ``primus-cortex-pr-api`` REST surface. Fail-soft
+(Inv-6.3), read-only, cross-cluster aware (KB_design §3.14 R-02).
 """
 
 from __future__ import annotations
@@ -49,50 +22,31 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-# Default service URL — primus-cortex-pr-api in the primus-cortex
-# namespace (see primus-cortex-pr-monitor-access.md §"服务地址"). When
-# the optimizer pod runs outside the primus-cortex cluster, the operator
-# must override via ``--pr-monitor-url`` / env var with a port-forward.
+# Default in-cluster service URL; operator overrides via ``--pr-monitor-url``.
 DEFAULT_PR_MONITOR_URL: str = (
     "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/v1"
 )
-# MCP URL (passed to specialist LLM backend; the runner doesn't need
-# a Python client). Note the trailing slash is mandatory per the
-# upstream doc.
+# MCP URL passed to specialist LLM backend; trailing slash mandatory.
 DEFAULT_PR_MONITOR_MCP_URL: str = (
     "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/mcp/"
 )
 
-# Default look-back window for ``pr_feed_warm`` (recent PRs, 30 days).
 DEFAULT_PR_FEED_WINDOW_DAYS: int = 30
 
-# Per-repo request limit (REST max is 200 per spec; we ask for less so
-# the prompt block stays compact).
+# Per-repo request limit (REST max is 200; kept smaller for compact prompts).
 DEFAULT_PR_FEED_PER_REPO_LIMIT: int = 25
 
-# How long to wait on a single HTTP call before giving up. PR feed
-# warming is on the critical path for specialist dispatch — we'd
-# rather time out fast and surface a warning than hold the
-# Orchestration tick.
+# Single HTTP call timeout — fail fast rather than hold the Orchestration tick.
 DEFAULT_PR_MONITOR_TIMEOUT_SEC: float = 5.0
 
 
-# Total wall-clock budget for one ``pr_feed_warm`` invocation. With
-# 5 repos × 5 s timeout per request, the worst case is 25 s; cap at
-# 15 s and let unreachable repos fall to the warning list rather than
-# blocking specialist dispatch indefinitely.
+# Total wall-clock budget for one ``pr_feed_warm`` invocation.
 DEFAULT_PR_FEED_TOTAL_BUDGET_SEC: float = 15.0
 
 
 @dataclass
 class PRSummary:
-    """One PR row returned by ``pr_feed_warm`` / ``list_prs``.
-
-    Mirrors the subset of the REST PR list response we put in
-    specialist prompts. Extra fields the upstream returns
-    (``head_sha``, ``base_sha``, …) are dropped — specialists can dig
-    them up via the MCP if they need.
-    """
+    """One PR row returned by ``pr_feed_warm`` / ``list_prs``."""
 
     repo: str
     number: int
@@ -126,38 +80,28 @@ class PRSummary:
         }
 
 
-# ---------------------------------------------------------------------------
 class PRMonitorError(RuntimeError):
     """Raised for unrecoverable PR Monitor interactions.
 
-    Most callers catch this and treat it as "PR feed unavailable" —
-    the prompt builder renders a ``(unavailable: pr_monitor)`` line and
-    specialists continue without PR context (KB_design §3.5 §6
-    section 6 / §3.14 R-02).
+    Most callers treat it as "PR feed unavailable" (KB_design §3.14 R-02).
     """
 
 
-# ---------------------------------------------------------------------------
 @dataclass
 class PRMonitorClient:
     """Stdlib-only REST client for the PR Monitor surface.
 
-    Instantiated once by the CLI / Coordinator. ``enabled=False``
-    (``--degraded-pr``) turns every call into a no-op returning
-    empty data — KB_design §3.13 M4 §9 verification 5.
+    ``enabled=False`` (``--degraded-pr``) turns every call into a no-op
+    returning empty data (KB_design §3.13 M4).
     """
 
     base_url: str = DEFAULT_PR_MONITOR_URL
     enabled: bool = True
     timeout_sec: float = DEFAULT_PR_MONITOR_TIMEOUT_SEC
     user_agent: str = "inference-optimizer/v0.8 (PRMonitorClient)"
-    # In-memory cache of (repo, params_hash) → list[PRSummary] keyed by
-    # the full URL. Specialist warmups in the same Orchestration tick
-    # tend to hit the same repos; we cache for one tick lifetime via
-    # ``reset_cache``.
+    # Per-tick URL-keyed cache; cleared via ``reset_cache``.
     _cache: dict[str, list[PRSummary]] = field(default_factory=dict)
 
-    # ------------------------------------------------------------------
     @classmethod
     def from_args(
         cls,
@@ -206,20 +150,16 @@ class PRMonitorClient:
         """Drop the per-tick cache (call between EXPLORE rounds)."""
         self._cache.clear()
 
-    # ------------------------------------------------------------------
     # Low-level HTTP helper
-    # ------------------------------------------------------------------
     def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        """GET ``base_url + path`` with a ``params`` query string.
+        """GET ``base_url + path`` with ``params``; parsed JSON or raises.
 
-        Defense-in-depth: limits response size to 4 MiB so a misbehaving
-        endpoint can't hang the optimizer pod by streaming gigabytes.
+        Response size capped at 4 MiB as defense-in-depth.
         """
         if not self.enabled:
             raise PRMonitorError("PR Monitor client disabled (--degraded-pr)")
         query = ""
         if params:
-            # Drop None / empty values so we don't send ``?state=&label=``.
             cleaned = {
                 k: str(v) for k, v in params.items()
                 if v is not None and str(v) != ""
@@ -234,8 +174,6 @@ class PRMonitorClient:
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
-                # Cap at 4 MiB to defend against runaway responses; PR
-                # Monitor's documented list endpoints are bounded.
                 payload = resp.read(4 * 1024 * 1024)
         except urllib.error.HTTPError as exc:
             raise PRMonitorError(
@@ -256,9 +194,7 @@ class PRMonitorClient:
                 f"PR Monitor non-JSON response at {url}: {exc}"
             ) from exc
 
-    # ------------------------------------------------------------------
     # REST endpoint wrappers
-    # ------------------------------------------------------------------
     def healthz(self) -> bool:
         """Probe the PR Monitor health endpoint.
 
@@ -276,17 +212,8 @@ class PRMonitorClient:
     def list_repos(self) -> list[str]:
         """Return the list of active repo names PR Monitor knows about.
 
-        The REST ``/repos`` endpoint returns a top-level JSON array
-        whose entries carry ``repo_name`` (canonical ``owner/name``)
-        and ``is_active``; older / test fixtures may wrap the array in
-        ``{"items": [...]}`` and use the legacy ``name`` field, so we
-        accept either shape. Entries with ``is_active=False`` are
-        skipped because PR Monitor stops polling them and they return
-        empty PR lists.
-
-        Returns:
-            list[str]: Canonical ``owner/name`` repo names; empty on
-            failure or when the response shape is unrecognised.
+        Accepts either the array or ``{"items": [...]}`` shape and either
+        ``repo_name``/``name`` field; skips ``is_active=False`` entries.
         """
         try:
             data = self._get_json("/repos")
@@ -320,19 +247,8 @@ class PRMonitorClient:
     ) -> list[PRSummary]:
         """List recent PRs for ``repo``.
 
-        Mirrors REST ``/repos/{repo}/prs``. Uses the in-memory cache
-        keyed by the rendered URL so multiple specialist dispatches
-        within the same tick don't re-hit the network.
-
-        Args:
-            repo (str): Canonical ``owner/name`` repo identifier.
-            state (str): PR state filter (e.g. ``all``, ``open``).
-            since (str | None): Optional ISO timestamp lower bound.
-            limit (int): Maximum PRs to request; non-positive falls back
-                to :data:`DEFAULT_PR_FEED_PER_REPO_LIMIT`.
-
-        Returns:
-            list[PRSummary]: Parsed PR rows; empty on failure.
+        Returns :class:`PRSummary` list (empty on failure). Cached by
+        rendered URL to avoid re-hitting the network within a tick.
         """
         params = {
             "state": state,
@@ -419,9 +335,7 @@ class PRMonitorClient:
             log.info("pr_monitor.get_pr(%s#%s) failed: %s", repo, number, exc)
             return None
 
-    # ------------------------------------------------------------------
     # High-level helper used by KnowledgePlane.pr_feed_warm
-    # ------------------------------------------------------------------
     def pr_feed_warm(
         self,
         repos: list[str],
@@ -432,36 +346,7 @@ class PRMonitorClient:
         total_budget_sec: float = DEFAULT_PR_FEED_TOTAL_BUDGET_SEC,
         now: datetime | None = None,
     ) -> tuple[list[PRSummary], list[str]]:
-        """Return ``(prs, warnings)`` for the union of ``repos``.
-
-        Always returns 2-tuples; warnings list is populated when a
-        repo couldn't be fetched (unreachable / 4xx). The caller is
-        expected to forward both into the specialist prompt builder
-        (``pr_feed`` section + ``warnings`` log).
-
-        Filtering rules:
-
-        - ``state=all`` (open + merged + closed merged together).
-        - ``since = now - window_days`` (ISO ``YYYY-MM-DDTHH:MM:SSZ``).
-        - When ``keywords`` is non-empty, drop PRs whose title + label
-          set contain none of the keywords (case-insensitive).
-        - Sort the merged list by ``updated_at`` desc (newest first).
-
-        Args:
-            repos (list[str]): Repos to fetch PRs from.
-            keywords (list[str] | None): Optional case-insensitive filter
-                applied to title + labels + body snippet.
-            window_days (int): Look-back window for the ``since`` bound.
-            per_repo_limit (int): Maximum PRs requested per repo.
-            total_budget_sec (float): Wall-clock budget for the whole
-                call; repos beyond it are skipped with a warning.
-            now (datetime | None): Override for the current time (tests).
-
-        Returns:
-            tuple[list[PRSummary], list[str]]: ``(prs, warnings)`` where
-            warnings note disabled state, per-repo failures, or budget
-            exhaustion.
-        """
+        """Return ``(prs, warnings)`` for the union of ``repos``."""
         out: list[PRSummary] = []
         warns: list[str] = []
         if not self.enabled:
@@ -484,9 +369,6 @@ class PRMonitorClient:
                     repo, state="all", since=since_iso, limit=per_repo_limit,
                 )
             except PRMonitorError as exc:
-                # Surface per-repo failures so the caller can render a
-                # "pr_monitor_unreachable:<repo>" line in the
-                # breakdown.warnings + specialist prompt.
                 warns.append(f"pr_monitor:fetch_failed:{repo}:{exc}"[:240])
                 continue
             except Exception as exc:  # noqa: BLE001 — defensive
@@ -516,23 +398,7 @@ class PRMonitorClient:
     ) -> list[PRSummary]:
         """Same as :meth:`list_prs` but re-raises :class:`PRMonitorError`.
 
-        :meth:`pr_feed_warm` uses this so it can distinguish ``[]`` =
-        "successful but no PRs in window" from ``[]`` = "fetch failed".
-        External callers should stick with the fail-soft
-        :meth:`list_prs`.
-
-        Args:
-            repo (str): Canonical ``owner/name`` repo identifier.
-            state (str): PR state filter.
-            since (str | None): Optional ISO timestamp lower bound.
-            limit (int): Maximum PRs to request; non-positive falls back
-                to :data:`DEFAULT_PR_FEED_PER_REPO_LIMIT`.
-
-        Returns:
-            list[PRSummary]: Parsed PR rows (possibly empty).
-
-        Raises:
-            PRMonitorError: If the underlying request fails.
+        Lets :meth:`pr_feed_warm` distinguish empty-window from fetch-failed.
         """
         params: dict[str, Any] = {
             "state": state,
@@ -590,23 +456,8 @@ class PRMonitorClient:
         return prs
 
 
-# ---------------------------------------------------------------------------
 def _matches_keywords(pr: PRSummary, keywords_lower: list[str]) -> bool:
-    """Return True iff ``pr`` mentions any of ``keywords_lower``.
-
-    The PR text we check is the concatenation of title + labels +
-    short body snippet (which is what specialists actually see in the
-    prompt). Empty keyword list → match everything (caller should
-    not call this in that case).
-
-    Args:
-        pr (PRSummary): PR whose title, labels, and snippet are scanned.
-        keywords_lower (list[str]): Lower-cased keywords to match.
-
-    Returns:
-        bool: ``True`` if any keyword appears in the PR text, or when
-        ``keywords_lower`` is empty.
-    """
+    """Return True iff ``pr`` (title + labels + body snippet) mentions any keyword."""
     if not keywords_lower:
         return True
     haystack = " ".join([
