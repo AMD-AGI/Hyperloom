@@ -164,14 +164,17 @@ def _default_kernel_batch_parallel() -> int:
 def _should_parallelize_backends(payload: dict, num_candidates: int) -> bool:
     """Decide whether to race GEAK against the OOB ladder per kernel.
 
-    Default policy ("GPU-aware"): parallelize whenever the node has more
-    visible GPUs than a single sequential pass over the batch needs, i.e.
-    ``visible_gpus > num_candidates * per_task_gpus``. Any spare capacity
-    beyond one ladder's footprint is spent racing GEAK against the OOB
-    ladder (the second backend may queue briefly behind the Ray GPU lease,
-    which is fine). At or below that threshold there is no spare GPU, so we
-    keep the legacy sequential ladder (GEAK first, OOB only as a fallback
-    when GEAK misses a KEEP).
+    Default policy ("GPU-aware"): enable whenever the node can run a single
+    kernel's GEAK *and* OOB ladder side-by-side, i.e.
+    ``visible_gpus >= 2 * per_task_gpus``. This is intentionally independent
+    of ``num_candidates`` -- batch width (how many kernels race at once) is
+    throttled separately by :func:`_run_optimization_batch`, which caps
+    concurrency to ``visible_gpus // (2 * per_task_gpus)`` so the per-kernel
+    before_kernel_opt rocprof (a pre-Ray subprocess NOT bound by the Ray GPU
+    lease) never overcommits the GPUs. Below ``2 * per_task`` there isn't
+    room for both ladders even for one kernel, so we keep the legacy
+    sequential ladder (GEAK first, OOB only as a fallback when GEAK misses a
+    KEEP).
 
     Operators / tests can force the decision via payload
     ``parallel_backends`` or env ``KERNEL_OPT_PARALLEL_BACKENDS``
@@ -189,7 +192,7 @@ def _should_parallelize_backends(payload: dict, num_candidates: int) -> bool:
     n_gpus = _visible_gpu_count()
     if not n_gpus or n_gpus <= 0:
         return False
-    return n_gpus > num_candidates * _per_task_gpus()
+    return n_gpus >= 2 * _per_task_gpus()
 
 
 _CANDIDATE_ENV_KEYS = {
@@ -1628,15 +1631,23 @@ async def _run_optimization_batch(
         or _default_kernel_batch_parallel()
     )
     max_parallel = max(1, max_parallel)
-    sem = asyncio.Semaphore(max_parallel)
-    # GPU-rich mode: when the node has more visible GPUs than a single
-    # sequential pass needs (``visible_gpus > num_kernels * per_task``),
-    # race GEAK against the OOB ladder per kernel and keep the stronger
-    # result instead of short-circuiting on GEAK's first KEEP. The spare
-    # capacity absorbs the second backend; if it can't all fit at once the
-    # extra sub-tasks queue briefly on the Ray GPU lease rather than
-    # overcommitting the cluster's real GPU budget.
+    # GPU-rich mode: when the node can fit a kernel's GEAK + OOB ladder
+    # side-by-side (see :func:`_should_parallelize_backends`), race them per
+    # kernel and keep the stronger result instead of short-circuiting on
+    # GEAK's first KEEP.
     parallel_backends = _should_parallelize_backends(payload, len(candidates))
+    # Each parallel-backends kernel launches TWO before_kernel_opt rocprof
+    # subprocesses (one per ladder) *before* entering Ray, so they are NOT
+    # bound by the Ray GPU lease. Cap concurrent kernels to
+    # ``visible_gpus // (2 * per_task)`` so those pre-Ray profilers (and the
+    # 2 * per_task Ray tasks that follow) stay within the real GPU budget
+    # instead of overcommitting it.
+    if parallel_backends:
+        n_gpus = _visible_gpu_count()
+        per_task = _per_task_gpus()
+        if n_gpus and per_task > 0:
+            max_parallel = min(max_parallel, max(1, n_gpus // (2 * per_task)))
+    sem = asyncio.Semaphore(max_parallel)
 
     async def _guarded(candidate: dict[str, Any]) -> HandlerResult:
         cand_kid = str(candidate.get("kernel_id") or "") if isinstance(candidate, dict) else ""
