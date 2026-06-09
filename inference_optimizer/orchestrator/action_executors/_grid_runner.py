@@ -26,7 +26,11 @@ from typing import Any
 import yaml
 
 from ._robustness_pulse import pulse as _robustness_pulse
-from ._subprocess_kill import OVERTIME_KILL_RETURNCODE, run_with_session_kill
+from ._subprocess_kill import (
+    OVERTIME_KILL_RETURNCODE,
+    SERVER_DEAD_RETURNCODE,
+    run_with_session_kill,
+)
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
@@ -1082,6 +1086,7 @@ def _run_magpie(
     proc = run_with_session_kill(
         cmd, env=env, cwd=cwd, timeout=timeout_sec,
         soft_deadline_sec=soft_deadline_sec,
+        server_log_path=str(output_dir / "server.log"),
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -1259,6 +1264,55 @@ async def run_grid(
                 nonfatal_warnings=[
                     f"harvested_leaked_artifact:{src}"
                     for src, _ in to_harvested
+                ],
+            ))
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+
+        # Server-liveness watchdog fired: the variant's server engine/worker
+        # bootstrap died but the parent process hung. Record a fast failure
+        # (instead of a ~2h hard-timeout stall) so the ExploreExecutor drops
+        # this variant and the round proceeds. Harvest the crash server.log.
+        if rc == SERVER_DEAD_RETURNCODE:
+            variant_runtime_sec = round(
+                max(0.0, time.time() - variant_started_unix), 2,
+            )
+            sd_candidates = sorted(slot.glob("benchmark_*"))
+            sd_destination = sd_candidates[-1] if sd_candidates else slot
+            sd_harvested = harvest_leaked_artifacts(
+                sd_destination,
+                subprocess_started_unix=variant_started_unix,
+            )
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: "
+                "server_init_dead (engine/worker bootstrap failed; parent "
+                "hung) after %.1fs",
+                i + 1, len(grid), variant.name, variant_runtime_sec,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="server_init_dead",
+                error_summary=(
+                    "server engine/worker init failed; parent process hung "
+                    "and was reaped by the liveness watchdog"
+                ),
+                extra_args=variant.extra_server_args,
+            )
+            results.append(VariantResult(
+                name=variant.name, extra_server_args=variant.extra_server_args,
+                extra_envs=dict(variant.extra_envs),
+                status="failed",
+                returncode=rc,
+                runtime_sec=variant_runtime_sec,
+                error="server_init_dead: engine/worker bootstrap failed",
+                error_class="server_init_dead",
+                note=variant.note,
+                nonfatal_warnings=[
+                    f"harvested_leaked_artifact:{src}"
+                    for src, _ in sd_harvested
                 ],
             ))
             await _pulse_after_variant(i)

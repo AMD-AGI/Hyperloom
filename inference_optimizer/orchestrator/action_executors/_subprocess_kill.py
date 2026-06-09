@@ -154,6 +154,57 @@ def kill_my_spawned_server(
 # ``-N`` returncode; the ExploreExecutor maps it to ``KILLED_OVERTIME``.
 OVERTIME_KILL_RETURNCODE: int = -909
 
+# Sentinel ``returncode`` when the server-liveness watchdog reaps a child
+# because the spawned inference server's engine/worker bootstrap died but the
+# parent ``vllm serve`` / ``sglang.launch_server`` process hung in
+# multiprocessing cleanup instead of exiting (observed on 671B MoE restarts on
+# ROCm). Without this watchdog the benchmark harness keeps polling a dead
+# ``/health`` until the variant hard-``timeout`` (~7800s ≈ 2h), burning the run
+# budget on a server that will never come up. Distinct from
+# ``OVERTIME_KILL_RETURNCODE`` so callers can label it precisely.
+SERVER_DEAD_RETURNCODE: int = -910
+
+# Fatal server-init markers. Once any appears in ``server.log`` the engine is
+# unrecoverable within the same Magpie subprocess. Kept deliberately specific
+# (terminal bootstrap failures, never transient per-shape warnings) so the
+# watchdog cannot false-positive on a server that is merely slow to load.
+_SERVER_DEAD_MARKERS: tuple[str, ...] = (
+    "WorkerProc initialization failed",
+    "EngineCore failed to start",
+    "Engine core initialization failed",
+    "Engine process failed to start",
+    "AsyncEngineDeadError",
+    "raise EngineDeadError",
+)
+
+# Default grace after the first fatal marker before forcing a reap. Gives the
+# harness a chance to exit on its own (the clean-exit case returns normally and
+# never trips the watchdog); far below the ~2h hard timeout. Overridable via
+# ``INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC``.
+_SERVER_DEAD_GRACE_SEC_DEFAULT: float = 120.0
+
+# Bytes read from the tail of ``server.log`` per scan (markers always land near
+# the end of the bootstrap traceback).
+_SERVER_LOG_TAIL_BYTES: int = 65536
+
+
+def _server_log_shows_death(path: str) -> bool:
+    """Return True iff ``server.log`` tail contains a terminal-init marker.
+
+    Best-effort and never raises: a missing / unreadable log (server hasn't
+    written yet) reads as "not dead" so a slow cold start is never misjudged.
+    """
+    try:
+        with open(path, "rb") as fh:
+            try:
+                fh.seek(-_SERVER_LOG_TAIL_BYTES, os.SEEK_END)
+            except OSError:
+                fh.seek(0)
+            tail = fh.read().decode("utf-8", "ignore")
+    except (OSError, ValueError):
+        return False
+    return any(marker in tail for marker in _SERVER_DEAD_MARKERS)
+
 
 def run_with_session_kill(
     cmd: list[str],
@@ -163,6 +214,8 @@ def run_with_session_kill(
     timeout: int | float | None = None,
     text: bool = True,
     soft_deadline_sec: float | None = None,
+    server_log_path: str | None = None,
+    server_dead_grace_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
     """``subprocess.run``-compatible call that ALSO tears down the entire
     descendant tree on every exit path.
@@ -178,7 +231,26 @@ def run_with_session_kill(
     ``CompletedProcess`` with ``returncode = OVERTIME_KILL_RETURNCODE`` is
     returned (does NOT raise). ``None`` / ≤ 0 keeps legacy behaviour. Tests
     should patch this function instead of ``subprocess.run``.
+
+    ``server_log_path`` (server-liveness watchdog): when set, the spawned
+    server's ``server.log`` is scanned each poll slice for terminal engine /
+    worker init failures; once a marker persists past ``server_dead_grace_sec``
+    (default ``INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC`` or 120s) the tree is
+    reaped and a ``CompletedProcess`` with
+    ``returncode = SERVER_DEAD_RETURNCODE`` is returned (does NOT raise). This
+    turns a crashed-but-hung server (parent never exits, ``/health`` polled
+    forever) into a fast fail instead of a ~2h hard-timeout stall.
     """
+    if server_dead_grace_sec is None:
+        try:
+            server_dead_grace_sec = float(
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC",
+                    _SERVER_DEAD_GRACE_SEC_DEFAULT,
+                )
+            )
+        except (TypeError, ValueError):
+            server_dead_grace_sec = _SERVER_DEAD_GRACE_SEC_DEFAULT
     proc: subprocess.Popen | None = None
     try:
         proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
@@ -195,6 +267,8 @@ def run_with_session_kill(
                 proc,
                 hard_timeout=timeout,
                 soft_deadline_sec=soft_deadline_sec,
+                server_log_path=server_log_path,
+                server_dead_grace_sec=server_dead_grace_sec,
             )
         except subprocess.TimeoutExpired:
             # Reap before re-raising so the caller doesn't see a running tree.
@@ -205,6 +279,25 @@ def run_with_session_kill(
             except subprocess.TimeoutExpired:
                 stdout, stderr = "", ""
             raise
+        except _ServerDeadDetected as exc:
+            kill_my_spawned_server(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            log.warning(
+                "_subprocess_kill: server-liveness watchdog reaped tree — "
+                "engine/worker init died but parent hung (marker=%r, "
+                "grace=%.1fs, elapsed=%.1fs); returncode=%d.",
+                exc.marker, exc.grace_sec, exc.elapsed_sec,
+                SERVER_DEAD_RETURNCODE,
+            )
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=SERVER_DEAD_RETURNCODE,
+                stdout=stdout if stdout is not None else ("" if text else b""),
+                stderr=stderr if stderr is not None else ("" if text else b""),
+            )
         except _SoftDeadlineExceeded as exc:
             kill_my_spawned_server(proc)
             try:
@@ -246,50 +339,103 @@ class _SoftDeadlineExceeded(Exception):
         self.elapsed_sec = float(elapsed_sec)
 
 
+class _ServerDeadDetected(Exception):
+    """Internal sentinel: the server-liveness watchdog saw a terminal engine /
+    worker init marker that persisted past the grace window. Never bubbles past
+    :func:`run_with_session_kill` (converted to a ``CompletedProcess`` carrying
+    ``SERVER_DEAD_RETURNCODE``).
+    """
+
+    def __init__(
+        self, *, marker: str, grace_sec: float, elapsed_sec: float,
+    ) -> None:
+        super().__init__(
+            f"server init died (marker={marker!r}) and parent hung past "
+            f"grace {grace_sec:.1f}s (elapsed={elapsed_sec:.1f}s)"
+        )
+        self.marker = marker
+        self.grace_sec = float(grace_sec)
+        self.elapsed_sec = float(elapsed_sec)
+
+
 def _communicate_with_soft_deadline(
     proc: subprocess.Popen,
     *,
     hard_timeout: int | float | None,
     soft_deadline_sec: float | None,
+    server_log_path: str | None = None,
+    server_dead_grace_sec: float | None = None,
 ) -> tuple[str | bytes, str | bytes]:
-    """``proc.communicate`` shim that also enforces ``soft_deadline_sec``.
+    """``proc.communicate`` shim enforcing the soft deadline + server watchdog.
 
-    Falsy / ≤ 0 deadline delegates straight to
-    ``proc.communicate(timeout=hard_timeout)``. Otherwise polls in 0.5s slices,
-    raising :class:`_SoftDeadlineExceeded` once the deadline passes; the
-    ``hard_timeout`` is still enforced so a stuck child can't dodge both gates.
+    With no soft deadline and no server watchdog this delegates straight to
+    ``proc.communicate(timeout=hard_timeout)`` (legacy fast path). Otherwise it
+    polls in 0.5s slices, enforcing:
+
+    * ``soft_deadline_sec`` — raise :class:`_SoftDeadlineExceeded` once passed;
+    * ``server_log_path`` watchdog — once a terminal init marker
+      (:data:`_SERVER_DEAD_MARKERS`) is observed AND it persists for
+      ``server_dead_grace_sec`` without the child exiting on its own, raise
+      :class:`_ServerDeadDetected`.
+
+    The ``hard_timeout`` is always honoured so a stuck child can't dodge the
+    gates.
     """
-    if soft_deadline_sec is None or float(soft_deadline_sec) <= 0.0:
+    watchdog_active = bool(server_log_path) and (
+        server_dead_grace_sec is not None and float(server_dead_grace_sec) > 0.0
+    )
+    soft_active = (
+        soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
+    )
+    if not soft_active and not watchdog_active:
         return proc.communicate(timeout=hard_timeout)
 
-    deadline_sec = float(soft_deadline_sec)
+    deadline_sec = float(soft_deadline_sec) if soft_active else None
+    grace_sec = float(server_dead_grace_sec) if watchdog_active else None
     poll_interval = 0.5
     start = time.monotonic()
+    dead_marker_since: float | None = None
     while True:
         elapsed = time.monotonic() - start
-        remaining_soft = deadline_sec - elapsed
-        if remaining_soft <= 0.0:
-            raise _SoftDeadlineExceeded(
-                deadline_sec=deadline_sec, elapsed_sec=elapsed,
-            )
-        # Slice bounded by both soft and hard remaining so ``TimeoutExpired``
-        # still fires at the right wall-clock.
-        slice_sec = min(poll_interval, remaining_soft)
+        if soft_active and deadline_sec is not None:
+            if deadline_sec - elapsed <= 0.0:
+                raise _SoftDeadlineExceeded(
+                    deadline_sec=deadline_sec, elapsed_sec=elapsed,
+                )
+        if watchdog_active and grace_sec is not None:
+            if _server_log_shows_death(server_log_path):  # type: ignore[arg-type]
+                if dead_marker_since is None:
+                    dead_marker_since = time.monotonic()
+                elif time.monotonic() - dead_marker_since >= grace_sec:
+                    raise _ServerDeadDetected(
+                        marker="server_init_failed",
+                        grace_sec=grace_sec,
+                        elapsed_sec=elapsed,
+                    )
+            else:
+                dead_marker_since = None
+        # Slice bounded by every active remaining window so the right gate
+        # fires first; the child can still finish inside any slice.
+        slice_sec = poll_interval
+        if soft_active and deadline_sec is not None:
+            slice_sec = min(slice_sec, deadline_sec - elapsed)
         if hard_timeout is not None:
             hard_remaining = float(hard_timeout) - elapsed
             if hard_remaining <= 0.0:
                 # Let proc.communicate's own TimeoutExpired path fire.
                 return proc.communicate(timeout=0.0)
             slice_sec = min(slice_sec, hard_remaining)
+        slice_sec = max(slice_sec, 0.0)
         try:
             return proc.communicate(timeout=slice_sec)
         except subprocess.TimeoutExpired:
-            # Not yet done; loop to re-evaluate both deadlines.
+            # Not yet done; loop to re-evaluate all gates.
             continue
 
 
 __all__ = [
     "OVERTIME_KILL_RETURNCODE",
+    "SERVER_DEAD_RETURNCODE",
     "kill_my_spawned_server",
     "new_session_kwargs",
     "run_with_session_kill",

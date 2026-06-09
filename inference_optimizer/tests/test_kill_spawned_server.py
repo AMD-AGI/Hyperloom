@@ -19,6 +19,8 @@ import pytest
 
 from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
     OVERTIME_KILL_RETURNCODE,
+    SERVER_DEAD_RETURNCODE,
+    _server_log_shows_death,
     kill_my_spawned_server,
     new_session_kwargs,
     run_with_session_kill,
@@ -261,3 +263,80 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
             timeout=1,
             soft_deadline_sec=None,
         )
+
+
+# Server-liveness watchdog — fast-fail on a crashed-but-hung server
+def test_server_log_shows_death_detects_marker(tmp_path):
+    """A ``server.log`` containing a terminal-init marker reads as dead;
+    a healthy / missing log reads as alive."""
+    log_path = tmp_path / "server.log"
+    assert _server_log_shows_death(str(log_path)) is False  # missing → alive
+    log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
+    assert _server_log_shows_death(str(log_path)) is False  # healthy → alive
+    log_path.write_text(
+        "ERROR core.py Exception: WorkerProc initialization failed due to an "
+        "exception in a background process.\n"
+    )
+    assert _server_log_shows_death(str(log_path)) is True
+
+
+def test_run_with_session_kill_watchdog_reaps_hung_server(tmp_path):
+    """A child that writes a fatal server marker then hangs is reaped via the
+    watchdog with ``SERVER_DEAD_RETURNCODE`` — well before the hard timeout."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "open(sys.argv[1], 'w').write("
+        "'Exception: WorkerProc initialization failed in background\\n')\n"
+        "time.sleep(60)\n"
+    )
+    start = time.monotonic()
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        timeout=60,
+        server_log_path=str(log_path),
+        server_dead_grace_sec=1.0,
+    )
+    elapsed = time.monotonic() - start
+    assert cp.returncode == SERVER_DEAD_RETURNCODE
+    assert elapsed < 15.0, f"watchdog path took {elapsed:.2f}s (expected fast)"
+
+
+def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
+    """If the harness exits on its own within the grace window after emitting a
+    marker, its real returncode wins (no spurious SERVER_DEAD)."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "open(sys.argv[1], 'w').write("
+        "'Exception: WorkerProc initialization failed in background\\n')\n"
+        "time.sleep(0.3)\n"
+        "raise SystemExit(7)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        timeout=30,
+        server_dead_grace_sec=10.0,
+        server_log_path=str(log_path),
+    )
+    assert cp.returncode == 7
+
+
+def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
+    """A child with a clean server.log returns its own returncode — the
+    watchdog must not false-positive on a healthy (or slow) server."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys\n"
+        "open(sys.argv[1], 'w').write('INFO server ready on port 8888\\n')\n"
+        "print('ok')\n"
+        "raise SystemExit(0)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        timeout=30,
+        server_dead_grace_sec=2.0,
+        server_log_path=str(log_path),
+    )
+    assert cp.returncode == 0
+    assert "ok" in (cp.stdout or "")

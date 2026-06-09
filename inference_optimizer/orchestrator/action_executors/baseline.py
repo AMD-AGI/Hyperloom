@@ -707,6 +707,7 @@ class BaselineExecutor:
             proc = await asyncio.to_thread(
                 run_with_session_kill, cmd,
                 env=env, cwd=str(self.cwd), timeout=timeout_sec,
+                server_log_path=str(output_dir / "server.log"),
             )
             subprocess_runtime_sec = max(
                 0.0, time.time() - subprocess_started_unix,
