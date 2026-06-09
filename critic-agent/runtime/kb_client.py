@@ -9,14 +9,10 @@ The Critic uses only 4 KB endpoints (contract §4):
 * ``POST /api/kb/batch_insert``
 * ``POST /api/kb/edges/add``
 
-We expose them as plain methods on :class:`KBClient` (a protocol) and ship
-two implementations:
-
-* :class:`HTTPKBClient` — thin urllib-based transport with retry +
-  exponential backoff. We deliberately avoid pulling in ``httpx`` so the
-  runtime stays installable in minimal Codex containers.
-* :class:`InMemoryKBClient` (in ``in_memory_kb_client.py``) — same surface,
-  pure Python state, used by tests and dry-runs.
+Exposed as methods on the :class:`KBClient` protocol with two
+implementations: :class:`HTTPKBClient` (urllib-based, retry + exponential
+backoff; avoids ``httpx`` so it installs in minimal Codex containers) and
+:class:`InMemoryKBClient` (pure-Python, for tests / dry-runs).
 """
 
 from __future__ import annotations

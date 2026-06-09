@@ -2,23 +2,9 @@
 
 """Pod-health signal driven by robustness-server's session snapshot.
 
-The current session may include both brain (shared) and hands
-(session-bound) pods.  ``session_pods`` rows shaped by
-``robustness-server`` carry ``pod.namespace`` / ``pod.name`` /
-``role`` / ``t_start`` / ``t_end`` and (when summary is fetched)
-``available_metrics``.
-
-For M1 we emit medium-severity alerts when:
-
-* a pod's record carries a non-empty ``phase`` other than ``Running``
-  (data shape varies; we accept ``phase`` at the top level or under
-  ``pod.phase``).
-* ``session_summary.pods`` reports an empty ``available_metrics`` list
-  for a hands pod that started more than ``no_metrics_warn_s`` seconds
-  ago (likely Pod is alive but no telemetry — surface low severity).
-
-GPU thermal / utilisation symptoms move into M2 once the cluster
-proxy endpoints land.
+Emits alerts when a ``session_pods`` row has a non-empty ``phase`` other than ``Running``,
+or when ``session_summary.pods`` shows empty ``available_metrics`` for a pod older than
+``no_metrics_warn_s`` (alive but no telemetry → LOW).
 """
 
 from __future__ import annotations

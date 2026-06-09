@@ -2,11 +2,8 @@
 
 """Kernel-opt dispatch shape / path validation.
 
-A kernel candidate may only be dispatched when it carries a non-empty,
-trace-anchored shape and its source / workspace paths exist. A shapeless
-candidate is rejected with a structured error so the run returns to
-``trace_analyze`` instead of burning a GEAK / OOB budget. ``dry_run`` and
-an explicit escape flag bypass the gate.
+A candidate may only dispatch with a non-empty trace-anchored shape and
+existing source/workspace paths; ``dry_run`` and an escape flag bypass the gate.
 """
 
 from __future__ import annotations
@@ -128,9 +125,7 @@ async def test_run_optimization_single_rejects_empty_shape(tmp_path: Path):
     assert res["error_class"] == "empty_kernel_shape"
 
 
-# ---------------------------------------------------------------------------
 # shape_provenance stamping in tracelens finalization
-# ---------------------------------------------------------------------------
 def test_finalize_candidates_stamps_trace_provenance():
     import importlib.util
     import sys
