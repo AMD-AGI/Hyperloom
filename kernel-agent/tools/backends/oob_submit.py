@@ -16,7 +16,12 @@ import subprocess
 import time
 from pathlib import Path
 
-from ray_runtime import ensure_ray_cluster, quiet_ray_init, safe_runtime_env
+from ray_runtime import (
+    ensure_ray_cluster,
+    isolated_compile_cache_env,
+    quiet_ray_init,
+    safe_runtime_env,
+)
 
 
 def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,
@@ -171,6 +176,14 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
                    or _os.environ.get("HIP_VISIBLE_DEVICES")
                    or _os.environ.get("CUDA_VISIBLE_DEVICES")
                    or "0")
+        # Per-attempt compile caches so a co-running GEAK ladder can't clobber
+        # this run's aiter/triton/inductor artifacts (see isolated_compile_cache_env).
+        for _var, _sub in (("TRITON_CACHE_DIR", "triton"),
+                           ("AITER_ROOT_DIR", "aiter"),
+                           ("TORCHINDUCTOR_CACHE_DIR", "inductor")):
+            _cdir = _os.path.join(output_dir_str, ".cache", _sub)
+            _os.makedirs(_cdir, exist_ok=True)
+            _os.environ[_var] = _cdir
         cmd = ["oob", "run", "-a", agent,
                "--prompt-file", prompt_file_str,
                "--max-turns", str(max_turns),
@@ -230,9 +243,12 @@ def run_via_cli(agent: str, prompt_file: Path, output_dir: Path, source_file: st
     gpu_ids = os.environ.get("ROCR_VISIBLE_DEVICES") \
         or os.environ.get("HIP_VISIBLE_DEVICES") \
         or os.environ.get("CUDA_VISIBLE_DEVICES") or "0"
+    # Per-attempt compile caches (see isolated_compile_cache_env).
+    child_env = isolated_compile_cache_env(output_dir)
     started = time.time()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 60)
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout_s + 60, env=child_env)
         result = {
             "returncode": proc.returncode,
             "stdout_tail": (proc.stdout or "")[-4000:],
