@@ -50,8 +50,8 @@ class DecisionAuditConfig:
     """Tunables for :func:`evaluate_decision_audit_signals`.
 
     ``min_keep_gain_pct`` (noise floor, G2) mirrors the upstream KEEP threshold (1.0%).
-    ``dispatch_bypass_pre_post_epsilon_pct`` (G3) is the |gain_pct| below which a KEEP
-    is suspected of never executing the patched kernel.
+    ``dispatch_bypass_pre_post_epsilon_pct`` (G3) is the ``|gain_pct|`` (absolute
+    gain) below which a KEEP is suspected of never executing the patched kernel.
     """
 
     min_keep_gain_pct: float = 1.0
