@@ -180,6 +180,7 @@ MAX_RESEARCH_LANE_CAPACITY: int = research_lane_ceiling()
 
 # Canonical name of the LLM-sub-agent resource lane shared by specialists.
 RESEARCH_LANE_NAME: str = "research_lane"
+DYNAMIC_ACTION_NAME: str = "dynamic_action"
 DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
 
 # Verdicts that allow ``integrate_patch`` without an operator override (``advise`` = soft approval, ``approve`` = green light).

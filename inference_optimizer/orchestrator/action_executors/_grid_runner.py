@@ -942,6 +942,223 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+# sglang scheduler watchdog timeout injection: on MI300X with aiter, the first
+# request's ``mha_batch_prefill`` JIT compile can exceed sglang's 300s default
+# watchdog, firing SIGQUIT mid-warmup -> baseline_failed. Inject a longer
+# timeout via ``EXTRA_SGLANG_ARGS`` unless the user already pinned one.
+DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC = 1800
+SGLANG_WATCHDOG_TIMEOUT_ENV = "SGLANG_WATCHDOG_TIMEOUT"
+_SGLANG_WATCHDOG_FLAG = "--watchdog-timeout"
+# Matches space- or equals-separated form so a user-pinned value suppresses
+# injection without false-matching a longer flag.
+_SGLANG_WATCHDOG_RE = re.compile(r"--watchdog-timeout(?:[=\s]|$)")
+
+
+def resolve_sglang_watchdog_timeout() -> int:
+    """Resolve the sglang scheduler watchdog timeout in seconds.
+
+    Reads ``$SGLANG_WATCHDOG_TIMEOUT`` (integer seconds) and falls back to
+    :data:`DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC` when the env var is unset,
+    empty, non-integer, or non-positive. A malformed value logs a warning
+    and uses the default rather than crashing the YAML materialization.
+    """
+    raw = os.environ.get(SGLANG_WATCHDOG_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
+    try:
+        val = int(raw)
+    except ValueError:
+        log.warning(
+            "%s=%r is not an integer; using default %ds.",
+            SGLANG_WATCHDOG_TIMEOUT_ENV, raw,
+            DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
+        )
+        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
+    if val <= 0:
+        log.warning(
+            "%s=%d is not positive; using default %ds.",
+            SGLANG_WATCHDOG_TIMEOUT_ENV, val,
+            DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
+        )
+        return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
+    return val
+
+
+def inject_sglang_watchdog_timeout(
+    server_args: str | None, framework: str | None,
+) -> str:
+    """Append ``--watchdog-timeout <N>`` to ``server_args`` for sglang runs.
+
+    Returns ``server_args`` unchanged when the framework is not sglang
+    (empty/unknown is treated as sglang) or the flag is already present.
+    Otherwise appends the value from :func:`resolve_sglang_watchdog_timeout`;
+    no other flag is touched.
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args
+    if _SGLANG_WATCHDOG_RE.search(args):
+        return args
+    timeout = resolve_sglang_watchdog_timeout()
+    return merge_server_args(args, f"{_SGLANG_WATCHDOG_FLAG} {timeout}")
+
+
+# sglang ``--context-length`` cap injection: sglang sizes ``max_total_tokens``
+# off the model's ``max_position_embeddings``, so a huge native window (e.g.
+# Mistral-Nemo's 1024000) balloons the aiter workspace_buffer past GPU memory
+# -> HIP OOM -> baseline_failed. vllm already caps via ``--max-model-len``, so
+# this fixes the sglang-only asymmetry: cap to ISL+OSL+headroom (floored,
+# clamped to the native window) unless the flag is already pinned.
+DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS = 2048
+DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS = 8192
+SGLANG_CONTEXT_HEADROOM_ENV = "SGLANG_CONTEXT_HEADROOM_TOKENS"
+SGLANG_CONTEXT_FLOOR_ENV = "SGLANG_CONTEXT_FLOOR_TOKENS"
+_SGLANG_CONTEXT_LENGTH_FLAG = "--context-length"
+# Matches space- or equals-separated form so an operator-pinned value
+# suppresses injection without false-matching a longer flag.
+_SGLANG_CONTEXT_LENGTH_RE = re.compile(r"--context-length(?:[=\s]|$)")
+_SGLANG_ATTN_BACKEND_FLAG = "--attention-backend"
+_SGLANG_ATTN_BACKEND_RE = re.compile(r"--attention-backend(?:[=\s]|$)")
+_SGLANG_DUAL_CHUNK_BACKEND = "dual_chunk_flash_attn"
+
+
+def _resolve_nonneg_int_env(name: str, default: int) -> int:
+    """Read a non-negative integer env override, else return ``default``.
+
+    A blank/non-integer/negative value logs a warning and falls back to the
+    default rather than crashing the YAML materialization.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        log.warning(
+            "%s=%r is not an integer; using default %d.", name, raw, default,
+        )
+        return default
+    if val < 0:
+        log.warning(
+            "%s=%d is negative; using default %d.", name, val, default,
+        )
+        return default
+    return val
+
+
+def resolve_sglang_context_cap(isl: int, osl: int) -> int:
+    """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
+
+    Returns ``max(isl + osl + headroom, floor)`` (headroom / floor are
+    operator-tunable via ``$SGLANG_CONTEXT_HEADROOM_TOKENS`` /
+    ``$SGLANG_CONTEXT_FLOOR_TOKENS``). Caller clamps to the model's native
+    window before injecting.
+    """
+    headroom = _resolve_nonneg_int_env(
+        SGLANG_CONTEXT_HEADROOM_ENV, DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
+    )
+    floor = _resolve_nonneg_int_env(
+        SGLANG_CONTEXT_FLOOR_ENV, DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
+    )
+    return max(int(isl) + int(osl) + headroom, floor)
+
+
+def inject_sglang_context_length(
+    server_args: str | None,
+    framework: str | None,
+    model_path: str | None,
+    isl: int,
+    osl: int,
+) -> str:
+    """Append ``--context-length <N>`` to ``server_args`` for sglang runs.
+
+    Returns ``server_args`` unchanged when the framework is not sglang
+    (empty/unknown treated as sglang), the flag is already present, or the
+    model's ``max_position_embeddings`` cannot be read. Otherwise appends
+    ``min(max_pos, cap)`` from :func:`resolve_sglang_context_cap`; only this
+    flag is added.
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args
+    if _SGLANG_CONTEXT_LENGTH_RE.search(args):
+        return args
+    # Lazy import to avoid a module-level cycle through the heavy cli.py.
+    from ...cli import _load_model_max_position_embeddings
+    max_pos = _load_model_max_position_embeddings(str(model_path or ""))
+    if not max_pos:
+        return args
+    cap = resolve_sglang_context_cap(isl, osl)
+    context_length = min(int(max_pos), cap)
+    return merge_server_args(
+        args, f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
+    )
+
+
+def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
+    """Pick the dual-chunk attention backend for the current hardware.
+
+    ``dual_chunk_flash_attn`` is an sgl-kernel flash-attn path that only
+    builds for sm90+ (NVIDIA Hopper); on AMD/ROCm (MI300X/MI325X/MI355X,
+    gfx9) sglang raises ``flash_attn at sgl-kernel is only supported on
+    sm90 and above`` and the server is killed before baseline. ``triton``
+    is the ROCm-capable backend that still honours dual-chunk attention,
+    so we fall back to it on any AMD GPU. The hardware is resolved from the
+    explicit ``gpu_type`` first (the caller already knows it and writes it
+    into the runner), then ``GPU_TYPE``, then a runtime autodetect, so a
+    missing ``rocm-smi``/torch probe at this call site cannot silently fall
+    back to the sm90-only kernel. Override via ``$HYPERLOOM_DUAL_CHUNK_BACKEND``.
+    """
+    override = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip()
+    if override:
+        return override
+    from ...cli import _resolve_amd_gpu_type
+    if _resolve_amd_gpu_type(gpu_type):
+        return "triton"
+    return _SGLANG_DUAL_CHUNK_BACKEND
+
+
+def inject_sglang_attention_backend(
+    server_args: str | None,
+    framework: str | None,
+    model_path: str | None,
+    gpu_type: str | None = None,
+) -> str:
+    """Append an ``--attention-backend`` for dual-chunk sglang models.
+
+    Models that declare ``dual_chunk_attention_config`` (Qwen 1M) make
+    sglang hard-reject its default aiter backend with ``ValueError: Dual
+    chunk attention is enabled, but attention backend is set to aiter.``.
+    On NVIDIA sm90+ the fix is ``dual_chunk_flash_attn``; on AMD/ROCm that
+    kernel is unsupported (``sm90 and above``), so we inject ``triton``
+    instead (see :func:`_resolve_dual_chunk_backend`). ``gpu_type`` (when
+    known by the caller) takes precedence over runtime autodetect.
+
+    Returns ``server_args`` unchanged when: framework is not sglang, an
+    ``--attention-backend`` is already pinned (operator wins), or the model
+    config has no dual-chunk block (fail-safe: inject nothing).
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args
+    if _SGLANG_ATTN_BACKEND_RE.search(args):
+        return args
+    from ...cli import _model_has_dual_chunk_attention
+    if not _model_has_dual_chunk_attention(str(model_path or "")):
+        return args
+    backend = _resolve_dual_chunk_backend(gpu_type)
+    if backend != _SGLANG_DUAL_CHUNK_BACKEND:
+        log.info(
+            "dual-chunk model on AMD/ROCm: injecting "
+            "--attention-backend %s (dual_chunk_flash_attn needs sm90+).",
+            backend,
+        )
+    return merge_server_args(
+        args, f"{_SGLANG_ATTN_BACKEND_FLAG} {backend}",
+    )
+
+
+
 def apply_runtime_benchmark_overrides(
     bench: dict[str, Any],
     *,

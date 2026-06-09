@@ -1150,6 +1150,45 @@ def compute_next_phase(
     return None
 
 
+def infer_phase_from_state(state: Any) -> tuple[str, dict[str, Any]]:
+    """Best-effort inference for sessions that lack a ``phase`` field.
+
+    Returns ``(phase, evidence)`` where evidence captures the inference
+    inputs so phase_history surfaces an audit row.
+
+    Inference rules (precedence top-down):
+
+    1. ``stop_reason`` is set → CLOSE
+    2. ``baseline_tput <= 0`` → PRELUDE
+    3. ``last_sweep`` present + non-empty → SWEEP
+    4. ``last_kernel_opt`` present + ``kernel_enabled`` → KERNEL
+    5. ``optimization_stack`` non-empty → EXPLORE
+    6. Fallback → EXPLORE
+    """
+    sr = (getattr(state, "stop_reason", "") or "").strip()
+    if sr:
+        return PHASE_CLOSE, {"inferred_from": "stop_reason", "stop_reason": sr}
+    try:
+        tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        tput = 0.0
+    if tput <= 0:
+        return PHASE_PRELUDE, {"inferred_from": "baseline_tput=0"}
+    last_sweep = getattr(state, "last_sweep", None) or {}
+    if isinstance(last_sweep, dict) and last_sweep:
+        return PHASE_SWEEP, {"inferred_from": "last_sweep_present"}
+    last_kernel_opt = getattr(state, "last_kernel_opt", None) or {}
+    kernel_enabled = bool(getattr(state, "kernel_enabled", True))
+    if isinstance(last_kernel_opt, dict) and last_kernel_opt and kernel_enabled:
+        return PHASE_KERNEL, {"inferred_from": "last_kernel_opt_present"}
+    opt_stack = getattr(state, "optimization_stack", None) or []
+    if isinstance(opt_stack, list) and opt_stack:
+        return PHASE_EXPLORE, {"inferred_from": "optimization_stack_nonempty"}
+    return PHASE_EXPLORE, {"inferred_from": "fallback"}
+
+
+# ---------------------------------------------------------------------------
+
 # phase_history helper (shape used by SharedState.record_phase_transition)
 def make_history_row(
     *,
@@ -1231,6 +1270,9 @@ __all__ = [
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",
+    "infer_phase_from_state",
+    "llm_proposable_actions_for",
+    "llm_proposable_actions_for_with_interleave",
     "make_history_row",
     "normalize_budget_pct",
     "phase_budget_remaining_seconds",
