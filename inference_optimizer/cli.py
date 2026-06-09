@@ -503,7 +503,7 @@ def _autodetect_gpu_type() -> str | None:
 
 # AMD/ROCm runner types (gfx9). dual_chunk_flash_attn (sm90+) is unsupported
 # here, and some upstream archs (DSA) are not adapted to AMD yet.
-_AMD_GPU_TYPES = frozenset({"mi300x", "mi325x", "mi355x"})
+_AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
 
 
 def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
