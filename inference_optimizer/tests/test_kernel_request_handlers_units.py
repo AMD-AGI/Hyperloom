@@ -548,9 +548,11 @@ class TestDefaultKernelBatchParallel:
 # _should_parallelize_backends
 #
 # GPU-rich mode: race GEAK against the OOB ladder per kernel whenever the
-# node has more visible GPUs than a single sequential pass needs
-# (``visible_gpus > num_candidates * per_task``). At/below that there is no
-# spare GPU, so keep the sequential GEAK-first / OOB-fallback ladder.
+# node can fit ONE kernel's GEAK + OOB ladder side-by-side
+# (``visible_gpus >= 2 * per_task``). The decision is independent of
+# ``num_candidates`` -- batch width is throttled separately by the batch
+# handler's concurrency cap. Below ``2 * per_task`` there is no room for a
+# second ladder, so keep the sequential GEAK-first / OOB-fallback ladder.
 # Operators / tests can force the decision via payload or env.
 # ---------------------------------------------------------------------------
 
@@ -574,17 +576,18 @@ class TestShouldParallelizeBackends:
     @pytest.mark.parametrize(
         "n_gpus, per_task, num_candidates, expected",
         [
-            # 8-GPU node, 1 GPU/task: parallelize while any GPU is spare.
-            (8, 1, 3, True),    # 3*1=3 < 8
-            (8, 1, 7, True),    # 7*1=7 < 8 (one spare GPU -> race backends)
-            (8, 1, 8, False),   # 8*1=8 == 8, no spare -> sequential
-            (8, 1, 9, False),   # 9*1=9 > 8
-            # 4-GPU GEAK reservations: need room for a second 4-GPU backend.
-            (8, 4, 1, True),    # 1*4=4 < 8
-            (8, 4, 2, False),   # 2*4=8 == 8, no spare -> sequential
-            # Tiny pod.
-            (2, 1, 1, True),    # 1*1=1 < 2
-            (2, 1, 2, False),   # 2*1=2 == 2, no spare -> sequential
+            # 1 GPU/task: need room for both ladders -> visible_gpus >= 2.
+            # The kernel count is irrelevant (batch width is capped elsewhere).
+            (8, 1, 3, True),     # 8 >= 2
+            (8, 1, 7, True),     # 8 >= 2 (kernel count no longer gates)
+            (8, 1, 100, True),   # 8 >= 2 even when candidates >> gpus
+            (2, 1, 1, True),     # 2 >= 2 boundary
+            (1, 1, 1, False),    # 1 < 2 -> no room for a second ladder
+            # Multi-GPU reservations: need room for TWO per_task backends.
+            (8, 4, 1, True),     # 8 >= 8 boundary
+            (8, 4, 5, True),     # 8 >= 8 (candidate count irrelevant)
+            (8, 8, 1, False),    # 8 < 16 -> can't fit a 2nd 8-GPU backend
+            (16, 8, 1, True),    # 16 >= 16
         ],
     )
     def test_gpu_aware_threshold(
@@ -613,7 +616,7 @@ class TestShouldParallelizeBackends:
         assert krh._should_parallelize_backends({}, 1) is False
 
     def test_payload_override_enables_below_threshold(self, patch_torch):
-        patch_torch(2, per_task=1)  # GPU-aware math would say False for 5
+        patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
         assert krh._should_parallelize_backends(
             {"parallel_backends": True}, 5,
         ) is True
@@ -631,11 +634,99 @@ class TestShouldParallelizeBackends:
         ) is False
 
     def test_env_override(self, patch_torch, monkeypatch):
-        patch_torch(2, per_task=1)  # would be False for 5 candidates
+        patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
         monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")
         assert krh._should_parallelize_backends({}, 5) is True
         monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "0")
         assert krh._should_parallelize_backends({}, 1) is False
+
+
+# ---------------------------------------------------------------------------
+# _run_optimization_batch concurrency cap (parallel-backends mode)
+#
+# Each parallel kernel launches TWO before_kernel_opt rocprof subprocesses
+# (GEAK + OOB) *before* entering Ray, bypassing the Ray GPU lease. The batch
+# caps concurrent kernels to ``visible_gpus // (2 * per_task)`` so those
+# pre-Ray profilers (and the Ray tasks that follow) stay within the real GPU
+# budget even when ``max_parallel`` is set higher.
+# ---------------------------------------------------------------------------
+
+class TestBatchParallelConcurrencyCap:
+    def test_caps_concurrency_to_gpu_budget(self, tmp_path, monkeypatch):
+        # 8 visible GPUs, 1 GPU/task -> safe concurrency = 8 // (2*1) = 4.
+        monkeypatch.setattr(krh, "_visible_gpu_count", lambda: 8)
+        monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", "1")  # per_task = 1
+        monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
+
+        state = {"in_flight": 0, "peak": 0}
+
+        async def fake_sequence(
+            base_payload, candidate, *, session_dir, parallel_backends=False,
+        ):
+            assert parallel_backends is True
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+            try:
+                await asyncio.sleep(0.02)  # hold the slot so siblings overlap
+            finally:
+                state["in_flight"] -= 1
+            return {
+                "status": "ok",
+                "kernel_id": candidate["kernel_id"],
+                "source_file": candidate.get("source_file"),
+                "proposal": {"decision": "REVERT"},
+                "verification": {"micro_speedup": 1.0},
+            }
+
+        monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
+        candidates = [
+            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py",
+             "reusable_native_kernel": True}
+            for i in range(10)
+        ]
+        out = asyncio.run(krh._run_optimization_batch(
+            payload={"candidates_path": "/dummy", "max_parallel": 10},
+            candidates=candidates,
+            session_dir=tmp_path,
+        ))
+
+        assert out["parallel_backends"] is True
+        # max_parallel echoes the capped value (10 -> 4).
+        assert out["max_parallel"] == 4
+        # Cap binds: 4 kernels * 2 ladders = 8 pre-Ray profilers == 8 GPUs.
+        assert state["peak"] == 4, state["peak"]
+
+    def test_no_cap_when_gpu_count_unknown(self, tmp_path, monkeypatch):
+        # torch can't report a count (None) -> cap math is skipped so the
+        # operator-supplied max_parallel is preserved (matches CI / mocks).
+        monkeypatch.setattr(krh, "_visible_gpu_count", lambda: None)
+        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")  # force parallel
+
+        async def fake_sequence(
+            base_payload, candidate, *, session_dir, parallel_backends=False,
+        ):
+            return {
+                "status": "ok",
+                "kernel_id": candidate["kernel_id"],
+                "source_file": candidate.get("source_file"),
+                "proposal": {"decision": "REVERT"},
+                "verification": {"micro_speedup": 1.0},
+            }
+
+        monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
+        candidates = [
+            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py",
+             "reusable_native_kernel": True}
+            for i in range(3)
+        ]
+        out = asyncio.run(krh._run_optimization_batch(
+            payload={"candidates_path": "/dummy", "max_parallel": 7},
+            candidates=candidates,
+            session_dir=tmp_path,
+        ))
+
+        assert out["parallel_backends"] is True
+        assert out["max_parallel"] == 7  # uncapped (visible GPU count unknown)
 
 
 # ---------------------------------------------------------------------------
