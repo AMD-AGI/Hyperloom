@@ -2,21 +2,8 @@
 
 """Mock Critic backend — auto-approves every proposal it sees.
 
-Used in P0 main-path tests so Coordinator + Orchestration + Kernel can run
-end-to-end without a real Codex Critic. The full Critic Review Protocol
-(§18) — verdict ∈ {approve, reject, redirect, advise, needs_review},
-KB-evidence reasoning, brier calibration — is implemented later by the
-Critic owner.
-
-Behaviour:
-
-* When the prompt contains an inbox row with ``topic=proposal`` and a
-  parseable ``msg_id``, emit ``review_verdict{verdict="approve",
-  source="mock"}`` for that proposal.
-* If multiple proposals are visible, emit one verdict per proposal in
-  the same turn.
-* Otherwise emit a ``send_message{topic="heartbeat"}`` so the reactor
-  loop sees signal of life (Critic always speaks at least once per tick).
+Used in P0 main-path tests. Emits ``review_verdict{verdict="approve"}`` per
+visible proposal, or a heartbeat when none are present.
 """
 
 from __future__ import annotations
@@ -28,8 +15,7 @@ from ...protocol.intent import Intent, IntentType
 from .base import BackendTurnResult
 
 
-# DESIGN §13.1 inbox rendering format. Coordinator._compose_prompt emits:
-#     seq=12 msg_id=<hex32> from=orchestration topic=proposal payload={...}
+# DESIGN §13.1 inbox rendering format.
 _PROPOSAL_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=proposal\s+payload=(.*)$",
     re.MULTILINE,
@@ -42,8 +28,7 @@ class MockCriticBackend:
     def __init__(self, name: str = "critic-mock"):
         self.name = name
         self.calls: list[dict[str, Any]] = []
-        # Track which proposals we've already approved so we don't double-emit
-        # if the same proposal appears in two consecutive inbox windows.
+        # Track approved proposals so a re-rendered inbox doesn't double-emit.
         self._approved_msg_ids: set[str] = set()
 
     async def run(

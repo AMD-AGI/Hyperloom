@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""L4: Critic injects recent Robustness findings as priors.
-
-Covers :func:`runtime.decision_reviewer._discover_robustness_findings_path`
-and the bundle field population from the ``prepare_review`` tail.
-"""
+"""L4: Critic injects recent Robustness findings as priors."""
 
 from __future__ import annotations
 
