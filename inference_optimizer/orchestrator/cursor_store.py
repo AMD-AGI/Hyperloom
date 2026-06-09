@@ -2,9 +2,8 @@
 
 """CursorStore
 
-Per-agent ``last_processed_seq`` cursor. Single SQL UPSERT replaces the
-per-file tmp+rename pattern from v0.4. Combined with the tasks/events
-tables, this gives the cross-table atomicity that ADR-42 promises.
+Per-agent ``last_processed_seq`` cursor via a single SQL UPSERT, giving the
+cross-table atomicity ADR-42 promises.
 """
 
 from __future__ import annotations

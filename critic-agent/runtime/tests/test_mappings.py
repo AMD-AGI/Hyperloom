@@ -1,9 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for :mod:`runtime.importance_mapping` and
-:mod:`runtime.category_mapping` — the small enum/score lookup tables
-that gate Critic verdicts and KB-draft kinds.
-"""
+"""Tests for :mod:`runtime.importance_mapping` and :mod:`runtime.category_mapping` lookup tables."""
 
 from __future__ import annotations
 

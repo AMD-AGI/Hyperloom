@@ -2,15 +2,10 @@
 
 """Decode robust-api raw responses into LocalProbe-equivalent schemas.
 
-robust-api emits Prometheus-style time-series via
-``pod-metrics/batch`` (proxied as ``/api/v1/cluster/pods/.../metrics``
-in M2). The agent's local signals consume a flatter snapshot — one
-row per device with the latest value of each metric — so this module
-bridges the two so ``signals/local_health.py`` does not have to
-care which source filled :data:`SourceData.local_gpu`.
-
-We currently decode GPU metrics only; disk / log mappings can be
-added the same way once we have a stable upstream catalogue.
+robust-api emits Prometheus-style time-series via ``pod-metrics/batch``;
+this module flattens them to one row per device (latest value per
+metric) so ``signals/local_health.py`` is agnostic to which source
+filled :data:`SourceData.local_gpu`. GPU metrics only for now.
 """
 
 from __future__ import annotations
@@ -18,11 +13,9 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
-# Map of metric_name -> SourceData.local_gpu field. Adding a new
-# metric is a one-line addition; the signal layer never sees this.
-# Keys cover the three exporter conventions we currently meet on
-# core42 (rocm exporter, DCGM, generic) so signals work uniformly
-# across nodes regardless of who scraped the raw counter.
+# Map of metric_name -> SourceData.local_gpu field. Keys cover the three
+# exporter conventions seen on core42 (rocm exporter, DCGM, generic) so
+# signals work uniformly regardless of who scraped the raw counter.
 _GPU_METRIC_FIELD: Mapping[str, str] = {
     # rocm-exporter
     "rocm_temperature_celsius": "temperature_c",
@@ -46,9 +39,8 @@ _GPU_METRIC_FIELD: Mapping[str, str] = {
 }
 
 
-# Series labels we look at to deduce gpu_id; first match wins.
-# robust-api / Prometheus exporters disagree on the label name so we
-# accept all three conventions.
+# Series labels used to deduce gpu_id; first match wins. Exporters
+# disagree on the label name so we accept all conventions.
 _GPU_ID_LABELS: tuple[str, ...] = (
     "gpu",
     "device",
@@ -115,10 +107,7 @@ def decode_gpu_snapshot(
                 latest = _latest_value(series.get("values"))
                 if latest is None:
                     continue
-                # Key by (ns, name, gpu_id) so two pods on the same
-                # node with overlapping GPU IDs don't collide. The
-                # caller can flatten this if it wants a single
-                # node-wide list.
+                # Key by (ns, name, gpu_id) so same-node pods with overlapping IDs don't collide.
                 key = (ns, name, gpu_id)
                 snap = by_id.setdefault(
                     key,
@@ -143,21 +132,8 @@ def merge_gpu_snapshots(
 ) -> dict[str, Any]:
     """Combine multiple per-pod snapshots into a single ``local_gpu``.
 
-    Used by :class:`RobustnessServerSource` when fan-out across the
-    session's pods produces one decoded snapshot each. Later writes
-    win on field clashes per (pod, gpu_id), but distinct pods stay
-    distinct so the signal evidence keeps the namespace / name the
-    GPU lived under. Rows are sorted by
-    ``(pod_namespace, pod_name, gpu_id)`` for deterministic output.
-
-    Args:
-        snapshots (list[Mapping[str, Any]]): Per-pod snapshots as
-            produced by :func:`decode_gpu_snapshot`. Non-mapping
-            entries and entries without a ``gpus`` list are skipped.
-
-    Returns:
-        dict[str, Any]: ``{"gpus": [...], "tool": "robust-api"}`` with
-        the merged, sorted device rows, or ``{}`` when nothing decodes.
+    Later writes win on field clashes per (pod, gpu_id); distinct pods
+    stay distinct so signal evidence keeps the GPU's namespace / name.
     """
 
     rows: list[dict[str, Any]] = []
@@ -172,8 +148,7 @@ def merge_gpu_snapshots(
                 rows.append(dict(row))
     if not rows:
         return {}
-    # Stable ordering: by (pod_namespace, pod_name, gpu_id) so test
-    # assertions are deterministic.
+    # Stable ordering by (pod_namespace, pod_name, gpu_id).
     rows.sort(
         key=lambda r: (
             str(r.get("pod_namespace") or ""),

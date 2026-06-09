@@ -2,23 +2,7 @@
 
 """Workspace-root resolver for the standalone kernel-agent tools.
 
-The tools in this directory (``kernel_optimization.py``,
-``tracelens_analysis.py``, ``parallel_e2e_runner.py``) run as standalone
-scripts with ``sys.path`` injection of the tools dir and therefore
-CANNOT ``import inference_optimizer.paths``. This module mirrors the
-``workspace_root()`` semantics of that package using only the standard
-library so every kernel-agent artefact lands under ``$USER_DATA_PATH``
-just like the orchestrator's.
-
-Contract (kept in lock-step with
-``inference_optimizer/paths.py::workspace_root``):
-
-* ``$USER_DATA_PATH`` set/non-empty  -> return it verbatim; NEVER the
-  ``/workspace/hyperloom`` default.
-* ``$USER_DATA_PATH`` unset/empty     -> emit ONE loud ``logging.warning``
-  (process-wide, guarded) and return ``DEFAULT_WORKSPACE_ROOT`` so a
-  misconfigured launcher is visible instead of silently writing to the
-  pod-local default.
+Stdlib-only mirror of ``inference_optimizer.paths.workspace_root``.
 """
 
 from __future__ import annotations
@@ -26,30 +10,18 @@ from __future__ import annotations
 import logging
 import os
 
-# Single source of the fallback literal for the kernel-agent tools. Kept
-# byte-for-byte identical to
-# ``inference_optimizer/paths.py::DEFAULT_SESSION_DIR`` so a bare-image run
-# without ``$USER_DATA_PATH`` lands in the same place the orchestrator does.
+# Kept byte-for-byte identical to inference_optimizer/paths.py::DEFAULT_SESSION_DIR.
 DEFAULT_WORKSPACE_ROOT = "/workspace/hyperloom"
 ENV_USER_DATA_PATH = "USER_DATA_PATH"
 
 log = logging.getLogger(__name__)
 
-# One-shot guard: workspace_root() is called from argparse defaults and
-# hot output-path helpers, so we only want the misconfiguration warning to
-# fire once per process.
+# One-shot guard so the misconfiguration warning fires once per process.
 _WARNED_NO_USER_DATA = False
 
 
 def workspace_root() -> str:
-    """Return ``$USER_DATA_PATH`` if set, else ``DEFAULT_WORKSPACE_ROOT``.
-
-    Mirrors ``inference_optimizer.paths.workspace_root()`` for the
-    standalone kernel-agent tools. Emits exactly one ``logging.warning``
-    when ``$USER_DATA_PATH`` is unset/empty so an operator immediately
-    sees that artefacts are going to the pod-local default rather than
-    their chosen workspace root.
-    """
+    """Return ``$USER_DATA_PATH`` if set, else ``DEFAULT_WORKSPACE_ROOT`` (warns once)."""
     global _WARNED_NO_USER_DATA
     user_data = os.environ.get(ENV_USER_DATA_PATH)
     if user_data:
