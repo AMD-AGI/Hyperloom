@@ -6416,7 +6416,8 @@ class Coordinator:
         if action_name == "dynamic_specialist_check":
             status = await self._handle_dynamic_specialist_check(source)
             await self._record_observation(
-                source, "dynamic_specialist_status", status,
+                source, "observation",
+                {"kind": "dynamic_specialist_status", **status},
             )
             return
         # dynamic_specialist_collect — read results from a completed agent.
@@ -6427,7 +6428,8 @@ class Coordinator:
                     source, agent_id,
                 )
                 await self._record_observation(
-                    source, "dynamic_specialist_results", results,
+                    source, "observation",
+                    {"kind": "dynamic_specialist_results", **results},
                 )
             return
         # For dynamic_action: generate the dyn_id, mkdir the artefact
@@ -8152,8 +8154,9 @@ class Coordinator:
         tasks = params.get("tasks", [])
         if not tasks:
             await self._record_observation(
-                source, "dynamic_specialist_error",
-                {"error": "No tasks provided in dynamic_specialist params"},
+                source, "observation",
+                {"kind": "dynamic_specialist_error",
+                 "error": "No tasks provided in dynamic_specialist params"},
             )
             return
 
@@ -8166,8 +8169,9 @@ class Coordinator:
             "dispatch_specialists", tool_input, str(self.session_dir),
         )
         await self._record_observation(
-            source, "dynamic_specialist_dispatched",
-            {"result": result_text, "task_count": len(tasks)},
+            source, "observation",
+            {"kind": "dynamic_specialist_dispatched",
+             "result": result_text, "task_count": len(tasks)},
         )
         log.info(
             "dynamic_specialist dispatch: %d tasks from %s",
@@ -8222,8 +8226,9 @@ class Coordinator:
             report = read_completion(str(self.session_dir), agent_id)
             if report:
                 await self._record_observation(
-                    "coordinator", "dynamic_specialist_completed",
+                    "coordinator", "observation",
                     {
+                        "kind": "dynamic_specialist_completed",
                         "agent_id": agent_id,
                         "status": report.status,
                         "summary": report.summary[:500],
@@ -8236,8 +8241,9 @@ class Coordinator:
         dead = summary.get("dead", [])
         if active or dead:
             await self._record_observation(
-                "coordinator", "dynamic_specialist_status",
+                "coordinator", "observation",
                 {
+                    "kind": "dynamic_specialist_status",
                     "active_count": len(active),
                     "completed_count": len(newly_done),
                     "dead_count": len(dead),
