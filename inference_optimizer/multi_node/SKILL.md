@@ -49,7 +49,7 @@ Run `<subcommand> --help` for the full flag set. **Do not invent flags.**
   `SAFE_API_URL`, `SAFE_API_KEY`, `SAFE_WORKSPACE`, `DISPLAY_NAME`,
   `WORKLOAD_ID` — Brain / SaFE injects at sandbox start.
 * **From user prompt** (verbatim): `--image` ← `RayJob image:`;
-  `--nodes` ← `Nodes=N` / 多节点说法; `--cpus-per-node` /
+  `--nodes` ← `Nodes=N` / multi-node phrasing; `--cpus-per-node` /
   `--mem-per-node` / `--ephemeral-per-node` ← `RayJob resource:`;
   `--tp` (restart-server only) ← `TP=N`; `--extra-env KEY=VAL` (repeatable)
   ← prompt `env:` block (skip `*_API_KEY` / `*_BASE_URL` /

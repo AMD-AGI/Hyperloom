@@ -2,26 +2,11 @@
 
 """GPU memory leak detector.
 
-Fires when **every** visible GPU reports near-100% memory utilization (or
-near-zero free MiB) AND **no** process matching any known inference-server
-owner pattern is live on the host. This is the classic ROCm KFD leak
-fingerprint observed when a Magpie / vLLM EngineCore crashes mid-run and
-the kernel-side driver tables keep tracking VRAM against dead PIDs.
-
-The signal stays out of M1 :mod:`local_health` because it has two
-properties the simpler rules don't:
-
-* It is **stateful** — a single tick of "all GPUs full" is not enough.
-  Baseline cold-start legitimately pegs every GPU's memory while
-  ``aiter`` JIT-compiles, so we require ``min_consecutive_ticks`` clean
-  hits before promoting to HIGH severity.
-* It cross-correlates two different :class:`SourceData` slots
-  (``local_gpu`` and ``local_processes``); the existing
-  :func:`evaluate_local_health_signals` rules are single-slot.
-
-The detector is therefore a class with internal counters; the classifier
-constructs one detector instance per reactor and calls
-:meth:`GpuLeakDetector.evaluate` each tick.
+Fires when every visible GPU is near-full AND no known inference-server owner process
+is live — the classic ROCm KFD leak fingerprint after a crashed EngineCore. Stateful
+(requires ``min_consecutive_ticks`` to skip the baseline cold-start VRAM ramp) and
+cross-correlates ``local_gpu`` + ``local_processes``, so it lives in its own detector
+class rather than M1 :mod:`local_health`.
 """
 
 from __future__ import annotations
@@ -36,13 +21,9 @@ from .symptom import Symptom, SymptomSeverity
 
 
 
-# Default inference-server / benchmark owners whose presence proves the
-# VRAM is being used legitimately rather than leaked. Mirrors the
-# extended ``_DEFAULT_PROCESS_PATTERNS`` in
-# :mod:`robustness_agent.sources.local_probe`. The 2026-05-18 vLLM v1
-# additions (``vllm.v1.engine.core`` / ``vllm.engine.async_llm_engine``)
-# close the false-fire gap where ``EngineCore-`` child PIDs hold VRAM
-# but their cmdline does not contain ``vllm.entrypoints``.
+# Inference-server / benchmark owners whose presence proves VRAM use is legitimate,
+# not leaked. Mirrors ``_DEFAULT_PROCESS_PATTERNS`` in sources.local_probe; the vLLM v1
+# entries close the gap where ``EngineCore-`` child PIDs hold VRAM without ``vllm.entrypoints``.
 _DEFAULT_OWNER_PATTERNS: tuple[str, ...] = (
     "sglang.launch_server",
     "sglang.srt",
@@ -64,11 +45,8 @@ _DEFAULT_OWNER_PATTERNS: tuple[str, ...] = (
 class GpuLeakConfig:
     """Tunables for :class:`GpuLeakDetector`.
 
-    Either threshold is sufficient to mark a GPU as "full" — operators
-    typically configure one and leave the other at a permissive default.
-    ``min_consecutive_ticks`` is the anti-flap gate; the recommended
-    value of 2 catches the steady-state leak without firing during the
-    normal baseline VRAM ramp.
+    Either threshold marks a GPU "full"; ``min_consecutive_ticks`` (default 2) is the
+    anti-flap gate that skips the baseline VRAM ramp.
     """
 
     util_mem_pct_threshold: float = 99.0
@@ -78,12 +56,8 @@ class GpuLeakConfig:
 
 
 class GpuLeakDetector:
-    """Stateful per-tick rule that emits ``gpu_memory_leaked`` symptoms.
-
-    Construct once per reactor and call :meth:`evaluate` each tick. The
-    counter resets to zero on any tick whose conditions are not met,
-    so a transient one-tick blip during baseline cold-start cannot
-    accumulate toward a false positive.
+    """Stateful per-tick rule emitting ``gpu_memory_leaked``; the counter resets on any
+    non-matching tick so a one-tick cold-start blip can't accumulate a false positive.
     """
 
     def __init__(
@@ -94,10 +68,7 @@ class GpuLeakDetector:
     ) -> None:
         self._config = config or GpuLeakConfig()
         self._state_view = state_view
-        # Disk-backed counter — survives the subprocess-per-tick
-        # transport. Persists `consecutive_hits` so a leak
-        # crossing the 2-tick threshold is detected even when the
-        # reactor is rebuilt every tick.
+        # Disk-backed counter so the multi-tick threshold survives the subprocess-per-tick transport.
         loaded = state_view.load() if state_view is not None else {}
         raw_hits = loaded.get("consecutive_hits", 0)
         try:
@@ -118,8 +89,7 @@ class GpuLeakDetector:
     def evaluate(self, ctx: ReactorContext, data: SourceData) -> list[Symptom]:
         gpus = self._extract_gpu_snapshots(data)
         if not gpus:
-            # No GPU data → can't conclude anything; reset so partial
-            # data on the next tick doesn't accumulate stale state.
+            # No GPU data → reset so the next tick doesn't accumulate stale state.
             self._consecutive_hits = 0
             self._persist()
             return []
@@ -240,13 +210,7 @@ def evaluate_gpu_leak_signals(
     ctx: ReactorContext,
     data: SourceData,
 ) -> list[Symptom]:
-    """Module-level helper mirroring the other signal rule entry points.
-
-    The classifier owns the :class:`GpuLeakDetector` instance because
-    the signal is stateful; this wrapper just adapts the
-    ``(ctx, data) -> list[Symptom]`` signature the rest of
-    :mod:`signals` exposes.
-    """
+    """Module-level helper adapting the stateful detector to the ``(ctx, data)`` entry-point signature."""
     return detector.evaluate(ctx, data)
 
 

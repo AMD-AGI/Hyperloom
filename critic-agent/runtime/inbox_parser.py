@@ -22,18 +22,11 @@ The Critic mock backend also uses the exact regex
 to spot proposals; we keep behaviour identical so a real Critic agent
 remains drop-in compatible.
 
-This parser is intentionally tolerant:
-
-* Unknown sections are stored under ``extras`` instead of raising.
-* The shared-state line is parsed as best-effort ``key=value`` tokens; values
-  that themselves contain ``=`` or whitespace are accepted but kept as the
-  raw tail.
-* Payload parsing prefers :func:`ast.literal_eval` (matches the
-  ``str(dict)`` format produced by ``_compose_prompt``) and falls back to
-  :func:`json.loads`. If neither succeeds, the row is still kept with the
-  raw payload string for audit, but it does **not** appear in
-  ``proposals`` so the Critic never produces a verdict against an
-  unparseable proposal.
+Intentionally tolerant: unknown sections go to ``extras``; shared-state is
+best-effort ``key=value`` tokens; payloads try :func:`ast.literal_eval`
+(the ``str(dict)`` form) then :func:`json.loads`. Unparseable rows are kept
+for audit but excluded from ``proposals`` so the Critic never verdicts a
+proposal it could not parse.
 """
 
 from __future__ import annotations
@@ -246,9 +239,8 @@ def parse_inbox_prompt(text: str) -> ParsedPrompt:
                     continue
                 row = _parse_inbox_row(raw_line)
                 if row is None:
-                    # Keep going — a malformed line is a coordinator bug, not
-                    # a fatal error for the Critic. We surface it via
-                    # ``extras['malformed_inbox']`` for audit.
+                    # Malformed line is a coordinator bug, not fatal — surface
+                    # via ``extras['malformed_inbox']`` for audit.
                     bucket = parsed.extras.setdefault("malformed_inbox", "")
                     parsed.extras["malformed_inbox"] = (
                         bucket + ("\n" if bucket else "") + raw_line.strip()

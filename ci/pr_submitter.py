@@ -450,10 +450,8 @@ def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
                             branch: str, token: str | None) -> None:
     """Merge upstream into the fork branch before creating a PR branch.
 
-    The fork keeps verify-pr/sync workflow files that upstream does not have.
-    Rebase is fragile with fork-only merge commits, while reset would make the
-    later PR appear to delete fork-only files. Merge preserves those files and
-    keeps the fork base current.
+    Merge (not rebase/reset) preserves the fork-only verify-pr/sync workflow
+    files while keeping the base current.
     """
     _run_git(["remote", "add", "upstream", upstream_url], repo_dir, check=False)
     _run_git(["fetch", "upstream", branch], repo_dir)

@@ -1,31 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""RobustnessAgentBackend — bridges the standalone ``robustness-agent``
-runtime into the ``inference_optimizer`` Coordinator as a real Robustness
-Backend.
+"""RobustnessAgentBackend — bridges the ``robustness-agent`` runtime into
+the Coordinator as a real Robustness Backend.
 
 Mirrors :class:`CriticAgentBackend`'s subprocess transport, simplified
-because the robustness reactor is end-to-end deterministic (no external
-LLM dependency, no KB I/O, no two-phase prepare/commit handshake — just
-``Source -> Classifier -> ActionLadder -> PolicyAware -> envelope``).
-
-Each Coordinator tick translates to one ``runtime.cli`` invocation::
-
-    python -m robustness_agent.runtime.cli tick \\
-        --request request.json \\
-        --out emit.json
-
-Where ``request.json`` carries the Coordinator-rendered prompt + a
-session_id + per-tick options (session_dir, robustness_server_url,
-LLM-RCA toggle), and ``emit.json`` carries an ``intent_envelope`` whose
-schema is identical to ``critic-agent``'s ``commit-review`` output.
-
-Test seams (mirroring :class:`CriticAgentBackend.runtime_caller_factory`):
-
-* ``runtime_caller_factory`` — bypass the ``runtime.cli`` subprocess; the
-  factory returns a callable ``(RuntimeCall) -> None`` that writes the
-  desired ``emit.json`` directly. Used by unit tests so we don't pay
-  for real Python startup × thousands of cases.
+because the robustness reactor is deterministic (no LLM, KB, or two-phase
+handshake). Each tick is one ``runtime.cli tick`` invocation whose
+``emit.json`` carries an ``intent_envelope`` like critic-agent's. Test seam:
+``runtime_caller_factory`` bypasses the subprocess.
 """
 
 from __future__ import annotations
@@ -59,10 +41,8 @@ ROBUSTNESS_AGENT_WORKDIR_KEEP_COUNT = 50
 def _default_runtime_caller(call: RuntimeCall) -> None:
     """Real implementation — runs ``python -m robustness_agent.runtime.cli tick``.
 
-    Sets ``PYTHONPATH=<root>/src`` so the package resolves without
-    requiring a pip-install of ``robustness-agent`` into the optimizer's
-    Python environment. ``cwd`` is ``<root>`` (matching the convention
-    :class:`CriticAgentBackend` uses for critic-agent).
+    Sets ``PYTHONPATH=<root>/src`` + ``cwd=<root>`` so the package resolves
+    without a pip-install (matching the critic-agent convention).
     """
     if call.phase != "tick":
         raise BackendError(
@@ -109,25 +89,16 @@ class RobustnessAgentBackend:
     Parameters
     ----------
     robustness_agent_root:
-        Directory containing ``src/robustness_agent/runtime/cli.py`` (the
-        ``robustness-agent`` repository / package root). The CLI is
-        invoked with ``cwd=robustness_agent_root`` and
-        ``PYTHONPATH=<root>/src`` so ``python -m robustness_agent.runtime.cli``
-        resolves the package without needing pip-install.
+        Package root containing ``src/robustness_agent/runtime/cli.py``
+        (invoked with ``cwd=root`` + ``PYTHONPATH=<root>/src``).
     session_dir:
-        Coordinator session directory. Used to scope per-turn workdirs;
-        also forwarded into ``request.options.session_dir`` so the
-        reactor's :class:`FindingSink` writes under a stable per-session
-        path.
+        Coordinator session directory; scopes per-turn workdirs and is
+        forwarded into ``request.options.session_dir``.
     options:
-        Optional ``request.options`` overrides forwarded verbatim into
-        every ``runtime.cli tick`` request (e.g.
-        ``{"robustness_server_url": "http://...", "llm_rca_enabled": false}``).
-        ``session_dir`` is auto-injected from the constructor argument
-        so callers don't need to repeat it.
+        Optional ``request.options`` overrides forwarded into every tick
+        request. ``session_dir`` is auto-injected.
     runtime_caller_factory:
-        Test seam returning a :data:`RuntimeCaller`. Tests override this
-        to bypass the real Python subprocess.
+        Test seam returning a :data:`RuntimeCaller` that bypasses the subprocess.
     name:
         Backend instance name surfaced in the Coordinator startup banner.
     """
@@ -302,13 +273,8 @@ class RobustnessAgentBackend:
                 continue
 
     def _build_runtime_env(self) -> dict[str, str]:
-        """Build env for the subprocess.
-
-        ``PYTHONPATH`` includes ``<root>/src`` so the CLI module resolves
-        even when ``robustness-agent`` isn't pip-installed into the
-        optimizer's environment. Existing ``PYTHONPATH`` (if any) is
-        preserved so test runners that rely on it keep working.
-        """
+        """Build subprocess env with ``<root>/src`` prepended to PYTHONPATH
+        (preserving any existing value) so the CLI module resolves."""
         env = dict(os.environ)
         src = str(self.robustness_agent_root / "src")
         existing = env.get("PYTHONPATH", "").strip()

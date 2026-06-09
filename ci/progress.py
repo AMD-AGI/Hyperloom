@@ -1,31 +1,17 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""ci/progress.py — promote / dedup batch results.
-
-After a batch finishes, this script promotes Succeeded models from the
-batch's ``ci_summary.json`` into ``ci/candidates/already_done.json`` so the
-next batch dispatch automatically skips them.
-
-It also supports listing pending candidates for retry or for sanity-checking
-how many of the candidates pool remain unrun.
+"""ci/progress.py — promote / dedup batch results into ci/candidates/already_done.json.
 
 Commands:
   promote <ci_summary.json> [--already-done <path>] [--write]
-      Read ci_summary.json (from build_summary.py output), extract
-      Succeeded rows + Failed rows, merge into already_done.json.
-      Without --write, prints what would change to stdout (dry-run).
+      Merge Succeeded + Failed rows into already_done.json. Without --write, dry-run to stdout.
 
   list-remaining <candidates.json> [--already-done <path>]
       Print repo_ids in candidates.json that are NOT in already_done.json.
-      Useful for retry batches.
 
   stats [--already-done <path>] [--candidates <path>]
       Summarize already_done.json (counts by status, success rate).
-
-The schema produced by ``promote`` matches the existing already_done.json:
-  {"models": [{"repo_id", "status", "framework", "precision", "tp",
-               "params_b", "gain_pct"?, "vs_infx_pct"?, "phase"?, ...}]}
 """
 
 from __future__ import annotations
@@ -50,9 +36,7 @@ def _load_json(path: Path) -> dict:
 
 
 def _summary_rows(summary_path: Path) -> list[dict]:
-    """Extract rows from a ci_summary.json (whatever shape build_summary uses).
-    Accepts both `{"rows": [...]}` and `{"models": [...]}` and a bare list.
-    """
+    """Extract rows from a ci_summary.json; accepts `{"rows": [...]}`, `{"models": [...]}`, or a bare list."""
     data = _load_json(summary_path)
     if isinstance(data, list):
         return data
@@ -60,13 +44,7 @@ def _summary_rows(summary_path: Path) -> list[dict]:
 
 
 def _classify_status(row: dict) -> tuple[str, str | None]:
-    """Return (status, reason) for an already_done entry.
-
-    Status taxonomy:
-      completed — task hit a final phase AND we have baseline+optimized
-      partial   — task ran but only optimized (or only baseline) recorded
-      failed    — submit/sandbox/register error, no usable data at all
-    """
+    """Return (status, reason): completed (baseline+optimized), partial (one only), or failed (no usable data)."""
     fs = row.get("final_status")
     submit = row.get("submit_status")
     has_opt = row.get("optimized_tok_per_gpu") is not None

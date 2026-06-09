@@ -1,14 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``optimizer_runs/robustness_monitor.sh.example`` session-dir
-resolution.
+"""Tests for ``optimizer_runs/robustness_monitor.sh.example`` session-dir resolution.
 
-The monitor resolves the session dir holding ``state.json`` from (1) an
-explicit ``$INFERENCE_OPTIMIZER_SESSION_DIR`` or (2) the ``.session_dir`` field
-of ``$LAUNCH_INFO_FILE``, and refuses to guess a timestamp/default path. When
-the launch-info JSON is configured but not yet flushed (the monitor raced ahead
-of the optimizer's launch-info write), it must poll for a bounded window rather
-than exiting immediately.
+The monitor resolves the session dir from an explicit env var or the
+``$LAUNCH_INFO_FILE`` ``.session_dir`` field (polling a bounded window if not
+yet flushed), and refuses to guess a default path.
 """
 
 from __future__ import annotations
@@ -24,8 +20,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MONITOR = REPO_ROOT / "optimizer_runs" / "robustness_monitor.sh.example"
 
-# Vars the monitor consumes; strip from the inherited env so each test is
-# hermetic and only sees what it sets explicitly.
+# Vars the monitor consumes; stripped from the inherited env so each test is hermetic.
 _MONITOR_VARS = (
     "INFERENCE_OPTIMIZER_SESSION_DIR",
     "LAUNCH_INFO_FILE",
@@ -45,13 +40,10 @@ def _clean_env() -> dict[str, str]:
 
 
 def test_monitor_waits_for_delayed_launch_info(tmp_path):
-    """LAUNCH_INFO_FILE set but written only after a short delay: the monitor
-    must poll (bounded) and resolve it, then go terminal (exit 0) — not give up
-    with exit 2 before the optimizer flushed launch-info."""
+    """A delayed LAUNCH_INFO_FILE: the monitor polls (bounded), resolves it, and exits 0 — not exit 2 before launch-info flushed."""
     sess = tmp_path / "sess"
     (sess / "reports").mkdir(parents=True)
-    # Terminal marker so the first main-loop iteration exits 0 right after the
-    # session dir is resolved (keeps the test from entering the resume loop).
+    # Terminal marker so the first main-loop iteration exits 0 right after the session dir resolves.
     (sess / "reports" / "final.md").write_text("done\n", encoding="utf-8")
 
     launch = tmp_path / "launch.json"
@@ -86,8 +78,7 @@ def test_monitor_waits_for_delayed_launch_info(tmp_path):
 
 
 def test_monitor_fails_fast_when_no_session_source(tmp_path):
-    """No explicit session dir AND no LAUNCH_INFO_FILE -> exit 2 immediately
-    (no wasted polling), never silently falling back to /workspace/hyperloom."""
+    """No session dir and no LAUNCH_INFO_FILE -> exit 2 immediately, never falling back to a default path."""
     pidfile = tmp_path / "pid"
     pidfile.write_text("1\n", encoding="utf-8")
 
@@ -113,15 +104,12 @@ def test_monitor_fails_fast_when_no_session_source(tmp_path):
 
     assert proc.returncode == 2
     assert "session dir is unknown" in proc.stderr
-    # Fail-fast: with no LAUNCH_INFO_FILE we must NOT enter the bounded wait
-    # loop (default 60s). A generous bound tolerates CI process-spawn latency
-    # while still proving we never polled a wait window.
+    # Fail-fast: with no LAUNCH_INFO_FILE we must NOT enter the bounded wait loop.
     assert elapsed < 30, f"should fail fast (no wait loop), took {elapsed:.1f}s"
 
 
 def test_monitor_times_out_when_launch_info_never_appears(tmp_path):
-    """LAUNCH_INFO_FILE configured but the file never appears: the monitor
-    polls for the bounded window then exits 2 (does not hang forever)."""
+    """LAUNCH_INFO_FILE configured but the file never appears: the monitor polls the bounded window then exits 2."""
     launch = tmp_path / "never.json"
     pidfile = tmp_path / "pid"
     pidfile.write_text("1\n", encoding="utf-8")
@@ -155,13 +143,7 @@ def test_monitor_times_out_when_launch_info_never_appears(tmp_path):
 
 
 def test_monitor_tolerates_non_integer_wait_sec(tmp_path):
-    """A malformed LAUNCH_INFO_WAIT_SEC must degrade to the default wait, not
-    emit a bash arithmetic error and skip the bounded poll. Pre-fix, an invalid
-    token ('60x') makes the ``$(( ... ))`` deadline computation error out under
-    ``set -u``, so the monitor never polls the real window and bails (exit 2)
-    with a confusing 'within 60xs' message before the delayed launch-info
-    appears. Post-fix it warns, falls back to the default window, picks up the
-    launch-info, and exits 0."""
+    """A malformed LAUNCH_INFO_WAIT_SEC ('60x') must degrade to the default wait, warn, poll, and exit 0 — not error out under ``set -u``."""
     sess = tmp_path / "sess"
     (sess / "reports").mkdir(parents=True)
     (sess / "reports" / "final.md").write_text("done\n", encoding="utf-8")
@@ -198,12 +180,7 @@ def test_monitor_tolerates_non_integer_wait_sec(tmp_path):
 
 
 def test_monitor_handles_leading_zero_wait_sec(tmp_path):
-    """A leading-zero LAUNCH_INFO_WAIT_SEC ('08') passes a naive ^[0-9]+$ check
-    but bash arithmetic treats it as OCTAL -> '08: value too great for base'
-    under ``set -u`` (the very crash the validation was meant to prevent). The
-    deadline computation must force base-10 so '08' means 8 seconds. We point a
-    delayed launch-info at a terminal session: post-fix the monitor polls, picks
-    it up, and exits 0 with no octal arithmetic error on stderr."""
+    """A leading-zero LAUNCH_INFO_WAIT_SEC ('08') must be parsed base-10 (not octal), so the monitor polls and exits 0 with no arithmetic error."""
     sess = tmp_path / "sess"
     (sess / "reports").mkdir(parents=True)
     (sess / "reports" / "final.md").write_text("done\n", encoding="utf-8")

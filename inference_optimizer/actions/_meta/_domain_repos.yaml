@@ -16,7 +16,7 @@
 #                                          labels + body snippet.
 #
 # Cross-reference with the PR Monitor's monitored-repo list (see
-# primus-cortex-pr-monitor-access.md §"当前监控仓库"); repos listed
+# primus-cortex-pr-monitor-access.md §"Currently Monitored Repos"); repos listed
 # here but not yet monitored upstream are tolerated — the REST
 # wrapper logs a warning and skips them.
 

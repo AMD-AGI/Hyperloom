@@ -1,22 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PRELUDE-bootstrap analysis-task enqueue test.
-
-The PRELUDE phase ends with an auto-enqueued analysis task driven by
-the baseline-completion hook inside ``_promote_to_shared_state``.
-That hook delegates the actual enqueue to
-:meth:`Coordinator._enqueue_internal_analysis_task` with the fixed
-``reason='prelude_initial'`` idempotency key. The task kind is
-``roofline`` when ``shared_state.enable_roofline`` is True (default)
-and ``profile`` when False — picked by ``_internal_analysis_kind``.
-
-This file pins:
-
-* The internal-analysis task contract: kind, idempotency key,
-  reason param, and benchmark-script wiring from ``last_baseline``.
-* Idempotency: a second enqueue with the same reason returns the
-  existing task instead of creating a duplicate.
-"""
+"""PRELUDE-bootstrap analysis-task enqueue tests (kind/idempotency/benchmark-script wiring of ``_enqueue_internal_analysis_task``)."""
 
 from __future__ import annotations
 
@@ -29,9 +13,7 @@ import pytest
 from inference_optimizer.orchestrator.coordinator import Coordinator
 
 
-# ---------------------------------------------------------------------------
 # Stubs — minimal SharedState + TaskRegistry doubles.
-# ---------------------------------------------------------------------------
 @dataclass
 class _BareState:
     baseline_tput: float = 100.0
@@ -89,10 +71,7 @@ def coord(tmp_path: Path) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_prelude_initial_roofline_task_contract(coord: Coordinator):
-    """The PRELUDE-bootstrap enqueue produces a ``roofline`` task with
-    idempotency key ``internal-analysis-prelude_initial`` and carries
-    forward the baseline's benchmark-script + current_best extra args
-    so the profile sub-step bench against the same workload."""
+    """The PRELUDE-bootstrap enqueue produces a ``roofline`` task carrying the baseline's benchmark-script + current_best args."""
     coord.shared_state.current_best = {
         "extra_server_args": "--tp 8 --enable-mla",
     }
@@ -112,9 +91,7 @@ async def test_prelude_initial_roofline_task_contract(coord: Coordinator):
 
 @pytest.mark.asyncio
 async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
-    """A second call with ``reason='prelude_initial'`` returns the
-    same task — resume after the baseline-completion edge must not
-    double-enqueue."""
+    """A second call with the same reason returns the same task (no double-enqueue on resume)."""
     first = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
     second = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
     assert first.task_id == second.task_id
@@ -123,10 +100,7 @@ async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
 
 @pytest.mark.asyncio
 async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
-    """A subsequent watermark-driven roofline (reason
-    ``explore_keep_watermark``) is a separate task from the PRELUDE
-    initial — the idempotency key is reason-scoped so the two never
-    collapse."""
+    """A watermark-driven roofline is a separate task; the idempotency key is reason-scoped."""
     prelude = await coord._enqueue_internal_analysis_task(
         reason="prelude_initial",
     )
@@ -140,10 +114,7 @@ async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
 
 @pytest.mark.asyncio
 async def test_enable_roofline_false_picks_profile_kind(coord: Coordinator):
-    """When ``shared_state.enable_roofline`` is False, the internal
-    analysis task switches kind to ``profile`` (the lighter
-    Coordinator-internal analysis path) while keeping the same
-    reason-scoped idempotency key prefix."""
+    """When ``enable_roofline`` is False, the task switches kind to ``profile`` keeping the reason-scoped key."""
     coord.shared_state.enable_roofline = False
     task = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
     assert task.kind == "profile"

@@ -1,42 +1,13 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Multi-node kernel patch fan-out (apply / revert).
+"""Multi-node kernel patch fan-out (apply / revert), run INSIDE the RayJob pod.
 
-Counterpart to ``kill_multinode.py`` and ``launch_multinode.py``. Submitted
-via Ray Dashboard REST by ``inference_optimizer.multi_node apply-patch`` /
-``revert-patch`` when the workload has ``nodes >= 2``.
-
-Algorithm (apply):
-
-  1. ``ray.init()`` (no address; in-pod).
-  2. Decode the patch payload (base64-encoded source bytes) from
-     ``--patch-b64`` once on the head; pass through to every actor.
-  3. Enumerate all alive nodes.
-  4. For each node, spawn a ``@ray.remote`` actor pinned via
-     ``NodeAffinitySchedulingStrategy(node_id, soft=False)``.
-  5. Inside each actor:
-     a. Copy ``target_path`` to ``<backup_dir>/<safe_name>.<host>.bak``.
-     b. Atomic write the decoded patch bytes to ``target_path``
-        (write-to-tmp + ``os.replace`` so a half-written file never
-        appears on disk visible to sglang loaders).
-     c. ``py_compile.compile`` if ``target_path`` ends in ``.py`` to catch
-        syntax errors before sglang tries to import it.
-  6. Collect per-node results; emit a single JSON document on stdout
-     so the caller can parse it from Ray Dashboard job_logs.
-
-Algorithm (revert): same actor fan-out, each actor copies its recorded
-backup file back to ``target_path``.
-
-Failure semantics: any actor that raises is treated as a hard failure.
-The caller (sandbox-side ``apply_kernel_patch.py``) is expected to
-issue a follow-up ``revert`` to roll back the actors that did succeed,
-preserving three-way (sandbox + head + worker) source consistency.
-
-ADDENDUM: this script runs INSIDE the RayJob pod (sglang/vllm image),
-not in the Claw sandbox. ``import ray`` is the standard in-pod way to
-talk to the local GCS; sandbox-side code (``cli.py`` etc.) must NOT
-import ray.
+One actor per alive node (NodeAffinity hard-pinned): apply backs up
+``target_path``, atomically writes the decoded patch bytes, and
+``py_compile``s ``.py`` targets (auto-reverting on failure); revert copies
+the recorded backup back. Any actor raising is a hard failure (caller
+issues a follow-up revert). Emits one JSON summary on stdout.
 """
 
 from __future__ import annotations
@@ -59,8 +30,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line; stdout is reserved for the
-    final JSON document the dashboard caller parses."""
+    """Stderr-only timestamped log line (stdout is reserved for the final JSON)."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kernel_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
@@ -98,9 +68,7 @@ def _apply_remote(
     backup_dir: str,
     kernel_id: str,
 ) -> dict:
-    """Apply a single patch on THIS pod. Returns a dict summary; raises
-    on any error so the caller sees the failure via ``ray.get`` exception
-    propagation."""
+    """Apply a single patch on this pod; raises on any error (surfaced via ``ray.get``)."""
     host = socket.gethostname()
     target = Path(target_path)
     if not target.is_file():
@@ -143,8 +111,7 @@ def _revert_remote(
     target_path: str,
     backup_path: str,
 ) -> dict:
-    """Restore ``target_path`` from ``backup_path`` on THIS pod. Idempotent
-    when ``backup_path`` is missing (assumes already-reverted state)."""
+    """Restore ``target_path`` from ``backup_path`` on this pod; noop when the backup is missing."""
     host = socket.gethostname()
     target = Path(target_path)
     backup = Path(backup_path)

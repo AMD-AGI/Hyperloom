@@ -1,17 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Mock end-to-end Coordinator loop tests.
-
-Covers the main path with all 4 agents wired to mock backends:
-
-* Orchestration proposes → Critic mock approves → task materialized →
-  dispatcher runs the registered baseline runner → succeeded.
-* Orchestration emits REQUEST{target=kernel, kind=trace_analyze} →
-  Coordinator mirrors to kernel inbox → Kernel mock auto-RESPONSEs →
-  Coordinator routes response back to orchestration inbox.
-* Robustness mock keeps ticking heartbeats throughout — no scheduling
-  police intervention.
-"""
+"""Mock end-to-end Coordinator loop tests."""
 
 from __future__ import annotations
 
@@ -31,9 +20,7 @@ from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -48,9 +35,7 @@ def _heartbeat() -> Intent:
                   payload={"topic": "heartbeat", "body_md": "ok"})
 
 
-# ===========================================================================
 # Mock Kernel adapter unit tests
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_mock_kernel_responds_to_request():
     backend = MockKernelBackend()
@@ -79,7 +64,7 @@ async def test_mock_kernel_dedups_same_request():
     r1 = await backend.run(prompt)
     r2 = await backend.run(prompt)
     assert r1.intents[0].type == IntentType.RESPONSE
-    # Second turn — same request should NOT be re-answered; expect heartbeat
+    # Same request should NOT be re-answered; expect heartbeat.
     assert r2.intents[0].type == IntentType.SEND_MESSAGE
     assert r2.intents[0].payload["topic"] == "heartbeat"
 
@@ -92,9 +77,7 @@ async def test_mock_kernel_heartbeat_when_no_request():
     assert res.intents[0].payload["topic"] == "heartbeat"
 
 
-# ===========================================================================
 # Full 4-agent main-loop e2e
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_e2e_propose_approve_dispatch_with_mock_executor(session_dir):
     """Orchestration → Critic (mock) → dispatcher → succeeded."""
@@ -114,9 +97,7 @@ async def test_e2e_propose_approve_dispatch_with_mock_executor(session_dir):
     c = Coordinator(session_dir, backends=backends)
     c.sub.register_executor("baseline", lambda ctx: _async_value({"tput": 1840}))
     try:
-        # tick 1: orchestration proposes
-        # tick 2: critic sees + approves; coordinator materializes task
-        # tick 3: dispatcher runs the runner → delegated_result succeeded
+        # tick 1 propose, tick 2 approve+materialize, tick 3 dispatch.
         await c.tick(3)
 
         proposals = await c.bus.tail(topic="proposal")
@@ -142,15 +123,7 @@ async def _async_value(v):
 
 @pytest.mark.asyncio
 async def test_e2e_request_response_round_trip(session_dir):
-    """Plan A: orchestration REQUEST → kernel mock RESPONSE → routed back.
-
-    Uses a kind (`explore_options`) that is NOT registered in
-    KERNEL_REQUEST_HANDLERS so the request flows through the LLM-backed
-    kernel agent instead of being intercepted by a programmatic handler.
-    Production kinds (trace_analyze / run_optimization / integrate)
-    have dedicated handler tests in test_p3_bugfixes.py and the
-    integration suite.
-    """
+    """Plan A: orchestration REQUEST → kernel mock RESPONSE → routed back."""
     req = Intent(type=IntentType.REQUEST, payload={
         "target_agent": "kernel",
         "kind": "explore_options",
@@ -168,15 +141,12 @@ async def test_e2e_request_response_round_trip(session_dir):
     }
     c = Coordinator(session_dir, backends=backends)
     try:
-        # tick 1: orchestration emits REQUEST → coordinator mirrors to kernel inbox
-        # tick 2: kernel sees request → emits RESPONSE → coordinator routes back
+        # tick 1 mirror REQUEST to kernel, tick 2 RESPONSE routed back.
         await c.tick(2)
 
-        # Request mirrored to kernel
         kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
         assert kernel_inbox
 
-        # Response routed back to orchestration
         responses = await c.bus.tail(to_agent="orchestration", topic="response")
         assert responses
         r = responses[0]
@@ -201,7 +171,6 @@ async def test_e2e_robustness_heartbeats_throughout(session_dir):
     try:
         await c.tick(4)
         beats = await c.bus.tail(topic="heartbeat", n=100)
-        # Robustness alone contributes 4 heartbeats over 4 ticks.
         robustness_beats = [b for b in beats if b.from_agent == "robustness"]
         assert len(robustness_beats) == 4
     finally:

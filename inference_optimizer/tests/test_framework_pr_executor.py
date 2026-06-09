@@ -1,17 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""FrameworkPrExecutor — Stage 2d coverage.
-
-Mirrors :file:`test_integrate_patch_executor.py`. The framework_pr
-executor is the FRAMEWORK_PR-phase counterpart to integrate_patch:
-per-candidate apply + bench + KEEP/REVERT.
-
-We exercise: candidate→workspace patch ingestion (explicit + via
-``diff_url`` curl), git-apply success / failure rollback,
-``apply_only`` smoke path, no-patch / no-diff_url guard, and an
-end-to-end happy path through a mocked ``run_grid`` so the bench
-delta computation runs.
-"""
+"""FrameworkPrExecutor — Stage 2d coverage."""
 
 from __future__ import annotations
 
@@ -37,9 +26,7 @@ from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.orchestrator.task_registry import Task
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 def _init_git_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -112,9 +99,7 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-# ---------------------------------------------------------------------------
 # 1. Pure helpers
-# ---------------------------------------------------------------------------
 def test_candidate_slug_prefers_repo_and_pr_number():
     cand = _make_candidate(repo="sgl-project/sglang", pr_number=1234)
     slug = _candidate_slug(cand)
@@ -152,9 +137,7 @@ def test_fetch_diff_to_path_fails_on_bad_url(tmp_path: Path):
     assert err
 
 
-# ---------------------------------------------------------------------------
 # 2. End-to-end executor (apply_only / explicit patches)
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_executor_missing_candidate_fails_cleanly(tmp_path: Path):
     session_dir = tmp_path / "session"
@@ -168,9 +151,7 @@ async def test_executor_missing_candidate_fails_cleanly(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
-    """No diff_url, no explicit patches, AND no head ref to check out →
-    genuine no_patch. (A candidate with a ref/pr_number would instead be
-    auto-routed to checkout-head; see the checkout-head tests.)"""
+    """No diff_url, no explicit patches, no head ref to check out → genuine no_patch."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -194,11 +175,8 @@ async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_no_patch_when_explicit_patches_all_missing(tmp_path: Path):
-    """Regression for P2.a: when params.patches is non-empty but every
-    listed path is missing from disk, the executor must NOT fall back to
-    the candidate's diff_url — it would benchmark an unpatched tree and
-    silently report a false KEEP/REJECT. The executor must short-circuit
-    with status='no_patch' and surface the missing paths."""
+    """Regression for P2.a: missing explicit patches must short-circuit to
+    no_patch, never falling back to the candidate's diff_url."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -220,14 +198,12 @@ async def test_executor_no_patch_when_explicit_patches_all_missing(tmp_path: Pat
     assert result["error_class"] == "explicit_patches_missing"
     assert result["patches_applied"] == []
     assert result["missing_patches"] == missing
-    # Tree must be untouched — no fall-through to diff_url fetch + apply.
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio
 async def test_executor_apply_only_with_explicit_patch_succeeds(tmp_path: Path):
-    """apply_only=True with an explicit patch path: patch lands on the
-    framework root, bench is skipped, status='applied_no_bench'."""
+    """apply_only=True with an explicit patch: applies, skips bench, status='applied_no_bench'."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -288,7 +264,6 @@ async def test_executor_no_framework_root_returns_apply_failed(tmp_path: Path):
     executor = FrameworkPrExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
-    # Patch _resolve_framework_root to return None.
     with patch(
         "inference_optimizer.orchestrator.action_executors.framework_pr."
         "_resolve_framework_root",
@@ -307,8 +282,7 @@ async def test_executor_no_framework_root_returns_apply_failed(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_fetch_failure_returns_fetch_failed(tmp_path: Path):
-    """When diff_url fetch fails, executor returns ``fetch_failed`` and
-    never touches the framework root."""
+    """A diff_url fetch failure returns ``fetch_failed`` and never touches the root."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -325,13 +299,10 @@ async def test_executor_fetch_failure_returns_fetch_failed(tmp_path: Path):
     result = await executor(ctx)
     assert result["status"] == "fetch_failed"
     assert result["error_class"] == "diff_fetch_failed"
-    # framework root must not have changed.
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# ---------------------------------------------------------------------------
 # 3. KEEP / REVERT decision (mocked bench)
-# ---------------------------------------------------------------------------
 def _mk_variant_result(*, tput: float | None, status: str = "succeeded") -> VariantResult:
     return VariantResult(
         name="framework-pr-x",
@@ -377,14 +348,12 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
     assert result["output_throughput"] == 1100.0
     assert len(result["patches_applied"]) == 1
     assert result["patches_reverted"] == []
-    # KEEP: patch is still applied on the framework root.
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
 @pytest.mark.asyncio
 async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
-    """D2: a KEEP appends an 'integrated' record to lessons.jsonl so the
-    next ``fa phase-discover`` can dedup the already-integrated PR."""
+    """D2: a KEEP appends an 'integrated' record to lessons.jsonl for dedup."""
     import inference_optimizer.orchestrator.kb_writeback as kb_writeback
 
     kb_root = tmp_path / "kb" / "framework_optimization"
@@ -433,8 +402,7 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
-    """D2: a REVERT appends a 'reverted_smoke_fail' record (dedup of a
-    tried-but-regressive PR)."""
+    """D2: a REVERT appends a 'reverted_smoke_fail' record for dedup."""
     import inference_optimizer.orchestrator.kb_writeback as kb_writeback
 
     kb_root = tmp_path / "kb" / "framework_optimization"
@@ -512,7 +480,6 @@ async def test_executor_revert_when_delta_below_threshold(tmp_path: Path):
     assert result["delta_pct"] == pytest.approx(-2.0, abs=1e-6)
     assert result["patches_applied"] == []
     assert len(result["patches_reverted"]) == 1
-    # REVERT: source tree is back to baseline.
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
@@ -580,9 +547,7 @@ async def test_executor_bench_exception_triggers_revert(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# ---------------------------------------------------------------------------
 # 3b. Serial-KEEP integrity — REJECT must not clobber prior KEPT patches
-# ---------------------------------------------------------------------------
 _PATCH_B_ADDS_FILE = """\
 diff --git a/new.py b/new.py
 new file mode 100644
@@ -597,11 +562,7 @@ index 0000000..1111111
 
 @pytest.mark.asyncio
 async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
-    """Regression for P1.c: two candidates against the same framework_root.
-    Candidate A KEEPs (commits) ``return 1 -> return 2`` on src.py.
-    Candidate B applies a different patch and is REJECTed by the gate.
-    The revert path must reset HEAD back to A's KEEP commit — NOT to the
-    original baseline — so A's change in src.py survives B's revert."""
+    """Regression for P1.c: B's REVERT must reset to A's KEEP commit, not baseline."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -626,7 +587,6 @@ async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
             {"accuracy_pass": None},
         )
 
-    # Candidate A — KEEP.
     ctx_a = _make_ctx("t-fp-keep-a", {
         "candidate": _make_candidate(pr_number=101, title="A"),
         "patches": [str(patch_a)],
@@ -640,7 +600,6 @@ async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
     assert res_a.get("keep_commit_sha"), "KEEP must record commit sha"
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
-    # Candidate B — REJECT.
     ctx_b = _make_ctx("t-fp-rej-b", {
         "candidate": _make_candidate(pr_number=102, title="B"),
         "patches": [str(patch_b)],
@@ -659,9 +618,7 @@ async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
-    """Companion to the test above: when candidate B's *apply* fails
-    (not the gate), the same reset-to-pre_apply_sha path is taken, and
-    A's KEPT commit must still survive."""
+    """Companion: when B's apply fails, A's KEPT commit must still survive."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -691,7 +648,6 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
         res_a = await executor(ctx_a)
     assert res_a["status"] == "kept"
 
-    # B fails to apply (bad patch).
     ctx_b = _make_ctx("t-fp-bad-b2", {
         "candidate": _make_candidate(pr_number=202, title="B"),
         "patches": [str(bad_patch)],
@@ -701,13 +657,10 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
     res_b = await executor(ctx_b)
     assert res_b["status"] == "apply_failed"
 
-    # A's KEPT change must still be there.
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-# ---------------------------------------------------------------------------
 # 3c. checkout-head (diff source) mode
-# ---------------------------------------------------------------------------
 def _git_env() -> dict[str, str]:
     env = os.environ.copy()
     env["GIT_AUTHOR_NAME"] = "FRAMEWORK_PR Test"
@@ -718,10 +671,7 @@ def _git_env() -> dict[str, str]:
 
 
 def _init_repo_with_pr_branch(path: Path, *, pr_ref: str = "pr-head") -> str:
-    """Init a repo on ``main`` (the live tree), then create a divergent
-    ``pr_ref`` branch carrying one extra commit (the "PR head"). Returns
-    the PR head sha. ``origin`` is set to the repo itself so a
-    ``git fetch origin <pr_ref>`` resolves locally without a network."""
+    """Init ``main`` plus a divergent ``pr_ref`` branch; returns the PR head sha."""
     env = _git_env()
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-b", "main", str(path)],
@@ -731,7 +681,6 @@ def _init_repo_with_pr_branch(path: Path, *, pr_ref: str = "pr-head") -> str:
                    check=True, capture_output=True, env=env)
     subprocess.run(["git", "-C", str(path), "commit", "-m", "init"],
                    check=True, capture_output=True, env=env)
-    # PR branch: one commit changing return 1 -> return 2.
     subprocess.run(["git", "-C", str(path), "checkout", "-b", pr_ref],
                    check=True, capture_output=True, env=env)
     (path / "src.py").write_text("def f():\n    return 2\n", encoding="utf-8")
@@ -741,7 +690,7 @@ def _init_repo_with_pr_branch(path: Path, *, pr_ref: str = "pr-head") -> str:
         ["git", "-C", str(path), "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True, env=env,
     ).stdout.strip()
-    # Back to main (the live tree) and point origin at ourselves.
+    # Back to main; point origin at ourselves.
     subprocess.run(["git", "-C", str(path), "checkout", "main"],
                    check=True, capture_output=True, env=env)
     subprocess.run(
@@ -764,9 +713,7 @@ def test_materialize_pr_diff_via_worktree_extracts_net_diff(tmp_path: Path):
     text = dest.read_text()
     assert "src.py" in text
     assert "return 2" in text
-    # The isolated worktree must be cleaned up.
     assert not (dest.parent / "wt-x-y-pr-7").exists()
-    # Live tree (main) is untouched by the extraction.
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
@@ -783,13 +730,8 @@ def test_materialize_pr_diff_empty_when_no_ref(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, monkeypatch):
-    """End-to-end: apply_mode=checkout_head extracts the PR's net diff via
-    an isolated worktree, applies it to the live tree, benches it (mocked
-    +10%), and KEEPs. patch_source_mode is surfaced as checkout_head."""
-    # Redirect the KB writeback root to tmp_path: this candidate carries a
-    # head_sha, so the KEEP path triggers write_framework_pr_record. Without
-    # this the record would leak into the real
-    # framework-agent/kb/framework_optimization/lessons.jsonl on every run.
+    """apply_mode=checkout_head extracts the PR's net diff, applies, benches (+10%), KEEPs."""
+    # Redirect the KB writeback root so the KEEP record doesn't leak into the real KB.
     import inference_optimizer.orchestrator.kb_writeback as kb_writeback
     monkeypatch.setattr(
         kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization"
@@ -830,8 +772,7 @@ async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, mon
 
 @pytest.mark.asyncio
 async def test_executor_no_diff_url_falls_back_to_checkout_head(tmp_path: Path):
-    """When a candidate carries no diff_url, the executor auto-selects
-    checkout-head rather than returning no_patch."""
+    """No diff_url → the executor auto-selects checkout-head rather than no_patch."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -854,10 +795,7 @@ async def test_executor_no_diff_url_falls_back_to_checkout_head(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
-    """P2 regression: a PR that ADDS a new file (no edits to tracked
-    files) must KEEP cleanly — _git_commit_keep runs ``git add -A`` so the
-    new file is captured in the commit instead of being dropped by
-    ``commit -am`` (which would either leave it untracked or fail)."""
+    """P2 regression: a PR that ADDS a new file must KEEP cleanly via ``git add -A``."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -886,7 +824,6 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
 
     assert result["status"] == "kept", result
     assert result.get("keep_commit_sha")
-    # The new file is present AND committed (not left as untracked debris).
     assert (repo / "new.py").exists()
     status = subprocess.run(
         ["git", "-C", str(repo), "status", "--porcelain"],
@@ -897,21 +834,16 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
-    """P1 regression: a candidate whose repo differs from the live
-    framework_root's origin must NOT use checkout-head (which would fetch
-    the wrong ref from the live origin). Even with apply_mode=checkout_head
-    explicitly set, the executor falls back to diff_url."""
+    """P1 regression: a cross-repo candidate must fall back to diff_url, not checkout-head."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
     _init_git_repo(repo)
-    # Point the live origin at sgl-project/sglang.
     subprocess.run(
         ["git", "-C", str(repo), "remote", "add", "origin",
          "https://github.com/sgl-project/sglang.git"],
         check=True, capture_output=True,
     )
-    # A served diff_url so the fallback has something to apply.
     diff_file = tmp_path / "served.patch"
     diff_file.write_text(_VALID_PATCH, encoding="utf-8")
 
@@ -922,7 +854,7 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
         "ref": "pr-head",
         "title": "cross-repo PR",
         "diff_url": f"file://{diff_file}",
-        "apply_mode": "checkout_head",  # explicitly requested, but cross-repo
+        "apply_mode": "checkout_head",  # explicitly requested
     }
     ctx = _make_ctx("t-fp-crossrepo", {
         "candidate": cand,
@@ -932,15 +864,11 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
     result = await executor(ctx)
 
     assert result["status"] == "applied_no_bench", result
-    # Fell back to the served diff_url (not checkout_head).
     assert result.get("patch_source_mode") == "diff_url"
-    # The served diff actually landed.
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-# ---------------------------------------------------------------------------
 # 4. Registration / import surface
-# ---------------------------------------------------------------------------
 def test_framework_pr_executor_imports_clean():
     from inference_optimizer.orchestrator.action_executors import (
         framework_pr as fp_mod,

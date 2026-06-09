@@ -136,9 +136,7 @@ async def test_local_probe_unavailable_when_no_data(monkeypatch, tmp_path: Path)
         disk_mountpoints=(),
         process_patterns=(),
         server_log_path=None,
-        # All optional probes neutralised so we exercise the
-        # SourceUnavailable path with no data anywhere. Each new probe
-        # generation has to be added here as it's introduced.
+        # All optional probes off → exercise the SourceUnavailable path.
         ray_probe_enabled=False,
         fd_probe_enabled=False,
         decision_audit_enabled=False,
@@ -148,7 +146,6 @@ async def test_local_probe_unavailable_when_no_data(monkeypatch, tmp_path: Path)
         external_deps_enabled=False,
     )
 
-    # Force samplers that read the local host to return empty.
     monkeypatch.setattr(
         "robustness_agent.sources.local_probe._sample_gpu", lambda: {}
     )
@@ -368,12 +365,8 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
 
-    # Isolate from host shell pollution: a configured ``$OPENAI_BASE_URL``
-    # would otherwise make the external-deps sub-probe fire an extra
-    # ``/models`` gateway request through the same mock transport, inflating
-    # ``seen`` and breaking the exact-count assertion below. This test only
-    # exercises ``_probe_local_servers``, so unset the gateway env vars and
-    # disable the orthogonal external-deps probe.
+    # Unset gateway env so the external-deps sub-probe doesn't add a
+    # ``/models`` request and break the exact-count assertion below.
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("SAFE_API_KEY", raising=False)
 
@@ -1245,11 +1238,7 @@ def test_probe_external_mounts_records_latency(monkeypatch, tmp_path):
 
 
 def test_probe_external_mounts_skips_tracelens_root_when_unset(monkeypatch):
-    """install.sh now clones AMD-AGI/TraceLens into
-    $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens (a session-local
-    path), so unset TRACELENS_ROOT must not be probed as a degraded
-    external mount. Only operator-set TRACELENS_ROOT (e.g. an explicit
-    /wekafs override) should appear in the probe output."""
+    """Unset TRACELENS_ROOT must not be probed as a degraded mount (TraceLens is now session-local); only operator-set TRACELENS_ROOT appears."""
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
     monkeypatch.delenv("TRACELENS_INTERNAL_ROOT", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)

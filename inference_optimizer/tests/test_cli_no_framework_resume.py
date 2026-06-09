@@ -11,26 +11,17 @@ import pytest
 from inference_optimizer import cli
 
 
-# ---------------------------------------------------------------------------
 # Parser default (P2.c) — env honored when flag not passed.
-# ---------------------------------------------------------------------------
 def _parse_optimize(argv: list[str]) -> object:
-    """Helper: run the cli parser, return the parsed args namespace.
-
-    Uses a minimal arg vector so we don't have to mirror the full
-    optimize launch surface — every required field has a default."""
+    """Helper: run the cli parser, return the parsed args namespace."""
     parser = cli._build_parser()
     return parser.parse_args(["optimize", "--model", "/tmp/m", *argv])
 
 
 def test_no_framework_default_false_when_env_unset(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NO_FRAMEWORK", raising=False)
-    # Reload parser module-state by re-importing the build closure
-    # (default is captured at add_argument time, so we must build the
-    # parser fresh in a context where the env var is absent — easiest
-    # is to monkeypatch before parsing).
+    # Default is captured at add_argument time, so build the parser fresh with env absent.
     args = _parse_optimize([])
-    # default keeps phase enabled, so no_framework is False.
     assert getattr(args, "no_framework") is False
 
 
@@ -46,13 +37,10 @@ def test_no_framework_explicit_flag_overrides_env_unset(monkeypatch: pytest.Monk
     assert getattr(args, "no_framework") is True
 
 
-# ---------------------------------------------------------------------------
 # Resume write-back (P2.d) — exercise just the branch logic, not the full
 # CLI session-resume orchestration which needs a real session dir.
-# ---------------------------------------------------------------------------
 class _ResumeStateStub:
-    """Mirrors only the SharedState fields the resume write-back branch
-    reads/writes for the framework_phase_enabled toggle."""
+    """Mirrors the SharedState fields the resume write-back branch reads/writes."""
 
     def __init__(self, *, framework_phase_enabled: bool, phase: str) -> None:
         self.framework_phase_enabled = framework_phase_enabled
@@ -69,11 +57,7 @@ class _ArgsStub:
 
 
 def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
-    """Re-implement the resume-branch logic from cli.py for testing.
-
-    The logic lives inline in the resume handler and is hard to lift
-    out without a refactor; mirror it byte-for-byte so a divergence
-    will be caught the next time the cli changes."""
+    """Re-implement the resume-branch logic from cli.py byte-for-byte to catch divergence."""
     msg = ""
     if not bool(getattr(state, "framework_phase_enabled", True)):
         args.no_framework = True
@@ -82,8 +66,7 @@ def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
         cur_phase = (getattr(state, "phase", "") or "").strip().upper()
         if cur_phase in ("", "PRELUDE"):
             state.framework_phase_enabled = False
-            # P2-g: persist immediately, not via the later conditional
-            # save, so a clean resume keeps the toggle on disk.
+            # P2-g: persist immediately so a clean resume keeps the toggle on disk.
             state.save("session_dir")
             msg = "DISABLING_RESUME"
         else:
