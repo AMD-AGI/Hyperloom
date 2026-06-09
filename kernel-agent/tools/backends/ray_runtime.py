@@ -17,6 +17,42 @@ from pathlib import Path
 from typing import Optional
 
 
+def isolated_compile_cache_env(output_dir, base_env: Optional[dict] = None) -> dict:
+    """Return an env dict with per-attempt JIT/compile cache dirs.
+
+    The kernel-opt parallel path runs the GEAK and OOB ladders at the same
+    time and both trigger aiter / triton / inductor compiles. aiter
+    (FileBaton) and triton self-serialize per cache *key*, so steady-state
+    concurrent compiles are safe -- but a sibling killed on timeout can leave
+    a stale lock, and an ``AITER_REBUILD=1`` import wipes the shared build dir
+    mid-compile. Pinning each attempt to caches under its unique ``output_dir``
+    removes that cross-talk without serializing the backends.
+
+    Isolated (all under ``<output_dir>/.cache``):
+      - ``TRITON_CACHE_DIR``        triton @jit .hsaco/.json cache
+      - ``AITER_ROOT_DIR``          aiter cpp_itfs runtime build (``$AITER_ROOT_DIR/build``)
+      - ``TORCHINDUCTOR_CACHE_DIR`` torch.compile inductor cache
+
+    Deliberately NOT isolated: ``AITER_JIT_DIR`` (the ``@compile_ops``
+    ``jit/build`` dir ships ~100 prebuilt modules; redirecting it would force a
+    full recompile per attempt and that path is already FileBaton-locked).
+    ``AITER_ROOT_DIR`` only steers aiter's cpp_itfs ``BUILD_DIR`` -- sources
+    and configs resolve off the package dir -- so redirecting it is
+    compile-safe.
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    base = os.path.join(str(output_dir), ".cache")
+    for var, sub in (
+        ("TRITON_CACHE_DIR", "triton"),
+        ("AITER_ROOT_DIR", "aiter"),
+        ("TORCHINDUCTOR_CACHE_DIR", "inductor"),
+    ):
+        path = os.path.join(base, sub)
+        os.makedirs(path, exist_ok=True)
+        env[var] = path
+    return env
+
+
 def ray_status_ok() -> bool:
     proc = subprocess.run(
         ["ray", "status"],

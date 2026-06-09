@@ -2192,7 +2192,7 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     completion_log: list[str] = []
     recorded: list[dict] = []
 
-    async def fake_sequence(base_payload, candidate, *, session_dir):
+    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
         kid = str(candidate.get("kernel_id"))
         # Stagger completion times so kA finishes last; the streaming
         # callback should still see kB and kC's results before kA.
@@ -2381,6 +2381,217 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
 
 
 @pytest.mark.asyncio
+async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_dir):
+    """GPU-rich mode: GEAK's clean KEEP must NOT short-circuit the OOB
+    ladder. GEAK and OOB race concurrently and the higher micro_speedup
+    wins -- the whole point of spending spare GPUs to chase a better
+    rewrite than GEAK's first KEEP."""
+    calls: list[str] = []
+
+    async def fake_single(child, *, session_dir):
+        backend = child["backends"]
+        calls.append(backend)
+        if backend == "geak":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {"micro_speedup": 1.20,
+                                 "correctness_passed": True,
+                                 "best_artifact_path": "/tmp/geak.py"},
+            }
+        if backend == "claude":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {"micro_speedup": 1.50,
+                                 "correctness_passed": True,
+                                 "best_artifact_path": "/tmp/claude.py"},
+            }
+        raise AssertionError(f"unexpected backend {backend!r}")
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
+             "reusable_native_kernel": True},
+            session_dir=session_dir,
+            parallel_backends=True,
+        )
+
+    # GEAK KEEP no longer short-circuits: claude (OOB) must have run too.
+    assert "geak" in calls and "claude" in calls, calls
+    # Higher micro wins (claude 1.50 > geak 1.20).
+    assert (best.get("proposal") or {}).get("decision") == "KEEP"
+    assert (best.get("verification") or {}).get("micro_speedup") == 1.50
+    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/claude.py"
+    # Attempt ledger records both ladders.
+    logged = {a["backend"] for a in best["backend_fallback_attempts"]}
+    assert "geak" in logged and "claude" in logged, logged
+
+
+@pytest.mark.asyncio
+async def test_backend_sequence_parallel_keeps_geak_when_oob_lower(session_dir):
+    """GPU-rich mode races both, but if GEAK is the strongest it still
+    wins the best-selection contest."""
+    async def fake_single(child, *, session_dir):
+        backend = child["backends"]
+        if backend == "geak":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {"micro_speedup": 1.60,
+                                 "best_artifact_path": "/tmp/geak.py"},
+            }
+        if backend == "claude":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {"micro_speedup": 1.10,
+                                 "best_artifact_path": "/tmp/claude.py"},
+            }
+        if backend == "codex":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
+                "verification": {"micro_speedup": 1.05,
+                                 "best_artifact_path": "/tmp/codex.py"},
+            }
+        raise AssertionError(f"unexpected backend {backend!r}")
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
+             "reusable_native_kernel": True},
+            session_dir=session_dir,
+            parallel_backends=True,
+        )
+
+    assert (best.get("verification") or {}).get("micro_speedup") == 1.60
+    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/geak.py"
+
+
+@pytest.mark.asyncio
+async def test_backend_sequence_parallel_oob_ladder_still_falls_back(session_dir):
+    """In GPU-rich mode the OOB group keeps its own internal
+    break-on-KEEP fallback (claude REVERT -> codex KEEP), raced against
+    GEAK, with the strongest overall result selected."""
+    calls: list[str] = []
+
+    async def fake_single(child, *, session_dir):
+        backend = child["backends"]
+        calls.append(backend)
+        if backend == "geak":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
+                "verification": {"micro_speedup": 1.30,
+                                 "best_artifact_path": "/tmp/geak.py"},
+            }
+        if backend == "claude":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "REVERT", "reasons": []},
+                "verification": {"micro_speedup": 0.9,
+                                 "best_artifact_path": "/tmp/claude.py"},
+            }
+        if backend == "codex":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {"micro_speedup": 1.45,
+                                 "best_artifact_path": "/tmp/codex.py"},
+            }
+        raise AssertionError(f"unexpected backend {backend!r}")
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
+             "reusable_native_kernel": True},
+            session_dir=session_dir,
+            parallel_backends=True,
+        )
+
+    # OOB group walked claude -> codex; geak raced alongside exactly once.
+    assert calls.count("geak") == 1
+    assert "claude" in calls and "codex" in calls, calls
+    # codex KEEP (1.45) beats geak NEEDS_REVIEW (1.30).
+    assert (best.get("proposal") or {}).get("decision") == "KEEP"
+    assert (best.get("verification") or {}).get("micro_speedup") == 1.45
+    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/codex.py"
+
+
+@pytest.mark.asyncio
+async def test_backend_sequence_parallel_noop_without_geak(session_dir):
+    """``parallel_backends`` is inert when GEAK isn't in the ladder
+    (nothing to race) -- it behaves like the sequential OOB ladder and
+    still short-circuits on the first KEEP."""
+    calls: list[str] = []
+
+    async def fake_single(child, *, session_dir):
+        backend = child["backends"]
+        calls.append(backend)
+        return {
+            "status": "ok", "kernel_id": child["kernel_id"],
+            "proposal": {"decision": "KEEP", "reasons": []},
+            "verification": {"micro_speedup": 1.2,
+                             "best_artifact_path": f"/tmp/{backend}.py"},
+        }
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy", "backend_order": "claude,codex"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
+             "reusable_native_kernel": True},
+            session_dir=session_dir,
+            parallel_backends=True,
+        )
+
+    # No geak in the ladder -> sequential break-on-KEEP: only claude runs.
+    assert calls == ["claude"]
+    assert (best.get("verification") or {}).get("micro_speedup") == 1.2
+
+
+@pytest.mark.asyncio
+async def test_batch_threads_parallel_backends_flag(session_dir, monkeypatch):
+    """``_run_optimization_batch`` computes the GPU-rich decision once,
+    threads it into every ``_run_kernel_backend_sequence`` call, and
+    surfaces it on the aggregate result for observability."""
+    seen_flags: list[bool] = []
+
+    async def fake_sequence(
+        base_payload, candidate, *, session_dir, parallel_backends=False,
+    ):
+        seen_flags.append(parallel_backends)
+        return {
+            "status": "ok",
+            "kernel_id": candidate["kernel_id"],
+            "source_file": candidate.get("source_file"),
+            "proposal": {"decision": "KEEP"},
+            "verification": {"micro_speedup": 1.3},
+        }
+
+    candidates = [
+        {"kernel_id": "k1", "source_file": "/p/a.py", "reusable_native_kernel": True},
+        {"kernel_id": "k2", "source_file": "/p/b.py", "reusable_native_kernel": True},
+    ]
+    # Force the decision deterministically (no real GPUs under CI); the
+    # env override short-circuits the torch/GPU math in
+    # ``_should_parallelize_backends``.
+    monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")
+    with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
+        out = await krh._run_optimization_batch(
+            payload={"candidates_path": "/dummy", "max_parallel": 2},
+            candidates=candidates,
+            session_dir=session_dir,
+        )
+
+    assert seen_flags == [True, True], seen_flags
+    assert out["parallel_backends"] is True
+
+
+@pytest.mark.asyncio
 async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
     session_dir,
 ):
@@ -2394,7 +2605,7 @@ async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
     recorded: list[dict] = []
     completion_order: list[str] = []
 
-    async def fake_sequence(base_payload, candidate, *, session_dir):
+    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
         kid = str(candidate.get("kernel_id"))
         if kid == "kFast":
             await asyncio.sleep(0.01)

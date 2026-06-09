@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ray_runtime import (
     ensure_ray_cluster,
+    isolated_compile_cache_env,
     quiet_ray_init,
 )
 
@@ -94,6 +95,14 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             if cuda_vis:
                 _os.environ["HIP_VISIBLE_DEVICES"] = cuda_vis
             gpu_ids = cuda_vis or "0"
+        # Per-attempt compile caches so a co-running OOB ladder can't clobber
+        # this run's aiter/triton/inductor artifacts (see isolated_compile_cache_env).
+        for _var, _sub in (("TRITON_CACHE_DIR", "triton"),
+                           ("AITER_ROOT_DIR", "aiter"),
+                           ("TORCHINDUCTOR_CACHE_DIR", "inductor")):
+            _cdir = _os.path.join(output_dir_str, ".cache", _sub)
+            _os.makedirs(_cdir, exist_ok=True)
+            _os.environ[_var] = _cdir
         geak_bin = _shutil.which("geak") or _shutil.which("mini") or "geak"
         cmd = [geak_bin, "-t", prompt_file_str, "--yolo",
                "--output", output_dir_str, "--gpu-ids", gpu_ids]
@@ -192,6 +201,8 @@ def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
         if cuda_vis and not child_env.get("HIP_VISIBLE_DEVICES"):
             child_env["HIP_VISIBLE_DEVICES"] = cuda_vis
         gpu_ids = cuda_vis or "0"
+    # Per-attempt compile caches (see isolated_compile_cache_env).
+    child_env = isolated_compile_cache_env(output_dir, base_env=child_env)
     started = time.time()
     try:
         cmd = _build_cmd(prompt_file, output_dir, kernel_path, gpu_ids, cost_limit,

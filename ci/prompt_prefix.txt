@@ -2,7 +2,7 @@ Before optimizing, run this shell prelude exactly:
 
   export HYPERLOOM_SOURCE_REPO="${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}"
   export HYPERLOOM_SOURCE_REF="${HYPERLOOM_SOURCE_REF:-main}"
-  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/workspace/Hyperloom-main}"
+  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/tmp/Hyperloom-main}"
   mkdir -p "$(dirname "$HYPERLOOM_SOURCE_DIR")"
   rm -rf "$HYPERLOOM_SOURCE_DIR"
   if ! git clone --depth 1 --branch main "$HYPERLOOM_SOURCE_REPO" "$HYPERLOOM_SOURCE_DIR"; then
@@ -22,3 +22,4 @@ SAFETY:
 - NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
 - NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
 - Per-bash timeouts must be <= 120s; use short polling loops rather than one long blocking call.
+- Modification of USER_DATA_PATH environment variable is not allowed.

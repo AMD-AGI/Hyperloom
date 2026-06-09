@@ -52,7 +52,6 @@ import logging
 import os
 import random
 import re
-import shlex
 import shutil
 import sys
 import time
@@ -172,23 +171,9 @@ def _load_default_prompt_prefix() -> str:
     return ""
 
 
-def _with_image_env_prompt_prefix(prompt_prefix: str | None, image: str | None) -> str | None:
-    """Append per-task image exports so V2 writes manifest.image at startup."""
-    image = (image or "").strip()
-    if not image:
-        return prompt_prefix
-    block = "\n".join([
-        "CI SANDBOX IMAGE (export before launching `inference_optimizer optimize`):",
-        f"  export HYPERLOOM_IMAGE={shlex.quote(image)}",
-        "  export CONTAINER_IMAGE=\"${CONTAINER_IMAGE:-$HYPERLOOM_IMAGE}\"",
-        "  export KERNEL_OPT_IMAGE=\"${KERNEL_OPT_IMAGE:-$HYPERLOOM_IMAGE}\"",
-    ])
-    prefix = (prompt_prefix or "").rstrip()
-    return f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
-
-
-# RDMA bnxt_re tar staged on WekaFS — same path ci-config.yaml multi-node
-# entries use; module constant keeps orchestrator and this SaFE path in sync.
+# RDMA bnxt_re tar package staged on WekaFS — same path the validated
+# ci-config.yaml multi-node entries hand the agent. Kept as a module constant
+# so the orchestrator (Claw-direct) and this SaFE path stay in sync.
 _MULTINODE_BNXT_TAR = "/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz"
 
 
@@ -484,8 +469,30 @@ def detect_concurrency(tp: int, framework: str) -> int:
     return 64 if tp == 1 else 32 if tp <= 4 else 64
 
 
-def detect_image(framework: str) -> str:
-    return _default_vllm_image() if framework == "vllm" else _default_sglang_image()
+def _sglang_image_for(repo_id: str = "") -> str:
+    """Pick the sglang image, honoring per-model baseline-arch needs.
+
+    Default is the profilerfix image. MiMo-V2.x is the exception: the undated
+    v0.5.11 profilerfix base does NOT register ``MiMoV2ForCausalLM`` (the
+    server dies at model-loader registration, three baseline attempts in a
+    row -> ``baseline_failed``), so it needs the image that carries the dated
+    20260508 sglang arch. That image is profilerfix's two patched ROCm libs
+    (libamdhip64/libroctracer, issue #352) layered onto the dated 20260508
+    build, so rocprofiler kernel capture under HipGraphLaunch still works.
+    Must be paired with ``--attention-backend triton`` (injected in
+    ``_workload_envs.materialize_config_with_envs``) to dodge the aiter
+    attention CUDA-graph-capture SIGABRT. Matched on the repo basename so it
+    fires for the HF repo id (the /wekafs/<org>-<repo> local path is derived
+    downstream from this same id).
+    """
+    basename = (repo_id or "").split("/")[-1].lower()
+    if "mimo-v2" in basename:
+        return "primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-profilerfix"
+    return _default_sglang_image()
+
+
+def detect_image(framework: str, repo_id: str = "") -> str:
+    return _default_vllm_image() if framework == "vllm" else _sglang_image_for(repo_id)
 
 
 def auto_detect(hf: HuggingFaceClient, repo_id: str,
@@ -521,7 +528,7 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str,
     max_context_tokens = detect_max_context_tokens(config)
     tp = detect_tp(params_b, precision, gpu_type)
     conc = detect_concurrency(tp, framework)
-    image = detect_image(framework)
+    image = detect_image(framework, repo_id)
 
     cfg = DetectedConfig(
         arch=arch, framework=framework, precision=precision,
@@ -576,9 +583,11 @@ class SafeOptimizeClient:
         self._sess.verify = os.environ.get(
             "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True))
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, body: dict | None = None,
+                 timeout: float | None = None) -> dict:
         url = f"{self.base_url}/{path.lstrip('/')}"
-        resp = self._sess.request(method, url, json=body, timeout=self.timeout)
+        resp = self._sess.request(method, url, json=body,
+                                  timeout=timeout or self.timeout)
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:300]}")
@@ -752,14 +761,23 @@ class SafeOptimizeClient:
         attempts = 8
         for attempt in range(1, attempts + 1):
             try:
-                return self._request("POST", "api/v1/optimization/tasks", body)
-            except RuntimeError as e:
+                # The submit POST can be slow when the core42 apiserver is
+                # under load from many parallel daily jobs. Give it a generous
+                # read timeout so a busy-but-alive backend doesn't trip the
+                # default 30s and get misreported as a hard submit failure.
+                return self._request(
+                    "POST", "api/v1/optimization/tasks", body, timeout=120)
+            except Exception as e:
                 msg = str(e)
+                low = msg.lower()
                 transient = (
                     "HTTP 500" in msg
                     or "HTTP 502" in msg
                     or "HTTP 503" in msg
                     or "HTTP 504" in msg
+                    or "timed out" in low      # requests ReadTimeout/ConnectTimeout
+                    or "timeout" in low
+                    or "connection" in low     # ConnectionError / HTTPSConnectionPool
                 )
                 if not transient or attempt >= attempts:
                     raise
@@ -1106,7 +1124,7 @@ def process_model(
     precision = overrides.get("precision") or (detected.precision if detected else "FP8")
     tp        = overrides.get("tp")        or (detected.tp if detected else 1)
     conc      = overrides.get("concurrency") or (detected.concurrency if detected else 64)
-    image     = overrides.get("image") or (detected.image if detected else detect_image(framework))
+    image     = overrides.get("image") or (detected.image if detected else detect_image(framework, repo_id))
 
     log.info("[%s] => mode=%s framework=%s precision=%s tp=%d conc=%d image=%s",
              repo_id, mode, framework, precision, tp, conc, image)
@@ -1192,7 +1210,7 @@ def process_model(
             return rec
 
     try:
-        task_prompt_prefix = _with_image_env_prompt_prefix(prompt_prefix, image)
+        task_prompt_prefix = prompt_prefix
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
             mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
@@ -2656,6 +2674,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="How often to poll task status, seconds (default: 60)")
     parser.add_argument("--wait-parallel", type=int, default=8,
                         help="How many tasks to wait for in parallel (default: 8)")
+    parser.add_argument(
+        "--submit-jitter-sec", type=int,
+        default=int(os.environ.get("SAFE_OPTIMIZE_SUBMIT_JITTER_SEC", "0") or 0),
+        help="Pre-submit random delay window in seconds. Each (parallel matrix) "
+             "job sleeps random(0..N) before touching SaFE so register/submit "
+             "calls de-sync instead of stampeding Claw-session creation all at "
+             "once (the thundering herd that the backend answers with HTTP 500 "
+             "'failed to create Claw session' / 504). 0 = off (default).")
     return parser
 
 
@@ -2815,6 +2841,19 @@ def main() -> int:
         log.info("multi-node: nodes=%d tp=%s mode=%s rayjob_image=%s",
                  args.nodes, args.tp, effective_mode,
                  rayjob_image or "(agent-chosen)")
+
+    # Pre-submit jitter. When a large matrix fans out, every job otherwise hits
+    # register/submit (and Claw-session creation) in the same instant — the
+    # backend then sheds load with HTTP 500 "failed to create Claw session" /
+    # 504. A per-process random(0..N) sleep here spreads the herd across an
+    # N-second window so the backend sees a trickle rather than a spike. The
+    # submit_task retry loop still backstops any residual collision.
+    jitter = max(0, args.submit_jitter_sec)
+    if jitter > 0 and not args.dry_run:
+        d = random.uniform(0, jitter)
+        log.info("submit jitter: sleeping %.1fs (window 0-%ds) to de-sync from "
+                 "other parallel jobs before hitting SaFE", d, jitter)
+        time.sleep(d)
 
     records: list[SubmissionRecord] = []
     for repo in repos:
