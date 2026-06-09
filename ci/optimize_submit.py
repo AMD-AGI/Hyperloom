@@ -3033,6 +3033,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="How often to poll task status, seconds (default: 60)")
     parser.add_argument("--wait-parallel", type=int, default=8,
                         help="How many tasks to wait for in parallel (default: 8)")
+    parser.add_argument(
+        "--submit-jitter-sec", type=int,
+        default=int(os.environ.get("SAFE_OPTIMIZE_SUBMIT_JITTER_SEC", "0") or 0),
+        help="Pre-submit random delay window in seconds. Each (parallel matrix) "
+             "job sleeps random(0..N) before touching SaFE so register/submit "
+             "calls de-sync instead of stampeding Claw-session creation all at "
+             "once (the thundering herd that the backend answers with HTTP 500 "
+             "'failed to create Claw session' / 504). 0 = off (default).")
     return parser
 
 
@@ -3200,6 +3208,19 @@ def main() -> int:
         log.info("multi-node: nodes=%d tp=%s mode=%s rayjob_image=%s",
                  args.nodes, args.tp, effective_mode,
                  rayjob_image or "(agent-chosen)")
+
+    # Pre-submit jitter. When a large matrix fans out, every job otherwise hits
+    # register/submit (and Claw-session creation) in the same instant — the
+    # backend then sheds load with HTTP 500 "failed to create Claw session" /
+    # 504. A per-process random(0..N) sleep here spreads the herd across an
+    # N-second window so the backend sees a trickle rather than a spike. The
+    # submit_task retry loop still backstops any residual collision.
+    jitter = max(0, args.submit_jitter_sec)
+    if jitter > 0 and not args.dry_run:
+        d = random.uniform(0, jitter)
+        log.info("submit jitter: sleeping %.1fs (window 0-%ds) to de-sync from "
+                 "other parallel jobs before hitting SaFE", d, jitter)
+        time.sleep(d)
 
     records: list[SubmissionRecord] = []
     for repo in repos:
