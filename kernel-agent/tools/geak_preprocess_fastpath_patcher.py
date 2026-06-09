@@ -108,24 +108,15 @@ def _run_path_a_fastpath(
         # PROFILE + FULL_BENCHMARK duplicate work and burned 40+ min in run11.
         skip_profile = True
         bench_repeats = 1
-        sanitized = output_dir / "_geak_sanitized_bench_moe_tile.sh"
-        _nl = chr(10)
-        sanitized.write_text(
-            _nl.join(
-                [
-                    "#!/usr/bin/env bash",
-                    "# HYPERLOOM_PATH_A_SANITIZED_WRAPPER",
-                    "set -euo pipefail",
-                    'REPO_SRC="${GEAK_WORK_DIR:-${GEAK_REPO_ROOT:-/sgl-workspace/sglang}}"',
-                    'export PYTHONPATH="${REPO_SRC}/python:${PYTHONPATH:-}"',
-                    f'exec python {harness_path} "$@"',
-                ]
-            )
-            + _nl,
-            encoding="utf-8",
-        )
-        sanitized.chmod(0o755)
-        harness_path = sanitized
+        # NOTE: do NOT wrap the harness in a .sh here. A sanitized .sh wrapper
+        # (exec python <harness>) breaks every downstream caller that invokes
+        # the harness with python/python3 — both _benchmark_command's
+        # correctness gate AND the COMMANDMENT's run.sh do `python3 "$@"`, so a
+        # .sh harness fails with `SyntaxError: invalid syntax` on
+        # `set -euo pipefail`. The .py harness is self-sufficient: it derives
+        # PYTHONPATH from GEAK_WORK_DIR (worktree-aware import), and the
+        # COMMANDMENT run.sh prepends GEAK_WORK_DIR/python anyway. Keep
+        # harness_path as the .py so it stays python-invocable end to end.
 
     if harness_path is not None:
         baseline = collect_baseline_metrics(
