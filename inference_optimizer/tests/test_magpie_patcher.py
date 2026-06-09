@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import subprocess
 import sys
 import threading
@@ -483,7 +482,8 @@ def test_patched_block_uses_unique_aliases():
     """Aliases must be ``_hyperloom_*`` so they can't shadow upstream names."""
     assert "_hyperloom_os" in _PATCHED_BLOCK
     assert "_hyperloom_tempfile" in _PATCHED_BLOCK
-    assert re.match(r"^( {12}#|\s*$)", _PATCHED_BLOCK.splitlines()[0])
+    first_line = _PATCHED_BLOCK.splitlines()[0]
+    assert first_line.startswith("            #") or first_line.strip() == ""
 
 
 # Helper-method unit tests (formerly test_magpie_patcher_units.py)
