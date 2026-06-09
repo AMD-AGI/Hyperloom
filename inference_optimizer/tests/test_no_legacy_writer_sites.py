@@ -59,11 +59,6 @@ ALLOWED_FILES: dict[str, str] = {
         "legacy v0.6 reader: raw optimization_stack carries pre-rename "
         "candidate_extra_sglang_args (breakdown loads state without the "
         "SharedState key migration)",
-    # The materializer keeps the legacy name in its env-routing docstring
-    # because the per-framework env names (EXTRA_SGLANG_ARGS / VLLM_ /
-    # ATOM_) are intentionally unchanged.
-    "inference_optimizer/orchestrator/action_executors/_workload_envs.py":
-        "docstring naming the renamed payload field for context",
     # CI transform reads legacy-keyed session_breakdown.json artefacts.
     "ci/transform_to_session_summary_v2.py":
         "legacy session-breakdown JSON reader (operator-side back-compat)",
@@ -112,9 +107,6 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/orchestrator/kernel_request_handlers.py":
         "comments explain the read_extra_server_args call at the "
         "integrate_patch sub-agent envelope read boundary",
-    "robustness-agent/src/robustness_agent/signals/repeated_payload.py":
-        "_normalise_extra_server_args_key uses the shim to fold "
-        "legacy-keyed envelopes into the same fingerprint",
     "robustness-agent/tests/test_signals_repeated_payload.py":
         "regression test that legacy + canonical envelopes hash to "
         "the same fingerprint",

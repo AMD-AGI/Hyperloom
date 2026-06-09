@@ -604,7 +604,7 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 )
 @functools.lru_cache(maxsize=1)
 def _framework_patch_roots() -> tuple[str, ...]:
-    """Framework install roots (from framework_paths.resolve_patch_target_roots); also emits a lower-case variant of each for case-insensitive matching."""
+    """Framework install roots (from framework_paths.resolve_patch_target_roots); also emits a lower-case variant of each (``/app/ATOM/atom/`` -> ``/app/atom/atom/``) for case-insensitive matching."""
     try:
         from inference_optimizer.orchestrator.framework_paths import (
             resolve_patch_target_roots,
