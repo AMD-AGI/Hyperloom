@@ -92,6 +92,41 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     assert os.environ["GPU_TYPE"] == "mi300x"
 
 
+def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    monkeypatch.setenv("TARGET_GPU_TYPE", "mi308x")
+    args = SimpleNamespace(
+        model="/models/Qwen3",
+        model_class="",
+        target_summary="",
+        max_hours=1,
+        no_kernel=False,
+        gpu_type="mi308x",
+        target_gain=None,
+        target_tput=None,
+    )
+
+    assert optimizer_cli._gpu_runner_type("mi308x") == "mi300x"
+    manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
+    state = optimizer_cli._seed_shared_state(
+        tmp_path, args, session_id="mi308x-session",
+    )
+
+    assert manifest["gpu_type"] == "mi308x"
+    assert state.gpu_type == "mi308x"
+    assert os.environ["TARGET_GPU_TYPE"] == "mi308x"
+    assert os.environ["GPU_TYPE"] == "mi300x"
+
+
+def test_cli_parser_accepts_mi308x():
+    parser = optimizer_cli._build_parser()
+    args = parser.parse_args([
+        "optimize", "--model", "/tmp/model", "--gpu-type", "mi308x",
+    ])
+    assert args.gpu_type == "mi308x"
+
+
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so the artifact harvest doesn't pick up the host's ``/workspace``."""

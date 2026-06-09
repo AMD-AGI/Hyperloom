@@ -37,6 +37,10 @@ HW_SPECS: dict[str, dict[str, Any]] = {
         "hbm_gb": 192.0, "hbm_bw_gbps": 5300.0,
         "peak_tflops": _MI300X_PEAK_TFLOPS,
     },
+    "mi308x": {
+        "hbm_gb": 192.0, "hbm_bw_gbps": 5300.0,
+        "peak_tflops": _MI300X_PEAK_TFLOPS,
+    },
     "mi325x": {
         "hbm_gb": 256.0, "hbm_bw_gbps": 6000.0,
         "peak_tflops": _MI300X_PEAK_TFLOPS,

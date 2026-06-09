@@ -465,6 +465,14 @@ _GPU_HW: dict[str, dict[str, Any]] = {
         "mem": "HBM3 (~5.3 TB/s peak), 256 MB Infinity Cache",
         "build_flag": "--offload-arch=gfx942",
     },
+    "mi308x": {
+        "name": "MI308X",
+        "arch": "gfx942",
+        "uarch": "CDNA3",
+        "cus": 304,
+        "mem": "HBM3 (~5.3 TB/s peak), 256 MB Infinity Cache",
+        "build_flag": "--offload-arch=gfx942",
+    },
     "mi325x": {
         "name": "MI325X",
         "arch": "gfx942",
