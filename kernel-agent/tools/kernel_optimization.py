@@ -1902,8 +1902,12 @@ def _restore_env(previous: dict[str, str | None]) -> None:
             os.environ[key] = value
 
 
-def _oob_output_dir(session_id: str) -> Path:
-    out = _kernel_agent_root() / "oob" / session_id
+def _oob_output_dir(session_id: str, prompt_file: Path) -> Path:
+    # Per-attempt, mirroring _geak_output_dir. A session-level dir would let
+    # concurrent OOB attempts share artifacts AND the per-attempt compile
+    # caches (isolated_compile_cache_env keys off output_dir), reintroducing
+    # the stale-lock / cache-clobber race this scoping is meant to avoid.
+    out = _kernel_agent_root() / "oob" / session_id / prompt_file.stem
     out.mkdir(parents=True, exist_ok=True)
     return out
 
@@ -1995,7 +1999,7 @@ def invoke_backend(
     _shared_out_dir = (
         _geak_output_dir(args.session_id, prompt_file)
         if backend == "geak"
-        else _oob_output_dir(args.session_id)
+        else _oob_output_dir(args.session_id, prompt_file)
     )
     if common_test_command:
         _harness_cmd = _try_generate_harness(
@@ -2104,7 +2108,7 @@ def invoke_backend(
             return result
         if backend in {"claude", "codex", "cursor"}:
             oob = _import_backend("oob_submit")
-            out_dir = _oob_output_dir(args.session_id)
+            out_dir = _oob_output_dir(args.session_id, prompt_file)
             is_multigpu = bool((candidate or {}).get("is_multigpu"))
             if is_multigpu:
                 keep = [f for f in bench_files if not Path(f).name.startswith("test_")]
