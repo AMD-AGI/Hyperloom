@@ -304,6 +304,13 @@ class ClaudeBackend:
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                # Full conversation text so the caller (which holds the
+                # session_dir / component / tick context the stateless
+                # backend lacks) can persist it to conversations.jsonl.
+                # The composed prompt carries the user turn; the system
+                # prompt is snapshotted once under agents/<role>/.
+                "prompt": full_prompt,
+                "response": raw_text,
             },
         )
 

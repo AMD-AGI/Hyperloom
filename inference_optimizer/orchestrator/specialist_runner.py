@@ -26,6 +26,8 @@ from ..session_paths import runs_dir
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
 from .specialist_bench import BENCH_TOOL_ENABLED, TOOL_RUN_BENCH
+from .trace.conversation_trace import ConversationRecord, append_conversation
+from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     FREEFORM_DOMAIN,
@@ -520,6 +522,84 @@ class SpecialistRunner:
             ),
         )
 
+    def _trace_specialist_llm_call(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """Append one ``llm_calls.jsonl`` row for an in-process specialist turn.
+
+        No-op when ``self.session_dir`` is unset (some test harnesses run
+        the runner without a session dir) or the backend reported no token
+        counters. Wrapped broadly so a trace failure never aborts the run.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            md = metadata or {}
+            has_tokens = any(
+                md.get(k) is not None
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                )
+            )
+            if not has_tokens:
+                return
+            record = LLMCallRecord.from_metadata(
+                session_id=self.session_dir.name,
+                component="specialist",
+                task_id=task_id,
+                turn=turn,
+                metadata=md,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the run
+            log.debug(
+                "full-trace: specialist llm_call append failed for "
+                "task_id=%s turn=%s", task_id, turn, exc_info=True,
+            )
+
+    def _record_specialist_conversation(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for an in-process specialist
+        turn. Persists the full (redacted) prompt + completion the backend put
+        on ``metadata``. No-op without a session dir; best-effort otherwise.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            md = metadata or {}
+            prompt = md.get("prompt")
+            response = md.get("response")
+            if not prompt and not response:
+                return
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component="specialist",
+                task_id=task_id,
+                turn=turn,
+                model=md.get("model"),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the run
+            log.debug(
+                "full-trace: specialist conversation append failed for "
+                "task_id=%s turn=%s", task_id, turn, exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
     # In-process Backend path (test path)
     async def _run_via_backend(
         self, ctx: RunnerContext, prep: "_PreparedRun",
@@ -600,6 +680,21 @@ class SpecialistRunner:
                 "raw_text_preview": _safe_redact(turn_result.raw_text[:1024]),
                 "metadata": dict(turn_result.metadata),
             })
+            # Full-trace A3: in-process specialist fallback. The token
+            # spend is already in the transcript's turn metadata; mirror it
+            # onto the unified ledger keyed by task_id + turn so the
+            # collector can join it to the EXPLORE decision. The production
+            # default (subprocess) path is covered separately by B1.
+            self._trace_specialist_llm_call(
+                task_id=ctx.task.task_id,
+                turn=turn_idx,
+                metadata=turn_result.metadata,
+            )
+            self._record_specialist_conversation(
+                task_id=ctx.task.task_id,
+                turn=turn_idx,
+                metadata=turn_result.metadata,
+            )
 
             # Tool-violation check (defense in depth).
             for intent in turn_result.intents:
@@ -688,8 +783,20 @@ class SpecialistRunner:
             "stale_heartbeat": sub_result.stale_heartbeat,
             "process_log_path": sub_result.process_log_path,
             "patch_count": len(sub_result.patches),
+            "usage": sub_result.usage,
             "error": sub_result.error,
         })
+        # Full-trace B1: fold the production specialist's token spend
+        # (recovered from the Claude CLI stream-json log by the dispatcher)
+        # into the unified ledger. The subprocess runs one logical agent
+        # session, so we record turn=1. ``usage`` already uses the four
+        # canonical counter names, so the metadata-shaped helper consumes
+        # it directly.
+        self._trace_specialist_llm_call(
+            task_id=ctx.task.task_id,
+            turn=1,
+            metadata=sub_result.usage,
+        )
         self._write_heartbeat(
             workspace, turn=1, max_turns=prep.max_turns, status="finished",
         )

@@ -135,6 +135,72 @@ def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
     return reports_dir(session_dir) / f"{ts}_final.{suffix}"
 
 
+# ---------------------------------------------------------------------------
+# Full-trace artefacts (token + decision timeline) under reports/trace/
+# ---------------------------------------------------------------------------
+# Layout (see FULL_TRACE_DESIGN §3.3):
+#
+#   <sd>/reports/trace/
+#     llm_calls.jsonl              # in-process components append directly
+#     ext/<component>-<pid>.jsonl  # each out-of-process child writes its own
+#     decision_trace.jsonl         # collector join product (token+decision)
+#
+# All trace writers are best-effort and swallow OSError; these helpers only
+# compute paths (callers mkdir the parent before writing).
+def trace_dir(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/`` — root of the unified token+decision trace."""
+    return reports_dir(session_dir) / "trace"
+
+
+def llm_calls_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every
+    in-process LLM call (orchestration / kernel / specialist
+    in-process fallback / codex / critic / proposal_scorer).
+
+    Out-of-process children write to :func:`ext_trace_path` instead; the
+    collector merges both streams.
+    """
+    return trace_dir(session_dir) / "llm_calls.jsonl"
+
+
+def trace_ext_dir(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/ext/`` — parent of every out-of-process child's
+    own ``<component>-<pid>.jsonl`` shard."""
+    return trace_dir(session_dir) / "ext"
+
+
+def ext_trace_path(session_dir: Path, component: str, pid: int) -> Path:
+    """``<sd>/reports/trace/ext/<component>-<pid>.jsonl``.
+
+    Each independent agent process (geak / oob / robustness / critic-agent
+    CLI / tracelens) writes its own shard so concurrent children never
+    contend on a shared file; the collector globs ``ext/*.jsonl`` and merges.
+    The ``pid`` keeps shards disjoint across re-spawns of the same component.
+    """
+    comp = str(component or "").strip() or "unknown"
+    return trace_ext_dir(session_dir) / f"{comp}-{int(pid)}.jsonl"
+
+
+def decision_trace_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/decision_trace.jsonl`` — collector output joining
+    every decision to its LLM token spend along the phase→tick timeline."""
+    return trace_dir(session_dir) / "decision_trace.jsonl"
+
+
+def conversations_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/conversations.jsonl`` — append-only record of the
+    full prompt + completion text for every in-process LLM call.
+
+    Sibling of :func:`llm_calls_path`: that ledger holds the *token* account
+    (kept small, no prompt text — see FULL_TRACE_DESIGN §9), while this file
+    carries the *conversation* (redacted full prompt/response) so a session
+    can be replayed or exported (e.g. to Langfuse) after the fact. Both share
+    the same ``session_id`` / ``component`` / ``tick`` / ``phase`` join keys
+    so the two streams line up against ``decision_trace``.
+    """
+    return trace_dir(session_dir) / "conversations.jsonl"
+
+
 def research_hints_md(session_dir: Path) -> Path:
     """``<sd>/research_hints.md`` — human-readable proven-prior hints
     collected by the research scout."""
@@ -340,6 +406,7 @@ __all__ = [
     "agent_persona",
     "agent_prompt_snapshot",
     "competitor_target_json",
+    "conversations_path",
     "cortex_audit_jsonl",
     "cortex_dead_letter_ndjson",
     "cortex_dir",
@@ -350,8 +417,11 @@ __all__ = [
     "cortex_pitfalls_json",
     "cortex_sid_file",
     "cortex_warm_json",
+    "decision_trace_path",
+    "ext_trace_path",
     "kernel_agent_runs_dir",
     "kernel_workspace",
+    "llm_calls_path",
     "logs_dir",
     "manifest_path",
     "optimizer_run_log",
@@ -368,4 +438,6 @@ __all__ = [
     "target_analysis_dir",
     "target_analysis_report_md",
     "target_baseline_json",
+    "trace_dir",
+    "trace_ext_dir",
 ]

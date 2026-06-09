@@ -29,6 +29,7 @@ from ...protocol.intent import (
     validate_envelope,
 )
 from ...session_paths import manifest_path
+from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult
 
 
@@ -807,6 +808,10 @@ class CriticAgentBackend:
         """
         tools = self._web_tool_schemas
         max_turns = self._web_tool_max_turns if tools else 0
+        # Full-trace A5: accumulate token usage across every Codex call in
+        # this reasoning loop (initial + tool-use rounds + forced final).
+        # OpenAI has no prompt-cache split, so only in/out counters move.
+        usage_acc = {"input_tokens": 0, "output_tokens": 0}
 
         for turn in range(max_turns + 1):
             kwargs: dict[str, Any] = {
@@ -825,12 +830,14 @@ class CriticAgentBackend:
                     f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 ) from exc
 
+            self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
             choice = resp.choices[0]
             msg = choice.message
             finish = getattr(choice, "finish_reason", None)
             tool_calls = getattr(msg, "tool_calls", None) or []
 
             if not tool_calls:
+                self._trace_critic_llm_call(usage_acc)
                 return msg.content or "", finish
 
             log.info(
@@ -858,8 +865,56 @@ class CriticAgentBackend:
             raise BackendError(
                 f"Codex API call failed (critic-agent reasoning final turn): {exc!r}",
             ) from exc
+        self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
+        self._trace_critic_llm_call(usage_acc)
         final = resp.choices[0]
         return final.message.content or "", getattr(final, "finish_reason", None)
+
+    @staticmethod
+    def _accumulate_usage(
+        acc: dict[str, int], usage: Any,
+    ) -> None:
+        """Fold one OpenAI ``resp.usage`` into the running token accumulator.
+
+        OpenAI reports ``prompt_tokens`` / ``completion_tokens``; map them
+        onto the canonical in/out counters. Missing / bad values contribute
+        0 so a single malformed response never corrupts the running sum.
+        """
+        if usage is None:
+            return
+        try:
+            acc["input_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            acc["output_tokens"] += int(
+                getattr(usage, "completion_tokens", 0) or 0
+            )
+        except (TypeError, ValueError):
+            pass
+
+    def _trace_critic_llm_call(self, usage_acc: dict[str, int]) -> None:
+        """Append one ``llm_calls.jsonl`` row for a critic reasoning loop.
+
+        Records the accumulated Codex token spend under
+        ``component=critic``. tick/phase are unknown to the critic backend
+        (it runs as its own reactor) — the collector backfills from the ts
+        window. Best-effort: never raises into the review path.
+        """
+        try:
+            record = LLMCallRecord(
+                session_id=self.session_dir.name,
+                component="critic",
+                role="critic",
+                model=self.codex_model,
+                input_tokens=usage_acc.get("input_tokens"),
+                output_tokens=usage_acc.get("output_tokens"),
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break review
+            log.debug(
+                "full-trace: critic llm_call append failed", exc_info=True,
+            )
 
     async def _execute_tool_call(self, tool_call: Any) -> str:
         """Dispatch one OpenAI tool_call to the configured web client."""
