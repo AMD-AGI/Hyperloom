@@ -34,11 +34,16 @@ fresh TraceLens snapshot (`last_profile_trace` +
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..sub_agent_runner import RunnerContext
+
+
+log = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -228,6 +233,9 @@ class RooflineExecutor:
         from .profile import profile_executor
 
         session_dir = self._resolve_session_dir(ctx)
+        # #266: time the composite so the END lifecycle event reports how
+        # long the auto-roofline TraceLens run took.
+        _lc_t0 = time.monotonic()
 
         # ---- Step 1: profile ------------------------------------------------
         profile_ctx = self._wrap_profile_ctx(ctx)
@@ -422,6 +430,32 @@ class RooflineExecutor:
         # analysis_md_text / analysis_md_path.
         self.shared_state.record_trace_analyze(ta_payload, ta_result)
         cached = self.shared_state.last_trace_analyze or {}
+
+        # #266: the auto-roofline TraceLens run does NOT pass through
+        # Coordinator._handle_request, so emit its lifecycle event here so
+        # operators still see "TraceLens finished -> analysis at <path>".
+        # Best-effort; persisted only when running against a real session
+        # dir (tests may resolve session_dir to ".").
+        try:
+            self.shared_state.record_lifecycle_event(
+                step="roofline",
+                status="END",
+                artifacts={
+                    "trace_input": str(trace_path),
+                    "analysis_md_path": str(cached.get("analysis_md_path") or ""),
+                    "candidates_path": str(cached.get("candidates_path") or ""),
+                    "kernel_roofline_path": str(
+                        cached.get("kernel_roofline_path") or ""
+                    ),
+                },
+                detail=f"hot_kernels={len(hot)}",
+                duration_s=time.monotonic() - _lc_t0,
+            )
+            sd = Path(session_dir)
+            if sd.name and sd.is_dir() and (sd / "state.json").exists():
+                self.shared_state.save(sd)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("roofline: lifecycle emit failed", exc_info=True)
 
         return {
             "status": "succeeded",

@@ -176,6 +176,32 @@ class PendingProposal:
     kb_edge_ids: dict[str, str] = field(default_factory=dict)
 
 
+# #266 lifecycle: path-like keys worth surfacing from a kernel handler
+# payload (inputs) or result (outputs) so operators can see where a step's
+# artifacts went without enumerating every per-handler return shape.
+_LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
+    "trace_input", "trace_dir", "candidates_path", "analysis_md_path",
+    "kernel_candidates", "best_artifact_path", "patch_path", "target_file",
+    "workspace", "workspace_path", "out_dir", "output_dir", "run_dir",
+    "report_path", "json_path", "md_path", "tracelens_agent_transcript",
+    "tracelens_agent_report",
+)
+
+
+def _lifecycle_paths(payload: Any) -> dict[str, str]:
+    """Extract present, non-empty path-like fields from a kernel handler
+    payload or result dict (#266). Best-effort: a non-dict argument yields
+    an empty mapping so callers never have to guard the type."""
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in _LIFECYCLE_PATH_KEYS:
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val
+    return out
+
+
 @dataclass
 class CoordinatorState:
     """In-memory ephemeral state for the reactor + dispatcher.
@@ -880,6 +906,19 @@ class Coordinator:
             reason=reason,
             evidence=evidence,
         )
+        # #266: mirror the phase boundary into the operator-facing
+        # lifecycle log so a launcher poll surfaces "entered <phase>" in
+        # chat (with the human-friendly label) alongside the step-level
+        # events. Best-effort; must never roll back the transition.
+        try:
+            state.record_lifecycle_event(
+                step=target,
+                status="START",
+                phase=target,
+                detail=f"reason={reason}" if reason else "",
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("Coordinator: lifecycle phase emit failed", exc_info=True)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
@@ -3394,6 +3433,20 @@ class Coordinator:
                 await self._record_close_step(
                     "report", status="done",
                     task_id=report_task.task_id,
+                )
+                # #266: surface the final report location in the lifecycle
+                # log. report_executor writes final.{json,md} under
+                # reports_dir(session_dir); advertise whichever exist.
+                from ..session_paths import reports_dir as _reports_dir
+                _rd = _reports_dir(self.session_dir)
+                self._emit_lifecycle(
+                    step="report",
+                    status="END",
+                    artifacts={
+                        "json_path": str(_rd / "final.json"),
+                        "md_path": str(_rd / "final.md"),
+                    },
+                    detail="close_phase_entry",
                 )
             else:
                 await self._record_close_step(
@@ -9113,6 +9166,35 @@ class Coordinator:
     # ------------------------------------------------------------------
     # REQUEST / RESPONSE (Plan A)
     # ------------------------------------------------------------------
+    def _emit_lifecycle(
+        self,
+        *,
+        step: str,
+        status: str,
+        artifacts: dict[str, str] | None = None,
+        detail: str = "",
+        duration_s: float | None = None,
+    ) -> None:
+        """Record + persist one operator-facing lifecycle event (#266).
+
+        Best-effort by design: operator-facing logging must never break the
+        orchestration loop, so any failure is swallowed at debug level.
+        """
+        try:
+            self.shared_state.record_lifecycle_event(
+                step=step,
+                status=status,
+                artifacts=artifacts,
+                detail=detail,
+                duration_s=duration_s,
+            )
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug(
+                "Coordinator: lifecycle emit failed (step=%s status=%s)",
+                step, status, exc_info=True,
+            )
+
     async def _handle_request(self, source: str, intent: Intent) -> None:
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
@@ -9249,6 +9331,19 @@ class Coordinator:
                             handler_kwargs["record_partial"] = (
                                 self._record_kernel_opt_partial
                             )
+                        # #266: bracket the programmatic kernel step with
+                        # START / END lifecycle events so operators see the
+                        # step ran, how long it took, and where its outputs
+                        # landed. ``kind`` is the machine step name
+                        # (trace_analyze / run_optimization / integrate /
+                        # run_gemm_tuning); the human label is resolved by
+                        # SharedState from LIFECYCLE_STEP_LABELS.
+                        _lc_t0 = time.monotonic()
+                        self._emit_lifecycle(
+                            step=kind,
+                            status="START",
+                            artifacts=_lifecycle_paths(merged_payload),
+                        )
                         try:
                             result = await handler(
                                 merged_payload,
@@ -9264,6 +9359,27 @@ class Coordinator:
                                 "error_class": "handler_exception",
                                 "error": repr(exc),
                             }
+                        _lc_status = (
+                            "ERROR"
+                            if str(result.get("status", "")).lower()
+                            in ("failed", "error")
+                            else "END"
+                        )
+                        _lc_detail = " ".join(
+                            str(p) for p in (
+                                result.get("decision"),
+                                result.get("status"),
+                                f"kernel={result.get('kernel_id')}"
+                                if result.get("kernel_id") else "",
+                            ) if p
+                        )
+                        self._emit_lifecycle(
+                            step=kind,
+                            status=_lc_status,
+                            artifacts=_lifecycle_paths(result),
+                            detail=_lc_detail,
+                            duration_s=time.monotonic() - _lc_t0,
+                        )
                 await self.bus.append_and_seq(Message.new(
                     "kernel", source, "response",
                     {
