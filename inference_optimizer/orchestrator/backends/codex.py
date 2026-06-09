@@ -253,6 +253,13 @@ class CodexBackend:
                 "output_tokens": output_tokens,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
+                # Full conversation text for conversations.jsonl — the
+                # stateless backend hands it up so the caller (which has
+                # the session_dir / component / tick context) can persist
+                # it. ``full_prompt`` is the user turn; the system prompt
+                # is snapshotted once under agents/<role>/.
+                "prompt": full_prompt,
+                "response": text,
             },
         )
 
