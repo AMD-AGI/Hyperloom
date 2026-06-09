@@ -646,6 +646,11 @@ class ModelMeta:
     moe_intermediate_size: int = 0
     vocab_size: int = 0
     num_attention_heads: int = 0
+    # VL-specific: vision token count consumed per image at the given
+    # (IMAGE_HEIGHT × IMAGE_WIDTH) resolution.  0 for text-only models.
+    # Used by the roofline caller to compute effective text ISL when
+    # benchmarking with synthetic multimodal requests.
+    vision_tokens_per_image: int = 0
 
 
 def _read_total_size(model_path: Path) -> int | None:
@@ -703,6 +708,59 @@ def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
         return json.loads(cfg.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _flatten_text_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Merge a nested ``text_config`` block into a flat view for field extraction.
+
+    VL models (Qwen2-VL, Qwen3-VL, etc.) nest the text decoder geometry under
+    ``text_config``; flat (text-only) models have everything at the top level.
+    Returns a merged dict where top-level keys take precedence over nested ones,
+    so this is a no-op for flat configs and correctly surfaces decoder fields
+    (``num_hidden_layers``, ``num_experts``, ``hidden_size``, etc.) for VL models.
+    """
+    nested = cfg.get("text_config")
+    if not isinstance(nested, dict):
+        return cfg
+    merged = dict(nested)
+    merged.update(cfg)
+    return merged
+
+
+def _vision_tokens_per_image(
+    cfg: dict[str, Any],
+    image_height: int = 512,
+    image_width: int = 512,
+) -> int:
+    """Estimate vision token count for one image at the given resolution.
+
+    Qwen2-VL / Qwen3-VL use a ViT with a 2D merge (spatial_merge_size=2):
+
+        grid_h = ceil(image_height / patch_size)
+        grid_w = ceil(image_width  / patch_size)
+        tokens = (grid_h // spatial_merge_size) * (grid_w // spatial_merge_size)
+
+    Values are read from ``vision_config`` (top-level, not flattened —
+    the flatten step exposes *text* decoder fields; vision geometry stays
+    under the separate ``vision_config`` sub-dict).
+
+    Returns 0 when no ``vision_config`` is present (text-only model) or
+    when required fields are missing.
+    """
+    import math
+    vision_cfg = cfg.get("vision_config")
+    if not isinstance(vision_cfg, dict):
+        return 0
+    patch_size = int(vision_cfg.get("patch_size") or 0)
+    if not patch_size:
+        return 0
+    merge = int(vision_cfg.get("spatial_merge_size") or 1)
+    if merge < 1:
+        merge = 1
+    grid_h = math.ceil(image_height / patch_size)
+    grid_w = math.ceil(image_width / patch_size)
+    tokens = (grid_h // merge) * (grid_w // merge)
+    return max(0, tokens)
 
 
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:
@@ -804,9 +862,10 @@ def load_model_meta(
     p = Path(model_path).expanduser()
     if not p.is_dir():
         return None
-    cfg = _read_hf_config(p)
-    if cfg is None:
+    raw_cfg = _read_hf_config(p)
+    if raw_cfg is None:
         return None
+    cfg = _flatten_text_config(raw_cfg)
     weight_bytes = _read_total_size(p)
     if not weight_bytes:
         return None
@@ -839,6 +898,7 @@ def load_model_meta(
         moe_intermediate_size=moe_intermediate_size,
         vocab_size=int(cfg.get("vocab_size") or 0),
         num_attention_heads=int(cfg.get("num_attention_heads") or 0),
+        vision_tokens_per_image=_vision_tokens_per_image(raw_cfg),
     )
 
 

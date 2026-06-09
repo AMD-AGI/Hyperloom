@@ -59,6 +59,14 @@ def _infer_model_class_from_config(model_path: str) -> str:
         except Exception:  # noqa: BLE001 - best effort only.
             log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
 
+    # Flatten text_config so VL MoE models (Qwen2-VL, Qwen3-VL, etc.) are
+    # classified correctly. Top-level keys take precedence; flat configs unchanged.
+    nested = payload.get("text_config")
+    if isinstance(nested, dict):
+        merged = dict(nested)
+        merged.update(payload)
+        payload = merged
+
     text_parts: list[str] = [raw_path.lower()]
     arch = payload.get("architectures")
     if isinstance(arch, list):

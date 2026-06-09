@@ -15,6 +15,7 @@ from inference_optimizer.orchestrator.roofline_ceiling import (
     ModelMeta,
     _resolve_dtype_bytes,
     _resolve_peak_tflops,
+    _vision_tokens_per_image,
     apply_runtime_dtype,
     compute_compute_bound_ceiling_tok_per_sec,
     compute_kv_bytes_per_token,
@@ -460,6 +461,150 @@ class TestComputePeakFromState:
         assert compute_peak_from_state(state) == 0.0
 
 
+
+# ---------------------------------------------------------------------------
+# VL model geometry via nested text_config.
+# ---------------------------------------------------------------------------
+class TestLoadModelMetaVL:
+    """load_model_meta must correctly extract geometry from VL configs where
+    the text decoder fields are nested under ``text_config``."""
+
+    def _write_qwen3_vl_model(self, model_dir: Path, *, total_size: int) -> None:
+        """Lay down a Qwen3-VL-shaped config with nested text_config.
+
+        Geometry uses a small MoE config so total_expert_bytes < total_size
+        (the decomposition guard requires this).  Real Qwen3-VL-235B geometry
+        combined with a naive safetensors total_size would trigger the guard
+        because the formula counts all expert parameters without the GQA /
+        attention compression that reduces the real checkpoint size.
+        """
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "config.json").write_text(json.dumps({
+            "architectures": ["Qwen3VLMoeForConditionalGeneration"],
+            "model_type": "qwen3_vl",
+            "vision_config": {"hidden_size": 1280, "num_hidden_layers": 32},
+            "text_config": {
+                "num_hidden_layers": 4,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 4,
+                "hidden_size": 512,
+                "head_dim": 32,
+                "intermediate_size": 256,
+                "moe_intermediate_size": 128,
+                "num_experts": 8,
+                "num_experts_per_tok": 2,
+                "torch_dtype": "float8_e4m3fn",
+            },
+        }))
+        # total_size must exceed total_expert_bytes:
+        # 4 layers × 8 experts × 3 × 512 × 128 × 1 byte = 6,291,456 bytes
+        (model_dir / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": total_size}, "weight_map": {}})
+        )
+
+    def test_vl_text_config_geometry_extracted(self, tmp_path):
+        """Fields nested in text_config must be surfaced in the returned ModelMeta."""
+        self._write_qwen3_vl_model(tmp_path / "m", total_size=100_000_000)
+        meta = load_model_meta(tmp_path / "m")
+        assert meta is not None
+        assert meta.weight_bytes == 100_000_000
+        assert meta.num_layers == 4
+        assert meta.num_kv_heads == 4
+        assert meta.head_dim == 32
+        assert meta.hidden_size == 512
+        assert meta.weight_dtype_bytes == 1.0   # fp8
+
+    def test_vl_moe_decomposition_from_text_config(self, tmp_path):
+        """MoE expert decomposition must work when num_experts is in text_config."""
+        self._write_qwen3_vl_model(tmp_path / "m", total_size=100_000_000)
+        meta = load_model_meta(tmp_path / "m")
+        assert meta is not None
+        assert meta.num_experts == 8
+        assert meta.experts_per_tok == 2
+        # Active weight bytes must be well below total (MoE routing activates 2/8).
+        assert 0 < meta.active_weight_bytes < meta.weight_bytes
+
+    def test_flat_config_unchanged_by_text_config_flatten(self, tmp_path):
+        """A flat (non-VL) config must be completely unaffected by the flattening."""
+        _write_synthetic_model(
+            tmp_path / "flat",
+            total_size=70_000_000_000,
+            num_layers=80,
+            num_kv_heads=8,
+            hidden_size=8192,
+            num_attention_heads=64,
+            torch_dtype="bfloat16",
+        )
+        meta = load_model_meta(tmp_path / "flat")
+        assert meta is not None
+        assert meta.num_layers == 80
+        assert meta.num_kv_heads == 8
+        assert meta.hidden_size == 8192
+        assert meta.weight_dtype_bytes == 2.0   # bf16
+        assert meta.vision_tokens_per_image == 0  # no vision_config → 0
+
+    def test_vl_vision_token_budget_qwen3(self, tmp_path):
+        """vision_tokens_per_image must be computed from vision_config.
+
+        Qwen3-VL: patch_size=14, spatial_merge_size=2.
+        For a 512×512 image:
+            grid_h = ceil(512/14) = 37
+            grid_w = ceil(512/14) = 37
+            tokens = (37//2) * (37//2) = 18 * 18 = 324
+        """
+        import math
+        m = tmp_path / "qwen3vl_vision"
+        m.mkdir(parents=True, exist_ok=True)
+        (m / "config.json").write_text(json.dumps({
+            "architectures": ["Qwen3VLMoeForConditionalGeneration"],
+            "model_type": "qwen3_vl",
+            "vision_config": {
+                "hidden_size": 1280,
+                "patch_size": 14,
+                "spatial_merge_size": 2,
+            },
+            "text_config": {
+                "num_hidden_layers": 4,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 4,
+                "hidden_size": 512,
+                "torch_dtype": "float8_e4m3fn",
+            },
+        }))
+        (m / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": 100_000_000}, "weight_map": {}})
+        )
+        meta = load_model_meta(m)
+        assert meta is not None
+        patch_size, merge = 14, 2
+        grid = math.ceil(512 / patch_size)
+        expected = (grid // merge) ** 2
+        assert meta.vision_tokens_per_image == expected, (
+            f"expected {expected}, got {meta.vision_tokens_per_image}"
+        )
+
+    def test_vl_missing_patch_size_returns_zero(self, tmp_path):
+        """vision_config without patch_size → vision_tokens_per_image == 0."""
+        m = tmp_path / "vl_no_patch"
+        m.mkdir(parents=True, exist_ok=True)
+        (m / "config.json").write_text(json.dumps({
+            "model_type": "qwen3_vl",
+            "vision_config": {"hidden_size": 1280},  # no patch_size
+            "text_config": {
+                "num_hidden_layers": 4,
+                "hidden_size": 512,
+                "torch_dtype": "bfloat16",
+            },
+        }))
+        (m / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": 100_000_000}, "weight_map": {}})
+        )
+        meta = load_model_meta(m)
+        assert meta is not None
+        assert meta.vision_tokens_per_image == 0
+
+
+# ---------------------------------------------------------------------------
 # MoE active weight bytes (PR: MoE-aware decode ceiling).
 def _write_qwen3_moe_model(model_dir: Path, *, total_size: int) -> None:
     """Lay down a Qwen3-30B-A3B-shaped MoE HF dir for ceiling tests."""
