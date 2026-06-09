@@ -3,25 +3,7 @@
 
 """End-to-end regression test for the FlyDSL kernel path (issue #211 §5).
 
-Lifts the ``flydsl_naive_gemm.py`` sample (modelled after
-``kernel_playground/flydsl/naive_gemm_flydsl/run_naive_gemm.py``) into the
-kernel-agent FlyDSL classification + metadata enrichment pipeline and
-asserts that every stage downstream of TraceLens produces the expected
-GEAK-facing contract:
-
-    source_type=flydsl  ->  kernel_category=FlyDSL
-                       ->  classify_patchability() reusable
-                       ->  _flydsl_kernel_params() populates target arch +
-                           SmemAllocator / buffer-load markers
-                       ->  enrich_candidates_with_runtime_metadata()
-                           attaches FLYDSL_* params to candidate
-                       ->  _GEAK_KERNEL_TYPE['flydsl'] = 'flydsl'
-
-A regression anywhere in that chain (sniff, kernel_category mapper,
-patchability gate, FlyDSL kernel_params extractor, GEAK type mapping)
-will surface as a single failing assertion here, which is what
-issue #211 §5 asks for: a multi-node-CI-runnable smoke test that
-catches FlyDSL-path drift before it lands on main.
+Drives the ``flydsl_naive_gemm.py`` fixture through the full classification + enrichment pipeline.
 """
 
 from __future__ import annotations
@@ -81,11 +63,7 @@ class TestFlyDSLNaiveGemmEndToEnd(unittest.TestCase):
         self.assertEqual(derive_kernel_category(cand), "FlyDSL")
 
     def test_patchability_admits_fixture_via_env_override(self) -> None:
-        """Bundled fixture sits outside the standard FlyDSL install roots;
-        pointing ``$FLYDSL_ROOT`` (or ``$DSL2_ROOT``) at the checkout is the
-        documented escape hatch for self-hosted CI sandboxes (and for ad-hoc
-        kernel checkouts on a developer laptop). The classifier surfaces it
-        via ``_flydsl_reusable_roots`` into the dynamic reusable-root set."""
+        """$FLYDSL_ROOT/$DSL2_ROOT override admits a fixture outside standard roots."""
         with mock.patch.dict(
             os.environ, {"FLYDSL_ROOT": FIXTURE_DIR},
         ):

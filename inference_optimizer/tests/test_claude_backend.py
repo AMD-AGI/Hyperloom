@@ -2,25 +2,8 @@
 
 """P1-5 ClaudeBackend + emit_intent MCP server tests.
 
-All tests use SDK test seams (``sdk_query_factory`` / ``sdk_options_cls``
-/ ``mcp_*_factory``) so no real Claude API calls are made and no
+All tests use SDK test seams so no real Claude API calls are made and no
 ``ANTHROPIC_API_KEY`` is required.
-
-Covers:
-
-* ``validate_emit_intent_input`` accepts well-formed payloads, rejects
-  unknown intent_type, missing required fields, extra top-level keys
-* ``build_emit_intent_server`` returns None when SDK helpers absent;
-  builds a server when factories are provided
-* ``ClaudeBackend.__post_init__`` raises BackendError when SDK + seams
-  both absent
-* ``ClaudeBackend.run`` collects intents from ToolUseBlock instances
-* Multiple ToolUseBlocks in one stream → multiple Intents
-* ToolUseBlock for a different tool → ignored
-* Non-emit_intent text content → returned in raw_text
-* Stream with zero matching tool_use blocks → NoIntentEmitted
-* Validation error in tool_use input → block dropped (no exception)
-* mcp_servers + allowed_tools propagated through ClaudeAgentOptions
 """
 
 from __future__ import annotations
@@ -45,9 +28,7 @@ from inference_optimizer.protocol.intent import (
 )
 
 
-# ===========================================================================
 # Fakes — minimal stand-ins for SDK classes
-# ===========================================================================
 @dataclass
 class FakeToolUseBlock:
     name: str
@@ -75,8 +56,7 @@ class FakeAssistantMessage:
 
 @dataclass
 class FakeResultMessage:
-    """Stand-in for the SDK's terminal ResultMessage (carries .result —
-    the consolidated final assistant text)."""
+    """Stand-in for the SDK's terminal ResultMessage (carries .result)."""
     result: str = ""
     content: list[Any] = field(default_factory=list)
 
@@ -97,9 +77,7 @@ def _make_query_factory(messages: list[Any]):
     return _q
 
 
-# ===========================================================================
 # validate_emit_intent_input
-# ===========================================================================
 @pytest.mark.parametrize(
     "payload",
     [
@@ -159,9 +137,7 @@ def test_validate_emit_intent_input_rejects_malformed(payload, error_match):
         validate_emit_intent_input(payload)
 
 
-# ===========================================================================
 # build_emit_intent_server
-# ===========================================================================
 def test_build_emit_intent_server_returns_none_without_factories():
     """Empty SDK shim with no `tool` or `create_sdk_mcp_server` → None."""
     class EmptySdk:
@@ -198,9 +174,7 @@ def test_build_emit_intent_server_uses_factories():
     assert len(captured["tools"]) == 1
 
 
-# ===========================================================================
 # ClaudeBackend construction
-# ===========================================================================
 def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
     """If neither real SDK nor test seams provided, BackendError fires."""
     import importlib
@@ -239,9 +213,7 @@ def test_claude_backend_warns_on_missing_api_key(monkeypatch):
     assert any("ANTHROPIC_API_KEY" in str(c) for c in backend.calls)
 
 
-# ===========================================================================
 # ClaudeBackend.run — intent extraction
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_run_extracts_single_emit_intent_tool_use():
     msg = FakeAssistantMessage(content=[
@@ -382,13 +354,10 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
     assert len(res.intents) == 1
 
 
-# ===========================================================================
-# raw_completion mode (dynamic_action ReAct runner backend)
-# ===========================================================================
+# raw_completion mode (single-shot backend)
 @pytest.mark.asyncio
 async def test_raw_completion_returns_raw_text_without_intent():
-    """raw_completion mode: a text-only reply yields raw_text and does
-    NOT raise NoIntentEmitted."""
+    """raw_completion mode: a text-only reply yields raw_text and does NOT raise NoIntentEmitted."""
     action = '{"tool": "read_source", "args": {"path": "/x"}}'
     msgs = [
         FakeAssistantMessage(content=[TextBlock(text=action)]),
@@ -406,8 +375,7 @@ async def test_raw_completion_returns_raw_text_without_intent():
 
 @pytest.mark.asyncio
 async def test_raw_completion_prefers_result_no_duplication():
-    """The streamed TextBlock and the terminal ResultMessage.result
-    carry the same content; raw_text must not concatenate both."""
+    """The streamed TextBlock and ResultMessage.result share content; raw_text must not concatenate both."""
     text = '{"tool": "emit_proposal", "args": {}}'
     msgs = [
         FakeAssistantMessage(content=[TextBlock(text=text)]),
@@ -425,8 +393,7 @@ async def test_raw_completion_prefers_result_no_duplication():
 
 @pytest.mark.asyncio
 async def test_raw_completion_falls_back_to_text_blocks_without_result():
-    """When no ResultMessage is emitted, raw_text is the joined
-    TextBlocks."""
+    """When no ResultMessage is emitted, raw_text is the joined TextBlocks."""
     msgs = [FakeAssistantMessage(content=[
         TextBlock(text="part-a "), TextBlock(text="part-b"),
     ])]
@@ -441,9 +408,7 @@ async def test_raw_completion_falls_back_to_text_blocks_without_result():
 
 @pytest.mark.asyncio
 async def test_raw_completion_options_disable_tools_and_skip_suffix():
-    """raw_completion options: all tools disallowed, no MCP server, no
-    OUTPUT FORMAT suffix, and max_turns bumped above the SDK's strict
-    single-turn cap."""
+    """raw_completion options: tools disallowed, no MCP server, no OUTPUT FORMAT suffix, max_turns bumped."""
     captured: dict[str, Any] = {}
 
     async def q(*, prompt, options):
@@ -467,8 +432,7 @@ async def test_raw_completion_options_disable_tools_and_skip_suffix():
 
 
 def test_raw_completion_disables_emit_intent_mcp():
-    """Constructing with raw_completion=True must not register the
-    emit_intent MCP server."""
+    """Constructing with raw_completion=True must not register the emit_intent MCP server."""
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([]),
         sdk_options_cls=FakeOptions,
@@ -477,9 +441,7 @@ def test_raw_completion_disables_emit_intent_mcp():
     assert backend.has_emit_intent_tool is False
 
 
-# ===========================================================================
 # Options propagation
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_options_includes_system_prompt_and_max_turns():
     captured: dict[str, Any] = {}
