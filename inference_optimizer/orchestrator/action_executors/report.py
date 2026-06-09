@@ -642,7 +642,8 @@ def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
 class ReportExecutor:
     """ActionRunner for the ``report`` action.
 
-    Honours ``ctx.task.params``:
+    Honours ``ctx.task.params``::
+
         output_dir:        write final.{md,json} here (default
                            ``$SESSION_DIR/reports``)
         highlight_topics:  list of topics to surface in ``highlights``

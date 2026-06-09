@@ -821,8 +821,8 @@ class LocalRecipeStore:
             limit (int): Maximum number of recipes to return.
 
         Returns:
-            list[dict[str, Any]]: Live recipes ordered ``updated_at
-                DESC``, truncated to ``limit``.
+            list[dict[str, Any]]: Live recipes ordered
+                ``updated_at DESC``, truncated to ``limit``.
         """
         return self.search(order_by="updated_at DESC", limit=int(limit))
 
@@ -958,8 +958,9 @@ class LocalRecipeStore:
                 stamped to now when ``None``.
 
         Returns:
-            dict[str, Any]: ``{"id", "recipe_canonical_id",
-                "attempt_at"}`` mirroring the central response.
+            dict[str, Any]: A dict with keys ``id``,
+                ``recipe_canonical_id`` and ``attempt_at``, mirroring
+                the central response.
 
         Raises:
             ValueError: If ``canonical_id`` or ``session_id`` is
