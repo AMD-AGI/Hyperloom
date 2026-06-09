@@ -1,29 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Integration test for ``_pump_framework_pr_phase`` covering the full
-discover → Critic gate → enqueue path.
-
-This complements the per-method stub tests
-(``test_framework_pr_discover_retry.py``,
-``test_framework_pr_critic_gate.py``) — none of those exercise the
-pump end-to-end. Here we bind the whole pump method to a stub that
-mocks just the three boundaries the pump talks to: the framework-agent
-CLI (``phase_discover``), the task registry, and the Critic backend.
-SharedState and the Critic prompt construction run for real.
-
-Scenarios covered:
-
-1. **discover → approve → enqueue** — happy path; the pump asks for a
-   batch, the Critic auto-approves the first candidate, the task
-   registry receives one ``framework_pr`` task, no progress rows are
-   written by the pump itself (the executor owns those).
-2. **discover → reject → skip → next** — two-candidate batch where the
-   Critic rejects the first; the pump writes a ``critic_denied``
-   progress row and on the next tick picks the second candidate.
-3. **already in flight → no-op** — when a ``framework_pr`` task is
-   already queued, the pump returns early without calling either the
-   discover client or the Critic.
-"""
+"""Integration test for ``_pump_framework_pr_phase`` covering the full discover → Critic gate → enqueue path."""
 
 from __future__ import annotations
 
@@ -40,15 +17,11 @@ from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 
-# Cross-cutting framework parametrisation. Add new frameworks here
-# when Hyperloom learns to drive them; the per-test parametrisation
-# reads this constant so a single edit propagates everywhere.
+# Cross-cutting framework parametrisation; add new frameworks here.
 _FRAMEWORK_PARAMETRISATION: tuple[str, ...] = ("sglang", "vllm", "atom")
 
 
-# Synthetic per-framework candidate fixtures used by the parametrised
-# happy-path test. Each entry yields a single-candidate batch that
-# looks like a real ``fa phase-discover`` payload for that framework.
+# Synthetic per-framework single-candidate batch fixtures (fa phase-discover shape).
 _FRAMEWORK_CANDIDATES: dict[str, dict[str, Any]] = {
     "sglang": {
         "pr_url":   "https://github.com/sgl-project/sglang/pull/1",
@@ -113,9 +86,7 @@ class _TasksStub:
 
     async def create_or_return_existing(self, **kwargs: Any) -> Any:
         self.created.append(kwargs)
-        # Mimic enqueue → queued so the pump's idempotency check fires
-        # on the next tick. The integration tests below only run one
-        # tick at a time, so this is mostly defensive.
+        # Mimic enqueue → queued so the pump's idempotency check fires next tick.
         self._queued.append(SimpleNamespace(
             kind=kwargs.get("kind"),
             task_id=f"t-{len(self.created)}",
@@ -175,11 +146,7 @@ class _ScriptedCriticBackend:
 
 
 class _CoordinatorStub:
-    """Glue stub that the pump method binds against. Carries the same
-    attribute / method surface area the pump touches: SharedState,
-    tasks, backends, session_dir, the framework_pr helpers, and the
-    discover timeout knob.
-    """
+    """Glue stub carrying the attribute/method surface the pump touches."""
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
@@ -215,9 +182,7 @@ class _CoordinatorStub:
             self.backends["critic"] = critic
 
     def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
-        # Pin to a single repo so these pump scenarios keep their
-        # one-batch / one-task accounting. Cross-repo fan-out is covered
-        # in test_framework_pr_discover_directed.py.
+        # Pin to a single repo so these scenarios keep one-batch/one-task accounting.
         return [_fa_client.repo_url_for_framework(framework or self._framework)]
 
     def _framework_pr_known_candidate_ids(self) -> set[str]:
@@ -231,25 +196,14 @@ def _pump(stub: _CoordinatorStub) -> None:
     asyncio.run(Coordinator._pump_framework_pr_phase(stub))  # type: ignore[arg-type]
 
 
-# ---------------------------------------------------------------------------
 # Scenario 1 — discover → approve → enqueue (parametrised across frameworks)
-
-
 @pytest.mark.parametrize("framework", _FRAMEWORK_PARAMETRISATION)
 def test_pump_happy_path_discover_approve_enqueue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     framework: str,
 ):
-    """A single-candidate batch is discovered, Critic approves, and
-    the pump enqueues exactly one ``framework_pr`` task. No progress
-    rows are written by the pump (the executor owns those).
-
-    Parametrised across sglang / vllm / atom so the happy path is
-    pinned for every supported framework. The atom case confirms the
-    pump does not raise on ``framework=atom`` (repo URL resolves) and
-    that the Critic prompt assembly handles atom candidates with no
-    special-casing required."""
+    """A single-candidate batch is approved and enqueued as one ``framework_pr`` task (parametrised sglang/vllm/atom)."""
     captured_framework: dict[str, str] = {}
 
     async def _discover(**kwargs: Any) -> dict[str, Any]:
@@ -265,45 +219,33 @@ def test_pump_happy_path_discover_approve_enqueue(
 
     _pump(stub)
 
-    # The pump forwarded the framework verbatim to phase_discover.
     assert captured_framework["framework"] == framework
-    # One discover round, one Critic call, one task created.
     assert len(stub.shared_state.framework_pr_batches) == 1
     assert critic.call_count == 1
     assert len(stub.tasks.created) == 1
     assert stub.tasks.created[0]["kind"] == "framework_pr"
-    # The enqueued task's candidate carries the per-framework fixture.
     enqueued = stub.tasks.created[0]["params"]["candidate"]
     assert enqueued["framework"] == framework
     assert enqueued["pr_url"] == _FRAMEWORK_CANDIDATES[framework]["pr_url"]
     # No progress rows yet (the executor writes those).
     assert stub.shared_state.framework_pr_phase_progress == []
-    # Critic decision cached.
     decisions = stub.shared_state.framework_pr_critic_decisions
     assert len(decisions) == 1
     assert decisions[0]["verdict"] == "approve"
 
 
 def test_pump_integration_parametrised_over_all_three_frameworks():
-    """G4 cross-cutting static guard: the parametrisation list must
-    cover exactly the three frameworks Hyperloom drives. A future add
-    (e.g. trtllm) requires extending the constant + fixture dict
-    together, surfacing the dependency in code review."""
+    """G4 static guard: the parametrisation list covers exactly the three frameworks (and matches the fixture dict)."""
     assert set(_FRAMEWORK_PARAMETRISATION) == {"sglang", "vllm", "atom"}
     assert set(_FRAMEWORK_CANDIDATES.keys()) == set(_FRAMEWORK_PARAMETRISATION)
 
 
-# ---------------------------------------------------------------------------
 # Scenario 2 — discover → reject → skip → next on the next tick
-
-
 def test_pump_reject_writes_progress_then_next_tick_picks_next(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Two-candidate batch: first is rejected (``critic_denied``
-    progress row written, no task enqueued), next tick picks the
-    second candidate and enqueues it."""
+    """Two-candidate batch: first rejected (``critic_denied``), next tick picks and enqueues the second."""
     discover_calls = SimpleNamespace(n=0)
 
     async def _discover(**_: Any) -> dict[str, Any]:
@@ -344,17 +286,12 @@ def test_pump_reject_writes_progress_then_next_tick_picks_next(
     assert enqueued_candidate["pr_url"] == "https://example.com/pr/2"
 
 
-# ---------------------------------------------------------------------------
 # Scenario 3 — already-in-flight task → pump no-op
-
-
 def test_pump_is_noop_when_framework_pr_task_already_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """When a ``framework_pr`` task is already in the running list, the
-    pump returns early WITHOUT calling discover or the Critic — this
-    is the idempotency guard that keeps the per-tick pump cheap."""
+    """An already-running ``framework_pr`` task makes the pump return early without discover or Critic (idempotency guard)."""
     discover_called = SimpleNamespace(n=0)
 
     async def _discover(**_: Any) -> dict[str, Any]:
@@ -374,23 +311,15 @@ def test_pump_is_noop_when_framework_pr_task_already_running(
     assert discover_called.n == 0
     assert critic.call_count == 0
     assert stub.tasks.created == []
-    # Phase done flag must not be flipped.
     assert stub.shared_state.framework_pr_phase_done is False
 
 
-# ---------------------------------------------------------------------------
 # Scenario 4 — discover empty payload → phase_history row + phase_done
-
-
 def test_pump_marks_phase_done_with_history_row_on_empty_discover(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A clean empty discover payload (no failures) flips
-    ``framework_pr_phase_done = True`` AND records a
-    ``framework_pr_phase_done`` row in phase_history so the give-up
-    decision is visible. Critic must not be consulted (no candidate
-    to review)."""
+    """A clean empty discover payload flips ``framework_pr_phase_done`` and records a phase_history row; no Critic call."""
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "", "candidates": []}
 

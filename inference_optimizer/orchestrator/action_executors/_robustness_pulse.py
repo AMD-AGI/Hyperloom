@@ -2,30 +2,13 @@
 
 """Best-effort robustness "pulse" used at long-action variant boundaries.
 
-Long actions (backends / params grid runners) execute one Magpie variant
-at a time, each taking several minutes. The Coordinator's reactor only
-ticks robustness **between** actions, so a mid-grid GPU leak, SGLang
-crash, or ROCm log error spike goes unobserved until the entire grid
-completes — see 2026-05 testing notes (B-tier).
-
-This module spawns the robustness-agent runtime CLI as a one-shot
-subprocess between variants, with LLM RCA explicitly disabled so the
-deterministic detectors run while staying under ~5s wall time. Results
-are persisted to ``<session_dir>/agents/robustness/findings/<id>.jsonl``
-via the normal sink path, giving operators a near-live view even during
-long actions.
-
-Design choices:
-
-* **Best-effort**: every failure mode (timeout, subprocess crash, missing
-  CLI, missing session_dir) is swallowed. The pulse is never on the
-  critical path of a variant.
-* **No new orchestrator wiring**: the helper is self-contained and reads
-  the session directory from the same environment variables the
-  Coordinator already sets (``SESSION_DIR`` / ``ROBUSTNESS_AGENT_SESSION_DIR``).
-* **Opt-out**: ``HYPERLOOM_GRID_ROBUSTNESS_PULSE=0`` disables the pulse
-  entirely (smoke tests, environments without the robustness-agent
-  package installed).
+The Coordinator only ticks robustness between actions, so a mid-grid leak /
+crash / ROCm error spike goes unobserved until the whole grid finishes. This
+spawns the robustness-agent runtime CLI as a one-shot subprocess between
+variants (LLM RCA disabled, ~5s wall time), persisting findings via the normal
+sink. Best-effort (every failure swallowed; never on the critical path), reads
+``SESSION_DIR`` / ``ROBUSTNESS_AGENT_SESSION_DIR``, opt-out via
+``HYPERLOOM_GRID_ROBUSTNESS_PULSE=0``.
 """
 
 from __future__ import annotations
@@ -48,10 +31,8 @@ _OFF_VALUES = frozenset({"0", "false", "no", "off", ""})
 
 
 def _enabled() -> bool:
-    # Disable inside pytest — the pulse spawns a real Python subprocess
-    # (``python -m robustness_agent.runtime.cli tick``) that bypasses test
-    # subprocess mocks and can write into a host session directory.
-    # Mirrors ``_run_magpie``'s ``PYTEST_CURRENT_TEST`` guard.
+    # Disable inside pytest — the pulse spawns a real subprocess that bypasses
+    # test mocks. Mirrors ``_run_magpie``'s guard.
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return False
     val = os.environ.get("HYPERLOOM_GRID_ROBUSTNESS_PULSE", "1").strip().lower()

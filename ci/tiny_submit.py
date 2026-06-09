@@ -3,30 +3,16 @@
 
 """Tiny CI — long-running queue controller for the full 3B-12B pool.
 
-A single process keeps up to ``--sandbox-cap`` + ``--hyperloom-cap`` SaFE
-optimization tasks in flight at once across two *independent* submit
-workspaces (default 150 + 150 = 300 concurrent), pulls the next model from a
-shared queue the instant a slot frees, and emits an incremental CI summary +
-Teams webhook every ``--report-every`` completed models (default every 10).
+A single process keeps up to ``--sandbox-cap`` + ``--hyperloom-cap`` SaFE tasks
+in flight across two independent submit workspaces (default 150+150=300),
+pulls the next model from a shared queue as slots free, and webhooks an
+incremental summary every ``--report-every`` completed models. Run as one job
+instead of a GHA matrix (which caps at ~256 concurrent jobs).
 
-Why a controller instead of a GitHub Actions matrix
-----------------------------------------------------
-GitHub Actions caps a single workflow's matrix at ~256 concurrent jobs, and a
-5341-model matrix would be unmanageable. Instead this runs as ONE job that
-manages its own 300-wide thread pool, so concurrency, replenishment and
-progressive reporting are all controlled in-process.
-
-Everything heavy is reused verbatim from ``optimize_submit.py``:
-  * ``process_model``        — auto-detect + register + download + submit.
-  * ``wait_and_collect_one`` — wait for the task (4h cap) + SaFE-artifact and
-                               NFS-fallback collection + wekafs in-place backfill.
-  * ``write_manifest``       — the same ``submission_manifest.{json,md}`` the
-                               existing summarize stage feeds to build_summary.
-
-The only new logic is the scheduler: two worker pools (one per submit
-workspace), a shared work queue, a registration-concurrency gate so the
-download burst stays bounded, crash-safe progress checkpointing, and the
-"every K completions -> build_summary.py + send_webhook.py" reporting hook.
+Reuses ``process_model`` / ``wait_and_collect_one`` / ``write_manifest`` from
+``optimize_submit.py``; the new logic is the scheduler: two worker pools, a
+shared queue, a register-concurrency gate, crash-safe checkpointing, and the
+per-K-completions reporting hook.
 """
 
 from __future__ import annotations
@@ -43,9 +29,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-# tiny_submit.py lives next to optimize_submit.py in ci/. Make the import
-# work regardless of the caller's CWD (workflow uses working-directory: ci,
-# but local debugging may run from the repo root).
+# Import optimize_submit regardless of the caller's CWD.
 _CI_DIR = Path(__file__).resolve().parent
 if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
@@ -69,15 +53,13 @@ from optimize_submit import (  # noqa: E402
 
 log = logging.getLogger("tiny")
 
-# Default workspaces for the two independent pools. Register happens in the
-# RW workspace (where /wekafs writes + the canonical Model CR live), submit
-# spreads across sandbox + hyperloom so each can run its own GPU pool.
+# Register happens in the RW workspace; submit spreads across sandbox +
+# hyperloom so each runs its own GPU pool.
 DEFAULT_SANDBOX_WORKSPACE = "core42-sandbox"
 DEFAULT_HYPERLOOM_WORKSPACE = "core42-hyperloom"
 DEFAULT_CANDIDATES_FILE = "candidates/hf_3b_12b_base_inference_2026-06-01.json"
 
-# Tiny runs each model for 4h (vs optimize-submit's 12h) per the user's
-# spec, so a 5341-model pool at 300-wide finishes in ~3 days instead of ~9.
+# Tiny runs each model for 4h (vs optimize-submit's 12h).
 DEFAULT_MAX_HOURS = 4.0
 DEFAULT_TASK_TIMEOUT_MIN = 240  # == 4h; the per-task wait deadline.
 
@@ -143,9 +125,8 @@ class TinyController:
         self.artifacts_dir = Path(args.artifacts_dir)
         self.manifests_dir = Path(args.output_dir)
         self.summary_out = Path(args.summary_out_dir)
-        # Per-batch webhook manifests live OUTSIDE manifests_dir: build_summary
-        # scans for submission_manifest.json *recursively*, so keeping them under
-        # manifests_dir would make the full-summary build double-count records.
+        # Per-batch webhook manifests live outside manifests_dir; build_summary
+        # scans recursively, so co-locating them would double-count records.
         self.batch_root = self.manifests_dir.parent / "tiny-batch-reports"
         self.progress_path = self.manifests_dir / "progress.ndjson"
         for d in (self.artifacts_dir, self.manifests_dir, self.summary_out,
@@ -157,9 +138,8 @@ class TinyController:
         self.progress_lock = threading.Lock()
         self.emit_lock = threading.Lock()
         self.manifest_lock = threading.Lock()
-        # Bound the register+download+submit burst. The 4h optimization wait
-        # runs OUTSIDE this gate, so we still reach full 300-wide concurrency;
-        # only the storage-heavy download fan-out is throttled.
+        # Bound only the register+download+submit burst; the 4h wait runs
+        # outside this gate, so full 300-wide concurrency is still reached.
         self.register_sem = threading.Semaphore(max(1, args.register_concurrency))
         self.stop = threading.Event()
 
@@ -174,8 +154,8 @@ class TinyController:
         self.prompt_prefix = self._resolve_prompt_prefix()
         self.kernel_backends = parse_kernel_backends(args.kernel_opt_backends)
 
-        # Resolve SaFE connection + cluster prompt fields with env fallbacks,
-        # mirroring optimize_submit.main() so a dispatch can configure either.
+        # Resolve SaFE connection fields with env fallbacks (mirrors
+        # optimize_submit.main()).
         self.base_url = (args.api_url or os.environ.get("SAFE_BASE_URL")
                          or os.environ.get("SAFE_API_URL") or DEFAULT_API_URL)
         self.api_key = (args.api_key or os.environ.get("CLAW_API_KEY")
@@ -227,8 +207,8 @@ class TinyController:
             volume=self.volume,
             submit_workspaces_pool=None,  # hard per-workspace cap, no round-robin
         )
-        # Size the urllib3 pool to the worker count so 150 concurrent requests
-        # don't serialize behind a default 10-connection pool.
+        # Size the urllib3 pool to the worker count to avoid serializing behind
+        # the default 10-connection pool.
         try:
             from requests.adapters import HTTPAdapter
             adapter = HTTPAdapter(pool_connections=2, pool_maxsize=cap + 16,
@@ -399,8 +379,7 @@ class TinyController:
             "batch_size": "",
             "source_task_id": "",
         }
-        # Register + download + submit happen under the concurrency gate so the
-        # storage fan-out stays bounded. The long 4h wait is OUTSIDE the gate.
+        # Register/download/submit under the gate; the 4h wait runs outside it.
         with self.register_sem:
             if self.stop.is_set():
                 return SubmissionRecord(model=repo, status="skipped",
