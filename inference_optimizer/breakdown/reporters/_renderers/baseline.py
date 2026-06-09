@@ -58,9 +58,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if attempts:
         facts.append(f"Baseline attempts recorded: {len(attempts)}.")
 
-    # Annotate the ttft row inline when it was reconstructed via the
-    # runs/baseline/ disk walk fallback — readers should see at a
-    # glance that the latency didn't come from state.last_baseline.
+    # Annotate ttft inline when reconstructed via the runs/baseline/ disk walk fallback.
     ttft_display: Any = ttft
     if ttft is not None and ttft_source == "runs_baseline_disk":
         ttft_display = f"{float(ttft):.1f} (reconstructed from runs/baseline/ disk walk)"

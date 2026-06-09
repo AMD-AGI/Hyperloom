@@ -2,20 +2,9 @@
 
 """P1-4 Coordinator resume tests.
 
-Covers:
-
-* Fresh session: is_resume=False, no replay needed
-* Existing state.json triggers is_resume=True even with empty events
-* Existing events trigger is_resume=True
-* replay_for_resume reconstructs pending_proposals from undecided
-  topic='proposal' events
-* Approved proposals are NOT re-instantiated as pending after resume
-* Rejected proposals are NOT re-instantiated as pending after resume
-* Multiple proposals + mixed decisions reconstruct correct pending set
-* Coordinator restart preserves pruned_families AND restores undecided
-  pending_proposals AND keeps task lifecycle intact
-* tick() lazily triggers replay_for_resume on first call (so callers
-  don't have to remember to call it explicitly)
+Covers resume detection, ``replay_for_resume`` rebuilding undecided
+pending_proposals (skipping approved/rejected), pruned_families preservation,
+and lazy replay on the first ``tick()``.
 """
 
 from __future__ import annotations
@@ -38,9 +27,7 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -65,9 +52,7 @@ def _backends_full() -> dict[str, object]:
     }
 
 
-# ===========================================================================
 # Resume detection
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_fresh_session_is_not_resume(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
@@ -94,13 +79,11 @@ async def test_existing_state_json_triggers_resume(session_dir):
 
 @pytest.mark.asyncio
 async def test_existing_events_triggers_resume(session_dir):
-    # First Coordinator: emit a heartbeat to populate the events table.
     c1 = Coordinator(session_dir, backends=_backends_full())
     try:
         await c1.tick(1)
     finally:
         await c1.stop()
-    # Second Coordinator on the same session_dir sees events ≥1.
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.resumed_from["is_resume"] is True
@@ -109,16 +92,13 @@ async def test_existing_events_triggers_resume(session_dir):
         await c2.stop()
 
 
-# ===========================================================================
 # Resume rebuild — pending_proposals
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_replay_rebuilds_undecided_proposals(session_dir):
     """One propose, no verdict → resume restores it as pending."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "baseline", "predicted_gain_pct": 0.0,
     })
-    # Mock orchestration only — no Critic mock so no auto-approval.
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends_no_critic = {
         "orchestration": MockBackend(ScriptedPlan(turns=[MockTurn(intents=[propose])],
@@ -162,7 +142,7 @@ async def test_replay_skips_approved_proposals(session_dir):
     )
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        await c1.tick(2)  # tick 1: propose, tick 2: critic auto-approves
+        await c1.tick(2)
         assert any(p.verdict == "approve" for p in c1.state.pending_proposals.values())
     finally:
         await c1.stop()
@@ -170,7 +150,6 @@ async def test_replay_skips_approved_proposals(session_dir):
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         stats = await c2.replay_for_resume()
-        # The approved proposal should be filtered out.
         assert stats["pending_restored"] == 0
         assert c2.state.pending_proposals == {}
     finally:
@@ -227,13 +206,11 @@ async def test_replay_mixed_pending_and_decided(session_dir):
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        # This test is about replay bookkeeping, not execution-order gating.
         # Seed prerequisites so arbitrary proposals are accepted.
         c1.shared_state.baseline_tput = 100.0
         c1.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
         c1.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
-            # Roofline-v2 N3: backends now requires fresh analysis_md_text.
             "analysis_md_text": "FAKE_REPORT",
         }
         c1.shared_state.save(session_dir)
@@ -243,23 +220,19 @@ async def test_replay_mixed_pending_and_decided(session_dir):
                 type=IntentType.PROPOSE_ACTION,
                 payload={"action_name": action, "predicted_gain_pct": 0.0},
             ))
-            # Grab the most recent proposal_msg_id
             tail = await c1.bus.tail(topic="proposal", n=1)
             proposal_ids.append(tail[0].msg_id)
 
-        # Approve baseline (proposal_ids[0])
         await c1._handle_intent("critic", Intent(
             type=IntentType.REVIEW_VERDICT,
             payload={"target_proposal_msg_id": proposal_ids[0],
                      "verdict": "approve", "reasoning": "ok"},
         ))
-        # Reject profile (proposal_ids[1])
         await c1._handle_intent("critic", Intent(
             type=IntentType.REVIEW_VERDICT,
             payload={"target_proposal_msg_id": proposal_ids[1],
                      "verdict": "reject", "reasoning": "no", "kb_evidence": "kb-x"},
         ))
-        # backends (proposal_ids[2]) left undecided
     finally:
         await c1.stop()
 
@@ -273,9 +246,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         await c2.stop()
 
 
-# ===========================================================================
 # Resume + SharedState combined
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
@@ -287,7 +258,6 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        # 1 prune + 1 undecided proposal
         await c1._handle_intent("robustness", Intent(
             type=IntentType.PRUNE_BRANCH,
             payload={"family": "deep_kernel", "reason": "x"},
@@ -310,8 +280,7 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
 
 @pytest.mark.asyncio
 async def test_tick_lazily_runs_replay_on_resume(session_dir):
-    """Resume callers shouldn't have to remember to call replay manually —
-    the first tick() should do it."""
+    """The first tick() triggers replay so resume callers needn't call it manually."""
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends = {
         "orchestration": MockBackend(silent, name="o"),
@@ -330,7 +299,6 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        # No explicit replay_for_resume — tick should trigger it
         assert c2.resumed_from["rebuilt"] is False
         await c2.tick(1)
         assert c2.resumed_from["rebuilt"] is True
@@ -339,27 +307,11 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
         await c2.stop()
 
 
-# ===========================================================================
 # N23 — --resume is N17-layout-aware (formerly test_n23_resume_per_session.py)
-# ===========================================================================
 
 
 class TestN23ResumePerSession:
-    """``--resume`` must understand the N17 per-session layout: workspace
-    is the parent of ``<model>/<UTC ts>/``. The fallback contract is:
-
-    * leave $USER_DATA_PATH alone (workspace level) so runtime/ resolves;
-    * pick the LATEST per-session subdir under ``<model>/<ts>/`` when no
-      ``--resume-from`` is given;
-    * accept ``--resume-from`` as an explicit override (must be under
-      workspace_root, must exist);
-    * pin INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR to the resolved subdir
-      BEFORE any state load, so subprocesses inherit it.
-
-    These tests exercise the path-resolution layer
-    (``inference_optimizer.paths.find_latest_per_session_dir``) the
-    ``--resume`` block delegates to.
-    """
+    """``--resume`` understands the N17 per-session layout, exercising ``find_latest_per_session_dir``."""
 
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch, tmp_path):
@@ -439,20 +391,12 @@ class TestN23ResumePerSession:
         assert "logs" not in str(picked)
 
 
-# ===========================================================================
 # N24 — _load_kernel_agent_env_fallback hard-fails on bad state
 # (formerly test_n24_kernel_agent_env_hardfail.py)
-# ===========================================================================
 
 
 class TestN24KernelAgentEnvHardFail:
-    """Pre-N24 the fallback printed a WARN and let ``_preflight()``
-    continue when ``$USER_DATA_PATH/runtime/kernel-agent.env.sh`` was
-    missing or empty — silently masking the most common N17 misuse
-    (USER_DATA_PATH pointed at a per-session subdir). N24 aborts with
-    sys.exit(2) and a clear actionable message so operators notice
-    within seconds instead of after a 10h silent stall.
-    """
+    """N24: a missing/empty ``kernel-agent.env.sh`` aborts with sys.exit(2) instead of warning-and-continuing."""
 
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):

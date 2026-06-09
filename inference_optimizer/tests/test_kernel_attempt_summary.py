@@ -1,21 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the kernel-optimization attempt summary aggregator.
-
-Pins the contract for ``build_kernel_optimization_summary``:
-
-* Categories: INTEGRATED / KEEP_PENDING / ATTEMPTED_REJECTED /
-  IN_FLIGHT / UNATTEMPTED.
-* Unattempted sub-reason classification (no_source_file /
-  not_reusable_native_kernel / no_recommended_backend /
-  below_priority_cutoff).
-* Backend ladder harvesting from ``kernel-agent/runs/<session_id>/
-  results/<kid>.json`` — present, missing dir, missing file, malformed.
-* ``failure_reason_breakdown`` aggregation (ladder_all_failed,
-  ladder_partial_no_artifact, ladder_unavailable, etc).
-* ``top_takeaways`` highlights the highest-impact missed kernel.
-* Deterministic, no LLM, no SVG.
-"""
+"""Tests for the kernel-optimization attempt summary aggregator ``build_kernel_optimization_summary``."""
 
 from __future__ import annotations
 
@@ -39,9 +24,7 @@ from inference_optimizer.orchestrator.kernel_attempt_summary import (
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 def _top15_entry(
     kid: str,
     *,
@@ -136,7 +119,7 @@ def _write_backend_results(
     *,
     backends: list[dict[str, Any]],
 ) -> None:
-    """Write a kernel-agent ``results/<kid>.json`` with given backend rows."""
+    """Write a kernel-agent ``results/<kid>.json`` with the given backend rows."""
     results_dir = (
         session_dir / "kernel-agent" / "runs" / session_id / "results"
     )
@@ -147,9 +130,7 @@ def _write_backend_results(
     )
 
 
-# ---------------------------------------------------------------------------
 # Categories
-# ---------------------------------------------------------------------------
 def test_unattempted_no_source_classifies_vendor_lib_ops(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001", name="aten::mm", source_file="",
@@ -240,9 +221,7 @@ def test_in_flight_classifies_correctly(tmp_path: Path) -> None:
     assert out["by_kernel"][0]["category"] == CATEGORY_IN_FLIGHT
 
 
-# ---------------------------------------------------------------------------
 # Backend ladder harvesting
-# ---------------------------------------------------------------------------
 def test_backend_ladder_loaded_from_kernel_agent_results(tmp_path: Path) -> None:
     session_dir = tmp_path
     state = _make_state(
@@ -313,8 +292,7 @@ def test_backend_ladder_malformed_json_falls_back_safely(tmp_path: Path) -> None
 
 
 def test_backend_ladder_with_artifact_marks_partial(tmp_path: Path) -> None:
-    """One backend produced an artifact but verification still rejected
-    (e.g. correctness failed). Should not bucket as ladder_all_failed."""
+    """One backend produced an artifact but verification rejected; must not bucket as ladder_all_failed."""
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
@@ -343,9 +321,7 @@ def test_backend_ladder_with_artifact_marks_partial(tmp_path: Path) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # Top takeaways + glossary
-# ---------------------------------------------------------------------------
 def test_top_takeaways_highlight_highest_gpu_pct_missed(tmp_path: Path) -> None:
     state = _make_state(
         session_id="sid1",
@@ -402,8 +378,7 @@ def test_zero_attempts_session_does_not_crash(tmp_path: Path) -> None:
 
 
 def test_attempt_without_top15_still_listed(tmp_path: Path) -> None:
-    """Kernels with an attempts ledger but absent from the current
-    top15 (e.g. dropped after a roofline refresh) are still surfaced."""
+    """Kernels with an attempts ledger but absent from the current top15 are still surfaced."""
     state = _make_state(
         top15=[],
         attempts={"k_obsolete": _attempt_entry(decision="REVERT",
@@ -416,17 +391,13 @@ def test_attempt_without_top15_still_listed(tmp_path: Path) -> None:
     assert any(r["kernel_id"] == "k_obsolete" for r in out["by_kernel"])
 
 
-# ---------------------------------------------------------------------------
 # Issue: summary buried failure root-cause in details file
-# ---------------------------------------------------------------------------
 def _write_full_kernel_result(
     session_dir: Path, session_id: str, kernel_id: str,
     *, attempts: list[dict[str, Any]],
     verification: dict[str, Any] | None = None,
 ) -> None:
-    """Like _write_backend_results but supports the top-level verification
-    block (used by the upgraded _render_attempted_row to pull real values
-    instead of leaving compile_passed/correctness_passed as null)."""
+    """Like _write_backend_results but also supports the top-level verification block."""
     results_dir = (
         session_dir / "kernel-agent" / "runs" / session_id / "results"
     )
@@ -440,9 +411,7 @@ def _write_full_kernel_result(
 
 
 def test_produced_artifact_excludes_stdout_log_path(tmp_path: Path) -> None:
-    """A geak preprocess failure points optimized_path at *_stdout.log;
-    that path is a log dump, not a real kernel artifact. produced_artifact
-    must be False."""
+    """A *_stdout.log optimized_path is a log dump, not an artifact; produced_artifact must be False."""
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001", gpu_pct=50.0)],
@@ -467,8 +436,7 @@ def test_produced_artifact_excludes_stdout_log_path(tmp_path: Path) -> None:
 
 
 def test_backend_ladder_elapsed_uses_elapsed_s_field(tmp_path: Path) -> None:
-    """Real kernel-agent results write ``elapsed_s`` (no -ec); the loader
-    must read that field so elapsed_sec lands in the ladder row."""
+    """The loader reads ``elapsed_s`` so elapsed_sec lands in the ladder row."""
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
@@ -491,8 +459,7 @@ def test_backend_ladder_elapsed_uses_elapsed_s_field(tmp_path: Path) -> None:
 
 
 def test_backend_ladder_classifies_timeout(tmp_path: Path) -> None:
-    """claude/codex oob CLI dies with 'Timed out after 480s'; ladder row
-    must surface error_class='timeout' + a concise error_message."""
+    """A 'Timed out after 480s' failure surfaces error_class='timeout' + a concise error_message."""
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
@@ -522,8 +489,7 @@ def test_backend_ladder_classifies_timeout(tmp_path: Path) -> None:
 
 
 def test_backend_ladder_classifies_preprocess_failed(tmp_path: Path) -> None:
-    """GEAK preprocess v3 emits 'success=False, errors=N' on failure; the
-    classifier must map that to error_class='preprocess_failed'."""
+    """'success=False, errors=N' maps to error_class='preprocess_failed'."""
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
@@ -555,10 +521,7 @@ def test_backend_ladder_classifies_preprocess_failed(tmp_path: Path) -> None:
 def test_backend_ladder_preprocess_failed_with_line_wrapped_stdout(
     tmp_path: Path,
 ) -> None:
-    """Real GEAK stdout_tail wraps at ~80 cols, so the
-    'preprocess completed in Ns' and '(success=False, errors=N)'
-    fragments end up on separate lines. The classifier's regex must
-    tolerate that interstitial whitespace."""
+    """The classifier's regex tolerates line-wrapped stdout where the preprocess fragments span lines."""
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
@@ -592,15 +555,12 @@ def test_backend_ladder_preprocess_failed_with_line_wrapped_stdout(
 def test_render_attempted_row_pulls_verification_from_result_file(
     tmp_path: Path,
 ) -> None:
-    """compile_passed / correctness_passed must come from the detail file's
-    verification block when the attempt ledger doesn't carry them
-    (which is the case for IN_FLIGHT / ATTEMPTED_REJECTED kernels)."""
+    """compile_passed / correctness_passed come from the detail file's verification block when the ledger lacks them."""
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
         attempts={"k001": _attempt_entry(decision="REVERT",
                                           rejected_reason="max_failures",
-                                          # ledger has no compile/correctness
                                           compile_passed=None,
                                           correctness_passed=None)},
         rejected_ids=["k001"],
@@ -629,8 +589,7 @@ def test_render_attempted_row_pulls_verification_from_result_file(
 
 
 def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
-    """failure_reason_breakdown must use the new error_class buckets so
-    real root causes (timeout / preprocess_failed) are not buried in 'other'."""
+    """failure_reason_breakdown uses error_class buckets so root causes aren't buried in 'other'."""
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001", gpu_pct=10.0),
@@ -645,7 +604,6 @@ def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
         },
         rejected_ids=["k001", "k002"],
     )
-    # k001: preprocess failure
     _write_full_kernel_result(
         tmp_path, "sid1", "k001",
         attempts=[{
@@ -657,7 +615,6 @@ def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
             ),
         }],
     )
-    # k002: ladder all timed out
     _write_full_kernel_result(
         tmp_path, "sid1", "k002",
         attempts=[

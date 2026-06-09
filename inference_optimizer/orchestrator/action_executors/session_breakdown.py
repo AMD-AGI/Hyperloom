@@ -3,14 +3,8 @@
 """ActionRunner for the ``session_breakdown`` action.
 
 Thin wrapper around :func:`inference_optimizer.breakdown.write_breakdown_json`
-so the Coordinator / orchestration agent can refresh
-``$SESSION_DIR/session_breakdown.json`` on demand (after an ``explore``
-KEEP, before a planned ``report``, when a live dashboard is observing
-this session, etc.).
-
-The end-of-session safety net lives in ``cli.py``'s finally block — this
-action is the agent-driven path used **during** a session for live
-refreshes.
+for on-demand refreshes of ``$SESSION_DIR/session_breakdown.json`` during a
+session (the end-of-session safety net lives in cli.py's finally block).
 
 Returned shape::
 
@@ -62,8 +56,7 @@ class SessionBreakdownExecutor:
                 "error":  f"{type(exc).__name__}: {exc}",
             }
 
-        # Re-read the rendered JSON to surface warnings + size to the bus
-        # event without parsing it back.
+        # Surface warnings + size to the bus event.
         try:
             warnings = build(session_dir).get("warnings") or []
         except Exception:  # noqa: BLE001
@@ -92,8 +85,8 @@ class SessionBreakdownExecutor:
             return Path(params["session_dir"])
         from ...paths import session_dir as _sd
         candidate = _sd()
-        # Don't require state.json — a fresh session with only manifest can
-        # still produce a partial breakdown (with a warning).
+        # manifest.json (not state.json) so a fresh session yields a partial
+        # breakdown.
         if candidate.exists() and (candidate / "manifest.json").exists():
             return candidate
         return None
