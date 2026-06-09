@@ -620,6 +620,99 @@ class TestDefaultKernelBatchParallel:
 
 
 # ---------------------------------------------------------------------------
+# _should_parallelize_backends
+#
+# GPU-rich mode: race GEAK against the OOB ladder per kernel only when the
+# node has enough visible GPUs to run both side-by-side for every hot
+# kernel without queueing (``visible_gpus >= 2 * num_candidates *
+# per_task``). Below that, keep the sequential GEAK-first / OOB-fallback
+# ladder. Operators / tests can force the decision via payload or env.
+# ---------------------------------------------------------------------------
+
+class TestShouldParallelizeBackends:
+    @pytest.fixture
+    def patch_torch(self, monkeypatch):
+        """Override ``torch.cuda.device_count`` + ``$KERNEL_AGENT_NUM_GPUS``
+        and clear the env override so the GPU-aware math is exercised."""
+        torch = _ensure_torch_module(monkeypatch)
+
+        def _set(n_gpus, per_task=None):
+            monkeypatch.setattr(torch.cuda, "device_count", lambda: n_gpus)
+            if per_task is None:
+                monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
+            else:
+                monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", str(per_task))
+            monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
+
+        return _set
+
+    @pytest.mark.parametrize(
+        "n_gpus, per_task, num_candidates, expected",
+        [
+            # 8-GPU node, 1 GPU/task: room to double up to 4 kernels.
+            (8, 1, 3, True),    # 2*3*1=6 <= 8
+            (8, 1, 4, True),    # 2*4*1=8 <= 8 (boundary)
+            (8, 1, 5, False),   # 2*5*1=10 > 8
+            # 4-GPU GEAK reservations: barely room for a single kernel.
+            (8, 4, 1, True),    # 2*1*4=8 <= 8 (boundary)
+            (8, 4, 2, False),   # 2*2*4=16 > 8
+            # Tiny pod.
+            (2, 1, 1, True),    # 2*1*1=2 <= 2
+            (2, 1, 2, False),   # 2*2*1=4 > 2
+        ],
+    )
+    def test_gpu_aware_threshold(
+        self, patch_torch, n_gpus, per_task, num_candidates, expected,
+    ):
+        patch_torch(n_gpus, per_task=per_task)
+        assert krh._should_parallelize_backends({}, num_candidates) is expected
+
+    def test_non_positive_candidates_is_false(self, patch_torch):
+        patch_torch(64, per_task=1)  # plenty of GPUs
+        assert krh._should_parallelize_backends({}, 0) is False
+        assert krh._should_parallelize_backends({}, -1) is False
+
+    def test_zero_visible_gpus_is_false(self, patch_torch):
+        patch_torch(0, per_task=1)
+        assert krh._should_parallelize_backends({}, 1) is False
+
+    def test_torch_unknown_is_false(self, monkeypatch):
+        torch = _ensure_torch_module(monkeypatch)
+
+        def _boom():
+            raise RuntimeError("driver init failed")
+
+        monkeypatch.setattr(torch.cuda, "device_count", _boom)
+        monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
+        assert krh._should_parallelize_backends({}, 1) is False
+
+    def test_payload_override_enables_below_threshold(self, patch_torch):
+        patch_torch(2, per_task=1)  # GPU-aware math would say False for 5
+        assert krh._should_parallelize_backends(
+            {"parallel_backends": True}, 5,
+        ) is True
+        assert krh._should_parallelize_backends(
+            {"parallel_backends": "on"}, 5,
+        ) is True
+
+    def test_payload_override_disables_above_threshold(self, patch_torch):
+        patch_torch(64, per_task=1)  # GPU-aware math would say True
+        assert krh._should_parallelize_backends(
+            {"parallel_backends": False}, 1,
+        ) is False
+        assert krh._should_parallelize_backends(
+            {"parallel_backends": "no"}, 1,
+        ) is False
+
+    def test_env_override(self, patch_torch, monkeypatch):
+        patch_torch(2, per_task=1)  # would be False for 5 candidates
+        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")
+        assert krh._should_parallelize_backends({}, 5) is True
+        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "0")
+        assert krh._should_parallelize_backends({}, 1) is False
+
+
+# ---------------------------------------------------------------------------
 # _reconcile_kernel_id
 # ---------------------------------------------------------------------------
 

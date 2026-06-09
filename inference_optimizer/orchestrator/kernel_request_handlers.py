@@ -198,6 +198,33 @@ def _default_geak_budget_minutes() -> float:
     return 70.0 if raw == "quick" else 130.0
 
 
+def _visible_gpu_count() -> int | None:
+    """Visible GPU count via ``torch.cuda.device_count()``.
+
+    Returns ``None`` when torch can't tell us (missing / driver-init
+    failure) so callers can distinguish "no GPUs" (``0``) from "unknown"
+    and pick the right fallback. Works for both ROCm and CUDA backends.
+    """
+    try:
+        import torch  # local import: torch driver init can be expensive
+        return int(torch.cuda.device_count() or 0)
+    except Exception:  # noqa: BLE001 -- torch missing / driver init failure
+        return None
+
+
+def _per_task_gpus() -> int:
+    """GPUs reserved per kernel-opt attempt (``$KERNEL_AGENT_NUM_GPUS``).
+
+    Floors at 1 so a missing / invalid env never zero-divides or stalls
+    the batch fanout.
+    """
+    try:
+        per_task = int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0") or 0)
+    except (TypeError, ValueError):
+        per_task = 0
+    return per_task if per_task > 0 else 1
+
+
 @functools.lru_cache(maxsize=1)
 def _default_kernel_batch_parallel() -> int:
     """Adaptive batch fanout: ``min(cap, visible_gpus // per_task_gpus)``.
@@ -221,20 +248,41 @@ def _default_kernel_batch_parallel() -> int:
     ``inference_optimizer/tests/conftest.py`` autouse fixture handles
     this for every test.
     """
-    try:
-        import torch  # local import: torch driver init can be expensive
-        n_gpus = int(torch.cuda.device_count() or 0)
-    except Exception:  # noqa: BLE001 -- torch missing / driver init failure
+    n_gpus = _visible_gpu_count()
+    if not n_gpus or n_gpus <= 0:
         return _DEFAULT_KERNEL_BATCH_PARALLEL
-    if n_gpus <= 0:
-        return _DEFAULT_KERNEL_BATCH_PARALLEL
-    try:
-        per_task = int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0") or 0)
-    except (TypeError, ValueError):
-        per_task = 0
-    if per_task <= 0:
-        per_task = 1
-    return max(1, min(_DEFAULT_KERNEL_BATCH_PARALLEL, n_gpus // per_task))
+    return max(1, min(_DEFAULT_KERNEL_BATCH_PARALLEL, n_gpus // _per_task_gpus()))
+
+
+def _should_parallelize_backends(payload: dict, num_candidates: int) -> bool:
+    """Decide whether to race GEAK against the OOB ladder per kernel.
+
+    Default policy ("GPU-aware"): only when the node has enough visible
+    GPUs to run GEAK *and* the OOB ladder side-by-side for every hot
+    kernel in the batch without queueing, i.e.
+    ``visible_gpus >= 2 * num_candidates * per_task_gpus``. Below that
+    threshold we keep the legacy sequential ladder (GEAK first, OOB only
+    as a fallback when GEAK misses a KEEP) so a couple of spare GPUs
+    don't make every kernel double-spend its OOB budget while siblings
+    starve behind the Ray GPU lease.
+
+    Operators / tests can force the decision via payload
+    ``parallel_backends`` or env ``KERNEL_OPT_PARALLEL_BACKENDS``
+    (truthy ``1/true/yes/on`` enables, anything else disables).
+    """
+    override = payload.get("parallel_backends")
+    if override is None:
+        raw_env = os.environ.get("KERNEL_OPT_PARALLEL_BACKENDS")
+        if raw_env is not None and raw_env.strip() != "":
+            override = raw_env
+    if override is not None:
+        return str(override).strip().lower() in {"1", "true", "yes", "on"}
+    if num_candidates <= 0:
+        return False
+    n_gpus = _visible_gpu_count()
+    if not n_gpus or n_gpus <= 0:
+        return False
+    return n_gpus >= 2 * num_candidates * _per_task_gpus()
 
 
 _CANDIDATE_ENV_KEYS = {
@@ -1751,16 +1799,46 @@ def _batch_kernel_candidates(
     return selected
 
 
-async def _run_kernel_backend_sequence(
+def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
+    """Best-selection key shared by the ladder and the batch handler.
+
+    A KEEP verdict always beats a non-KEEP regardless of micro_speedup
+    (GEAK frequently reports a higher micro on a NEEDS_REVIEW that has no
+    correctness gate, while a Claude/Codex KEEP at a lower micro is a real
+    integrate-ready patch); among equals, higher ``micro_speedup`` wins.
+    Mirrors the max-key in :func:`_run_optimization_batch` so the ladder,
+    the GEAK-vs-OOB race, and the batch all agree on "best".
+    """
+    if not isinstance(result, dict):
+        return (0, 0.0)
+    proposal = result.get("proposal") or {}
+    verification = result.get("verification") or {}
+    keep = 1 if (
+        result.get("status") == "ok" and proposal.get("decision") == "KEEP"
+    ) else 0
+    micro = float(verification.get("micro_speedup") or 0.0)
+    return (keep, micro)
+
+
+async def _run_backend_ladder(
     base_payload: dict,
     candidate: dict[str, Any],
+    kernel_id: str,
+    backends: list[str],
     *,
     session_dir: Path,
-) -> HandlerResult:
-    kernel_id = str(candidate.get("kernel_id") or base_payload.get("kernel_id") or "")
+) -> tuple[HandlerResult | None, list[dict[str, Any]]]:
+    """Run ``backends`` as a sequential break-on-KEEP ladder.
+
+    Returns ``(best, attempts)`` where ``best`` is the strongest result by
+    :func:`_kernel_result_rank` and ``attempts`` is the ordered per-backend
+    attempt log. Stops at the first KEEP so a clean GEAK KEEP still
+    short-circuits *its own* ladder and OOB fallbacks (claude -> codex ->
+    cursor) only fire when an earlier backend misses a KEEP.
+    """
     attempts: list[dict[str, Any]] = []
     best: HandlerResult | None = None
-    for backend in _backend_order(base_payload):
+    for backend in backends:
         child = dict(base_payload)
         child["_single_kernel"] = True
         child["kernel_id"] = kernel_id
@@ -1777,37 +1855,63 @@ async def _run_kernel_backend_sequence(
             "best_artifact_path": result.get("best_artifact_path"),
             "error": result.get("error"),
         })
-        verification = result.get("verification") or {}
-        proposal = result.get("proposal") or {}
-        # Prefer a KEEP verdict over a higher-micro non-KEEP. The ladder
-        # runs GEAK first; GEAK frequently returns NEEDS_REVIEW at e.g.
-        # 1.3x because it has no correctness gate, while a subsequent
-        # Claude/Codex attempt may deliver a real KEEP at 1.17x with full
-        # correctness. Without this, the higher-micro NEEDS_REVIEW would
-        # win the best-selection contest and the actual KEEP patch would
-        # be silently discarded.
-        # Mirror the batch handler's max-key in
-        # ``_run_optimization_batch`` so ladder + batch agree.
-        new_keep = (
-            result.get("status") == "ok"
-            and proposal.get("decision") == "KEEP"
-        )
-        new_micro = float(verification.get("micro_speedup") or 0.0)
-        if best is None:
+        if best is None or _kernel_result_rank(result) > _kernel_result_rank(best):
             best = result
-        else:
-            best_proposal = (best.get("proposal") or {})
-            best_keep = (
-                best.get("status") == "ok"
-                and best_proposal.get("decision") == "KEEP"
-            )
-            best_micro = float(
-                (best.get("verification") or {}).get("micro_speedup") or 0.0
-            )
-            if (new_keep, new_micro) > (best_keep, best_micro):
-                best = result
-        if new_keep:
+        if _kernel_result_rank(result)[0] == 1:  # KEEP -> stop this ladder
             break
+    return best, attempts
+
+
+async def _run_kernel_backend_sequence(
+    base_payload: dict,
+    candidate: dict[str, Any],
+    *,
+    session_dir: Path,
+    parallel_backends: bool = False,
+) -> HandlerResult:
+    """Optimize one kernel across the backend ladder.
+
+    Two modes:
+
+    * **Sequential (default)** -- the legacy ladder. Walk
+      ``_backend_order`` (GEAK first), stopping at the first KEEP. OOB
+      (claude/codex/cursor) only runs as a fallback when GEAK misses a
+      KEEP.
+    * **Parallel (``parallel_backends=True``)** -- GPU-rich mode chosen by
+      :func:`_should_parallelize_backends` at the batch layer. Race GEAK
+      against the OOB ladder concurrently and keep the stronger result by
+      :func:`_kernel_result_rank`, so we no longer short-circuit on GEAK's
+      first KEEP when there are spare GPUs to let OOB chase a higher
+      speedup. Falls back to sequential when GEAK or every OOB backend is
+      absent from the ladder (nothing to race).
+    """
+    kernel_id = str(candidate.get("kernel_id") or base_payload.get("kernel_id") or "")
+    order = _backend_order(base_payload)
+    geak_group = [b for b in order if b == "geak"]
+    oob_group = [b for b in order if b != "geak"]
+
+    if parallel_backends and geak_group and oob_group:
+        (geak_best, geak_attempts), (oob_best, oob_attempts) = await asyncio.gather(
+            _run_backend_ladder(
+                base_payload, candidate, kernel_id, geak_group,
+                session_dir=session_dir,
+            ),
+            _run_backend_ladder(
+                base_payload, candidate, kernel_id, oob_group,
+                session_dir=session_dir,
+            ),
+        )
+        attempts = geak_attempts + oob_attempts
+        best = max(
+            (r for r in (geak_best, oob_best) if r is not None),
+            key=_kernel_result_rank,
+            default=None,
+        )
+    else:
+        best, attempts = await _run_backend_ladder(
+            base_payload, candidate, kernel_id, order, session_dir=session_dir,
+        )
+
     if best is None:
         best = {
             "status": "failed",
@@ -1850,6 +1954,14 @@ async def _run_optimization_batch(
     )
     max_parallel = max(1, max_parallel)
     sem = asyncio.Semaphore(max_parallel)
+    # GPU-rich mode: when the node has spare GPUs beyond one task per hot
+    # kernel, race GEAK against the OOB ladder per kernel and keep the
+    # stronger result instead of short-circuiting on GEAK's first KEEP.
+    # The threshold (``visible_gpus >= 2 * num_kernels * per_task``) makes
+    # sure both backends can actually run side-by-side without queueing on
+    # the Ray GPU lease, so each kernel still holds at most two concurrent
+    # sub-tasks and the cluster stays within its real GPU budget.
+    parallel_backends = _should_parallelize_backends(payload, len(candidates))
 
     async def _guarded(candidate: dict[str, Any]) -> HandlerResult:
         cand_kid = str(candidate.get("kernel_id") or "") if isinstance(candidate, dict) else ""
@@ -1861,6 +1973,7 @@ async def _run_optimization_batch(
             try:
                 result = await _run_kernel_backend_sequence(
                     payload, candidate, session_dir=session_dir,
+                    parallel_backends=parallel_backends,
                 )
             except Exception as exc:  # noqa: BLE001
                 # A sub-task exception (network blip, GEAK crash, ...)
@@ -1913,14 +2026,7 @@ async def _run_optimization_batch(
         return result
 
     results = await asyncio.gather(*(_guarded(c) for c in candidates))
-    best = max(
-        results,
-        key=lambda r: (
-            1 if (r.get("proposal") or {}).get("decision") == "KEEP" else 0,
-            float((r.get("verification") or {}).get("micro_speedup") or 0.0),
-        ),
-        default=None,
-    )
+    best = max(results, key=_kernel_result_rank, default=None)
     if best is None:
         return {
             "status": "failed",
@@ -1932,6 +2038,7 @@ async def _run_optimization_batch(
     out["batch_kernel_ids"] = [str(c.get("kernel_id")) for c in candidates]
     out["backend_order"] = _backend_order(payload)
     out["max_parallel"] = max_parallel
+    out["parallel_backends"] = parallel_backends
     out["batch_results"] = results
     return out
 
