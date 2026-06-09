@@ -78,7 +78,7 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
     if not hints:
         lines += [
             "_No proven priors collected yet (scout produced an empty set "
-            "or all sources are unreachable)._",
+            + "or all sources are unreachable)._",
             "",
         ]
         return "\n".join(lines)
@@ -295,7 +295,7 @@ def full_gap_summary(
     if not gap:
         return ""
     lines = ["External target gap (advisory) — competitor numbers are "
-             "LLM-authored with sources; treat as direction, not a gate."]
+             + "LLM-authored with sources; treat as direction, not a gate."]
     tg = gap.get("throughput_gap_pct")
     tr = gap.get("tpot_ratio")
     ig = gap.get("interactivity_gap_pct")
@@ -411,8 +411,8 @@ def priors_match_summary(
         return ""
     lines = [
         "Recently proposed variants that align with proven priors / the "
-        "dominant external gap. Treat as a reason to TRY THESE EARLIER — "
-        "advisory ordering only, NOT a score, NOT a gate.",
+        + "dominant external gap. Treat as a reason to TRY THESE EARLIER — "
+        + "advisory ordering only, NOT a score, NOT a gate.",
     ]
     for name in sorted(matches)[:max_rows]:
         info = matches[name]
@@ -435,7 +435,7 @@ def summarise_for_prompt(
         return ""
     lines = [
         "Proven priors collected by the research scout. Treat as advisory "
-        "hints to try earlier — each carries a source.",
+        + "hints to try earlier — each carries a source.",
     ]
     for h in hints[:max_entries]:
         impact = h["expected_impact"] or "?"

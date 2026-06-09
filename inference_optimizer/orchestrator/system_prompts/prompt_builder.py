@@ -161,11 +161,11 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
         lines.extend([
             "",
             "**Phase interleave mode is ON** (on by default; set env "
-            "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable):",
+            + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable):",
             "- EXPLORE may also REQUEST kernel-owned kinds "
-            "(kernel_opt / integrate / deep_kernel_analysis / "
-            "operator_tuning / vendor_kernel_config / gemm_tuning) when "
-            "a probe of the kernel surface is needed mid-EXPLORE.",
+            + "(kernel_opt / integrate / deep_kernel_analysis / "
+            + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
+            + "a probe of the kernel surface is needed mid-EXPLORE.",
             "- KERNEL may also propose / delegate explore / specialist /",
             "  integrate_patch when a config / patch refinement is needed",
             "  mid-KERNEL.",
@@ -419,7 +419,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "      `last_action_failures` + `explore_search.winners_history`.",
         "   c. **KB sub-graphs + warm-start recipe** when present —",
         "      cross-session priors carry "
-        "*qualitative* hints (what worked / what failed last time).",
+        + "*qualitative* hints (what worked / what failed last time).",
         "   d. **specialist proposal_set** (M5+) — when an explore round just",
         "      finished, the proposal_set drives the next `explore` grid.",
         "   e. **Ordering facts**: baseline runs before anything else",

@@ -144,7 +144,8 @@ def compute_headroom_gib(
 
     required_gib = weights_gib + kv_cache_gib + activation_buf_gib
     headroom_gib = hbm_gib - required_gib
-    headroom_pct = (headroom_gib / hbm_gib) * 100.0 if hbm_gib > 0 else 0.0
+    # hbm_gib > 0 already guaranteed by the early guard above.
+    headroom_pct = (headroom_gib / hbm_gib) * 100.0
     return HeadroomBreakdown(
         weights_gib=round(weights_gib, 2),
         kv_cache_gib=round(kv_cache_gib, 2),

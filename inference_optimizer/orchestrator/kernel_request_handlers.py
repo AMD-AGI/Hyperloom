@@ -2172,7 +2172,8 @@ async def integrate_handler(
             }
 
     new_tput = float(bench_result.get("output_throughput") or 0.0)
-    gain_pct = ((new_tput - base_tput) / base_tput * 100.0) if base_tput > 0 else 0.0
+    # base_tput > 0 already guaranteed by the early guard above.
+    gain_pct = (new_tput - base_tput) / base_tput * 100.0
     decision = (
         "KEEP" if gain_pct > keep_threshold_pct
         else ("REVERT" if gain_pct < -keep_threshold_pct

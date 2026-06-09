@@ -342,7 +342,7 @@ class SpecialistSubprocessDispatcher:
             "--system-prompt-file", str(prompt_file),
             "-p",
             "Execute the task in your system prompt. Work autonomously. "
-            "Write specialist_done.json as your absolute last action.",
+            + "Write specialist_done.json as your absolute last action.",
         ]
         if cfg.model:
             cmd.extend(["--model", cfg.model])

@@ -375,10 +375,10 @@ def write_minimal_final_report(
         f"# Inference Optimizer — emergency final report",
         "",
         "> **Auto-generated safety-net.** The CLOSE phase 5-step "
-        "sequencer did not run to completion (process exited before "
-        "phase transition, or ``report`` executor failed). For the "
-        "full audit trail open `session_breakdown.json` next to this "
-        "file.",
+        + "sequencer did not run to completion (process exited before "
+        + "phase transition, or ``report`` executor failed). For the "
+        + "full audit trail open `session_breakdown.json` next to this "
+        + "file.",
         "",
         f"- session_id     : `{state.session_id or '-'}`",
         f"- model_path     : `{state.model_path or '-'}`",

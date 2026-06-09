@@ -297,7 +297,7 @@ def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> st
         f"- Sort: by Gain% (desc); failures last",
         "",
         "| # | Model | Frm | Prec | TP | Params | Baseline tok/s/GPU | "
-        "Optimized tok/s/GPU | Gain | InfX | vs InfX |",
+        + "Optimized tok/s/GPU | Gain | InfX | vs InfX |",
         "|---:|---|---|---|---:|---|---:|---:|---|---:|---|",
     ]
     for idx, r in enumerate(sorted_rows, start=1):

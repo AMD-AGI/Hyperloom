@@ -360,9 +360,9 @@ def _read_coordinator_events(
             conn,
             [
                 "SELECT seq AS id, from_agent AS agent, topic, payload, ts "
-                "FROM events ORDER BY seq DESC LIMIT ?",
+                + "FROM events ORDER BY seq DESC LIMIT ?",
                 "SELECT id, agent, topic, payload, timestamp AS ts "
-                "FROM events ORDER BY id DESC LIMIT ?",
+                + "FROM events ORDER BY id DESC LIMIT ?",
             ],
             (limit,),
         )

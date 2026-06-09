@@ -50,15 +50,15 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
             "",
             "**What to read first**",
             "- `atom/entrypoints/openai_server.py` (HTTP request routing, "
-            "`/start_profile`, `/stop_profile`).",
+            + "`/start_profile`, `/stop_profile`).",
             "- `atom/model_engine/engine_core.py` (engine main loop, "
-            "`start_profiler` call sites).",
+            + "`start_profiler` call sites).",
             "- `atom/model_engine/llm_engine.py` (engine API surface).",
             "- `atom/model_engine/model_runner.py` (per-rank forward, "
-            "profiler hooks, cudagraph capture).",
+            + "profiler hooks, cudagraph capture).",
             "- `atom/model_engine/arg_utils.py` (CLI flag inventory; "
-            "ground-truth for `--level`, `--enable_prefix_caching`, "
-            "`--cudagraph-capture-sizes`, `--kv_cache_dtype`, etc.).",
+            + "ground-truth for `--level`, `--enable_prefix_caching`, "
+            + "`--cudagraph-capture-sizes`, `--kv_cache_dtype`, etc.).",
             "- `atom/config.py` (engine config shape).",
             "- KB anchor `framework.*` (cuda_graph / batching / kv_cache).",
             "",
@@ -68,14 +68,14 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
             "- `--cudagraph-capture-sizes` bracketed around the live CONC.",
             "- `--kv_cache_dtype fp8` on FP8-shipped models (gate accuracy).",
             "- `--max-num-seqs` / `--max-num-batched-tokens` at concurrency "
-            "boundaries (same scheduler-side tuning as sglang/vllm).",
+            + "boundaries (same scheduler-side tuning as sglang/vllm).",
             "",
             "**Pitfalls (historical REVERTs / atom-specific)**",
             "- Atom is single-node only. Multi-node distributed proposals "
-            "are non-actionable — pivot to rank-local optimisations.",
+            + "are non-actionable — pivot to rank-local optimisations.",
             "- `--enforce-eager` is a debug fallback; almost never a perf win.",
             "- Cudagraph capture size lists that don't bracket the live "
-            "CONC trigger silent recapture on every batch boundary.",
+            + "CONC trigger silent recapture on every batch boundary.",
         ]
     return [
         "You target **vLLM / SGLang scheduler / cuda_graph / kv_cache** code.",
@@ -132,8 +132,8 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
             "",
             "**What to read first**",
             "- `aiter/csrc/` and `aiter/aiter/ops/` (CK / hipBLASLt "
-            "wrappers — **shared with sglang and vllm**, so aiter "
-            "patches apply transparently across all three).",
+            + "wrappers — **shared with sglang and vllm**, so aiter "
+            + "patches apply transparently across all three).",
             "- `atom/model_ops/` (atom-specific kernel call sites).",
             "- `atom/quantization/` (atom's FP8 / weight-quant paths).",
             "- `atom/models/` (built-in model implementations; cross-",
@@ -142,17 +142,17 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
             "",
             "**Winning techniques to consider**",
             "- aiter env switches (`VLLM_ROCM_USE_AITER=1` umbrella + "
-            "per-op overrides) — the shared aiter surface means the "
-            "same env knobs that work on sglang/vllm carry over to atom.",
+            + "per-op overrides) — the shared aiter surface means the "
+            + "same env knobs that work on sglang/vllm carry over to atom.",
             "- Tile-size / occupancy tuning for short-OSL decode.",
             "- Fused-attention enable flags for prefill chunks.",
             "",
             "**Pitfalls**",
             "- Searching `sglang/python/sglang/srt/layers/attention/` on "
-            "an atom box: those paths are empty / absent. Use "
-            "`atom/model_ops/` + shared `aiter/` instead.",
+            + "an atom box: those paths are empty / absent. Use "
+            + "`atom/model_ops/` + shared `aiter/` instead.",
             "- Mixing aiter overrides with `--enforce-eager` invalidates "
-            "atom's cudagraph captures silently.",
+            + "atom's cudagraph captures silently.",
         ]
     return [
         "You target **aiter / SGLang kernels / triton** code (attention,",
@@ -183,39 +183,39 @@ def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
     if _is_atom(inp):
         return [
             "You target **intra-node RCCL / NCCL / QuickReduce / "
-            "AllReduce** tuning on atom.",
+            + "AllReduce** tuning on atom.",
             "",
             "**Atom is single-node only.** Multi-node tensor / data / "
-            "pipeline parallelism is NOT available on atom. Cross-node "
-            "collectives proposals are non-actionable — focus on "
-            "intra-node concerns (rank-local optimisations, "
-            "intra-node NCCL/RCCL config, allreduce algorithm choice "
-            "for the on-box TP group).",
+            + "pipeline parallelism is NOT available on atom. Cross-node "
+            + "collectives proposals are non-actionable — focus on "
+            + "intra-node concerns (rank-local optimisations, "
+            + "intra-node NCCL/RCCL config, allreduce algorithm choice "
+            + "for the on-box TP group).",
             "",
             "**What to read first**",
             "- `atom/utils/distributed/utils.py` (single-node "
-            "`torch.distributed` helper — NOT a multi-node TP "
-            "orchestration layer).",
+            + "`torch.distributed` helper — NOT a multi-node TP "
+            + "orchestration layer).",
             "- `aiter/csrc/quick_reduce/` and RCCL plugin paths "
-            "(shared with sglang/vllm; intra-node only on atom).",
+            + "(shared with sglang/vllm; intra-node only on atom).",
             "- KB anchor `communication.*` (allreduce / QuickReduce / "
-            "topology).",
+            + "topology).",
             "",
             "**Winning techniques to consider (single-node)**",
             "- `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` when "
-            "intra-node TP allreduce message size > 1MiB.",
+            + "intra-node TP allreduce message size > 1MiB.",
             "- `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` tuning for "
-            "the on-box XGMI topology.",
+            + "the on-box XGMI topology.",
             "- `--enable-dp-attention` (MLA models) — DP-attention "
-            "shifts work onto a TP-free per-rank path, reducing the "
-            "allreduce footprint.",
+            + "shifts work onto a TP-free per-rank path, reducing the "
+            + "allreduce footprint.",
             "",
             "**Pitfalls**",
             "- Proposing multi-node TP / PP topologies — atom rejects "
-            "them at startup. The Coordinator collapses `--nodes>1` to "
-            "single-node mode on atom (IR-8).",
+            + "them at startup. The Coordinator collapses `--nodes>1` to "
+            + "single-node mode on atom (IR-8).",
             "- INT4 QuickReduce at TP=2 — overhead dominates the "
-            "bandwidth savings on small message sizes.",
+            + "bandwidth savings on small message sizes.",
         ]
     return [
         "You target **RCCL / NCCL / QuickReduce / AllReduce** code and tuning.",
@@ -551,11 +551,11 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
         "Your previous attempt on this task did NOT finish cleanly — the "
         f"Coordinator is re-dispatching you. Reason: ``{reason}``.",
         "This is a transient infrastructure failure (a timeout, crash, or "
-        "silent hang), not a rejection of the approach. Scope your "
-        "investigation so you reach a single ``specialist_done`` within "
-        "``max_turns`` this time: prefer fewer, higher-confidence probes, "
-        "emit heartbeats, and avoid long-running shell that risks the same "
-        "timeout.",
+        + "silent hang), not a rejection of the approach. Scope your "
+        + "investigation so you reach a single ``specialist_done`` within "
+        + "``max_turns`` this time: prefer fewer, higher-confidence probes, "
+        + "emit heartbeats, and avoid long-running shell that risks the same "
+        + "timeout.",
     ]
 
 
@@ -584,8 +584,8 @@ def _bench_block(inp: SpecialistPromptInputs) -> list[str]:
     lines.extend([
         "",
         "run_bench is advisory: the Coordinator still owns the authoritative "
-        "E2E benchmark and the KEEP/REVERT decision. Never self-report numeric "
-        "speedups in ``specialist_done`` based on a micro-bench.",
+        + "E2E benchmark and the KEEP/REVERT decision. Never self-report numeric "
+        + "speedups in ``specialist_done`` based on a micro-bench.",
     ])
     return lines
 
@@ -601,18 +601,18 @@ def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
         "### Free-form mandate (scope = freeform)",
         "",
         "You are dispatched as a **free-form** specialist: you are NOT bound to "
-        "the domain catalogue above. The Orchestration mandate below is your "
-        "whole task — investigate it wherever it leads (framework internals, "
-        "upstream PRs, host probing, source patches).",
+        + "the domain catalogue above. The Orchestration mandate below is your "
+        + "whole task — investigate it wherever it leads (framework internals, "
+        + "upstream PRs, host probing, source patches).",
         "",
         "Mandate from Orchestration:",
         "",
         f"> {desc}",
         "",
         "Set ``scope='freeform'`` on each proposal. Your single deliverable is "
-        "still ONE ``specialist_done`` carrying ``proposal_set`` + "
-        "``patches_written``. Never self-report numeric speedups — the "
-        "Coordinator measures gain.",
+        + "still ONE ``specialist_done`` carrying ``proposal_set`` + "
+        + "``patches_written``. Never self-report numeric speedups — the "
+        + "Coordinator measures gain.",
     ]
 
 
@@ -628,9 +628,9 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
         "",
         f"You are dispatched as a **cross-domain** specialist over: {tags}.",
         "You may author a single coherent patch that spans these domains "
-        "together when (and only when) the change must happen jointly — a "
-        "combination no single-domain specialist could surface from within "
-        "its own boundary.",
+        + "together when (and only when) the change must happen jointly — a "
+        + "combination no single-domain specialist could surface from within "
+        + "its own boundary.",
         "",
         "In your ``specialist_done`` you MUST justify the combination:",
         "- give an independent rationale for the change **within each domain** "
@@ -641,8 +641,8 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
         + "two independent single-domain edits (that is an explore grid combo, "
         + "not a cross-domain patch).",
         "Set ``scope='domains'`` on the proposal so the Critic attaches the "
-        "cross-domain review rules. Never self-report numeric speedups — the "
-        "Coordinator measures gain.",
+        + "cross-domain review rules. Never self-report numeric speedups — the "
+        + "Coordinator measures gain.",
     ]
 
 
@@ -737,14 +737,14 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             # Research hints stand in as an advisory prior when KB is empty.
             rows.extend([
                 "Structured KB context is empty for this (model, hardware, domain), but "
-                "the research scout collected source-backed priors this "
-                "session. Treat these as your advisory prior (co-equal with "
-                "RecipeKB priors; the Critic still gates the final answer):",
+                + "the research scout collected source-backed priors this "
+                + "session. Treat these as your advisory prior (co-equal with "
+                + "RecipeKB priors; the Critic still gates the final answer):",
                 "",
                 inp.research_hints,
                 "",
                 "Anchor proposals on these hints where they fit the gap "
-                "(Section 3) and hardware (Section 2).",
+                + "(Section 3) and hardware (Section 2).",
             ])
             return rows
         if cold:
@@ -756,38 +756,38 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                 "All prior sources for this gap are empty:",
                 "",
                 "- KB context: ``(none)`` — no RecipeKB warm-start facts, "
-                "research hints, or PR feed entries were available for this "
-                "(model, hardware, domain) tuple.",
+                + "research hints, or PR feed entries were available for this "
+                + "(model, hardware, domain) tuple.",
                 "- Warm-start recipe: ``(none)`` (Section 5).",
                 "- PR feed: ``(none)`` (Section 6).",
                 "",
                 "**Directive — DO NOT return an empty proposal_set.** "
-                "Treat the *Winning techniques* + *Pitfalls* in your "
-                "**domain focus** block (Section 1) as your fallback "
-                "prior. Pick the **1–2 most conservative, "
-                "well-attested defaults** from those bullets that are "
-                "compatible with the hardware (Section 2) and the "
-                "gap symptom (Section 3); flag each as "
-                "``confidence: low`` and ``provenance: "
-                "domain_focus_default`` in the proposal. Use the "
-                "``residual_questions`` field to record what RecipeKB, "
-                "research, or PR query a future round should pre-warm.",
+                + "Treat the *Winning techniques* + *Pitfalls* in your "
+                + "**domain focus** block (Section 1) as your fallback "
+                + "prior. Pick the **1–2 most conservative, "
+                + "well-attested defaults** from those bullets that are "
+                + "compatible with the hardware (Section 2) and the "
+                + "gap symptom (Section 3); flag each as "
+                + "``confidence: low`` and ``provenance: "
+                + "domain_focus_default`` in the proposal. Use the "
+                + "``residual_questions`` field to record what RecipeKB, "
+                + "research, or PR query a future round should pre-warm.",
                 "",
                 "If the *Winning techniques* block is generic enough "
-                "that no proposal is safer than a coin-flip, you may "
-                "still emit ``empty=true`` — but you MUST cite which "
-                "bullets you considered and why each was rejected "
-                "(in ``summary``). A bare empty exit with no rationale "
-                "will be treated as a tool failure by the Coordinator.",
+                + "that no proposal is safer than a coin-flip, you may "
+                + "still emit ``empty=true`` — but you MUST cite which "
+                + "bullets you considered and why each was rejected "
+                + "(in ``summary``). A bare empty exit with no rationale "
+                + "will be treated as a tool failure by the Coordinator.",
             ])
         else:
             rows.extend([
                 _NONE_PLACEHOLDER,
                 "",
                 "(No structured KB context supplied. Use Sections 1, 3, 5, "
-                "and 6 plus source inspection; record missing RecipeKB / "
-                "research / PR questions in ``residual_questions`` so a "
-                "future round can warm richer advisory context.)",
+                + "and 6 plus source inspection; record missing RecipeKB / "
+                + "research / PR questions in ``residual_questions`` so a "
+                + "future round can warm richer advisory context.)",
             ])
         return rows
     rows.append("```json")
@@ -1167,9 +1167,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         ),
         (
             "- The Critic reviews each surviving variant against the KB "
-            "before benchmarking, so a marginal-quality proposal costs you "
-            "a reject (and a pitfall fact that will warn future sessions "
-            "off the same dead-end)."
+            + "before benchmarking, so a marginal-quality proposal costs you "
+            + "a reject (and a pitfall fact that will warn future sessions "
+            + "off the same dead-end)."
         ),
         "- ``patches_written`` (PR-A2) lists paths (relative to your",
         "  workspace or worktree) of any unified-diff patch files you",

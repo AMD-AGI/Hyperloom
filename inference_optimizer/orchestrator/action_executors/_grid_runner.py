@@ -992,7 +992,8 @@ def _kill_stale_servers() -> None:
         if pid == my_pid:
             continue
         try:
-            cmdline = open(f"/proc/{pid}/cmdline", "rb").read()
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                cmdline = fh.read()
         except (OSError, PermissionError):
             continue
         text = cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
