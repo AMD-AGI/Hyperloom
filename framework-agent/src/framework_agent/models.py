@@ -2,15 +2,10 @@
 
 """Request and result models for framework PR/ref exploration.
 
-Ported from zhenggong/framework-agent with two fusion-plan additions:
-
-* :attr:`ExploreRequest.gap_description` - free-form bottleneck description
-  consumed by :mod:`framework_agent.keywords` to extract perf keywords
-  before hitting GitHub Search.
-* :attr:`ExploreRequest.search_modes` - tuple of enabled candidate
-  sources. Order matters; ``("primus_cortex", "github")`` means we union
-  results from both, with primus-cortex hard-failing on transport errors
-  and GitHub falling back to best-effort.
+``ExploreRequest.gap_description`` feeds :mod:`framework_agent.keywords` for
+perf keyword extraction; ``search_modes`` is an ordered tuple of enabled
+candidate sources (e.g. ``("primus_cortex", "github")`` unions both, with
+primus-cortex hard-failing and GitHub best-effort).
 """
 
 from __future__ import annotations
@@ -121,13 +116,10 @@ class CommandSpec:
 class Candidate:
     """A single PR or git ref candidate (explicit, primus_cortex, or github).
 
-    ``score`` carries the gap-relevance score produced by the dispatcher's
-    anti-aware reranker (:func:`framework_agent.keywords.score_title_with_anti_signal`).
-    It is 0.0 when no gap-driven ranking happened (e.g. ``source='explicit'``
-    or label-only listing). Downstream consumers (notably the IO
-    ``framework_pr`` arm) use it to log why a candidate won and to drive
-    a "best vs second" gap in their bandit history; the field is non-load-
-    bearing in fa itself (sort order is preserved by the dataclass list).
+    ``score`` is the gap-relevance score from
+    :func:`framework_agent.keywords.score_title_with_anti_signal`; 0.0 when no
+    gap-driven ranking happened. Non-load-bearing in fa itself (sort order is
+    preserved by the list); downstream IO ``framework_pr`` logs it.
     """
 
     ref: str
@@ -240,14 +232,9 @@ _VALID_SEARCH_MODES = frozenset({"primus_cortex", "github"})
 def _parse_keywords(raw: Any) -> tuple[str, ...]:
     """Coerce an optional ``keywords`` field into a tuple of trimmed strings.
 
-    Accepts:
-      * ``None`` / missing  -> ``()``  (auto-extract from gap_description)
-      * empty string        -> ``()``
-      * non-empty string    -> split on comma/whitespace
-      * list / tuple        -> coerce items to str + trim + drop empties
-
-    Anything else raises ``ValueError`` (matches the strictness of the
-    other ``_parse_*`` helpers in this module).
+    None/empty -> ``()`` (auto-extract from gap_description); string ->
+    split on comma/whitespace; list/tuple -> trimmed non-empty items.
+    Anything else raises ``ValueError``.
     """
     if raw is None or raw == "":
         return ()
@@ -300,31 +287,24 @@ class ExploreRequest:
     outputs: dict[str, str] = field(default_factory=dict)
     primus_cortex: PrimusCortexConfig | None = None
     pr_filter: PrFilter = field(default_factory=PrFilter)
-    # Fusion-plan additions.
     gap_description: str = ""
-    # C: explicit keyword override for the primus_cortex search query +
-    # client-side rerank. Non-empty value bypasses extract_keywords() and
-    # uses these tokens verbatim. See ``sources._resolve_keywords``.
+    # Explicit keyword override; non-empty bypasses extract_keywords() and is
+    # used verbatim. See ``sources._resolve_keywords``.
     keywords: tuple[str, ...] = ()
     search_modes: tuple[str, ...] = ("primus_cortex", "github")
-    # KB integration; empty string disables the contribute hook.
+    # Empty string disables the KB contribute hook.
     kb_domain: str = ""
-    # Ranking + cleanup + disk preflight additions.
-    # When True, ``explore()`` keeps going after the first winner and
-    # returns the full list sorted by ``candidate_score`` descending.
-    # When False (default), it short-circuits on the first winner.
+    # True: keep going past the first winner, return list sorted by
+    # candidate_score descending. False (default): short-circuit on first winner.
     ranking_mode: bool = False
-    # When True, ``explorer`` removes the worktree+venv directories of
-    # every non-winner candidate at the end of the run. The
-    # ``candidate_dir`` itself and the audit material inside it stay so
-    # reviewers can still diff the PRs that lost.
+    # True: remove worktree+venv of every non-winner at end of run;
+    # candidate_dir + audit material stay so reviewers can diff losers.
     keep_winner_only: bool = False
-    # When > 0, ``explore()`` runs the build step of multiple candidates
-    # concurrently via ``asyncio.gather`` (bench/accuracy stay strictly
-    # serial to avoid GPU contention). 0 / 1 / negative => fully serial.
+    # > 0: build multiple candidates concurrently via asyncio.gather
+    # (bench/accuracy stay serial to avoid GPU contention). <=1 => fully serial.
     build_concurrency: int = 1
-    # Disk preflight threshold (GB). ``None`` falls back to the env var
-    # ``FRAMEWORK_EXPLORER_DISK_MIN_GB`` (default 20). Set 0 to bypass.
+    # Disk preflight threshold (GB); None -> env FRAMEWORK_EXPLORER_DISK_MIN_GB
+    # (default 20). Set 0 to bypass.
     disk_min_free_gb: float | None = None
 
     @classmethod

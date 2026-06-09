@@ -8,21 +8,12 @@ The Coordinator () accepts intent envelopes of the form
 {"intents": [{"intent_type": "<type>", "payload": {...}}, ...]}
 ```
 
-The Critic agent only ever produces three intent types in normal operation:
-
-* ``review_verdict`` — primary output for any ``proposal`` it sees.
-* ``send_message`` — heartbeat (no proposal in inbox) or devil's advocate
-  ``advice`` topic.
-* ``update_persona`` — append-only persona update (Critic role permission).
-
-We deliberately mirror the schema and verdict vocabulary from
-``inference_optimizer/protocol/intent.py`` and
-``inference_optimizer/orchestrator/policy.py`` rather than importing them, so
-the Critic skill stays usable as a standalone package (no Hyperloom-wide
-runtime dependency at install time).
-
-If the Coordinator ever extends the envelope schema, update this file and
-the ``ENVELOPE_SCHEMA_VERSION`` constant.
+The Critic normally produces three intent types: ``review_verdict``
+(per proposal), ``send_message`` (heartbeat / ``advice``), and
+``update_persona``. Schema and verdict vocabulary are mirrored from
+``inference_optimizer/protocol/intent.py`` and ``.../policy.py`` rather than
+imported, so the skill stays a standalone package. Bump
+``ENVELOPE_SCHEMA_VERSION`` if the Coordinator extends the envelope schema.
 """
 
 from __future__ import annotations
@@ -261,8 +252,7 @@ def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
     env = IntentEnvelope()
     for intent in materialised:
         env.append(intent)
-    # Self-check by routing through validate_envelope so we surface bugs at
-    # build time rather than after the LLM has already produced a response.
+    # Self-check at build time rather than after the LLM responds.
     validate_envelope(env.to_dict())
     return env
 

@@ -111,9 +111,7 @@ def _cmd_candidates(args: argparse.Namespace) -> None:
 
 
 def _read_json_request(path: str) -> dict[str, Any]:
-    """Load a JSON request file for the ``phase-*`` subcommands.
-
-    Mirrors :func:`critic-agent.runtime.cli._read_json` but enforces a
+    """Load a JSON request file for the ``phase-*`` subcommands; enforces a
     dict at the top level since every ``phase-*`` request is an object.
     """
     req_path = Path(path).expanduser()
@@ -162,8 +160,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     framework = str(request.get("framework") or "sglang").strip().lower()
     repo_url = str(request.get("repo_url") or "").strip()
     if not repo_url:
-        # Fall back to the standalone repo_map (no reverse-import of
-        # inference_optimizer; framework-agent is a standalone package).
+        # Standalone repo_map; no reverse-import of inference_optimizer.
         from framework_agent.repo_map import repo_url_for_framework
         repo_url = repo_url_for_framework(framework)
     if not repo_url:
@@ -366,8 +363,8 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="framework-agent",
         description="Explore serving framework PRs/refs in isolated worktrees.",
     )
-    # Global flags wired into logging_setup.configure_logging. Kept on the
-    # top-level parser so every subcommand picks them up uniformly.
+    # Global logging flags on the top-level parser so every subcommand picks
+    # them up uniformly (wired into logging_setup.configure_logging).
     parser.add_argument(
         "--log-level",
         default=None,
