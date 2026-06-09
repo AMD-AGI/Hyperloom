@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""End-to-end reactor + backend adapter tests, plus L1/L2 finalizer
-integration.
-
-Backend-adapter level tests (subprocess transport: prompt -> ReactorContext
-parsing + reactor tick advancement) live in test_runtime_cli.py — that's
-where the host-visible JSON-IO contract is exercised end-to-end.
-"""
+"""End-to-end reactor tests plus L1/L2 finalizer integration. The subprocess-transport JSON-IO contract is exercised in test_runtime_cli.py."""
 
 from __future__ import annotations
 

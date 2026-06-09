@@ -1,14 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Sweep matrix renderer.
-
-Sweeps are concurrency / ISL-OSL grids run on the final stack so users
-can see end-of-session frontier coverage. The renderer surfaces:
-
-* grid size, accepted vs failed count,
-* the best (highest output_throughput) point,
-* all variants in a small table (truncated to 50 rows).
-"""
+"""Sweep matrix renderer — concurrency/ISL-OSL grid on the final stack (grid size, best point, variants ≤50 rows)."""
 
 from __future__ import annotations
 

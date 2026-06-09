@@ -1,37 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""ResourceLockManager + SqliteLeaseBackend ( + KB_design §3.7).
+"""ResourceLockManager + SqliteLeaseBackend (KB_design §3.7).
 
-All ``acquire_many`` writes happen inside a single ``BEGIN IMMEDIATE``
-transaction, giving the "all or nothing" property the lane semantics
-require: if any lane is busy or full, the entire INSERT batch ROLLBACKs.
-
-v0.6 single-holder semantics:
-
-Cross-lane mutual-exclusion rules (DESIGN §3.5.3) are enforced by adding
-the conflicting lanes to the requested set before the SQL acquire — e.g.
-``benchmark_lane`` conflicts with ``profile_lane``, so a ``bench_runner``
-task transparently asks for ``[benchmark_lane, profile_lane]`` and lets
-the per-lane capacity check enforce the mutual exclusion.
-
-v0.8 M6 multi-holder semantics:
-
-* ``leases`` PK widened to ``(lane, holder_id)`` so the same lane can
-  carry multiple concurrent holders (e.g. ``research_lane`` with
-  capacity=6 hosting six specialists).
-* Per-lane capacity sits in the ``lane_capacity`` table. ``acquire_many``
-  counts the current non-expired holders per lane and raises a new
-  :class:`LaneFull` when ``count >= capacity`` — semantically distinct
-  from :class:`LaneBusy` (capacity 0 / cross-lane conflict) so the
-  dispatcher can decide whether to retry next tick (LaneFull) or
-  permanently degrade (LaneBusy).
-* :meth:`ResourceLockManager.try_acquire_many` is the non-blocking
-  variant the Coordinator's concurrent dispatcher uses to fan out
-  ready-to-run tasks per tick.
-
-Inv-7.1 ``benchmark_lane.holders ≤ 1`` is preserved by the default
-``capacity = 1`` for serving-side lanes (see
-``storage.schema.DEFAULT_LANE_CAPACITIES``).
+``acquire_many`` is a single ``BEGIN IMMEDIATE`` all-or-nothing batch acquire;
+cross-lane mutual exclusion (DESIGN §3.5.3) co-acquires conflicting lanes.
+v0.8 M6 multi-holder: ``leases`` PK widened to ``(lane, holder_id)``; raises
+:class:`LaneFull` at capacity vs :class:`LaneBusy` cross-lane conflict.
+Inv-7.1 ``benchmark_lane.holders ≤ 1`` preserved by default capacity=1 for
+serving-side lanes.
 """
 
 from __future__ import annotations
@@ -56,11 +32,8 @@ KNOWN_LANES = (
     "workspace_mutation",
     "benchmark_lane",
     "profile_lane",
-    # research_lane carries LLM specialist sub-agents. It has NO
-    # LANE_CONFLICTS with the four serving lanes: a specialist reading
-    # source / KB / PR can coexist with a benchmark / profile / server
-    # restart on the same tick. Capacity may exceed 1 via a
-    # (lane, holder_id) schema.
+    # research_lane carries LLM specialist sub-agents; no LANE_CONFLICTS
+    # with the serving lanes and capacity may exceed 1.
     "research_lane",
 )
 
@@ -81,7 +54,7 @@ def _now_iso() -> str:
 
 
 def _expand_lanes(lanes: list[str]) -> list[str]:
-    """Expand requested lanes by transitive conflicts; sort deterministically."""
+    """Expand requested lanes by transitive conflicts; sorted deterministically."""
     out: set[str] = set()
     for lane in lanes:
         if lane not in KNOWN_LANES:
@@ -91,7 +64,6 @@ def _expand_lanes(lanes: list[str]) -> list[str]:
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
 @dataclass
 class Lease:
     """Lease handle returned by ``acquire_many``."""
@@ -105,15 +77,7 @@ class Lease:
 
 
 class LaneBusy(RuntimeError):
-    """Raised by ``acquire_many`` when at least one requested lane has
-    a cross-lane conflict (Inv-7.1).
-
-    KB_design §3.7 §5.1 keeps the *cross-lane mutex* and *capacity*
-    failure modes semantically separate. ``LaneBusy`` covers the
-    mutex case (e.g. benchmark vs. profile), so dispatchers know to
-    leave the task queued and retry next tick once the conflicting
-    holder releases.
-    """
+    """Raised by ``acquire_many`` on a cross-lane conflict (Inv-7.1, KB_design §3.7 §5.1); kept distinct from capacity."""
 
     def __init__(self, busy_lanes: list[str]):
         super().__init__(f"lanes busy: {busy_lanes!r}")
@@ -121,14 +85,7 @@ class LaneBusy(RuntimeError):
 
 
 class LaneFull(RuntimeError):
-    """Raised by ``acquire_many`` when a requested lane has reached its
-    per-lane ``capacity`` cap.
-
-    Distinct from :class:`LaneBusy`: ``LaneFull`` is a pure capacity
-    decision (e.g. research_lane with N holders, N == capacity); no
-    cross-lane conflict is involved. Dispatcher leaves the task queued
-    and tries again on the next tick when a holder releases.
-    """
+    """Raised by ``acquire_many`` when a lane hits its ``capacity`` cap (pure capacity decision, distinct from :class:`LaneBusy`)."""
 
     def __init__(self, full_lanes: list[str]):
         super().__init__(f"lanes full: {full_lanes!r}")
@@ -139,13 +96,8 @@ class StaleLeaseError(RuntimeError):
     """Heartbeat / release found that the lease no longer belongs to us."""
 
 
-# ---------------------------------------------------------------------------
 class SqliteLeaseBackend:
-    """Default ``ResourceLockBackend`` (DESIGN §3.5.4 / ADR-42).
-
-    Uses ``leases`` rows in the unified SQLite WAL DB. ``BEGIN IMMEDIATE``
-    plus row-level uniqueness on the ``lane`` PK gives atomic acquire-many.
-    """
+    """Default ``ResourceLockBackend`` (DESIGN §3.5.4 / ADR-42); ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
 
     def __init__(self, db: SqliteConnection):
         self.db = db
@@ -159,24 +111,10 @@ class SqliteLeaseBackend:
         action: str,
         ttl_sec: int,
     ) -> Lease:
-        """Acquire every lane in ``lanes`` (plus their transitive
-        cross-lane conflicts) as a single atomic batch.
+        """Acquire ``lanes`` + transitive conflicts as one atomic batch.
 
-        capacity-aware:
-
-        * Counts *non-expired* holders per lane (skipping any row that
-          shares ``holder_id`` so a retry from the same holder is a
-          no-op rather than an immediate full).
-        * Compares against the per-lane capacity (read from
-          ``lane_capacity``; falls back to
-          :data:`storage.schema.DEFAULT_LANE_CAPACITIES`).
-        * Raises :class:`LaneFull` when at least one lane is at cap
-          and :class:`LaneBusy` when an expanded conflict-lane shows
-          a *different-holder* live row.
-
-        Inv-7.1 is enforced via ``DEFAULT_LANE_CAPACITIES``: serving
-        lanes default to capacity 1, so any second holder still raises
-        LaneFull immediately.
+        Same-holder retries are idempotent; raises :class:`LaneFull` (at cap)
+        or :class:`LaneBusy` (different-holder conflict). Inv-7.1: serving lanes default capacity 1.
         """
         if not lanes:
             raise ValueError("acquire_many called with no lanes")
@@ -187,9 +125,7 @@ class SqliteLeaseBackend:
         expires_iso = datetime.fromtimestamp(expires_ts, tz=timezone.utc).isoformat()
 
         async with self.db.transaction() as cur:
-            # Resolve capacity per lane (defensive fallback for legacy
-            # DBs where lane_capacity hasn't been seeded yet — should
-            # never happen on a freshly-ensured schema).
+            # Resolve capacity per lane (defensive fallback for unseeded legacy DBs).
             capacity_by_lane: dict[str, int] = {}
             placeholders = ",".join("?" * len(expanded))
             cur.execute(
@@ -204,8 +140,7 @@ class SqliteLeaseBackend:
                     lane, int(DEFAULT_LANE_CAPACITIES.get(lane, 1)),
                 )
 
-            # Pull *all* current holders so we can reap expired rows
-            # and count surviving distinct holders per lane.
+            # Pull holders to reap expired rows and count surviving distinct holders per lane.
             cur.execute(
                 f"SELECT lane, holder_id, expires_at FROM leases "
                 f"WHERE lane IN ({placeholders})",
@@ -250,32 +185,22 @@ class SqliteLeaseBackend:
                     ),
                 )
 
-            # distinguish capacity (LaneFull) from
-            # cross-lane mutex (LaneBusy). For capacity == 1 lanes
-            # (serving side) the two converge in behaviour; we still
-            # surface the right exception class so dispatchers can
-            # tell "I'm queued behind a long-running benchmark" from
-            # "the lane is full of specialists".
+            # Distinguish capacity (LaneFull) from cross-lane mutex (LaneBusy).
             full: list[str] = []
             busy: list[str] = []
             for lane in expanded:
                 live = holders_per_lane.get(lane, set())
-                # An attempt by the same holder is idempotent; skip
-                # all the gates so it acts as a TTL refresh.
+                # Same-holder attempt is idempotent (acts as TTL refresh).
                 if holder_id in live:
                     continue
                 cap = capacity_by_lane.get(lane, 1)
                 if cap <= 0:
-                    # capacity=0 → lane disabled (e.g. --research-lane-
-                    # capacity 0). Treat as LaneFull so dispatcher
-                    # knows to drop the task rather than spin.
+                    # capacity=0 → lane disabled; LaneFull so dispatcher drops.
                     full.append(lane)
                     continue
                 if len(live) >= cap:
-                    # Multi-holder lane (cap > 1) full → LaneFull.
-                    # Single-holder lane (cap == 1) full → LaneBusy
-                    # for back-compat with the legacy contract callers that pattern-
-                    # match on ``LaneBusy``.
+                    # cap>1 full → LaneFull; cap==1 full → LaneBusy
+                    # (back-compat for callers pattern-matching LaneBusy).
                     if cap > 1:
                         full.append(lane)
                     else:
@@ -287,9 +212,8 @@ class SqliteLeaseBackend:
                 raise LaneFull(full)
 
             for lane in expanded:
-                # ``INSERT OR REPLACE`` lets the same holder refresh
-                # an existing lease row without violating the (lane,
-                # holder_id) PK.
+                # INSERT OR REPLACE lets the same holder refresh its row
+                # without violating the (lane, holder_id) PK.
                 cur.execute(
                     "INSERT OR REPLACE INTO leases(lane, holder_id, "
                     "task_id, action, pid, acquired_at, expires_at, "
@@ -317,12 +241,7 @@ class SqliteLeaseBackend:
         )
 
     async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
-        """Refresh ``expires_at`` for every lane this holder owns.
-
-        keys on the composite ``(lane, holder_id)`` PK so a
-        multi-holder lane (research_lane with capacity > 1) only
-        bumps this holder's row, not the others.
-        """
+        """Refresh ``expires_at`` for every lane this holder owns (keyed on ``(lane, holder_id)`` PK)."""
         new_expires_iso = datetime.fromtimestamp(
             time.time() + ttl_sec, tz=timezone.utc
         ).isoformat()
@@ -355,9 +274,8 @@ class SqliteLeaseBackend:
 
     async def reap_expired(self) -> list[dict]:
         """Sweep expired rows; emits one ``lease_expired`` event per stale
-        (lane, holder_id) row. v0.8 M6 keys deletion on both columns so
-        a multi-holder lane reaps only the holders whose TTL fired —
-        live holders on the same lane keep their leases."""
+        (lane, holder_id) row. Reaps only TTL-fired holders, leaving live
+        holders on a multi-holder lane untouched."""
         now_iso_str = _now_iso()
         reaped: list[dict] = []
         async with self.db.transaction() as cur:
@@ -431,23 +349,17 @@ class SqliteLeaseBackend:
         return out
 
 
-# ---------------------------------------------------------------------------
 class ResourceLockManager:
     """Coordinator-facing wrapper.
 
-    v0.8 M6 adds non-blocking acquire + multi-holder observability so
-    the concurrent dispatcher can fan tasks out
-    per tick without spinning on lane busy errors.
+    v0.8 M6 adds non-blocking acquire + multi-holder observability so the
+    concurrent dispatcher can fan tasks out without spinning on busy errors.
     """
 
     def __init__(self, backend: SqliteLeaseBackend):
         self.backend = backend
-        # Per-process counters. The
-        # leases DB is the authoritative source for current state;
-        # these counters track *cumulative* acquire / lane-full /
-        # lane-busy events for the lifetime of this process so the
-        # breakdown can surface peak / total numbers without re-reading
-        # the SQLite log.
+        # Per-process cumulative acquire / lane-full / lane-busy counters
+        # so the breakdown can surface totals without re-reading SQLite.
         self._counters: dict[str, dict[str, int]] = {}
 
     async def acquire_many(self, lanes: list[str], **kwargs) -> Lease:
@@ -466,18 +378,10 @@ class ResourceLockManager:
         return lease
 
     async def try_acquire_many(self, lanes: list[str], **kwargs) -> Lease | None:
-        """Non-blocking variant of :meth:`acquire_many` (KB_design §3.7
-        §4.3).
+        """Non-blocking variant of :meth:`acquire_many` (KB_design §3.7 §4.3).
 
-        Returns the :class:`Lease` on success, ``None`` when any
-        requested lane is busy or full. The Coordinator's concurrent
-        dispatcher uses this to fan out queued tasks per tick without
-        having to wrap every dispatch in a try/except.
-
-        Cross-lane mutex (``LaneBusy``) and capacity (``LaneFull``)
-        both map to ``None``. Distinguishing the two is the caller's
-        job via :meth:`acquire_many` when needed; the concurrent
-        dispatch path treats them identically (retry next tick).
+        Returns the :class:`Lease` on success, ``None`` when any lane is
+        busy or full (both LaneBusy and LaneFull map to None; retry next tick).
         """
         try:
             return await self.acquire_many(lanes, **kwargs)
