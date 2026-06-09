@@ -494,7 +494,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p task-artifacts
-          # ALWAYS-PUBLISH policy (无论如何都要发): we deliberately DO NOT gate on
+          # ALWAYS-PUBLISH policy: we deliberately DO NOT gate on
           # final_status==Succeeded / ci_success / ci_status==Delivered here.
           # Any session_breakdown that was collected — even for Timeout / Failed
           # / Interrupted sessions — is pushed to the sbd-ingester so pulse never
