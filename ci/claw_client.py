@@ -330,5 +330,3 @@ class ClawClient:
                 time.sleep(poll_interval)
         finally:
             stop_sse.set()
-
-        return "timeout"

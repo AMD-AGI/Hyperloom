@@ -234,7 +234,6 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             done_candidates.append(worktree / "specialist_done.json")
         done_candidates.append(workspace / "specialist_done.json")
-        done_file = done_candidates[0]
         heartbeat_file = workspace / "heartbeat.json"
 
         # Write the prompt file (system + user collapsed into one
@@ -312,7 +311,6 @@ class SpecialistSubprocessDispatcher:
             if cand.exists():
                 done_payload = self._read_done(cand)
                 if done_payload is not None:
-                    done_file = cand
                     break
 
         return SpecialistSubprocessResult(

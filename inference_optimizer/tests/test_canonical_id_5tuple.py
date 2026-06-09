@@ -78,10 +78,11 @@ def test_canonical_id_basenames_path_style_model() -> None:
 
 def test_canonical_id_is_keyword_only() -> None:
     """Positional args must raise ``TypeError`` — prevents accidental re-ordering."""
+    # Indirect call (``fn`` alias) so the intentional bad arity stays a runtime
+    # check without tripping static arity analysis.
+    fn = recipe_canonical_id
     with pytest.raises(TypeError):
-        recipe_canonical_id(  # type: ignore[misc]
-            "m", "h", "f", "v", "p",
-        )
+        fn("m", "h", "f", "v", "p")  # type: ignore[misc]
 
 
 def test_canonical_id_normalises_whitespace_and_slashes() -> None:

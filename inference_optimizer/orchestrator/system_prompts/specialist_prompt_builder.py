@@ -634,12 +634,12 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "In your ``specialist_done`` you MUST justify the combination:",
         "- give an independent rationale for the change **within each domain** "
-        "in scope;",
+        + "in scope;",
         "- name the **coupling points** (why these changes must land together) "
-        "and at least one **side effect** of the combination;",
+        + "and at least one **side effect** of the combination;",
         "- show this is genuine cross-domain synthesis, not a concatenation of "
-        "two independent single-domain edits (that is an explore grid combo, "
-        "not a cross-domain patch).",
+        + "two independent single-domain edits (that is an explore grid combo, "
+        + "not a cross-domain patch).",
         "Set ``scope='domains'`` on the proposal so the Critic attaches the "
         "cross-domain review rules. Never self-report numeric speedups — the "
         "Coordinator measures gain.",

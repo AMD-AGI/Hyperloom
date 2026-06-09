@@ -140,8 +140,6 @@ class BenchmarkAnalyzer:
                 ref_candidates.append(fi)
             elif is_kernel or has_source_module_call:
                 kernel_candidates.append(fi)
-            elif has_torch_functional:
-                ref_candidates.append(fi)
             else:
                 kernel_candidates.append(fi)
 
@@ -903,7 +901,6 @@ def maybe_generate_harness(
     except Exception as exc:
         _log(f"static_check validation failed: {exc}")
         # Can't validate, but the harness was generated — try it anyway.
-        pass
 
     # Append --correctness so GEAK's SaveAndTest validator (runs test_command verbatim) can execute it.
     test_command = f"python {harness_path} --correctness"

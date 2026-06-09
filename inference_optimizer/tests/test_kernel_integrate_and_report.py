@@ -115,7 +115,6 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
     """re-baseline returns 900 vs base 800 → KEEP."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
-    target, patch_file = _write_patch_pair(tmp_path)
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -190,7 +189,6 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
     """re-baseline returns 700 vs base 800 → REVERT."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
-    target, patch_file = _write_patch_pair(tmp_path)
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")

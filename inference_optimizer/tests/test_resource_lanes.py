@@ -131,7 +131,7 @@ def test_v1_to_v2_migration_preserves_rows(tmp_path):
 
 def test_v2_ensure_schema_is_idempotent(conn):
     """Calling ensure_schema twice on the same DB doesn't lose data."""
-    cur = conn.raw.execute(
+    conn.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
         "acquired_at, expires_at, heartbeat_at) "
         "VALUES (?,?,?,?,?,?,?,?)",

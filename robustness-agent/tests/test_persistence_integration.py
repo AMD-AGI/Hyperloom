@@ -142,7 +142,6 @@ def test_gpu_leak_resets_when_owner_reappears(tmp_path: Path):
         ],
         sources_used=["local"],
     )
-    c2, store2 = _fresh_classifier(tmp_path)
     # Rebuild with a matching owner pattern to actually exercise reset (the default test classifier has owner_patterns=()).
     c2, store2 = _fresh_classifier(tmp_path)
     classifier = Classifier(

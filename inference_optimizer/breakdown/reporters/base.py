@@ -9,6 +9,7 @@ historically hallucinated them); the LLM only narrates ``key_facts``.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -110,7 +111,7 @@ def _md_cell(v: Any) -> str:
     if isinstance(v, bool):
         return "✅" if v else "❌"
     if isinstance(v, float):
-        if v != v:  # NaN
+        if math.isnan(v):
             return "—"
         return f"{v:.3g}" if abs(v) < 1 or abs(v) >= 1e4 else f"{v:.2f}"
     if isinstance(v, (list, tuple)):

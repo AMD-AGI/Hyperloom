@@ -822,7 +822,6 @@ class ExploreExecutor:
                 outcome = "FAILED"
                 reason: str = ""
                 if r.status != "succeeded" or gain is None:
-                    outcome = "FAILED"
                     reason = (r.error or "")[-256:] or "no_measurement"
                 elif gain < keep_threshold_pct:
                     outcome = "REVERT"

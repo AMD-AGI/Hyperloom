@@ -245,7 +245,7 @@ def test_backend_turn_result_default_fields():
 # ---------------------------------------------------------------------------
 
 def test_payload_required_covers_every_intent_type():
-    for intent_type in IntentType:
+    for intent_type in IntentType.__members__.values():
         assert intent_type in PAYLOAD_REQUIRED, intent_type
 
 
