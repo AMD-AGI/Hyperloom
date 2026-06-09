@@ -180,6 +180,16 @@ export PATCH_MAGPIE="${PATCH_MAGPIE:-0}"
 export HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT="${HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT:-0}"
 export INFERENCE_OPTIMIZER_STEADY_STATE_MODE="${INFERENCE_OPTIMIZER_STEADY_STATE_MODE:-mixed}"
 
+# Per-run JIT cache isolation (#485 review point b): the integrate cache
+# move-aside (apply_kernel_patch) operates on $TRITON_CACHE_DIR /
+# $TORCHINDUCTOR_CACHE_DIR. Pinning both under USER_DATA_PATH scopes the
+# move-aside to THIS run so it cannot disturb a co-tenant's compile cache on a
+# shared node. Set here (after local-setup.env.sh) so it is the authoritative
+# value the coordinator and its sglang subprocesses inherit.
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${USER_DATA_PATH}/runtime/jit-cache/triton}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${USER_DATA_PATH}/runtime/jit-cache/torchinductor}"
+mkdir -p "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
+
 TS="$(date -u +%Y%m%d_%H%M%S)"
 RUN_LOG="${USER_DATA_PATH}/optimizer_runs/zero_touch_${TS}.log"
 log "mirror log → $RUN_LOG"

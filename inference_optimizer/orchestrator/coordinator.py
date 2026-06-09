@@ -7780,8 +7780,14 @@ class Coordinator:
         :mod:`dynamic_action_resume`; this wrapper only threads the
         coordinator-side context (session_dir, shared_state,
         framework_source_roots) and forwards a single boot-log line."""
-        from .dynamic_action_resume import resume_abandon_dynamic_actions
-        from .framework_paths import resolve_source_file_allowlist
+        try:
+            from .dynamic_action_resume import resume_abandon_dynamic_actions
+            from .framework_paths import resolve_source_file_allowlist
+        except ImportError:
+            log.debug(
+                "dynamic_action resume module unavailable; skipping sweep",
+            )
+            return
 
         if self.session_dir is None:
             return
