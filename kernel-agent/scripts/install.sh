@@ -953,7 +953,13 @@ parallel:
   min_parallel: ${GEAK_MIN_PARALLEL_WORKERS_VAL}
   workers_per_gpu: ${GEAK_WORKERS_PER_GPU_VAL}
   gpu_oversubscribe: 1.0
-  max_concurrent_llm: null
+  # Cap concurrent LLM calls independently of worker count. Left null it rides
+  # at num_parallel (=12 on 4 GPUs), and 12 simultaneous calls stall the
+  # auth-proxy (accepts the socket, never sends response headers -> httpx read
+  # blocks; the orchestrator preprocess hangs the whole job). 12 diverse worker
+  # STRATEGIES are still planned/benchmarked; only the LLM call fan-out is
+  # throttled. Env override: GEAK_MAX_CONCURRENT_LLM.
+  max_concurrent_llm: ${GEAK_MAX_CONCURRENT_LLM:-4}
 env:
   env:
     PAGER: cat
