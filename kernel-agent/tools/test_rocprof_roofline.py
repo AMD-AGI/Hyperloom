@@ -41,6 +41,57 @@ def test_rocprof_roofline_mapper_exposes_efficiency_percentage():
     assert "Roofline Eff (empirical peak): 62.5%" in build_text_report(payload)
 
 
+def test_rocprof_compute_resolver_uses_configured_absolute_path(tmp_path: Path, monkeypatch):
+    import rocprof_roofline as rr
+
+    tool = tmp_path / "rocprof-compute"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.setenv("HYPERLOOM_ROCPROF_COMPUTE_PATH", str(tool))
+    monkeypatch.setattr(rr.shutil, "which", lambda _name: None)
+
+    seen = {}
+
+    def fake_run(cmd, **_kwargs):
+        seen["cmd"] = cmd
+        return type("Proc", (), {
+            "returncode": 0,
+            "stdout": "rocprofiler-compute version: 1.2.3\n",
+        })()
+
+    monkeypatch.setattr(rr.subprocess, "run", fake_run)
+
+    assert rr._resolve_rocprof_compute() == str(tool)
+    assert rr._check_rocprof_compute() == "1.2.3"
+    assert seen["cmd"] == [str(tool), "--version"]
+
+
+def test_rocprof_run_uses_resolved_absolute_path(tmp_path: Path, monkeypatch):
+    import rocprof_roofline as rr
+
+    monkeypatch.setattr(rr, "_resolve_rocprof_compute", lambda: "/opt/rocm/bin/rocprof-compute")
+    monkeypatch.setattr(rr, "_check_rocprof_compute", lambda: "1.2.3")
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd[0])
+        stdout = SAMPLE_ROOFLINE if " analyze " in cmd[0] else ""
+        return type("Proc", (), {"returncode": 0, "stdout": stdout})()
+
+    monkeypatch.setattr(rr.subprocess, "run", fake_run)
+
+    ok, error = RocprofRooflineAnalyzer(tmp_path / "out").run(
+        workdir=str(tmp_path),
+        cmd="python harness.py --profile",
+        target_kernel="triton_my_kernel",
+    )
+
+    assert ok is True
+    assert error is None
+    assert commands[0].startswith("/opt/rocm/bin/rocprof-compute profile")
+    assert commands[1].startswith("/opt/rocm/bin/rocprof-compute analyze")
+
+
 def _make_sidecar(path: Path, kernel_id: str = "k001") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
@@ -98,6 +149,40 @@ def test_kernel_roofline_sidecar_before_kernel_opt_schema(tmp_path: Path):
     assert row["efficiency_percent"] == 62.5
     assert row["compute_utilization_pct"] == 50.0
     assert row["bandwidth_utilization_pct"] == 75.0
+
+
+def test_sidecar_kernel_name_without_metrics_does_not_tag_source(tmp_path: Path):
+    """A matched row carrying only a kernel name (no numeric roofline metrics)
+    must NOT flip source to +rocprof_roofline."""
+    workspace = tmp_path / "session"
+    sidecar = workspace / "reports" / "kernel_roofline.json"
+    _make_sidecar(sidecar)
+    rocprof_json = tmp_path / "before.json"
+    rocprof_txt = tmp_path / "before.txt"
+    rocprof_txt.write_text("no metrics\n", encoding="utf-8")
+    rocprof_json.write_text(json.dumps({
+        "status": "ok",
+        "results": [{
+            "name": "triton_my_kernel",
+            "matched_kernel_name": "triton_my_kernel",
+            "status": "matched",
+            "rocprof_roofline": {},
+        }],
+    }), encoding="utf-8")
+
+    ko._update_kernel_roofline_sidecar(
+        workspace_path=str(workspace),
+        kernel_id="k001",
+        rocprof_json_path=str(rocprof_json),
+        rocprof_txt_path=str(rocprof_txt),
+        log_path=None,
+        phase="before_kernel_opt",
+    )
+
+    updated = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert updated["source"] == "tracelens_analysis"
+    rr = updated["kernels"][0]["rocprof_roofline"]
+    assert rr["before_kernel_opt"]["matched_kernel_name"] == "triton_my_kernel"
 
 
 def test_kernel_roofline_sidecar_after_kernel_opt_schema(tmp_path: Path):
@@ -171,7 +256,7 @@ def test_sidecar_writes_skipped_status_without_json(tmp_path: Path):
 
     updated = json.loads(sidecar.read_text(encoding="utf-8"))
     row = updated["kernels"][0]
-    assert updated["source"] == "tracelens_analysis+rocprof_roofline"
+    assert updated["source"] == "tracelens_analysis"
     rr = row["rocprof_roofline"]
     assert rr["before_kernel_opt"] == {"status": "skipped", "reason": "missing_test_command"}
     assert rr["after_kernel_opt"] is None
@@ -234,7 +319,7 @@ def test_enrich_marks_no_benchmark_files_skipped(tmp_path: Path, monkeypatch):
     assert summary["skipped"] == 2
     assert summary["matched"] == 0
     assert summary["status"] == "ok"
-    assert updated["source"] == "tracelens_analysis+rocprof_roofline"
+    assert updated.get("source") is None
 
 
 def test_enrich_marks_all_skipped_when_rocprof_unavailable(tmp_path: Path, monkeypatch):
@@ -267,3 +352,4 @@ def test_enrich_marks_all_skipped_when_rocprof_unavailable(tmp_path: Path, monke
     rr_row = updated["kernels"][0]["rocprof_roofline"]
     assert rr_row["before_kernel_opt"]["reason"] == "rocprof_compute_unavailable"
     assert rr_row["after_kernel_opt"] is None
+    assert updated.get("source") is None

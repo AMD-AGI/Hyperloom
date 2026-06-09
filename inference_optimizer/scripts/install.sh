@@ -728,6 +728,52 @@ ensure_bench_serving_deps() {
   log "bench_serving deps installed OK"
 }
 
+# --- 4b. rocprof-compute (kernel roofline profiler) ---
+# kernel_optimization.py's before-GEAK roofline step shells out to
+# `rocprof-compute` (apt package rocprofiler-compute, ships under
+# /opt/rocm/bin). Without it every per-kernel roofline collection fails with
+# "rocprof-compute is not installed or not on PATH" and kernel_roofline.json
+# stays measurement-free. Detect first; install only when missing AND apt is
+# available. Fail-soft: a missing tool degrades roofline data, it does not
+# block optimization.
+# Command name + fallback path are overridable so tests can point them at
+# non-existent targets; production uses the canonical rocprof-compute / ROCm bin.
+ROCPROF_COMPUTE_BIN="${ROCPROF_COMPUTE_BIN:-rocprof-compute}"
+ROCPROF_COMPUTE_PATH="${HYPERLOOM_ROCPROF_COMPUTE_PATH:-${ROCPROF_COMPUTE_PATH:-/opt/rocm/bin/rocprof-compute}}"
+ROCPROF_APT_BIN="${ROCPROF_APT_BIN:-apt-get}"
+
+_rocprof_compute_present() {
+  command -v "$ROCPROF_COMPUTE_BIN" >/dev/null 2>&1 || [ -x "$ROCPROF_COMPUTE_PATH" ]
+}
+
+ensure_rocprof_compute() {
+  if _rocprof_compute_present; then
+    log "rocprof-compute present"
+    return 0
+  fi
+  if ! command -v "$ROCPROF_APT_BIN" >/dev/null 2>&1; then
+    warn "rocprof-compute missing and apt-get unavailable; kernel roofline data will be skipped"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute missing (check-only; would apt-get install rocprofiler-compute)"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install rocprofiler-compute via apt-get"
+    return 0
+  fi
+  log "installing rocprofiler-compute (provides rocprof-compute)"
+  export DEBIAN_FRONTEND=noninteractive
+  if "$ROCPROF_APT_BIN" update -qq >/dev/null 2>&1 \
+      && "$ROCPROF_APT_BIN" install -y --no-install-recommends rocprofiler-compute >/dev/null 2>&1 \
+      && _rocprof_compute_present; then
+    log "rocprofiler-compute installed OK"
+  else
+    warn "rocprofiler-compute install failed; kernel roofline data will be skipped (preinstall it in the image to fix)"
+  fi
+}
+
 # --- 5. Chain to kernel-agent ---
 chain_kernel_agent() {
   if [ "$SKIP_KERNEL_AGENT" -eq 1 ]; then
@@ -794,6 +840,7 @@ ensure_magpie
 ensure_magpie_atomic_scripts_patch
 ensure_inferencex
 ensure_bench_serving_deps
+ensure_rocprof_compute
 chain_kernel_agent
 chain_framework_agent
 
