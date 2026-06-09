@@ -109,8 +109,9 @@ def _run_path_a_fastpath(
         skip_profile = True
         bench_repeats = 1
         sanitized = output_dir / "_geak_sanitized_bench_moe_tile.sh"
+        _nl = chr(10)
         sanitized.write_text(
-            "\n".join(
+            _nl.join(
                 [
                     "#!/usr/bin/env bash",
                     "# HYPERLOOM_PATH_A_SANITIZED_WRAPPER",
@@ -120,7 +121,7 @@ def _run_path_a_fastpath(
                     f'exec python {harness_path} "$@"',
                 ]
             )
-            + "\n",
+            + _nl,
             encoding="utf-8",
         )
         sanitized.chmod(0o755)
