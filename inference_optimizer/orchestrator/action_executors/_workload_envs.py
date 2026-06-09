@@ -400,6 +400,7 @@ def materialize_config_with_envs(
     #    unless the operator already pinned --attention-backend.
     resolved_server_args = inject_sglang_attention_backend(
         resolved_server_args, bench.get("framework"), bench.get("model"),
+        gpu_type=gpu_type or bench.get("runner_type"),
     )
     if resolved_server_args:
         envs[framework_env] = resolved_server_args

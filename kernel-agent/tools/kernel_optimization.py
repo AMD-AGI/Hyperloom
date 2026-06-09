@@ -1756,6 +1756,23 @@ def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_p
     return roof
 
 
+def _rocprof_phase_has_measurement(phase_data: dict[str, Any]) -> bool:
+    status = str(phase_data.get("status") or "").lower()
+    if status in {"failed", "skipped"}:
+        return False
+    # Only numeric roofline metrics count as real measurement. matched_kernel_name
+    # is metadata and may be present even when rocprof produced no roofline values.
+    measured_keys = (
+        "roofline_efficiency_pct",
+        "compute_utilization_pct",
+        "bandwidth_utilization_pct",
+        "ai_hbm",
+        "perf_gflops",
+        "hbm_actual_gbps",
+    )
+    return any(phase_data.get(key) not in (None, "") for key in measured_keys)
+
+
 def _update_kernel_roofline_sidecar(
     *,
     workspace_path: str,
@@ -1852,7 +1869,10 @@ def _update_kernel_roofline_sidecar(
                 row["bandwidth_utilization_pct"] = phase_data["bandwidth_utilization_pct"]
         changed = True
     if changed:
-        payload["source"] = "tracelens_analysis+rocprof_roofline"
+        if _rocprof_phase_has_measurement(phase_data):
+            source = str(payload.get("source") or "tracelens_analysis")
+            if "rocprof_roofline" not in source:
+                payload["source"] = f"{source}+rocprof_roofline" if source else "rocprof_roofline"
         atomic_write_json(sidecar_path, payload)
         if log_path is not None:
             append_log(log_path, f"[rocprof_roofline] updated {sidecar_path} [{phase}]")
