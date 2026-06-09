@@ -68,8 +68,11 @@ def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
 
 def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
     """Positional args must raise so a future caller can't re-order the 5-tuple."""
+    # Indirect call (``fn`` alias) so the intentional bad arity stays a runtime
+    # check without tripping static arity analysis.
+    fn = recipe_canonical_id
     with pytest.raises(TypeError):
-        recipe_canonical_id("m", "h", "fw", "v", "p")  # type: ignore[misc]
+        fn("m", "h", "fw", "v", "p")  # type: ignore[misc]
 
 
 # §4 Item 2 — Local KB root is ${USER_DATA_PATH}/kb
