@@ -465,7 +465,16 @@ def _enrich_candidates_artifact(
     enrich_candidates_with_workload_shapes = None
     try:
         import importlib.util
+        import sys as _sys
         tl_path = _kernel_agent_tool_path("tracelens_analysis.py")
+        # tracelens_analysis.py does `from tracelens_arch_benchmark import ...`
+        # (a sibling under kernel-agent/tools/). Loading it via
+        # spec_from_file_location does NOT put that dir on sys.path, so the
+        # sibling import fails ("No module named 'tracelens_arch_benchmark'")
+        # and shape enrichment is silently skipped. Add the tools dir first.
+        _tl_dir = str(tl_path.parent) if hasattr(tl_path, "parent") else os.path.dirname(str(tl_path))
+        if _tl_dir and _tl_dir not in _sys.path:
+            _sys.path.insert(0, _tl_dir)
         spec = importlib.util.spec_from_file_location("tracelens_analysis", tl_path)
         if spec is not None and spec.loader is not None:
             mod = importlib.util.module_from_spec(spec)
