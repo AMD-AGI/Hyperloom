@@ -293,6 +293,7 @@ jobs:
           ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-1560}")
           ARGS+=(--output-dir "${OUTPUT_DIR}")
           ARGS+=(--artifacts-dir "${ARTIFACTS_DIR}")
+          ARGS+=(--submit-jitter-sec 600)
           python3 optimize_submit.py "${ARGS[@]}"
 
       - name: Render per-model manifest to job summary
