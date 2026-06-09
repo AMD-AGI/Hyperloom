@@ -82,7 +82,8 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
                 cost_limit: float | None, num_gpus: int, timeout_s: int,
                 kernel_repo: str = "", test_command: str = "") -> dict:
     import ray
-    runtime_env = quiet_ray_init()
+    runtime_env = quiet_ray_init(
+        num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
 
     @ray.remote(num_gpus=num_gpus)
     def _task(prompt_file_str: str, output_dir_str: str, kernel_path: str,

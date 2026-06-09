@@ -289,6 +289,43 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path):
     assert "baseline_warmup_round_failed" in result.get("nonfatal_warnings", [])
 
 
+def test_baseline_no_workspace_persists_stderr_to_file(tmp_path):
+    """When Magpie exits nonzero before creating a benchmark_* workspace
+    (no server.log ever written), the executor must persist the captured
+    stderr to ``baseline_stderr.log`` so the failure leaves an on-disk
+    artifact that survives the NFS clone / S3 archive."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="sglang")
+    output_dir = tmp_path / "ws"
+    crash_text = "torch.OutOfMemoryError: HIP out of memory (workspace_buffer)"
+
+    def fake_run(cmd, *args, **kwargs):
+        # Nonzero exit, no benchmark_* workspace created.
+        return subprocess.CompletedProcess(cmd, 1, "", crash_text)
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "subprocess_nonzero"
+    log_path = result.get("stderr_log_path")
+    assert log_path is not None, result
+    saved = Path(log_path)
+    assert saved.exists() and saved.name == "baseline_stderr.log"
+    assert crash_text in saved.read_text(encoding="utf-8")
+
+
 def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
     """Atom is a Magpie built-in (phase-aware) framework per
     AMD-AGI/Magpie#34, so an atom baseline engages the lifecycle
