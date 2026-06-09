@@ -58,12 +58,14 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
         "authority": "EXPERIENTIAL", "confidence": 0.85,
     }
     r = _page_to_recipe(fm)
+    # Reader now emits the unified nested KB-interface envelope: champion
+    # under ``body.best_config``, throughput under ``metrics``/``body``.
     assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:0_5_11:fp8"
-    assert r["best_config"] == {
+    assert r["body"]["best_config"] == {
         "extra_server_args": "--cuda-graph-max-bs 256",
         "extra_envs": {"FOO": "1"},
     }
-    assert r["best_throughput"] == 5800.5
+    assert r["body"]["best_throughput"] == 5800.5
 
 
 def test_best_config_split_unwraps_nested_extra_envs() -> None:
@@ -107,7 +109,7 @@ def test_nested_extra_envs_roundtrips_via_reader() -> None:
     _slug, content = recipe_to_page(rec)
     fm = yaml.safe_load(content.split("---", 2)[1])
     r = _page_to_recipe(fm)
-    assert r["best_config"] == {
+    assert r["body"]["best_config"] == {
         "extra_server_args": "--cuda-graph-max-bs 256",
         "extra_envs": {"SGLANG_X": "1"},
     }
@@ -127,10 +129,12 @@ def test_negative_knowledge_roundtrips() -> None:
     ))
     fm = yaml.safe_load(content.split("---", 2)[1])
     r = _page_to_recipe(fm)
+    # pitfalls / lessons stay top-level in the nested envelope; the
+    # success / failure lists map to findings / failures.
     assert r["pitfalls"] == pitfalls
     assert r["lessons"] == lessons
-    assert r["what_failed"] == what_failed
-    assert r["what_worked"] == what_worked
+    assert r["failures"] == what_failed
+    assert r["findings"] == what_worked
 
 
 def test_negative_knowledge_absent_yields_empty() -> None:
@@ -139,7 +143,7 @@ def test_negative_knowledge_absent_yields_empty() -> None:
     fm = yaml.safe_load(recipe_to_page(_recipe())[1].split("---", 2)[1])
     r = _page_to_recipe(fm)
     assert r["pitfalls"] == [] and r["lessons"] == []
-    assert r["what_failed"] == [] and r["what_worked"] == []
+    assert r["failures"] == [] and r["findings"] == []
 
 
 def test_recipe_to_page_skips_bare_anchor() -> None:

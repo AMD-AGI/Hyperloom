@@ -350,7 +350,11 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    # Always-on default = the per-task workspace.
+    # Always-on default = the per-task workspace. This fixture omits
+    # ``benchmark_script``, so the empty script name is not a Magpie
+    # built-in and the cold-start double-run is *not* eligible; the
+    # single-round path runs directly in ``output_dir`` and defaults
+    # ``$RESULT_DIR`` to that per-task workspace.
     assert captured["env"]["RESULT_DIR"] == str(output_dir)
 
 

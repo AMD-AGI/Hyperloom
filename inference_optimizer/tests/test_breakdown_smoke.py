@@ -1197,6 +1197,16 @@ def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
                 "call_count": 48,
                 "duration_us": 6874.0,
                 "reusable_native_kernel": True,
+                "rocprof_roofline": {
+                    "before_kernel_opt": {
+                        "status": "matched",
+                        "roofline_efficiency_pct": 37.77,
+                    },
+                    "after_kernel_opt": {
+                        "status": "scheduled",
+                        "reason": "background_task",
+                    },
+                },
             },
             {
                 "kernel_id": "k002",
@@ -1232,6 +1242,9 @@ def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
     assert k1["call_count"] == 48
     assert k1["duration_us"] == pytest.approx(6874.0)
     assert k1["reusable_native_kernel"] is True
+    assert k1["rocprof_roofline"]["before_kernel_opt"]["status"] == "matched"
+    assert k1["rocprof_roofline"]["after_kernel_opt"]["status"] == "scheduled"
+    # Compute-bound entry preserves False explicitly.
     assert kr["kernels"][1]["reusable_native_kernel"] is False
 
 
@@ -2057,6 +2070,39 @@ def test_baseline_attempts_history_state_recorded_takes_precedence(
     )
 
 
+def test_baseline_attempts_history_passes_through_error_excerpt(
+    tmp_path: Path,
+) -> None:
+    """A failed baseline attempt's ``error_excerpt`` / ``stderr_tail`` survives into exported ``attempts_history`` for RCA."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "errx"})
+    _write_json(sd / "state.json", {
+        "session_id": "errx",
+        "baseline_tput": 0.0,
+        "baseline_attempts": [
+            {"ts": "2026-06-08T01:00:00+00:00", "task_id": "t1",
+             "status": "failed", "decision": "no_promote",
+             "key_metric": None, "error_class": "subprocess_nonzero",
+             "error_excerpt": "torch.OutOfMemoryError: HIP out of memory",
+             "stderr_tail": "aiter_backend.py line 219 workspace_buffer",
+             "stderr_log_path": "runs/baseline/t1/baseline_stderr.log"},
+        ],
+    })
+
+    b = build(sd)
+    history = b["baseline"]["attempts_history"]
+    assert len(history) == 1
+    assert history[0]["error_class"] == "subprocess_nonzero"
+    assert history[0]["error_excerpt"] == (
+        "torch.OutOfMemoryError: HIP out of memory"
+    )
+    assert "workspace_buffer" in (history[0]["stderr_tail"] or "")
+    assert history[0]["stderr_log_path"] == (
+        "runs/baseline/t1/baseline_stderr.log"
+    )
+
+
+# ---------------------------------------------------------------------------
 # B3: invocation populated from baseline_config + server.log
 def test_baseline_invocation_populated(tmp_path: Path) -> None:
     """``baseline.invocation`` reads framework_args from server.log and allowlisted envs, keeping secret-shaped keys out."""

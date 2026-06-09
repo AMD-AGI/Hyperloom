@@ -186,8 +186,7 @@ def build_roofline_snapshot(
 ) -> dict[str, Any]:
     """Materialise one side (baseline or latest) of the comparison.
 
-    ``theoretical_peak_tok_per_sec`` is the two-sided ceiling ``min(T_mem, T_cmp)``,
-    constant across a session; defaults of 0/"unknown" make derived pct fields ``None``.
+    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling (from ``roofline_ceiling.compute_roofline_breakdown_from_state``); mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
     """
     within, gap = _compute_within_and_gap(
         peak=theoretical_peak_tok_per_sec,
@@ -203,7 +202,7 @@ def build_roofline_snapshot(
         "comm_pct": None,
         "top_bottleneck": None,
         "top_kernel": None,
-        # Two-sided roofline ceiling: theoretical_peak stays min(mem, cmp); mem/cmp/bound surface each side independently.
+        # Primary decode roofline ceiling plus its memory/compute sides; all None when the ceiling is unavailable.
         "theoretical_peak_tok_per_sec": (
             float(theoretical_peak_tok_per_sec)
             if theoretical_peak_tok_per_sec > 0 else None

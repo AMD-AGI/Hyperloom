@@ -29,6 +29,7 @@ class _FakeSharedState:
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[Any] = field(default_factory=list)
     warm_start_lessons: list[Any] = field(default_factory=list)
+    warm_start_context: dict[str, Any] = field(default_factory=dict)
     framework: str = "sglang"
     framework_version: str = "0.4.5"
     precision: str = "fp8"
@@ -39,6 +40,7 @@ class _FakeSharedState:
     osl: int = 0
     max_model_len: int = 0
     model_class: str = ""
+    baseline_workload_extra: dict[str, Any] = field(default_factory=dict)
 
     def save(self, _path: Path) -> None:  # noqa: D401
         """No-op save — tests don't care about disk persistence here."""
@@ -117,9 +119,10 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
     assert warm_path.is_file()
     import json
     payload = json.loads(warm_path.read_text())
-    # warm_start lookup runs AFTER put_recipe, so the row is present and tier == "exact".
-    assert payload["tier"] == "exact"
-    assert payload["confidence"] == 1.0
+    # Bare T0 anchor row (identity but no best_config) is present after put_recipe but NOT actionable: classified seed_only/conf 0.0 so warm-replay won't apply an empty config.
+    assert payload["tier"] == "seed_only"
+    assert payload["confidence"] == 0.0
+    assert state.warm_start_context.get("status") == "seed_only"
 
 
 # warm-start surfacing pitfalls / lessons embedded in the recipe row

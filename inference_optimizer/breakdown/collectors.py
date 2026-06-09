@@ -705,6 +705,9 @@ def collect_baseline(
             "key_metric":    _to_float(a.get("key_metric")),
             "workspace":     a.get("workspace"),
             "error_class":   a.get("error_class"),
+            "error_excerpt": a.get("error_excerpt"),
+            "stderr_tail":   a.get("stderr_tail"),
+            "stderr_log_path": a.get("stderr_log_path"),
         })
 
     # Disk-walking fallback when state.baseline_attempts is empty; each
@@ -843,6 +846,9 @@ def _reconstruct_baseline_attempts(
             "key_metric":   out_tput,
             "workspace":    _rel(task_dir, session_dir) or str(task_dir),
             "error_class":  None,
+            "error_excerpt": None,
+            "stderr_tail":  None,
+            "stderr_log_path": None,
         })
     return out
 
@@ -3459,6 +3465,7 @@ def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "call_count":            _to_int(raw.get("call_count")) or 0,
         "duration_us":           _to_float(raw.get("duration_us")) or 0.0,
         "reusable_native_kernel": bool(raw.get("reusable_native_kernel")),
+        "rocprof_roofline":      raw.get("rocprof_roofline"),
     }
 
 

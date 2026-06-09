@@ -274,8 +274,38 @@ class RooflineExecutor:
                 sub_result=ta_result,
             )
 
-        # Cache via the C1 recorder (bumps roofline_snapshot_id by one and
-        # writes analysis_md_text / analysis_md_path).
+        # #431: trace_analyze status=ok but ZERO hot kernels means cuda-graph capture folded per-kernel time into hipGraphLaunch wrappers (degraded input, not a TraceLens failure). Append a trace_health_warnings entry so the LLM re-profiles in eager mode instead of reading top=[] as "no kernels".
+        hot = (
+            ta_result.get("hot_kernels_top15")
+            or ta_result.get("hot_kernels")
+            or []
+        )
+        trace_health = profile_result.get("trace_health") or {}
+        attribution_degraded = bool(
+            not hot and trace_health.get("per_kernel_attribution_degraded")
+        )
+        if attribution_degraded:
+            warning = {
+                "code": "cuda_graph_attribution_degraded",
+                "severity": "warning",
+                "message": (
+                    "trace_analyze returned 0 hot kernels: the profile trace "
+                    "has no execute_*/user_annotation events, so per-kernel "
+                    "device time is folded into hipGraphLaunch wrappers under "
+                    "cuda-graph capture (#431). Re-profile in eager mode "
+                    "(append --enforce-eager to EXTRA_SGLANG_ARGS / "
+                    "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
+                    "a capture-fold fallback over capture_traces/."
+                ),
+                "capture_traces_present": bool(
+                    trace_health.get("capture_traces_present")
+                ),
+            }
+            health = list(ta_result.get("trace_health_warnings") or [])
+            health.append(warning)
+            ta_result["trace_health_warnings"] = health
+
+        # Cache via the C1 recorder (bumps roofline_snapshot_id by one, writes analysis_md_text / analysis_md_path).
         self.shared_state.record_trace_analyze(ta_payload, ta_result)
         cached = self.shared_state.last_trace_analyze or {}
 
@@ -287,6 +317,11 @@ class RooflineExecutor:
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile_result.get("workspace"),
+            # #431: False on a healthy run; True when trace_analyze produced
+            # 0 hot kernels because cuda-graph folding stripped per-kernel
+            # attribution (a ``cuda_graph_attribution_degraded`` entry was
+            # appended to trace_health_warnings for the prompt/audit).
+            "kernel_attribution_degraded": attribution_degraded,
         }
 
     # Helpers (instance methods so tests can subclass / monkeypatch)

@@ -29,6 +29,7 @@ import yaml
 
 from ...paths import asset_root
 from ._grid_runner import (
+    inject_sglang_attention_backend,
     inject_sglang_context_length,
     inject_sglang_watchdog_timeout,
     server_args_env_name,
@@ -392,6 +393,13 @@ def materialize_config_with_envs(
     )
     resolved_server_args = inject_sglang_watchdog_timeout(
         resolved_server_args, bench.get("framework"),
+    )
+    # 3. Dual-chunk attention backend: Qwen 1M models declare
+    #    dual_chunk_attention_config; sglang rejects the default aiter
+    #    backend for them and demands dual_chunk_flash_attn. Inject it
+    #    unless the operator already pinned --attention-backend.
+    resolved_server_args = inject_sglang_attention_backend(
+        resolved_server_args, bench.get("framework"), bench.get("model"),
     )
     if resolved_server_args:
         envs[framework_env] = resolved_server_args

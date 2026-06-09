@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable
 
 
 log = logging.getLogger(__name__)
+_BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
 
 
 # Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
@@ -1716,6 +1717,258 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
     return {"raw_stdout_tail": text[-2000:]}
 
 
+# ---------------------------------------------------------------------------
+def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
+    """Resolve the TraceLens/device kernel name for a roofline sidecar row."""
+    sidecar_path = session_dir / "reports" / "kernel_roofline.json"
+    try:
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    rows = payload.get("kernels") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return ""
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("kernel_id") or "") == str(kernel_id):
+            return str(row.get("name") or row.get("matched_kernel_name") or "").strip()
+    return ""
+
+
+def _record_after_kernel_opt_rocprof_status(
+    *,
+    session_dir: Path,
+    kernel_id: str,
+    status: str,
+    reason: str = "",
+    json_path: str = "",
+    txt_path: str = "",
+    log: Any = None,
+) -> None:
+    """Best-effort sidecar status update for skipped/failed after-opt rocprof."""
+    try:
+        ko_tool = _kernel_agent_tool_path("kernel_optimization.py")
+        ko_dir = ko_tool.parent
+        import sys as _sys
+        if str(ko_dir) not in _sys.path:
+            _sys.path.insert(0, str(ko_dir))
+        from kernel_optimization import _update_kernel_roofline_sidecar  # type: ignore[import-not-found]  # noqa: PLC0415
+        _update_kernel_roofline_sidecar(
+            workspace_path=str(session_dir),
+            kernel_id=kernel_id,
+            rocprof_json_path=json_path,
+            rocprof_txt_path=txt_path,
+            log_path=None,
+            rocprof_status=status,
+            rocprof_reason=reason,
+            phase="after_kernel_opt",
+        )
+    except Exception as exc:
+        if log is not None:
+            log.warning("integrate: after_kernel_opt sidecar status update failed: %s", exc)
+
+
+def _rocprof_timeout_sec() -> int:
+    try:
+        return max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800")))
+    except (TypeError, ValueError):
+        return 1800
+
+
+def _rocprof_profile_command(test_command: str) -> str:
+    if "--correctness" not in test_command:
+        return test_command
+    if "/unittest/harness_" not in test_command and " harness_" not in test_command:
+        return test_command
+    return test_command.replace("--correctness", "--profile", 1)
+
+
+async def _run_after_kernel_opt_rocprof(
+    *,
+    kernel_id: str,
+    session_dir: Path,
+    log: Any,
+) -> dict[str, Any]:
+    """Best-effort: after an integrate KEEP, run rocprof on the now-patched kernel.
+
+    Resolves ``test_command`` from ``SharedState.kernel_opt_attempts`` or
+    ``last_kernel_opt``, launches ``rocprof_roofline.py`` as a subprocess, and
+    calls ``_update_kernel_roofline_sidecar`` with ``phase='after_kernel_opt'``.
+
+    Always returns a small status dict; never raises.
+    """
+    rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
+    if rocprof_env in {"0", "false", "no", "off"}:
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason="disabled_by_env",
+            log=log,
+        )
+        return {"status": "skipped", "reason": "disabled_by_env"}
+
+    try:
+        from .shared_state import SharedState
+        state = SharedState.load_or_init(session_dir)
+        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        test_command = str(attempt.get("test_command") or "").strip()
+        if not test_command:
+            lko = state.last_kernel_opt or {}
+            if str(lko.get("kernel_id") or "") == kernel_id:
+                bp = lko.get("backend_paths") or {}
+                test_command = str(bp.get("test_command") or "").strip()
+        # Derive workdir from last_source_file (mirrors before-opt logic); fall back to session_dir.
+        run_workdir: Path = session_dir
+        source_file = str(attempt.get("last_source_file") or "").strip()
+        if source_file:
+            sf = Path(source_file)
+            if sf.is_file():
+                run_workdir = sf.parent
+            elif sf.is_dir():
+                run_workdir = sf
+    except Exception as exc:
+        reason = f"state_load_error: {type(exc).__name__}"
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason=reason,
+            log=log,
+        )
+        return {"status": "skipped", "reason": reason}
+
+    if not test_command:
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason="no_test_command_in_state",
+            log=log,
+        )
+        return {"status": "skipped", "reason": "no_test_command_in_state"}
+
+    try:
+        tool = _kernel_agent_tool_path("rocprof_roofline.py")
+    except Exception:
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason="rocprof_roofline_tool_unavailable",
+            log=log,
+        )
+        return {"status": "skipped", "reason": "rocprof_roofline_tool_unavailable"}
+
+    out_dir = session_dir / "kernel-agent" / "rocprof_after_kernel_opt" / kernel_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_json = out_dir / "after.json"
+    out_txt = out_dir / "after.txt"
+    timeout_sec = _rocprof_timeout_sec()
+    profiling_command = _rocprof_profile_command(test_command)
+
+    cmd = [
+        "python3", str(tool),
+        "--workdir", str(run_workdir),
+        "--cmd", profiling_command,
+        "--out-json", str(out_json),
+        "--out-txt", str(out_txt),
+        "--timeout-sec", str(timeout_sec),
+    ]
+    target_kernel = _lookup_kernel_roofline_name(session_dir, kernel_id)
+    if target_kernel:
+        cmd.extend(["--target-kernel", target_kernel])
+    log.info("integrate: running after_kernel_opt rocprof for %s", kernel_id)
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec + 30)
+    except Exception as exc:
+        log.warning("integrate: after_kernel_opt rocprof subprocess error: %s", exc)
+        reason = f"{type(exc).__name__}: {exc}"
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="failed",
+            reason=reason,
+            json_path=str(out_json),
+            txt_path=str(out_txt),
+            log=log,
+        )
+        return {"status": "failed", "reason": reason}
+
+    try:
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+
+    status = "ok" if rc == 0 and payload.get("status") == "ok" else payload.get("status", "failed")
+    log.info("integrate: after_kernel_opt rocprof status=%s for %s", status, kernel_id)
+
+    # Mirror into reports/kernel_roofline.json
+    try:
+        ko_tool = _kernel_agent_tool_path("kernel_optimization.py")
+        ko_dir = ko_tool.parent
+        import sys as _sys
+        if str(ko_dir) not in _sys.path:
+            _sys.path.insert(0, str(ko_dir))
+        from kernel_optimization import _update_kernel_roofline_sidecar  # type: ignore[import-not-found] # noqa: PLC0415
+        _update_kernel_roofline_sidecar(
+            workspace_path=str(session_dir),
+            kernel_id=kernel_id,
+            rocprof_json_path=str(out_json),
+            rocprof_txt_path=str(out_txt),
+            log_path=None,
+            rocprof_status=status,
+            phase="after_kernel_opt",
+        )
+    except Exception as exc:
+        log.warning("integrate: after_kernel_opt sidecar update failed: %s", exc)
+
+    return {
+        "status": status,
+        "json_path": str(out_json),
+        "txt_path": str(out_txt),
+    }
+
+
+def _schedule_after_kernel_opt_rocprof(
+    *,
+    kernel_id: str,
+    session_dir: Path,
+    log: logging.Logger,
+) -> dict[str, Any]:
+    rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
+    if rocprof_env in {"0", "false", "no", "off"}:
+        _record_after_kernel_opt_rocprof_status(
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+            status="skipped",
+            reason="disabled_by_env",
+            log=log,
+        )
+        return {"status": "skipped", "reason": "disabled_by_env"}
+
+    _record_after_kernel_opt_rocprof_status(
+        session_dir=session_dir,
+        kernel_id=kernel_id,
+        status="scheduled",
+        reason="background_task",
+        log=log,
+    )
+    task = asyncio.create_task(_run_after_kernel_opt_rocprof(
+        kernel_id=kernel_id,
+        session_dir=session_dir,
+        log=log,
+    ))
+    _BACKGROUND_ROCPROF_TASKS.add(task)
+
+    def _done(done_task: asyncio.Task[Any]) -> None:
+        _BACKGROUND_ROCPROF_TASKS.discard(done_task)
+        try:
+            done_task.result()
+        except Exception as exc:  # noqa: BLE001 — best-effort background task
+            log.warning("integrate: after_kernel_opt rocprof background failed: %s", exc)
+
+    task.add_done_callback(_done)
+    return {"status": "scheduled", "reason": "background_task"}
 async def integrate_handler(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
@@ -1803,7 +2056,22 @@ async def integrate_handler(
     )
     ctx = RunnerContext(task=fake_task, lease=None)
 
-    # Multi-node: force a FULL sglang restart so it re-imports the patched modules (a resume would measure the pre-patch process); ctx.extra flag stops a double restart in BaselineExecutor.
+    # GH #458: aiter cpp_itfs / runtime-compiled kernels recompile at runtime (cache dir hashes params not source, so pristine+patched collide). Set AITER_REBUILD=1 for the re-baseline server so aiter wipes its BUILD_DIR and recompiles the patched kernel. Scoped to cpp_itfs applies and ALWAYS restored.
+    cpp_itfs_backup = apply_result.get("cpp_itfs_cache_backup") or {}
+    force_aiter_rebuild = bool(cpp_itfs_backup.get("is_cpp_itfs"))
+    _prev_aiter_rebuild = os.environ.get("AITER_REBUILD")
+    if force_aiter_rebuild:
+        os.environ["AITER_REBUILD"] = "1"
+
+    def _restore_aiter_rebuild_env() -> None:
+        if not force_aiter_rebuild:
+            return
+        if _prev_aiter_rebuild is None:
+            os.environ.pop("AITER_REBUILD", None)
+        else:
+            os.environ["AITER_REBUILD"] = _prev_aiter_rebuild
+
+    # Multi-node: force a FULL sglang restart so it re-imports the patched modules (a resume would measure the pre-patch process); ctx.extra["mn_round_restarted"] stops a double restart in BaselineExecutor, force_full_restart scopes MULTI_NODE_RESTART_RESUME_RUNNING=0 to this call only.
     from .action_executors._multi_node_env import is_multi_node
     if is_multi_node():
         from .action_executors._multi_node_server_lifecycle import (
@@ -1825,6 +2093,7 @@ async def integrate_handler(
             ctx.extra = {**(getattr(ctx, "extra", None) or {}),
                          "mn_round_restarted": True}
         except ServerRestartFailed as exc:
+            _restore_aiter_rebuild_env()
             revert_result = _maybe_revert_kernel_patch(apply_result)
             return {
                 "status": "failed",
@@ -1850,6 +2119,10 @@ async def integrate_handler(
             "apply_result": apply_result,
             "revert_result": revert_result,
         }
+    finally:
+        # Restore AITER_REBUILD on every path once the re-baseline server has
+        # been launched, so the env override never leaks past this integrate.
+        _restore_aiter_rebuild_env()
 
     if not is_valid_measurement(bench_result):
         revert_result = _maybe_revert_kernel_patch(apply_result)
@@ -1864,6 +2137,41 @@ async def integrate_handler(
             "revert_result": revert_result,
         }
 
+    # GH #458 (point 2): don't score a stale binary. For cpp_itfs targets the
+    # served kernel is runtime-compiled, so a re-baseline that reused a stale
+    # params-hashed lib.so would silently measure the PRE-patch kernel (the
+    # observed -0.17% on a real +2.5% paged_attention win). Before trusting
+    # gain_pct, assert a real rebuild landed: apply moved the cache aside, so
+    # a fresh <build_dir>/<md_name>_*/lib.so newer than the invalidation is
+    # proof the patched kernel was (re)compiled and served. If not, flag for
+    # review instead of emitting a KEEP/REVERT on a possibly-stale measure.
+    #
+    # Single-node only: in multi-node the served cache lives on the serving
+    # pod, not this sandbox, so AITER_REBUILD=1 on the pod restart is the
+    # mechanism and the sandbox-local check is skipped to avoid false aborts.
+    # verify_cpp_itfs_rebuilt() returns verified=True for non-cpp_itfs targets
+    # so this gate is a strict no-op off the cpp_itfs path.
+    rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
+    if force_aiter_rebuild and not is_multi_node():
+        rebuild_check = _load_apply_tool().verify_cpp_itfs_rebuilt(cpp_itfs_backup)
+        if not rebuild_check.get("verified", True):
+            revert_result = _maybe_revert_kernel_patch(apply_result)
+            return {
+                "status": "failed",
+                "error_class": "cpp_itfs_rebuild_not_verified",
+                "error": (
+                    "re-baseline did not produce a freshly-built cpp_itfs "
+                    "lib.so; refusing to score a possibly-stale binary"
+                ),
+                "decision": "NEEDS_REVIEW",
+                "kernel_id": kernel_id,
+                "patch_path": patch_path,
+                "target_file": payload.get("target_file") or payload.get("source_file"),
+                "apply_result": apply_result,
+                "revert_result": revert_result,
+                "rebuild_check": rebuild_check,
+            }
+
     new_tput = float(bench_result.get("output_throughput") or 0.0)
     gain_pct = ((new_tput - base_tput) / base_tput * 100.0) if base_tput > 0 else 0.0
     decision = (
@@ -1876,7 +2184,18 @@ async def integrate_handler(
         if decision == "KEEP"
         else _maybe_revert_kernel_patch(apply_result)
     )
-    return {
+
+    # After KEEP, schedule rocprof so integrate returns without waiting
+    # up to the profiling timeout.
+    rocprof_after_info: dict[str, Any] = {}
+    if decision == "KEEP" and kernel_id:
+        rocprof_after_info = _schedule_after_kernel_opt_rocprof(
+            kernel_id=kernel_id,
+            session_dir=session_dir,
+            log=log,
+        )
+
+    result: dict[str, Any] = {
         "status":      "ok",
         "decision":    decision,
         "kernel_id":   kernel_id,
@@ -1890,7 +2209,11 @@ async def integrate_handler(
         "extra_server_args": extra_args,
         "apply_result": apply_result,
         "revert_result": revert_result,
+        "rebuild_check": rebuild_check,
     }
+    if rocprof_after_info:
+        result["rocprof_after_kernel_opt"] = rocprof_after_info
+    return result
 
 
 # Kernel-agent programmatic dispatch table (LLM-driven requests routed via ``Coordinator._handle_request``).

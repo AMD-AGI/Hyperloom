@@ -2239,6 +2239,21 @@ class Coordinator:
         bc_envs = best_config.get("extra_envs") or best_config.get("envs") or {}
         if not isinstance(bc_envs, dict):
             bc_envs = {}
+        # Prefer the WarmStartContext's ready-to-replay champion when T0
+        # built one (status=hit). It is the model-facing projection that
+        # already normalized args/envs, so it wins over re-deriving from
+        # the raw recipe row; the recipe path stays as the fallback for
+        # legacy state.json without a context.
+        wsc = getattr(state, "warm_start_context", None) or {}
+        if isinstance(wsc, dict) and str(wsc.get("status") or "") == "hit":
+            replay = wsc.get("recommended_replay") or {}
+            if isinstance(replay, dict):
+                rep_args = str(replay.get("extra_server_args") or "").strip()
+                rep_envs = replay.get("extra_envs") or {}
+                if rep_args or (isinstance(rep_envs, dict) and rep_envs):
+                    bc_args = rep_args or bc_args
+                    if isinstance(rep_envs, dict) and rep_envs:
+                        bc_envs = rep_envs
         if not bc_args and not bc_envs:
             state.warm_replay_outcome = {
                 "status": "skipped",

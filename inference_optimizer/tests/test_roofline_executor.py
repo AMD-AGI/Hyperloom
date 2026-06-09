@@ -1095,3 +1095,111 @@ async def test_retry_works_when_operator_started_with_non_mixed(tmp_path):
     assert result["status"] == "succeeded"
     assert calls["payloads"][1]["steady_state_mode"] == "decode_only"
     assert calls["payloads"][1]["_n26_retry_from_mode"] == "prefilldecode"
+
+
+# ---------------------------------------------------------------------------
+# #431: cuda-graph folding -> trace_analyze ok but 0 hot kernels
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
+    """#431: trace_analyze succeeds (status=ok) but returns 0 hot kernels
+    because cuda-graph capture folded per-kernel activity (profile
+    trace_health flags per_kernel_attribution_degraded). The executor must
+    append a ``cuda_graph_attribution_degraded`` trace_health_warnings entry
+    — persisted into last_trace_analyze + rendered as ``warnings=[...]`` in
+    the orchestration prompt — so the LLM re-profiles eager instead of
+    reading top=[] as 'no optimizable kernels'."""
+    state = _state()
+    ctx = _ctx(tmp_path)
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\nCompute 80%, Idle 18%\n", encoding="utf-8")
+
+    profile = _profile_success("/tmp/trace.gz")
+    profile["trace_health"] = {
+        "per_kernel_attribution_degraded": True,
+        "capture_traces_present": True,
+        "issues": ["[3] main trace ... no execute_*/user_annotation ..."],
+    }
+    ta = _trace_analyze_success()          # hot_kernels: []
+    ta["trace_report_path"] = str(md)
+
+    p1, p2 = _patch_subs(profile, ta)
+    executor = RooflineExecutor(shared_state=state)
+    with p1, p2:
+        result = await executor(ctx)
+
+    assert result["status"] == "succeeded"
+    assert result["kernel_attribution_degraded"] is True
+    # Persisted into the canonical last_trace_analyze warnings channel:
+    warnings = state.last_trace_analyze.get("trace_health_warnings") or []
+    codes = [w.get("code") for w in warnings if isinstance(w, dict)]
+    assert "cuda_graph_attribution_degraded" in codes, warnings
+    w = next(
+        w for w in warnings
+        if w.get("code") == "cuda_graph_attribution_degraded"
+    )
+    assert w["capture_traces_present"] is True
+    assert "--enforce-eager" in w["message"]
+
+
+@pytest.mark.asyncio
+async def test_431_zero_hot_without_degraded_health_no_warning(tmp_path):
+    """Healthy trace (per_kernel_attribution_degraded=False) that genuinely
+    finds 0 hot kernels must NOT be mislabeled as cuda-graph degradation."""
+    state = _state()
+    ctx = _ctx(tmp_path)
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+
+    profile = _profile_success("/tmp/trace.gz")
+    profile["trace_health"] = {
+        "per_kernel_attribution_degraded": False,
+        "capture_traces_present": True,
+        "issues": [],
+    }
+    ta = _trace_analyze_success()
+    ta["trace_report_path"] = str(md)
+
+    p1, p2 = _patch_subs(profile, ta)
+    executor = RooflineExecutor(shared_state=state)
+    with p1, p2:
+        result = await executor(ctx)
+
+    assert result["status"] == "succeeded"
+    assert result["kernel_attribution_degraded"] is False
+    warnings = state.last_trace_analyze.get("trace_health_warnings") or []
+    codes = [w.get("code") for w in warnings if isinstance(w, dict)]
+    assert "cuda_graph_attribution_degraded" not in codes
+
+
+@pytest.mark.asyncio
+async def test_431_nonzero_hot_never_flags_degraded(tmp_path):
+    """Even if trace_health says degraded, a non-empty hot_kernels list
+    proves attribution worked — do NOT append the warning."""
+    state = _state()
+    ctx = _ctx(tmp_path)
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+
+    profile = _profile_success("/tmp/trace.gz")
+    profile["trace_health"] = {
+        "per_kernel_attribution_degraded": True,
+        "capture_traces_present": False,
+        "issues": [],
+    }
+    ta = _trace_analyze_success()
+    ta["hot_kernels"] = [
+        {"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 30.0},
+    ]
+    ta["trace_report_path"] = str(md)
+
+    p1, p2 = _patch_subs(profile, ta)
+    executor = RooflineExecutor(shared_state=state)
+    with p1, p2:
+        result = await executor(ctx)
+
+    assert result["status"] == "succeeded"
+    assert result["kernel_attribution_degraded"] is False
+    warnings = state.last_trace_analyze.get("trace_health_warnings") or []
+    codes = [w.get("code") for w in warnings if isinstance(w, dict)]
+    assert "cuda_graph_attribution_degraded" not in codes

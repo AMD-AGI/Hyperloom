@@ -20,6 +20,13 @@ from inference_optimizer.orchestrator.action_executors._inferencex_patcher impor
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_inferencex_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every test hermetic w.r.t. the #210 discovery env: clear ``$INFERENCEX_PATH`` / ``$MAGPIE_DIR`` so a synthetic ``tmp_path`` test never discovers a real on-pod checkout (tests that exercise the fallback re-set them)."""
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+
+
 # Verbatim upstream shape (incl. the 8-space indent the patcher matches on).
 _UPSTREAM_FIXTURE = """\
 #!/usr/bin/env bash

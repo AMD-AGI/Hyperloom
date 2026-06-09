@@ -394,6 +394,56 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
 
 
+def test_write_reports_does_not_run_rocprof_enrich_by_default(tmp_path, monkeypatch):
+    """Trace analysis must not synchronously profile every hot kernel by default."""
+    import json as _json
+    from argparse import Namespace
+    import rocprof_roofline as rr
+
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
+    analysis_md.parent.mkdir(parents=True, exist_ok=True)
+    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
+    candidate = {
+        "kernel_id": "k001",
+        "name": "paged_attention",
+        "duration_us": 100.0,
+        "call_count": 2,
+        "reusable_native_kernel": True,
+    }
+    args = Namespace(
+        trace_input=str(trace),
+        model_name="llama",
+        framework="sglang",
+        target_platform="MI300X",
+        analysis_mode="inference",
+        runtime_env="local",
+        dry_run=False,
+    )
+    called = {"value": False}
+
+    def _boom(*_args, **_kwargs):
+        called["value"] = True
+        raise AssertionError("batch enrich should be opt-in")
+
+    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
+    monkeypatch.setattr(rr, "enrich_kernel_roofline_sidecar", _boom)
+
+    artifacts = tla.write_reports(
+        tmp_path / "run",
+        trace_input_type="file",
+        trace_files=[trace],
+        candidates=[candidate],
+        args=args,
+        existing_report_path=analysis_md,
+    )
+
+    assert called["value"] is False
+    payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
+    assert payload["hot_kernels"][0]["kernel_id"] == "k001"
+
+
 def test_load_model_kernel_params_reads_head_dim(tmp_path):
     import json as _json
 
@@ -2352,6 +2402,193 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
     groups = tlr.aggregate_by_source_function(cands)
     assert len(groups) == 1
     assert groups[0]["function_name"] == "rms_norm"
+
+
+# ===========================================================================
+# #420: task-group over-splitting — one device kernel fragmented across
+# multiple groups, each costing a redundant GEAK dispatch. Two fragmentation
+# sources:
+#   (1) native (.cu/.hip/.cpp) kernels have no Python AST def-line, so
+#       TraceLens reports the per-call ``#L`` line that differs per call site;
+#   (2) C++ template/dtype mangling (``rmsnorm_kernel<bf16>`` vs ``<fp16>``).
+# The fix keys native sources on ``(normalized_op, canonical_path)`` only and
+# normalizes the operation name, while preserving the Q1 invariant that
+# distinct base-name kernels sharing a wrapper never merge.
+# ===========================================================================
+def test_normalize_operation_key_strips_templates():
+    """Template/dtype args are dropped; distinct base names stay distinct;
+    nested templates are handled; an all-template name falls back to the
+    original so a group key never collapses to empty."""
+    assert tlr._normalize_operation_key("rmsnorm_kernel<bf16>") == "rmsnorm_kernel"
+    assert tlr._normalize_operation_key("rmsnorm_kernel<fp16>") == "rmsnorm_kernel"
+    assert tlr._normalize_operation_key("foo<bar<baz>>") == "foo"
+    # Distinct base names must remain distinct after normalization.
+    assert tlr._normalize_operation_key("a<x>") != tlr._normalize_operation_key("b<x>")
+    # No templates: returned verbatim (Q1 base names never change).
+    assert (
+        tlr._normalize_operation_key("vllm::rocm_unquantized_gemm")
+        == "vllm::rocm_unquantized_gemm"
+    )
+    # Degenerate all-template name: keep original rather than an empty key.
+    assert tlr._normalize_operation_key("<all>") == "<all>"
+
+
+def test_is_native_source_detects_device_extensions():
+    """Native C/C++/HIP/CUDA suffixes are recognized (case-insensitive);
+    Python and unrelated files are not."""
+    for p in ("kern.cu", "a/b/kern.cuh", "x.hip", "y.cpp", "Z.CU", "k.cc"):
+        assert tlr._is_native_source(p), p
+    for p in ("model.py", "wrapper.pyi", "notes.txt", ""):
+        assert not tlr._is_native_source(p), p
+
+
+def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
+    """#420 core: a native .cu kernel invoked from two call sites reports
+    two different ``#L`` lines (no Python AST def-line exists, so the
+    reported line is the call site). The OLD key ``(op, path, line, fn)``
+    split one kernel into two task_groups — two redundant GEAK dispatches.
+    Native sources must key on ``(op, path)`` only and collapse to one."""
+    src = tmp_path / "rmsnorm.cu"
+    src.write_text(
+        "__global__ void rmsnorm_kernel(float* x) { /* ... */ }\n",
+        encoding="utf-8",
+    )
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "rmsnorm_kernel",
+            "duration_us": 100.0,
+            "call_count": 64,
+            "gpu_pct": 5.0,
+            "tracelens_launcher_path": f"{src}(120): rmsnorm_kernel",
+        },
+        {
+            "kernel_id": "k002",
+            "name": "rmsnorm_kernel",  # same kernel, different call site
+            "duration_us": 50.0,
+            "call_count": 32,
+            "gpu_pct": 2.5,
+            "tracelens_launcher_path": f"{src}(456): rmsnorm_kernel",
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1, (
+        f"native kernel split across {len(groups)} groups by call-site line "
+        "— #420 regression"
+    )
+    g = groups[0]
+    assert set(g["kernel_ids"]) == {"k001", "k002"}
+    assert g["aggregate_duration_us"] == 150.0
+    assert g["aggregate_call_count"] == 96
+
+
+def test_aggregate_merges_native_template_instances_by_source(tmp_path):
+    """#420 real-world case (Qwen3-32B rmsnorm_quant from the issue):
+    k005/k006/k007 are three instantiations of ONE ``__global__`` template
+    (``add_rmsnorm_quant_kernel``) living in ONE .cu. TraceLens names them
+    with DIFFERENT Itanium-mangled operation symbols — a mangled symbol,
+    NOT a ``<...>`` spelling — and the candidates autoresolve to the SAME
+    bare .cu path (no ``(line): func`` suffix), so resolution yields the
+    file stem as ``function``. They MUST collapse into ONE composite
+    task_group: the mangled operation and the per-call line are NOT part of
+    the native key, so 3 instantiations don't become 3 redundant GEAK
+    dispatches that each edit the same template body from the same baseline.
+
+    Regression guard for the original fix that wrongly kept a normalized
+    operation in the native key — since the real symbols carry no ``<...>``
+    to strip, that left k005/k006/k007 in three separate groups."""
+    src = tmp_path / "rmsnorm_quant_kernels.cu"
+    src.write_text(
+        "template <typename DTYPE_I, typename DTYPE_O, int BlockSize,\n"
+        "          bool ADD_RESIDUAL, bool FUSE_QUANT>\n"
+        "__global__ void add_rmsnorm_quant_kernel() {}\n",
+        encoding="utf-8",
+    )
+    bare = str(src)  # autoresolved .cu carries no "(line): func" suffix
+    cands = [
+        {  # rmsnorm (mode 1), shape A
+            "kernel_id": "k005",
+            "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb0ELb0EEEvPKT_",
+            "duration_us": 300.0, "call_count": 30,
+            "tracelens_launcher_path": bare,
+        },
+        {  # rmsnorm (mode 1), shape B -> different BlockSize template arg
+            "kernel_id": "k006",
+            "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi512ELi16ELb0ELb0EEEvPKT_",
+            "duration_us": 200.0, "call_count": 20,
+            "tracelens_launcher_path": bare,
+        },
+        {  # add_rmsnorm (mode 2) -> ADD_RESIDUAL=true template arg
+            "kernel_id": "k007",
+            "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0EEEvPKT_",
+            "duration_us": 100.0, "call_count": 10,
+            "tracelens_launcher_path": bare,
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1, (
+        f"3 instantiations of one __global__ split into {len(groups)} "
+        "groups — #420 native grouping must ignore the mangled operation"
+    )
+    g = groups[0]
+    assert set(g["kernel_ids"]) == {"k005", "k006", "k007"}
+    assert g["aggregate_duration_us"] == 600.0
+    assert g["aggregate_call_count"] == 60
+    assert g["source_path"].endswith("rmsnorm_quant_kernels.cu")
+
+
+def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
+    """Operation normalization applies to the Python track too: two
+    candidates sharing one wrapper whose names differ only by dtype
+    template args merge. Path/line/fn are identical here, so this
+    isolates normalization from the native call-site-line rule."""
+    src = tmp_path / "layer.py"
+    src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
+    launcher = f"{src}(1): forward"
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "fused_moe_kernel<bf16>",
+            "duration_us": 70.0,
+            "call_count": 7,
+            "tracelens_launcher_path": launcher,
+        },
+        {
+            "kernel_id": "k002",
+            "name": "fused_moe_kernel<fp16>",
+            "duration_us": 30.0,
+            "call_count": 3,
+            "tracelens_launcher_path": launcher,
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1
+    assert set(groups[0]["kernel_ids"]) == {"k001", "k002"}
+
+
+def test_aggregate_canonicalizes_native_source_path():
+    """#420: the same .cu file reached via a non-normalized path
+    (``sub/../rmsnorm.cu``) and a clean path must canonicalize to one
+    group rather than splitting on the literal path string."""
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "rmsnorm_kernel",
+            "duration_us": 40.0,
+            "call_count": 4,
+            "tracelens_launcher_path": "csrc/sub/../rmsnorm.cu(12): rmsnorm_kernel",
+        },
+        {
+            "kernel_id": "k002",
+            "name": "rmsnorm_kernel",
+            "duration_us": 10.0,
+            "call_count": 1,
+            "tracelens_launcher_path": "csrc/rmsnorm.cu(99): rmsnorm_kernel",
+        },
+    ]
+    groups = tlr.aggregate_by_source_function(cands)
+    assert len(groups) == 1, "path spellings of one .cu must canonicalize"
+    assert set(groups[0]["kernel_ids"]) == {"k001", "k002"}
 
 
 # PR-B §1 + §2: build_task_groups (tracelens_analysis.py wrapper)

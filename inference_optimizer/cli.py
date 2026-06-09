@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -830,6 +831,25 @@ def _load_model_max_position_embeddings(model_path: str) -> int | None:
             if isinstance(val, int) and val > 0:
                 return val
     return None
+
+
+def _model_has_dual_chunk_attention(model_path: str) -> bool:
+    """Best-effort detect a ``dual_chunk_attention_config`` in config.json.
+
+    Qwen 1M long-context models ship this block; sglang then rejects the
+    default aiter attention backend and demands ``dual_chunk_flash_attn``.
+    Checks the top level and a nested ``text_config``. Soft-degrades to
+    False on any missing / unreadable / invalid config.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    if data.get("dual_chunk_attention_config"):
+        return True
+    nested = data.get("text_config")
+    return isinstance(nested, dict) and bool(
+        nested.get("dual_chunk_attention_config")
+    )
 
 
 def _context_headroom_tokens() -> int:
@@ -2020,6 +2040,67 @@ def _smoke_test_codex_model(
     )
 
 
+# InferenceX clone defaults — kept in sync with
+# inference_optimizer/scripts/install.sh (INFERENCEX_REPO / INFERENCEX_REF).
+_INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
+_INFERENCEX_REF_DEFAULT = "2035a2117ad22403376359be0064dfa2c078c59b"
+
+
+def _inferencex_checkout_ok(path: Path | str) -> bool:
+    """True when ``path`` is a usable InferenceX checkout, not a stub.
+
+    A bare ``is_dir()`` check accepts a half-cloned dir left behind by a
+    ``git init`` that then failed to fetch/checkout. Magpie sources
+    ``benchmarks/benchmark_lib.sh`` at runtime, so require that file to
+    exist — a complete checkout always has it, a stub never does.
+    """
+    return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
+
+
+def _clone_inferencex(dest: Path) -> str | None:
+    """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF.
+
+    Mirrors install.sh ``git_fetch_pinned``: a 7-40 hex ref triggers a
+    shallow fetch-checkout (GitHub serves SHA fetches), otherwise a
+    ``--branch`` clone. Returns the path on success, ``None`` on failure
+    (caller decides how to surface it). Never raises out.
+
+    On any failure the partial ``dest`` (e.g. a bare ``git init`` with no
+    fetched tree) is removed so a later preflight's detection does not
+    mistake the stub for a valid checkout and skip re-cloning.
+    """
+    repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
+    ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+    dest_str = str(dest)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
+            subprocess.run(["git", "init", "-q", dest_str], check=True, timeout=60)
+            subprocess.run(
+                ["git", "-C", dest_str, "fetch", "-q", "--depth", "1", repo, ref],
+                check=True, timeout=600,
+            )
+            subprocess.run(
+                ["git", "-C", dest_str, "checkout", "-q", "FETCH_HEAD"],
+                check=True, timeout=120,
+            )
+        else:
+            subprocess.run(
+                ["git", "clone", "-q", "--depth", "1", "--branch", ref, repo, dest_str],
+                check=True, timeout=600,
+            )
+        if not _inferencex_checkout_ok(dest):
+            raise OSError(
+                f"clone reported success but {dest_str} is missing "
+                "benchmarks/benchmark_lib.sh"
+            )
+        return dest_str
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("InferenceX clone into %s failed: %s", dest_str, exc)
+        shutil.rmtree(dest, ignore_errors=True)
+        return None
+
+
 def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
@@ -2154,7 +2235,7 @@ def _preflight(
         print("Preflight: Magpie installed OK")
 
     # 3. InferenceX — required for GSM8K accuracy eval; lm-eval deps auto-install at runtime via benchmark_lib.sh.
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "")
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if not inferencex_path:
         from .paths import (
             magpie_dir as _magpie_default,
@@ -2166,23 +2247,55 @@ def _preflight(
             if os.environ.get("MAGPIE_DIR")
             else _magpie_default(_session_dir_resolve())
         )
-        # InferenceX detection order: Magpie submodule → standalone runtime checkout → legacy host mounts.
+        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone runtime checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
             runtime_root / "InferenceX",
-            Path("/wekafs/hyperloom/InferenceX"),
-            Path("/opt/hyperloom/InferenceX"),
-            Path("/wekafs/fully-local/inference_optimization/InferenceX"),
         ):
-            if candidate.is_dir():
-                inferencex_path = str(candidate)
-                break
-    if inferencex_path and Path(inferencex_path).is_dir():
-        os.environ.setdefault("INFERENCEX_PATH", inferencex_path)
-    else:
-        print("Preflight: WARNING — InferenceX not found. GSM8K accuracy "
-              "eval will fail. Set INFERENCEX_PATH or clone Magpie with "
-              "InferenceX submodule.")
+            if _inferencex_checkout_ok(candidate):
+                if os.access(candidate, os.W_OK):
+                    inferencex_path = str(candidate)
+                    break
+                print(
+                    "Preflight: skipping non-writable auto-detected "
+                    f"InferenceX checkout at {candidate}; cloning a "
+                    "writable checkout instead."
+                )
+    # When no writable checkout was found (e.g. a brain-launched run that
+    # skipped install.sh's ensure_inferencex), clone one ourselves rather
+    # than falling back to a read-only host mount. baseline cannot run
+    # without InferenceX, so a clone failure is a hard error.
+    if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+        from .paths import runtime_dir as _runtime_default
+        dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
+        print(f"Preflight: InferenceX not found; cloning into {dest} ...")
+        inferencex_path = _clone_inferencex(dest)
+        if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+            print(
+                "Preflight: ERROR — InferenceX checkout missing and clone "
+                "failed. baseline cannot run without it. Set INFERENCEX_PATH "
+                "to a writable checkout or re-run "
+                "inference_optimizer/scripts/install.sh.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    # Guard against a read-only selection (shared mount handed to us via
+    # INFERENCEX_PATH): Magpie stages benchmark scripts there, so a
+    # non-writable tree fails the run before server boot.
+    if not os.access(inferencex_path, os.W_OK):
+        print(
+            f"Preflight: ERROR — INFERENCEX_PATH={inferencex_path} is not "
+            f"writable. Magpie stages benchmark scripts into it and will "
+            f"fail with [Errno 30] Read-only file system. Point "
+            f"INFERENCEX_PATH at a writable checkout (unset it to let "
+            f"Hyperloom clone a fresh one).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH that
+    # triggered the clone above must not survive into the child env, or Magpie
+    # still reads the bad path. The validated value wins.
+    os.environ["INFERENCEX_PATH"] = inferencex_path
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()

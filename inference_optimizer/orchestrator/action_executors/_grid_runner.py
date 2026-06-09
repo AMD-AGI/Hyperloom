@@ -77,11 +77,19 @@ def _resolve_magpie_python() -> str:
     validated and skipped to avoid ``ModuleNotFoundError`` at benchmark time.
     """
     def _can_import_magpie(py: str) -> bool:
+        # Probe Magpie AND its top-level runtime dep ``yaml``: an editable
+        # install puts Magpie on sys.path via a .pth regardless of whether
+        # the interpreter has PyYAML, so ``import Magpie`` alone can succeed
+        # on an interpreter that then dies at Magpie startup with
+        # ``ModuleNotFoundError: No module named 'yaml'`` (surfaced as
+        # subprocess_nonzero / baseline_failed). Requiring yaml here makes
+        # the resolver skip such interpreters and fall through to the
+        # canonical /opt/venv that has the full dependency set.
         try:
             # ``run_with_session_kill`` captures stdout/stderr internally and
             # rejects ``capture_output`` (would raise TypeError).
             proc = run_with_session_kill(
-                [py, "-c", "import Magpie"],
+                [py, "-c", "import Magpie, yaml"],
                 timeout=10,
             )
             return getattr(proc, "returncode", 1) == 0
@@ -693,6 +701,9 @@ _SGLANG_CONTEXT_LENGTH_FLAG = "--context-length"
 # Matches space- or equals-separated form so an operator-pinned value
 # suppresses injection without false-matching a longer flag.
 _SGLANG_CONTEXT_LENGTH_RE = re.compile(r"--context-length(?:[=\s]|$)")
+_SGLANG_ATTN_BACKEND_FLAG = "--attention-backend"
+_SGLANG_ATTN_BACKEND_RE = re.compile(r"--attention-backend(?:[=\s]|$)")
+_SGLANG_DUAL_CHUNK_BACKEND = "dual_chunk_flash_attn"
 
 
 def _resolve_nonneg_int_env(name: str, default: int) -> int:
@@ -765,6 +776,35 @@ def inject_sglang_context_length(
     context_length = min(int(max_pos), cap)
     return merge_server_args(
         args, f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
+    )
+
+
+def inject_sglang_attention_backend(
+    server_args: str | None,
+    framework: str | None,
+    model_path: str | None,
+) -> str:
+    """Append ``--attention-backend dual_chunk_flash_attn`` for sglang runs
+    whose model declares ``dual_chunk_attention_config`` (Qwen 1M models).
+
+    sglang defaults to the aiter backend and hard-rejects it for dual-chunk
+    models with ``ValueError: Dual chunk attention is enabled, but attention
+    backend is set to aiter. Please set it to 'dual_chunk_flash_attn'.``.
+
+    Returns ``server_args`` unchanged when: framework is not sglang, an
+    ``--attention-backend`` is already pinned (operator wins), or the model
+    config has no dual-chunk block (fail-safe: inject nothing).
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args
+    if _SGLANG_ATTN_BACKEND_RE.search(args):
+        return args
+    from ...cli import _model_has_dual_chunk_attention
+    if not _model_has_dual_chunk_attention(str(model_path or "")):
+        return args
+    return merge_server_args(
+        args, f"{_SGLANG_ATTN_BACKEND_FLAG} {_SGLANG_DUAL_CHUNK_BACKEND}",
     )
 
 
@@ -1487,6 +1527,7 @@ __all__ = [
     "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
     "apply_runtime_benchmark_overrides",
+    "inject_sglang_attention_backend",
     "inject_sglang_context_length",
     "inject_sglang_watchdog_timeout",
     "merge_server_args",

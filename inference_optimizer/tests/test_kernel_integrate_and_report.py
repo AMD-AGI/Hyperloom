@@ -709,3 +709,196 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path,
     assert res.state == "succeeded"
     assert res.result["status"] == "failed"
     assert "session_dir" in res.result.get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# after_kernel_opt rocprof: KEEP triggers it, REVERT/NEEDS_REVIEW skips it.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_integrate_keep_schedules_after_kernel_opt_rocprof(
+    session_dir, tmp_path, monkeypatch,
+):
+    """On KEEP, after-opt rocprof is scheduled without blocking integrate."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    calls: list[dict] = []
+
+    def _fake_rocprof(*, kernel_id, session_dir, log):
+        calls.append({"kernel_id": kernel_id})
+        return {"status": "scheduled", "reason": "stub"}
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=900.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(krh, "_schedule_after_kernel_opt_rocprof", _fake_rocprof)
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_rocprof_test",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["decision"] == "KEEP"
+    assert len(calls) == 1
+    assert calls[0]["kernel_id"] == "k_rocprof_test"
+    assert res["rocprof_after_kernel_opt"]["status"] == "scheduled"
+
+
+@pytest.mark.asyncio
+async def test_integrate_revert_skips_after_kernel_opt_rocprof(
+    session_dir, tmp_path, monkeypatch,
+):
+    """On REVERT, _run_after_kernel_opt_rocprof is NOT called."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    calls: list[dict] = []
+
+    def _fake_rocprof(*, kernel_id, session_dir, log):  # pragma: no cover
+        calls.append({"kernel_id": kernel_id})
+        return {"status": "stub"}
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        # return tput lower than base → REVERT
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=500.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(krh, "_schedule_after_kernel_opt_rocprof", _fake_rocprof)
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_revert_test",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["decision"] == "REVERT"
+    assert len(calls) == 0
+    assert "rocprof_after_kernel_opt" not in res
+
+
+@pytest.mark.asyncio
+async def test_after_kernel_opt_rocprof_uses_profile_mode_and_safe_timeout(
+    session_dir, tmp_path, monkeypatch,
+):
+    """After-opt rocprof must be best-effort and profile the same workload as before."""
+    state = SharedState.load_or_init(session_dir)
+    source_file = tmp_path / "kernel.cu"
+    source_file.write_text("// kernel\n", encoding="utf-8")
+    state.kernel_opt_attempts = {
+        "k_after": {
+            "test_command": "python /tmp/run/unittest/harness_moe.py --correctness",
+            "last_source_file": str(source_file),
+        }
+    }
+    state.save(session_dir)
+    sidecar = session_dir / "reports" / "kernel_roofline.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps({
+        "kernels": [{
+            "kernel_id": "k_after",
+            "name": "aiter::moe_kernel",
+            "rocprof_roofline": {
+                "before_kernel_opt": {"status": "matched"},
+                "after_kernel_opt": None,
+            },
+        }]
+    }), encoding="utf-8")
+    captured: dict[str, list[str]] = {}
+
+    async def _fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = cmd
+        captured["timeout_sec"] = timeout_sec
+        out_json = Path(cmd[cmd.index("--out-json") + 1])
+        out_json.write_text(json.dumps({
+            "status": "ok",
+            "target_kernel": "aiter::moe_kernel",
+            "results": [{
+                "name": "aiter::moe_kernel",
+                "matched_kernel_name": "aiter::moe_kernel",
+                "status": "matched",
+                "rocprof_roofline": {"bound_type": "memory"},
+            }],
+        }), encoding="utf-8")
+        return 0, "ok", ""
+
+    monkeypatch.setenv("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "abc")
+    monkeypatch.setattr(krh, "_run_subprocess", _fake_run_subprocess)
+
+    res = await krh._run_after_kernel_opt_rocprof(
+        kernel_id="k_after",
+        session_dir=session_dir,
+        log=krh.log,
+    )
+
+    cmd = captured["cmd"]
+    assert res["status"] == "ok"
+    assert cmd[cmd.index("--cmd") + 1].endswith("harness_moe.py --profile")
+    assert cmd[cmd.index("--timeout-sec") + 1] == "1800"
+    assert captured["timeout_sec"] == 1830
+    assert cmd[cmd.index("--target-kernel") + 1] == "aiter::moe_kernel"
+
+
+def test_schedule_after_kernel_opt_rocprof_marks_scheduled(
+    session_dir, monkeypatch,
+):
+    sidecar = session_dir / "reports" / "kernel_roofline.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps({
+        "kernels": [{
+            "kernel_id": "k_sched",
+            "name": "aiter::sched_kernel",
+            "rocprof_roofline": {
+                "before_kernel_opt": {"status": "matched"},
+                "after_kernel_opt": None,
+            },
+        }]
+    }), encoding="utf-8")
+    created: list[object] = []
+
+    async def _fake_run_after(**_kwargs):
+        return {"status": "ok"}
+
+    class _DummyTask:
+        def result(self):
+            return {"status": "ok"}
+
+        def add_done_callback(self, callback):
+            callback(self)
+
+    def _fake_create_task(coro):
+        coro.close()
+        task = _DummyTask()
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(krh, "_run_after_kernel_opt_rocprof", _fake_run_after)
+    monkeypatch.setattr(krh.asyncio, "create_task", _fake_create_task)
+
+    res = krh._schedule_after_kernel_opt_rocprof(
+        kernel_id="k_sched",
+        session_dir=session_dir,
+        log=krh.log,
+    )
+
+    updated = json.loads(sidecar.read_text(encoding="utf-8"))
+    after = updated["kernels"][0]["rocprof_roofline"]["after_kernel_opt"]
+    assert res["status"] == "scheduled"
+    assert after == {"status": "scheduled", "reason": "background_task"}
+    assert len(created) == 1

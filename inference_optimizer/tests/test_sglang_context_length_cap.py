@@ -18,6 +18,7 @@ import yaml
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
     DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
     DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
+    inject_sglang_attention_backend,
     inject_sglang_context_length,
     resolve_sglang_context_cap,
 )
@@ -260,3 +261,70 @@ def test_materialize_vllm_no_context_length(tmp_path):
     envs = _materialize_envs(tmp_path, framework="vllm", model=model)
     assert "EXTRA_SGLANG_ARGS" not in envs
     assert "--context-length" not in envs.get("EXTRA_VLLM_ARGS", "")
+
+
+# ---------------------------------------------------------------------------
+# inject_sglang_attention_backend (dual chunk attention)
+# ---------------------------------------------------------------------------
+def _write_dual_chunk_model(
+    tmp_path: Path, *, dual_chunk: bool, nested: bool = False
+) -> str:
+    model_dir = tmp_path / "dcmodel"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    cfg: dict = {"model_type": "qwen2", "max_position_embeddings": 1_010_000}
+    block = {"chunk_size": 262144} if dual_chunk else None
+    if dual_chunk:
+        if nested:
+            cfg["text_config"] = {"dual_chunk_attention_config": block}
+        else:
+            cfg["dual_chunk_attention_config"] = block
+    (model_dir / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    return str(model_dir)
+
+
+def test_dual_chunk_injects_flash_attn_backend(tmp_path):
+    """A model with dual_chunk_attention_config gets the compatible backend."""
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    out = inject_sglang_attention_backend("--foo bar", "sglang", model)
+    assert "--attention-backend dual_chunk_flash_attn" in out
+    assert "--foo bar" in out
+
+
+def test_dual_chunk_injects_via_nested_text_config(tmp_path):
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True, nested=True)
+    out = inject_sglang_attention_backend("", "sglang", model)
+    assert "--attention-backend dual_chunk_flash_attn" in out
+
+
+def test_dual_chunk_noop_without_config(tmp_path):
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=False)
+    assert inject_sglang_attention_backend("--foo", "sglang", model) == "--foo"
+
+
+def test_dual_chunk_does_not_override_operator_backend(tmp_path):
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    existing = "--attention-backend triton"
+    out = inject_sglang_attention_backend(existing, "sglang", model)
+    assert out == existing
+    assert out.count("--attention-backend") == 1
+
+
+@pytest.mark.parametrize("framework", ["vllm", "atom"])
+def test_dual_chunk_noop_for_non_sglang(tmp_path, framework):
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    assert (
+        inject_sglang_attention_backend("--foo", framework, model) == "--foo"
+    )
+
+
+def test_dual_chunk_noop_when_config_unreadable(tmp_path):
+    missing = str(tmp_path / "nope")
+    assert inject_sglang_attention_backend("--foo", "sglang", missing) == "--foo"
+    assert inject_sglang_attention_backend("--foo", "sglang", "") == "--foo"
+
+
+def test_materialize_sglang_injects_dual_chunk_backend(tmp_path):
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    envs = _materialize_envs(tmp_path, framework="sglang", model=model)
+    sglang_args = envs["EXTRA_SGLANG_ARGS"]
+    assert "--attention-backend dual_chunk_flash_attn" in sglang_args

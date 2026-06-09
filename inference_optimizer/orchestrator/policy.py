@@ -378,7 +378,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "warm_start_pitfalls",
     "warm_start_lessons",
     "warm_start_ts",
-    # KB tag completeness (Coordinator-populated from manifest + baseline config).
+    "warm_start_context",
+    # KB tag completeness (Coordinator-populated from manifest + baseline config; LLM reads via prompt, Coordinator writes).
     "stack_fingerprint_meta",
     "baseline_workload_extra",
     # warm-recipe replay one-shot guard + outcome; LLM cannot edit (bypasses replay budget).

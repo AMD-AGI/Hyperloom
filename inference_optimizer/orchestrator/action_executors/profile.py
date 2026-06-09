@@ -121,7 +121,7 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
 
 def _validate_trace_structure(
     trace_dir: Path, framework: str, expected_pieces: int = 1,
-) -> None:
+) -> dict[str, Any]:
     """Post-profile sanity check (#210 / Deval's ``check_torch_trace.py``).
 
     Logs warnings (never raises) when the trace structure suggests
@@ -143,8 +143,12 @@ def _validate_trace_structure(
        gun: profile_by_stage leaked through PROFILE_EXTRA_BODY)
 
     Read-only; each check warns independently so partial signals stay actionable.
+
+    Returns a structured ``trace_health`` dict (#431): ``per_kernel_attribution_degraded`` (no execute_*/user_annotation events -> cuda-graph folds per-kernel time, 0 hot kernels -> triggers eager re-profile), ``capture_traces_present``, and ``issues`` (logged warning strings).
     """
     issues: list[str] = []
+    per_kernel_attribution_degraded = False
+    capture_traces_present = False
 
     # --- Check 1: capture_traces/ presence ---
     capture = trace_dir / "capture_traces"
@@ -157,6 +161,7 @@ def _validate_trace_structure(
         )
     else:
         capture_files = sorted(p for p in capture.iterdir() if p.is_file())
+        capture_traces_present = bool(capture_files)
         if not capture_files:
             issues.append(
                 "[1] capture_traces/ exists but is empty — graph capture "
@@ -225,6 +230,7 @@ def _validate_trace_structure(
                     )
                 )
                 if confirmed_absent:
+                    per_kernel_attribution_degraded = True
                     issues.append(
                         f"[3] main trace {main_traces[0].name} has no "
                         "execute_* / user_annotation events — InferenceX "
@@ -298,6 +304,11 @@ def _validate_trace_structure(
             "downstream analysis may be degraded. See per-issue messages "
             "above for the actionable check.", len(issues),
         )
+    return {
+        "issues": issues,
+        "per_kernel_attribution_degraded": per_kernel_attribution_degraded,
+        "capture_traces_present": capture_traces_present,
+    }
 
 
 # Legacy constant kept pointing at the sglang profile yaml for fixture use.
@@ -647,7 +658,9 @@ class ProfileExecutor(BaselineExecutor):
                         or (extra.get("framework") if isinstance(extra, dict) else "")
                         or ""
                     )
-                    _validate_trace_structure(selected_trace_dir, framework)
+                    health = _validate_trace_structure(selected_trace_dir, framework)
+                    if isinstance(health, dict):
+                        result["trace_health"] = health
                 except Exception as e:  # noqa: BLE001 - validator is best-effort
                     log.debug(
                         "profile_executor: trace structure validator failed: %s", e,

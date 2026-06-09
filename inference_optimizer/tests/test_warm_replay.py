@@ -32,6 +32,7 @@ class _StubSharedState:
     baseline_tput: float = 600.0
     baseline_config_path: str = "/tmp/baseline.yaml"
     warm_start_recipe: dict = field(default_factory=dict)
+    warm_start_context: dict = field(default_factory=dict)
     warm_replay_attempted: bool = False
     warm_replay_outcome: dict = field(default_factory=dict)
     warm_history_injected: bool = False
@@ -78,6 +79,7 @@ def _make_coord(
     tmp_path: Path,
     *,
     warm_start_recipe: dict | None = None,
+    warm_start_context: dict | None = None,
     warm_replay_enabled: bool = True,
     warm_replay_min_confidence: float = 0.7,
     warm_replay_min_reproduce_pct: float = 0.8,
@@ -87,6 +89,7 @@ def _make_coord(
     coord.session_dir = tmp_path
     coord.shared_state = _StubSharedState(
         warm_start_recipe=warm_start_recipe or {},
+        warm_start_context=warm_start_context or {},
         warm_replay_attempted=warm_replay_attempted,
     )
     coord.tasks = _StubTaskRegistry()
@@ -305,6 +308,55 @@ async def test_warm_replay_enqueues_with_v2_arbor_top_level_best_config(tmp_path
     assert params["warm_expected_gain_pct"] == 25.0
 
 
+@pytest.mark.asyncio
+async def test_warm_replay_prefers_warm_start_context_recommended_replay(tmp_path):
+    """status=hit WarmStartContext: warm-replay launches from its ``recommended_replay`` champion (args/envs) over the raw recipe row."""
+    recipe = _warm_recipe_t1(
+        extra_sglang_args="--from-recipe-row",
+        extra_envs={"RECIPE": "1"},
+        expected_gain_pct=25.0,
+    )
+    context = {
+        "status": "hit",
+        "match": {"tier": "exact", "confidence": 0.85, "source": "gbrain"},
+        "recommended_replay": {
+            "extra_server_args": "--from-context --cuda-graph-max-bs 256",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+            "expected_gain_pct": 25.0,
+            "best_throughput": 5430.9,
+        },
+    }
+    coord = _make_coord(
+        tmp_path, warm_start_recipe=recipe, warm_start_context=context,
+    )
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    assert task is not None
+    params = coord.tasks.calls[0]["params"]
+    # Context wins over the raw recipe row's champion.
+    assert params["extra_sglang_args"] == "--from-context --cuda-graph-max-bs 256"
+    assert params["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_falls_back_to_recipe_when_context_not_hit(tmp_path):
+    """A non-hit (e.g. seed_only) WarmStartContext must NOT override the recipe-derived champion."""
+    recipe = _warm_recipe_t1(
+        extra_sglang_args="--from-recipe-row",
+        extra_envs={"RECIPE": "1"},
+        expected_gain_pct=25.0,
+    )
+    context = {"status": "seed_only", "recommended_replay": {}}
+    coord = _make_coord(
+        tmp_path, warm_start_recipe=recipe, warm_start_context=context,
+    )
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    assert task is not None
+    params = coord.tasks.calls[0]["params"]
+    assert params["extra_sglang_args"] == "--from-recipe-row"
+    assert params["extra_envs"] == {"RECIPE": "1"}
+
+
+# ===========================================================================
 # Promote — reproduced
 def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     tmp_path,
