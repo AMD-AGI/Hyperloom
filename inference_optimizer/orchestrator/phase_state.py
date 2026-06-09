@@ -762,6 +762,7 @@ def exit_normal_explore(
     now_unix: float | None = None,
     force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+    disable_legacy_proxy: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
     """EXPLORE normal exit.
 
@@ -801,6 +802,58 @@ def exit_normal_explore(
             "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
         }
     return None
+
+
+def wants_steward_assessment(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+    plateau_keep_gain_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+    plateau_empty_streak: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+    plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+) -> bool:
+    """Return True when Coordinator should enqueue a steward task NOW."""
+    phase = (getattr(state, "phase", "") or "").strip().upper()
+    if phase != PHASE_EXPLORE:
+        return False
+    overrides = _resolve_plateau_overrides(state)
+    if bool(overrides.get("steward_disabled", False)):
+        return False
+    forced, _ = should_force_exit_explore(
+        state,
+        hours_remaining_threshold=float(overrides.get(
+            "force_exit_hours_remaining",
+            DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+        )),
+        budget_pct_threshold=float(overrides.get(
+            "force_exit_budget_pct",
+            DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+        )),
+        budget_pct=budget_pct,
+        now_unix=now_unix,
+    )
+    if forced:
+        return False
+    explore_search = getattr(state, "explore_search", None) or {}
+    has_v08_signals = (
+        isinstance(explore_search, dict)
+        and (explore_search.get("winners_history") or [])
+    ) or bool(getattr(state, "specialist_rounds", None) or [])
+    if not has_v08_signals:
+        return False
+    triggered, _ = compute_plateau_explore(
+        state,
+        lookback=plateau_lookback,
+        keep_gain_threshold_pct=plateau_keep_gain_pct,
+        empty_streak_threshold=plateau_empty_streak,
+    )
+    if not triggered:
+        return False
+    assessment = getattr(state, "last_remaining_gaps_assessment", None) or {}
+    if isinstance(assessment, dict) and assessment.get("recommendation"):
+        return False
+    return True
 
 
 def exit_normal_kernel(
@@ -1047,6 +1100,7 @@ def compute_next_phase(
     framework_phase_enabled: bool = False,
     explore_enabled: bool = True,
     max_hours: float | None = None,
+    disable_legacy_proxy: bool = False,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
@@ -1117,6 +1171,7 @@ def compute_next_phase(
                 "force_exit_budget_pct",
                 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
             )),
+            disable_legacy_proxy=disable_legacy_proxy,
         )
         if norm is not None:
             # Non-terminal "no more leverage" → wind down to SWEEP,
@@ -1271,8 +1326,6 @@ __all__ = [
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",
     "infer_phase_from_state",
-    "llm_proposable_actions_for",
-    "llm_proposable_actions_for_with_interleave",
     "make_history_row",
     "normalize_budget_pct",
     "phase_budget_remaining_seconds",
@@ -1281,4 +1334,5 @@ __all__ = [
     "session_remaining_seconds",
     "should_force_exit_explore",
     "warm_replay_in_flight",
+    "wants_steward_assessment",
 ]
