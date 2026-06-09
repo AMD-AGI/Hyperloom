@@ -1,0 +1,1329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hyperloom Quantization-Agent 架构设计说明书</title>
+<style>
+:root{
+  --bg:#fafafa; --surface:#ffffff; --text:#1f2328; --muted:#656d76;
+  --accent:#0969da; --accent-soft:#ddf4ff; --border:#d0d7de;
+  --code-bg:#0d1117; --code-text:#e6edf3; --code-inline:#eff1f3;
+  --table-stripe:#f6f8fa; --table-hover:#eaeef2;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",Helvetica,Arial,sans-serif;
+  font-size:15px; line-height:1.7; color:var(--text); background:var(--bg);
+}
+.layout{display:flex; min-height:100vh; max-width:1400px; margin:0 auto;}
+aside.toc{
+  position:sticky; top:0; align-self:flex-start;
+  width:280px; flex-shrink:0; height:100vh; overflow-y:auto;
+  padding:32px 20px; border-right:1px solid var(--border); background:var(--surface);
+}
+aside.toc h2{font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 14px;}
+aside.toc ul{list-style:none; padding:0; margin:0;}
+aside.toc li{margin:4px 0;}
+aside.toc a{color:var(--text); text-decoration:none; display:block; padding:4px 8px; border-radius:6px; font-size:13.5px; line-height:1.4;}
+aside.toc a:hover{background:var(--accent-soft); color:var(--accent);}
+aside.toc ul ul{padding-left:14px; margin-top:2px;}
+aside.toc ul ul a{font-size:12.5px; color:var(--muted);}
+main.content{flex:1; min-width:0; padding:48px 56px; background:var(--surface);}
+main.content h1{font-size:28px; font-weight:700; margin:0 0 8px; padding-bottom:14px; border-bottom:2px solid var(--border);}
+main.content h2{font-size:22px; font-weight:600; margin:40px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--border);}
+main.content h3{font-size:17px; font-weight:600; margin:28px 0 10px;}
+main.content h4{font-size:15px; font-weight:600; margin:20px 0 8px; color:var(--muted);}
+main.content p{margin:10px 0;}
+main.content a{color:var(--accent); text-decoration:none;}
+main.content a:hover{text-decoration:underline;}
+main.content hr{border:none; border-top:1px solid var(--border); margin:32px 0;}
+main.content blockquote{
+  margin:14px 0; padding:10px 16px; border-left:4px solid var(--accent);
+  background:var(--accent-soft); border-radius:0 6px 6px 0; color:#024;
+}
+main.content blockquote p{margin:6px 0;}
+main.content ul,main.content ol{padding-left:24px;}
+main.content li{margin:4px 0;}
+table{
+  border-collapse:separate; border-spacing:0; width:100%;
+  margin:14px 0; border:1px solid var(--border); border-radius:8px; overflow:hidden;
+  font-size:13.5px;
+}
+th,td{padding:9px 12px; text-align:left; border-bottom:1px solid var(--border); vertical-align:top;}
+th{background:var(--table-stripe); font-weight:600; color:var(--text);}
+tbody tr:nth-child(even){background:var(--table-stripe);}
+tbody tr:hover{background:var(--table-hover);}
+tbody tr:last-child td{border-bottom:none;}
+code{
+  font-family:"SF Mono","Menlo","Monaco","Consolas",monospace;
+  font-size:.88em; background:var(--code-inline); padding:1px 5px;
+  border-radius:4px; color:#cf222e;
+}
+pre{
+  background:var(--code-bg); color:var(--code-text); padding:16px 20px;
+  border-radius:8px; overflow-x:auto; font-size:13px; line-height:1.55;
+  margin:14px 0;
+}
+pre code{background:transparent; color:inherit; padding:0; border-radius:0; font-size:13px;}
+.highlight pre{background:var(--code-bg);}
+.highlight .hll{background-color:#2d333b}
+.highlight .c,.highlight .c1,.highlight .cm,.highlight .cp,.highlight .cpf,.highlight .cs{color:#7d8590;font-style:italic}
+.highlight .k,.highlight .kc,.highlight .kd,.highlight .kn,.highlight .kp,.highlight .kr,.highlight .kt{color:#ff7b72}
+.highlight .s,.highlight .s1,.highlight .s2,.highlight .sb,.highlight .sc,.highlight .sd,.highlight .se,.highlight .sh,.highlight .si,.highlight .sx,.highlight .sr,.highlight .ss{color:#a5d6ff}
+.highlight .m,.highlight .mf,.highlight .mh,.highlight .mi,.highlight .mo,.highlight .il{color:#79c0ff}
+.highlight .n,.highlight .nb,.highlight .nc,.highlight .nd,.highlight .ne,.highlight .nf,.highlight .ni,.highlight .nl,.highlight .nn,.highlight .no,.highlight .nt,.highlight .nv,.highlight .nx{color:#e6edf3}
+.highlight .o,.highlight .ow,.highlight .p{color:#e6edf3}
+.highlight .err{color:#f85149}
+.highlight .gp{color:#8b949e}
+pre:has(.language-text), pre code.language-text{color:#e6edf3 !important;}
+@media (max-width: 1024px){
+  .layout{flex-direction:column;}
+  aside.toc{position:relative; width:100%; height:auto; border-right:none; border-bottom:1px solid var(--border);}
+  main.content{padding:28px 20px;}
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside class="toc">
+<h2>目录</h2>
+<div class="toc">
+<div class="toc">
+<ul>
+<li><a href="#0">0. 文档目的与背景</a></li>
+<li><a href="#1-hyperloom-quark">1. Hyperloom 使用 Quark 的流程图</a></li>
+<li><a href="#2-agent">2. Agent 内部调用流程</a></li>
+<li><a href="#3-agent">3. Agent 输入输出规范</a><ul>
+<li><a href="#31">3.1 输入参数</a></li>
+<li><a href="#32">3.2 返回结构</a></li>
+<li><a href="#33-quark">3.3 内部合约（与 Quark 的接口）</a></li>
+</ul>
+</li>
+<li><a href="#4-scheme">4. Scheme 词表参考</a><ul>
+<li><a href="#41-scheme">4.1 常用 scheme 术语</a></li>
+<li><a href="#42">4.2 常被引用的模块名</a></li>
+<li><a href="#43">4.3 当前已知约束</a></li>
+<li><a href="#44">4.4 默认值</a></li>
+</ul>
+</li>
+<li><a href="#5-validation-evaluation">5. 量化后的 Validation 与 Evaluation</a><ul>
+<li><a href="#51-validation">5.1 结构性 Validation</a></li>
+<li><a href="#52-evaluation">5.2 精度 Evaluation</a></li>
+<li><a href="#53-inference_optimizer">5.3 失败传播：如何向 inference_optimizer 返回</a></li>
+<li><a href="#54">5.4 门控策略与失败兜底</a></li>
+</ul>
+</li>
+<li><a href="#6-checkpoint">6. 需要操作者确认的检查点（Checkpoint 汇总）</a></li>
+<li><a href="#7-agent-agent">7. Agent 定位与其他 Agent 的区别</a></li>
+<li><a href="#8-quark">8. Quark 仓库只读性保证</a></li>
+<li><a href="#9">9. 参考资料</a></li>
+<li><a href="#a">附录 A. 异常处置矩阵（按阶段分组）</a><ul>
+<li><a href="#a1-1-pre">A.1 阶段 1 · Pre（预检）</a></li>
+<li><a href="#a2-2-intakequark-torch-ptq-step-1">A.2 阶段 2 · Intake（quark-torch-ptq Step 1）</a></li>
+<li><a href="#a3-3-planquark-torch-ptq-step-2">A.3 阶段 3 · Plan（quark-torch-ptq Step 2）</a></li>
+<li><a href="#a4-4-manifestquark-torch-ptq-step-3">A.4 阶段 4 · Manifest（quark-torch-ptq Step 3）</a></li>
+<li><a href="#a5-5-execquark-torch-ptq-step-4aptq">A.5 阶段 5 · Exec（quark-torch-ptq Step 4a，PTQ 计算）</a></li>
+<li><a href="#a6-6-exportquark-torch-ptq-step-4b">A.6 阶段 6 · Export（quark-torch-ptq Step 4b，写盘）</a></li>
+<li><a href="#a7-7-validatequark-torch-result-validator">A.7 阶段 7 · Validate（quark-torch-result-validator）</a></li>
+<li><a href="#a8-8-evalquark-torch-llm-eval">A.8 阶段 8 · Eval（quark-torch-llm-eval）</a></li>
+<li><a href="#a9">A.9 跨阶段</a></li>
+<li><a href="#a10">A.10 分布与重跑机制</a></li>
+</ul>
+</li>
+</ul>
+</div>
+
+</div>
+</aside>
+<main class="content">
+<h1 id="hyperloom-quantization-agent">Hyperloom Quantization-Agent 架构设计说明书</h1>
+<h2 id="0">0. 文档目的与背景</h2>
+<p>立项目标：<em>"将 Quark 作为一个 sub agent 嵌入至 hyperloom 中…该模块也可以独立完成模型的量化"</em>。</p>
+<p>本 agent 是 <strong>Hyperloom → Quark 的薄适配层（thin adapter）</strong>：</p>
+<ul>
+<li>唯一入口是协程 <code>quantize_via_prompt(prompt, ...)</code>，把自然语言 prompt 喂给 Claude Agent SDK session。</li>
+<li>session 加载 Quark 的三个 skills（<code>quark-torch-ptq</code> / <code>quark-torch-result-validator</code> / <code>quark-torch-llm-eval</code>）与 agent 自身的 <code>SKILL.md</code>（运行时合约）。</li>
+<li>自然语言到 <code>quant_plan</code> 的翻译、默认值填充、CRITICAL STOP 的呈现都由 Quark skills 完成。</li>
+<li>agent 自身只做两件事：按 <code>SKILL.md</code> 应答 checkpoint，扫描 workspace 校验产物。</li>
+</ul>
+<p>本文档记录这套设计的 <strong>结构、合约与权衡</strong>；运行时行为以 <code>../SKILL.md</code> 为准。</p>
+<hr />
+<h2 id="1-hyperloom-quark">1. Hyperloom 使用 Quark 的流程图</h2>
+<div class="codehilite"><pre><span></span><code>  Hyperloom 侧                              Quark 侧（只读）
+  ┌────────────────────────────┐            ┌────────────────────────────┐
+  │  quantization-agent        │  prompt    │                            │
+  │  （薄适配层）              │ ─────────▶ │  quark-torch-ptq                 │
+  │                            │            │  quark-quantization-       │
+  │  · 按 SKILL.md 应答        │ ◀──── ?    │       result-validator     │
+  │  · result_collector 收产物 │  answer ─▶ │  quark-torch-llm-eval            │
+  │                            │            │                            │
+  │                            │ ◀───────── │  artifacts + reports       │
+  └────────────────────────────┘            └────────────────────────────┘
+</code></pre></div>
+
+<p>三个箭头分别表示：① 首条 prompt；② Quark 三个 CRITICAL STOP 与 SKILL.md 触发的 warning checkpoint（按 SKILL.md：自动 → 默认 → 升级操作者）；③ Quark 工作完成后落盘的产物与报告。Quark 始终只读，所有 workflow 逻辑由 Quark 仓库自身维护。</p>
+<hr />
+<h2 id="2-agent">2. Agent 内部调用流程</h2>
+<div class="codehilite"><pre><span></span><code>   调用方
+     │  prompt
+     ▼
+   quantize_via_prompt
+     │
+     ▼
+   ┌──────────────────────────────────────────────────┐
+   │  Claude Agent SDK session (cwd = workspace)      │
+   │    loads  : quantization-agent/SKILL.md          │
+   │             + quark-torch-ptq / validator / llm-eval   │
+   │    runs   : Intake → Plan → Manifest →           │
+   │             Execute → Validate → (Eval)          │
+   │    answers: checkpoints per SKILL.md             │
+   └──────────────────────────────────────────────────┘
+     │  artifacts on disk
+     ▼
+   result_collector             ──  artifact-presence-as-truth
+     │
+     ▼
+   QuantSkillRunResult
+</code></pre></div>
+
+<p>确定性代码只剩两层 + 一份运行时合约：</p>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>职责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>quantize_via_prompt</code></td>
+<td>协程入口：起 SDK session、把 prompt 投递给 Quark skills、收集结果</td>
+</tr>
+<tr>
+<td><code>SKILL.md</code>（运行时合约）</td>
+<td>SDK 加载；规定 checkpoint 应答策略、<code>acceptable_eval_gap</code> 默认值、产物命名</td>
+</tr>
+<tr>
+<td><code>result_collector</code></td>
+<td>扫描 workspace artifact，判定 <code>success</code> / <code>partial</code> / <code>failed</code></td>
+</tr>
+</tbody>
+</table>
+<p>判定不依赖 SDK 退出码，而是基于落盘产物，分两层：</p>
+<ol>
+<li><strong>存在性</strong>——合约 artifact 是否齐全（决定 <code>failed</code> vs <code>partial</code>/<code>success</code>）。</li>
+<li><strong>内容解析</strong>——<code>validation_report.md</code> 中各 step 的 <code>ok</code> / <code>FAIL</code> / <code>skipped</code>（决定 <code>partial</code> 是否升级为 <code>failed</code>，门控细则见 §5.4）。</li>
+</ol>
+<hr />
+<h2 id="3-agent">3. Agent 输入输出规范</h2>
+<p>Agent 对外暴露唯一的协程入口 <code>quantize_via_prompt</code>。一次最小调用如下：</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">quantization_agent</span><span class="w"> </span><span class="kn">import</span> <span class="n">quantize_via_prompt</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">quantize_via_prompt</span><span class="p">(</span>
+    <span class="s2">&quot;把 Qwen/Qwen3-8B 进行 mxfp4 量化，self-attention 与 kv-cache 用 fp8，&quot;</span>
+    <span class="s2">&quot;排除 lm_head，输出到 /scratch/qwen3-8b-mxfp4&quot;</span><span class="p">,</span>
+    <span class="n">workspace</span><span class="o">=</span><span class="s2">&quot;/tmp/wks-xxx&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">run_result</span><span class="o">.</span><span class="n">status</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">run_result</span><span class="o">.</span><span class="n">quantized_model_dir</span><span class="p">)</span>
+</code></pre></div>
+
+<p>输入是<strong>自然语言 prompt</strong>。自然语言到 <code>quant_plan</code> 的映射、默认值填充都由 Quark <code>quark-torch-ptq</code> 在 Plan checkpoint 里完成；用户在 checkpoint 里确认或调整。</p>
+<h3 id="31">3.1 输入参数</h3>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>prompt</code></td>
+<td>str</td>
+<td>✅</td>
+<td>自然语言量化请求；至少包含模型 + 输出目录 + 大致量化方案</td>
+</tr>
+<tr>
+<td><code>workspace</code></td>
+<td>str | Path</td>
+<td>✅</td>
+<td>agent 写中间产物的工作目录；Quark workflow 的 cwd</td>
+</tr>
+<tr>
+<td><code>quark_root</code></td>
+<td>str | Path | None</td>
+<td>—</td>
+<td>显式指定 Quark checkout；缺省按 <code>$QUARK_ROOT</code> → <code>/scratch/kewang/workspace/Quark</code> 自动发现</td>
+</tr>
+<tr>
+<td><code>interactive</code></td>
+<td>bool | None</td>
+<td>—</td>
+<td>是否允许 stdin 升级（CRITICAL STOP 应答）。<code>None</code> = tty 自动判断</td>
+</tr>
+<tr>
+<td><code>acceptable_eval_gap</code></td>
+<td>float | None</td>
+<td>—</td>
+<td>数值评测可接受 gap（默认 0.03）。超过即触发 warning checkpoint。也可在 prompt 里写"接受 5% gap"等价表达，优先级见 §5.2</td>
+</tr>
+<tr>
+<td><code>max_requantize_attempts</code></td>
+<td>int</td>
+<td>—</td>
+<td>Ask 类失败（§A 中 #3/#6/#16/#26）重跑上限，默认 <code>1</code>。设 <code>0</code> 即 fail-fast，不重跑；调大允许 caller 让 agent 多试几次（适合 inference_optimizer 想做整体重试预算时覆写）。受 <code>&lt;workspace&gt;/requantize_attempts.txt</code> 持久化计数器约束</td>
+</tr>
+</tbody>
+</table>
+<p><strong>prompt 示例</strong>（含常见字段——用户只写他在意的部分即可，未写项由 Quark skill 填默认）：</p>
+<div class="codehilite"><pre><span></span><code>把 /scratch/models/Qwen3-30B-A3B 进行 mxfp4 量化：
+- self-attention 用 fp8 量化
+- kv-cache 用 fp8、排除 lm_head
+- 校准用 pileval、128 条、序列长度 512
+- 导出 HF 格式，evaluation 可接受 5% gap
+- 输出到 /scratch/qwen3-30b-mxfp4
+</code></pre></div>
+
+<p>Quark 在 Plan checkpoint 里把 prompt 翻译成 <code>quant_plan</code> 并请求用户确认。可用 scheme 词表见 §4。</p>
+<h3 id="32">3.2 返回结构</h3>
+<p>调用返回 <code>QuantSkillRunResult</code>，只暴露 3 个字段（其余审计信息走日志 / <code>&lt;workspace&gt;</code> 内固定命名的 artifact 文件，不进返回值）：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status</code></td>
+<td>str</td>
+<td><code>success</code> / <code>partial</code> / <code>failed</code>（语义见下表）</td>
+</tr>
+<tr>
+<td><code>quantized_model_dir</code></td>
+<td>Path | None</td>
+<td><code>success</code> / <code>partial</code> 时指向量化结果目录；<code>failed</code> 时为 <code>None</code></td>
+</tr>
+<tr>
+<td><code>assessment</code></td>
+<td><code>Assessment</code></td>
+<td>主结论 + 多次尝试的完整轨迹（结构见下）</td>
+</tr>
+</tbody>
+</table>
+<p><code>Assessment</code> 把"这次调用最后落在哪一类、一共跑了几次、有没有靠重跑救回来、关键数值是多少"四件事合并成一个对象，避免调用方再去翻日志：</p>
+<div class="codehilite"><pre><span></span><code><span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Assessment</span><span class="p">:</span>
+    <span class="n">final</span><span class="p">:</span>     <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span>              <span class="c1"># 最终主结论 ID（§A 中的行名）；干净一次过为 None</span>
+    <span class="n">attempts</span><span class="p">:</span>  <span class="nb">list</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]</span>        <span class="c1"># 每次量化尝试的主结论 ID，按时间顺序；len = 实际跑过的次数</span>
+    <span class="n">recovered</span><span class="p">:</span> <span class="nb">bool</span>                    <span class="c1"># True 当且仅当：前面有尝试失败、但后续重跑成功（即 attempts 中既有失败 ID 又以 None/成功 tag 收尾）</span>
+    <span class="n">eval_gap</span><span class="p">:</span>  <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>     <span class="c1"># eval 阶段的 relative_gap 数值；仅当 final ∈ {eval_gap_exceeded, eval_gap_accepted} 时填充</span>
+</code></pre></div>
+
+<p>字段语义：</p>
+<ul>
+<li><strong><code>final</code></strong>：本次调用对外公布的"主结论"。<code>failed</code> / <code>partial</code> 时是根因（如 <code>exec_oom</code>、<code>checkpoint_aborted</code>、<code>eval_gap_exceeded</code>、<code>upstream_change_required</code>、<code>unclassified_failure</code>）；<code>success</code> 但"有故事"时是叙事 tag（如 <code>eval_gap_accepted</code>）；干净成功为 <code>None</code>。所有可能取值见附录 §A。</li>
+<li><strong><code>attempts</code></strong>：每次完整流水线（Intake → Execute → Validate → Eval）的主结论 ID，最早一次在 <code>[0]</code>。<code>len(attempts) - 1</code> 即额外重跑次数（受 §3.1 <code>max_requantize_attempts</code> 上限约束）。</li>
+<li><strong><code>recovered</code></strong>：诊断 → 修补 → 重跑机制是否真正起作用。常被调用方用作"该不该把这次结果列入'需要人复盘'"的过滤条件。</li>
+<li><strong><code>eval_gap</code></strong>：把唯一一个目前会暴露的数值字段抬到结构里，免得调用方再去 parse <code>&lt;workspace&gt;/eval_report.json</code>。其它结论一律为 <code>None</code>。</li>
+</ul>
+<p>典型场景：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th><code>final</code></th>
+<th><code>attempts</code></th>
+<th><code>recovered</code></th>
+<th><code>eval_gap</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>干净一次过</td>
+<td><code>None</code></td>
+<td><code>[None]</code></td>
+<td><code>False</code></td>
+<td><code>None</code></td>
+</tr>
+<tr>
+<td>首次 OOM、重跑成功</td>
+<td><code>None</code></td>
+<td><code>["exec_oom", None]</code></td>
+<td><code>True</code></td>
+<td><code>None</code></td>
+</tr>
+<tr>
+<td>两次都 OOM</td>
+<td><code>"exec_oom"</code></td>
+<td><code>["exec_oom", "exec_oom"]</code></td>
+<td><code>False</code></td>
+<td><code>None</code></td>
+</tr>
+<tr>
+<td>超阈值、非交互直接 partial</td>
+<td><code>"eval_gap_exceeded"</code></td>
+<td><code>["eval_gap_exceeded"]</code></td>
+<td><code>False</code></td>
+<td><code>0.052</code></td>
+</tr>
+<tr>
+<td>超阈值、操作者接受</td>
+<td><code>"eval_gap_accepted"</code></td>
+<td><code>["eval_gap_accepted"]</code></td>
+<td><code>False</code></td>
+<td><code>0.041</code></td>
+</tr>
+</tbody>
+</table>
+<p>调用方若要 artifact 路径，直接按 §3.3 出站合约固定命名拼：<code>workspace / "validation_report.md"</code>、<code>workspace / "eval_report.json"</code> 等；存在性 <code>Path.exists()</code> 自验。这样路径模式归调用方自己掌握，agent 改产物布局不会破坏调用方的上报字段。</p>
+<p><strong><code>status</code> 语义</strong>（精确分档见 §5.4）</p>
+<table>
+<thead>
+<tr>
+<th>status</th>
+<th>含义</th>
+<th>调用方处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>success</code></td>
+<td>全部 artifact 齐全 + MUST-validate 全 ok</td>
+<td>把 <code>quantized_model_dir</code> 切给下游；<code>assessment.final</code> 若非空（如 <code>eval_gap_accepted</code>），记审计</td>
+</tr>
+<tr>
+<td><code>partial</code></td>
+<td>量化模型可加载，但审计 / eval 类工件缺失或有警告</td>
+<td>看 <code>assessment.final</code> 决定是否接受</td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td>模型缺失或 MUST-validate 失败</td>
+<td>视为失败，<code>assessment.final</code> 即根因</td>
+</tr>
+</tbody>
+</table>
+<h3 id="33-quark">3.3 内部合约（与 Quark 的接口）</h3>
+<p>agent 与 Quark 只有<strong>一条入站合约 + 一条出站合约</strong>：</p>
+<ul>
+<li><strong>Hyperloom → Quark</strong>：把用户 prompt 作为 SDK session 的首条消息发出；Quark 的 3 个 CRITICAL STOP 由 SKILL.md 规定的 checkpoint 应答协议自动 / 默认 / 升级处理。可选择性写 <code>session_context.json</code> 作为审计 trace。</li>
+<li><strong>Quark → Hyperloom</strong>：合约 artifact 列表为 <code>session_context.json</code> / <code>model_analysis.json</code> / <code>quant_plan.json</code> / <code>run_manifest.yaml</code> / <code>&lt;output_dir&gt;/{config.json, *.safetensors, tokenizer*}</code> / <code>validation_report.md</code>；§5.2 评估开启时再加 <code>eval_report.md</code>。由 <code>result_collector</code> 扫描并据此判定 status。</li>
+</ul>
+<hr />
+<h2 id="4-scheme">4. Scheme 词表参考</h2>
+<p>prompt 是自由文本，Quark <code>quark-torch-ptq</code> 在 Plan checkpoint 中负责把它翻译为合法 <code>quant_plan</code> 并由用户确认。本节只列<strong>写 prompt 时常用的术语</strong>作为参考。<strong>权威定义见 Quark <code>quark-llm-ptq-workflow/SKILL.md</code> 与 <code>quant_plan.schema.json</code></strong>。</p>
+<h3 id="41-scheme">4.1 常用 scheme 术语</h3>
+<table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+<th>适用模块</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fp8</code></td>
+<td>8-bit 浮点（E4M3）</td>
+<td>weight / activation / kv_cache</td>
+</tr>
+<tr>
+<td><code>mxfp4</code></td>
+<td>OCP MX 4-bit 浮点</td>
+<td>weight / activation（主要用于 MoE/MLP）</td>
+</tr>
+<tr>
+<td><code>int8</code> / <code>int4</code></td>
+<td>整数量化</td>
+<td>weight</td>
+</tr>
+<tr>
+<td><code>awq</code> / <code>gptq</code> / <code>smoothquant</code></td>
+<td>量化算法（非 dtype）</td>
+<td>与 <code>int*</code>/<code>fp8</code> 组合使用</td>
+</tr>
+<tr>
+<td><code>none</code> / 不写</td>
+<td>该模块保持原 dtype（bf16/fp16）</td>
+<td>任意</td>
+</tr>
+</tbody>
+</table>
+<h3 id="42">4.2 常被引用的模块名</h3>
+<p>写 prompt 时可以直接说"self-attention"、"MoE expert"、"普通 MLP"、"kv-cache"、"lm_head"——Quark 会把它们对应到 <code>attention_scheme</code>、<code>layer_overrides[".*\.experts\..*"]</code>、<code>layer_overrides[".*\.mlp\.(?!experts\.|shared_expert).*"]</code>、<code>kv_cache_scheme</code>、<code>exclude_layers</code> 上。无需在 prompt 里写正则。</p>
+<h3 id="43">4.3 当前已知约束</h3>
+<ul>
+<li><code>kv_cache</code> 在 Quark 当前发布版的 <code>quark-llm-ptq-workflow</code> 示例与 <code>quantize_quark.py</code> 中只接受 <code>fp8</code> 或不启用；其他值会在 Quark Plan checkpoint 被拒。</li>
+<li>若 prompt 中模块/scheme 组合 Quark 不支持，Plan checkpoint 会列出原因并要求修改。</li>
+</ul>
+<h3 id="44">4.4 默认值</h3>
+<p>用户在 prompt 没指定的字段（calibration 样本、序列长度、导出格式、evaluation_intent 等），由 Quark <code>quark-torch-ptq</code> skill 在 Plan checkpoint 内填默认并展示给用户确认。</p>
+<hr />
+<h2 id="5-validation-evaluation">5. 量化后的 Validation 与 Evaluation</h2>
+<p>本章四节按"检查什么 → 怎么传播 → 怎么门控"展开：</p>
+<ul>
+<li>§5.1 <strong>结构性 validation</strong>——4 个字节级 sanity check</li>
+<li>§5.2 <strong>精度 evaluation</strong>——源模型 vs 量化模型 PPL/accuracy 对比</li>
+<li>§5.3 <strong>失败传播</strong>——validation 结果如何变成 <code>status</code> 与进程退出</li>
+<li>§5.4 <strong>门控策略 + 失败兜底</strong>——artifact 分档、recovery 矩阵、retry 上限</li>
+</ul>
+<h3 id="51-validation">5.1 结构性 Validation</h3>
+<p>Execute 完成后，SKILL.md 指示 SDK 按 <strong>4 → 1 → 3 → 2</strong>
+顺序调用 Quark 的 <code>quark-torch-result-validator</code>，入参为
+<code>source_model_dir = model_path</code> 与 <code>quantized_model_dir = output_dir</code>，
+产物写到 <code>&lt;workspace&gt;/validation_report.md</code>。</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>子命令</th>
+<th>判定依据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>4</td>
+<td><code>fuzzy</code></td>
+<td>每个 pattern 的 <code>dtype_counts</code>；同一 pattern 出现混合 dtype 即有层未按计划量化</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>auxiliary</code></td>
+<td>tokenizer / generation_config 等辅助文件全部转移，无 missing / mismatched / extra</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>config</code></td>
+<td>剥掉 <code>quantization_config</code> 等键后 <code>config.json</code> 深度相等</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>md5</code></td>
+<td><code>exclude_layers</code> 张量字节级 MD5 抽样比对</td>
+</tr>
+</tbody>
+</table>
+<p>这些是 <strong>结构 / 字节级 sanity check</strong>，不覆盖数值精度（perplexity、accuracy）。</p>
+<h3 id="52-evaluation">5.2 精度 Evaluation</h3>
+<p>§5.1 只覆盖结构；本节是<strong>精度层</strong>校验——直接对比原模型 vs 量化模型在同一组测试上的差距，gap 超阈值即提请用户确认。</p>
+<p><strong>机制</strong></p>
+<ul>
+<li>SKILL.md 在 Validate 阶段后追加一段 prompt，调用 Quark <code>quark-torch-llm-eval</code> skill。</li>
+<li>Skill 使用<strong>当前环境中已安装的 vLLM 或 SGLang</strong> 作为推理后端（由 skill 内部按可用性选择，优先级见 <code>quark-torch-llm-eval/SKILL.md</code>），启动两个 offline engine（源模型 + 量化模型），跑同一组测试（默认 PPL on wikitext-2 + 小规模 gsm8k 抽样）。<strong>Skill 不做任何 <code>pip install</code></strong>——后端缺失即报 <code>eval_env_unavailable</code>（见附录 §A.8），由调用方按 SHOULD-have 档处理。</li>
+<li>产物写到 <code>&lt;workspace&gt;/eval_report.md</code> 与 <code>eval_report.json</code>，后者含 <code>source_score</code> / <code>quantized_score</code> / <code>relative_gap</code> 字段。</li>
+</ul>
+<p><strong>Gap 阈值</strong></p>
+<p><code>acceptable_eval_gap</code> 按以下优先级解析（高到低）：</p>
+<ol>
+<li><strong>Python 入参</strong> — <code>quantize_via_prompt(..., acceptable_eval_gap=)</code> 显式传值</li>
+<li><strong>Prompt 内声明</strong> — 用户在 prompt 里写明"接受 5% gap"等</li>
+<li><strong>SKILL.md 默认</strong> — <code>0.03</code>（相对 gap 3%）</li>
+</ol>
+<p>调用方传了 Python 入参就直接生效，不再看 prompt 与 SKILL.md。</p>
+<p><strong>判定规则</strong></p>
+<table>
+<thead>
+<tr>
+<th>相对 gap</th>
+<th>操作者响应</th>
+<th>status</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>≤ 阈值</code></td>
+<td>—</td>
+<td><code>success</code></td>
+<td>直接通过</td>
+</tr>
+<tr>
+<td><code>&gt; 阈值</code></td>
+<td><code>y</code></td>
+<td><code>success</code></td>
+<td><code>assessment.final=eval_gap_accepted</code></td>
+</tr>
+<tr>
+<td><code>&gt; 阈值</code></td>
+<td><code>n</code></td>
+<td><code>failed</code></td>
+<td>显式拒绝视为错误</td>
+</tr>
+<tr>
+<td><code>&gt; 阈值</code></td>
+<td>非交互</td>
+<td><code>partial</code></td>
+<td><code>assessment.final=eval_gap_exceeded</code>，上游 gating 自决</td>
+</tr>
+</tbody>
+</table>
+<p>gap 超阈值时 SKILL.md 把 gap / 单条 metric / 阈值打到 stderr 后再要求 y/n。</p>
+<p><strong>Eval 阶段自身的失败</strong>（eval 跑不起来，区别于"gap 超阈值"——完整枚举见附录 §A.8）：</p>
+<table>
+<thead>
+<tr>
+<th>故障</th>
+<th>触发</th>
+<th>处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>quantized_load_failed</code></td>
+<td>vLLM/SGLang 无法加载量化模型</td>
+<td>升级为 MUST-validate <code>failed</code>（下游同样无法 serve）</td>
+</tr>
+<tr>
+<td><code>eval_oom</code></td>
+<td>source + quantized 同卡放不下</td>
+<td>改串行加载；仍 OOM → <code>partial</code> + <code>assessment.final=eval_oom</code></td>
+</tr>
+<tr>
+<td><code>eval_env_unavailable</code></td>
+<td>环境中既无 vLLM 也无 SGLang，或测试集缺失</td>
+<td><code>partial</code> + <code>assessment.final=eval_skipped</code>；不阻断</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Result collector 行为</strong></p>
+<ul>
+<li><code>eval_report.md</code> / <code>eval_report.json</code> 归入 SHOULD-have（§5.4）——缺失只警告，不阻断。</li>
+<li>调用方若需要原始 <code>relative_gap</code> 数值，可直接读 <code>assessment.eval_gap</code>（agent 已从 <code>&lt;workspace&gt;/eval_report.json</code> 抽出）；agent 在超阈值时把判定结果写入 <code>assessment.final</code>：非交互模式下为 <code>eval_gap_exceeded</code>（status=<code>partial</code>），操作者接受时为 <code>eval_gap_accepted</code>（status=<code>success</code>）。</li>
+</ul>
+<h3 id="53-inference_optimizer">5.3 失败传播：如何向 inference_optimizer 返回</h3>
+<p>§5.1 / §5.2 给出"是否通过";本节给出"未通过时这条信号怎么走出 agent"。校验结果经四层向上传播：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>产出</th>
+<th>给下一层的信号</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>quark-torch-result-validator</code> / <code>quark-torch-llm-eval</code></td>
+<td><code>validation_report.md</code> / <code>eval_report.json</code></td>
+<td>每步 <code>ok</code> / <code>FAIL</code> / <code>skipped</code>；<code>relative_gap</code></td>
+</tr>
+<tr>
+<td><code>result_collector.collect_results</code></td>
+<td><code>QuantRunResult</code></td>
+<td><code>status ∈ {success, partial, failed}</code> + <code>assessment.final</code>（按 §5.4 解析 validation_report 各 step 状态后归并到主结论 ID）</td>
+</tr>
+<tr>
+<td><code>quantization_request_handlers.py</code>（prelude 适配层）</td>
+<td>payload dict</td>
+<td><code>success</code> → <code>status="ok"</code>；<code>partial</code> → 按 §5.4 四档分级 ok / failed；<code>failed</code> → <code>status="failed"</code></td>
+</tr>
+<tr>
+<td><code>_run_quantization_prelude</code></td>
+<td>进程退出 / <code>args.model</code> 改写</td>
+<td><code>status != "ok"</code> 则 <code>SystemExit(3)</code>；否则继续，并把 <code>quantized_model_dir</code> 注入下游</td>
+</tr>
+</tbody>
+</table>
+<p>适配层按 §5.4 四档分级决定 ok / failed：</p>
+<table>
+<thead>
+<tr>
+<th>QuantRunResult.status</th>
+<th>触发条件</th>
+<th>适配层 status</th>
+<th>inference_optimizer 行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>success</code></td>
+<td>artifact 齐全 + MUST-validate 全 ok</td>
+<td><code>ok</code></td>
+<td>继续；<code>args.model</code> ← <code>quantized_model_dir</code></td>
+</tr>
+<tr>
+<td><code>partial</code>（SHOULD/NICE 缺）</td>
+<td>模型可加载、MUST-validate ok，仅审计/eval 缺</td>
+<td><code>ok</code></td>
+<td>继续；payload 标注 <code>quant_status="partial"</code></td>
+</tr>
+<tr>
+<td><code>partial</code>（MUST-validate FAIL/SKIPPED）</td>
+<td>md5 / config FAIL，或 STRICT 下 SKIPPED</td>
+<td><code>failed</code></td>
+<td><code>SystemExit(3)</code></td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td><code>run_manifest.yaml</code> 或量化权重缺</td>
+<td><code>failed</code></td>
+<td><code>SystemExit(3)</code>，stderr 打印 <code>assessment.final</code></td>
+</tr>
+</tbody>
+</table>
+<p>早期失败（<code>workspace_unwritable</code> / <code>quark_root_missing</code> / <code>sdk_runtime_error</code> / <code>checkpoint_aborted</code> 等，完整枚举见附录 §A.1 / §A.9）同样走 <code>status="failed"</code> + <code>assessment.final</code> + <code>SystemExit(3)</code>。</p>
+<blockquote>
+<p><strong><code>SystemExit(3)</code> 归属</strong>：由 <code>_run_quantization_prelude</code>（CLI 适配层）抛出；直接调用 <code>quantize_via_prompt</code> 不退进程，只返回 <code>QuantSkillRunResult</code>，由调用方读 <code>status</code> 自行处置。这是 agent 独立于 inference_optimizer 可用的前提（立项目标）。</p>
+</blockquote>
+<h3 id="54">5.4 门控策略与失败兜底</h3>
+<p>按"下游是否真的需要"把 artifact 分四档,每档给出明确门控动作:</p>
+<table>
+<thead>
+<tr>
+<th>档次</th>
+<th>内容</th>
+<th>缺失后果</th>
+<th>门控动作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>MUST-have</strong>(加载)</td>
+<td><code>config.json</code>、<code>*.safetensors</code>/<code>*.bin</code>（多分片时加 <code>model.safetensors.index.json</code>）、<code>tokenizer*</code></td>
+<td>vLLM 无法加载</td>
+<td>缺即终止</td>
+</tr>
+<tr>
+<td><strong>MUST-validate</strong>(正确性)</td>
+<td>validation_report 中 Step 3 config + Step 2 md5 = ok</td>
+<td>模型能加载但结果错</td>
+<td>FAIL 终止;SKIPPED 默认终止,<code>HYPERLOOM_QUANT_STRICT_VALIDATION=0</code> 改为只警告</td>
+</tr>
+<tr>
+<td><strong>SHOULD-have</strong>(可低成本修复)</td>
+<td>validation_report 存在 + Step 1/4 ok;<code>model_analysis.json</code> / <code>quant_plan.json</code> / <code>run_manifest.yaml</code></td>
+<td>违反硬契约但可秒级修复</td>
+<td>FAIL → 走兜底矩阵补文件 + 重跑 validator</td>
+</tr>
+<tr>
+<td><strong>NICE-to-have</strong></td>
+<td><code>session_context.json</code></td>
+<td>缺失无害</td>
+<td>仅警告</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>档次语义</strong>：分档判定的是"违反时走哪条修复路径"，不是"重不重要"。Step 1 auxiliary 同样 enforce 一条硬契约——<strong>"源目录里有的非权重文件，量化目录必须有"</strong>（覆盖 <code>special_tokens_map.json</code> / <code>generation_config.json</code> / <code>chat_template.jinja</code> 等"源有则必须有"的文件）。它留在 SHOULD-have 不是因为允许失败，而是因为修复路径是"从 source <code>cp</code> + 重跑 Step 1"（秒级），不值得 abort 已完成的量化。SKIPPED 才走警告路径。</p>
+</blockquote>
+<p><strong>失败处置概览</strong>——<code>result_collector</code> 解析 artifact 后，SKILL.md 中的 checkpoint 协议按附录 §A 的分类驱动 LLM 处置：</p>
+<ul>
+<li><strong>Auto-recover</strong>（§A.10 列出 13 条）：LLM 在 sandbox 内补文件 / 重跑 validator / 修 plan，<strong>不打扰人</strong>。</li>
+<li><strong>Auto-fail</strong>（10 条）：环境硬错或语义违约——立即 <code>failed</code>，不重跑（重跑无意义）。</li>
+<li><strong>Ask</strong>（6 条）：决策点。<code>interactive=True</code> 询问操作者；<code>interactive=False</code> 时其中 4 条（#3 / #6 / #16 / #26）按 SKILL.md <code>Recovery</code> 中的 fix hypothesis <strong>自动重跑 1 次</strong>，其余两条（#2 缺信息、#21 验收决策）立即定性。</li>
+<li><strong>兜底 #30 <code>unclassified_failure</code></strong>：不在已枚举行内的失败，agent 在运行时分析（log + SKILL.md Recovery + 阶段上下文），自动落到上面三类之一。详见 §A.9。</li>
+</ul>
+<p><strong>重跑前必须先诊断</strong>：所有进入重跑路径的行（Ask 类 + #30）在再次调用 quark-torch-ptq 前，必须先输出一份具体可执行的 fix hypothesis，并把补丁仅落在 <code>&lt;workspace&gt;</code> 及 agent 自身可控范围；<strong>不得修改 <code>quark_root</code> 下任何文件</strong>（Quark 视为不可变上游）。流程细节见 §A.10。</p>
+<p>每条失败的具体兜底动作与重跑触发条件见附录 §A.1–§A.9。</p>
+<p><strong>重跑量化上限</strong>：由 §3.1 入参 <code>max_requantize_attempts</code>（默认 <code>1</code>）控制，仅对 Ask 类 #3/#6/#16/#26 生效，通过 <code>&lt;workspace&gt;/requantize_attempts.txt</code> 持久化计数器约束。</p>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>重跑前是否询问</th>
+<th>计数行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>interactive=False</code>（CI）</td>
+<td>跳过询问，到达上限即 <code>failed</code></td>
+<td>计数器自增；达 <code>max_requantize_attempts</code> 即停</td>
+</tr>
+<tr>
+<td><code>interactive=True</code>（人在场）</td>
+<td>重跑前在 stderr 打印 fix hypothesis 请操作者 <code>y/n</code></td>
+<td>同上；操作者拒绝 → <code>SystemExit(3)</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Caller 覆写</strong>：inference_optimizer 可以传 <code>max_requantize_attempts=0</code> 让 agent 立即定性（适合全局重试预算已用完的场景），也可调高让 agent 多试几次。<strong>Auto-recover 类（13 条）的 LLM 内部修复不受此参数限制</strong>——那些是同 SDK session 内秒级动作，不计入 Ask 类计数。</p>
+<p>原则：盲目重跑只是复现同一次失败；"有 SKILL.md fix hypothesis 才重跑"把每次重跑绑定到明确的修复假设，CI 在无人值守下既不会被 30 分钟量化盲跑两遍，也不会因瞬态错误失掉值得救的产物。</p>
+<hr />
+<h2 id="6-checkpoint">6. 需要操作者确认的检查点（Checkpoint 汇总）</h2>
+<p>确定性边界压到最薄,代价是把"是否继续"的判断让给操作者。本节把<strong>所有会向操作者要 y/n / 让其改 prompt / 让其确认退出的点</strong>一次列清,便于运维侧排班、CI 侧关停。</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Checkpoint</th>
+<th>来源</th>
+<th>触发条件</th>
+<th>自动跳过</th>
+<th>拒绝后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Intake CRITICAL STOP</td>
+<td>Quark <code>quark-torch-ptq</code></td>
+<td>解析完模型结构请求确认</td>
+<td>prompt 写"接受 Intake 默认" + <code>interactive=False</code></td>
+<td><code>failed</code>,<code>assessment.final=checkpoint_aborted</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Plan CRITICAL STOP</td>
+<td>Quark <code>quark-torch-ptq</code></td>
+<td>自然语言翻译为 <code>quant_plan</code> 后请求确认</td>
+<td>prompt 写"按生成方案执行";<code>interactive=False</code> 自动接受</td>
+<td>同上</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Manifest CRITICAL STOP</td>
+<td>Quark <code>quark-torch-ptq</code></td>
+<td>执行前展示 run_manifest</td>
+<td>prompt 写"接受默认 manifest";<code>interactive=False</code> 自动接受</td>
+<td>同上</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Eval gap warning(§5.2)</td>
+<td>SKILL.md</td>
+<td>相对 gap &gt; <code>acceptable_eval_gap</code>(默认 3%)</td>
+<td><code>acceptable_eval_gap</code> 调大或 prompt 内声明</td>
+<td><code>n</code> → <code>failed</code>;非交互 → <code>partial</code> + <code>eval_gap_exceeded</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Requantize warning(§A.10)</td>
+<td>SKILL.md</td>
+<td>Ask 类 #3/#6/#16/#26 与兜底 #30 在<strong>完成诊断 → 形成 fix hypothesis</strong> 之后、重跑之前请求确认</td>
+<td><code>interactive=False</code> 跳过确认直接由计数器自动重跑（受 §3.1 <code>max_requantize_attempts</code> 约束）；诊断给不出 hypothesis → 不重跑直接 <code>failed</code></td>
+<td><code>n</code> → <code>SystemExit(3)</code>,根因+fix hypothesis 摘要到 stderr</td>
+</tr>
+</tbody>
+</table>
+<p><strong>关于 <code>interactive</code> 的语义</strong>:<code>quantize_via_prompt(..., interactive=...)</code> 是<strong>唯一</strong>控制以上 1–5 是否允许向 stdin 升级的开关。Auto-fail 类失败（§A.10）直接退出，不经过 checkpoint。<code>None</code>(默认)按 tty 自动判断;<code>True</code> 强开 stdin;<code>False</code> 强制走 SKILL.md 里写的"非交互回退策略"(基本上是"按 prompt / 按默认值,否则拒绝")。</p>
+<p><strong>MUST-validate SKIPPED 不是 checkpoint</strong>——§5.4 的"终止 / 警告"分支在 result_collector 时由 <code>HYPERLOOM_QUANT_STRICT_VALIDATION</code> 决定，没有运行时 y/n；CI 在部署时设一次即可。</p>
+<p><strong>CI 推荐配方</strong>:<code>interactive=False</code> + prompt 内显式写全 Intake/Plan/Manifest 想要的选择 + <code>acceptable_eval_gap</code> 设大或为 prompt 显式声明阈值 + <code>HYPERLOOM_QUANT_STRICT_VALIDATION</code> 保持默认。这样除了真实致命错误外不会停在任何 checkpoint 上等人。</p>
+<hr />
+<h2 id="7-agent-agent">7. Agent 定位与其他 Agent 的区别</h2>
+<p>quantization-agent 是 <strong>reactor loop 启动前的一次性 prelude</strong>：用户带 <code>--quantize "&lt;prompt&gt;"</code> 启动 CLI 时，由 <code>inference_optimizer/cli.py::_run_quantization_prelude</code> 调用一次 <code>quantize_via_prompt</code>，返回 <code>quantized_model_dir</code> 并写回 <code>args.model</code>，随后退出，不参与任何 tick。</p>
+<div class="codehilite"><pre><span></span><code>   用户 CLI                quantization-agent         Coordinator        reactor loop
+   --quantize &quot;&lt;prompt&gt;&quot; ──►   (一次性)         ──►   (启动)        ──►  每 tick 唤起
+                              返回 quantized_model_dir                   orchestration / kernel
+                              写回 args.model                            critic / robustness
+</code></pre></div>
+
+<p>与 reactor-loop agent 的对照：</p>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>Reactor-loop agent</th>
+<th>quantization-agent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>例子</td>
+<td><code>orchestration</code> / <code>kernel</code> / <code>critic</code> / <code>robustness</code></td>
+<td>本 agent</td>
+</tr>
+<tr>
+<td>生命周期</td>
+<td>每个 tick 被重新唤起</td>
+<td>reactor loop 启动前调用一次</td>
+</tr>
+<tr>
+<td>输出方式</td>
+<td><code>emit_intent</code> → PolicyGate → dispatch</td>
+<td>直接以 Python <code>dict</code> 返回调用方</td>
+</tr>
+<tr>
+<td>注册进 <code>AgentRole</code></td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-quark">8. Quark 仓库只读性保证</h2>
+<p>Agent 严格视 Quark 仓库为只读：<code>quantization-agent/SKILL.md</code> 与 Quark 各 workflow SKILL.md 都禁止修改 <code>quark/</code>、<code>examples/</code>、<code>tools/</code>、<code>docs/</code>、<code>tests/</code>、<code>pyproject.toml</code>、<code>requirements.txt</code>。如确需自定义脚本（新旗标、新模板），agent 写入 <code>&lt;workspace&gt;/</code> 并由 <code>run_manifest.yaml</code> 引用，从而保留对干净 Quark 安装的复现性。</p>
+<hr />
+<h2 id="9">9. 参考资料</h2>
+<ul>
+<li><code>quantization-agent/SKILL.md</code> — <strong>运行时合约</strong>：checkpoint 应答协议、Quark skill 调用顺序、eval gap 阈值</li>
+<li><code>quantization-agent/__init__.py</code> — 暴露 <code>quantize_via_prompt</code> 协程入口</li>
+<li><code>quantization-agent/tools/result_collector.py</code> — artifact 收集（唯一确定性边界）</li>
+<li><code>inference_optimizer/orchestrator/quantization_request_handlers.py</code> — 程序化派发（<code>quantize_via_prompt</code> 适配层）</li>
+<li><code>inference_optimizer/cli.py::_run_quantization_prelude</code> — <code>--quantize "&lt;prompt&gt;"</code> pre-hook</li>
+<li>Quark <code>quark-llm-ptq-workflow/SKILL.md</code> — 本 agent 驱动的 workflow 合约</li>
+<li>Quark <code>quark-torch-result-validator/SKILL.md</code> — §5.1 四项结构性检查的实现</li>
+<li>Quark <code>quark-torch-llm-eval/SKILL.md</code> — §5.2 精度评测中调用的 skill</li>
+<li><code>kernel-agent/tools/tracelens_skill_runner.py</code> — 架构模板</li>
+</ul>
+<hr />
+<h2 id="a">附录 A. 异常处置矩阵（按阶段分组）</h2>
+<p>本附录把 quantization-agent 全流程可能出现的失败一次列清，给出每条的<strong>类别</strong>（Auto-recover / Auto-fail / Ask）、<strong>具体说明</strong>与<strong>CI / 交互两种模式下的处置</strong>。原则：</p>
+<ul>
+<li><strong>Auto-recover</strong>：LLM 在 sandbox 内能自愈，无需打扰人。</li>
+<li><strong>Auto-fail</strong>：修不了或重跑无意义，立即 <code>failed</code>。</li>
+<li><strong>Ask</strong>：决策点。CI 默认重跑（前提：SKILL.md <code>Recovery</code> 中有 fix hypothesis 且 LLM 已写出具体修复动作）；交互模式向用户请示。重跑由 <code>&lt;workspace&gt;/requantize_attempts.txt</code> 持久化计数器约束，上限由 §3.1 入参 <code>max_requantize_attempts</code>（默认 <code>1</code>）控制，超限即 <code>failed</code>。</li>
+<li><strong>兜底行 #30</strong>：未列入 1–29 的任何失败统一进入 #30，agent 运行时诊断后映射到上面三类之一。</li>
+</ul>
+<p><strong>通用约束</strong>：所有重跑前必须先诊断并给出<strong>具体</strong>的 fix hypothesis；<strong>任何修复仅可改 <code>&lt;workspace&gt;</code> 内容，不得改 <code>quark_root</code> 下文件</strong>（Quark 视为不可变上游，避免污染共享 checkout）。完整流程见 §A.10。</p>
+<h3 id="a1-1-pre">A.1 阶段 1 · Pre（预检）</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>异常</th>
+<th>类别</th>
+<th>具体说明</th>
+<th>CI=False</th>
+<th>interactive=True</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>quark_root_missing</code></td>
+<td>Auto-fail</td>
+<td><code>quark_root</code> 参数对应路径不存在 / 不可读 / 非 git checkout；首次启动时探测一次</td>
+<td>立即 <strong>failed</strong></td>
+<td>立即 <strong>failed</strong></td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>quark_skill_unavailable</code></td>
+<td>Auto-fail</td>
+<td><code>quark_root/.claude/skills/{quark-torch-ptq,validator,llm-eval}/SKILL.md</code> 任一缺失或注册失败</td>
+<td>立即 <strong>failed</strong></td>
+<td>立即 <strong>failed</strong></td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>intent_parse_failed</code></td>
+<td>Auto-recover</td>
+<td>LLM 读 prompt 后无法产出合法 <code>hyperloom_quant_intent</code>：缺 model_path / target_dtype / output_dir 必填字段，或字段类型错</td>
+<td>LLM 内部自纠 ≤2 次；仍失败 → <strong>failed</strong></td>
+<td>LLM 自纠 2 次失败后向用户请求补全 prompt</td>
+</tr>
+<tr>
+<td>23</td>
+<td><code>workspace_unwritable</code></td>
+<td>Auto-fail</td>
+<td><code>workspace</code> 路径无法 mkdir 或目录存在但 <code>os.access(W_OK)=False</code>；Pre 阶段 touch 探测一次，避免量化跑 30 分钟才暴露</td>
+<td>立即 <strong>failed</strong>（带具体 PermissionError）</td>
+<td>立即 <strong>failed</strong></td>
+</tr>
+</tbody>
+</table>
+<h3 id="a2-2-intakequark-torch-ptq-step-1">A.2 阶段 2 · Intake（quark-torch-ptq Step 1）</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>异常</th>
+<th>类别</th>
+<th>具体说明</th>
+<th>CI=False</th>
+<th>interactive=True</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>9</td>
+<td><code>model_path_unreachable</code></td>
+<td>Auto-fail</td>
+<td>quark-torch-ptq Step 1 尝试装载源模型时 <code>model_path</code> 不可达 / 不可读 / 不含 <code>config.json</code></td>
+<td>立即 <strong>failed</strong></td>
+<td>立即 <strong>failed</strong></td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>analysis_artifact_invalid_or_missing</code></td>
+<td>Auto-recover</td>
+<td><code>model_analysis.json</code> 完全没产出、或产出后 schema 不合法 / JSON 损坏</td>
+<td>LLM 重跑 Step 1 → 继续</td>
+<td>同左</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a3-3-planquark-torch-ptq-step-2">A.3 阶段 3 · Plan（quark-torch-ptq Step 2）</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>异常</th>
+<th>类别</th>
+<th>具体说明</th>
+<th>CI=False</th>
+<th>interactive=True</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2</td>
+<td><code>checkpoint_aborted</code></td>
+<td>Ask</td>
+<td>Intake/Plan/Manifest 任一 CRITICAL STOP 触发；非交互模式下 prompt 又没写「接受默认」</td>
+<td>prompt 写默认 → 自动接受；否则 <strong>failed</strong>（缺信息，重跑无用）</td>
+<td>询问用户接受 / 改写 prompt</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>plan_artifact_invalid_or_missing</code></td>
+<td>Auto-recover</td>
+<td><code>quant_plan.json</code> 缺失或字段 schema 不合法（scheme 不在白名单、layer_overrides 正则非法等）</td>
+<td>LLM 重跑 Step 2 → 继续</td>
+<td>同左</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a4-4-manifestquark-torch-ptq-step-3">A.4 阶段 4 · Manifest（quark-torch-ptq Step 3）</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>异常</th>
+<th>类别</th>
+<th>具体说明</th>
+<th>CI=False</th>
+<th>interactive=True</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>12</td>
+<td><code>manifest_artifact_invalid_or_missing</code></td>
+<td>Auto-recover</td>
+<td><code>run_manifest.yaml</code> 缺失，或解析后缺 <code>outputs.quantized_model_dir</code> 字段</td>
+<td>LLM 重跑 Step 3 → 继续</td>
+<td>同左</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a5-5-execquark-torch-ptq-step-4aptq">A.5 阶段 5 · Exec（quark-torch-ptq Step 4a，PTQ 计算）</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>异常</th>
+<th>类别</th>
+<th>具体说明</th>
+<th>CI=False</th>
+<th>interactive=True</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3</td>
+<td><code>exec_oom</code></td>
+<td>Ask</td>
+<td>quark-torch-ptq Step 4a 执行 PTQ 时 GPU OOM；根因：batch 太大 / seq_len 太长 / kv_cache 量化开关问题</td>
+<td>LLM 减 batch/seq_len + 自动重跑 1 次 → success / <strong>failed</strong></td>
+<td>同左 + 重跑前请用户确认参数</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>exec_model_load_failed</code></td>
+<td>Auto-fail</td>
+<td>Exec 阶段装载源模型失败（与 #9 不同：路径在但权重损坏 / dtype 不支持 / 缺 transformers 依赖）</td>
+<td>立即 <strong>failed</strong></td>
+<td>立即 <strong>failed</strong></td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>exec_calibration_data_missing</code></td>
+<td>Auto-fail</td>
+<td>calibration 数据集（pileval / wikitext / 自定义）不可达，或样本数为 0</td>
+<td>立即 <strong>failed</strong></td>
+<td>立即 <strong>failed</strong></td>
+</tr>
+</tbody>
+</table>
+<h3 id="a6-6-exportquark-torch-ptq-step-4b">A.6 阶段 6 · Export（quark-torch-ptq Step 4b，写盘）</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>异常</th>
+<th>类别</th>
+<th>具体说明</th>
+<th>CI=False</th>
+<th>interactive=True</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>6</td>
+<td><code>export_crashed</code></td>
+<td>Ask</td>
+<td>Step 4b 序列化 quantized state_dict → safetensors 时崩溃；常见：磁盘满 / NFS 抖 / 临时文件竞争 / config 写入冲突</td>
+<td>LLM 自动重跑 1 次 → success / <strong>failed</strong></td>
+<td>同左 + 重跑前确认</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a7-7-validatequark-torch-result-validator">A.7 阶段 7 · Validate（quark-torch-result-validator）</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>异常</th>
+<th>类别</th>
+<th>具体说明</th>
+<th>CI=False</th>
+<th>interactive=True</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>13</td>
+<td><code>validator_self_test_failed</code></td>
+<td>Auto-fail</td>
+<td><code>run_validation.py self-test</code> 退出非零；Quark 验证脚本损坏或导入错误</td>
+<td>立即 <strong>failed</strong></td>
+<td>立即 <strong>failed</strong></td>
+</tr>
+<tr>
+<td>14</td>
+<td><code>must_have_config_missing_or_invalid</code></td>
+<td>Auto-recover</td>
+<td><code>&lt;quantized_dir&gt;/config.json</code> 缺失，或 JSON 损坏，或 vLLM 加载所需的核心字段（<code>model_type</code> / <code>architectures</code>）缺</td>
+<td>LLM 从 source 拷贝 + 补 <code>quantization_config</code> → 重跑 Step 3 → 继续</td>
+<td>同左</td>
+</tr>
+<tr>
+<td>15</td>
+<td><code>must_have_tokenizer_missing</code></td>
+<td>Auto-recover</td>
+<td><code>tokenizer.json</code> / <code>tokenizer_config.json</code> 等 tokenizer 必需文件缺失</td>
+<td>LLM 从 source <code>cp</code> tokenizer 全集 → 重跑 Step 1 → 继续</td>
+<td>同左</td>
+</tr>
+<tr>
+<td>16</td>
+<td><code>must_have_weights_missing</code></td>
+<td>Ask</td>
+<td><code>&lt;quantized_dir&gt;</code> 下没有 <code>*.safetensors</code> / <code>*.bin</code>；Step 4 实际没产出权重</td>
+<td>LLM 自动重跑 1 次 → success / <strong>failed</strong></td>
+<td>同左 + 重跑前确认</td>
+</tr>
+<tr>
+<td>17</td>
+<td><code>must_validate_config_mismatch</code></td>
+<td>Auto-recover</td>
+<td>Step 3 <code>config</code> FAIL：剥离 <code>quantization_config</code> 后仍有非量化字段差异</td>
+<td>LLM 修复字段（白名单加白 / 业务字段从 source 覆写）→ 重跑 Step 3 → 继续</td>
+<td>同左</td>
+</tr>
+<tr>
+<td>18</td>
+<td><code>must_validate_md5_mismatch</code></td>
+<td>Auto-fail</td>
+<td>Step 2 <code>md5</code> FAIL：<code>exclude_layers</code> 中声明的张量字节级 MD5 与 source 不一致——<strong>承诺不动却动了</strong></td>
+<td>立即 <strong>failed</strong>（语义违约）</td>
+<td>立即 <strong>failed</strong></td>
+</tr>
+<tr>
+<td>19</td>
+<td><code>should_have_aux_missing</code></td>
+<td>Auto-recover</td>
+<td>Step 1 <code>auxiliary</code> FAIL：源目录有但 quantized 目录缺的非权重文件（<code>special_tokens_map.json</code> / <code>generation_config.json</code> / <code>chat_template.jinja</code> 等）</td>
+<td>LLM <code>cp</code> 缺失文件 → 重跑 Step 1 → 继续</td>
+<td>同左</td>
+</tr>
+<tr>
+<td>20</td>
+<td><code>nice_to_have_skipped</code></td>
+<td>Auto-recover</td>
+<td>PyYAML 缺失导致 manifest 解析降级；或 <code>session_context.json</code> 缺失等不影响下游的工件</td>
+<td>记 note → 继续 success</td>
+<td>同左</td>
+</tr>
+<tr>
+<td>25</td>
+<td><code>validation_report_absent</code></td>
+<td>Auto-recover</td>
+<td><code>validation_report.md</code> 完全没产出——validator 未被 SKILL.md 调用，或调用时整体崩溃；区别于"产出但某 step FAIL"</td>
+<td>LLM 直接调一次 <code>quark-torch-result-validator</code> → 继续</td>
+<td>同左</td>
+</tr>
+<tr>
+<td>26</td>
+<td><code>fuzzy_check_failed</code></td>
+<td>Ask</td>
+<td>Step 4 <code>fuzzy</code> FAIL：同一 pattern 出现混合 dtype，或 safetensors header 异常；多数是 plan 写错（mixed precision），少数是文件损坏</td>
+<td>LLM 比对 <code>model_analysis.json</code> 修正 plan + 自动重跑 1 次 → success / <strong>failed</strong></td>
+<td>同左 + 重跑前确认</td>
+</tr>
+<tr>
+<td>27</td>
+<td><code>must_validate_skipped</code></td>
+<td>Auto-recover</td>
+<td>Step 2 md5 或 Step 3 config 因环境原因 SKIPPED（source 不可达、quant_config 无 exclude 等）——<strong>与 FAIL 不同</strong>：未证实 ≠ 已违约</td>
+<td><code>HYPERLOOM_QUANT_STRICT_VALIDATION=1</code>（默认）→ <strong>failed</strong>；<code>=0</code> → partial + warning</td>
+<td>同左（一次性环境变量决定）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a8-8-evalquark-torch-llm-eval">A.8 阶段 8 · Eval（quark-torch-llm-eval）</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>异常</th>
+<th>类别</th>
+<th>具体说明</th>
+<th>CI=False</th>
+<th>interactive=True</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>21</td>
+<td><code>eval_gap_exceeded</code></td>
+<td>Ask</td>
+<td>quark-torch-llm-eval 跑完后 <code>relative_gap &gt; acceptable_eval_gap</code> —— 验收决策问题，非重跑可解</td>
+<td>自动 → <strong>partial</strong> + <code>eval_gap_exceeded</code></td>
+<td>询问用户接受 partial / 重新 plan</td>
+</tr>
+<tr>
+<td>22</td>
+<td><code>eval_env_unavailable</code></td>
+<td>Auto-recover</td>
+<td>环境中既无 vLLM 也无 SGLang，或测试数据集不可达、或无 GPU；<strong>skill 不会自行安装后端</strong></td>
+<td>跳过 eval → success + note <code>eval_skipped</code></td>
+<td>同左</td>
+</tr>
+<tr>
+<td>28</td>
+<td><code>quantized_load_failed</code></td>
+<td>Auto-fail</td>
+<td>Eval 阶段 vLLM/SGLang 尝试加载量化模型失败（区别于 #4 装载的是源模型）——下游推理同样无法 serve，等价于 MUST-validate 违约</td>
+<td>升级为 MUST-validate <strong>failed</strong></td>
+<td>同左</td>
+</tr>
+<tr>
+<td>29</td>
+<td><code>eval_oom</code></td>
+<td>Auto-recover</td>
+<td>Eval 阶段 source + quantized 双 engine 同卡放不下；区别于 #3：发生在 vLLM/SGLang 推理而非 PTQ 算子计算</td>
+<td>自动改串行加载；仍 OOM → <strong>partial</strong> + note <code>eval_oom</code></td>
+<td>同左</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a9">A.9 跨阶段</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>异常</th>
+<th>类别</th>
+<th>具体说明</th>
+<th>CI=False</th>
+<th>interactive=True</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>24</td>
+<td><code>sdk_runtime_error</code></td>
+<td>Auto-fail</td>
+<td>Claude Agent SDK session 本身抛异常（rate-limit / network / context overflow / authentication）；与 Quark / 验证逻辑无关</td>
+<td>立即 <strong>failed</strong>，附 sdk traceback 摘要</td>
+<td>立即 <strong>failed</strong></td>
+</tr>
+<tr>
+<td>30</td>
+<td><code>unclassified_failure</code></td>
+<td>Auto-recover*</td>
+<td>任何不匹配第 1–29 行的失败：例如 Quark 升级引入的新异常类型、未识别的 SKILL.md 输出、陌生 traceback。Agent 必须先做诊断（读 stderr / 阶段上下文 / 对应 SKILL.md 的 <code>Recovery</code> 表），再<strong>自动决定</strong>按哪种已知类别处置：能在 workspace 内打补丁就走 Auto-recover；适合重跑且有 fix hypothesis 走 Ask（受 §3.1 <code>max_requantize_attempts</code> 约束）；否则走 Auto-fail。<strong>全过程禁止修改 <code>quark_root</code> 下任何文件</strong>——Quark 视为上游不可变。</td>
+<td>诊断 → 可修则修补 workspace 后重跑；不可修 → <strong>failed</strong> + <code>assessment.final=unclassified_failure</code>（附诊断摘要）</td>
+<td>同左；操作者可在 stderr 上覆写自动选定的策略</td>
+</tr>
+</tbody>
+</table>
+<h3 id="a10">A.10 分布与重跑机制</h3>
+<blockquote>
+<p><strong>正交关系</strong>：§5.4 的"档次"（MUST-have / MUST-validate / SHOULD-have / NICE-to-have）描述<strong>违反一条契约后产生的后果</strong>；本附录的"类别"（Auto-recover / Auto-fail / Ask）描述<strong>处置行为</strong>。例如 #14 <code>must_have_config_missing</code> 档次 = MUST-have（没有就不能加载），类别 = Auto-recover（LLM 能补出来）；#18 <code>must_validate_md5_mismatch</code> 档次 = MUST-validate（语义违约），类别 = Auto-fail（修不了）。</p>
+</blockquote>
+<p><strong>诊断 → 修复 → 重跑流程</strong>：所有 Ask 类（#3 / #6 / #16 / #26）以及兜底行 #30 在执行任何重跑之前，必须先走一次显式诊断：</p>
+<ol>
+<li><strong>诊断</strong>：读失败阶段的 stderr、artifacts、对应 SKILL.md 的 <code>Recovery</code> 列，定位根因。</li>
+<li><strong>形成 fix hypothesis</strong>：必须是<strong>具体、可执行</strong>的修改（例如 <code>batch_size 32→16</code>、<code>exclude lm_head</code>、<code>扩大 calibration 样本到 256</code>、<code>改 prompt 加 "execute generated plan"</code>）。空泛的"再跑一次试试"不算。</li>
+<li><strong>应用修复</strong>：补丁仅落在 <code>&lt;workspace&gt;</code> 下（修 prompt / 修 <code>quant_plan.json</code> / 调环境变量）或 agent 自身可控的状态里。<strong>严禁修改 <code>quark_root</code> 下任何文件</strong>——Quark 被视为不可变上游；任何"需要改 Quark 才能修"的失败一律转 Auto-fail，<code>assessment.final=upstream_change_required</code>。</li>
+<li><strong>重跑</strong>：用补丁后的输入重新执行失败阶段；计数器递增 1。</li>
+</ol>
+<p>诊断给不出 fix hypothesis 的，立即 <code>failed</code>——不做盲目重跑。</p>
+<p><strong>类别分布</strong>（共 30 行）：</p>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>行数</th>
+<th>行号</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Auto-recover</td>
+<td>13</td>
+<td>8, 10, 11, 12, 14, 15, 17, 19, 20, 22, 25, 27, 29</td>
+</tr>
+<tr>
+<td>Auto-fail</td>
+<td>10</td>
+<td>1, 4, 5, 7, 9, 13, 18, 23, 24, 28</td>
+</tr>
+<tr>
+<td>Ask</td>
+<td>6</td>
+<td>2, 3, 6, 16, 21, 26</td>
+</tr>
+<tr>
+<td>Auto-recover* (兜底，运行时分类)</td>
+<td>1</td>
+<td>30</td>
+</tr>
+</tbody>
+</table>
+<p><strong>CI 重跑触发行</strong>（仅 Ask 类 #3 / #6 / #16 / #26）：</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>fix hypothesis 来源</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3 <code>exec_oom</code></td>
+<td>quark-torch-ptq SKILL.md Recovery：减 batch / seq_len</td>
+</tr>
+<tr>
+<td>6 <code>export_crashed</code></td>
+<td>经验：清 tmp + 同参重试（多为瞬态）</td>
+</tr>
+<tr>
+<td>16 <code>must_have_weights_missing</code></td>
+<td>等同 #3 / #6 的合集（PTQ 没产出权重）</td>
+</tr>
+<tr>
+<td>26 <code>fuzzy_check_failed</code></td>
+<td>LLM 对照 <code>model_analysis.json</code> 修正 plan 的 layer_overrides</td>
+</tr>
+</tbody>
+</table>
+<p><strong>不自动重跑的 Ask 类</strong>：</p>
+<ul>
+<li><strong>#2</strong> <code>checkpoint_aborted</code> — 缺的是用户决策信息，重跑还是缺。</li>
+<li><strong>#21</strong> <code>eval_gap_exceeded</code> — 验收决策，非重跑可解；同 plan 仍是同 gap。</li>
+</ul>
+</main>
+</div>
+</body>
+</html>
