@@ -1,7 +1,7 @@
 """Multi-attempt orchestration: ``quantize_via_prompt`` public entry.
 
 Wraps :func:`_runner.run_one_attempt` with the diagnose-fix-retry protocol
-from ``docs/DESIGN.zh-CN.md §A.10``:
+(the per-attempt contract lives in ``SKILL.md``):
 
   * Each attempt → classifier → outcome.
   * ``None`` / ``eval_gap_accepted``                → done, build assessment.
@@ -32,10 +32,9 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from .assessment import (
-    ASK,
     ASK_RETRYABLE,
     AUTO_FAIL,
     AUTO_RECOVER,
@@ -46,17 +45,28 @@ from .assessment import (
 )
 from .outcomes import OutcomeId, SUCCESS_TAGS, UNCLASSIFIED_FAILURE
 from .result_collector import CollectedArtifacts, collect_artifacts
-from .runner import AttemptResult, RunOneAttemptFn, run_one_attempt
+from .runner import RunOneAttemptFn, run_one_attempt
 
 
 _COUNTER_FILE = "requantize_attempts.txt"
+
+# Canonical Quark checkout used when neither the ``quark_root`` kwarg nor the
+# ``$QUARK_ROOT`` env var is set. Until the Quark team ships a public package
+# that bundles ``.claude/skills/quark-torch-*`` (and a version-matched
+# ``amd-quark`` wheel), agents resolve the repo from this local checkout.
+DEFAULT_QUARK_ROOT = "/wekafs/hyperloom/Quark"
+
+# Upstream git URL for the Quark repo. Left empty on purpose: fill this in once
+# the Quark repo is open-sourced so installers can clone it when the default
+# checkout is absent.
+DEFAULT_QUARK_GIT_URL = ""
 
 
 @dataclass(frozen=True)
 class QuantSkillRunResult:
     """Public return shape of :func:`quantize_via_prompt`.
 
-    Mirrors ``docs/DESIGN.zh-CN.md §3.2``. Exactly three fields by design;
+    Exactly three fields by design;
     legacy ``intent_digest`` / ``artifact_paths`` / ``sdk_error`` are folded
     into ``assessment`` (`final` / `attempts` / `recovered` / `eval_gap` +
     `notes`) so caller code never has to negotiate a sprawling result dict.
@@ -235,18 +245,18 @@ async def quantize_via_prompt(
     workspace_path.mkdir(parents=True, exist_ok=True)
 
     if quark_root is None:
-        quark_root_env = os.environ.get("QUARK_ROOT")
-        if not quark_root_env:
-            return _build_failed_bootstrap_result(
-                workspace_path, OutcomeId.quark_root_missing,
-                "QUARK_ROOT not set and quark_root not passed",
-            )
-        quark_root = quark_root_env
+        # Resolution order: $QUARK_ROOT env -> DEFAULT_QUARK_ROOT canonical
+        # checkout. So an agent that sets neither the kwarg nor the env var
+        # still finds the repo at the well-known location.
+        quark_root = os.environ.get("QUARK_ROOT") or DEFAULT_QUARK_ROOT
     quark_root_path = Path(quark_root).expanduser()
     if not quark_root_path.is_dir():
         return _build_failed_bootstrap_result(
             workspace_path, OutcomeId.quark_root_missing,
-            f"quark_root path does not exist or is not a directory: {quark_root_path}",
+            f"quark_root path does not exist or is not a directory: {quark_root_path} "
+            f"(set $QUARK_ROOT or pass quark_root=; default is {DEFAULT_QUARK_ROOT}"
+            + (f", clone from {DEFAULT_QUARK_GIT_URL}" if DEFAULT_QUARK_GIT_URL else "")
+            + ")",
         )
 
     interactive_resolved = _resolve_interactive(interactive)

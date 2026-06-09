@@ -1,7 +1,7 @@
 """quantization_agent — Hyperloom sub-agent for AMD Quark PTQ.
 
-Single public entry: ``quantize_via_prompt`` (async). See
-``docs/DESIGN.zh-CN.md`` for the contract.
+Single public entry: ``quantize_via_prompt`` (async). See ``SKILL.md``
+for the runtime contract.
 """
 
 from __future__ import annotations
