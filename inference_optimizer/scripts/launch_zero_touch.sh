@@ -172,7 +172,11 @@ export HYPERLOOM_KERNEL_MAX_TURNS="${HYPERLOOM_KERNEL_MAX_TURNS:-40}"
 export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
 export HYPERLOOM_KERNEL_AGENT_ROOT="${REPO_ROOT}/kernel-agent"
 export KERNEL_AGENT_ROOT="${REPO_ROOT}/kernel-agent"
-unset GEAK_CONFIG
+# NOTE: do NOT unset GEAK_CONFIG here. The pre-install unset (above install.sh)
+# already clears any inherited stale value so install.sh writes a fresh config.
+# By this point kernel-agent.env.sh has been sourced and exports the correct
+# GEAK_CONFIG=${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml; unsetting it here
+# made every GEAK subprocess abort with "GEAK_CONFIG is required" (~2s exit).
 export HYPERLOOM_DISABLE_MOE_TILE_HACK="${HYPERLOOM_DISABLE_MOE_TILE_HACK:-0}"
 export HYPERLOOM_ZERO_TOUCH_MINIMAL_EXPLORE="${HYPERLOOM_ZERO_TOUCH_MINIMAL_EXPLORE:-1}"
 export SGLANG_WARMUP_TIMEOUT="${SGLANG_WARMUP_TIMEOUT:-2400}"
