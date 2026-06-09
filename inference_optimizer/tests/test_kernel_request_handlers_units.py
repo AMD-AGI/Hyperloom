@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the small helpers inside ``kernel_request_handlers``.
-
-The handler entry points are exercised by full Coordinator e2e tests, but
-several module-level helpers (env coercion, candidate enrichment,
-materialized-config parsing) have private branches that current tests
-miss. We target those here so the helper contracts stay locked.
-"""
+"""Unit tests for the small helpers inside ``kernel_request_handlers``."""
 
 from __future__ import annotations
 
@@ -33,10 +27,7 @@ def _ensure_torch_module(monkeypatch):
     return torch
 
 
-# ---------------------------------------------------------------------------
 # _coerce_runtime_value
-# ---------------------------------------------------------------------------
-
 class TestCoerceRuntimeValue:
     @pytest.mark.parametrize(
         "value, expected",
@@ -55,18 +46,14 @@ class TestCoerceRuntimeValue:
         assert krh._coerce_runtime_value(value) == expected
 
 
-# ---------------------------------------------------------------------------
 # _candidate_env_allowed
-# ---------------------------------------------------------------------------
-
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
     def test_sensitive_env_blocked(self, name):
         assert krh._candidate_env_allowed(name) is False
 
     def test_known_prefix_allowed(self):
-        # Probe at least one well-known prefix without depending on the
-        # full allowlist contents (which are product-internal).
+        # Probe one prefix without depending on the product-internal allowlist.
         prefixes = krh._CANDIDATE_ENV_PREFIXES
         assert prefixes  # registry not empty
         sample = next(iter(prefixes))
@@ -80,14 +67,9 @@ class TestCandidateEnvAllowed:
         assert krh._candidate_env_allowed(sample) is True
 
 
-# ---------------------------------------------------------------------------
 # _is_runtime_generated_kernel
-# ---------------------------------------------------------------------------
-
 class TestRuntimeGeneratedKernel:
     def test_runtime_generated_path_treats_as_generated(self):
-        # Pick whichever marker the production list publishes and ensure
-        # the source-file check fires.
         markers = krh._RUNTIME_GENERATED_SOURCE_MARKERS
         if not markers:
             pytest.skip("no runtime markers in build")
@@ -111,10 +93,7 @@ class TestRuntimeGeneratedKernel:
         )
 
 
-# ---------------------------------------------------------------------------
 # _split_server_args
-# ---------------------------------------------------------------------------
-
 class TestSplitServerArgs:
     def test_empty_returns_empty(self):
         assert krh._split_server_args("") == []
@@ -129,10 +108,7 @@ class TestSplitServerArgs:
         assert argv == []
 
 
-# ---------------------------------------------------------------------------
 # _load_candidate_metadata
-# ---------------------------------------------------------------------------
-
 class TestLoadCandidateMetadata:
     def test_uses_inline_candidate(self):
         out = krh._load_candidate_metadata({"candidate": {"kernel_id": "x"}})
@@ -173,10 +149,7 @@ class TestLoadCandidateMetadata:
         }) == {}
 
 
-# ---------------------------------------------------------------------------
 # _load_materialized_workload_metadata
-# ---------------------------------------------------------------------------
-
 class TestLoadMaterializedWorkloadMetadata:
     def test_empty_when_no_path(self):
         assert krh._load_materialized_workload_metadata("") == {}
@@ -202,12 +175,10 @@ class TestLoadMaterializedWorkloadMetadata:
         runtime = out["runtime_args"]
         assert runtime["framework"] == "sglang"
         assert runtime["server_args"] == "--foo 1"
-        # ARGV split is preserved.
         assert runtime["server_args_argv"] == ["--foo", "1"]
         workload = runtime["workload"]
         assert workload["tp"] == 1
         assert workload["conc"] == 16
-        # Env vars passed through the allowlist guard.
         assert "TP" in out["env_vars"]
 
     @pytest.mark.parametrize(
@@ -222,12 +193,7 @@ class TestLoadMaterializedWorkloadMetadata:
     def test_server_args_read_from_per_framework_env_key(
         self, tmp_path, framework, env_name, expected_args,
     ):
-        """The handler must read the per-framework
-        ``EXTRA_<FRAMEWORK>_ARGS`` slot, not silently default to
-        ``EXTRA_SGLANG_ARGS`` on non-sglang sessions. Otherwise atom
-        sessions resolve to an empty ``EXTRA_SGLANG_ARGS`` and drop
-        every atom-side flag from the kernel-opt metadata.
-        """
+        """The handler reads the per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot, not always ``EXTRA_SGLANG_ARGS``."""
         cfg = tmp_path / f"magpie_{framework}.yaml"
         cfg.write_text(
             "benchmark:\n"
@@ -244,18 +210,13 @@ class TestLoadMaterializedWorkloadMetadata:
         out = krh._load_materialized_workload_metadata(str(cfg))
         runtime = out["runtime_args"]
         assert runtime["framework"] == framework
-        # The per-framework slot wins regardless of which framework
-        # the session is on.
         assert runtime["server_args"] == expected_args, (
             f"framework={framework!r} expected server_args="
             f"{expected_args!r}; got {runtime['server_args']!r}."
         )
 
     def test_atom_server_args_not_read_from_extra_sglang_args(self, tmp_path):
-        """When an atom YAML carries BOTH ``EXTRA_ATOM_ARGS`` (real) AND
-        a stray ``EXTRA_SGLANG_ARGS`` (left over from a copy-paste), the
-        handler MUST pick the atom slot, not the sglang one.
-        """
+        """When an atom YAML carries both EXTRA_ATOM_ARGS and a stray EXTRA_SGLANG_ARGS, the atom slot wins."""
         cfg = tmp_path / "magpie_atom_mixed.yaml"
         cfg.write_text(
             "benchmark:\n"
@@ -277,10 +238,7 @@ class TestLoadMaterializedWorkloadMetadata:
         assert "--should-be-ignored" not in runtime["server_args"]
 
 
-# ---------------------------------------------------------------------------
 # enrichment helpers
-# ---------------------------------------------------------------------------
-
 class TestEnrichCandidate:
     def test_enrich_candidate_runtime_metadata_setdefault_semantics(self):
         candidates = [{"kernel_id": "k", "env_vars": {"TP": "8"}}]
@@ -300,25 +258,17 @@ class TestEnrichCandidate:
         assert "trace_report_path" not in candidates[0]
 
     def test_enrich_candidates_artifact_noop_when_missing_path(self):
-        # Should not raise even though path does not exist.
         krh._enrich_candidates_artifact("", {"env_vars": {}}, trace_report_path="")
 
 
-# ---------------------------------------------------------------------------
 # atom-aware reusable kernel detection
-# ---------------------------------------------------------------------------
-
 class TestReusableSourceRootsAtom:
     """atom layout prefixes participate in cross-task kernel reuse
     alongside aiter/sglang/vllm."""
 
     def test_includes_atom_editable_path(self):
-        # The matcher (``_is_runtime_generated_kernel``) lowercases its
-        # source-file input before substring matching, so the stored
-        # prefix is lowercase ``/app/atom/atom/`` even though the real
-        # filesystem path is ``/app/ATOM/atom/``. PolicyGate uses a
-        # case-sensitive ``startswith`` and keeps the canonical case in
-        # ``framework_paths._DEFAULT_SOURCE_ROOTS`` separately.
+        # The matcher lowercases its source-file input, so the stored prefix is
+        # lowercase ``/app/atom/atom/`` even though the real path is ``/app/ATOM/atom/``.
         assert any(
             "/app/atom/atom/" in r.lower()
             for r in krh._reusable_source_roots()
@@ -337,11 +287,7 @@ class TestReusableSourceRootsAtom:
         )
 
     def test_atom_path_classified_as_reusable(self):
-        """A representative atom-owned kernel source (model_runner.py) at
-        /app/ATOM/atom/ must NOT be flagged as runtime-generated even
-        when its kernel name matches an inductor / triton compile
-        marker. This is the exact condition the reusable-roots check
-        guards against in ``_is_runtime_generated_kernel``."""
+        """An atom-owned kernel source under /app/ATOM/atom/ is NOT runtime-generated even if its name matches a compile marker."""
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
         if not markers:
             pytest.skip("compile markers empty in build")
@@ -349,29 +295,22 @@ class TestReusableSourceRootsAtom:
         result = krh._is_runtime_generated_kernel(
             marker, "/app/ATOM/atom/model_engine/model_runner.py",
         )
-        # Same logic as the existing sglang/vllm test (line 84): the
-        # name marker would normally classify as runtime-generated, but
-        # the source path lives under a reusable root so the kernel is
-        # treated as patchable framework code.
         assert result is False
 
     def test_non_framework_path_under_app_is_not_reusable(self):
-        """A non-atom path under /app/ (e.g. /app/session_dir/runs/...)
-        must NOT match the atom reusable-source-root prefix — only
-        /app/ATOM/atom/ specifically."""
+        """A non-atom path under /app/ must NOT match the atom reusable-source-root prefix."""
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
         if not markers:
             pytest.skip("compile markers empty in build")
         marker = next(iter(markers))
-        # Path under /app/ but NOT /app/ATOM/atom/ — must classify as
-        # runtime-generated (i.e. not reusable).
+        # Under /app/ but not /app/ATOM/atom/ → runtime-generated (not reusable).
         result = krh._is_runtime_generated_kernel(
             marker, "/app/session_dir/runs/baseline/foo.py",
         )
         assert result is True
-# run_gemm_tuning_handler
-# ---------------------------------------------------------------------------
 
+
+# run_gemm_tuning_handler
 class TestRunGemmTuningHandler:
     def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path):
         state = SharedState(precision="bf16", framework="sglang")
@@ -480,14 +419,8 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
 
-# ---------------------------------------------------------------------------
-# _default_geak_budget_minutes / _geak_budget_minutes
-#
-# Orchestrator-side mirror of the kernel-agent default (PR #301). The
-# legacy hard-coded 90 forced quick-mode timing on the orchestrator path
-# even when ``install.sh`` had set ``GEAK_RUN_MODE=full``.
-# ---------------------------------------------------------------------------
-
+# _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
+# of the kernel-agent default (PR #301); the legacy 90 forced quick-mode timing.
 class TestDefaultGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
@@ -515,13 +448,11 @@ class TestGeakBudgetMinutes:
     def test_payload_override_wins(self, monkeypatch):
         monkeypatch.setenv("GEAK_RUN_MODE", "quick")
         monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "500")
-        # payload wins over both env signals
         assert krh._geak_budget_minutes({"geak_budget_min": 100}) == 100.0
 
     def test_env_override_beats_default(self, monkeypatch):
         monkeypatch.setenv("GEAK_RUN_MODE", "quick")
         monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "115")
-        # env wins over the GEAK_RUN_MODE-derived default
         assert krh._geak_budget_minutes({}) == 115.0
 
     @pytest.mark.parametrize("geak_run_mode, expected", [
@@ -542,14 +473,8 @@ class TestGeakBudgetMinutes:
         assert krh._geak_budget_minutes({}) == 130.0
 
 
-# ---------------------------------------------------------------------------
-# _default_kernel_batch_parallel
-#
-# Adaptive batch fanout. The legacy hard-coded 8 over-admitted on smaller
-# pods (4-GPU labs, partial-node CI shards), letting the asyncio
-# semaphore queue up siblings that Ray could not actually schedule.
-# ---------------------------------------------------------------------------
-
+# _default_kernel_batch_parallel — adaptive batch fanout; the legacy 8
+# over-admitted on smaller pods (4-GPU labs, partial-node CI shards).
 class TestDefaultKernelBatchParallel:
     @pytest.fixture
     def patch_torch(self, monkeypatch):
@@ -714,8 +639,6 @@ class TestShouldParallelizeBackends:
 
 # ---------------------------------------------------------------------------
 # _reconcile_kernel_id
-# ---------------------------------------------------------------------------
-
 class TestReconcileKernelId:
     CANDS = [
         {"kernel_id": "k001", "name": "aten::mm"},
@@ -754,16 +677,9 @@ class TestReconcileKernelId:
         )
 
 
-# ---------------------------------------------------------------------------
-# _resolve_candidate_id / _all_kernel_candidates
-#
-# When hot_kernels is empty the batch dispatcher returns no candidates, so
-# _reconcile_kernel_id never runs. _resolve_candidate_id canonicalizes an
-# aliased id against the full hot ∪ skipped set (no fallback) so the
-# downstream reusable-native guard rejects the real k00x rather than the
-# raw hallucinated alias.
-# ---------------------------------------------------------------------------
-
+# _resolve_candidate_id / _all_kernel_candidates — canonicalizes an aliased id
+# against the full hot ∪ skipped set (no fallback) so the reusable-native guard
+# rejects the real k00x rather than the raw hallucinated alias.
 class TestResolveCandidateId:
     SKIPPED = [
         {"kernel_id": "k001", "name": "aten::mm",

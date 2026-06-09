@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for ``scripts/roofline_sweep.py``.
-
-Real ``sglang_server`` / ``run_bench`` are mocked so the test suite stays
-GPU-free. We exercise: template extraction guard, csv round-trip,
-ceiling computation parity with ``roofline_ceiling``, and sweep
-dispatch with a fake server context manager. SVG rendering is left
-out of CI because matplotlib is an operator-side dependency only.
-"""
+"""Unit tests for ``scripts/roofline_sweep.py`` (GPU-free: server/bench mocked)."""
 
 from __future__ import annotations
 
@@ -21,9 +14,7 @@ import pytest
 from inference_optimizer.scripts import roofline_sweep as rs
 
 
-# ---------------------------------------------------------------------------
 # extract_templates: both empty -> raise; optimized populated -> two templates
-# ---------------------------------------------------------------------------
 def test_extract_templates_refuses_when_current_best_empty() -> None:
     state = {"current_best": {"extra_server_args": "", "extra_envs": {}}}
     with pytest.raises(SystemExit, match="did not accept any optimization"):
@@ -52,9 +43,7 @@ def test_extract_templates_optimized_via_envs_only() -> None:
     assert opt.extra_server_args == "" and opt.extra_envs == {"FOO": "1"}
 
 
-# ---------------------------------------------------------------------------
 # compute_ceiling: parity with the underlying roofline_ceiling helper
-# ---------------------------------------------------------------------------
 def test_compute_ceiling_matches_underlying_formula() -> None:
     from inference_optimizer.orchestrator.roofline_ceiling import (
         ModelMeta, compute_theoretical_peak_output_tok_per_sec,
@@ -84,9 +73,7 @@ def test_compute_ceiling_matches_underlying_formula() -> None:
     assert higher > got
 
 
-# ---------------------------------------------------------------------------
 # write_csv: round-trip
-# ---------------------------------------------------------------------------
 def test_write_csv_roundtrip(tmp_path: Path) -> None:
     rows = [
         {"conc": 1, "config": "baseline", "measured_tps": 100.0,
@@ -105,9 +92,7 @@ def test_write_csv_roundtrip(tmp_path: Path) -> None:
     assert float(back[1]["measured_tps"]) == 900.0
 
 
-# ---------------------------------------------------------------------------
 # sweep_one_template: mock SglangServer + run_bench
-# ---------------------------------------------------------------------------
 class _FakeServer:
     """In-memory replacement for the real SglangServer context manager."""
 
@@ -177,8 +162,5 @@ def test_sweep_one_template_marks_failed_bench_as_oom(tmp_path: Path) -> None:
     assert rows[0]["ceiling_tps"] > 0
 
 
-# plot_svg + main --skip-bench tests removed: matplotlib is an
-# operator-side dependency for roofline_sweep.py's SVG rendering and
-# is not pulled into the orchestrator's CI environment. The driver
-# itself still imports matplotlib lazily inside plot_svg() so the
-# import only fires when an operator actually runs the script.
+# plot_svg + main --skip-bench tests removed: matplotlib is operator-side only
+# (lazily imported inside plot_svg), so it isn't pulled into the orchestrator CI.
