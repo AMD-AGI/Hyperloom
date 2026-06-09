@@ -1148,17 +1148,40 @@ def inject_sglang_context_length(
     )
 
 
+def _resolve_dual_chunk_backend() -> str:
+    """Pick the dual-chunk attention backend for the current hardware.
+
+    ``dual_chunk_flash_attn`` is an sgl-kernel flash-attn path that only
+    builds for sm90+ (NVIDIA Hopper); on AMD/ROCm (MI300X/MI325X/MI355X,
+    gfx9) sglang raises ``flash_attn at sgl-kernel is only supported on
+    sm90 and above`` and the server is killed before baseline. ``triton``
+    is the ROCm-capable backend that still honours dual-chunk attention,
+    so we fall back to it on any detected AMD GPU. Non-AMD / undetectable
+    hardware keeps the upstream ``dual_chunk_flash_attn``. Override via
+    ``$HYPERLOOM_DUAL_CHUNK_BACKEND``.
+    """
+    override = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip()
+    if override:
+        return override
+    from ...cli import _autodetect_gpu_type
+    if _autodetect_gpu_type():
+        return "triton"
+    return _SGLANG_DUAL_CHUNK_BACKEND
+
+
 def inject_sglang_attention_backend(
     server_args: str | None,
     framework: str | None,
     model_path: str | None,
 ) -> str:
-    """Append ``--attention-backend dual_chunk_flash_attn`` for sglang runs
-    whose model declares ``dual_chunk_attention_config`` (Qwen 1M models).
+    """Append an ``--attention-backend`` for dual-chunk sglang models.
 
-    sglang defaults to the aiter backend and hard-rejects it for dual-chunk
-    models with ``ValueError: Dual chunk attention is enabled, but attention
-    backend is set to aiter. Please set it to 'dual_chunk_flash_attn'.``.
+    Models that declare ``dual_chunk_attention_config`` (Qwen 1M) make
+    sglang hard-reject its default aiter backend with ``ValueError: Dual
+    chunk attention is enabled, but attention backend is set to aiter.``.
+    On NVIDIA sm90+ the fix is ``dual_chunk_flash_attn``; on AMD/ROCm that
+    kernel is unsupported (``sm90 and above``), so we inject ``triton``
+    instead (see :func:`_resolve_dual_chunk_backend`).
 
     Returns ``server_args`` unchanged when: framework is not sglang, an
     ``--attention-backend`` is already pinned (operator wins), or the model
@@ -1172,8 +1195,15 @@ def inject_sglang_attention_backend(
     from ...cli import _model_has_dual_chunk_attention
     if not _model_has_dual_chunk_attention(str(model_path or "")):
         return args
+    backend = _resolve_dual_chunk_backend()
+    if backend != _SGLANG_DUAL_CHUNK_BACKEND:
+        log.info(
+            "dual-chunk model on AMD/ROCm: injecting "
+            "--attention-backend %s (dual_chunk_flash_attn needs sm90+).",
+            backend,
+        )
     return merge_server_args(
-        args, f"{_SGLANG_ATTN_BACKEND_FLAG} {_SGLANG_DUAL_CHUNK_BACKEND}",
+        args, f"{_SGLANG_ATTN_BACKEND_FLAG} {backend}",
     )
 
 

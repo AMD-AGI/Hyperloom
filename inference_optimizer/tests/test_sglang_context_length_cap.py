@@ -312,6 +312,17 @@ def test_materialize_vllm_no_context_length(tmp_path):
 # ---------------------------------------------------------------------------
 # inject_sglang_attention_backend (dual chunk attention)
 # ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _default_non_amd_gpu(monkeypatch: pytest.MonkeyPatch):
+    """Default the dual-chunk backend resolver to the non-AMD path so the
+    upstream ``dual_chunk_flash_attn`` assertions hold without real GPU
+    hardware. MI30x-path tests override this with their own monkeypatch."""
+    monkeypatch.setattr(
+        "inference_optimizer.cli._autodetect_gpu_type", lambda: None,
+    )
+    monkeypatch.delenv("HYPERLOOM_DUAL_CHUNK_BACKEND", raising=False)
+
+
 def _write_dual_chunk_model(
     tmp_path: Path, *, dual_chunk: bool, nested: bool = False
 ) -> str:
@@ -340,6 +351,30 @@ def test_dual_chunk_injects_via_nested_text_config(tmp_path):
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True, nested=True)
     out = inject_sglang_attention_backend("", "sglang", model)
     assert "--attention-backend dual_chunk_flash_attn" in out
+
+
+def test_dual_chunk_falls_back_to_triton_on_amd(tmp_path, monkeypatch):
+    """On AMD/ROCm dual_chunk_flash_attn is unsupported (sm90+), so the
+    injected backend must fall back to triton."""
+    monkeypatch.setattr(
+        "inference_optimizer.cli._autodetect_gpu_type", lambda: "mi300x",
+    )
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    out = inject_sglang_attention_backend("--foo bar", "sglang", model)
+    assert "--attention-backend triton" in out
+    assert "dual_chunk_flash_attn" not in out
+    assert "--foo bar" in out
+
+
+def test_dual_chunk_backend_env_override(tmp_path, monkeypatch):
+    """HYPERLOOM_DUAL_CHUNK_BACKEND wins over hardware detection."""
+    monkeypatch.setattr(
+        "inference_optimizer.cli._autodetect_gpu_type", lambda: "mi300x",
+    )
+    monkeypatch.setenv("HYPERLOOM_DUAL_CHUNK_BACKEND", "flashinfer")
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    out = inject_sglang_attention_backend("", "sglang", model)
+    assert "--attention-backend flashinfer" in out
 
 
 def test_dual_chunk_noop_without_config(tmp_path):
