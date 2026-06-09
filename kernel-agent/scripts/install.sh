@@ -888,8 +888,16 @@ ensure_geak() {
     else
       warn "geak prompt patcher missing at $_geak_patcher; skip"
     fi
+    # Path-A fast-path patcher: OFF by default. The fast-path skips GEAK's
+    # standard run_discovery + profiling, so it never writes discovery.json /
+    # CODEBASE_CONTEXT.md / profile.json — the task-generation agent then has no
+    # planning context and emits zero tasks (LimitsExceeded). GEAK's standard
+    # preprocess (the path the +24.59% reference run used) generates all of
+    # them. Opt back in only with HYPERLOOM_ENABLE_PATH_A_FASTPATH=1.
     _geak_preprocess_patcher="${KERNEL_AGENT_ROOT}/tools/geak_preprocess_fastpath_patcher.py"
-    if [ -f "$_geak_preprocess_patcher" ]; then
+    if [ "${HYPERLOOM_ENABLE_PATH_A_FASTPATH:-0}" != "1" ]; then
+      log "geak preprocess fast-path patcher: SKIPPED (standard preprocess; set HYPERLOOM_ENABLE_PATH_A_FASTPATH=1 to enable)"
+    elif [ -f "$_geak_preprocess_patcher" ]; then
       run python3 "$_geak_preprocess_patcher"
     else
       warn "geak preprocess fast-path patcher missing at $_geak_preprocess_patcher; skip"
