@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for :mod:`runtime.session_memory`.
-
-We test against a temp directory so we don't touch the real
-``CRITIC_SESSION_MEMORY_DIR``.
-"""
+"""Tests for :mod:`runtime.session_memory`, run against a temp directory."""
 
 from __future__ import annotations
 
@@ -51,7 +47,6 @@ def test_merge_context_explicit_wins_and_persists(tmp_session_root):
     assert res.merged["model"] == "Qwen3-14B"
     assert "framework" in res.explicit_keys
     assert "model" in res.from_memory_keys
-    # Persisted
     assert sm.load_context("sess_1")["framework"] == "sglang"
 
 

@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for framework_agent.sources.github.
-
-Hermetic - monkeypatches urlopen. Verifies best-effort policy
-(returns [] on failure) and keyword-driven query composition.
-"""
+"""Tests for framework_agent.sources.github. Hermetic - monkeypatches urlopen; verifies best-effort policy (returns [] on failure) and keyword-driven query composition."""
 
 from __future__ import annotations
 
@@ -20,21 +16,17 @@ class _FakeResp:
     """Tiny urllib response stand-in usable as a context manager."""
 
     def __init__(self, status: int, body: bytes):
-        """Capture status and body for later urlopen() reads."""
         self.status = status
         self._body = body
         self.headers = {"Content-Type": "application/json"}
 
     def __enter__(self):
-        """Context-manager enter; returns self so .read() works."""
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        """Context-manager exit; nothing to clean up."""
         return None
 
     def read(self) -> bytes:
-        """Return the canned body."""
         return self._body
 
 
