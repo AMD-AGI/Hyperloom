@@ -4672,19 +4672,6 @@ class Coordinator:
                 action_name=action_name,
             )
             return
-        if was_existing:
-            # Shouldn't happen after the retry loop unless create failed.
-            await self._record_policy_denied(
-                source, intent,
-                PolicyDenied(
-                    f"delegate{{action_name={action_name!r}}} duplicate "
-                    f"idempotency_key={idempotency_key!r}",
-                    rule="duplicate_idempotency_key",
-                    hint="unexpected duplicate after retry loop",
-                ),
-                action_name=action_name,
-            )
-            return
         self.shared_state.reset_policy_denial_streak(action_name)
         await self.bus.append_and_seq(Message.new(
             "coordinator", "*", "event",

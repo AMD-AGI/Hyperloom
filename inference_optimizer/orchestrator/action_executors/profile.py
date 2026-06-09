@@ -222,22 +222,25 @@ def _validate_trace_structure(
             # profiler-version-dependent. Only warn when both are absent, and
             # confirm via a streaming scan (the 2 MB window misses markers on
             # 600 MB+ traces) to avoid false "annotations didn't fire" warnings.
-            if execute_count == 0 and user_ann_count == 0:
-                confirmed_absent = not (
+            confirmed_absent = (
+                execute_count == 0
+                and user_ann_count == 0
+                and not (
                     _trace_contains(main_traces[0], '"execute_')
                     or _trace_contains(
                         main_traces[0], '"name": "user_annotation"'
                     )
                 )
-                if confirmed_absent:
-                    per_kernel_attribution_degraded = True
-                    issues.append(
-                        f"[3] main trace {main_traces[0].name} has no "
-                        "execute_* / user_annotation events — InferenceX "
-                        "per-step annotations didn't fire. Verify "
-                        "roofline_annotations reached the framework "
-                        "(PROFILE_EXTRA_BODY consumed; see #210)."
-                    )
+            )
+            if confirmed_absent:
+                per_kernel_attribution_degraded = True
+                issues.append(
+                    f"[3] main trace {main_traces[0].name} has no "
+                    "execute_* / user_annotation events — InferenceX "
+                    "per-step annotations didn't fire. Verify "
+                    "roofline_annotations reached the framework "
+                    "(PROFILE_EXTRA_BODY consumed; see #210)."
+                )
 
     # --- Check 4 (Deval): per-file execute_* in trace_split/ ---
     # An empty split means the splitter ran but got no usable events.

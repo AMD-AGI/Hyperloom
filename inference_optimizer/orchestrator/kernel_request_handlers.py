@@ -1275,7 +1275,6 @@ def _batch_kernel_candidates(
     attempts_by_kid: dict[str, dict] = {}
     in_flight: set[str] = set()
     max_attempts = 1
-    min_gpu_pct = 0.0
     try:
         max_attempts = max(1, int(os.environ.get(
             "INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS", "1",

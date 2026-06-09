@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -101,7 +102,7 @@ def _coerce_score(raw: Any) -> float | None:
         val = float(raw)
     except (TypeError, ValueError):
         return None
-    if val != val:  # NaN
+    if math.isnan(val):
         return None
     return max(0.0, min(10.0, val))
 
