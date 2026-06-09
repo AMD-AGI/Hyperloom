@@ -2,20 +2,15 @@
 
 """Session-end postmortem + decision trace finalizer (L1 + L2).
 
-The reactor fires this once per session — on the first tick where
-``shared_state.stop_reason`` transitions from ``""`` to a non-empty
-value. Idempotency is enforced via a ``.robustness_finalized`` marker
-file under ``<session_dir>/reports/``: if the marker exists, the
-finalizer returns immediately so re-running the reactor (resume) does
-not overwrite the postmortem.
+Fired once per session on the first non-empty ``stop_reason``; idempotent
+via a ``.robustness_finalized`` marker under ``<session_dir>/reports/``.
 
 Outputs (under ``<session_dir>/reports/``):
 
 * ``robustness_postmortem.md`` — markdown human-facing summary.
 * ``decision_trace.json`` — machine-readable per-task ledger.
 
-Both are best-effort. Any per-file error is logged and skipped; one
-missing ``result.json`` does not block the rest of the report.
+Best-effort: per-file errors are logged and skipped.
 """
 
 from __future__ import annotations
@@ -30,18 +25,14 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-# Filename of the idempotency marker. Living under ``reports/`` keeps
-# it co-located with the produced outputs so cleanup is one ``rm -r``.
+# Idempotency marker; lives under ``reports/`` for one-``rm -r`` cleanup.
 _FINALIZED_MARKER_NAME: str = ".robustness_finalized"
 
-# Filenames written by the finalizer.
 _POSTMORTEM_FILENAME: str = "robustness_postmortem.md"
 _DECISION_TRACE_FILENAME: str = "decision_trace.json"
 
-# Action families we scan under ``runs/`` for L2. Mirrors
-# ``inference_optimizer.session_paths.RUN_ACTION_FAMILIES`` so the
-# trace doesn't quietly drop new action types — see the constant on
-# the inference_optimizer side for the source of truth.
+# Action families scanned under ``runs/`` for L2. Mirrors
+# ``inference_optimizer.session_paths.RUN_ACTION_FAMILIES`` (source of truth).
 _DECISION_TRACE_ACTION_DIRS: tuple[str, ...] = (
     "baseline",
     "profile",
@@ -63,24 +54,17 @@ _DECISION_TRACE_ACTION_DIRS: tuple[str, ...] = (
 class PostmortemFinalizerConfig:
     """Tunables for the postmortem writer.
 
-    The defaults match the SKILL.md ``reports/`` convention so the
-    output sits next to the deterministic Coordinator ``report``
-    action's outputs; no operator setup needed for the common case.
+    Defaults match the SKILL.md ``reports/`` convention; no operator setup
+    needed for the common case.
     """
 
-    # Subdirectory under ``session_dir`` where outputs live.
     reports_subdir: str = "reports"
-    # Where Robustness findings already live (FindingSink-owned). The
-    # finalizer reads this verbatim; it does not write here.
+    # Where FindingSink writes; the finalizer only reads here.
     findings_subdir: str = "agents/robustness/findings"
-    # Per-action run dir under ``session_dir``.
     runs_subdir: str = "runs"
-    # Number of HIGH-severity findings rendered in the postmortem
-    # body (after the flashpoint). Cap keeps the markdown readable
-    # for runs that produced 50+ findings.
+    # HIGH-severity findings rendered in the body (cap keeps markdown readable).
     max_findings_in_report: int = 20
-    # Max recent tasks per action in the decision trace. Keeps the
-    # JSON small even for sweep-heavy long-running sessions.
+    # Recent tasks per action in the trace (keeps JSON small on sweep-heavy runs).
     max_tasks_per_action: int = 50
 
 
@@ -477,12 +461,9 @@ def finalize_session(
     stop_reason: str = "manual_finalize",
     config: PostmortemFinalizerConfig | None = None,
 ) -> bool:
-    """Convenience wrapper for non-reactor callers.
+    """Convenience wrapper for non-reactor callers (e.g. post-hoc re-runs).
 
-    Useful when an operator wants to re-run the finalizer outside the
-    live reactor (e.g. post-hoc on a session whose Robustness died
-    before stop_reason was written). Returns the
-    :meth:`PostmortemFinalizer.finalize` boolean.
+    Returns the :meth:`PostmortemFinalizer.finalize` boolean.
     """
     finalizer = PostmortemFinalizer(
         session_dir=session_dir,
@@ -499,12 +480,8 @@ def finalize_session(
 def _pick_flashpoint(
     findings: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Pick the first HIGH-severity finding in chronological order.
-
-    "First" means the lowest ``tick_index``; ``timestamp_unix`` as a
-    secondary key when ticks tie or when the source uses a different
-    counter. Returns ``None`` when nothing crossed HIGH.
-    """
+    """First HIGH-severity finding, ordered by ``tick_index`` then
+    ``timestamp_unix`` (tie-break). ``None`` if nothing crossed HIGH."""
     high = [
         f for f in findings
         if isinstance(f, dict) and str(f.get("severity")) == "high"
@@ -525,13 +502,9 @@ def _normalise_task_entry(
     result_path: Path,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Project an executor ``result.json`` into the trace shape.
-
-    Different actions emit slightly different field sets (e.g.
-    ``baseline`` carries ``output_throughput`` while ``integrate``
-    carries ``gain_pct``); we capture the union so downstream
-    dashboards have everything they need without re-reading each file.
-    """
+    """Project an executor ``result.json`` into the trace shape, capturing
+    the union of action-specific fields (e.g. ``output_throughput`` vs
+    ``gain_pct``) so dashboards need not re-read each file."""
     entry: dict[str, Any] = {
         "task_id": task_dir.name,
         "workspace": str(task_dir),

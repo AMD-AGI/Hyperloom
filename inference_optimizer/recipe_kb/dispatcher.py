@@ -197,7 +197,85 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         "evidence_refs": list(v2_payload.get("evidence_refs") or []),
         "provenance":    dict(v2_payload.get("provenance") or {}),
     }
+    # Carry through any extra top-level keys the envelope shipped that
+    # aren't part of the v2 wire structure (``body`` / ``labels`` /
+    # ``metrics`` / ``findings`` / ``failures`` / ``gaps``) and aren't
+    # already mapped above. This mirrors the local store's arbor shape
+    # (``Recipe.to_dict`` splats free-form ``extras`` — e.g. the workload
+    # knobs ``tp`` / ``ep`` / ``conc`` / ``framework_version`` /
+    # ``quant_scheme`` — at the top level), so the dispatcher's
+    # ``prefer`` rerank reads identical fields whether the row came from
+    # a remote or local. Reserved keys never get clobbered.
+    _wire_only = {"body", "labels", "metrics", "findings", "failures", "gaps"}
+    for key, val in v2_payload.items():
+        if key in _wire_only or key in arbor:
+            continue
+        arbor[key] = val
     return arbor
+
+
+# ---------------------------------------------------------------------------
+# Client-side rerank by ``prefer`` similarity
+# ---------------------------------------------------------------------------
+# The ``required`` filter (5-tuple ``label_match``) decides reusability;
+# ``prefer`` decides similarity. Neither the cortex kb-service nor the
+# gbrain page store rank by ``prefer`` server-side, so the dispatcher does
+# a stable client-side rerank over the already-arbor rows: higher
+# prefer-hit count first, ties broken by the backend's original order
+# (the sort is stable). Rows are NEVER dropped — prefer only reorders.
+#
+# Match rules per field:
+# * ``framework_version`` / ``quant_scheme`` / ``workload_mode`` — exact
+#   string equality (case-insensitive, stripped).
+# * numeric workload knobs (``tp`` / ``ep`` / ``pp`` / ``conc`` / ``isl``
+#   / ``osl`` / ``max_model_len``) — exact int/float equality.
+# A field absent on the row contributes 0 (no penalty, no credit).
+_PREFER_NUMERIC_KEYS: tuple[str, ...] = (
+    "tp", "ep", "pp", "conc", "isl", "osl", "max_model_len",
+)
+_PREFER_STRING_KEYS: tuple[str, ...] = (
+    "framework_version", "quant_scheme", "workload_mode",
+)
+
+
+def _prefer_score(row: dict[str, Any], prefer: dict[str, Any]) -> int:
+    """Count how many ``prefer`` fields the (flat arbor) row matches."""
+    if not isinstance(row, dict):
+        return 0
+    score = 0
+    for key in _PREFER_NUMERIC_KEYS:
+        want = prefer.get(key)
+        if want in (None, "", 0):
+            continue
+        have = row.get(key)
+        if have in (None, ""):
+            continue
+        try:
+            if float(have) == float(want):
+                score += 1
+        except (TypeError, ValueError):
+            continue
+    for key in _PREFER_STRING_KEYS:
+        want = str(prefer.get(key) or "").strip().lower()
+        if not want:
+            continue
+        have = str(row.get(key) or "").strip().lower()
+        if have and have == want:
+            score += 1
+    return score
+
+
+def _rerank_by_prefer(
+    rows: list[dict[str, Any]], prefer: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Stable rerank of flat arbor rows by ``prefer`` similarity.
+
+    No-op when ``prefer`` is empty. Never drops rows; only reorders so a
+    closer-workload recipe surfaces first.
+    """
+    if not prefer:
+        return rows
+    return sorted(rows, key=lambda r: _prefer_score(r, prefer), reverse=True)
 
 
 @dataclass
@@ -256,25 +334,18 @@ class RecipeKB:
     def _normalize_remote_row(self, row: dict[str, Any]) -> dict[str, Any]:
         """Project a remote row into the consistent arbor shape callers see.
 
-        Two remote backends feed this dispatcher with DIFFERENT wire
-        shapes:
+        Every remote backend (cortex kb-service, gbrain, and any future
+        KB) returns the SAME unified nested KB-interface envelope
+        (``labels`` / ``body`` / ``metrics`` / ``findings`` / ``failures``
+        / ``gaps`` / ``lessons`` / ``pitfalls``). The dispatcher runs a
+        single :func:`_v2_to_arbor` translation regardless of which
+        backend served the row — backend-native storage shapes are the
+        adapter's private detail and never reach this point.
 
-        * the central kb-service speaks the nested v2 envelope
-          (``labels`` / ``body`` / ``findings`` / ``metrics``) → it needs
-          the :func:`_v2_to_arbor` projection;
-        * the gbrain client (:class:`GbrainRemoteRecipeClient`) already
-          pre-translates pages into the flat ``Recipe.to_dict()`` arbor
-          shape → re-projecting it would null out ``best_config`` /
-          ``best_throughput`` / ``what_worked``.
-
-        A remote advertises which shape it returns via the
-        ``returns_arbor_shape`` capability flag (default ``False`` =
-        v2). The :func:`_v2_to_arbor` projection keeps an independent
-        idempotency guard as a secondary safety net for a mis-flagged
-        remote.
+        :func:`_v2_to_arbor` keeps an idempotency guard so a row that is
+        already in flat arbor shape (e.g. a mis-built adapter) passes
+        through untouched rather than being silently emptied.
         """
-        if getattr(self.remote, "returns_arbor_shape", False):
-            return dict(row)
         return _v2_to_arbor(row)
 
     def _note_failure(self, method: str, exc: Exception) -> None:
@@ -391,15 +462,24 @@ class RecipeKB:
         *,
         canonical_id: str,
         version: int | None = None,
+        prefer: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Read a recipe row.
 
         Remote uses the SINGLE ``/recipes/search`` route: the 5-tuple
         decoded from ``canonical_id`` is passed as ``label_match`` and
         the central kb-service decides exact-vs-relative match +
-        ranking — the client issues ONE search and takes the top
-        (server-ranked) row. We deliberately do NOT hit
-        ``GET /recipes/{cid}``; search is the only remote route.
+        ranking. We deliberately do NOT hit ``GET /recipes/{cid}``;
+        search is the only remote route.
+
+        ``prefer`` (workload-similarity hints — ``tp`` / ``ep`` / ``pp``
+        / ``conc`` / ``isl`` / ``osl`` / ``max_model_len`` /
+        ``framework_version`` / ``quant_scheme`` / ``workload_mode``)
+        does NOT change the ``required`` (5-tuple) filter; it only
+        reranks the candidate rows so the closest-workload recipe is
+        returned first. When ``prefer`` is set we ask the remote for a
+        small candidate window instead of a single row, rerank
+        client-side, and take the top.
 
         Local is an arbor-style exact read of the on-disk
         ``recipe.json`` for this canonical_id. It serves:
@@ -413,11 +493,17 @@ class RecipeKB:
         if version is None and self._remote_active():
             try:
                 labels = _labels_from_canonical_id(canonical_id)
+                # With prefer hints we pull a candidate window so the
+                # client-side rerank has rows to reorder; otherwise the
+                # single top (server-ranked) row is enough.
+                candidate_limit = 25 if prefer else 1
                 rows = self.remote.search(  # type: ignore[union-attr]
-                    label_match=labels, limit=1,
+                    label_match=labels, limit=candidate_limit, prefer=prefer,
                 )
                 if rows:
-                    return self._normalize_remote_row(rows[0])
+                    normalized = [self._normalize_remote_row(r) for r in rows]
+                    ranked = _rerank_by_prefer(normalized, prefer)
+                    return ranked[0]
                 # remote miss — fall through to local.
             except RemoteRecipeClientError as exc:
                 self._note_failure("get_recipe", exc)
@@ -460,14 +546,16 @@ class RecipeKB:
         updated_since: str | None = None,
         order_by: str = "updated_at DESC",
         limit: int = 50,
+        prefer: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Filtered search, remote-first with local fall-through.
 
         Single-source-of-record per call (no merging across stores
         — see the class docstring for why). Resolution:
 
-        1. Remote returned a non-empty list → that list is
-           returned verbatim.
+        1. Remote returned a non-empty list → that list is reranked
+           by ``prefer`` (similarity hints; never drops rows) and
+           returned.
         2. Remote returned ``[]`` → fall through to local. A
            genuinely-empty central corpus matching this filter is
            rare; an empty result is more often "the central
@@ -475,6 +563,9 @@ class RecipeKB:
            callers nearly always benefit from seeing local matches
            in that case.
         3. Remote raised → log + fall through.
+
+        ``prefer`` only reorders; the ``required`` filter
+        (``label_match`` / ``metric_filters``) decides membership.
         """
         if self._remote_active():
             try:
@@ -484,6 +575,7 @@ class RecipeKB:
                     updated_since=updated_since,
                     order_by=order_by,
                     limit=limit,
+                    prefer=prefer,
                 )
                 # Empty remote search → fall through to local. A
                 # genuinely-empty search corpus on a working remote
@@ -491,16 +583,18 @@ class RecipeKB:
                 # network or a freshly-bootstrapped service that
                 # hasn't received our local writes yet.
                 if rows:
-                    return [self._normalize_remote_row(r) for r in rows]
+                    normalized = [self._normalize_remote_row(r) for r in rows]
+                    return _rerank_by_prefer(normalized, prefer)
             except RemoteRecipeClientError as exc:
                 self._note_failure("search", exc)
-        return self.local.search(
+        local_rows = self.local.search(
             label_match=label_match,
             metric_filters=metric_filters,
             updated_since=updated_since,
             order_by=order_by,
             limit=limit,
         )
+        return _rerank_by_prefer(local_rows, prefer)
 
     def list_attempts(
         self,
