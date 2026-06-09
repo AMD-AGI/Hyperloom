@@ -3,33 +3,12 @@
 
 """PD-disaggregation router launcher (head pod, multi-node).
 
-When ``inference_optimizer.multi_node restart-server`` runs in PD mode,
-``launch_multinode.py`` spawns the prefill / decode sglang or vllm
-server groups but does NOT bind the public 8888 port — every group
-listens on internal ports (30000 / 30001) only. This script then runs
-on the head pod (via Ray Dashboard submission) and starts the router
-that fronts those internal endpoints at the public 8888 port. The
-router is detached with ``nohup`` + ``setsid`` so the dashboard job
-can exit while the router keeps serving.
-
-Two router implementations are supported:
-
-* **sglang**: ``python3 -m sglang_router.launch_router --pd-disaggregation
-  --prefill <url> --decode <url> --host 0.0.0.0 --port 8888``. Requires
-  the ``sglang-router`` PyPI package in the RayJob image.
-
-* **vllm**: ``vllm-project/production-stack`` ships an orchestrated
-  router supporting disaggregated prefill — at the time of writing it
-  is invoked via ``python3 -m vllm.entrypoints.openai.api_server
-  --kv-transfer-config ...`` on a dedicated proxy node (no separate
-  binary). For the v1 of this script we route vllm PD via a thin
-  ``proxy_server.py`` style ASGI app. Concrete vllm command is gated
-  by ``--vllm-router-cmd`` so we don't hard-code something the upstream
-  may rename in the next release.
-
-Failure semantics: if the router exits within 0.5 s of spawn we read
-the last 8 KiB of its log and raise. Otherwise we return 0 and emit
-the router PID so callers (cli.py) can persist it in state.json.
+In PD mode the prefill/decode groups listen on internal ports only; this
+script starts the router fronting them at the public 8888 port, detached
+via ``nohup`` + ``setsid`` so the dashboard job can exit. Supports the
+sglang_router and vllm routers (vllm command overridable via
+``--vllm-router-cmd``). If the router dies within 0.5 s of spawn it reads
+the log tail and raises; otherwise returns 0 and emits the router PID.
 """
 
 from __future__ import annotations
@@ -43,20 +22,14 @@ import sys
 import time
 from pathlib import Path
 
-# Public port the router binds. Matches launch_multinode.py's
-# _INFERENCE_PORT and SaFE Service.targetPort. magpie's
-# BENCHMARK_BASE_URL points here regardless of pd_mode.
+# Public port the router binds (matches launch_multinode._INFERENCE_PORT and SaFE Service.targetPort).
 _PUBLIC_PORT = 8888
 _DEFAULT_PID_FILE = "/tmp/multi_node_pids/router.pid"
 _DEFAULT_LOG_FILE = "/tmp/multi_node_logs/router.log"
 
 
 def _log(msg: str) -> None:
-    """Stderr line with timestamp; mirrors launch_multinode style.
-
-    Args:
-        msg (str): The message text to emit.
-    """
+    """Stderr line with timestamp."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_router {ts}] {msg}\n")
     sys.stderr.flush()
@@ -67,21 +40,7 @@ def _build_sglang_router_cmd(
     decode_url: str,
     public_port: int,
 ) -> list[str]:
-    """Compose the sglang_router PD-disaggregation launch command.
-
-    sglang_router accepts repeated ``--prefill`` / ``--decode`` flags
-    when there are multiple workers per side; we emit one of each for
-    the v1 of this launcher (matching the launch_multinode.py default
-    of one prefill server group + one decode server group).
-
-    Args:
-        prefill_url (str): Internal prefill server HTTP endpoint.
-        decode_url (str): Internal decode server HTTP endpoint.
-        public_port (int): Public port the router should bind.
-
-    Returns:
-        list[str]: The argv list to launch the sglang router.
-    """
+    """Compose the sglang_router PD-disaggregation launch command (one prefill + one decode group)."""
     return [
         "python3", "-m", "sglang_router.launch_router",
         "--pd-disaggregation",
@@ -98,25 +57,7 @@ def _build_vllm_router_cmd(
     public_port: int,
     override_cmd: str = "",
 ) -> list[str]:
-    """Compose the vllm router/proxy launch command.
-
-    vllm has not converged on a single official PD router CLI as of
-    2026; ``--vllm-router-cmd`` lets the operator override the entire
-    command (with ``{prefill}`` / ``{decode}`` / ``{port}`` placeholders).
-    Default falls back to the production-stack disagg proxy entrypoint
-    name; if your image ships a different binary, supply the override.
-
-    Args:
-        prefill_url (str): Internal prefill server HTTP endpoint.
-        decode_url (str): Internal decode server HTTP endpoint.
-        public_port (int): Public port the router should bind.
-        override_cmd (str): Optional full command template with
-            ``{prefill}`` / ``{decode}`` / ``{port}`` placeholders. When
-            non-empty it replaces the default command entirely.
-
-    Returns:
-        list[str]: The argv list to launch the vllm router/proxy.
-    """
+    """Compose the vllm router/proxy launch command; ``--vllm-router-cmd`` overrides it ({prefill}/{decode}/{port} placeholders)."""
     if override_cmd:
         rendered = (
             override_cmd
@@ -139,24 +80,7 @@ def _detach_router(
     log_file: Path,
     pid_file: Path,
 ) -> int:
-    """Run ``cmd`` detached via bash+nohup+setsid.
-
-    Reuses the same pattern as launch_multinode._detach_framework_launch
-    so the router survives the ray dashboard job exit and is killed
-    cleanly by kill_multinode.py (which SIGTERMs the process group).
-
-    Args:
-        cmd (list[str]): The router argv to launch.
-        log_file (Path): File to which router stdout/stderr is redirected.
-        pid_file (Path): File where the detached router PID is written.
-
-    Returns:
-        int: The PID of the detached router process.
-
-    Raises:
-        RuntimeError: If the spawn shell fails, the PID file is missing or
-            invalid, or the router is not alive 0.5s after spawn.
-    """
+    """Run ``cmd`` detached via bash+nohup+setsid so it survives the dashboard job exit and dies cleanly under kill_multinode."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     log_q = shlex.quote(str(log_file))

@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the resume-safe CLI flag helpers in ``cli.py``.
-
-``_resume_safe_flag`` / ``_resume_safe_numeric`` resolve a CLI option
-with manifest-fallback semantics so robustness_monitor.sh resume can
-preserve the operator's original ``--no-warm-replay`` / ``--no-fact-
-writes`` intent without re-passing the flag every restart.
-"""
+"""Tests for the resume-safe CLI flag helpers in ``cli.py``."""
 
 from __future__ import annotations
 
@@ -22,12 +16,9 @@ def _ns(**kw) -> argparse.Namespace:
     return argparse.Namespace(**kw)
 
 
-# ===========================================================================
 # _resume_safe_flag
-# ===========================================================================
 def test_resume_safe_flag_explicit_disable_wins_over_manifest():
-    """Operator passes ``--no-foo`` on this run; manifest says enabled.
-    The explicit current-launch intent wins."""
+    """Explicit current-launch ``--no-foo`` wins over an enabled manifest."""
     args = _ns(no_foo=True)
     manifest = {"foo_enabled": True}
     result = _resume_safe_flag(
@@ -38,9 +29,7 @@ def test_resume_safe_flag_explicit_disable_wins_over_manifest():
 
 
 def test_resume_safe_flag_falls_back_to_manifest_when_arg_default():
-    """Operator did NOT pass ``--no-foo`` on resume; manifest stored
-    ``foo_enabled=False`` from the original launch. Honor the
-    persisted value rather than reverting to argparse default (True)."""
+    """When ``--no-foo`` isn't re-passed on resume, honor the persisted manifest value over the argparse default."""
     args = _ns(no_foo=False)  # argparse default for store_true
     manifest = {"foo_enabled": False}
     result = _resume_safe_flag(
@@ -68,12 +57,9 @@ def test_resume_safe_flag_handles_none_manifest():
     assert result is True
 
 
-# ===========================================================================
 # _resume_safe_numeric
-# ===========================================================================
 def test_resume_safe_numeric_explicit_override_wins():
-    """Operator passes ``--threshold 0.5`` on this run; manifest stored
-    0.7. The current-launch override wins."""
+    """Explicit ``--threshold 0.5`` wins over a manifest value of 0.7."""
     args = _ns(threshold=0.5)
     manifest = {"threshold": 0.7}
     result = _resume_safe_numeric(
@@ -83,9 +69,7 @@ def test_resume_safe_numeric_explicit_override_wins():
 
 
 def test_resume_safe_numeric_falls_back_to_manifest():
-    """Operator did NOT pass an explicit value on resume (argparse
-    filled in the default 0.8); manifest stored 0.7 from launch. Use
-    manifest value so the operator's original threshold is honored."""
+    """With no explicit value on resume, use the manifest's 0.7 over the argparse default."""
     args = _ns(threshold=0.8)  # argparse default
     manifest = {"threshold": 0.7}
     result = _resume_safe_numeric(
@@ -104,8 +88,7 @@ def test_resume_safe_numeric_falls_back_to_default():
 
 
 def test_resume_safe_numeric_handles_malformed_manifest_value():
-    """Manifest carrying a non-numeric value (corrupt JSON) → default
-    rather than crashing the cli boot."""
+    """Manifest carrying a non-numeric value (corrupt JSON) → default rather than crashing the cli boot."""
     args = _ns(threshold=0.8)
     manifest = {"threshold": "garbage"}
     result = _resume_safe_numeric(

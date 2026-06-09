@@ -2,26 +2,14 @@
 
 """Build a KB scope dict from explicit context + session memory.
 
-The KB service requires the 6 mandatory scope dimensions
-``{org, framework, model, model_family, workload, precision}`` to be present
-on every write (contract §2.1). Two optional dimensions ``{scale, objective}``
-may be added when known. ``org`` is fixed at ``"hyperloom"`` in v1.
-
-Inputs to :func:`build_scope`:
-
-* ``packet_context``: explicit context coming from the current Coordinator
-  packet or decision request.
-* ``session_context``: context recovered from session memory (already
-  merged with previous turns).
-
-Order of precedence: ``packet_context > session_context > "unknown"``. The
-service normalises values via ``trim().lowercase()`` (G-3); we do the same
-client-side so list / metadata filters round-trip without surprises.
-
-If :data:`CRITICAL_SCOPE_KEYS` cannot be filled by either input we raise
-:class:`ScopeError`. The caller (typically ``decision_reviewer``) treats
-this as a hard signal to skip KB reads / writes and downgrade the verdict
-to ``needs_review``.
+Every write needs the 6 mandatory dimensions
+``{org, framework, model, model_family, workload, precision}`` (contract
+§2.1); ``{scale, objective}`` are optional and ``org`` is fixed to
+``"hyperloom"`` in v1. Precedence is ``packet_context > session_context >
+"unknown"``, with client-side ``trim().lowercase()`` (G-3) so filters
+round-trip. When ``model`` / ``framework`` can't be filled, :func:`build_scope`
+raises :class:`ScopeError` — the caller skips KB and downgrades to
+``needs_review``.
 """
 
 from __future__ import annotations
@@ -34,7 +22,7 @@ from .errors import ScopeError
 
 ORG_DEFAULT = "hyperloom"
 
-# 6 必填维度
+# 6 required dimensions
 CRITICAL_SCOPE_KEYS: tuple[str, ...] = (
     "org",
     "framework",
@@ -44,7 +32,7 @@ CRITICAL_SCOPE_KEYS: tuple[str, ...] = (
     "precision",
 )
 
-# 可选维度 — 不写 "unknown"，要么填要么不填 key
+# Optional dimensions — never write "unknown"; either set the value or omit the key
 OPTIONAL_SCOPE_KEYS: tuple[str, ...] = ("scale", "objective")
 
 

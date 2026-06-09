@@ -3,10 +3,8 @@
 
 """Normalize Hyperloom optimization artifacts into a stable data shape.
 
-This module is intentionally entrypoint-agnostic: GitHub CI, the Hyperloom web
-UI, or a manual local import can all hand it a downloaded artifact directory.
-It turns loose result files into one JSON object per optimization task so later
-steps can summarize, upload, or publish without parsing markdown.
+Entrypoint-agnostic: turns a downloaded artifact directory into one JSON
+object per optimization task (CI, web UI, or manual import).
 """
 
 from __future__ import annotations
@@ -95,21 +93,8 @@ def _first_of(data: dict[str, Any], *keys: str) -> Any | None:
 
 
 def _first_nested(data: dict[str, Any], *paths: str) -> Any | None:
-    """Return the first non-None value from dotted paths.
-
-    Agents have produced several ci_metrics schemas over time. The original
-    schema was flat (baseline_throughput / optimized_throughput / gain_pct);
-    newer reports often use nested baseline/best dictionaries with varied key
-    names. Dotted lookup keeps the parser compact and backwards compatible.
-
-    Args:
-        data (dict[str, Any]): Source mapping to walk.
-        *paths (str): Dotted key paths (e.g. ``"baseline.tpot_ms"``) tried in
-            order.
-
-    Returns:
-        Any | None: The first fully-resolved non-None value, or ``None``.
-    """
+    """Return the first non-None value from dotted paths (compat across the
+    several flat and nested ci_metrics schemas agents have emitted)."""
     for path in paths:
         cur: Any = data
         ok = True
@@ -283,8 +268,7 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
         "improvement.output_tok_s_pct",
         "improvement.output_tps_pct",
     )
-    # Some agents report speedup as a multiplier (1.10x). Convert to percent
-    # only for clear ratio fields.
+    # Some agents report speedup as a multiplier (1.10x); convert to percent.
     ratio_gain = _first_nested(
         data,
         "best.speedup_vs_baseline",
@@ -544,19 +528,8 @@ def normalize_task_result(
 ) -> dict[str, Any]:
     """Normalize one task artifact directory.
 
-    ``manifest_record`` is just optional task metadata supplied by the caller.
-    The metrics themselves are read from files under ``task_dir``.
-
-    Args:
-        task_dir (Path): Directory holding one task's downloaded artifacts.
-        manifest_record (dict[str, Any]): Task metadata (ids, status, model,
-            overrides) merged into the ``task`` block.
-        run (dict[str, Any] | None): Optional run-level metadata.
-
-    Returns:
-        dict[str, Any]: A single normalized result object (schema
-            ``hyperloom.ci.normalized.v1``) with metrics, baseline, sweep
-            points, kernels, artifact index, source-file map, and warnings.
+    ``manifest_record`` is caller-supplied task metadata; metrics are read
+    from files under ``task_dir``.
     """
     warnings: list[str] = []
 
@@ -588,9 +561,7 @@ def normalize_task_result(
         "run": run or {},
         "task": {
             "task_id": manifest_record.get("task_id"),
-            # Claw session UUID — same value SaFE / Hyperloom-Web dashboards
-            # use to deep-link into the chat transcript. Populated by
-            # optimize_submit::wait_and_collect_one from SaFE task.clawSessionId.
+            # Claw session UUID used by dashboards to deep-link the transcript.
             "claw_session_id": manifest_record.get("claw_session_id"),
             "model": manifest_record.get("model"),
             "display_name": manifest_record.get("display_name"),
@@ -633,19 +604,7 @@ def collect_normalized_results(
 ) -> list[dict[str, Any]]:
     """Normalize CI-collected artifacts using submission manifests.
 
-    This is the GitHub Actions adapter around the entrypoint-agnostic
-    ``normalize_task_result`` function.
-
-    Args:
-        artifacts_dir (Path): Root directory of downloaded task artifacts,
-            keyed by task id.
-        manifests_dir (Path): Directory searched recursively for
-            ``submission_manifest.json`` files.
-        run (dict[str, Any] | None): Optional base run metadata; manifest
-            fields fill in any missing values.
-
-    Returns:
-        list[dict[str, Any]]: One normalized result per manifest record.
+    GitHub Actions adapter around ``normalize_task_result``.
     """
     results: list[dict[str, Any]] = []
     manifest_files = sorted(manifests_dir.rglob("submission_manifest.json"))

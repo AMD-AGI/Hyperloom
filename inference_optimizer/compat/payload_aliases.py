@@ -70,6 +70,12 @@ def _coerce_str(value: Any) -> str:
         return ""
     if isinstance(value, str):
         return value
+    # The LLM occasionally emits server flags as a JSON list
+    # (``["--flag", "value"]``); space-join into shell tokens rather than
+    # emitting a Python repr that the Magpie wrapper would splice verbatim
+    # into ``vllm/sglang serve`` (rejected as "unrecognized arguments").
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
     return str(value)
 
 

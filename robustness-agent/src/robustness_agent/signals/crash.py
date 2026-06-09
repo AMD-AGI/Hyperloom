@@ -2,13 +2,9 @@
 
 """Crash-count signal.
 
- lets ``crash_count >= crash_emergency_threshold``
-(default 25) terminate the run with ``stop_reason=emergency``. We fire
-escalating severity well before that:
-
-* >= 2  consecutive crashes -> medium symptom suggesting recover delegate
-* >= 5  consecutive crashes -> high symptom suggesting strategy change
-* >= 10 consecutive crashes -> high symptom flagged ``emergency``
+Fires escalating severity before ``crash_count >= crash_emergency_threshold``
+(default 25) terminates the run: >= 2 → MEDIUM (recover), >= 5 → HIGH (strategy
+change), >= 10 → HIGH (``emergency``).
 """
 
 from __future__ import annotations

@@ -1,21 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Fake Primus Cortex HTTP server fixture for integration tests.
-
-Spawns a stdlib ``http.server.ThreadingHTTPServer`` on an OS-assigned
-port and serves the four endpoints framework-agent talks to:
-
-* ``GET  /v1/healthz``                                ->  ``{"status": "ok"}``
-* ``GET  /v1/repos/{owner}/{repo}/prs``               ->  ``{"items": [...]}``
-* ``GET  /v1/repos/{owner}/{repo}/prs/{n}``           ->  ``{"summary": {...}, "files": [...]}``
-* ``GET  /v1/repos/{owner}/{repo}/prs/{n}/files``     ->  list payload
-* ``GET  /v1/repos/{owner}/{repo}/prs/{n}/patches``   ->  JSON array of
-                                                          ``{file, patch}``
-
-The fixture yields ``(base_url, server)`` so tests can configure the
-ExploreRequest with the live base URL and tear the server down
-cleanly afterwards.
-"""
+"""Fake Primus Cortex HTTP server fixture (healthz, prs list/detail/files/patches)."""
 
 from __future__ import annotations
 
@@ -73,7 +58,6 @@ class _FakeHandler(BaseHTTPRequestHandler):
         return
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib signature
-        """Route GET requests by path; respond JSON or 404."""
         path = self.path.split("?", 1)[0]
         if path == "/v1/healthz":
             self._send_json({"status": "ok"})
@@ -94,7 +78,6 @@ class _FakeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_json(self, payload) -> None:
-        """Encode ``payload`` as JSON and write a 200 response."""
         body = json.dumps(payload).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

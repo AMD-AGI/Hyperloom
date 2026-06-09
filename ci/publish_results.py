@@ -12,14 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Public ingress URL for the hyperloom-results-service (deployed in the
-# primus-claw-dev namespace on the core42 data-plane cluster). Higress rewrites
-# /hyperloom-results/* -> backend /*, so /api/import becomes
-# /hyperloom-results/api/import here. We default to the ingress URL (not the
-# cluster-internal service DNS the helm chart exposes) so callers running on
-# any GHA runner — public ubuntu-latest or the hyperloom-mh826 self-hosted
-# pod — can reach the service without extra config. Override via
-# HYPERLOOM_RESULTS_SERVICE_URL when targeting a different deployment.
+# Public ingress URL (not cluster-internal DNS) so any GHA runner can reach the service;
+# Higress rewrites /hyperloom-results/* -> backend /*. Override via HYPERLOOM_RESULTS_SERVICE_URL.
 DEFAULT_SERVICE_URL = "http://core42.primus-safe.amd.com/hyperloom-results"
 
 
@@ -63,26 +57,11 @@ def load_results(path: Path) -> list[dict[str, Any]]:
 
 
 def _normalize_submitted_at(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Move ``run.submitted_at`` ISO strings into ``run.submitted_at_iso``
-    and set the original field to ``None``.
+    """Move ``run.submitted_at`` ISO strings to ``run.submitted_at_iso`` (set original to None).
 
-    Required because the hyperloom-results-service ingest path declares
-    ``submitted_at`` as a ``timestamptz`` column and binds the value via
-    a helper that returns ``str``; asyncpg rejects this and the POST
-    returns HTTP 500 ``invalid input for query argument $9 (expected a
-    datetime.date or datetime.datetime instance, got 'str')``.
-
-    Keeping the raw ISO value under a sibling key means the information
-    still lands in the row's ``raw_result`` JSONB blob, so consumers can
-    reconstruct the timestamp without a backend round-trip. Drop this
-    function once the ingest path accepts ISO strings directly.
-
-    Args:
-        results (list[dict[str, Any]]): Result records to normalize.
-
-    Returns:
-        list[dict[str, Any]]: Copies of the records with ``run.submitted_at``
-        relocated to ``run.submitted_at_iso``.
+    Required because the ingest path binds ``submitted_at`` (timestamptz) as a str and asyncpg
+    rejects it with HTTP 500. The sibling key preserves the value in the raw_result JSONB blob.
+    Drop once the ingest path accepts ISO strings directly.
     """
     cleaned: list[dict[str, Any]] = []
     for r in results:
@@ -110,29 +89,8 @@ def publish(
 ) -> dict:
     """POST results to /api/import with exponential-backoff retry.
 
-    Retries cover the two known intermittent failure modes on the
-    hyperloom-results-service side:
-      * PG pod crashloop drops the service's connection pool — first
-        request after the restart returns ConnectionDoesNotExistError
-        (HTTP 500 with empty body), the next one usually succeeds once
-        asyncpg re-establishes a connection.
-      * Postgres liveness-probe restarts can briefly make the whole
-        endpoint unreachable (HTTP 5xx / connection refused).
-
-    Args:
-        results (list[dict[str, Any]]): Result records to publish.
-        url (str): Base URL of the results service; ``/api/import`` is appended.
-        token (str): Optional bearer token for the ``Authorization`` header.
-        timeout (int): Per-request timeout in seconds.
-        max_retries (int): Maximum number of POST attempts before giving up.
-        initial_backoff_s (float): Initial backoff delay in seconds, doubled
-            (capped at 60s) after each failed attempt.
-
-    Returns:
-        dict: The decoded JSON response from a successful import.
-
-    Raises:
-        RuntimeError: If all attempts fail or the final response is non-2xx.
+    Retries cover intermittent service-side failures: PG pool drops after a pod crashloop
+    (HTTP 500, succeeds on retry once asyncpg reconnects) and liveness-probe restarts (5xx / refused).
     """
     import time
     import requests
@@ -150,8 +108,7 @@ def publish(
             resp = requests.post(
                 endpoint, headers=headers, json=body, timeout=timeout,
             )
-            # 5xx is the only thing worth retrying — 4xx means our payload
-            # is wrong and retrying won't help.
+            # Only retry 5xx; 4xx means our payload is wrong and retrying won't help.
             if 500 <= resp.status_code < 600:
                 snippet = (resp.text or "")[:200].replace("\n", " ")
                 err = RuntimeError(
