@@ -160,6 +160,17 @@ def test_detect_causal_lm_with_vision_config_rejected(tmp_path):
     assert "vision_config" in hit["signal"]
 
 
+def test_detect_kimi_k25_text_compatible_exception_allowed(tmp_path):
+    """Kimi-K2.6 carries vision_config but its text path is benchmark-compatible."""
+    m = tmp_path / "kimi_k25"
+    _write_config(m, {
+        "architectures": ["KimiK25ForConditionalGeneration"],
+        "model_type": "kimi_k25",
+        "vision_config": {"hidden_size": 1024},
+    })
+    assert cli._detect_unsupported_model(str(m)) is None
+
+
 def test_detect_missing_config_returns_none(tmp_path):
     assert cli._detect_unsupported_model(str(tmp_path / "nope")) is None
 
