@@ -3679,6 +3679,96 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         )
 
 
+async def _run_quantization_prelude(args: argparse.Namespace) -> None:
+    """Run the quantization-agent once before the optimization loop.
+
+    No-op unless ``--quantize "<prompt>"`` was passed. When set, this drives
+    AMD Quark PTQ from the prompt via the ``quantization_request_handlers``
+    adapter, then rewrites ``args.model`` (+ ``$MODEL_PATH``) to the exported
+    quantized model so every downstream phase (baseline / profile / sweep /
+    kernel) optimizes the quantized model instead of the source.
+
+    Contract:
+      * Skipped on ``--resume`` (a resumed session already has its model
+        pinned in the manifest; re-quantizing would diverge from it).
+      * On a failed/blocked quantization the process exits with code 3 —
+        we must not silently fall through and optimize the un-quantized
+        source model when the user explicitly asked for quantization.
+      * On a scheme/GPU mismatch (e.g. an MI355X-only scheme on an mi300x
+        target), the structured ``--quantize-scheme`` path reports the error
+        and *skips* quantization, then continues optimizing the un-quantized
+        model. The mismatch is a config error caught before any Quark work
+        runs, not a mid-run failure, so the run proceeds rather than aborting.
+        The skip is made **detectable** so a launcher / UI never mistakes the
+        run for quantized: a ``QUANTIZATION_SKIPPED:`` marker line on stdout
+        plus the ``$HYPERLOOM_QUANTIZATION_SKIPPED`` env var (set to the reason).
+    """
+    # Free-text --quantize wins; otherwise resolve the structured
+    # --quantize-scheme enum (the UI/backend path) to a prompt.
+    prompt = getattr(args, "quantize", None)
+    if not prompt:
+        from .orchestrator.quantization_schemes import (
+            SchemeNotSupportedError,
+            resolve_scheme_prompt,
+            validate_scheme,
+        )
+
+        scheme = getattr(args, "quantize_scheme", None)
+        # Constrain the scheme by the target GPU. The real GPU is probed later;
+        # use the --gpu-type / $GPU_TYPE hint here (empty => no enforcement).
+        gpu_hint = (
+            getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")
+        ).strip().lower()
+        try:
+            validate_scheme(scheme, gpu_hint)
+        except SchemeNotSupportedError as exc:
+            # Pre-flight config error (caught before any Quark work): per the
+            # documented contract we SKIP quantization and continue on the
+            # un-quantized model rather than hard-stopping. Make the skip
+            # explicit + machine-detectable (stdout marker + env var) so a
+            # launcher / UI surfaces "requested quantization was skipped"
+            # instead of silently believing the run is quantized.
+            reason = str(exc)
+            os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
+            print(
+                f"QUANTIZATION_SKIPPED: {reason}; continuing optimization on the "
+                "un-quantized model. Pick a scheme supported by this GPU TYPE "
+                "(or change GPU_TYPE) to actually quantize."
+            )
+            print(f"ERROR: quantization skipped — {reason}", file=sys.stderr)
+            return
+        prompt = resolve_scheme_prompt(scheme)
+    if not prompt:
+        return
+    if getattr(args, "resume", False):
+        print("Quantization prelude: skipped (--resume); using model from manifest.")
+        return
+
+    from .paths import workspace_root
+
+    source_model = str(args.model)
+    workspace = workspace_root() / "quantization" / Path(source_model).name
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    # Adapter lives in the orchestrator package; lazy-import so the CLI keeps
+    # importing cleanly even in environments without the quantization deps.
+    # _run_optimize already runs under asyncio.run, so await the async form
+    # directly (the sync wrapper would call asyncio.run inside a live loop).
+    from .orchestrator.quantization_request_handlers import (
+        run_quantization_prelude_async,
+    )
+
+    quantized_model_dir = await run_quantization_prelude_async(
+        prompt=prompt,
+        source_model=source_model,
+        workspace=workspace,
+    )
+
+    args.model = Path(quantized_model_dir)
+    os.environ["MODEL_PATH"] = str(quantized_model_dir)
+    print(f"Quantization prelude: model -> {quantized_model_dir}")
+
+
 def _argv_has_option(argv: list[str], option: str) -> bool:
     """Return True when argv explicitly carries ``option``."""
     prefix = f"{option}="
@@ -4171,6 +4261,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # (baseline / profile / sweep / backends / params) inject it into
         # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
         os.environ["MODEL_PATH"] = str(args.model)
+
+        # Quantization prelude (one-shot, before any session/baseline work):
+        # if --quantize was passed, quantize the source model now and rewrite
+        # args.model to the exported quantized model. No-op otherwise.
+        await _run_quantization_prelude(args)
 
         # Resolve framework: --framework > $FRAMEWORK env > "sglang".
         # Session-wide; mixing frameworks in one session is not supported.
@@ -4784,6 +4879,24 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Model path (required for new runs; ignored when "
                            "--resume is set — model is read from manifest.json/"
                            "state.json)")
+    opt.add_argument(
+        "--quantize", type=str, default=None, metavar="PROMPT",
+        help="Optional natural-language quantization request. When set, the "
+             "quantization-agent runs ONCE as a prelude before the "
+             "optimization loop: it drives AMD Quark PTQ from this prompt, "
+             "then rewrites --model to the exported quantized model so the "
+             "rest of the run optimizes the quantized model. Ignored on "
+             "--resume.",
+    )
+    from .orchestrator.quantization_schemes import QUANT_SCHEME_CHOICES
+    opt.add_argument(
+        "--quantize-scheme", choices=QUANT_SCHEME_CHOICES, default=None,
+        metavar="SCHEME",
+        help="Structured alternative to --quantize for UI/backends: pick a "
+             "curated quantization scheme (resolved to a prompt internally). "
+             f"Choices: {', '.join(QUANT_SCHEME_CHOICES)}. 'none' or omit = no "
+             "quantization. Ignored if --quantize (free text) is also given.",
+    )
     opt.add_argument(
         "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
