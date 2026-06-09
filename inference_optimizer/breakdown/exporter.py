@@ -194,6 +194,17 @@ def build(
                                         ),
                                         warnings,
                                         default={})
+    # Full-trace: unified token + decision timeline. Joins the per-call
+    # token ledger (reports/trace/llm_calls.jsonl + ext/*.jsonl) with the
+    # KEEP/REVERT journal + dynamic_action dispatch history. Empty (zeroed
+    # rollup) on sessions that predate the trace subsystem. Also writes
+    # reports/trace/decision_trace.jsonl as a side effect.
+    decision_trace     = _safe_collect("decision_trace",
+                                        lambda: collectors.collect_decision_trace(
+                                            sd, state, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
 
     source_files = collectors.collect_source_files(
         sd,
@@ -244,6 +255,12 @@ def build(
         # Optimization-progress curve (spec §2); ``ceiling_available`` False
         # when the watermark roofline pipeline never ran.
         "roofline_progress":   roofline_progress,
+        # Full-trace token + decision timeline (FULL_TRACE_DESIGN §6).
+        # ``decision_trace`` is the per-decision join (phase/tick/decision
+        # + token rollup); ``token_rollup`` is the by_phase / by_component
+        # / session_total summary. New optional section — v1 readers ignore
+        # it. Empty on pre-trace sessions.
+        "decision_trace":      decision_trace,
 
         "warnings":            warnings,
         "source_files":        source_files,

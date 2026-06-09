@@ -72,6 +72,8 @@ from .resource_lock import (
 from .shared_state import SharedState
 from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
+from .trace.conversation_trace import ConversationRecord, append_conversation
+from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .action_executors.benchmark_result import is_valid_measurement
 from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _BASELINE_FINGERPRINT_KEYS,
@@ -2470,6 +2472,7 @@ class Coordinator:
                     gain_pct=round(measured_gain, 3),
                     throughput_after=tput,
                     task_id=str(task.task_id if task is not None else ""),
+                    tick=int(state.tick or 0),
                 ))
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("warm-replay journal append failed")
@@ -2903,7 +2906,42 @@ class Coordinator:
                 detail=repr(exc)[:240],
             )
 
-        # Step 4: fact finalize (Cortex commit) — update_recipe + finalise local journal.
+        # ---------------- Step 2.6: artifact package -> /workspace -------
+        # Bundle the curated result/report/analysis files (incl. the
+        # session_breakdown just written in step 2) into a single zip
+        # placed under ``/workspace`` so the Claw sandbox sync ships it
+        # to object storage even when ``$USER_DATA_PATH`` points at a
+        # wekafs path outside ``/workspace`` (the common production case).
+        # Best-effort: failures are recorded but never abort the close
+        # sequence. The zip carries its own PACKAGE_MANIFEST log of what
+        # went in / what was missing.
+        try:
+            from ..breakdown import package_session_artifacts
+            pkg_path = package_session_artifacts(
+                self.session_dir,
+                session_id=str(getattr(self.shared_state, "session_id", "") or ""),
+            )
+            if pkg_path is not None:
+                await self._record_close_step(
+                    "artifact_package", status="done", detail=str(pkg_path),
+                )
+            else:
+                await self._record_close_step(
+                    "artifact_package", status="skipped",
+                    detail="no artifacts matched or dest unwritable",
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 2.6 (artifact_package) failed")
+            await self._record_close_step(
+                "artifact_package", status="failed", detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 4: fact finalize (Cortex commit) ----------
+        # The canonical step-4 "Cortex session commit": writes
+        # update_recipe + finalises the local journal (final_throughput /
+        # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
+        # Ordered before the retired NDJSON-drain no-op (step 3) so the
+        # recipe write is part of the same flush.
         try:
             self.cortex_finalize_recipe_and_journal()
             await self._record_close_step("fact_finalize", status="done")
@@ -3614,11 +3652,102 @@ class Coordinator:
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
+        # Full-trace A1: record this reactor turn's token spend on the
+        # unified ledger. One call site covers every in-process reactor
+        # role (orchestration / kernel) whose backend reports usage on
+        # metadata (ClaudeBackend + CodexBackend). Best-effort: a trace
+        # failure must never affect intent routing.
+        self._trace_reactor_llm_call(agent_name, result)
+        # Full-trace (conversations): persist the full, redacted
+        # prompt+response for this reactor turn. Separate file from the
+        # token ledger; same best-effort posture.
+        self._record_reactor_conversation(agent_name, result)
         # Completed orchestration turn means SEED delivered; flip flag so later turns send DELTA (plan Step 3).
         if agent_name == "orchestration":
             self._orchestration_seeded = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
+
+    def _trace_reactor_llm_call(
+        self, agent_name: str, result: BackendTurnResult,
+    ) -> None:
+        """Append one ``llm_calls.jsonl`` row for a reactor turn.
+
+        The reactor role name (``orchestration`` / ``kernel`` / ``critic`` /
+        ``robustness``) doubles as both the trace ``component`` and
+        ``role``. Only rows carrying real token counters are written, so
+        subprocess-backed reactors (critic / robustness) that don't report
+        usage here don't pollute the ledger with empty rows — their token
+        spend is captured by the dedicated agent collectors instead.
+
+        Wrapped in a broad ``try`` so any unexpected error in trace
+        assembly degrades to a logged warning rather than breaking the
+        tick loop.
+        """
+        try:
+            metadata = result.metadata or {}
+            has_tokens = any(
+                metadata.get(k) is not None
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                )
+            )
+            if not has_tokens:
+                return
+            record = LLMCallRecord.from_metadata(
+                session_id=self.session_dir.name,
+                component=agent_name,
+                role=agent_name,
+                metadata=metadata,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: reactor llm_call append failed for %s",
+                agent_name, exc_info=True,
+            )
+
+    def _record_reactor_conversation(
+        self, agent_name: str, result: BackendTurnResult,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a reactor turn.
+
+        Persists the full (redacted) prompt + completion the backend put on
+        ``metadata`` (``prompt`` / ``response``). Only rows that actually
+        carry conversation text are written, so subprocess-backed reactors
+        (critic / robustness) that don't surface text here don't emit empty
+        rows — their conversation is captured by their own workdir artefacts.
+
+        Best-effort: any failure degrades to a logged warning rather than
+        breaking the tick loop.
+        """
+        try:
+            metadata = result.metadata or {}
+            prompt = metadata.get("prompt")
+            response = metadata.get("response")
+            if not prompt and not response:
+                return
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component=agent_name,
+                role=agent_name,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                model=metadata.get("model"),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: reactor conversation append failed for %s",
+                agent_name, exc_info=True,
+            )
 
     async def _track_backend_error_streak(
         self, agent_name: str, exc: BackendError,
@@ -6823,6 +6952,7 @@ class Coordinator:
             error_class=error_class,
             reason=reason,
             task_id=task.task_id,
+            tick=int(self.shared_state.tick or 0),
         ))
 
         if self.cortex_kb is None:
@@ -6986,6 +7116,7 @@ class Coordinator:
             reason=reason,
             task_id=task.task_id,
             variant_name=variant_name,
+            tick=int(self.shared_state.tick or 0),
         ))
 
         if self.cortex_kb is None:
