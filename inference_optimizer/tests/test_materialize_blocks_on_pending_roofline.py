@@ -132,11 +132,12 @@ def _explore_proposal() -> PendingProposal:
 
 
 @pytest.mark.asyncio
-async def test_materialize_defers_explore_while_roofline_pending(
+async def test_materialize_dispatches_explore_while_roofline_pending(
     coord: Coordinator,
 ):
-    """Critic-approved explore proposal must land on the deferred queue
-    (not the TaskRegistry) while a roofline task is in flight."""
+    """P3-b: auto-roofline is advisory. A Critic-approved explore
+    proposal dispatches immediately even while a roofline task is in
+    flight — it is NOT parked on the deferred queue."""
     from inference_optimizer.orchestrator.task_registry import Task
 
     pending = Task(
@@ -152,30 +153,24 @@ async def test_materialize_defers_explore_while_roofline_pending(
     proposal = _explore_proposal()
     await coord._materialize_approved_proposal(proposal)
 
-    # No explore Task was created (the only thing in the registry is
-    # the pending roofline task we set up).
-    explore_kinds = [
-        t.kind for t in coord.tasks._tasks.values() if t.kind == "explore"
+    # Explore Task created right away; nothing parked, no blocked audit.
+    explore_tasks = [
+        t for t in coord.tasks._tasks.values() if t.kind == "explore"
     ]
-    assert explore_kinds == [], (
-        "materialise gate failed — explore task was dispatched against "
-        "a stale analysis snapshot"
-    )
-    # Proposal is parked on the deferred queue for later drain.
-    assert len(coord._proposals_awaiting_roofline) == 1
-    parked, names = coord._proposals_awaiting_roofline[0]
-    assert parked is proposal
-    assert names is None
-    # Audit observation recorded so the failure mode is visible.
+    assert len(explore_tasks) == 1
+    assert coord._proposals_awaiting_roofline == []
     obs = [m for m in coord.bus.messages if getattr(m, "topic", "") == "observation"]
-    assert any(
+    assert not any(
         getattr(m, "payload", {}).get("kind") == "proposal_materialize_blocked"
         for m in obs
     )
 
 
 @pytest.mark.asyncio
-async def test_drain_creates_task_once_roofline_clears(coord: Coordinator):
+async def test_drain_creates_task_once_roofline_clears(
+    coord: Coordinator, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("HYPERLOOM_ROOFLINE_DISPATCH_GATE", "1")
     """Once the analysis task lands and the pending field is cleared,
     :meth:`_drain_proposals_awaiting_roofline` re-runs materialise and
     finally creates the explore Task."""
@@ -211,11 +206,14 @@ async def test_drain_creates_task_once_roofline_clears(coord: Coordinator):
 
 
 @pytest.mark.asyncio
-async def test_drain_re_defers_if_another_roofline_armed(coord: Coordinator):
+async def test_drain_re_defers_if_another_roofline_armed(
+    coord: Coordinator, monkeypatch: pytest.MonkeyPatch,
+):
     """Edge case the drain must handle: a second watermark fires while
     the queue is being drained. The re-materialise hits the gate again
     and re-parks the proposal rather than dispatching against the new
-    stale snapshot."""
+    stale snapshot. (Legacy blocking gate, opt-in.)"""
+    monkeypatch.setenv("HYPERLOOM_ROOFLINE_DISPATCH_GATE", "1")
     from inference_optimizer.orchestrator.task_registry import Task
 
     rl1 = Task(

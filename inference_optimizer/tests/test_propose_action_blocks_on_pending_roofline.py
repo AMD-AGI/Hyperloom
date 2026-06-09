@@ -103,13 +103,13 @@ def coord(tmp_path: Path) -> Coordinator:
 
 
 @pytest.mark.asyncio
-async def test_propose_action_blocks_explore_while_roofline_pending(
+async def test_propose_action_explore_passes_while_roofline_pending(
     coord: Coordinator,
 ):
-    """Explore-with-grid is the only path that re-routes through
-    ``_handle_propose_action``. With a roofline task pending, the gate
-    must drop the proposal *before* a ``proposal`` message hits the bus
-    (which is what the Critic agent reads)."""
+    """P3-b: auto-roofline is advisory. With a roofline task in flight,
+    an explore proposal must NOT be blocked — it dispatches to the Critic
+    and is recorded in the PendingProposal table, so a stalled/failed
+    MI300X profile can no longer starve EXPLORE."""
     from inference_optimizer.orchestrator.task_registry import Task
 
     pending = Task(
@@ -132,19 +132,49 @@ async def test_propose_action_blocks_explore_while_roofline_pending(
     )
     await coord._handle_propose_action("orchestration", intent)
 
-    # No ``proposal`` envelope must have reached the bus (gate fired
-    # before bus.append_and_seq for the proposal). The only envelope
-    # in flight is the denial observation.
+    # Explore proposal reaches the bus and is tracked; no wait_for_auto_
+    # roofline denial is recorded.
     topics = [getattr(m, "topic", None) for m in coord.bus.messages]
-    assert "proposal" not in topics, (
-        "propose_action gate failed — Critic would see a stale-roofline "
-        "explore proposal: %r" % topics
+    assert "proposal" in topics
+    assert len(coord.state.pending_proposals) == 1
+    assert not any(
+        d.get("rule") == "wait_for_auto_roofline"
+        for d in coord.shared_state.policy_denial_history
     )
-    assert "observation" in topics
-    # PendingProposal table must remain empty so no later verdict can
-    # re-animate the rejected proposal.
+
+
+@pytest.mark.asyncio
+async def test_propose_action_explore_blocked_when_gate_opt_in(
+    coord: Coordinator, monkeypatch: pytest.MonkeyPatch,
+):
+    """Legacy blocking gate is still reachable via the opt-in env so
+    operators can restore the old behaviour if ever needed."""
+    monkeypatch.setenv("HYPERLOOM_ROOFLINE_DISPATCH_GATE", "1")
+    from inference_optimizer.orchestrator.task_registry import Task
+
+    pending = Task(
+        task_id="rl-pending-id",
+        kind="roofline",
+        state="running",
+        params={},
+        idempotency_key="internal-analysis-watermark_crossed",
+    )
+    coord.tasks._tasks[pending.task_id] = pending  # type: ignore[assignment]
+    coord.shared_state.auto_roofline_pending_task_id = pending.task_id
+
+    intent = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "explore",
+            "predicted_gain_pct": 5.0,
+            "params": {"grid": [{"name": "v1"}]},
+        },
+    )
+    await coord._handle_propose_action("orchestration", intent)
+
+    topics = [getattr(m, "topic", None) for m in coord.bus.messages]
+    assert "proposal" not in topics
     assert coord.state.pending_proposals == {}
-    # Denial counted in the streak ledger via record_policy_denial.
     assert len(coord.shared_state.policy_denial_history) == 1
     assert coord.shared_state.policy_denial_history[0]["rule"] == (
         "wait_for_auto_roofline"

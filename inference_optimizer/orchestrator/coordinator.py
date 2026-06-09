@@ -2779,7 +2779,21 @@ class Coordinator:
     async def _roofline_denial_for_action(
         self, action_name: str,
     ) -> "PolicyDenied | None":
-        """Apply the auto-analysis gate only to actions that require it."""
+        """Auto-roofline is advisory: never block dispatch (P3-b).
+
+        Historically this gate denied specialist/explore/kernel actions
+        while an auto-enqueued roofline/profile task was in flight, to
+        force a fresh ``analysis.md`` snapshot first. On MI300X the
+        profile sub-step can stall or fail (no .trace.json.gz), starving
+        EXPLORE and leaving the session to idle to ``conc_sweep_done``
+        with zero gain. GPU/lane leases already serialise concurrent
+        resource use, so acting on a slightly older analysis is an
+        acceptable efficiency tradeoff. Default behaviour is now
+        pass-through; set ``HYPERLOOM_ROOFLINE_DISPATCH_GATE=1`` to
+        restore the legacy blocking gate.
+        """
+        if os.environ.get("HYPERLOOM_ROOFLINE_DISPATCH_GATE", "").strip() != "1":
+            return None
         if action_name not in _ROOFLINE_GATED_ACTIONS:
             return None
         return await self._auto_roofline_pending_denial(action_name=action_name)
