@@ -102,9 +102,9 @@ class BaselinePoint:
 class BaselineSummary:
     """The full target-analysis artefact persisted under the session dir.
 
-    Shape:
+    Shape (schematic, not literal JSON):
 
-    .. code-block:: json
+    .. code-block:: text
 
         {
           "query":         {model, gpu, framework, precision, isl, osl},
