@@ -1,6 +1,7 @@
 """Outcome taxonomy for quantization-agent.
 
-Enumerates the 30 failure rows from ``docs/DESIGN.zh-CN.md`` Appendix §A plus
+Enumerates the 30 failure rows handled by the SKILL.md auto-recover /
+auto-fail / ask catalogs, plus
 the narrative success tag ``eval_gap_accepted`` and the upstream-mutation
 sentinel ``upstream_change_required`` (the resolution #30 takes when the LLM
 diagnoses that the fix would require editing files under ``quark_root``).
@@ -13,7 +14,14 @@ retry-loop branching in ``_retry.run_with_retries``.
 
 from __future__ import annotations
 
-from enum import StrEnum
+try:  # Python 3.11+
+    from enum import StrEnum
+except ImportError:  # Python 3.10 fallback — mirror 3.11 StrEnum semantics
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        def __str__(self) -> str:
+            return str(self.value)
 
 
 class OutcomeId(StrEnum):
