@@ -24,12 +24,14 @@ from .exporter import (
     write_minimal_final_report,
 )
 from .schema import SCHEMA_VERSION
+from .session_package import package_session_artifacts
 
 __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "SCHEMA_VERSION",
     "build",
+    "package_session_artifacts",
     "write_breakdown_json",
     "write_minimal_final_report",
 ]

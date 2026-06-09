@@ -765,6 +765,59 @@ class ConcSweepSummary(TypedDict, total=False):
     report_path: str                       # rel-to-session path to the mirrored source report
 
 
+# ---------------------------------------------------------------------------
+# Full-trace: unified token + decision timeline (FULL_TRACE_DESIGN §6)
+# ---------------------------------------------------------------------------
+class TokenBucket(TypedDict, total=False):
+    """Aggregated token counters for one grouping (phase / component / total).
+
+    ``total_cache`` (in the per-decision view) is the sum of cache-creation
+    and cache-read tokens; the rollup view keeps them split. ``calls`` is
+    the number of LLM calls folded into this bucket.
+    """
+    total_in: int
+    total_out: int
+    total_cache_creation: int
+    total_cache_read: int
+    calls: int
+
+
+class DecisionTokens(TypedDict, total=False):
+    by_component: dict[str, TokenBucket]   # component -> its token bucket for this decision
+    total_in: int
+    total_out: int
+    total_cache: int                       # cache_creation + cache_read
+    calls: int
+
+
+class DecisionTraceEntry(TypedDict, total=False):
+    phase: str                             # phase active at the decision (declared or ts-window backfill)
+    tick: int | None                       # orchestrator tick (None when the producer didn't stamp one)
+    ts: str                                # ISO ...Z of the decision
+    decision: dict[str, Any]               # {component, change/event/verdict, outcome, gain_pct, task_id/dyn_id}
+    tokens: DecisionTokens
+
+
+class TokenRollup(TypedDict, total=False):
+    by_phase: dict[str, TokenBucket]       # phase -> aggregate token bucket
+    by_component: dict[str, TokenBucket]   # component -> aggregate token bucket
+    session_total: TokenBucket             # whole-session token total
+
+
+class DecisionTrace(TypedDict, total=False):
+    """The joined token+decision timeline plus its rollups.
+
+    ``decision_trace`` is one entry per decision (KEEP/REVERT journal row +
+    dynamic_action dispatch event) with the LLM calls attributed to it.
+    ``token_rollup`` summarises every call by phase / component / total.
+    ``unattributed_tokens`` is the bucket of calls that matched no decision
+    (kept so the per-decision sums + this reconcile to ``session_total``).
+    """
+    decision_trace: list[DecisionTraceEntry]
+    token_rollup: TokenRollup
+    unattributed_tokens: TokenBucket
+
+
 class SessionBreakdown(TypedDict, total=False):
     schema_version: str
     exported_at_utc: str
@@ -806,6 +859,11 @@ class SessionBreakdown(TypedDict, total=False):
     # Optimization-progress curve (spec §2); renamed from ``roofline`` to
     # coexist with the list-shaped ``roofline`` above.
     roofline_progress: RooflineProgress
+    # Full-trace token + decision timeline (FULL_TRACE_DESIGN §6). New
+    # optional section: a v1/v2 reader that doesn't know about it simply
+    # ignores it. Empty dict on sessions that ran before the trace
+    # subsystem landed (no reports/trace/ files).
+    decision_trace: DecisionTrace
 
     warnings: list[str]
     source_files: SourceFiles
@@ -824,6 +882,9 @@ __all__ = [
     "CriticIteration",
     "CriticKBWritesSummary",
     "CriticRobustness",
+    "DecisionTokens",
+    "DecisionTrace",
+    "DecisionTraceEntry",
     "DetectedKernel",
     "Final",
     "GpuMonitorAggregate",
@@ -857,6 +918,8 @@ __all__ = [
     "Sweep",
     "SweepPoint",
     "Telemetry",
+    "TokenBucket",
+    "TokenRollup",
     "Workload",
     "WorkloadObjective",
 ]
