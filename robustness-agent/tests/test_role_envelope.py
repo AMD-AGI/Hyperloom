@@ -1,16 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for :mod:`robustness_agent.role.envelope`.
-
-Covers:
-
-* every builder produces an :class:`Intent` whose ``to_envelope_item``
-  round-trips through ``build_envelope_dict``.
-* invalid arguments to builders raise ``ValueError`` (so a bad caller
-  blows up before reaching the Coordinator).
-* the static tables (``PAYLOAD_REQUIRED`` / role allowlist /
-  robustness-only set) keep the shape upstream PolicyGate expects.
-"""
+"""Unit tests for :mod:`robustness_agent.role.envelope`: builder round-trips, defensive ValueError on bad args, and static-table invariants matching upstream PolicyGate."""
 
 from __future__ import annotations
 
@@ -186,11 +176,7 @@ def test_delegate_accepts_only_handle_actions():
 
 
 def test_delegate_allowlist_includes_report_wind_down():
-    """``report`` is the wind-down lever for ``deadline_imminent`` /
-    ``recover_unsuccessful``. If this asserts trips check whether you
-    are intentionally narrowing the allowlist; the ladder relies on
-    ``build_delegate('report')`` not raising.
-    """
+    """``report`` is the wind-down lever for ``deadline_imminent``/``recover_unsuccessful``; the ladder relies on ``build_delegate('report')`` not raising."""
     assert "report" in ROBUSTNESS_DELEGATE_ACTIONS
     intent = build_delegate(
         "report",
@@ -259,7 +245,7 @@ def test_backend_turn_result_default_fields():
 # ---------------------------------------------------------------------------
 
 def test_payload_required_covers_every_intent_type():
-    for intent_type in IntentType:
+    for intent_type in IntentType.__members__.values():
         assert intent_type in PAYLOAD_REQUIRED, intent_type
 
 

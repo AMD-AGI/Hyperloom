@@ -1,22 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``orchestrator.optimization_journal``.
-
-Covers:
-
-* ``load_or_create`` mints an empty journal when none exists, and
-  resurrects fields verbatim when one does.
-* ``append_entry`` writes through to disk after every call and is
-  idempotent under resume replay (dedupe by stable key).
-* ``finalize`` mutates only the top-level summary fields.
-* ``update_baseline`` is a no-op for non-positive values.
-* ``classify_change_kind`` / ``summarize_change`` produce stable vocab.
-* Atomic-write semantics: a temp file appears mid-flush but the final
-  destination always contains a valid JSON document.
-
-No KB / HTTP / asyncio dependencies; pure file IO so the suite runs
-in <100ms.
-"""
+"""Tests for ``orchestrator.optimization_journal``."""
 
 from __future__ import annotations
 
@@ -41,9 +25,7 @@ from inference_optimizer.orchestrator.optimization_journal import (
 )
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path: Path) -> Path:
     sd = tmp_path / "session-X"
@@ -51,9 +33,7 @@ def session_dir(tmp_path: Path) -> Path:
     return sd
 
 
-# ===========================================================================
 # Journal — construction
-# ===========================================================================
 def test_load_or_create_mints_new_when_absent(session_dir: Path):
     j = Journal.load_or_create(
         session_dir, session_id="sid-1", model="m", hardware="mi300x",
@@ -68,7 +48,7 @@ def test_load_or_create_mints_new_when_absent(session_dir: Path):
     expected = session_dir / "reports" / JOURNAL_FILENAME
     assert j.path == expected
     assert expected.parent.exists()
-    assert not expected.exists()  # only flushes when something is appended
+    assert not expected.exists()  # flushes only when something is appended
 
 
 def test_load_or_create_round_trips_existing_file(session_dir: Path):
@@ -82,7 +62,6 @@ def test_load_or_create_round_trips_existing_file(session_dir: Path):
     ))
     j1.finalize(final_throughput=900.0, total_gain_pct=50.0)
 
-    # Second construct (e.g. after resume) — header fields and entries match.
     j2 = Journal.load_or_create(
         session_dir, session_id="sid-1", model="m", hardware="mi300x",
         baseline_throughput=600.0,
@@ -97,9 +76,7 @@ def test_load_or_create_round_trips_existing_file(session_dir: Path):
 def test_load_or_create_keeps_existing_header_when_caller_passes_defaults(
     session_dir: Path,
 ):
-    """Header fields from disk win over empty-string defaults so a
-    resume call that doesn't yet know the baseline doesn't blow away
-    a real measurement."""
+    """Header fields from disk win over empty-string defaults on resume."""
     j1 = Journal.load_or_create(
         session_dir, session_id="sid-1", model="m", hardware="mi300x",
         baseline_throughput=700.0,
@@ -130,9 +107,7 @@ def test_load_or_create_recovers_from_corrupt_file(
     assert j.session_id == "sid-x"
 
 
-# ===========================================================================
 # Journal — mutation + persistence
-# ===========================================================================
 def test_append_entry_flushes_to_disk(session_dir: Path):
     j = Journal.load_or_create(
         session_dir, session_id="s", model="m", hardware="h",
@@ -162,9 +137,7 @@ def test_append_entry_dedupes_on_resume_replay(session_dir: Path):
 
 
 def test_append_entry_dedupe_per_variant(session_dir: Path):
-    """Two variants of the same explore round produce two entries
-    even though phase/iter/kind/change collide — variant_name breaks
-    the tie."""
+    """variant_name breaks the dedupe tie for two variants of the same round."""
     j = Journal.load_or_create(
         session_dir, session_id="s", model="m", hardware="h",
     )
@@ -178,12 +151,7 @@ def test_append_entry_dedupe_per_variant(session_dir: Path):
 
 
 def test_append_entry_dedupe_per_task_id(session_dir: Path):
-    """Two non-explore tasks scheduled in the same tick collide on
-    (phase, iter, kind, change, outcome) when summarize_change falls
-    back to the task kind string (e.g. two ``profile`` tasks or two
-    ``kernel_opt`` tasks). ``task_id`` must break the tie so the
-    second entry is preserved rather than silently dropped as a
-    "resume replay"."""
+    """``task_id`` breaks the dedupe tie for two same-kind tasks in one tick."""
     from inference_optimizer.orchestrator.optimization_journal import (
         KIND_KERNEL_FILE,
     )
@@ -197,9 +165,7 @@ def test_append_entry_dedupe_per_task_id(session_dir: Path):
     assert j.append_entry(JournalEntry(task_id="task-1", **base_kwargs))
     assert j.append_entry(JournalEntry(task_id="task-2", **base_kwargs))
     assert len(j.entries) == 2
-    # Re-appending an identical (task_id) row IS treated as resume
-    # replay and skipped — the dedupe contract still holds within a
-    # single task_id.
+    # Re-appending an identical (task_id) row is treated as resume replay.
     assert not j.append_entry(JournalEntry(task_id="task-1", **base_kwargs))
     assert len(j.entries) == 2
 
@@ -229,7 +195,7 @@ def test_finalize_with_partial_args_only_updates_given_fields(session_dir: Path)
     assert j.total_gain_pct == 44.9
     assert j.final_throughput is None
     j.finalize(final_throughput=875.0)
-    assert j.total_gain_pct == 44.9  # not clobbered
+    assert j.total_gain_pct == 44.9
     assert j.final_throughput == 875.0
 
 
@@ -256,15 +222,13 @@ def test_to_dict_strips_none_in_entries(session_dir: Path):
     ))
     blob = json.loads(j.path.read_text(encoding="utf-8"))
     e = blob["entries"][0]
-    # gain_pct present; error_class / reason were None → stripped.
+    # error_class / reason were None → stripped.
     assert "error_class" not in e
     assert "reason" not in e
     assert e["gain_pct"] == 10.0
 
 
-# ===========================================================================
 # classify_change_kind / summarize_change vocab
-# ===========================================================================
 def test_classify_change_kind_recognises_top_level_kinds():
     assert classify_change_kind("kernel_opt") == KIND_KERNEL_FILE
     assert classify_change_kind("integrate") == "integrate"

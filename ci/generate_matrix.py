@@ -11,45 +11,12 @@ import yaml
 
 
 def _entry_key(m: dict) -> str:
-    """Effective matrix/filter key: explicit `key` field overrides `inferenceX_key`.
-
-    Two reasons an entry sets its own `key` instead of inheriting from
-    `inferenceX_key`:
-
-    1. Self-contained entries with no upstream amd-master baseline. The GLM-5
-       multi-node entry (`key: glm5-multinode-fp8-mi300x-sglang`) is the
-       canonical case — `inferenceX_parser.synthesize_entry_from_ci_config`
-       builds the lookup row from the ci-config fields themselves.
-    2. Two ci-config entries sharing the same `inferenceX_key` (e.g. variants
-       of the same amd-master row) need unique matrix display names to avoid
-       dedupe.
-
-    Args:
-        m (dict): A single ci-config ``models`` entry.
-
-    Returns:
-        str: The explicit ``key`` field if present, otherwise ``inferenceX_key``.
-    """
+    """Effective matrix/filter key: explicit `key` field overrides `inferenceX_key`."""
     return m.get("key") or m["inferenceX_key"]
 
 
 def generate_matrix(config_path: str = "ci-config.yaml", selected_models: str = "") -> dict:
-    """Build the GitHub Actions matrix include list from a ci-config file.
-
-    Loads the YAML config, optionally filters the models down to a
-    comma-separated selection, and emits one matrix entry per remaining model.
-
-    Args:
-        config_path (str): Path to the ci-config YAML file to read.
-        selected_models (str): Optional comma-separated list of model keys to
-            include. When empty, all configured models are used.
-
-    Returns:
-        dict: A matrix mapping of the form ``{"include": [{"key": ...}, ...]}``.
-    """
-    # Force UTF-8 — ci-config.yaml uses box-drawing chars (──) in section
-    # comments. Linux runners default to UTF-8, but Windows defaults to
-    # cp1252 which raises UnicodeDecodeError on byte 0x9d.
+    # Force UTF-8: ci-config.yaml uses box-drawing chars (──); Windows cp1252 would raise UnicodeDecodeError.
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 

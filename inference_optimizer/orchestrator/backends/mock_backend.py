@@ -2,8 +2,7 @@
 
 """MockBackend — scripted-turn LLM stub for P0 / unit / e2e tests.
 
-Avoids burning tokens during dev, makes tests deterministic and offline.
-The Coordinator / SubAgentRunner / Critic Review tests all use this.
+Deterministic, offline, token-free playback of pre-recorded turns.
 
 Usage::
 
@@ -41,10 +40,10 @@ class MockTurn:
 
 @dataclass
 class ScriptedPlan:
-    """Sequence of pre-recorded turns. Loops if ``loop_last=True``.
+    """Sequence of pre-recorded turns.
 
-    If ``default_intent`` is provided, it's used after the script is
-    exhausted (only when ``loop_last`` is False).
+    ``loop_last`` repeats the final turn after the script is exhausted;
+    otherwise ``default_intent`` (if set) is used.
     """
 
     turns: list[MockTurn]
@@ -80,7 +79,6 @@ class MockBackend:
         self.plan = plan
         self.name = name
         self._cursor = 0
-        # Recorded so tests can assert what the reactor sent us
         self.calls: list[dict[str, Any]] = []
 
     async def run(
@@ -141,8 +139,7 @@ class MockBackend:
             return self.plan.turns[-1]
         if self.plan.default_intent is not None:
             return MockTurn(intents=[self.plan.default_intent])
-        # Out of script and no fallback → silently emit a heartbeat so the
-        # reactor can keep ticking without exploding mid-test.
+        # Out of script and no fallback → emit a heartbeat so the reactor keeps ticking.
         from ...protocol.intent import Intent as _Intent
         from ...protocol.intent import IntentType as _IT
         return MockTurn(intents=[

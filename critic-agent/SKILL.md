@@ -137,7 +137,7 @@ Every proposal in `judge_bundle.proposals` is classified into one of:
 | Class | Actions | Approve bar |
 |---|---|---|
 | `patch_landing` | `integrate`, `integrate_patch`, `apply_patch` | Strict — comparable before/after benchmark + accuracy gate + active-path proof + rollback. Critic is the last gate before `optimization_stack` / `framework_source_roots` mutates. |
-| `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt`, `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config`, `assess_remaining_gaps` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
+| `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt`, `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
 | `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown` | None — approve by default; Critic is not a useful gatekeeper here. |
 
 Unknown action names fall through to `evidence_producer` (cold-start

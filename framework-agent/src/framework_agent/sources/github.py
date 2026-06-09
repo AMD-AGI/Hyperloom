@@ -2,18 +2,11 @@
 
 """Anonymous GitHub Search backend for perf PR candidate discovery.
 
-Best-effort, zero-deps fallback used when ``primus_cortex`` is unavailable
-or when an operator wants to union both sources. Policy differs from
-``primus_cortex``:
-
-* **No hard-fail**: rate-limits (HTTP 403/422), transport errors, or a
-  non-GitHub remote all return ``[]`` instead of raising. The caller can
-  still depend on ``primus_cortex`` for the authoritative list.
-* Uses keyword-driven queries derived from
-  ``ExploreRequest.gap_description`` (Arbor's
-  :func:`framework_agent.keywords.extract_keywords`); falls back to a
-  curated PERF_TERMS list when no description is provided.
-* Anonymous (no token), so subject to GitHub's 60 req/h IP limit.
+Best-effort, zero-deps fallback when ``primus_cortex`` is unavailable.
+No hard-fail: rate-limits, transport errors, or a non-GitHub remote return
+``[]``. Queries are keyword-driven from ``gap_description`` via
+:func:`framework_agent.keywords.extract_keywords`, falling back to PERF_TERMS.
+Anonymous (no token), so subject to GitHub's 60 req/h IP limit.
 """
 
 from __future__ import annotations

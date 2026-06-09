@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Schema validation for :mod:`critic-agent.runtime.request_models`.
-
-The test set is intentionally exhaustive on edge cases because the rest
-of the runtime trusts these dataclasses.
-"""
+"""Schema validation for :mod:`critic-agent.runtime.request_models` (exhaustive edge cases)."""
 
 from __future__ import annotations
 

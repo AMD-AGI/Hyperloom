@@ -1,12 +1,7 @@
 """Tests for the unsupported-model preflight gate (whitelist approach).
 
-Policy: Hyperloom only supports text-generation (decoder-only causal LM)
-models whose architecture contains ForCausalLM / LMHeadModel and has no
-explicit multimodal / vision signals. All other architectures are rejected
-BEFORE the expensive baseline server boot.
-
-Best-effort contract: a missing / unreadable / invalid ``config.json`` does
-NOT hard-block (the upstream filter + downstream loader still apply); only a
+Only text-generation (causal LM) models pass; others are rejected before the
+baseline boot. A missing/invalid ``config.json`` does NOT hard-block — only a
 positively-identified non-text-generation model is rejected.
 """
 
@@ -44,9 +39,7 @@ def _seed_state(session_dir: Path, monkeypatch) -> None:
     SharedState(session_id="t", model_name="m", model_path="m").save(session_dir)
 
 
-# ---------------------------------------------------------------------------
 # 1. classifier — whitelist-based detection
-# ---------------------------------------------------------------------------
 def test_detect_gemma3_conditional_generation_rejected(tmp_path):
     """Gemma3ForConditionalGeneration is not a causal LM arch -> rejected."""
     m = tmp_path / "gemma3"
@@ -167,6 +160,17 @@ def test_detect_causal_lm_with_vision_config_rejected(tmp_path):
     assert "vision_config" in hit["signal"]
 
 
+def test_detect_kimi_k25_text_compatible_exception_allowed(tmp_path):
+    """Kimi-K2.6 carries vision_config but its text path is benchmark-compatible."""
+    m = tmp_path / "kimi_k25"
+    _write_config(m, {
+        "architectures": ["KimiK25ForConditionalGeneration"],
+        "model_type": "kimi_k25",
+        "vision_config": {"hidden_size": 1024},
+    })
+    assert cli._detect_unsupported_model(str(m)) is None
+
+
 def test_detect_missing_config_returns_none(tmp_path):
     assert cli._detect_unsupported_model(str(tmp_path / "nope")) is None
 
@@ -177,9 +181,7 @@ def test_detect_invalid_config_returns_none(tmp_path):
     assert cli._detect_unsupported_model(str(m)) is None
 
 
-# ---------------------------------------------------------------------------
 # 2. preflight gate — persists a canonical stop reason and signals exit
-# ---------------------------------------------------------------------------
 def test_preflight_blocks_gemma3(tmp_path, monkeypatch):
     model = tmp_path / "gemma3"
     _write_config(model, {
@@ -234,9 +236,7 @@ def test_preflight_allows_missing_config(tmp_path, monkeypatch):
     assert not (sd / "reports" / "final.json").exists()
 
 
-# ---------------------------------------------------------------------------
 # 3. stop_reason vocabulary registration
-# ---------------------------------------------------------------------------
 def test_stop_reason_is_canonical_vocab():
     from inference_optimizer.orchestrator.phase_state import (
         STOP_REASON_VOCAB,

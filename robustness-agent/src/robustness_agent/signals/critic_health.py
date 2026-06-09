@@ -2,37 +2,19 @@
 
 """Critic-health signals (E1 / E2 / E4 / E5).
 
-Critic is the reviewer; **no one reviews the reviewer**. When the KB
-service goes down, when the critic-agent subprocess starts returning
-``("needs_review", "critic_unavailable")`` for every proposal, or when
-``critic-workdir/`` runs away because the in-process pruner is broken,
-the whole session loses its decision gate without anyone shouting.
+Critic is the reviewer and no one reviews the reviewer; these detectors catch the
+session silently losing its decision gate:
 
-Four detectors live here:
+* **E1 ``critic_kb_outage``** — ``judge_bundle.json`` marks
+  ``kb_read_skipped_reason="kb_unreachable"`` for ``min_outage_judges`` consecutive turns.
+* **E2 ``critic_unavailable_streak``** — ``review_verdict`` events with
+  ``source="critic_unavailable"`` for ``min_unavailable_verdicts`` consecutive verdicts.
+* **E4 ``critic_prune_stuck``** — ``critic-workdir/`` count past ``max_workdir_count`` (pruner broken).
+* **E5 ``critic_runtime_stuck``** — runtime-cli timeout pattern in server logs
+  (reuses :data:`local_log_errors`), collapsed into one critic-attributed symptom.
 
-* **E1 ``critic_kb_outage``** — recent ``judge_bundle.json`` files mark
-  ``kb_read_skipped_reason="kb_unreachable"`` for ``min_outage_judges``
-  consecutive turns. Means the KB priors layer is silently absent.
-
-* **E2 ``critic_unavailable_streak``** — ``review_verdict`` events in
-  ``coordinator_events`` with ``source="critic_unavailable"`` for
-  ``min_unavailable_verdicts`` consecutive verdicts. Means the
-  critic-agent runtime fell into the "missing context" fallback path
-  and is no longer producing real verdicts.
-
-* **E4 ``critic_prune_stuck``** — ``critic-workdir/`` directory count
-  blew past ``max_workdir_count``. Means the in-process pruner is
-  failing to remove old turns (disk leak).
-
-* **E5 ``critic_runtime_stuck``** — the runtime-cli timeout pattern
-  matched in server logs. Re-uses :data:`local_log_errors` populated
-  by ``signals/local_health.py``; this detector only collapses the
-  per-line hits into a single critic-attributed symptom.
-
-E3 ("critic full-approve drift") deliberately stays out of scope —
-it requires invariants on the critic-agent runtime side that
-Robustness cannot back-fill (the proposal evidence isn't visible
-from coordinator_events).
+E3 ("critic full-approve drift") is out of scope: it needs critic-agent runtime
+invariants Robustness cannot see from coordinator_events.
 """
 
 from __future__ import annotations
@@ -174,23 +156,7 @@ def _unavailable_streak_symptoms(
     data: SourceData,
     cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """Count consecutive ``critic_unavailable`` verdicts in events.
-
-    We scan both ``data.coordinator_events`` and ``ctx.inbox`` so the
-    rule works on either transport. Events are time-ordered (oldest
-    first); we walk from newest backward and count consecutive
-    ``critic_unavailable`` rows.
-
-    Args:
-        ctx (ReactorContext): Reactor context providing the inbox.
-        data (SourceData): Collected source data including coordinator events.
-        cfg (CriticHealthConfig): Tunables (provides the unavailable-verdict
-            threshold).
-
-    Returns:
-        list[Symptom]: A one-element list with the ``critic_unavailable_streak``
-            symptom when the streak threshold is met, otherwise an empty list.
-    """
+    """Count consecutive ``critic_unavailable`` verdicts across coordinator_events + inbox."""
     rows: list[dict[str, Any]] = []
     for event in data.coordinator_events:
         if not isinstance(event, dict):
@@ -301,19 +267,7 @@ def _prune_stuck_symptoms(
 def _runtime_stuck_symptoms(
     data: SourceData, cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """Collapse ``runtime.cli .* timed out`` log hits into a critic-specific
-    symptom, on top of the generic ``log_error_pattern`` rule.
-
-    Args:
-        data (SourceData): Collected source data including ``local_log_errors``.
-        cfg (CriticHealthConfig): Tunables (provides the marker and hit
-            threshold).
-
-    Returns:
-        list[Symptom]: A one-element list with the ``critic_runtime_stuck``
-            symptom when enough timeout hits are present, otherwise an empty
-            list.
-    """
+    """Collapse ``runtime.cli .* timed out`` log hits into a critic-specific symptom."""
     errors = data.local_log_errors
     if not isinstance(errors, list) or not errors:
         return []

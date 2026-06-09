@@ -1,21 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""TaskRegistry
-
-DelegatedTask state machine, persisted in the ``tasks`` table.
+"""TaskRegistry — DelegatedTask state machine, persisted in the ``tasks`` table.
 
 Allowed transitions::
 
     queued       -> running, cancelled
     running      -> succeeded, failed, cancelled, needs_manual_review
-    failed       -> running                    (retry, only when allowed)
-    succeeded    -> (terminal)
-    cancelled    -> (terminal)
-    needs_manual_review -> (terminal blocking)
+    failed       -> running                    (retry)
+    succeeded / cancelled / needs_manual_review -> (terminal)
 
-``idempotency_key`` is a UNIQUE column so re-creating the same logical
-task (e.g. after a partial-write crash) returns the existing row rather
-than producing a duplicate.
+``idempotency_key`` is UNIQUE so re-creating a logical task returns the existing row.
 """
 
 from __future__ import annotations
@@ -164,27 +158,7 @@ class TaskRegistry:
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
     ) -> tuple[Task, bool]:
-        """Insert a new task row OR return the existing one keyed by idempotency_key.
-
-        Returns ``(task, was_existing)``. ``was_existing=True`` means the row
-        was already in the DB (any state, including terminal); callers should
-        treat this as a duplicate-emission signal instead of silently
-        proceeding as if a fresh task was queued.
-
-        Args:
-            kind (str): The task kind/action name.
-            params (dict): Action parameters.
-            idempotency_key (str): UNIQUE de-duplication key.
-            requires_lanes (list[str] | None): Resource lanes needed.
-            allowed_tools (list[str] | None): Tool whitelist for the task.
-            side_effects (list[str] | None): Declared side effects.
-            lease_ttl_sec (int): Lease TTL in seconds. Defaults to ``0``.
-            task_id (str | None): Explicit id; a random hex id when ``None``.
-
-        Returns:
-            tuple[Task, bool]: ``(task, was_existing)`` where ``was_existing``
-                is ``True`` when an existing row was returned.
-        """
+        """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``."""
         existing = await self.db.fetchone(
             "SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,)
         )
@@ -246,22 +220,7 @@ class TaskRegistry:
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
     ) -> Task:
-        """Thin wrapper around :meth:`create_or_return_existing` for callers
-        that don't need the ``was_existing`` signal (most legacy callers).
-
-        Args:
-            kind (str): The task kind/action name.
-            params (dict): Action parameters.
-            idempotency_key (str): UNIQUE de-duplication key.
-            requires_lanes (list[str] | None): Resource lanes needed.
-            allowed_tools (list[str] | None): Tool whitelist for the task.
-            side_effects (list[str] | None): Declared side effects.
-            lease_ttl_sec (int): Lease TTL in seconds. Defaults to ``0``.
-            task_id (str | None): Explicit id; a random hex id when ``None``.
-
-        Returns:
-            Task: The created or pre-existing task.
-        """
+        """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``."""
         task, _was_existing = await self.create_or_return_existing(
             kind=kind,
             params=params,
@@ -393,14 +352,7 @@ class TaskRegistry:
         return [Task.from_row(r) for r in rows]
 
     async def cancel_family(self, family_kinds: list[str]) -> list[str]:
-        """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch).
-
-        Args:
-            family_kinds (list[str]): Task kinds whose queued rows to cancel.
-
-        Returns:
-            list[str]: The cancelled task ids.
-        """
+        """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch); returns cancelled task_ids."""
         if not family_kinds:
             return []
         cancelled: list[str] = []

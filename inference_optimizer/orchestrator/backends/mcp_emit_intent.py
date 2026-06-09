@@ -1,24 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""In-process MCP server exposing the ``emit_intent`` tool
+"""In-process MCP server exposing the ``emit_intent`` tool.
 
-Wires :data:`EMIT_INTENT_TOOL_NAME` into the Claude SDK as a real tool
-(rather than a JSON-in-text convention). Each tool_use block from Claude's
-trajectory becomes one validated :class:`Intent` downstream.
-
-Why in-process (not stdio/SSE):
-
-* **Zero extra processes** — Coordinator + reactors + sub-agents already
-  use plenty of pids; an in-process MCP server keeps the topology trim.
-* **Synchronous lookup** — handler validates + returns an MCP envelope;
-  intent capture is done by the trajectory parser (so the handler can
-  stay tiny).
-* **Test seam** — :func:`build_emit_intent_server` accepts factory
-  overrides so tests don't have to import ``claude_agent_sdk``.
-
-Tool-name rewriting: the SDK rewrites ``emit_intent`` to
-``mcp__inference_optimizer__emit_intent`` when forwarding to Claude.
-Use :data:`EMIT_INTENT_TOOL_QUALIFIED` to allow-list it.
+Wires :data:`EMIT_INTENT_TOOL_NAME` into the Claude SDK as a real tool; each
+tool_use block becomes one validated :class:`Intent`. In-process avoids extra
+processes; :func:`build_emit_intent_server` accepts factory overrides for
+tests. The SDK rewrites the name to :data:`EMIT_INTENT_TOOL_QUALIFIED` when
+forwarding to Claude.
 """
 
 from __future__ import annotations
@@ -129,17 +117,7 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
 
 
 async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
-    """Default handler — validate then ack. Errors return is_error=True.
-
-    Args:
-        args (dict[str, Any]): The ``emit_intent`` tool input forwarded by the
-            SDK.
-
-    Returns:
-        dict[str, Any]: An MCP tool-result envelope; ``{"content": ["ok"]}`` on
-        success, or a text ``validation_error`` envelope with ``is_error=True``
-        when validation fails.
-    """
+    """Default handler — validate then ack; errors return is_error=True."""
     try:
         validate_emit_intent_input(args)
     except IntentValidationError as exc:
@@ -179,23 +157,10 @@ def build_emit_intent_server(
 ) -> Any | None:
     """Build the in-process MCP server config exposing ``emit_intent``.
 
-    Resolves the SDK (or its test overrides), decorates the handler as the
-    ``emit_intent`` tool, and wraps it in an in-process SDK MCP server config.
-
-    Args:
-        sdk_module (Any | None): Explicit SDK module override; defaults to
-            importing ``claude_agent_sdk``.
-        tool_factory (Callable[..., Any] | None): Replacement for ``sdk.tool``;
-            falls back to the SDK's attribute when ``None``.
-        server_factory (Callable[..., Any] | None): Replacement for
-            ``sdk.create_sdk_mcp_server``; falls back to the SDK's attribute.
-        handler (Callable[[dict[str, Any]], Any] | None): Replacement for the
-            default validator-handler.
-
-    Returns:
-        Any | None: The SDK ``McpSdkServerConfig`` to plug into
-        :class:`ClaudeAgentOptions.mcp_servers`, or ``None`` if the SDK lacks
-        in-process MCP helpers.
+    Returns the SDK ``McpSdkServerConfig`` for
+    :class:`ClaudeAgentOptions.mcp_servers`, or ``None`` if the SDK lacks
+    in-process MCP helpers. ``tool_factory`` / ``server_factory`` /
+    ``handler`` are test seams.
     """
     sdk = _resolve_sdk(sdk_module)
     handler = handler or _emit_intent_handler

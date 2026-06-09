@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for ``orchestrator.action_executors._framework_gap_composer``.
-
-Covers the pure-Python ``compose_gap`` helper plus the kernel-breakdown
-parser used to derive the bottleneck keyword.
-"""
+"""Unit tests for ``orchestrator.action_executors._framework_gap_composer``."""
 
 from __future__ import annotations
 
@@ -20,9 +16,7 @@ from inference_optimizer.orchestrator.action_executors._framework_gap_composer i
 )
 
 
-# ---------------------------------------------------------------------------
 # normalisation helpers
-# ---------------------------------------------------------------------------
 
 class TestNormalizeModelClass:
     @pytest.mark.parametrize(
@@ -54,9 +48,7 @@ class TestModelClassSearchToken:
         assert _model_class_to_search_token(raw) == expected
 
 
-# ---------------------------------------------------------------------------
 # _extract_bottleneck_from_breakdown
-# ---------------------------------------------------------------------------
 
 class TestExtractBottleneck:
     def test_returns_empty_when_path_blank(self):
@@ -99,9 +91,7 @@ class TestExtractBottleneck:
         assert _extract_bottleneck_from_breakdown(path) == ""
 
 
-# ---------------------------------------------------------------------------
 # compose_gap
-# ---------------------------------------------------------------------------
 
 class TestComposeGap:
     def test_minimal_inputs(self):
@@ -135,8 +125,7 @@ class TestComposeGap:
         assert sorted(kw) == sorted({"vllm", "dense"})
 
     def test_bottleneck_dedup_with_existing_token(self, tmp_path):
-        # When bottleneck duplicates an arch/fw/prec token it must NOT be
-        # appended again to the gap phrase.
+        # A bottleneck duplicating an existing token must not be appended again.
         breakdown = tmp_path / "br.json"
         breakdown.write_text(json.dumps([{"name": "moe_ck_tile_fused"}]))
         gap, kw = compose_gap(

@@ -2,19 +2,12 @@
 
 """Deterministic slug generation per ``kb-critic-integration-contract`` Appendix D.
 
-Two writers — Critic and Alchemist — share this algorithm so the same fact
-collapses onto the same ``(scope, kind, slug)`` tuple. Any change here is a
-breaking SDK bump (contract D.5).
-
-Public API:
-
-* :func:`slugify(topic)` — ASCII-only deterministic slug, raises
-  :class:`SlugifyError` for ``empty`` / ``non_ascii`` / ``too_short``.
-* :func:`slugify_safe(topic, translate_fn=None, fallback_prefix='auto')` —
-  Non-ASCII safe wrapper. Pure-ASCII input falls through to ``slugify``;
-  otherwise the caller can inject a translation function (e.g. an LLM
-  call) and we slugify the result. If translation fails or is absent, we
-  fall back to ``<fallback_prefix>-<sha256(topic)[:8]>``.
+Critic and Alchemist share this so the same fact collapses onto one
+``(scope, kind, slug)`` tuple; any change is a breaking SDK bump (D.5).
+:func:`slugify` is ASCII-only (raises :class:`SlugifyError` on empty /
+non-ASCII / too-short); :func:`slugify_safe` wraps it, optionally using a
+``translate_fn`` and otherwise falling back to
+``<fallback_prefix>-<sha256(topic)[:8]>``.
 """
 
 from __future__ import annotations

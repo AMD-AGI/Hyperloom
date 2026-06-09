@@ -1,20 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Critic-agent web tools — pluggable, off-by-default ``web_search`` and
-``web_fetch`` capability for the critic LLM reasoning step.
+"""Critic-agent web tools — pluggable, off-by-default ``web_search`` /
+``web_fetch`` for the critic LLM reasoning step.
 
-Public surface:
-
-* :class:`WebToolsConfig` — env-driven configuration; build once per process.
-* :class:`WebSearchClient` / :class:`WebFetchClient` — facades that return
-  the formatted string to feed back as an OpenAI ``tool`` message.
-* :func:`build_tool_schemas` — list of OpenAI tool schemas, gated by config.
-* :func:`build_clients` — convenience factory that wires providers and the
-  default ``httpx.Client`` together; tests call the underlying classes
-  directly with their own transports.
-
-See ``Claw/docs/builtin-tools-design.md`` (sections 5.1 / 5.2) for the
-reference design these clients mirror.
+Public surface: :class:`WebToolsConfig` (env-driven, build once per
+process), :class:`WebSearchClient` / :class:`WebFetchClient` (return the
+formatted ``tool`` message string), :func:`build_tool_schemas` (config-gated
+OpenAI schemas), :func:`build_clients` (factory wiring providers + default
+``httpx.Client``). Mirrors ``Claw/docs/builtin-tools-design.md`` §5.1/5.2.
 """
 
 from __future__ import annotations

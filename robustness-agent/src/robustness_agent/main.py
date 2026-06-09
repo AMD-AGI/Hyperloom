@@ -2,9 +2,9 @@
 
 """Entry point for the standalone Robustness Agent reactor.
 
-The package console script runs the symptom -> intent reactor in standalone
-form, polling sources every ``standalone_tick_interval_s`` seconds and
-writing findings to disk. Production hosts drive the same reactor via
+The console script runs the symptom -> intent reactor standalone, polling
+sources every ``standalone_tick_interval_s`` and writing findings to disk.
+Production hosts drive the same reactor via
 :mod:`robustness_agent.runtime.cli` in a subprocess instead.
 """
 
@@ -37,17 +37,9 @@ def _setup_logging() -> None:
 
 
 async def _run_reactor_mode(config: Config) -> None:
-    """Standalone reactor loop for dev / debugging.
-
-    Polls the configured sources at ``standalone_tick_interval_s`` and
-    writes findings to disk. Coordinator integration drives the same
-    reactor through ``robustness_agent.runtime.cli tick`` in a
-    subprocess (mirroring critic-agent's transport).
-
-    Args:
-        config (Config): Resolved agent configuration controlling the
-            tick interval, server URL, and session directory.
-    """
+    """Standalone reactor loop for dev / debugging; polls sources at
+    ``standalone_tick_interval_s`` and writes findings to disk. (Production
+    drives the same reactor via ``runtime.cli tick`` in a subprocess.)"""
     log = logging.getLogger("robustness_agent")
     bundle = build_reactor_components(config)
 

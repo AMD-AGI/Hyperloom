@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ray_runtime import (
     ensure_ray_cluster,
+    isolated_compile_cache_env,
     quiet_ray_init,
 )
 
@@ -96,18 +97,7 @@ def _build_cmd(prompt_file: Path, output_dir: Path, kernel_path: str, gpu_ids: s
         cmd.extend(["--repo", kernel_repo])
     if test_command:
         cmd.extend(["--test-command", test_command])
-    # cost_limit semantics (matches GEAK's ``-l/--cost-limit`` option):
-    #   * ``None``  — caller did not pass a value; do NOT add the flag, so
-    #                 GEAK falls back to its config-file value. For Hyperloom
-    #                 callers this branch is unreachable today because
-    #                 ``kernel_optimization.py`` defaults to ``0.0`` (see the
-    #                 long comment there). Kept for direct CLI users.
-    #   * ``0.0``   — explicitly disable the cap. GEAK's ``mini.py:194-195``
-    #                 writes ``config["agent"]["cost_limit"] = 0`` which is
-    #                 honoured by every child agent spawned from that config;
-    #                 this is the only way to defeat the sub-agent path that
-    #                 silently falls back to ``AgentConfig.cost_limit = 3.0``.
-    #   * ``> 0.0`` — finite per-attempt budget in USD (CI guardrail).
+    # cost_limit: None omits the flag; 0.0 disables GEAK's sub-agent fallback; >0.0 is a USD budget.
     if cost_limit is not None:
         cmd.extend(["--cost-limit", str(cost_limit)])
     return cmd
@@ -146,48 +136,11 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
     @ray.remote(num_gpus=num_gpus)
     def _task(prompt_file_str: str, output_dir_str: str, kernel_path: str,
               cost_limit, timeout_s: int, kernel_repo: str, test_command: str) -> dict:
-        """Ray worker body: run the GEAK CLI on this node's GPUs.
-
-        Self-contained (no kernel-agent imports) because Ray workers do
-        not inherit the driver's ``sys.path`` patches. Validates
-        ``$GEAK_CONFIG`` and maps GPU-visibility env vars before running.
-
-        Args:
-            prompt_file_str (str): Task prompt file path.
-            output_dir_str (str): GEAK output directory path.
-            kernel_path (str): Optional kernel file path.
-            cost_limit: Per-attempt USD budget or ``None``.
-            timeout_s (int): Subprocess timeout in seconds.
-            kernel_repo (str): Optional repo path.
-            test_command (str): Optional test command.
-
-        Returns:
-            dict: Result mapping with ``returncode``, ``stdout_tail``,
-                ``stderr_tail``, ``stdout``, ``gpu_ids``, ``elapsed_s``,
-                and ``cmd``.
-        """
-        # Self-contained: do NOT import kernel-agent modules here, Ray workers
-        # don't share the driver's sys.path patches.
-        import os as _os
-        import shutil as _shutil
-        import subprocess as _sp
-        import time as _t
+        # Self-contained: Ray workers lack the driver's sys.path.
+        import os as _os, shutil as _shutil, subprocess as _sp, time as _t
         import re as _re
         from pathlib import Path as _Path
-        # GPU visibility on AMD/ROCm + Ray:
-        #   * Ray sets ROCR_VISIBLE_DEVICES (NOT CUDA_VISIBLE_DEVICES) to a
-        #     comma-list of *physical* GPU ids it allocated to this worker.
-        #   * ROCR pre-filters at the lower layer, so HIP/CUDA APIs see those
-        #     N physical GPUs as logical device 0..N-1.
-        # To make GEAK's --gpu-ids and any nested torchrun rank that calls
-        # `torch.cuda.set_device(local_rank)` work for BOTH single-GPU and
-        # multi-GPU (e.g. set_device(1) when num_gpus=2), we must pass the
-        # ROCR-filtered logical ids 0..N-1 to HIP/CUDA, NOT the raw physical
-        # ids. Symptoms this fixes:
-        #   * r17 GEAK single-GPU: "No HIP GPUs available" (we previously
-        #     overwrote ROCR with the wrong value, double-filtering).
-        #   * r20 GEAK multi-GPU: "invalid device ordinal" on rank 1 because
-        #     HIP only saw device 0 when --gpu-ids was "0" (or unset).
+        # r17/r20: map ROCR physical ids to logical 0..N-1 for HIP/CUDA so set_device works.
         rocr_raw = _os.environ.get("ROCR_VISIBLE_DEVICES", "")
         if rocr_raw:
             n_visible = len([x for x in rocr_raw.split(",") if x.strip()])
@@ -200,6 +153,14 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             if cuda_vis:
                 _os.environ["HIP_VISIBLE_DEVICES"] = cuda_vis
             gpu_ids = cuda_vis or "0"
+        # Per-attempt compile caches so a co-running OOB ladder can't clobber
+        # this run's aiter/triton/inductor artifacts (see isolated_compile_cache_env).
+        for _var, _sub in (("TRITON_CACHE_DIR", "triton"),
+                           ("AITER_ROOT_DIR", "aiter"),
+                           ("TORCHINDUCTOR_CACHE_DIR", "inductor")):
+            _cdir = _os.path.join(output_dir_str, ".cache", _sub)
+            _os.makedirs(_cdir, exist_ok=True)
+            _os.environ[_var] = _cdir
         geak_bin = _shutil.which("geak") or _shutil.which("mini") or "geak"
         cmd = [geak_bin, "-t", prompt_file_str, "--yolo",
                "--output", output_dir_str, "--gpu-ids", gpu_ids]
@@ -247,11 +208,7 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             cmd.extend(["--repo", kernel_repo])
         if test_command:
             cmd.extend(["--test-command", test_command])
-        # Mirrors ``_build_cmd``: only emit ``--cost-limit`` when the
-        # caller specified one. Hyperloom's default (0.0) means we
-        # always pass the flag and disable GEAK's $3 sub-agent
-        # fallback; see the cost_limit semantics comment in
-        # ``_build_cmd`` above for the full rationale.
+        # Mirrors ``_build_cmd``: only emit ``--cost-limit`` when specified.
         if cost_limit is not None:
             cmd.extend(["--cost-limit", str(cost_limit)])
         started = _t.time()
@@ -288,27 +245,7 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
 def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
                 cost_limit: float | None, timeout_s: int,
                 kernel_repo: str = "", test_command: str = "") -> dict:
-    """Run a GEAK submission directly via subprocess (no Ray).
-
-    Builds a child environment with a ROCR→logical GPU mapping (instead
-    of mutating ``os.environ``), then runs the GEAK CLI.
-
-    Args:
-        prompt_file (Path): Task prompt file passed to GEAK.
-        output_dir (Path): Directory for GEAK output.
-        kernel_path (str): Optional kernel file path.
-        cost_limit (float | None): Per-attempt USD budget; see
-            :func:`_build_cmd`.
-        timeout_s (int): Subprocess timeout in seconds.
-        kernel_repo (str): Optional repo path.
-        test_command (str): Optional test command.
-
-    Returns:
-        dict: Result mapping with ``returncode``, ``stdout_tail``,
-            ``stderr_tail``, ``gpu_ids``, ``elapsed_s``, and ``cmd``.
-    """
-    # Build a child env with ROCR→logical GPU mapping instead of
-    # mutating os.environ (avoids leaking GPU vars to later steps).
+    # Child env with ROCR→logical GPU mapping; avoids leaking GPU vars to later steps.
     child_env = os.environ.copy()
     rocr_raw = child_env.get("ROCR_VISIBLE_DEVICES", "")
     if rocr_raw:
@@ -322,6 +259,8 @@ def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
         if cuda_vis and not child_env.get("HIP_VISIBLE_DEVICES"):
             child_env["HIP_VISIBLE_DEVICES"] = cuda_vis
         gpu_ids = cuda_vis or "0"
+    # Per-attempt compile caches (see isolated_compile_cache_env).
+    child_env = isolated_compile_cache_env(output_dir, base_env=child_env)
     started = time.time()
     try:
         cmd = _build_cmd(prompt_file, output_dir, kernel_path, gpu_ids, cost_limit,
@@ -388,9 +327,7 @@ def submit(prompt_file: Path, output_dir: Path, kernel_path: str = "",
     if prefer_ray:
         try:
             import ray  # noqa: F401
-            # Don't burn 30 s of ray.init retries on a wedged cluster. If
-            # `ray status` fails, ``ensure_ray_cluster`` will start a fresh
-            # head node here (safe no-op when the cluster is already healthy).
+            # ensure_ray_cluster starts a fresh head if `ray status` fails (no-op when healthy).
             ensure_ray_cluster(num_gpus=num_gpus,
                                log_path=output_dir / "ray_lifecycle.log")
             return run_via_ray(prompt_file, output_dir, kernel_path, cost_limit,

@@ -88,7 +88,12 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-TRACELENS_REF="c35c787ef31f0425fa0028a605ffc8c60a737c2c"
+# TraceLens v0.6.0 integration (#474): head of
+# release/hyperloom_integration_v0.6.0. The optional internal extension tracks
+# the matching release/hyperloom_integration_v0.6.0 branch of
+# AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
+# operator supplies it via TRACELENS_INTERNAL_ROOT.
+TRACELENS_REF="0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9"
 _tracelens_root_was_set="${TRACELENS_ROOT:+1}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors/TraceLens}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"

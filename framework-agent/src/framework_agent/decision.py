@@ -1,15 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Winner-decision gates split out of ``explorer.py``.
-
-Per merged-design §2.2 / §4.6, the 3-gate logic
-(throughput / accuracy / completed) lives in its own module so it can
-be tested in isolation and reused by callers that integrate fa as a
-library (e.g. ``runtime/tools_api.evaluate_candidate_outcome``).
-
-The behaviour is byte-equivalent to the previous ``_winner_decision``
-in explorer.py; only the module boundary moved.
-"""
+"""Winner-decision gates (throughput / accuracy / completed) split out of ``explorer.py`` for isolated testing and reuse by ``runtime/tools_api.evaluate_candidate_outcome``."""
 
 from __future__ import annotations
 
@@ -22,32 +13,11 @@ def winner_decision(
     accuracy: float | None,
     completed: str,
 ) -> tuple[bool, str]:
-    """Apply throughput / accuracy / completed gates.
+    """Apply throughput / accuracy / completed gates, short-circuiting on first miss; returns ``(is_winner, reason)`` with ``reason`` always set for audit.
 
-    Args:
-        req (ExploreRequest): Request whose ``baseline`` and ``thresholds``
-            supply the comparison reference and gate tolerances.
-        throughput (float | None): Measured candidate throughput, or ``None``
-            when the benchmark produced no reading.
-        accuracy (float | None): Measured candidate accuracy, or ``None`` when
-            unavailable.
-        completed (str): Benchmark completion marker, typically ``"K/N"``.
-
-    Returns:
-        tuple[bool, str]: ``(is_winner, reason)``. ``reason`` is always
-            populated so the explore summary can audit why a candidate was
-            rejected.
-
-    Gate order (short-circuit on first miss):
-
-      1. **Throughput presence + ratio gate**: throughput must be > 0 and
-         ``throughput / req.baseline.throughput >= thresholds.min_throughput_ratio``.
-      2. **Accuracy drop gate** (only when baseline accuracy is set): the
-         candidate must produce an accuracy reading and the drop must not
-         exceed ``thresholds.max_accuracy_drop``.
-      3. **Completed N/N gate**: when the benchmark exposes a
-         ``completed`` field of the form ``"K/N"`` the gate fails unless
-         ``K == N`` (partial benchmark runs cannot be promoted).
+    Gates: (1) throughput > 0 and ratio >= min_throughput_ratio;
+    (2) when baseline accuracy set, accuracy present and drop <=
+    max_accuracy_drop; (3) ``completed`` "K/N" must have K == N.
     """
     if throughput is None or throughput <= 0:
         return False, "missing throughput"
@@ -82,31 +52,13 @@ def candidate_score(
     throughput: float | None,
     accuracy: float | None,
 ) -> float:
-    """Compute a sortable score for ranking mode (merged-design §4.4.1).
-
-    Score = ``throughput_ratio - accuracy_drop_penalty``. Used by
-    ``explore()`` to sort the result list when no early-stop ``winner``
-    short-circuits the loop. Higher = better. Missing throughput is
-    treated as 0 so failed candidates sort to the tail without crashing
-    the comparator.
-
-    Args:
-        req (ExploreRequest): Request whose ``baseline`` and ``thresholds``
-            supply the comparison reference and accuracy-drop penalty scale.
-        throughput (float | None): Measured candidate throughput, or ``None``.
-        accuracy (float | None): Measured candidate accuracy, or ``None``.
-
-    Returns:
-        float: The ranking score; ``0.0`` when throughput is missing or the
-            baseline throughput is non-positive.
-    """
+    """Sortable ranking score = ``throughput_ratio - accuracy_drop_penalty`` (higher is better); missing throughput scores 0 so failed candidates sort to the tail."""
     if throughput is None or throughput <= 0 or req.baseline.throughput <= 0:
         return 0.0
     ratio = throughput / req.baseline.throughput
     if req.baseline.accuracy is not None and accuracy is not None:
         drop = max(0.0, req.baseline.accuracy - accuracy)
-        # Convert "drop above the allowed max" into a positive penalty so
-        # an accuracy-degraded candidate still scores below a clean one.
+        # Penalty keeps accuracy-degraded candidates below clean ones.
         max_drop = max(req.thresholds.max_accuracy_drop, 1e-6)
         penalty = drop / max_drop
         return ratio - penalty

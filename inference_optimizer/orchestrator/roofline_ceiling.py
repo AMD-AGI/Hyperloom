@@ -2,30 +2,13 @@
 
 """Theoretical peak ``output_throughput`` ceiling (decode memory roofline).
 
-Hardware ceiling for the ``output_throughput`` (tok/s) field that
-``baseline`` / ``profile`` / ``sweep`` executors already write into the
-result dict and that ``SharedState._KEY_METRIC_MAP`` already pins as the
-canonical comparable metric.
-
-Formula (decode-only, memory-bound; same form across
-arXiv 2402.16363 §LLM Inference Roofline, arXiv 2602.11506 RooflineBench,
-and the Berkeley Williams roofline applied to LLM serving):
+Formula (decode-only, memory-bound)::
 
     peak_output_tok_per_sec
       = (HBM_BW_per_gpu × num_gpus)
         / (weight_bytes / batch + kv_bytes_per_token × kv_seq_len)
 
-We deliberately do NOT model prefill: ``output_throughput`` only counts
-decode tokens, so a decode-only ceiling stays language-faithful with
-the implemented benchmark metric (see ``shared_state._KEY_METRIC_MAP``).
-The ``batch = max(concurrency, 1)`` term captures shared-weight reuse
-under continuous batching; it is the B1 variant the operator picked
-over plain single-stream ceiling.
-
-Outputs are an ``upper bound``: real serving never hits this because
-of comm overhead, kernel efficiency < 100% of peak, and KV-cache
-fragmentation. Down-stream renderers should label the value
-accordingly (e.g. ``Theoretical Peak — single-stream-reuse ceiling``).
+Prefill is not modelled; ``batch = max(concurrency, 1)``. Outputs are an upper bound.
 """
 
 from __future__ import annotations
@@ -37,46 +20,8 @@ from pathlib import Path
 from typing import Any
 
 
-# ---------------------------------------------------------------------------
 # Hardware specs (AMD MI300/MI355 line only).
-# ---------------------------------------------------------------------------
-#: GPU per-chip peak specs. ``hbm_bw_gbps`` is the vendor-quoted HBM
-#: bandwidth (theoretical peak across all stacks at advertised
-#: clocks); ``hbm_gb`` is total HBM capacity per chip. Keys must match
-#: ``SharedState.gpu_type`` vocabulary (lowercase, no whitespace) —
-#: see ``inference_optimizer/cli.py`` ``_autodetect_gpu_type`` for the
-#: canonical list.
-#:
-#: CAVEAT — vendor-quoted peak vs sustained achievable. The numbers
-#: below are the **upper-bound** marketing figures. In practice, the
-#: bandwidth a single decode kernel can sustain over a steady-state
-#: workload is typically **70–90% of the quoted peak** because of:
-#:   * memory controller scheduling overhead at small batch sizes
-#:   * cache-line / read-burst granularity that wastes a few percent
-#:     when the access pattern is not fully coalesced
-#:   * thermal / power throttling under sustained load
-#:   * (multi-GPU only) XGMI / Infinity Fabric arbitration cost on
-#:     all-gather / all-reduce when TP > 1
-#: Using the vendor peak here is deliberate: ``compute_theoretical_
-#: peak_output_tok_per_sec`` returns a **ceiling** that real
-#: ``output_throughput`` always stays under. Dashboards label the
-#: result accordingly (``Within roofline %`` = measured / ceiling;
-#: 100% would mean "matching the theoretical peak", which is
-#: physically unreachable but a useful single anchor for baseline /
-#: optimized comparison).
-#:
-#: ``peak_tflops`` per chip is the **dense** matrix peak (no structured
-#: sparsity); LLM inference matmul is not 2:4 structured-sparse, so the
-#: sparse-doubled marketing figures must not be used here. Keys are the
-#: same precision aliases ``_DTYPE_BYTES`` accepts, so the resolver can
-#: share the precision-normalisation logic. Missing key ⇒ 0.0, which
-#: degrades T_cmp to "unknown" and lets the roofline fall back to the
-#: pure T_mem ceiling (see ``compute_compute_bound_ceiling_tok_per_sec``).
-#:
-#: Sources (vendor datasheets / official product briefs):
-#:   MI300X: 192 GB HBM3,  5.3 TB/s; BF16/FP16 1307.4, FP8 2614.9 TFLOPS
-#:   MI325X: 256 GB HBM3e, 6.0 TB/s; same compute as MI300X (CDNA3, 304 CU)
-#:   MI355X: 288 GB HBM3e, 8.0 TB/s; CDNA4 ≈ 2× BF16/FP16, new MXFP4 path
+#: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase). ``hbm_bw_gbps`` is vendor peak (strict ceiling); ``peak_tflops`` is DENSE peak (missing key ⇒ 0.0 falls back to T_mem). Vendor datasheets.
 _MI300X_PEAK_TFLOPS: dict[str, float] = {
     "bf16": 1307.4, "bfloat16": 1307.4, "fp16": 1307.4, "float16": 1307.4,
     "fp8": 2614.9, "float8_e4m3fn": 2614.9, "float8_e5m2": 2614.9,
@@ -92,6 +37,10 @@ HW_SPECS: dict[str, dict[str, Any]] = {
         "hbm_gb": 192.0, "hbm_bw_gbps": 5300.0,
         "peak_tflops": _MI300X_PEAK_TFLOPS,
     },
+    "mi308x": {
+        "hbm_gb": 192.0, "hbm_bw_gbps": 5300.0,
+        "peak_tflops": _MI300X_PEAK_TFLOPS,
+    },
     "mi325x": {
         "hbm_gb": 256.0, "hbm_bw_gbps": 6000.0,
         "peak_tflops": _MI300X_PEAK_TFLOPS,
@@ -103,13 +52,8 @@ HW_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Dtype bytes lookup.
-# ---------------------------------------------------------------------------
-#: HF ``torch_dtype`` / precision tag → bytes per element. Used only as
-#: a fallback when ``model.safetensors.index.json`` is not available:
-#: when the index file is present, ``weight_bytes = total_size`` already
-#: reflects on-disk quantization byte-exact, so dtype is sidestepped.
+#: HF ``torch_dtype`` / precision tag → bytes per element (fallback when safetensors index absent).
 _DTYPE_BYTES: dict[str, float] = {
     "float32": 4.0, "fp32": 4.0,
     "bfloat16": 2.0, "bf16": 2.0,
@@ -486,20 +430,7 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
 
 
 def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss.
-
-    Returning 0.0 is a deliberate safe-degrade signal: callers treat it
-    as "T_cmp unavailable" and fall back to the pure T_mem ceiling
-    (``bound_kind="memory"``), which keeps backward compatibility with
-    sessions whose precision/GPU pair is not in ``HW_SPECS`` yet.
-
-    Args:
-        gpu_type (str | None): GPU type key (e.g. ``"mi300x"``).
-        precision_tag (str | None): Precision tag (e.g. ``"bf16"``).
-
-    Returns:
-        float: Vendor dense peak TFLOPS, or ``0.0`` when the pair is unknown.
-    """
+    """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss (safe-degrade signal → T_cmp unavailable, fall back to T_mem)."""
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
@@ -509,30 +440,10 @@ def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> flo
     return float(table.get(str(precision_tag).strip().lower(), 0.0))
 
 
-# ---------------------------------------------------------------------------
 # Model metadata extraction.
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ModelMeta:
-    """HF subset needed for the decode roofline ceiling.
-
-    ``active_weight_bytes`` (MoE-aware, optional): bytes of model weights
-    actually fetched from HBM per generated token. For dense models this
-    equals ``weight_bytes``; for Mixture-of-Experts models (e.g.
-    Qwen3-30B-A3B, DeepSeek-V3, Mixtral) only a routed subset of expert
-    weights fires per token so the divisor of the roofline must shrink.
-    Defaults to ``0`` for backward-compat with callers that construct
-    ``ModelMeta`` directly without MoE knowledge; the compute helpers
-    treat ``0`` as "fall back to weight_bytes" so dense behaviour is
-    preserved. ``load_model_meta`` always sets a concrete value.
-
-    ``hidden_size``, ``intermediate_size``, ``vocab_size``,
-    ``num_attention_heads``: HF config fields consumed by
-    ``compute_roofline_from_perfmodel`` to drive the per-op TraceLens
-    PerfModel breakdown.  Callers that only need the aggregate ceiling
-    can ignore these; ``load_model_meta`` populates them from
-    ``config.json`` when available, falling back to ``0``.
-    """
+    """HF subset needed for the decode roofline ceiling. ``active_weight_bytes`` is per-token MoE weight IO (0 ⇒ fall back to ``weight_bytes``; ``load_model_meta`` always sets it). ``hidden_size``/``intermediate_size``/``vocab_size``/``num_attention_heads`` drive the PerfModel per-op breakdown (default 0)."""
 
     weight_bytes: int
     num_layers: int
@@ -540,10 +451,7 @@ class ModelMeta:
     head_dim: int
     weight_dtype_bytes: float
     active_weight_bytes: int = 0
-    # MoE expert decomposition (0 for dense). Enables batch-aware expert
-    # saturation in the peak formula: at batch B the union of activated
-    # experts approaches all of them, so the weight-read term must grow
-    # from ``active`` (B=1) toward the full ``weight_bytes`` (high B).
+    # MoE expert decomposition (0 for dense); enables batch-aware expert saturation in the peak formula.
     num_experts: int = 0
     experts_per_tok: int = 0
     expert_weight_bytes: int = 0
@@ -558,18 +466,7 @@ class ModelMeta:
 
 
 def _read_total_size(model_path: Path) -> int | None:
-    """Read ``metadata.total_size`` (bytes) from the safetensors index.
-
-    This is byte-exact on-disk weight size and already reflects
-    quantization (FP8/FP4/INT4 weights produce a smaller value).
-
-    Args:
-        model_path (Path): Local HF model directory.
-
-    Returns:
-        int | None: Total weight bytes, or ``None`` when the index file is
-            absent or unreadable.
-    """
+    """Read ``metadata.total_size`` (bytes) from the safetensors index (byte-exact)."""
     idx = model_path / "model.safetensors.index.json"
     if idx.is_file():
         try:
@@ -618,15 +515,7 @@ def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
 
 
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:
-    """GQA-aware: ``num_key_value_heads`` if present, else MHA fallback
-    to ``num_attention_heads``.
-
-    Args:
-        cfg (dict[str, Any]): Parsed HF ``config.json``.
-
-    Returns:
-        int: The number of KV heads, or ``0`` when neither field is present.
-    """
+    """GQA-aware: ``num_key_value_heads`` if present, else ``num_attention_heads``."""
     kv = cfg.get("num_key_value_heads")
     if kv is None:
         kv = cfg.get("num_attention_heads")
@@ -634,15 +523,7 @@ def _derive_kv_heads(cfg: dict[str, Any]) -> int:
 
 
 def _derive_head_dim(cfg: dict[str, Any]) -> int:
-    """HF either exposes ``head_dim`` directly or implies it via
-    ``hidden_size / num_attention_heads``.
-
-    Args:
-        cfg (dict[str, Any]): Parsed HF ``config.json``.
-
-    Returns:
-        int: The attention head dimension, or ``0`` when it cannot be derived.
-    """
+    """``head_dim`` directly, or ``hidden_size / num_attention_heads``."""
     head_dim = cfg.get("head_dim")
     if head_dim:
         return int(head_dim)
@@ -659,51 +540,7 @@ def _compute_active_weight_bytes(
     weight_bytes: int,
     dtype_bytes: float,
 ) -> int:
-    """MoE-aware estimate of bytes of weight actually fetched per token.
-
-    Background: a vanilla Mixture-of-Experts decoder routes each token
-    to ``num_experts_per_tok`` of ``num_experts`` routed experts; all
-    other weights (attention / norms / embeddings / router / optional
-    shared experts) run on every token. Using the full safetensors
-    ``total_size`` as the divisor of the memory roofline therefore
-    over-counts the per-token weight IO by ~10× on Qwen3-30B-A3B,
-    DeepSeek-V3, Mixtral, etc., and drives the ceiling below the
-    measured throughput (``within_roofline_pct > 100%``).
-
-    Geometry-based estimate, derived from HF config:
-
-      expert_bytes_per_layer = num_experts
-                              × 3 × hidden_size × moe_intermediate_size
-                              × dtype_bytes
-      total_expert_bytes     = num_hidden_layers × expert_bytes_per_layer
-      non_expert_bytes       = weight_bytes − total_expert_bytes
-      active_expert_bytes    = (num_experts_per_tok / num_experts)
-                              × total_expert_bytes
-      active_weight_bytes    = non_expert_bytes + active_expert_bytes
-
-    The ``3 ×`` factor matches the gated-MLP convention used by Qwen3
-    / Llama-style experts (gate + up + down projections). DeepSeek's
-    optional shared experts are conservatively treated as part of
-    ``non_expert_bytes`` via the subtraction: any weight not accounted
-    for by the routed experts (including shared experts) stays in the
-    always-active pool, which is the safe direction (slightly larger
-    divisor → slightly lower ceiling, never inflates).
-
-    Safe degrade — returns ``int(weight_bytes)`` unchanged when:
-      * any MoE field is missing or non-positive  → treat as dense
-      * computed ``total_expert_bytes >= weight_bytes`` → config /
-        safetensors mismatch (quantized experts, accounting drift);
-        stay safe and keep the dense-equivalent divisor
-
-    Args:
-        cfg (dict[str, Any]): Parsed HF ``config.json``.
-        weight_bytes (int): Total on-disk weight bytes.
-        dtype_bytes (float): Bytes per weight element.
-
-    Returns:
-        int: Estimated per-token active weight bytes; equals ``weight_bytes``
-            for dense or unknown-geometry models.
-    """
+    """MoE-aware estimate of weight bytes fetched per token (geometry-based, avoids the ~10× over-count from the safetensors total; safe-degrades to ``weight_bytes``)."""
     active, _total_expert, _ne, _ept = _compute_expert_decomposition(
         cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
     )
@@ -716,40 +553,7 @@ def _compute_expert_decomposition(
     weight_bytes: int,
     dtype_bytes: float,
 ) -> tuple[int, int, int, int]:
-    """MoE decomposition for the batch-aware roofline.
-
-    Returns ``(active_weight_bytes, total_expert_bytes, num_experts,
-    experts_per_tok)``. ``active_weight_bytes`` is the B=1 per-token weight
-    IO (non-expert + routed fraction of experts). ``total_expert_bytes`` is
-    the full routed-expert pool, used by the peak formula to grow the
-    weight term from ``active`` (B=1) toward ``weight_bytes`` as the batch
-    saturates the activated-expert union.
-
-    Safe degrade (dense / unknown geometry): returns
-    ``(weight_bytes, 0, 0, 0)`` so callers fall back to the dense
-    ``weight_bytes`` divisor and skip expert saturation.
-
-    HF config key aliases handled here so the MoE detection stays
-    architecture-agnostic:
-      * ``num_experts`` (Qwen3 MoE, Mixtral, …)
-      * ``n_routed_experts`` (DeepSeek V3 / GigaChat — V3-derived models)
-      * ``num_local_experts`` (gpt-oss family — GptOssForCausalLM).
-    Shared experts (``n_shared_experts``) are intentionally not folded
-    in: they are always-active and the safetensors total already lumps
-    them into ``non_expert_bytes`` via ``weight_bytes - routed_pool``,
-    so ``active = non_expert + (k/n)*routed`` correctly counts them
-    as always-active without double-charging the routed top-k pool.
-
-    Args:
-        cfg (dict[str, Any]): Parsed HF ``config.json``.
-        weight_bytes (int): Total on-disk weight bytes.
-        dtype_bytes (float): Bytes per weight element.
-
-    Returns:
-        tuple[int, int, int, int]: ``(active_weight_bytes, total_expert_bytes,
-            num_experts, experts_per_tok)``; dense/unknown geometry yields
-            ``(weight_bytes, 0, 0, 0)``.
-    """
+    """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases."""
     num_experts = int(
         cfg.get("num_experts")
         or cfg.get("n_routed_experts")  # DeepSeek V3 alias
@@ -791,38 +595,7 @@ def load_model_meta(
     *,
     precision_hint: str = "",
 ) -> ModelMeta | None:
-    """Read ``weight_bytes`` + KV-cache shape from a local HF model dir.
-
-    Returns ``None`` when ``config.json`` or ``model.safetensors.index.json``
-    is unreadable — caller falls back to a ``0.0`` ceiling so the
-    dashboard renders ``"—"`` instead of a misleading value.
-
-    ``precision_hint`` is the operator-declared precision (passed via
-    ``state.precision``); consulted only when ``config.json`` omits
-    ``torch_dtype``.
-
-    Weight-dtype resolution (priority, first non-empty wins):
-      1. ``quantization_config.quant_method`` — fp8 / fp4 / mxfp4
-         block-scaled weights (DeepSeek V3, GigaChat, etc.). The HF
-         ``torch_dtype`` / ``dtype`` fields under these configs refer
-         to *activation* dtype (typically bf16) and would over-count
-         the per-param byte size by 2× if used naively.
-      2. ``torch_dtype`` — HF-standard.
-      3. ``dtype`` — DeepSeek-style alias used by some V3-derived
-         configs (still activation dtype, but a closer hint than
-         the operator-supplied fallback when ``torch_dtype`` is
-         omitted).
-      4. ``precision_hint`` from the CLI.
-
-    Args:
-        model_path (str | Path): Local HF model directory.
-        precision_hint (str): Operator-declared precision, consulted only when
-            the config omits a dtype. Defaults to ``""``.
-
-    Returns:
-        ModelMeta | None: The extracted metadata, or ``None`` when the config
-            or safetensors index is missing/unreadable.
-    """
+    """Read ``weight_bytes`` + KV-cache shape from a local HF model dir (``None`` when unreadable). Weight-dtype priority: quantization_config.quant_method > torch_dtype > dtype > precision_hint."""
     if not model_path:
         return None
     p = Path(model_path).expanduser()
@@ -871,9 +644,7 @@ def load_model_meta(
     )
 
 
-# ---------------------------------------------------------------------------
 # Peak throughput formula.
-# ---------------------------------------------------------------------------
 def compute_kv_bytes_per_token(
     *,
     num_layers: int,
@@ -881,20 +652,7 @@ def compute_kv_bytes_per_token(
     head_dim: int,
     kv_dtype_bytes: float,
 ) -> int:
-    """KV cache footprint per generated token, summed over all layers.
-
-    ``2`` factors covers K + V tensors. Caller multiplies by
-    ``kv_seq_len`` to get the per-token HBM read volume.
-
-    Args:
-        num_layers (int): Number of transformer layers.
-        num_kv_heads (int): Number of KV heads.
-        head_dim (int): Attention head dimension.
-        kv_dtype_bytes (float): Bytes per KV-cache element.
-
-    Returns:
-        int: KV-cache bytes read per generated token across all layers.
-    """
+    """KV cache footprint per generated token, summed over all layers (the ``2`` covers K + V)."""
     return int(2 * num_layers * num_kv_heads * head_dim * kv_dtype_bytes)
 
 
@@ -915,49 +673,7 @@ def compute_theoretical_peak_output_tok_per_sec(
     experts_per_tok: int = 0,
     expert_weight_bytes: int = 0,
 ) -> float:
-    """Decode-only memory-bound ceiling for ``output_throughput``.
-
-    Returns ``0.0`` when ``gpu_type`` is not in :data:`HW_SPECS` or any
-    divisor degenerates so the caller can render a uniform ``"—"``
-    placeholder. Never raises.
-
-    Inputs map to ``SharedState`` fields:
-      ``gpu_type``           -> ``state.gpu_type``
-      ``num_gpus``           -> ``state.tp`` (tensor-parallel per replica)
-      ``weight_bytes``       -> ``ModelMeta.weight_bytes``
-      ``active_weight_bytes``-> ``ModelMeta.active_weight_bytes`` (MoE)
-      ``concurrency``        -> ``state.conc`` (continuous-batching width)
-      ``isl`` / ``osl``      -> ``state.isl`` / ``state.osl``
-
-    ``active_weight_bytes`` (optional, defaults to 0) shrinks the
-    per-token weight IO term for MoE models: the divisor uses
-    ``active_weight_bytes`` instead of ``weight_bytes`` when the former
-    is positive. Dense models (or callers without MoE knowledge) leave
-    it at 0 and get the original ``weight_bytes`` divisor — preserves
-    backward compatibility.
-
-    Args:
-        gpu_type (str): GPU type key (e.g. ``"mi300x"``).
-        num_gpus (int): Tensor-parallel GPU count per replica.
-        weight_bytes (int): Total model weight bytes.
-        num_layers (int): Number of transformer layers.
-        num_kv_heads (int): Number of KV heads.
-        head_dim (int): Attention head dimension.
-        kv_dtype_bytes (float): Bytes per KV-cache element.
-        isl (int): Input sequence length.
-        osl (int): Output sequence length.
-        concurrency (int): Continuous-batching width.
-        active_weight_bytes (int): MoE B=1 per-token active weight bytes.
-            Defaults to ``0`` (dense).
-        num_experts (int): Total routed experts. Defaults to ``0``.
-        experts_per_tok (int): Experts activated per token. Defaults to ``0``.
-        expert_weight_bytes (int): Total routed-expert pool bytes. Defaults to
-            ``0``.
-
-    Returns:
-        float: The decode memory-bound ceiling in tok/s, or ``0.0`` when the
-            GPU is unsupported or a divisor degenerates.
-    """
+    """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``active_weight_bytes`` shrinks per-token IO for MoE."""
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
@@ -969,22 +685,9 @@ def compute_theoretical_peak_output_tok_per_sec(
         head_dim=head_dim,
         kv_dtype_bytes=kv_dtype_bytes,
     )
-    # Average KV-cache length during decode: read isl + already-decoded
-    # tokens, averaged over the osl decode steps.
+    # Average KV-cache length during decode (isl + half of osl).
     kv_seq_len = max(int(isl) + int(osl) // 2, 1)
-    # Per-decode-step weight IO. For MoE, the union of experts activated
-    # across the ``batch`` tokens saturates toward all of them as batch
-    # grows. Under (near-)uniform routing the EXPECTED fraction of the
-    # ``num_experts`` routed experts hit by at least one of the ``batch``
-    # tokens (each token routes to ``experts_per_tok``) is the occupancy
-    # / coupon-collector form ``1 - (1 - k/n)^B``. The earlier linear
-    # ``min(1, B*k/n)`` is the union BOUND: it ignores collisions and
-    # declares all experts active at B≈n/k (e.g. B=16 for 128/top-8),
-    # over-counting weight IO and dropping the ceiling BELOW measured
-    # throughput at mid batch (within%>100%). ``1-(1-k/n)^B`` agrees with
-    # the bound at B=1 (==k/n) and asymptotes to 1 (dense) at high B, so
-    # it stays a valid upper bound everywhere. Dense models
-    # (num_experts==0) keep the full ``weight_bytes`` read each step.
+    # Per-decode-step weight IO; MoE activated-expert union uses the coupon form ``activated_fraction = 1-(1-k/n)^B`` (valid upper bound everywhere) instead of the linear ``min(1, B*k/n)`` bound that over-counts at mid batch. Dense (num_experts==0) reads full ``weight_bytes`` each step.
     if (
         num_experts > 0
         and experts_per_tok > 0
@@ -1022,48 +725,14 @@ def compute_compute_bound_ceiling_tok_per_sec(
 ) -> float:
     """Decode-only compute-bound ceiling for ``output_throughput``.
 
-    Implements the second half of the two-sided roofline:
-
         T_cmp = (F_peak * G * dtype_bytes) / (2 * active_weight_bytes_B1)
 
-    Derivation: each generated token does ≈ 2 FLOP per active parameter
-    (one multiply + one add inside every MFMA), so per-token FLOPs =
-    2 * active_params = 2 * active_weight_bytes_B1 / dtype_bytes. Total
-    compute throughput = F_peak * G / FLOPs_per_token, which rearranges
-    to the formula above. Note the divisor uses ``active_weight_bytes``
-    at **B=1** (per-token active parameters) — NOT the batch-saturated
-    ``effective_weight`` used by T_mem. They look like the same symbol
-    in the textbook roofline but model different physical quantities:
-    T_mem amortises HBM weight reads across the batch (so MoE expert
-    union saturates with B), while T_cmp counts arithmetic per token
-    (every token still routes through only top-k experts, regardless
-    of batch). Mixing them up over-amortises compute at high batch and
-    under-estimates T_cmp by ~10x on MoE models.
-
-    Returns 0.0 when any of ``gpu_type`` / precision / active_weight_bytes
-    / dtype_bytes is missing or zero so the caller treats T_cmp as
-    "unavailable" and the roofline degrades to the pure T_mem ceiling.
-
-    Args:
-        gpu_type (str): GPU type key (e.g. ``"mi300x"``).
-        num_gpus (int): Tensor-parallel GPU count per replica.
-        precision_tag (str): Precision tag (e.g. ``"bf16"``).
-        active_weight_bytes (int): B=1 per-token active weight bytes.
-        weight_bytes (int): Dense total weight bytes (fallback divisor).
-        weight_dtype_bytes (float): Bytes per weight element.
-
-    Returns:
-        float: The decode compute-bound ceiling in tok/s, or ``0.0`` when any
-            required input is missing or zero.
+    Divisor uses ``active_weight_bytes`` at B=1 (NOT batch-saturated). Returns 0.0 on missing input (degrade to T_mem).
     """
     peak_tflops = _resolve_peak_tflops(gpu_type, precision_tag)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
-    # ``active_weight_bytes`` is the B=1 per-token figure populated by
-    # ``load_model_meta`` (dense models: == weight_bytes; MoE: routed-k
-    # share of expert pool + non-expert blocks). Fall back to the dense
-    # weight_bytes only when active is missing/0 — never use a batch-
-    # saturated effective weight here (see docstring).
+    # B=1 per-token figure; fall back to dense weight_bytes only when active is missing/0 (never a batch-saturated weight here).
     active_b1 = (
         int(active_weight_bytes)
         if active_weight_bytes and active_weight_bytes > 0
@@ -1079,17 +748,7 @@ def compute_compute_bound_ceiling_tok_per_sec(
 
 
 def _read_baseline_yaml_conc(state: Any) -> int:
-    """Read ``benchmark.envs.CONC`` from the materialized baseline yaml.
-
-    This is the ground-truth concurrency the Magpie subprocess actually
-    ran with. Returns ``0`` when the file / field is unreadable.
-
-    Args:
-        state (Any): The SharedState-like object carrying ``last_baseline``.
-
-    Returns:
-        int: The parsed concurrency, or ``0`` when unreadable/non-positive.
-    """
+    """Read ``benchmark.envs.CONC`` from the materialized baseline yaml (ground-truth concurrency; ``0`` when unreadable)."""
     return _env_int(
         _benchmark_envs(_read_baseline_yaml_benchmark(state)),
         "CONC",
@@ -1097,31 +756,7 @@ def _read_baseline_yaml_conc(state: Any) -> int:
 
 
 def _resolve_effective_concurrency(state: Any) -> int:
-    """Resolve the concurrency the actual benchmark ran with.
-
-    Priority (authoritative first):
-
-      1. ``state.last_baseline.extras.materialized_config`` →
-         ``benchmark.envs.CONC`` in the on-disk baseline yaml. This is the
-         ground-truth value the Magpie subprocess actually ran with, so it
-         is authoritative whenever the file is readable. It is checked
-         FIRST because ``state.conc`` has a default-vs-stale pitfall: when
-         an operator launches without ``--conc`` / ``$CONC``, ``state.conc``
-         stays at the SharedState dataclass default (typically 8) while the
-         yaml carries the real ``CONC: 64`` — reading ``state.conc`` first
-         (the old behaviour) produced an 8x under-counted ceiling.
-      2. ``state.conc`` (SharedState field) when the yaml is unavailable.
-      3. ``1`` as the ultimate fallback so the formula divisor never
-         degenerates (matches the single-stream interpretation).
-
-    Returns ``int`` >= 1.
-
-    Args:
-        state (Any): The SharedState-like object carrying baseline / conc.
-
-    Returns:
-        int: The effective concurrency, always ``>= 1``.
-    """
+    """Resolve the concurrency the actual benchmark ran with (returns int >= 1; on-disk baseline yaml CONC wins, since ``state.conc`` can stay stale and under-count the ceiling 8x)."""
     yaml_conc = _read_baseline_yaml_conc(state)
     if yaml_conc > 0:
         return yaml_conc
@@ -1133,18 +768,7 @@ def _resolve_effective_concurrency(state: Any) -> int:
 
 @dataclass(frozen=True)
 class RooflineBreakdown:
-    """Decode roofline ceiling plus memory/compute side projections.
-
-    For PerfModel, ``peak_tok_per_sec`` is based on summing per-op
-    ``max(t_mem, t_cmp)`` and may differ from ``min(T_mem, T_cmp)``.
-
-    ``bound_kind`` values:
-      * ``"memory"``  — T_mem ≤ T_cmp (or T_cmp unavailable/degenerate).
-      * ``"compute"`` — T_cmp < T_mem (compute-bound; rare in decode but
-        possible at very small B with large F_peak relative to BW).
-      * ``"unknown"`` — both ceilings degenerate (e.g. unsupported gpu,
-        missing model HF config); ``peak_tok_per_sec == 0``.
-    """
+    """Decode roofline ceiling plus memory/compute side projections (PerfModel peak sums per-op max(t_mem,t_cmp), may differ from min(T_mem,T_cmp)). ``bound_kind`` ∈ {memory, compute, unknown} (unknown ⇒ peak 0)."""
     mem_tok_per_sec: float
     cmp_tok_per_sec: float
     peak_tok_per_sec: float
@@ -1159,28 +783,7 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 
 
 def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
-    """Compute the primary decode ceiling plus T_mem/T_cmp side projections.
-
-    Primary entry point for roofline ceiling. Uses the TraceLens-compatible
-    bottom-up PerfModel (``compute_roofline_from_perfmodel``) as the preferred
-    source when model config is complete; falls back to the legacy top-down
-    formula (T_mem / T_cmp aggregate) when PerfModel metadata is unavailable.
-
-    When PerfModel is available, all three ceiling fields come from the same
-    bottom-up model. Legacy aggregate T_mem/T_cmp are used only as fallback.
-
-    Safe degrade: never raises; returns ``_EMPTY_BREAKDOWN`` on any
-    missing-field path so the caller can stamp the result into history
-    snapshots unconditionally.
-
-    Args:
-        state (Any): The SharedState-like object carrying model path, GPU,
-            precision, tp, isl, osl and concurrency fields.
-
-    Returns:
-        RooflineBreakdown: The T_mem / T_cmp / peak / bound-kind breakdown;
-            ``_EMPTY_BREAKDOWN`` when inputs are missing.
-    """
+    """Primary decode ceiling + T_mem/T_cmp side projections. Prefers the bottom-up PerfModel (``compute_roofline_from_perfmodel``) when model config is complete, else the legacy top-down aggregate. Never raises; returns ``_EMPTY_BREAKDOWN`` on missing fields."""
     runtime = resolve_runtime_workload(state)
     meta = load_model_meta(
         runtime.model_path,
@@ -1227,8 +830,7 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
     if mem <= 0 and cmp <= 0:
         return _EMPTY_BREAKDOWN
     if cmp <= 0:
-        # T_cmp unknown (precision not in HW_SPECS); degrade to T_mem
-        # ceiling and mark memory-bound (matches pre-PR behaviour).
+        # T_cmp unknown (precision not in HW_SPECS); degrade to T_mem ceiling, memory-bound.
         legacy = RooflineBreakdown(mem, 0.0, mem, "memory")
     elif mem <= 0:
         legacy = RooflineBreakdown(0.0, cmp, cmp, "compute")
@@ -1237,10 +839,7 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
     else:
         legacy = RooflineBreakdown(mem, cmp, mem, "memory")
 
-    # Prefer the bottom-up PerfModel peak for both dense and MoE models.
-    # MoE FFN now uses the TraceLens FusedMoE bytes formula with the
-    # batch-aware coupon expert-activation count, so the ceiling is tight
-    # at every batch size (matches legacy within <5% on anchor workloads).
+    # Prefer the bottom-up PerfModel peak (MoE FFN uses the coupon expert-activation count, tight at every batch); legacy is the fallback.
     try:
         pm_bd = compute_roofline_from_perfmodel(
             meta=meta,
@@ -1265,19 +864,7 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
 
 
 def compute_peak_from_state(state: Any) -> float:
-    """Convenience scalar wrapper for ``T_peak`` only.
-
-    Kept for backward compatibility (shared_state, tests, report
-    docstring references). New code should call
-    ``compute_roofline_breakdown_from_state`` directly to get T_mem /
-    T_cmp / bound_kind alongside the min.
-
-    Args:
-        state (Any): The SharedState-like object.
-
-    Returns:
-        float: The ``T_peak`` ceiling in tok/s (``0.0`` when unavailable).
-    """
+    """Convenience scalar wrapper for ``T_peak`` only (kept for backward compat; prefer ``compute_roofline_breakdown_from_state``)."""
     return compute_roofline_breakdown_from_state(state).peak_tok_per_sec
 
 

@@ -3,10 +3,8 @@
 
 """Run GEAK's FP8 GEMM tuning workflow as a Hyperloom kernel-agent tool.
 
-This wrapper intentionally passes the long task via a file / in-memory Python
-string, never through argv. GEAK-generated cleanup commands commonly inspect
-``ps aux`` for strings such as ``sglang``; putting the task text in argv can
-make the GEAK driver match its own cleanup pattern and SIGKILL itself.
+Passes the task via file/string never argv, so GEAK's ``ps aux`` cleanup can't
+match the task text and SIGKILL itself.
 """
 
 from __future__ import annotations

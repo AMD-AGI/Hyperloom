@@ -2,29 +2,9 @@
 
 """KnowledgePlane facade for advisory knowledge inputs.
 
-Single point of contact between the Coordinator and the live external
-knowledge sources:
-
-1. **PR Monitor** — recent PRs across repos the LLM specialists care
-   about. Wraps :class:`PRMonitorClient` (M4).
-2. **Local framework source** — read-only access to
-   ``/sgl-workspace/{aiter,sglang,vllm}/`` (and operator-supplied
-   roots). Exposed via the existing PolicyGate-gated tool whitelist;
-   the facade only surfaces the *roots* so specialist prompt
-   assembly can advertise them in section 7.
-
-The facade is **stateless** (it holds the two clients + the
-domain-repos config) and offers two flavours of methods:
-
-* ``read_*`` — used everywhere (Coordinator prompt assembly, breakdown
-  collectors). Reads never write to SharedState directly.
-The old Cortex v1 graph traversal / hypothesize surface was removed
-from this facade. Canonical cross-session reads and writes now flow
-through RecipeKB and warm-start state, while this class remains the PR
-feed facade for specialist prompt context.
-
-KB_design §3.6 §4.3 says specialists DON'T use this facade — they get
-direct MCP tool access. The facade is purely Coordinator-side glue.
+Coordinator-side glue exposing the PR Monitor (wraps
+:class:`PRMonitorClient`) for specialist prompt assembly. Stateless.
+KB_design §3.6 §4.3: specialists use direct MCP access, not this facade.
 """
 
 from __future__ import annotations
@@ -49,17 +29,13 @@ from .specialist_domains import SPECIALIST_DOMAIN_KEYS
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # domain → repos config
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class DomainRepos:
     """Resolved domain-repos entry for one specialist domain.
 
-    ``repos`` is a tuple of canonical repo names (``owner/name``);
-    a wildcard ``"*"`` in the yaml becomes the special sentinel
-    :data:`DOMAIN_REPOS_WILDCARD` that the facade later expands to the
-    PR Monitor's full repo list at call time.
+    A wildcard ``"*"`` becomes :data:`DOMAIN_REPOS_WILDCARD`, expanded to
+    the PR Monitor's full repo list at call time.
     """
 
     domain: str
@@ -75,31 +51,15 @@ _DOMAIN_REPOS_FILENAME: str = "_domain_repos.yaml"
 
 
 def _domain_repos_path() -> Path:
-    """Where ``_domain_repos.yaml`` lives. Centralised so tests can
-    monkeypatch the resolution if they ever need to.
-
-    Returns:
-        Path: The resolved path to the ``_domain_repos.yaml`` config.
-    """
+    """Where ``_domain_repos.yaml`` lives (centralised for test monkeypatching)."""
     return asset_actions_dir() / "_meta" / _DOMAIN_REPOS_FILENAME
 
 
 def load_domain_repos(path: Path | None = None) -> dict[str, DomainRepos]:
-    """Load the domain → repos config from yaml. Idempotent; safe to
-    call repeatedly (no caching layered on; each call re-parses).
+    """Load the domain → repos config from yaml (re-parses each call).
 
-    Returns ``{domain_key: DomainRepos}`` with the six M5/M6
-    specialist domains pre-populated. Missing / malformed yaml falls
-    back to an empty dict + a warning log; callers should treat that
-    as "no PR feed for any domain".
-
-    Args:
-        path (Path | None): Override config path; resolved from
-            :func:`_domain_repos_path` when ``None``.
-
-    Returns:
-        dict[str, DomainRepos]: Mapping of domain key to its resolved repos
-            config; empty when the yaml is missing or malformed.
+    Returns ``{domain_key: DomainRepos}``; missing/malformed yaml returns an
+    empty dict + warning log ("no PR feed for any domain").
     """
     target = path or _domain_repos_path()
     if not target.exists():
@@ -159,17 +119,13 @@ def load_domain_repos(path: Path | None = None) -> dict[str, DomainRepos]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Facade
-# ---------------------------------------------------------------------------
 @dataclass
 class KnowledgePlane:
-    """Single facade for the three knowledge sources.
+    """Single facade for the knowledge sources.
 
-    Construction is cheap (no I/O); the clients are injected. The
-    facade is meant to live for the lifetime of one Coordinator run;
-    PR Monitor in-memory caches are cleared between EXPLORE rounds
-    by :meth:`reset_round_caches`.
+    Lives for one Coordinator run; PR Monitor caches are cleared between
+    EXPLORE rounds by :meth:`reset_round_caches`.
     """
 
     pr_monitor: PRMonitorClient | None = None
@@ -177,12 +133,9 @@ class KnowledgePlane:
     pr_feed_window_days: int = DEFAULT_PR_FEED_WINDOW_DAYS
     pr_feed_per_repo_limit: int = DEFAULT_PR_FEED_PER_REPO_LIMIT
     pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL
-    # Aggregated warnings from the latest pr_feed_warm call. Exposed
-    # for the breakdown collector + prompt assembly to surface
-    # "pr_monitor_unreachable" lines.
+    # Aggregated warnings from the latest pr_feed_warm call.
     last_warnings: list[str] = field(default_factory=list)
 
-    # ------------------------------------------------------------------
     @classmethod
     def from_clients(
         cls,
@@ -223,9 +176,7 @@ class KnowledgePlane:
             self.pr_monitor.reset_cache()
         self.last_warnings = []
 
-    # ------------------------------------------------------------------
     # Read surface
-    # ------------------------------------------------------------------
     @property
     def pr_monitor_enabled(self) -> bool:
         """Whether the PR Monitor client is wired and enabled.
@@ -237,8 +188,7 @@ class KnowledgePlane:
 
     @property
     def cortex_enabled(self) -> bool:
-        # Backwards-compatible property for callers that still check the
-        # old v1 graph surface. KnowledgePlane no longer wires Cortex.
+        # Backwards-compatible shim; KnowledgePlane no longer wires Cortex.
         return False
 
     def resolve_domain_repos(self, domain: str) -> DomainRepos | None:
@@ -255,12 +205,8 @@ class KnowledgePlane:
     def specialist_mcp_url(self) -> str:
         """MCP URL to advertise in the specialist tool whitelist.
 
-        Returns ``""`` when PR Monitor is disabled so the specialist
-        runner can elide the ``mcp__pr_monitor__*`` tool block instead
-        of dangling a broken endpoint.
-
-        Returns:
-            str: The MCP URL, or ``""`` when PR Monitor is disabled.
+        Returns ``""`` when PR Monitor is disabled so the runner can elide
+        the ``mcp__pr_monitor__*`` tool block.
         """
         if not self.pr_monitor_enabled:
             return ""
@@ -275,42 +221,14 @@ class KnowledgePlane:
     ) -> dict[str, tuple[list[PRSummary], list[str]]]:
         """Batch-warm the PR feed for every known specialist domain.
 
-        Called once per EXPLORE phase entry (KB_design §3.6 §5.2 +
-        KB_gaps/Gap-02 PR 5.4) so the per-domain cache is populated
-        before the orchestration LLM gets a chance to dispatch
-        specialists. Per-domain warmups run serially — the
-        :class:`PRMonitorClient` itself reuses an HTTP session, so the
-        cumulative wall-clock budget is shared across all domains via
-        ``total_budget_sec``.
-
-        Returns a ``{domain: (prs, warnings)}`` map. Always returns
-        an entry per known domain, even when the underlying call
-        fails (so downstream callers can produce a uniform breakdown
-        row). Aggregated warnings are also stashed on
-        :attr:`last_warnings` for the breakdown collector.
-
-        Fail-soft: a domain whose pr_feed_warm raises bubbles up the
-        exception text as a single warning rather than poisoning the
-        whole batch.
-
-        Args:
-            window_days (int | None): PR lookback window; falls back to the
-                instance default when ``None``.
-            per_repo_limit (int | None): Max PRs per repo; falls back to the
-                instance default when ``None``.
-            total_budget_sec (float): Shared wall-clock budget across domains.
-
-        Returns:
-            dict[str, tuple[list[PRSummary], list[str]]]: A ``{domain: (prs,
-                warnings)}`` map with an entry for every known domain.
+        Called once per EXPLORE phase entry (KB_design §3.6 §5.2). Returns a
+        ``{domain: (prs, warnings)}`` map; aggregated warnings stashed on
+        :attr:`last_warnings`. Fail-soft.
         """
         out: dict[str, tuple[list[PRSummary], list[str]]] = {}
         all_warnings: list[str] = []
-        # ``SPECIALIST_DOMAIN_KEYS`` is the authoritative list; the
-        # domain_repos yaml may be a strict subset (e.g. operator
-        # masked some domains by removing repos). We still call
-        # pr_feed_warm so the unknown-domain warning surfaces in a
-        # consistent shape.
+        # SPECIALIST_DOMAIN_KEYS is authoritative; the yaml may be a subset,
+        # so we still call pr_feed_warm for a consistent warning shape.
         for domain in SPECIALIST_DOMAIN_KEYS:
             try:
                 prs, warnings = self.pr_feed_warm(
@@ -337,30 +255,10 @@ class KnowledgePlane:
     ) -> tuple[list[PRSummary], list[str]]:
         """Warm the PR feed for one specialist domain.
 
-        Returns ``(prs, warnings)``. ``warnings`` is also stashed on
-        :attr:`last_warnings` so the breakdown collector can surface
-        them in the ``warnings`` section.
-
-        Failure semantics:
-
-        - PR Monitor disabled (``--degraded-pr``) → ``([],
-          ["pr_monitor:disabled"])``.
-        - Unknown domain → ``([], ["pr_monitor:unknown_domain:<d>"])``.
-        - Per-repo unreachability is folded into ``warnings`` (PRs
-          from reachable repos still surface).
-
-        Args:
-            domain (str): The specialist domain key.
-            extra_keywords (list[str] | None): Additional keywords to merge
-                with the domain defaults.
-            window_days (int | None): PR lookback window; instance default when
-                ``None``.
-            per_repo_limit (int | None): Max PRs per repo; instance default
-                when ``None``.
-            total_budget_sec (float): Wall-clock fetch budget in seconds.
-
-        Returns:
-            tuple[list[PRSummary], list[str]]: The fetched PRs and any warnings.
+        Returns ``(prs, warnings)`` (also stashed on :attr:`last_warnings`).
+        Failure semantics: disabled → ``["pr_monitor:disabled"]``; unknown
+        domain → ``["pr_monitor:unknown_domain:<d>"]``; per-repo failures
+        fold into ``warnings`` while reachable repos still surface.
         """
         warnings: list[str] = []
         if not self.pr_monitor_enabled:
@@ -390,7 +288,6 @@ class KnowledgePlane:
         keywords = list(cfg.default_keywords)
         if extra_keywords:
             keywords.extend(extra_keywords)
-        # The PR Monitor client returns warnings inline; merge them.
         prs, fetch_warnings = self.pr_monitor.pr_feed_warm(  # type: ignore[union-attr]
             repos,
             keywords=keywords,

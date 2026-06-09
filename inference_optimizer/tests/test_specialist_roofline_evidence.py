@@ -1,19 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""SpecialistPromptInputs.roofline_evidence + ROOFLINE EVIDENCE
-section tests.
-
-Coverage:
-
-* ``Coordinator._warm_specialist_params`` populates the
-  ``roofline_evidence`` task param when
-  :attr:`SharedState.last_trace_analyze` carries a snapshot;
-  no-ops when it doesn't.
-* ``build_specialist_prompts`` renders the new "## 4a. ROOFLINE
-  EVIDENCE" section between the KB sub-graph and the recipe sections.
-* Empty ``roofline_evidence`` falls back to a "(none …)" placeholder
-  so the prompt layout stays stable.
-"""
+"""SpecialistPromptInputs.roofline_evidence + ROOFLINE EVIDENCE section tests."""
 
 from __future__ import annotations
 
@@ -34,15 +21,12 @@ from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder i
 )
 
 
-# ---------------------------------------------------------------------------
 # Coordinator-warmer integration
-# ---------------------------------------------------------------------------
 @dataclass
 class _BareState:
     """Minimal SharedState double used by _warm_specialist_params."""
 
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
-    # Fields the warmer touches but we don't care about here.
     gpu_type: str = ""
     tp: int = 0
     precision: str = ""
@@ -69,11 +53,8 @@ def _make_coord(tmp_path: Path, *, state: _BareState) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
-    """``_warm_specialist_params`` mirrors ``last_trace_analyze`` into
-    ``params['roofline_evidence']`` including
-    ``analysis_md_path / executive_summary / hot_kernels_top15``."""
-    # Build a synthetic analysis.md so extract_workload_summary can
-    # parse the Executive Summary table.
+    """``_warm_specialist_params`` mirrors ``last_trace_analyze`` into ``params['roofline_evidence']``."""
+    # Synthetic analysis.md so extract_workload_summary can parse the table.
     analysis_path = tmp_path / "analysis.md"
     analysis_path.write_text(
         "## Executive Summary\n"
@@ -147,8 +128,7 @@ async def test_warm_specialist_params_noop_when_no_snapshot(tmp_path):
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_noop_when_analysis_md_text_empty(tmp_path):
-    """Empty ``analysis_md_text`` (snapshot recorded but text missing)
-    is treated as no-snapshot."""
+    """Empty ``analysis_md_text`` is treated as no-snapshot."""
     state = _BareState(
         last_trace_analyze={
             "analysis_md_text": "",
@@ -163,8 +143,7 @@ async def test_warm_specialist_params_noop_when_analysis_md_text_empty(tmp_path)
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
-    """If the caller already supplied ``roofline_evidence``, the
-    warmer must not overwrite it (setdefault semantics)."""
+    """A caller-supplied ``roofline_evidence`` is not overwritten (setdefault)."""
     analysis_path = tmp_path / "analysis.md"
     analysis_path.write_text("# stub\n", encoding="utf-8")
     state = _BareState(
@@ -184,9 +163,7 @@ async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
     assert params["roofline_evidence"] == {"sentinel": True}
 
 
-# ---------------------------------------------------------------------------
 # Prompt rendering
-# ---------------------------------------------------------------------------
 def _make_inp(roofline_evidence: dict[str, Any]) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
         task_id="t-1",
@@ -237,8 +214,7 @@ def test_section_renders_none_when_evidence_empty():
 
 
 def test_build_specialist_prompts_inserts_section_between_kb_and_recipe():
-    """End-to-end: build_specialist_prompts inserts section 4a between
-    section 4 (KB) and section 5 (recipe)."""
+    """build_specialist_prompts inserts section 4a between section 4 (KB) and section 5 (recipe)."""
     inp = _make_inp(
         {
             "analysis_md_path": "/sd/analysis.md",
@@ -247,8 +223,6 @@ def test_build_specialist_prompts_inserts_section_between_kb_and_recipe():
         }
     )
     _system, user = build_specialist_prompts(inp)
-    # Order matters: KB heading must precede ROOFLINE heading, which
-    # must precede recipe heading.
     kb_idx = user.index("## 4. KB CONTEXT (optional, advisory)")
     roof_idx = user.index("## 4a. ROOFLINE EVIDENCE")
     recipe_idx = user.index("## 5. WARM-START RECIPE SUMMARY")

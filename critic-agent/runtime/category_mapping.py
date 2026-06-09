@@ -2,12 +2,9 @@
 
 """Translate Critic ``kb_drafts[].category`` into KB ``kind`` (contract §2.1).
 
-The KB contract enumerates exactly four ``kind`` values; the Critic
-SKILL operates on a richer category vocabulary (see
-``actions/draft_kb.md`` and ``references/verdict_schema.md``). This
-module provides a deterministic surjective mapping plus a list of
-categories that intentionally have no KB equivalent and should be
-``rejected`` rather than silently dropped.
+The KB contract has exactly four ``kind`` values; the richer Critic
+category vocabulary maps onto them surjectively. Categories with no KB
+equivalent are ``rejected`` rather than silently dropped.
 """
 
 from __future__ import annotations

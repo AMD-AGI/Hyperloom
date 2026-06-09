@@ -1,3 +1,8 @@
+# Deadline auto-flush is the artefact-contract invariant: at the wall-
+# clock deadline the Coordinator enqueues a deterministic ``report``
+# with no LLM in the loop. Everything else here (`cost_minutes_*` /
+# `typical_runtime_min` / `expected_gain_pct` / risk fields) is
+# prompt-advisory metadata; the runtime never sorts or gates on them.
 name: report
 family: shallow
 cost_minutes_p50: 2.0
@@ -16,7 +21,7 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 10
 lease_ttl_sec: 300
-description: "Write final.md / final.json under reports/. Auto-enqueued by Coordinator at closing phase (after deadline); LLM may propose once stop_reason is set or < 3 * typical_runtime_min remains."
+description: "Write final.md / final.json under reports/. Coordinator auto-flushes deterministic report at the deadline (invariant); LLM may propose earlier on stop_reason or low remaining."
 pipeline_phase: finalize
 typical_runtime_min: 2.0
 applicable_when:

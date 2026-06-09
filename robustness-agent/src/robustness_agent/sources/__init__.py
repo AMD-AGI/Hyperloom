@@ -3,9 +3,8 @@
 """Data sources used by the reactor.
 
 Layered as ``robustness-server`` (preferred) -> ``local probe`` (fallback)
-through :class:`DegradeRouter`. Higher milestones add a cluster proxy
-client; the contract here is intentionally narrow so each source is a
-drop-in replacement.
+through :class:`DegradeRouter`. The contract is narrow so each source is
+a drop-in replacement.
 """
 
 from .base import (

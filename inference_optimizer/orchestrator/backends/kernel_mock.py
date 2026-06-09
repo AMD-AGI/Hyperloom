@@ -2,16 +2,8 @@
 
 """Mock Kernel backend — auto-responds to every REQUEST it sees.
 
-Used in P0 main-path tests so Coordinator + Orchestration can exercise the
-Plan A REQUEST/RESPONSE protocol without a real Claude Kernel agent.
-
-Behaviour:
-
-* When the prompt contains an inbox row with ``topic=request`` and a
-  parseable ``msg_id`` + ``kind``, emit ``response{in_reply_to=msg_id,
-  kind=kind, status="ok", result={"source": "mock"}}``.
-* Multiple requests in one inbox window → one response per request.
-* Otherwise emit a heartbeat.
+Used in P0 main-path tests. Emits one ``response`` per visible request, or
+a heartbeat when none are present.
 """
 
 from __future__ import annotations
@@ -23,8 +15,7 @@ from ...protocol.intent import Intent, IntentType
 from .base import BackendTurnResult
 
 
-# Coordinator renders inbox rows as:
-#   seq=N msg_id=<hex32> from=orchestration topic=request payload={'target_agent': 'kernel', 'kind': 'trace_analyze', ...}
+# Coordinator inbox row format for request topics.
 _REQUEST_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=request\s+payload=(.*)$",
     re.MULTILINE,
@@ -43,8 +34,7 @@ class MockKernelBackend:
         """
         self.name = name
         self.calls: list[dict[str, Any]] = []
-        # Don't double-respond if the same request appears in two consecutive
-        # inbox windows (which can happen during reactor fan-out).
+        # Track answered requests so reactor fan-out re-renders don't double-respond.
         self._answered_msg_ids: set[str] = set()
 
     async def run(

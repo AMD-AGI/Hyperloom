@@ -1,23 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-# Naive GEMM kernel written with FlyDSL.
-#
-# Lifted from the AMD-AGI/kernel_playground `flydsl/naive_gemm_flydsl/`
-# example referenced in Hyperloom issue #211 §5 as the canonical FlyDSL
-# regression sample. Kept minimal so the file remains self-contained and
-# parseable by ``tracelens_analysis._looks_like_flydsl_source`` /
-# ``_flydsl_kernel_params`` without bringing the upstream FlyDSL runtime
-# into Hyperloom's test environment. Trimmed to the markers we actually
-# assert on:
-#
-#   * ``@flyc.kernel`` decorator    -> source-type sniff signal
-#   * ``flydsl.compiler`` import    -> source-type sniff signal
-#   * ``flydsl.expr`` import        -> source-type sniff signal
-#   * ``SmemAllocator`` reference   -> FLYDSL_USES_SMEM=True
-#   * ``rocdl.make_buffer_tensor``  -> FLYDSL_USES_BUFFER_LOAD=True
-#
-# This file is not executed; it is loaded as text by the FlyDSL classifier
-# during patchability + metadata enrichment tests.
+# Naive GEMM FlyDSL fixture (issue #211 §5): text sample for classifier patchability/metadata tests; not executed.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx

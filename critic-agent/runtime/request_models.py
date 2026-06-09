@@ -2,25 +2,12 @@
 
 """Internal request / context models for the Critic runtime.
 
-The Critic agent has two main entry shapes today:
-
-1. ``coordinator_inbox`` — Coordinator () feeds a textual
-   prompt with a shared-state header and an inbox tail. The Critic must
-   emit an intent envelope (``{"intents": [{"intent_type": ...}, ...]}``)
-   that the Coordinator can route via :func:`validate_envelope`.
-
-2. ``critic_decision_request`` — a higher-level decision review used by
-   non-Coordinator hosts (e.g. an A2A chat server). The first call carries
-   the full context; later calls may be incremental and must be merged
-   against the per-session memory.
-
-Both shapes converge on :class:`CriticRequest`, which carries the
-session id, optional explicit context, the parsed proposals (if any) and
-the original raw payload for audit.
-
-This module is import-light: it has no dependency on the KB client, the
-inbox parser, or the LLM. It only validates structure so other modules
-can rely on the shape.
+Two entry shapes — ``coordinator_inbox`` (textual prompt, must emit an
+intent envelope) and ``critic_decision_request`` (decision review whose
+incremental turns merge against session memory) — both converge on
+:class:`CriticRequest` (session id, context, parsed proposals, raw payload).
+Import-light: no KB / inbox-parser / LLM dependency, only structural
+validation other modules can rely on.
 """
 
 from __future__ import annotations

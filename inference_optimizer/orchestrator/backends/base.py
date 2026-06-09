@@ -2,10 +2,8 @@
 
 """Backend protocol — what the Coordinator needs from any LLM provider.
 
-Concrete implementations (Claude SDK, Codex, multi-CLI bridge, mock)
-return a :class:`BackendTurnResult` carrying the intents emitted in this
-turn. The Coordinator handles validation, PolicyGate, and persistence —
-backends only need to produce intents.
+Concrete implementations return a :class:`BackendTurnResult` carrying the
+turn's intents; the Coordinator handles validation, PolicyGate, persistence.
 """
 
 from __future__ import annotations
@@ -24,25 +22,8 @@ log = logging.getLogger(__name__)
 def parse_call_timeout_env(env_name: str, *, default: float) -> float:
     """Read a per-call wall-clock timeout from ``env_name``, default on miss/error.
 
-    Operators bump ``call_timeout_s`` for the LLM backends when a heavy
-    orchestrator prompt + multi-turn agentic loop reproducibly exceeds the
-    120s default on the AMD gateway. Reading the env var lets them tune
-    without code changes / redeploys.
-
-    Returns ``default`` (not raising) when the env var is unset, empty, or
-    not a positive finite float — a malformed knob must not be a fatal
-    boot-time error for the orchestrator. Mis-parses are logged at WARNING
-    so the operator sees the fallback in the boot logs.
-
-    Args:
-        env_name (str): Name of the environment variable to read the timeout
-            from.
-        default (float): Fallback timeout in seconds used when the variable is
-            unset, empty, or not a positive finite float.
-
-    Returns:
-        float: The parsed positive finite timeout in seconds, or ``default``
-        when the variable is missing or malformed.
+    Returns ``default`` (logging a WARNING) when the env var is unset, empty,
+    or not a positive finite float — a malformed knob must not be fatal.
     """
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
@@ -65,11 +46,7 @@ def parse_call_timeout_env(env_name: str, *, default: float) -> float:
 
 
 class BackendError(RuntimeError):
-    """Backend invocation failed (network, schema, etc.).
-
-    Coordinator catches this, surfaces a ``policy_denied``-style observation
-    so the next reactor turn sees the failure context.
-    """
+    """Backend invocation failed (network, schema, etc.)."""
 
 
 @dataclass
@@ -85,9 +62,7 @@ class BackendTurnResult:
 class Backend(Protocol):
     """Async LLM backend protocol used by the Coordinator reactor loop.
 
-    Backends are stateful (they hold conversation continuation, tool
-    config, etc.) but each ``run`` invocation is one logical turn — given
-    a prompt it produces a :class:`BackendTurnResult`.
+    Backends are stateful but each ``run`` invocation is one logical turn.
     """
 
     async def run(

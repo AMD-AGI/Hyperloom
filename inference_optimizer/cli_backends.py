@@ -3,14 +3,8 @@
 """Per-role backend construction + robustness option wiring for the CLI.
 
 Builds the orchestration / critic / robustness / kernel backends, the
-advisory proposal scorer, and the robustness ``request.options`` overrides
-from parsed CLI args. Extracted from ``cli.py``; imports orchestrator
-packages only and must not import ``cli`` (one-way dependency).
-
-The env-computed defaults (``DEFAULT_CRITIC_BACKEND`` /
-``DEFAULT_ROBUSTNESS_BACKEND``) and their ``_resolve_*_choice`` readers
-stay in ``cli.py`` because a reload-based test relies on recomputing them
-when ``cli`` is reimported.
+advisory proposal scorer, and robustness ``request.options`` overrides from
+parsed CLI args. Imports orchestrator packages only (must not import ``cli``).
 """
 
 from __future__ import annotations
@@ -107,7 +101,16 @@ def _build_backends(
         )
 
     backends: dict[str, Any] = {
-        "orchestration": ClaudeBackend(model=claude_model, max_turns_default=4),
+        # Orchestration runs as a persistent ReAct conversation (plan
+        # Step 1): the same Claude session is resumed across ticks so the
+        # model's plan / chain-of-thought persists instead of being
+        # re-derived from a full state dump each turn. The conversational
+        # floors (max_turns / call_timeout) are applied inside
+        # ClaudeBackend.__post_init__. kernel / critic / robustness keep
+        # the stateless per-tick reactor mode.
+        "orchestration": ClaudeBackend(
+            model=claude_model, max_turns_default=4, conversational=True,
+        ),
         "critic":        critic_backend,
         "robustness":    robustness_backend,
     }
@@ -121,12 +124,17 @@ def _build_backends(
 
 def _build_proposal_scorer(
     args: argparse.Namespace,
+    session_dir: Path | None = None,
 ) -> ProposalScorer | None:
     """Construct the advisory specialist-proposal scorer, or ``None``.
 
     Returns ``None`` when ``--no-proposal-scoring`` is set or the resolved
     model list is empty (defaults to :data:`DEFAULT_SCORER_MODELS`). The
     scorer is purely advisory and never gates anything.
+
+    ``session_dir`` is forwarded so the scorer can append its per-model
+    token usage to the full-trace ledger (component=proposal_scorer); when
+    omitted the scorer simply skips trace writes.
     """
     if getattr(args, "no_proposal_scoring", False):
         return None
@@ -139,7 +147,7 @@ def _build_proposal_scorer(
         )
     if not models:
         return None
-    return ProposalScorer(models=models)
+    return ProposalScorer(models=models, session_dir=session_dir)
 
 
 def _robustness_server_configured(args: argparse.Namespace) -> bool:

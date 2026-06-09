@@ -1,28 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Kernel lifecycle renderer.
+"""Kernel lifecycle renderer — one row per detected kernel with its full optimization lifecycle.
 
-Single table view: **every** detected kernel as one row with its full
-optimization lifecycle. Columns mirror the MAE dashboard contract so
-downstream consumers (TraceLens team in particular) get the same data
-they used to scrape out of MAE events:
-
-* ``kernel_id``, ``name`` (truncated to keep the table readable)
-* ``gpu_pct``        — share of GPU time on baseline trace
-* ``duration_us``    — wall time the kernel held the GPU (μs)
-* ``call_count``     — number of times the kernel was launched
-* ``bandwidth%`` / ``compute%`` — roofline utilization
-* ``selected``       — did the orchestrator route it into kernel
-                       optimization? (top-15 in last_trace_analyze)
-* ``geak_speedup``   — best micro-speedup the GEAK lane achieved
-                       (None = lane never touched this kernel)
-* ``oob_speedup``    — best micro-speedup the OOB lane achieved
-* ``adopted_by``     — which lane's patch ended up in the final stack
-* ``final``          — ``kept`` / ``reverted`` / ``rejected`` /
-                       ``attempted`` / ``not_optimized``
-
-Skipped entirely when the kernel pipeline did not detect any kernels
-(rare — implies the profile phase never ran).
+Columns mirror the MAE dashboard contract. Skipped when no kernels were
+detected (implies the profile phase never ran).
 """
 
 from __future__ import annotations
@@ -40,21 +21,7 @@ _MAX_NAME_LEN = 70
 
 
 def _short_name(name: str) -> str:
-    """Shorten a kernel name keeping head + tail.
-
-    A naive head-truncation made many CK/ROCBLAS kernels look
-    identical in the table because the discriminating template
-    arguments live at the tail of the symbol. Keeping both ends
-    (with ``…`` in the middle) lets the reader tell variants apart
-    without making the column too wide.
-
-    Args:
-        name (str): The full kernel/symbol name.
-
-    Returns:
-        str: The name unchanged when within the length budget, otherwise a
-            head/tail-truncated form with ``...`` in the middle.
-    """
+    """Shorten a kernel name keeping head + tail (CK/ROCBLAS variants differ at the tail)."""
     if not name:
         return ""
     if len(name) <= _MAX_NAME_LEN:
@@ -131,9 +98,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             detected.append({"kernel_id": str(d)})
             continue
         if not d.get("kernel_id"):
-            # Filter out anonymous placeholder rows (older collector
-            # versions occasionally produced these from kernel_summary
-            # entries with neither name nor id).
+            # Filter out anonymous placeholder rows from older collectors.
             continue
         detected.append(d)
 
@@ -206,9 +171,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ),
         ))
 
-    # Drop bw% / compute% columns when every entry is None/0 — keeps
-    # the table compact on workloads where the trace doesn't carry
-    # roofline data (the common case on real wekafs sessions).
+    # Drop bw% / compute% columns when every entry is None/0 (no roofline data).
     show_bw = any(d.get("bandwidth_util_pct") for d in detected)
     show_compute = any(d.get("compute_util_pct") for d in detected)
 
@@ -248,11 +211,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         ]
         return row
 
-    # Partition into "actionable" (selected for optimization, OR touched
-    # by GEAK / OOB, OR with a final decision other than not_optimized)
-    # vs. "residual" (long-tail kernels the orchestrator left alone).
-    # Residual rows go into a collapsible <details> block so the
-    # default view stays focused on what mattered for optimization.
+    # Partition into "actionable" (selected/touched/decided) vs "residual"
+    # long-tail kernels; residual rows collapse into a <details> block.
     actionable: list[dict[str, Any]] = []
     residual: list[dict[str, Any]] = []
     for d in detected:
@@ -278,9 +238,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if residual:
         total_dur = sum((d.get("duration_us") or 0.0) for d in residual)
         total_gpu = sum((d.get("gpu_pct") or 0.0) for d in residual)
-        # Collapsible block. GitHub-flavored markdown renders <details>
-        # / <summary> as a clickable expander; the inner blank lines
-        # are required so the table inside still parses as markdown.
+        # Inner blank lines are required so the table inside <details> still parses as markdown.
         parts.append("")
         parts.append(
             f"<details><summary>Show {len(residual)} residual kernels "

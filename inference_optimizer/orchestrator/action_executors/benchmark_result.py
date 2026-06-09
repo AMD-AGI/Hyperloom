@@ -20,41 +20,19 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Default rescue path: Magpie's ``dsr1_fp8_mi300x.sh`` hardcodes
-# ``--result-dir /workspace/`` so the canonical leak destination is
-# ``/workspace/inferencex_result.json``. Operators can extend or
-# replace the list via ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` (see
-# :func:`_rescue_candidate_paths`). Kept as a list so future variants
-# (e.g. ``inferencex_result_eval.json``) can be appended in one place.
+# Default rescue path: scripts hardcoding ``--result-dir /workspace/``
+# leak to ``/workspace/inferencex_result.json``. Extend/replace via
+# ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` (see :func:`_rescue_candidate_paths`).
 _DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (
     Path("/workspace/inferencex_result.json"),
 )
 
 
-# Magpie shell wrappers (``InferenceX/benchmarks/{single_node,multi_node}/*.sh``)
-# hardcode several additional output paths under ``/workspace/`` that
-# the wrapper status code does NOT depend on:
-#
-# * ``SERVER_LOG=/workspace/server.log`` — every ``single_node/*.sh``
-#   redirects sglang/vllm server stdout+stderr here. Vital for
-#   diagnosing GPU OOMs / init failures / accuracy-mode crashes.
-# * ``GPU_METRICS_CSV=/workspace/gpu_metrics.csv`` — default of
-#   ``benchmark_lib.sh:start_gpu_monitor`` (nvidia-smi / amd-smi
-#   per-second power / temp / utilisation telemetry).
-# * ``/workspace/profile_<RESULT_FILENAME>.trace.json.gz`` — the
-#   PROFILE relay copy of the torch profiler trace
-#   (``benchmark_lib.sh`` ``[PROFILE] Relay trace prepared``).
-#
-# Unlike ``inferencex_result.json`` these files are NOT consulted by
-# :func:`extract_benchmark_measurement` to recover a measurement —
-# they are wrapper-side diagnostics. But they live OUTSIDE the
-# per-task workspace under ``<session>/runs/<action>/<task_id>/``,
-# so the NFS clone of that task dir misses them entirely.
-# :func:`harvest_leaked_artifacts` copies every fresh match into the
-# task workspace so the canonical NFS layout is self-contained.
-# Globs are evaluated via :meth:`Path.glob` against ``/workspace`` so
-# new wrapper-side conventions (e.g. ``profile_<run>.trace.json.gz``)
-# can be added without code changes.
+# Wrapper-side diagnostic files hardcoded under ``/workspace/`` (server
+# log, GPU monitor CSV, profile relay trace). Unlike
+# ``inferencex_result.json`` they don't feed measurement recovery, but
+# they live outside the per-task workspace so the NFS clone misses them;
+# :func:`harvest_leaked_artifacts` copies fresh matches in.
 _DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
     "server.log",
     "gpu_metrics.csv",
@@ -63,21 +41,10 @@ _DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
 )
 _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 
-# Slack subtracted from ``subprocess_started_unix`` before comparing it
-# against a candidate leak's ``st_mtime``. The cutoff exists to reject
-# *stale* leaks from a previous run or an earlier grid variant, which are
-# always seconds-to-hours older than the current launch. A file written
-# *after* the launch can nonetheless report an ``st_mtime`` slightly
-# *behind* the ``time.time()`` we snapshot as ``subprocess_started_unix``:
-# filesystem mtime resolution is coarser than the monotonic-ish wall clock
-# (commonly 1s on NFS, and even on local ext4 we measured the freshly
-# written file's mtime trailing the pre-write clock by several ms). The old
-# 1e-3 (1ms) tolerance was below that skew, so genuinely fresh salvage
-# candidates were misclassified as stale and dropped — silently failing a
-# benchmark whose result had actually been written. One full second is
-# comfortably larger than any observed clock-vs-mtime skew / FS granularity,
-# yet far smaller than the multi-second gaps that separate genuinely stale
-# prior-run leaks, so it preserves the staleness guard without false drops.
+# Slack subtracted from ``subprocess_started_unix`` before comparing a leak's
+# ``st_mtime``, to reject stale prior-run leaks without false-dropping fresh
+# ones. 1s absorbs clock-vs-mtime / FS-granularity skew (NFS ~1s) while
+# staying below the multi-second gap that separates genuinely stale leaks.
 _MTIME_GATE_SLACK_SEC: float = 1.0
 
 
@@ -198,42 +165,14 @@ def _rescue_candidate_paths(
 ) -> list[Path]:
     """Return absolute paths to known Magpie leak destinations.
 
-    Magpie's bundled ``dsr1_fp8_mi300x.sh`` (and a handful of
-    framework-specific siblings) hardcode ``--result-dir /workspace/``,
-    so when the optimizer launches a benchmark with a per-task workspace
-    the InferenceX result JSON lands at ``/workspace/inferencex_result.json``
-    instead of inside ``workspace``. The wrapper then reports failure
-    because it can't find a result file under its own workspace.
+    Scripts hardcoding ``--result-dir /workspace/`` land the InferenceX
+    result at ``/workspace/inferencex_result.json`` outside the per-task
+    workspace. Order: ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` (files verbatim;
+    dirs scanned for ``inferencex_result*.json``) → :data:`_DEFAULT_RESCUE_PATHS`.
 
-    Resolution order:
-
-    1. ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` — colon-separated list of
-       files and/or directories. Files are returned verbatim;
-       directories are scanned for ``inferencex_result*.json``.
-    2. Default fallback :data:`_DEFAULT_RESCUE_PATHS`
-       (currently ``/workspace/inferencex_result.json``).
-
-    When ``subprocess_started_unix`` is provided, candidates whose mtime
-    is **earlier** than that timestamp (minus :data:`_MTIME_GATE_SLACK_SEC`)
-    are dropped. This guards against a stale leak from a *previous* run
-    masquerading as the current run's result — without the cutoff we'd risk
-    re-promoting a stale 1761.6 tok/s number after a fresh run silently
-    failed. The slack absorbs the skew between the wall clock used for
-    ``subprocess_started_unix`` and the coarser filesystem mtime resolution
-    so a leak written just after launch is not misjudged as stale.
-
-    The function intentionally never raises: any I/O error on a single
-    candidate is swallowed (the file is just skipped) so the caller's
-    fast-path (no rescue) is preserved.
-
-    Args:
-        workspace (Path): The task workspace; candidates already inside
-            it are skipped (handled by :func:`_candidate_raw_jsons`).
-        subprocess_started_unix (float | None): Wall-clock start of the
-            benchmark subprocess; older candidates are dropped as stale.
-
-    Returns:
-        list[Path]: Absolute paths to fresh, in-scope leak candidates.
+    When ``subprocess_started_unix`` is given, candidates older than it
+    (minus :data:`_MTIME_GATE_SLACK_SEC`) are dropped as stale prior-run
+    leaks. Never raises: per-candidate I/O errors are swallowed.
     """
     candidates: list[Path] = []
     seen: set[Path] = set()
@@ -258,9 +197,8 @@ def _rescue_candidate_paths(
         if resolved in seen:
             return
         seen.add(resolved)
-        # Skip files that live inside the workspace already — those are
-        # the responsibility of ``_candidate_raw_jsons`` and including
-        # them again here would just duplicate work.
+        # Skip files already inside the workspace (handled by
+        # ``_candidate_raw_jsons``).
         try:
             ws_resolved = workspace.resolve()
             resolved.relative_to(ws_resolved)
@@ -305,33 +243,10 @@ def _materialize_rescue_into_workspace(
 ) -> Path | None:
     """Copy a leaked InferenceX result back into the task workspace.
 
-    Magpie scripts that hardcode ``--result-dir /workspace/`` (e.g.
-    ``dsr1_fp8_mi300x.sh``) write ``inferencex_result.json`` outside
-    the per-task workspace the optimizer created. When that workspace
-    later gets cloned to NFS (the canonical artifact location for
-    cross-host inspection), the JSON is missing — only the wrapper
-    summary ``benchmark_report.json`` is present.
-
-    This helper performs a best-effort ``shutil.copy2`` of the leaked
-    file into ``workspace`` (preserving its basename so multiple
-    variants — ``inferencex_result.json``,
-    ``inferencex_result_eval.json``, etc. — remain distinguishable).
-    On any I/O error we return ``None`` and the caller falls back to
-    advertising the leak path verbatim, so this only adds capability;
-    it never breaks the read path.
-
-    Returns the destination path on success, or ``None`` on failure /
-    when the source already lives inside the workspace (the latter
-    means the path came through ``_candidate_raw_jsons`` already and
-    we should not re-copy onto ourselves).
-
-    Args:
-        rescue_path (Path): The leaked result file to copy.
-        workspace (Path): The task workspace to copy the file into.
-
-    Returns:
-        Path | None: The destination path on success, or ``None`` on
-        failure or when the source already lives inside the workspace.
+    Best-effort ``shutil.copy2`` (preserving basename) so the NFS clone is
+    self-contained. Returns the destination on success, or ``None`` on I/O
+    error (caller falls back to the leak path) or when the source already
+    lives inside the workspace.
     """
     try:
         rescue_resolved = rescue_path.resolve()
@@ -359,24 +274,9 @@ def _materialize_rescue_into_workspace(
 def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
     """Return the directory roots to scan for wrapper-side leak files.
 
-    Priority:
-
-    1. Explicit ``leak_root`` kwarg (single path, used by unit tests
-       to isolate the scan from the host's real ``/workspace``).
-    2. ``$INFERENCE_OPTIMIZER_LEAK_ROOTS`` — colon-separated paths.
-       Set this in production when the deployed wrapper writes leaks
-       to a non-``/workspace/`` location, or in test envs to point
-       at a sandbox.
-    3. Default :data:`_DEFAULT_LEAK_ARTIFACT_ROOT`
-       (``/workspace``), matching the destinations hardcoded into
-       Magpie's bundled ``InferenceX/benchmarks/*.sh``.
-
-    Args:
-        leak_root (Path | None): Explicit single root override; takes
-            precedence over env and default when provided.
-
-    Returns:
-        tuple[Path, ...]: The directory roots to scan for leak files.
+    Order: explicit ``leak_root`` kwarg (tests) →
+    ``$INFERENCE_OPTIMIZER_LEAK_ROOTS`` (colon-separated) →
+    :data:`_DEFAULT_LEAK_ARTIFACT_ROOT` (``/workspace``).
     """
     if leak_root is not None:
         return (leak_root,)
@@ -397,42 +297,12 @@ def harvest_leaked_artifacts(
 ) -> list[tuple[Path, Path]]:
     """Copy known Magpie/InferenceX leak artifacts into ``destination``.
 
-    Magpie's bundled shell wrappers hardcode several output paths
-    under ``/workspace/`` (server log, GPU monitor CSV, profile relay
-    trace, InferenceX result JSON). When the optimizer launches a
-    benchmark inside a per-task workspace under
-    ``<session_dir>/runs/.../`` those artifacts end up outside the
-    session tree — the NFS clone of the task therefore misses them
-    entirely.
-
-    For every glob in :data:`_DEFAULT_LEAK_ARTIFACT_GLOBS` (extensible
-    via ``extra_globs``) this helper scans each leak root resolved by
-    :func:`_resolve_leak_roots` (explicit ``leak_root`` kwarg, then
-    ``$INFERENCE_OPTIMIZER_LEAK_ROOTS``, then ``/workspace``),
-    mtime-gates against ``subprocess_started_unix`` (same discipline
-    as :func:`_rescue_candidate_paths` — files older than the
-    subprocess start are treated as stale and skipped), and
-    ``shutil.copy2``-s each match into ``destination``. The source is
-    never moved or deleted; the copy preserves the basename so
-    artifacts remain distinguishable (``server.log``,
-    ``gpu_metrics.csv``, etc.).
-
-    Each step is wrapped in its own ``try`` so a permission error on
-    one artifact does not block the rest of the harvest. The function
-    intentionally never raises: callers always receive a (possibly
-    empty) list and can decide what to surface to the prompt.
-
-    Args:
-        destination (Path): Workspace directory to copy artifacts into.
-        subprocess_started_unix (float | None): Wall-clock start of the
-            benchmark; older matches are skipped as stale.
-        leak_root (Path | None): Explicit single scan root override.
-        extra_globs (tuple[str, ...]): Additional glob patterns to scan
-            beyond :data:`_DEFAULT_LEAK_ARTIFACT_GLOBS`.
-
-    Returns:
-        list[tuple[Path, Path]]: ``(leak_path, copy_path)`` pairs for
-        every artifact successfully harvested.
+    For every glob in :data:`_DEFAULT_LEAK_ARTIFACT_GLOBS` (extensible via
+    ``extra_globs``), scans each root from :func:`_resolve_leak_roots`,
+    mtime-gates against ``subprocess_started_unix`` (skips stale), and
+    ``shutil.copy2``-s each match (source never moved). Returns
+    ``(leak_path, copy_path)`` tuples for audit; never raises (per-artifact
+    errors are isolated).
     """
     harvested: list[tuple[Path, Path]] = []
     leak_roots = _resolve_leak_roots(leak_root)
@@ -472,9 +342,7 @@ def harvest_leaked_artifacts(
                 seen.add(resolved)
                 try:
                     resolved.relative_to(ws_resolved)
-                    # Match is already under the workspace — nothing
-                    # to harvest, it landed in the right place
-                    # already.
+                    # Already under the workspace — nothing to harvest.
                     continue
                 except ValueError:
                     pass
@@ -570,23 +438,8 @@ def extract_benchmark_measurement(
     """Extract a normalized measurement from Magpie and InferenceX outputs.
 
     ``subprocess_started_unix`` enables an opt-in salvage pass over the
-    documented Magpie leak destinations (see
-    :func:`_rescue_candidate_paths`) when the in-workspace search fails.
-    Callers (executors) capture ``time.time()`` immediately before
-    invoking the benchmark subprocess and forward it here so we only
-    adopt a leaked result that was written *after* this run started.
-
-    Args:
-        report (dict[str, Any] | None): The wrapper's
-            ``benchmark_report.json`` payload, if any.
-        workspace (Path | None): The task workspace to search for raw
-            InferenceX result JSONs and leak destinations.
-        subprocess_started_unix (float | None): Wall-clock start used to
-            gate the salvage pass against stale leaks.
-
-    Returns:
-        dict[str, Any]: A normalized measurement dict, including a
-        ``valid_measurement`` flag and any ``nonfatal_warnings``.
+    Magpie leak destinations (see :func:`_rescue_candidate_paths`) when the
+    in-workspace search fails; only leaks written after this run are adopted.
     """
     report = report or {}
     throughput = report.get("throughput") or {}
@@ -636,11 +489,8 @@ def extract_benchmark_measurement(
     _derive_tpot_if_missing(measurement, report)
     measurement["valid_measurement"] = is_valid_measurement(measurement)
 
-    # Second-chance salvage: try documented Magpie leak destinations
-    # (e.g. ``/workspace/inferencex_result.json``) when the in-workspace
-    # search didn't yield a usable measurement. mtime gating inside
-    # :func:`_rescue_candidate_paths` prevents stale leaks from being
-    # adopted as this run's result.
+    # Second-chance salvage from Magpie leak destinations when the
+    # in-workspace search found no usable measurement (mtime-gated).
     if (
         not measurement["valid_measurement"]
         and workspace is not None
@@ -652,17 +502,10 @@ def extract_benchmark_measurement(
             raw = _load_json(rescue_path)
             if not raw or _to_float(raw.get("output_throughput")) is None:
                 continue
-            # Copy the leaked InferenceX result back into the task
-            # workspace BEFORE merging so ``raw_result_path`` always
-            # advertises the in-workspace copy. This keeps NFS clones
-            # of ``<session>/runs/<action>/<task_id>/`` self-contained
-            # — the canonical artifact is materialized alongside
-            # ``benchmark_report.json`` rather than left at the leak
-            # location (typically ``/workspace/`` outside the session
-            # tree). ``_materialize_rescue_into_workspace`` is
-            # best-effort: on permission / disk failure we fall back
-            # to the leak path so a successful salvage measurement is
-            # never discarded just because the copy step couldn't run.
+            # Copy the leak into the workspace BEFORE merging so
+            # ``raw_result_path`` advertises the in-workspace copy and the
+            # NFS clone stays self-contained. Best-effort: on copy failure
+            # we fall back to the leak path rather than drop the measurement.
             materialized = _materialize_rescue_into_workspace(
                 rescue_path, workspace,
             )

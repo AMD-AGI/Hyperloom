@@ -70,17 +70,8 @@ def fetch_inferenceX_ref(
 ) -> float | None:
     """Look up InferenceX output_tput_per_gpu for repo_id on target_gpu.
 
-    Args:
-        repo_id (str): HF model id to look up.
-        hf_to_ifx (dict[str, str]): HF model id → InferenceX api_name map.
-        target_gpu (str): Reference GPU (e.g. ``"b200"``).
-        isl (int): Input sequence length to match.
-        osl (int): Output sequence length to match.
-
-    Returns:
-        float | None: The reference throughput per GPU, or ``None`` if the
-            repo isn't mapped, the API has no benchmarks, or none match the
-            (hardware, ISL, OSL); ``None`` leaves the comparison column blank.
+    Returns None when no comparison is available (unmapped repo, no benchmarks,
+    or no (hardware, ISL, OSL) match) — the column stays blank.
     """
     api_name = hf_to_ifx.get(repo_id)
     if not api_name:
@@ -415,7 +406,7 @@ def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> st
         "- Sort: by Gain% (desc); failures last",
         "",
         "| # | Model | Frm | Prec | TP | Params | Baseline tok/s/GPU | "
-        "Optimized tok/s/GPU | Gain | InfX | vs InfX |",
+        + "Optimized tok/s/GPU | Gain | InfX | vs InfX |",
         "|---:|---|---|---|---:|---|---:|---:|---|---:|---|",
     ]
     for idx, r in enumerate(sorted_rows, start=1):
@@ -527,8 +518,7 @@ def main() -> int:
     )
     log.info("wrote summary and normalized results under %s", out)
 
-    # Print the table to stdout too, so the GitHub Actions log shows it
-    # without having to download the artifact.
+    # Echo the table to stdout so the GitHub Actions log shows it.
     print(md)
     return 0
 

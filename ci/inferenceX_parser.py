@@ -198,17 +198,8 @@ def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
 
 
 def parse_model_entry(entry: dict) -> dict:
-    """Extract a structured config dict from an ``amd-master.yaml`` model entry.
-
-    Args:
-        entry (dict): A model entry in either the legacy ``seq-len-configs``
-            format or the newer ``scenarios.fixed-seq-len`` format.
-
-    Returns:
-        dict: Flattened config with model, image, framework, tp/ep, conc
-            range, and the list of ``(isl, osl)`` pairs.
-    """
-    # Support both old format (seq-len-configs) and new format (scenarios.fixed-seq-len)
+    """Extract structured config from an amd-master.yaml model entry."""
+    # Support both seq-len-configs (old) and scenarios.fixed-seq-len (new).
     seq_configs = (
         entry.get("seq-len-configs")
         or (entry.get("scenarios") or {}).get("fixed-seq-len")
@@ -523,31 +514,18 @@ def merge_model_config(
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
         "inferenceX_key": model_cfg.get("inferenceX_key", ""),
         "rayjob_image": resolve_var(model_cfg.get("rayjob_image", "")),
-        # ── Per-entry Claw pluginId override ──
-        # Default behaviour (key absent in ci-config) → plugin_id=4 (legacy
-        # Hyperloom plugin, used by all existing entries). To opt a specific
-        # entry OUT of the plugin and have the agent talk to the Claw API
-        # without a pluginId in the body, set:
-        #     claw_plugin_id: null
-        # in the ci-config entry. (claw_client.send_message already omits the
-        # "pluginId" field from the JSON body when plugin_id is None.)
-        # Other integer values (e.g. claw_plugin_id: 5) switch to a different
-        # plugin — same hook used by the Inference A/B Test workflow via
-        # --plugin-id CLI override.
+        # Per-entry Claw pluginId override; default 4 (legacy Hyperloom plugin).
+        # claw_plugin_id: null omits pluginId from the body; other ints switch
+        # plugin (same hook as the A/B Test --plugin-id override).
         "claw_plugin_id": (
             model_cfg["claw_plugin_id"]
             if "claw_plugin_id" in model_cfg
             else 4
         ),
-        # ── Hyperloom-skill knobs surfaced to prompt_template.md ──
-        # `nodes` triggers the multinode Task-submission block when > 1.
-        # `target_gain` / `max_hours` are forwarded as CLI flags to
-        # `inference_optimizer optimize`. `random_range_ratio` controls
-        # benchmark prompt length jitter (matches InferenceX default 0.8).
-        # `kernel_agent_build_geak_rag_index` defaults off to skip the slow
-        # GEAK RAG index rebuild on each cold-start. All five fall back to
-        # legacy single-node defaults when absent in ci-config, so the 5
-        # existing entries are unchanged.
+        # Hyperloom-skill knobs for prompt_template.md: nodes>1 triggers the
+        # multinode block; target_gain/max_hours become optimize CLI flags;
+        # random_range_ratio is benchmark prompt jitter (InferenceX default 0.8);
+        # kernel_agent_build_geak_rag_index defaults off to skip the slow rebuild.
         "nodes": model_cfg.get("nodes", 1),
         "target_gain": model_cfg.get("target_gain", defaults.get("target_gain", 10)),
         "max_hours": model_cfg.get("max_hours", defaults.get("max_hours", 2)),

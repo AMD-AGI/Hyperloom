@@ -1,3 +1,8 @@
+# `family` / `cost_minutes_*` / `expected_gain_pct` / `accuracy_risk` /
+# `crash_risk` / `typical_runtime_min` are prompt-advisory metadata.
+# Nothing in the runtime sorts, filters, cools-down, or prioritises
+# actions on these values; they exist only to render the catalogue
+# block in the Orchestration / Critic prompts.
 name: explore
 family: shallow
 cost_minutes_p50: 12.0

@@ -3,25 +3,15 @@
 
 """Build the production rerun corpus directly from the HuggingFace catalog.
 
-The pool selection rule:
-  * pipeline_tag=text-generation
-  * inference_provider=all (HF "Inference Available" filter)
-  * num_parameters >= --min-params (HF server-side ``min:NB`` filter,
-    default 12 — matches the operator-supplied search URL)
-  * minus the InferenceX-roadmap / customer-noop blacklist defined in
-    ``ci/inferenceX_models.yaml::production_pool_exclusion_keywords``
+Pool selection: pipeline_tag=text-generation, inference_provider=all,
+num_parameters >= --min-params (default 12), minus the exclusion keywords in
+``ci/inferenceX_models.yaml::production_pool_exclusion_keywords``.
 
 The HF list endpoint caps a single sort at 500 rows, so we crawl every
-``sort`` × ``direction`` combination plus a per-author slice list, dedup
-by repo id, then sort by downloads descending. Roughly 1000+ unique
-candidates today; the legacy leaderboard-derived approach maxed out at
-~400 because it only counted models that already had a successful
-Hyperloom optimization task.
-
-The output JSON keeps the same ``hyperloom.production_corpus.v1``
-schema as the legacy ``build_production_leaderboard_pool.py`` (which
-this script replaces) so downstream consumers (generate_hf_matrix.py,
-the optimize-submit workflow) work without changes.
+``sort`` × ``direction`` plus a per-author slice list, dedup by repo id, then
+sort by downloads descending. Output keeps the ``hyperloom.production_corpus.v1``
+schema so downstream consumers (generate_hf_matrix.py, optimize-submit) are
+unchanged.
 """
 
 from __future__ import annotations
@@ -75,21 +65,8 @@ DEFAULT_AUTHOR_SLICES = [
 def _load_yaml_exclusions(path: Path) -> tuple[set[str], list[str]]:
     """Read ``ci/inferenceX_models.yaml`` and return ``(exact_ids, keywords)``.
 
-    See the original builder for the schema rationale; we only consume
-    two fields here:
-
-    * ``models[].hf_model``                              — exact lower-case match
-    * ``production_pool_exclusion_keywords``             — substring match
-
-    Falls back to a line-based parse of ``hf_model:`` entries if PyYAML is
-    unavailable or the file fails to parse.
-
-    Args:
-        path (Path): Path to the exclusion YAML config.
-
-    Returns:
-        tuple[set[str], list[str]]: Lower-cased exact repo ids and substring
-        exclusion keywords.
+    Consumes ``models[].hf_model`` (exact lower-case match) and
+    ``production_pool_exclusion_keywords`` (substring match).
     """
     if not path.exists():
         return set(), []
@@ -291,8 +268,7 @@ def build_candidates(
             continue
         params = _params_total(m)
         if threshold and params == 0:
-            # The HF min: filter should have removed these already, but
-            # be paranoid in case the server returned a stale row.
+            # Defensive: HF min: filter should have removed these already.
             stats["models_without_safetensors"] += 1
             continue
         if threshold and params < threshold:
@@ -311,9 +287,8 @@ def build_candidates(
             "trending_score": m.get("trendingScore"),
             "last_modified": m.get("lastModified"),
             "pipeline_tag": m.get("pipeline_tag") or "text-generation",
-            # Keep stub fields the legacy schema downstream consumers
-            # expect; leaderboard-derived metrics will be filled by the
-            # results service after the first optimization run.
+            # Stub fields the legacy schema expects; filled by the results
+            # service after the first optimization run.
             "data_quality": "hf_inference_listed",
             "framework": None,
             "precision": None,

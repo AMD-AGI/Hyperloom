@@ -1,25 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Top-level composer: run every renderer + (optionally) call the LLM
-+ stitch the result into a single markdown document.
+"""Top-level composer: run every renderer, optionally call the LLM, stitch to one markdown doc.
 
-Entry points:
-
-* :func:`render_session_report` — the main programmatic API. Takes a
-  parsed ``session_breakdown.json`` dict + an optional LLM client and
-  returns the final markdown string.
-
-Design notes:
-
-* The compose layer never inspects per-section semantics; it just
-  walks :data:`base.REGISTRY` in registration order, hands each
-  renderer the breakdown dict, and stitches outputs together. This
-  means new sections plug in with zero changes to compose.py.
-* When ``llm_client`` is ``None`` the output still works — sections
-  show only their deterministic markdown blocks, prefixed by the
-  global executive-summary computed from :class:`GlobalFacts`. This
-  is the path tests use, and is the path operators get when the LLM
-  backend is misconfigured.
+:func:`render_session_report` is the main API. The compose layer is
+section-agnostic (walks :data:`base.REGISTRY`), and degrades to
+deterministic-only output when ``llm_client`` is ``None``.
 """
 
 from __future__ import annotations
@@ -31,10 +16,8 @@ from .base import REGISTRY, RenderedSection
 from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
-# Import every renderer module so its @register_renderer side effect
-# runs. Renderer order in REGISTRY is decoupled from final report
-# layout — :data:`SECTION_GROUPS` below dictates the H2/H3 grouping
-# the reader actually sees.
+# Import every renderer module for its @register_renderer side effect.
+# REGISTRY order is decoupled from layout; :data:`SECTION_GROUPS` drives it.
 from ._renderers import (   # noqa: F401  (side-effect imports)
     session as _r_session,
     workload as _r_workload,
@@ -57,14 +40,9 @@ from ._renderers import (   # noqa: F401  (side-effect imports)
 )
 
 
-# Final report layout: ``(group_title, [section_id, ...])``.
-#
-# Grouping mirrors the orchestration phases a hyperloom run actually
-# goes through: session/workload setup, performance results, explore and
-# sweep capability search, kernel optimization, and bookkeeping.
-# ``telemetry`` is deliberately dropped from the report because the
-# on-disk GPU monitor data has been consistently broken on real wekafs
-# sessions.
+# Final report layout ``(group_title, [section_id, ...])``, mirroring the
+# orchestration phases. ``telemetry`` is dropped (GPU monitor data is
+# consistently broken on real wekafs sessions).
 SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ("Session & Workload",          ["session", "workload"]),
     ("Performance Results",          ["baseline", "final", "roofline", "attribution"]),
@@ -79,11 +57,7 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
                                       "oob_invocations",
                                       "critic_robustness"]),
     ("Run Trace",                    ["phase_timeline"]),
-    # ``source_files`` lists the artifacts the breakdown was synthesized
-    # from; ``data_provenance`` (right after) explains, per section,
-    # which of those source artifacts the collector actually saw —
-    # making it trivial to diagnose "why is X empty?" without leaving
-    # the report.
+    # source_files lists synthesis inputs; data_provenance explains per-section coverage.
     ("Source Artifacts",             ["source_files", "data_provenance"]),
 ]
 
@@ -95,12 +69,7 @@ __all__ = [
 
 
 class LLMClient(Protocol):
-    """Minimal LLM client interface the compose layer uses.
-
-    Any callable mapping ``(system, user) -> str`` works, including a
-    thin shim around :class:`ClaudeBackend`. Kept as a Protocol so we
-    can swap in mocks for tests without importing the orchestrator.
-    """
+    """Minimal LLM client interface (``(system, user) -> str``); a Protocol so tests can mock it."""
 
     def complete(self, *, system: str, user: str) -> str:
         """Run one completion and return the model's text.
@@ -116,13 +85,7 @@ class LLMClient(Protocol):
 
 @dataclass(frozen=True)
 class ComposeResult:
-    """Full output of one compose run.
-
-    ``markdown`` is the user-facing report; the other fields are kept
-    so callers can persist them alongside the report for debugging /
-    replay (e.g. dump ``llm_user_prompt`` next to the report to
-    diagnose hallucinations).
-    """
+    """Full output of one compose run (``markdown`` plus debug/replay fields)."""
 
     markdown: str
     sections: list[RenderedSection]
@@ -188,9 +151,7 @@ def render_session_report(
     )
 
 
-# ---------------------------------------------------------------------------
 # Stitching
-# ---------------------------------------------------------------------------
 def _stitch(
     *,
     sections: list[RenderedSection],
@@ -238,8 +199,7 @@ def _stitch(
         live = [by_id[sid] for sid in ids
                 if sid in by_id and not by_id[sid].skipped]
         if not live:
-            # All sections in this group are skipped → drop the H2 header
-            # too. Avoids "## Sweep\n_skipped_" placeholder noise.
+            # All sections skipped → drop the H2 header too.
             continue
         parts.append(f"## {group_title}")
         parts.append("")
@@ -261,18 +221,7 @@ def _stitch(
 
 
 def _deterministic_exec_summary(g: GlobalFacts) -> str:
-    """Fallback exec summary used when no LLM is configured / LLM failed.
-
-    Intentionally terse and bullet-point-y so it's obviously the
-    deterministic path (vs a polished LLM paragraph). Mentions every
-    data-quality flag so silent issues are never hidden.
-
-    Args:
-        g (GlobalFacts): The deterministic cross-section fact pack.
-
-    Returns:
-        str: A newline-joined markdown bullet summary.
-    """
+    """Fallback exec summary when no LLM is configured / it failed; lists every data-quality flag."""
     out: list[str] = []
     out.append(f"- {g.headline} (stop_reason={g.stop_reason or 'unset'}, "
                f"elapsed={g.elapsed_minutes or 0:.0f}min, objective={g.objective}).")
@@ -300,16 +249,7 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
 
 
 def _render_global_facts_block(g: GlobalFacts) -> str:
-    """Render :class:`GlobalFacts` as a compact key-value block so the
-    raw computed facts are always inspectable in the report (and so
-    the LLM-written exec summary can be cross-checked against them).
-
-    Args:
-        g (GlobalFacts): The deterministic cross-section fact pack.
-
-    Returns:
-        str: A newline-joined markdown key-value block.
-    """
+    """Render :class:`GlobalFacts` as a compact key-value block for cross-checking the report."""
     funnel = g.kernel_pipeline_funnel
     out: list[str] = []
     out.append(f"- **Headline**: {g.headline}")
@@ -333,8 +273,5 @@ def _render_global_facts_block(g: GlobalFacts) -> str:
             out.append(f"  - {line}")
     else:
         out.append("  - (no attribution recorded)")
-    # Data quality flags appear in the Executive Summary above —
-    # don't duplicate them here (the Key Facts block is the LLM /
-    # script-facing cross-check view, not a second human-facing
-    # summary).
+    # Data quality flags live in the Executive Summary; don't duplicate here.
     return "\n".join(out)

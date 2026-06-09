@@ -2,34 +2,18 @@
 
 """External-dependency signals (J1 / J2 / J3).
 
-These three signals cover failure modes that **originate outside
-Hyperloom proper** but manifest as opaque hangs / 401 storms inside the
-session:
+Failure modes originating outside Hyperloom but manifesting as opaque
+hangs / 401 storms:
 
-* **J1 ``gateway_auth_outage``** — ``OPENAI_BASE_URL/models`` returns
-  401 / forbidden when probed with ``$SAFE_API_KEY``. The upstream
-  gateway has lost or revoked the key. Every claude/codex CLI will
-  now fail with HTTP 401 at the gateway level.
-
-* **J2 ``wekafs_degraded``** — ``stat`` on any of
-  ``$TRACELENS_ROOT`` / ``$TRACELENS_INTERNAL_ROOT`` /
-  ``$INFERENCEX_PATH`` / ``$OOB_SRC`` either
-  errored or took longer than the configured budget. WekaFS is the
-  read-only source mount Hyperloom relies on for source-code, traces,
-  and benchmark scripts; ``trace_analyze`` and the OOB CLI hang
-  silently when the mount goes slow / drops.
-
-* **J3 ``tracelens_cli_missing``** — neither
-  ``TraceLens_generate_perf_report_pytorch_inference`` nor the legacy
-  ``TraceLens_generate_perf_report_pytorch`` is on ``PATH``. This is a
-  boot-time-only condition (the binaries land via ``install.sh`` and
-  don't disappear mid-run), so the detector latches and stays silent
-  after the first fire.
+* **J1 ``gateway_auth_outage``** — gateway ``/models`` returns 401/403
+  (key lost/revoked); every claude/codex CLI will fail at the gateway.
+* **J2 ``wekafs_degraded``** — ``stat`` on a source mount errored or
+  exceeded the latency budget; ``trace_analyze`` / OOB CLI hang silently.
+* **J3 ``tracelens_cli_missing``** — neither TraceLens perf-report CLI
+  is on ``PATH``. Boot-time-only, so the detector latches after first fire.
 
 J4 ``cluster_gpu_quota_anomaly`` is covered by F1
-``ray_pending_starvation`` (see ``signals/kernel_pipeline.py``); the
-P2#7 case study shows up there because all sweep tasks land on
-``PENDING`` for >10 min when the cluster quota ledger goes wrong.
+``ray_pending_starvation`` in ``signals/kernel_pipeline.py``.
 """
 
 from __future__ import annotations
@@ -48,24 +32,16 @@ from .symptom import Symptom, SymptomSeverity
 class ExternalDepsConfig:
     """Tunables for :func:`evaluate_external_deps_signals`."""
 
-    # J1 — the J1 detector fires immediately on a single 401 because
-    # the gateway is the global authentication source; one bad probe
-    # means every subsequent CLI call WILL fail too.
+    # J1 fires on a single 401: the gateway is the global auth source.
     fire_on_first_401: bool = True
-    # J2 — mount stat latency budget. The probe layer also tracks
-    # ``ok=False`` for FileNotFoundError; that variant fires HIGH
+    # J2 mount stat latency budget; ``ok=False`` (FileNotFound) fires HIGH
     # regardless of latency.
     mount_latency_warn_ms: float = 5000.0
     mount_latency_critical_ms: float = 15000.0
 
 
 class TraceLensCliFiredOnce:
-    """One-shot latch helper used by :class:`ExternalDepsDetector`.
-
-    Backed by a :class:`DetectorStateView` when supplied so the latch
-    survives subprocess restarts; M1 transport would otherwise re-fire
-    the J3 symptom every tick.
-    """
+    """One-shot latch; backed by :class:`DetectorStateView` to survive restarts."""
 
     def __init__(
         self,

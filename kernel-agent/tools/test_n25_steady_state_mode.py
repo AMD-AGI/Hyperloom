@@ -1,57 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""N25 — TraceLens splitter steady-state chunk selection contract.
+"""N25 — TraceLens splitter steady-state chunk selection contract (SOLAR-10.7B TP=1 case).
 
-Background — the May 2026 SOLAR-10.7B TP=1 BF16 case:
-
-Pre-N25 ``tracelens_analysis.py`` line 1908 silently fell through three
-TraceLens splitter chunks with an implicit ``mixed or decode_only or
-prefilldecode`` ladder. The TraceLens spec (docs/Inference_analysis.md
-in TraceLens-internal) treats the three chunks as **parallel views** of
-the same steady-state region (representative mix / pure-decode /
-pure-PD), NOT a fallback ladder — TraceLens itself encodes no
-preference between them.
-
-The implicit ladder broke when SOLAR-10.7B TP=1 produced a mixed chunk
-of ``gpu_busy=1.4ms / gpu_duration=1118ms`` (= 0.13% busy, 160 sampler
-kernels only — all forward inside CUDA graph + rocprofiler-sdk emits no
-Dispatch Task aggregate without TP-multi-stream sync). The
-prefilldecode chunk for the same trace carried ``gpu_busy=2723ms /
-gpu_duration=4538ms`` (60% busy, 2,790 events including 480 Tensile
-GEMM + 240 paged_attention). Pre-N25 always picked mixed first → empty
-trace → analysis.md reported "Compute %=0.18%, Idle %=99.77%" →
-PolicyGate's idle-gate routed to host-bound params variants → LLM ran
-torch_compile / cuda_graph_* for 1h with all results in noise.
-
-N25 makes the consumer's choice explicit (``--steady-state-mode`` flag
-+ ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE`` env passthrough), removes
-the implicit fallback, and hard-fails when the selected chunk is
-missing or structurally empty so the coordinator can re-issue with a
-different mode. This file pins that contract.
-
-Tests:
-
-* ``_check_selected_chunk_has_gpu_events`` returns None when the
-  selected chunk has real GPU events (Qwen1.5-7B mixed: busy=49%).
-* Returns a ``steady_state_chunk_empty`` warning when the selected
-  chunk has zero events / zero busy (SOLAR mixed: busy=0.13%).
-* Returns the SAME warning shape when num_gpu_events>0 but
-  gpu_busy_duration=0 (degenerate degenerate case).
-* Surfaces ``non_empty_modes`` correctly (lists ONLY the other modes
-  whose chunks have events; excludes the requested mode itself and
-  any other-mode chunks that are also empty).
-* Returns None when no ``execution_details.csv`` is present
-  (back-compat: don't break older TraceLens that didn't emit the CSV).
-* Returns None when the CSV exists but doesn't contain the selected
-  chunk's row (back-compat).
-
-CLI flag tests:
-
-* ``--steady-state-mode`` accepts only ``mixed`` / ``decode_only`` /
-  ``prefilldecode`` (argparse-enforced).
-* Default is ``mixed`` when env unset.
-* Reads ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE`` as default when set.
-* Env wins over default but explicit flag wins over env.
+Explicit chunk selection (``--steady-state-mode`` + ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE``) that hard-fails on a structurally-empty chunk (num_gpu_events==0 OR gpu_busy_duration==0.0); busy-% judgment stays with the T3 idle gate.
 """
 
 from __future__ import annotations
@@ -64,9 +15,7 @@ from pathlib import Path
 import pytest
 
 
-# Resolve tracelens_analysis.py so we can import its module-level helpers
-# without going through the heavy __main__ path (which requires Claude
-# SDK, anthropic creds, etc.).
+# Import module-level helpers without the heavy __main__ path (Claude SDK, creds).
 TOOLS_DIR = Path(__file__).resolve().parent
 TL_PATH = TOOLS_DIR / "tracelens_analysis.py"
 
@@ -87,8 +36,7 @@ def _write_exec_details(
     split_dir: Path,
     rows: list[dict[str, object]],
 ) -> Path:
-    """Write a minimal execution_details.csv matching TraceLens splitter
-    output (the columns this fix reads)."""
+    """Write a minimal execution_details.csv matching TraceLens splitter output."""
     path = split_dir / "execution_details.csv"
     cols = [
         "idx", "output_path", "event_count", "num_gpu_events",
@@ -107,8 +55,7 @@ def _write_exec_details(
 
 
 def _make_chunk_files(split_dir: Path) -> dict[str, Path]:
-    """Create empty placeholder chunk files (the gate inspects the CSV
-    only, not the trace contents)."""
+    """Create empty placeholder chunk files (the gate inspects the CSV, not trace contents)."""
     chunks = {}
     for label in (
         "mixed_steady_state",
@@ -126,9 +73,7 @@ def split_dir(tmp_path):
     return tmp_path / "trace_split"
 
 
-# ---------------------------------------------------------------------------
 # _check_selected_chunk_has_gpu_events behavioural contract
-# ---------------------------------------------------------------------------
 
 
 def test_chunk_with_real_gpu_work_passes(tl_module, split_dir):
@@ -165,10 +110,7 @@ def test_empty_solar_style_mixed_chunk_emits_warning(tl_module, split_dir):
     mixed_path = chunks["mixed_steady_state"]
     pd_path = chunks["prefilldecode_steady_state"]
     _write_exec_details(split_dir, [
-        # The SOLAR mixed chunk: ostensibly 160 events but 99.87% idle
-        # (160 sampler kernels only). Pre-N25 we'd consume this and
-        # report "Compute %=0.18%". The gate must catch it because
-        # gpu_busy_duration is effectively zero (1428us / 1118730us).
+        # SOLAR mixed chunk: 160 sampler kernels, 99.87% idle.
         {
             "output_path": str(mixed_path),
             "num_gpu_events": 160,
@@ -187,26 +129,14 @@ def test_empty_solar_style_mixed_chunk_emits_warning(tl_module, split_dir):
         "decode_only": ("decode_only_steady_state", []),
         "prefilldecode": ("prefilldecode_steady_state", [pd_path]),
     }
-    # IMPORTANT: gpu_busy_duration > 0 here (1428us). The gate only
-    # fires when busy_duration is EXACTLY 0.0 OR when num_gpu_events is
-    # exactly 0. SOLAR's real failure mode is the splitter producing a
-    # chunk with non-sampler kernels filtered out. We test both vectors
-    # in separate cases; here we cover the "non-zero but tiny" path by
-    # also ensuring the next test covers the exact-zero path.
-    # Actually -- re-read the helper: it returns None when
-    # `num_gpu_events > 0 AND gpu_busy_duration > 0.0`. 1428 > 0 so this
-    # case should pass through. We verify the gate is precisely the
-    # zero-check, not a heuristic ratio.
+    # gpu_busy_duration > 0 here (1428us), so the structural zero-check gate must NOT fire.
     result = tl_module._check_selected_chunk_has_gpu_events(
         split_dir=split_dir,
         selected_chunk=mixed_path,
         mode="mixed",
         available_modes=available,
     )
-    # 1428us > 0 and 160 > 0 -> gate passes (no false positive).
-    # The empty-chunk gate is the STRUCTURAL safety net; the busy-%
-    # judgment is done downstream by the analysis.md idle gate (T3).
-    # We DO NOT want N25 to second-guess T3 with a heuristic ratio.
+    # Busy-% judgment stays with T3; N25 is purely the structural zero-check.
     assert result is None, (
         "N25 gate must NOT be a busy-ratio heuristic; only structural "
         "emptiness (num_gpu_events==0 OR gpu_busy_duration==0.0) "
@@ -300,8 +230,7 @@ def test_zero_busy_duration_emits_warning(tl_module, split_dir):
 
 
 def test_warning_excludes_self_from_non_empty_modes(tl_module, split_dir):
-    """Even if the requested mode's chunk has events somewhere, the
-    warning's non_empty_modes list must exclude the requested mode."""
+    """The warning's non_empty_modes list must exclude the requested mode."""
     split_dir.mkdir()
     chunks = _make_chunk_files(split_dir)
     mixed_path = chunks["mixed_steady_state"]
@@ -335,8 +264,7 @@ def test_warning_excludes_self_from_non_empty_modes(tl_module, split_dir):
 
 
 def test_missing_exec_details_returns_none(tl_module, split_dir):
-    """Back-compat: older TraceLens doesn't emit execution_details.csv;
-    we let the chunk through and rely on T3 idle gate downstream."""
+    """Back-compat: no execution_details.csv -> let the chunk through (T3 handles it)."""
     split_dir.mkdir()
     chunks = _make_chunk_files(split_dir)
     available = {
@@ -344,7 +272,6 @@ def test_missing_exec_details_returns_none(tl_module, split_dir):
         "decode_only": ("decode_only_steady_state", []),
         "prefilldecode": ("prefilldecode_steady_state", []),
     }
-    # No execution_details.csv written.
     result = tl_module._check_selected_chunk_has_gpu_events(
         split_dir=split_dir,
         selected_chunk=chunks["mixed_steady_state"],
@@ -355,13 +282,11 @@ def test_missing_exec_details_returns_none(tl_module, split_dir):
 
 
 def test_selected_chunk_not_in_csv_returns_none(tl_module, split_dir):
-    """Back-compat: if the CSV exists but doesn't list the selected
-    chunk, we don't second-guess — same fallback to T3."""
+    """Back-compat: CSV missing the selected chunk's row -> fall back to T3."""
     split_dir.mkdir()
     chunks = _make_chunk_files(split_dir)
     selected = chunks["mixed_steady_state"]
     _write_exec_details(split_dir, [
-        # Row for a totally different file.
         {
             "output_path": str(split_dir / "some_other.json.gz"),
             "num_gpu_events": 0,
@@ -383,9 +308,7 @@ def test_selected_chunk_not_in_csv_returns_none(tl_module, split_dir):
     assert result is None
 
 
-# ---------------------------------------------------------------------------
 # CLI flag contract (parser-level; --help inspection is enough)
-# ---------------------------------------------------------------------------
 
 
 def _run_help() -> str:
@@ -401,8 +324,7 @@ def test_cli_flag_appears_in_help():
     """--steady-state-mode is wired into argparse and documented."""
     out = _run_help()
     assert "--steady-state-mode" in out
-    # All three choices visible in usage/help (argparse renders them
-    # inline as {mixed,decode_only,prefilldecode}).
+    # All three choices visible in usage/help.
     assert "mixed" in out
     assert "decode_only" in out
     assert "prefilldecode" in out

@@ -1,21 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""RCA engines.
+"""RCA engines, both exposing ``async def summarize(symptom) -> str``.
 
-M1.5 ships two engines:
-
-* :class:`NoopRcaEngine` — default. Returns "" so the ActionLadder skips
-  the ``rca_text`` field on findings.
-* :class:`LlmRcaEngine` — calls an OpenAI-compatible chat completion
-  endpoint (the chat-server proxying Codex / Claude). The engine is
-  guarded by :class:`RcaThrottle` so cost stays bounded:
-
-    - severity gate (default: only ``high`` symptoms),
-    - per-dedup-key cooldown (default 60s),
-    - per-tick cap (default 1 LLM call).
-
-Both engines expose ``async def summarize(symptom) -> str``. The
-ActionLadder ``await``s each call.
+* :class:`NoopRcaEngine` — default; returns "" (ladder skips ``rca_text``).
+* :class:`LlmRcaEngine` — OpenAI-compatible chat endpoint, cost-bounded by
+  :class:`RcaThrottle`: severity gate (default high), per-dedup-key cooldown
+  (default 60s), per-tick cap (default 1 call).
 """
 
 from __future__ import annotations
@@ -112,12 +102,9 @@ class RcaThrottle:
         """
         self._config = config or RcaThrottleConfig()
         self._state_view = state_view
-        # Disk-backed per-key cooldown timestamps — the 60s default
-        # cooldown is meaningless without persistence under the
-        # subprocess-per-tick transport (every subprocess sees an
-        # empty dict and calls the LLM again). ``_tick_calls`` /
-        # ``_tick_id`` deliberately stay in-memory: they're per-tick
-        # budget counters, not cross-tick state.
+        # Disk-backed per-key cooldown timestamps; the 60s cooldown is
+        # meaningless without persistence under subprocess-per-tick.
+        # ``_tick_calls`` / ``_tick_id`` stay in-memory (per-tick budget only).
         loaded = state_view.load() if state_view is not None else {}
         self._last_called_unix: dict[tuple[str, ...], float] = (
             _decode_throttle_keys(loaded.get("last_called_unix"))
@@ -261,9 +248,8 @@ class LlmRcaEngine:
         if not self.base_url or not self.api_key:
             return ""
         now_unix = time.time()
-        # tick_id = -1 routes per-tick budget to a single bucket when
-        # callers don't provide one; ActionLadder calls begin_tick via
-        # its own wrapper to scope buckets per tick (see decide()).
+        # tick_id = -1 = single shared bucket when no caller sets one;
+        # ActionLadder scopes per-tick buckets via set_tick (see decide()).
         tick_id = getattr(self, "_current_tick_id", -1)
         assert self.throttle is not None
         if not self.throttle.should_call(symptom, now_unix=now_unix, tick_id=tick_id):

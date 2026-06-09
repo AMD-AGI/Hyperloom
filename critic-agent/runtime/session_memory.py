@@ -2,26 +2,13 @@
 
 """Per-session memory store for the Critic agent.
 
-The Critic must keep state inside a single session because the Coordinator
-(and other A2A hosts) only send the full context on the *first* call —
-subsequent turns may carry incremental messages plus a decision. Critic
-needs to merge those turns against the previously known context, recall
-already-reviewed proposals, and reuse cached KB priors instead of hammering
-the KB on every reactor tick.
-
-Design constraints (handoff doc §5):
-
-* MVP storage is local JSON / JSONL — no database dependency.
-* Stateful per-session, stateless across sessions: nothing in this file
-  is intended to outlive the session (long-term knowledge goes to remote
-  KB).
-* Files are append-only where it makes sense (decisions, events) and
-  small-and-rewritten where consolidation is cheaper (context, priors
-  cache, reviewed msg ids).
-* Merging an incoming context dict with the stored one is **explicit-wins**:
-  values present in the request override stored values, but stored values
-  fill in for keys the request omitted. Both ``""`` and ``"unknown"`` are
-  treated as missing.
+Hosts only send full context on the first call, so Critic merges later
+incremental turns against stored context, recalls already-reviewed
+proposals, and caches KB priors. Constraints (handoff doc §5): local
+JSON/JSONL only; per-session and not meant to outlive the session
+(long-term knowledge goes to remote KB); append-only for decisions/events,
+rewritten for context/priors/reviewed ids; context merge is explicit-wins
+with ``""`` / ``"unknown"`` treated as missing.
 
 Layout under ``CRITIC_SESSION_MEMORY_DIR``::
 

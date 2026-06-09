@@ -2,8 +2,8 @@
 
 """Library entry-points for LLM specialists (Arbor / TBO / Hyperloom).
 
-Three high-level helpers that wrap framework-agent's internals without
-forcing the caller to construct a full :class:`ExploreRequest` JSON:
+Three helpers wrapping framework-agent internals without a full
+:class:`ExploreRequest` JSON:
 
 * :func:`find_relevant_prs_smart`  - cross-repo PR discovery via
   primus_cortex + (optional) anonymous GitHub Search.
@@ -12,12 +12,7 @@ forcing the caller to construct a full :class:`ExploreRequest` JSON:
 * :func:`evaluate_candidate_outcome` - stateless winner check given
   pre-computed benchmark/accuracy JSON blobs.
 
-These mirror the contract documented in
-``claw-dev/docs-zh/framework-agent-hyperloom-implementation-plan.md``
-§4.9 and §"Operation Protocol (for LLM specialists)". The CLI does
-NOT depend on this module so removing it would not break ``fa
-explore``; conversely callers of this module do not need argparse /
-JSON request files.
+The CLI does not depend on this module and vice versa.
 """
 
 from __future__ import annotations
@@ -68,42 +63,14 @@ def find_relevant_prs_smart(
     primus_label: str | None = None,
     include_github: bool = True,
 ) -> list[Candidate]:
-    """Discover candidate PRs across one or more repos.
+    """Discover candidate PRs across one or more repos (plain-arg version of
+    :func:`framework_agent.sources.enumerate_candidates`).
 
-    Behaviour mirrors :func:`framework_agent.sources.enumerate_candidates`
-    but takes plain arguments instead of an ExploreRequest:
-
-    * Each repo is queried via primus_cortex (hard-fail on transport
-      errors) when ``primus_cortex_url`` is provided.
-    * GitHub Search is consulted as a best-effort secondary source
-      when ``include_github=True`` (returns ``[]`` on rate-limit
-      or non-GitHub remote, never raises).
-    * Results are de-duped by ``(repo_url, ref)`` preserving the
-      first occurrence so primus_cortex entries win ties.
-
-    Args:
-        gap_description (str): Free-text gap used to drive GitHub keyword
-            search.
-        repos (list[str] | None): Repo URLs to query. Empty/None short-circuits
-            to ``[]``.
-        primus_cortex_url (str | None): Base URL of the primus_cortex service;
-            when set, each repo is queried there (hard-fail on transport error).
-        primus_timeout_sec (float): Per-request primus_cortex timeout. Defaults
-            to 10.0.
-        limit_per_repo (int): Max PRs to take per repo per source. Defaults to 5.
-        primus_state (str): PR state filter for primus_cortex. Defaults to
-            ``"open"``.
-        primus_label (str | None): Optional label filter for primus_cortex.
-        include_github (bool): Whether to also consult anonymous GitHub Search.
-            Defaults to True.
-
-    Returns:
-        list[Candidate]: De-duped candidates by ``(repo_url, ref)`` preserving
-            first occurrence (primus_cortex wins ties); empty when there is no
-            work to do.
-
-    Raises:
-        PrimusCortexError: Propagated when a primus_cortex query fails.
+    Each repo is queried via primus_cortex (hard-fail) when
+    ``primus_cortex_url`` is set; GitHub Search is a best-effort secondary
+    when ``include_github=True`` (returns ``[]``, never raises). Results are
+    de-duped by ``(repo_url, ref)`` so primus_cortex wins ties. Returns ``[]``
+    when ``repos`` is empty.
     """
     if not repos:
         return []
@@ -151,31 +118,11 @@ def fetch_pr_audit_material(
     primus_cortex_url: str,
     primus_timeout_sec: float = 30.0,
 ) -> dict[str, str]:
-    """Download ``pr.patches`` and ``pr_files.json`` for a single PR.
+    """Download ``pr.patches`` (unified diff) and ``pr_files.json``
+    ({repo, number, files}) for a single PR under ``out_dir``.
 
-    Output layout (under ``out_dir``):
-
-      pr.patches          - unified diff (synthesized from primus's
-                            JSON patch array)
-      pr_files.json       - {repo, number, files: [...]} payload
-
-    Hard-fails (raises ``PrimusCortexError``) when primus_cortex transport /
-    parse errors occur, mirroring the explorer's stage-3 policy.
-
-    Args:
-        repo_url (str): Git URL of the repo; parsed to an ``owner/name`` slug.
-        pr_number (int): PR number to fetch material for.
-        out_dir (Path | str): Directory to write ``pr.patches`` and
-            ``pr_files.json`` into (created if missing).
-        primus_cortex_url (str): Base URL of the primus_cortex service.
-        primus_timeout_sec (float): Per-request timeout. Defaults to 30.0.
-
-    Returns:
-        dict[str, str]: Absolute paths under keys ``patches_path`` and
-            ``files_json_path``, suitable for downstream logging / metadata.
-
-    Raises:
-        PrimusCortexError: On primus_cortex transport or parse errors.
+    Returns the absolute paths in a dict. Hard-fails (raises
+    ``PrimusCortexError``) on primus_cortex transport / parse errors.
     """
     out = Path(out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -261,33 +208,10 @@ def evaluate_candidate_outcome(
 ) -> dict:
     """Stateless winner check given pre-computed benchmark/accuracy data.
 
-    The gate logic matches :func:`framework_agent.explorer._winner_decision`
-    so library callers see the same verdict as the CLI. Inputs accept
-    either a dict, a Path to a JSON file, or a string path; missing /
-    invalid inputs trigger a ``False`` verdict with a reason rather
-    than raising.
-
-    Args:
-        benchmark (dict | Path | str | None): Benchmark data or a path to its
-            JSON; missing/invalid yields a non-winner verdict.
-        accuracy (dict | Path | str | None): Accuracy data or a path to its
-            JSON. Defaults to None.
-        baseline_throughput (float): Positive baseline throughput for the ratio
-            gate.
-        baseline_accuracy (float | None): Baseline accuracy enabling the
-            accuracy-drop gate. Defaults to None.
-        min_throughput_ratio (float): Minimum candidate/baseline ratio to pass.
-            Defaults to 1.05.
-        max_accuracy_drop (float): Maximum tolerated accuracy drop. Defaults to
-            0.05.
-
-    Returns:
-        dict: Verdict with keys ``winner`` (bool), ``reason`` (str),
-            ``throughput``, ``accuracy``, ``throughput_ratio``, and
-            ``completed``.
-
-    Raises:
-        ValueError: If ``baseline_throughput`` is not a positive float.
+    Gate logic matches the CLI's winner decision. Inputs accept a dict, a
+    Path, or a string path; missing/invalid inputs yield a ``False`` verdict
+    with a reason rather than raising. Returns a dict with keys ``winner``,
+    ``reason``, ``throughput``, ``accuracy``, ``throughput_ratio``, ``completed``.
     """
     if baseline_throughput is None or baseline_throughput <= 0:
         raise ValueError("baseline_throughput must be a positive float")

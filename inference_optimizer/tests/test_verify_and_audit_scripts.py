@@ -1,22 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Roofline-v2 N7: verify + audit script smoke tests.
-
-These scripts (`scripts.verify_roofline_v2` /
-`scripts.audit_roofline_decisions`) are pure operator tooling — no
-production code path depends on them.
-
-Tests pin:
-
-* Exit-code contract for verify (0=PASS ≥+5%, 2=PARTIAL >0 but <5%,
-  1=FAIL ≤0 or missing state.json).
-* §10.3 v2 quality criteria surfaced in the rendered output
-  (cache_hit_rate, analysis_md_referenced_count,
-  hallucinated_flag_count, roofline_action_count).
-* JSON output schema for CI consumption (verify + audit both).
-* Graceful degradation when state.json is missing / cache field
-  empty / analysis_md not referenced.
-"""
+"""Roofline-v2 N7: verify + audit script smoke tests."""
 
 from __future__ import annotations
 
@@ -31,9 +15,7 @@ from inference_optimizer.scripts import (
 )
 
 
-# ---------------------------------------------------------------------------
 # State.json fixtures
-# ---------------------------------------------------------------------------
 def _baseline_state() -> dict:
     """Pre-v2 state: gain ~0, no roofline action, no v2 metadata."""
     return {
@@ -56,8 +38,7 @@ def _baseline_state() -> dict:
 
 
 def _exp_state(*, gain: float = 6.5) -> dict:
-    """Post-v2 experiment: roofline ran 2x, prunes grounded in
-    analysis.md, only proposed discovered flags, with cache metrics."""
+    """Post-v2 experiment: roofline ran 2x, grounded prunes, discovered flags, cache metrics."""
     return {
         "session_id": "exp-1",
         "cumulative_gain_validated": gain,
@@ -125,9 +106,7 @@ def _write(session_dir: Path, state: dict) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # verify_roofline_v2 — exit codes
-# ---------------------------------------------------------------------------
 def test_verify_pass_when_delta_at_least_5pct(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
     _write(tmp_path / "e", _exp_state(gain=6.5))
@@ -168,14 +147,12 @@ def test_verify_fail_on_missing_state_json(tmp_path, capsys):
         "--baseline", str(tmp_path / "b"),
         "--exp", str(tmp_path / "no-such-dir"),
     ])
-    assert rc == 1  # delta gain = 0 - 0.1 = negative
+    assert rc == 1  # delta gain negative
     out = capsys.readouterr().out
     assert "state.json not found" in out
 
 
-# ---------------------------------------------------------------------------
 # verify rendering — §10.3 v2 criteria + tabular data
-# ---------------------------------------------------------------------------
 def test_verify_renders_v2_quality_criteria(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
     _write(tmp_path / "e", _exp_state(gain=6.5))
@@ -184,13 +161,11 @@ def test_verify_renders_v2_quality_criteria(tmp_path, capsys):
         "--exp", str(tmp_path / "e"),
     ])
     out = capsys.readouterr().out
-    # §10.3 criteria block present
     assert "§10.3 v2 quality criteria" in out
     assert "cache_hit_rate ≥ 50%" in out
     assert "analysis_md_referenced_count ≥ 3" in out
     assert "hallucinated_flag_count = 0" in out
     assert "roofline_action_count ≥ 1" in out
-    # Cache hit rate computed from tick_cache_metrics
     # 15000 / (5000+15000) = 75.0%
     assert "75.0%" in out
 
@@ -203,9 +178,7 @@ def test_verify_renders_action_seq_for_both_sessions(tmp_path, capsys):
         "--exp", str(tmp_path / "e"),
     ])
     out = capsys.readouterr().out
-    # Baseline single-entry stack
     assert "params:v1" in out
-    # Exp stack with roofline + variants
     assert "two_batch_overlap" in out
     assert "comm_optimization:aiter_allreduce" in out
 
@@ -227,9 +200,7 @@ def test_verify_json_emits_structured_summary(tmp_path, capsys):
     assert payload["exp"]["prune_branch_count_orchestration"] == 2
 
 
-# ---------------------------------------------------------------------------
 # audit_roofline_decisions — content + JSON
-# ---------------------------------------------------------------------------
 def test_audit_renders_full_block(tmp_path, capsys):
     _write(tmp_path / "s", _exp_state(gain=6.5))
     rc = audit_roofline_decisions.main([
@@ -237,34 +208,24 @@ def test_audit_renders_full_block(tmp_path, capsys):
     ])
     assert rc == 0
     out = capsys.readouterr().out
-    # Section headers
     assert "roofline action timeline" in out
     assert "pruned_families (analysis-md grounding)" in out
     assert "flag audit" in out
     assert "decision quality criteria" in out
-    # Roofline timeline entries
     assert "t-rf-1" in out and "t-rf-2" in out
-    # Pruned families with analysis-md-grounded flag
     assert "kernel_opt" in out
     assert "analysis.md snapshot #1" in out
-    # Grounded should be yes (mentions "analysis.md", "saturated")
-    # First prune row has the keyword
-    # Hallucinated flag detection: --known-flag-c was proposed but not in
-    # discovered_flags namespace... wait — _exp_state lists it as a
-    # discovered flag. So no hallucination.
+    # --known-flag-c is a discovered flag here, so no hallucination.
     assert "hallucinated (not in namespace): 0" in out
-    # Cache hit rate 75%
     assert "75.0%" in out
 
 
 def test_audit_detects_hallucinated_flag(tmp_path, capsys):
-    """When a proposed flag is NOT in discovered_flags, count as
-    hallucinated."""
+    """A proposed flag not in discovered_flags counts as hallucinated."""
     state = _exp_state(gain=4.0)
-    # Remove --known-flag-c from discovered namespace; it was still
-    # used in explore_attempts → should now register as hallucination
+    # Drop --known-flag-c from the namespace; it's still used in explore_attempts.
     state["discovered_flags"]["sglang"]["backend_flags"] = [
-        "--known-flag-a", "--known-flag-b",  # drop --known-flag-c
+        "--known-flag-a", "--known-flag-b",
     ]
     _write(tmp_path / "s", state)
     audit_roofline_decisions.main([
@@ -314,8 +275,7 @@ def test_audit_json_output_schema(tmp_path, capsys):
 
 
 def test_audit_classifies_main_llm_only_prune(tmp_path, capsys):
-    """A prune whose reason does NOT mention any analysis.md keyword
-    is classified as not-grounded."""
+    """A prune whose reason mentions no analysis.md keyword is not-grounded."""
     state = _exp_state(gain=4.0)
     state["pruned_families"].append({
         "family": "operator_tuning",
@@ -327,13 +287,7 @@ def test_audit_classifies_main_llm_only_prune(tmp_path, capsys):
         "--session", str(tmp_path / "s"),
     ])
     out = capsys.readouterr().out
-    # operator_tuning row exists
     assert "operator_tuning" in out
-    # And its grounding tag is "no" (look for "operator_tuning ... no")
-    # Simple substring check: the row text contains "no" between the
-    # source and reason columns. We don't pin column positions; just
-    # check that "manual operator override" surfaces and the row
-    # exists.
     assert "manual operator override" in out
 
 
@@ -346,6 +300,5 @@ def test_audit_cache_hit_rate_zero_when_no_metrics(tmp_path, capsys):
         "--session", str(tmp_path / "s"),
     ])
     out = capsys.readouterr().out
-    # cache_hit_rate criterion should report MISS when no metrics
     assert "[MISS] cache_hit_rate ≥ 50%" in out
     assert "0.0%" in out

@@ -2,13 +2,9 @@
 
 """Cross-tick state persistence for stateful subsystems.
 
-The robustness-agent M1 transport spawns a fresh ``python -m
-robustness_agent.runtime.cli tick`` subprocess per Coordinator tick.
-That means **any in-memory state accumulated by a detector / ladder /
-throttle is lost between ticks** — fatal for any rule that depends on
-"N consecutive ticks", a rolling window, or a cooldown timestamp.
-
-:class:`DetectorStateStore` is the disk-backed unification layer.
+The subprocess-per-tick transport loses any in-memory detector / ladder /
+throttle state between ticks, breaking "N consecutive ticks", rolling-window,
+and cooldown rules. :class:`DetectorStateStore` is the disk-backed layer.
 One JSON file per session lives at::
 
     <session_dir>/agents/robustness/detector_state.json
@@ -26,14 +22,10 @@ with a flat namespaced layout::
       "rca_throttle":  {"last_called_unix": {"key|tuple": 1700000003.5, ...}}
     }
 
-Owners hold a thin :class:`DetectorStateView` handle that exposes
-``load() / save(dict)`` against their own slot — they don't see other
-namespaces. The store is responsible for atomic flush via
-``tmpfile + os.replace``; views just mutate the shared in-memory dict.
-
-The reactor calls :meth:`DetectorStateStore.flush_atomic` at the end
-of every successful tick (via ``asyncio.to_thread`` so the tick budget
-isn't blocked on the fsync).
+Owners hold a thin :class:`DetectorStateView` handle exposing ``load() /
+save(dict)`` against their own slot. The store flushes atomically via
+``tmpfile + os.replace``; the reactor calls :meth:`flush_atomic` once per
+successful tick (off the event loop so fsync doesn't block the tick budget).
 """
 
 from __future__ import annotations
@@ -49,13 +41,10 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-# Default filename. The path lives under ``<session_dir>/<subdir>/``
-# so a single ``rm -r agents/robustness`` resets all robustness disk
-# artefacts together (findings + state + reports).
+# Lives under ``<session_dir>/<subdir>/`` so ``rm -r agents/robustness`` resets all artefacts together.
 _STATE_FILENAME: str = "detector_state.json"
 
-# Default subdir under ``session_dir``. Keep aligned with
-# ``FindingSinkConfig.subdir.parent`` so the disk layout is uniform.
+# Keep aligned with ``FindingSinkConfig.subdir.parent`` so the disk layout is uniform.
 _DEFAULT_SUBDIR: str = "agents/robustness"
 
 
@@ -134,8 +123,7 @@ class DetectorStateStore:
                 self._path,
             )
             return
-        # Per-slot normalisation — drop non-dict values so consumers
-        # always see ``dict[str, Any]`` on read.
+        # Drop non-dict slot values so consumers always see ``dict[str, Any]``.
         for key, value in parsed.items():
             if isinstance(value, dict):
                 self._data[str(key)] = value
@@ -157,8 +145,7 @@ class DetectorStateStore:
             )
             return
         try:
-            # NamedTemporaryFile in the same dir guarantees os.replace
-            # is atomic (same filesystem).
+            # Same-dir tmpfile keeps os.replace atomic (same filesystem).
             tmp = tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",

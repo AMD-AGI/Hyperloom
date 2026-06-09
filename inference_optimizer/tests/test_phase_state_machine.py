@@ -1,21 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 M2 — phase state machine tests (KB_design §3.2 + §3.8 + §3.11 R1).
-
-Covers the additive subset of M2 implemented in this PR:
-
-* ``phase_state`` pure functions (allowed actions, exit reasons,
-  stop_reason vocab, plateau/budget judges, v0.6 phase inference).
-* SharedState new fields + ``record_phase_transition`` helper.
-* PolicyGate R1 ``phase_incompatible`` (warn-vs-enforce modes).
-* Coordinator initialises ``phase`` to PRELUDE on fresh sessions and
-  records a baseline ``phase_entered`` row in ``phase_history``.
-* Coordinator advances PRELUDE → EXPLORE once ``baseline_tput > 0``
-  (with FRAMEWORK_PR phase opt-out via ``framework_phase_enabled=False``).
-* breakdown.collect_phase_segments groups action events by phase
-  window with proper ``elapsed_seconds`` math.
-* PolicyGate adds the new phase fields to ``CORE_STATE_FIELDS``.
-"""
+"""v0.8 M2 — phase state machine tests (KB_design §3.2 + §3.8 + §3.11 R1)."""
 
 from __future__ import annotations
 
@@ -35,35 +20,28 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
 
 
-# ===========================================================================
 # phase_state pure function tests
-# ===========================================================================
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
         "PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE",
     )
-    # phase_index strictly increases.
     for i, name in enumerate(phase_state.PHASE_NAMES):
         assert phase_state.phase_index(name) == i
     assert phase_state.phase_index("unknown") == -1
 
 
 def test_allowed_actions_disjoint_phases():
-    # Every kernel-owned action belongs only to KERNEL phase (Inv-2.1
-    # protects the strictly-monotonic flow). recover is in every phase.
+    # recover is in every phase; kernel-owned actions only in KERNEL (Inv-2.1).
     for phase in phase_state.PHASE_NAMES:
         allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
         assert "recover" in allowed
-    # Cross-phase exclusion sanity.
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "kernel_opt" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL"]
@@ -83,6 +61,129 @@ def test_is_action_allowed_in_phase_handles_unknowns():
     assert not phase_state.is_action_allowed_in_phase("baseline", "")
     # Empty action name → deny.
     assert not phase_state.is_action_allowed_in_phase("", "PRELUDE")
+
+
+def test_llm_proposable_set_drops_coordinator_internal_actions():
+    from inference_optimizer.protocol.action_surfaces import (
+        COORDINATOR_INTERNAL_ACTIONS,
+        ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
+    )
+
+    # Proposable = allowlist minus Coordinator-internal and robustness-delegate-only actions.
+    for phase in phase_state.PHASE_NAMES:
+        allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
+        proposable = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS[phase]
+        assert proposable == (
+            allowed
+            - COORDINATOR_INTERNAL_ACTIONS
+            - ROBUSTNESS_DELEGATE_ONLY_ACTIONS
+        )
+        assert proposable.isdisjoint(COORDINATOR_INTERNAL_ACTIONS)
+        # recover stays phase-allowed (robustness delegate) but is
+        # never LLM-proposable by Orchestration.
+        assert "recover" in allowed
+        assert "recover" not in proposable
+    # The advertised analysis / framework_pr names are never proposable.
+    explore = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["EXPLORE"]
+    assert "roofline" not in explore
+    assert "profile" not in explore
+    assert "explore" in explore and "specialist" in explore
+    framework_pr = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_PR"]
+    assert "framework_pr" not in framework_pr
+    assert "integrate_patch" in framework_pr
+
+
+def test_is_action_llm_proposable_in_phase_handles_unknowns():
+    assert phase_state.is_action_llm_proposable_in_phase("baseline", "PRELUDE")
+    assert phase_state.is_action_llm_proposable_in_phase("explore", "EXPLORE")
+    # roofline lives in the allowlist but is never LLM-proposable.
+    assert phase_state.is_action_allowed_in_phase("roofline", "EXPLORE")
+    assert not phase_state.is_action_llm_proposable_in_phase("roofline", "EXPLORE")
+    assert not phase_state.is_action_llm_proposable_in_phase("framework_pr", "FRAMEWORK_PR")
+    # Unknown phase / empty action → deny by default.
+    assert not phase_state.is_action_llm_proposable_in_phase("baseline", "UNKNOWN")
+    assert not phase_state.is_action_llm_proposable_in_phase("", "PRELUDE")
+    # llm_proposable_actions_for is sorted and excludes internal names.
+    explore = phase_state.llm_proposable_actions_for("EXPLORE")
+    assert explore == tuple(sorted(explore))
+    assert "roofline" not in explore and "profile" not in explore
+
+
+def test_phase_interleave_off_matches_default_proposable_set():
+    """With the env flag off, the interleave-aware helpers match the default set."""
+    for phase in phase_state.PHASE_NAMES:
+        base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
+            phase, frozenset(),
+        )
+        assert (
+            phase_state.llm_proposable_actions_for_with_interleave(
+                phase, interleave=False,
+            )
+            == base
+        )
+    # And kernel-owned actions are denied in EXPLORE under default mode.
+    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "kernel_opt", "EXPLORE", interleave=False,
+    )
+    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "explore", "KERNEL", interleave=False,
+    )
+
+
+def test_phase_interleave_on_widens_explore_and_kernel():
+    """With interleave=True, EXPLORE gains kernel-owned actions and KERNEL gains explore/specialist/integrate_patch."""
+    explore = phase_state.llm_proposable_actions_for_with_interleave(
+        "EXPLORE", interleave=True,
+    )
+    assert "kernel_opt" in explore
+    assert "integrate" in explore
+    assert "gemm_tuning" in explore
+    assert "explore" in explore  # native EXPLORE actions still present
+    assert "specialist" in explore
+    kernel = phase_state.llm_proposable_actions_for_with_interleave(
+        "KERNEL", interleave=True,
+    )
+    assert "explore" in kernel
+    assert "specialist" in kernel
+    assert "integrate_patch" in kernel
+    assert "kernel_opt" in kernel  # native KERNEL actions still present
+    # SWEEP / CLOSE / PRELUDE / FRAMEWORK_PR are unchanged.
+    for phase in ("PRELUDE", "FRAMEWORK_PR", "SWEEP", "CLOSE"):
+        base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
+            phase, frozenset(),
+        )
+        assert (
+            phase_state.llm_proposable_actions_for_with_interleave(
+                phase, interleave=True,
+            )
+            == base
+        )
+
+
+def test_phase_interleave_env_flag_is_picked_up(monkeypatch):
+    """The helpers honour the env flag; interleave is ON by default, only an explicit off value disables it."""
+    # Unset / empty => ON by default.
+    monkeypatch.delenv(phase_state.PHASE_INTERLEAVE_ENV, raising=False)
+    assert phase_state.is_phase_interleave_enabled() is True
+    assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "kernel_opt", "EXPLORE",
+    )
+    # Explicit on values stay on.
+    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
+    assert phase_state.is_phase_interleave_enabled() is True
+    assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "kernel_opt", "EXPLORE",
+    )
+    # Explicit off values are the rollback knob.
+    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "0")
+    assert phase_state.is_phase_interleave_enabled() is False
+    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
+        "kernel_opt", "EXPLORE",
+    )
+    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "false")
+    assert phase_state.is_phase_interleave_enabled() is False
+    monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "off")
+    assert phase_state.is_phase_interleave_enabled() is False
 
 
 def test_phase_exit_reasons_includes_required_vocab():
@@ -149,10 +250,7 @@ def test_exit_terminal_prelude_after_three_baseline_failures():
 
 
 def test_exit_normal_explore_uses_budget_exhaustion():
-    # Provide an in-the-past phase_started_unix so elapsed exceeds budget.
-    # IR-6 force-exit is disabled (thresholds=0) for this test so we
-    # isolate the budget_exhausted path; a dedicated suite in
-    # test_phase_force_exit.py exercises the force-exit gate.
+    # Past phase_started_unix so elapsed exceeds budget; IR-6 force-exit disabled to isolate budget path.
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=1.0,
@@ -207,9 +305,7 @@ def test_compute_next_phase_terminal_overrides_phase():
     assert out[2].get("terminal") is True
 
 
-# ===========================================================================
 # SharedState writer
-# ===========================================================================
 def test_shared_state_phase_fields_default_to_empty():
     s = SharedState()
     assert s.phase == ""
@@ -243,9 +339,7 @@ def test_record_phase_transition_writes_row_and_updates_phase():
     assert row2["from_phase"] == "PRELUDE"
 
 
-# ===========================================================================
 # CORE_STATE_FIELDS includes phase fields (Inv-1 single writer)
-# ===========================================================================
 def test_core_state_fields_includes_phase_fields():
     for f in (
         "phase", "phase_started_ts", "phase_started_unix",
@@ -254,9 +348,7 @@ def test_core_state_fields_includes_phase_fields():
         assert f in CORE_STATE_FIELDS, f
 
 
-# ===========================================================================
 # PolicyGate R1 phase_incompatible
-# ===========================================================================
 def _make_role_registry():
     from inference_optimizer.orchestrator.agent_role import default_role_registry
     return default_role_registry()
@@ -332,12 +424,12 @@ def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
         shared_state=state,
         strict_phase=True,
     )
-    # ``profile`` / ``roofline`` are now LLM-denied earlier via the
-    # ``analysis_action_not_llm_proposable`` rule (Coordinator-internal
-    # analysis actions never reach R1), and ``params`` is denied with
-    # ``action_deprecated``. We pick ``sweep`` instead — a non-deprecated,
-    # non-internal action that is allowed only in the SWEEP phase, so the
-    # propose lands cleanly on R1 phase_incompatible while in PRELUDE.
+    # ``profile`` / ``roofline`` are Coordinator-managed and denied by
+    # R1 ``phase_incompatible`` regardless of phase, and ``params`` is
+    # denied with ``action_deprecated``. We pick ``sweep`` instead — a
+    # non-deprecated, non-internal action that is proposable only in the
+    # SWEEP phase, so the propose lands on R1 phase_incompatible via the
+    # per-phase set while in PRELUDE.
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "sweep", "predicted_gain_pct": 1.0},
@@ -347,9 +439,105 @@ def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
     assert excinfo.value.rule == "phase_incompatible"
 
 
-# ===========================================================================
+def test_policy_gate_phase_interleave_off_denies_kernel_request_in_explore(
+    monkeypatch,
+):
+    """With interleave off, a kernel-owned REQUEST in EXPLORE is denied by R1."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "0")
+    state = SharedState()
+    state.record_phase_transition(
+        to_phase="EXPLORE", reason="prelude_done", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+    )
+    gate = PolicyGate(
+        role_registry=_make_role_registry(),
+        shared_state=state,
+        strict_phase=True,
+    )
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": "kernel_opt",
+            "params": {},
+        },
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "phase_incompatible"
+
+
+def test_policy_gate_phase_interleave_on_allows_kernel_request_in_explore(
+    monkeypatch,
+):
+    """With interleave on, EXPLORE widens to kernel-owned kinds, so R1 lets the REQUEST through."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+    state = SharedState()
+    state.record_phase_transition(
+        to_phase="EXPLORE", reason="prelude_done", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+    )
+    gate = PolicyGate(
+        role_registry=_make_role_registry(),
+        shared_state=state,
+        strict_phase=True,
+    )
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": "kernel_opt",
+            "params": {},
+        },
+    )
+    gate.validate_intent("orchestration", intent)  # no exception
+
+
+def test_policy_gate_phase_interleave_on_allows_explore_propose_in_kernel(
+    monkeypatch,
+):
+    """With interleave on, KERNEL also accepts explore/specialist/integrate_patch proposals."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+    state = SharedState()
+    state.record_phase_transition(
+        to_phase="KERNEL", reason="plateau_explore", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+    )
+    gate = PolicyGate(
+        role_registry=_make_role_registry(),
+        shared_state=state,
+        strict_phase=True,
+    )
+    intent = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
+    )
+    gate.validate_intent("orchestration", intent)  # no exception
+
+
+def test_policy_gate_phase_interleave_does_not_widen_other_phases(monkeypatch):
+    """Interleave widening is scoped to EXPLORE/KERNEL; SWEEP still rejects explore/kernel_opt under R1."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+    state = SharedState()
+    state.record_phase_transition(
+        to_phase="SWEEP", reason="plateau_kernel", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+    )
+    gate = PolicyGate(
+        role_registry=_make_role_registry(),
+        shared_state=state,
+        strict_phase=True,
+    )
+    intent = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={"action_name": "kernel_opt", "predicted_gain_pct": 1.0},
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "phase_incompatible"
+
+
 # Coordinator initialises phase on fresh sessions
-# ===========================================================================
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
     from inference_optimizer.orchestrator.backends import (
@@ -377,16 +565,9 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     row = c.shared_state.phase_history[0]
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
-    # Budget dict populated. 2026-06 rebalance reshaped the slice:
-    # PRELUDE 0.08 → 0.05 (only ever used ~5min of 27min in practice),
-    # EXPLORE 0.47 → 0.40 (force-exit at phase_remaining_pct=0.176
-    # confirmed it was over-provisioned by ~7pp), KERNEL held at 0.35
-    # (GEAK quick-mode needs full cycles), and SWEEP 0.08 → 0.18 to
-    # fit the sweep + conc_sweep pair that field telemetry showed
-    # running ~2.5x over the old 8% slice. Sum across phases stays
-    # at 1.0.
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.40
-    assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.05
+    # P3_22 rebalance: EXPLORE/KERNEL carry a larger slice; PRELUDE 3%, SWEEP 12%; sum stays 1.0.
+    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.45
+    assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.03
 
 
 @pytest.mark.asyncio
@@ -395,20 +576,14 @@ async def test_coordinator_advances_to_explore_when_baseline_present(
 ):
     c = coordinator_with_mocks
     try:
-        # Skip the FRAMEWORK_PR phase so the legacy PRELUDE→EXPLORE
-        # contract is what this test exercises (the FRAMEWORK_PR
-        # transition is covered separately in
-        # ``test_phase_state_framework_pr.py``).
+        # Skip FRAMEWORK_PR so this exercises the legacy PRELUDE→EXPLORE contract.
         c.shared_state.framework_phase_enabled = False
-        # Simulate baseline KEEP without running the executor: write the
-        # SharedState event that triggers the prelude_done condition.
+        # Simulate baseline KEEP: write the event that triggers prelude_done.
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
         assert c.shared_state.phase == "EXPLORE"
-        # phase_history now has 2 rows: PRELUDE entry + PRELUDE→EXPLORE
-        # (FRAMEWORK_PR is skipped here because the fixture sets
-        # ``framework_phase_enabled=False``).
+        # 2 rows: PRELUDE entry + PRELUDE→EXPLORE (FRAMEWORK_PR skipped).
         assert len(c.shared_state.phase_history) == 2
         last = c.shared_state.phase_history[-1]
         assert last["from_phase"] == "PRELUDE"
@@ -429,16 +604,14 @@ async def test_coordinator_phase_idempotent_within_same_tick(
         c.shared_state.save(session_dir)
         await c.tick(1)
         first_history = list(c.shared_state.phase_history)
-        # Another tick without further state change → no new transition.
+        # Another tick without state change → no new transition.
         await c.tick(1)
         assert c.shared_state.phase_history == first_history
     finally:
         await c.stop()
 
 
-# ===========================================================================
 # breakdown collect_phase_segments
-# ===========================================================================
 def test_collect_phase_segments_groups_actions_by_window():
     from inference_optimizer.breakdown.collectors import collect_phase_segments
     state = {

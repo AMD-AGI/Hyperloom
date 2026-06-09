@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Normalize and publish a Hyperloom result directory.
+"""Normalize and publish a Hyperloom result directory (artifacts -> ndjson -> results service).
 
-This is the one-shot end-of-run helper used by Web/skill flows:
-
-  result artifacts -> normalized_results.ndjson -> results service
-
-Failures are non-fatal by default so result publishing never invalidates an
-optimization run. Pass --strict when a caller wants publish failures to fail.
+One-shot end-of-run helper for Web/skill flows. Failures are non-fatal by default so
+publishing never invalidates an optimization run; pass --strict to make publish failures fatal.
 """
 
 from __future__ import annotations

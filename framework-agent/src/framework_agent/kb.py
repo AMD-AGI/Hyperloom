@@ -2,20 +2,12 @@
 
 """Knowledge-base selector + contributor for framework-agent.
 
-Derived from ``TBO/src/arbor/kb.py`` (the 4-file domain schema) with two
-framework-agent-specific changes:
-
-* ``KB_ROOT`` is resolved at call time via ``_resolve_kb_root()`` instead of
-  being a hardcoded module-level path - the framework-agent KB lives under
-  ``${FRAMEWORK_AGENT_KB_DIR}`` (env), with a sane fallback for tests.
-* A new :func:`synthesize_findings` distils a list of :class:`Finding`
-  records into a markdown blob suitable for ``contribute_to_kb``. The
-  default path is pure-Python (zero deps); ``with_llm=True`` lazy-imports
-  ``claude_agent_sdk`` (same pattern as kernel-agent's
-  ``tracelens_skill_runner``) and only raises on real failure.
-
-Domain matching keywords + the per-domain priority order
-(``empirical_kb.md`` -> ``shared_pitfalls.md`` -> rest) follow Arbor 1:1.
+``KB_ROOT`` is resolved at call time via ``_resolve_kb_root()`` (under
+``${FRAMEWORK_AGENT_KB_DIR}``, with a test fallback) so tests can monkeypatch
+the environment. :func:`synthesize_findings` distils :class:`Finding` records
+into a markdown blob for ``contribute_to_kb``; the default path is pure-Python
+(zero deps), ``with_llm=True`` lazy-imports ``claude_agent_sdk``. Per-domain
+priority order is ``empirical_kb.md`` -> ``shared_pitfalls.md`` -> rest.
 """
 
 from __future__ import annotations
@@ -29,43 +21,22 @@ from typing import Iterable
 from .models import Finding
 
 
-# Per-framework KB partition root: flat
-# ``<KB_ROOT>/framework_optimization/<framework>/`` layout. A thin
-# per-framework bucket layered on top of the existing per-domain
-# layout so framework-specific empirical findings (sglang scheduler
-# tweaks, vllm chunked-prefill recipes, atom MTP / EP gotchas) can be
-# kept out of the cross-framework ``framework`` domain bag without
-# contaminating it.
-#
-# The directory is NOT created up-front — it's auto-created by
-# :func:`contribute_to_kb_for_framework` on first finding. Callers that
-# only need the path (e.g. for assertion / preview) use
-# :func:`path_for_framework`.
+# Per-framework KB partition root: ``<KB_ROOT>/framework_optimization/
+# <framework>/`` keeps framework-specific findings out of the cross-framework
+# ``framework`` domain bag. Auto-created lazily by
+# :func:`contribute_to_kb_for_framework` on first finding.
 _FRAMEWORK_OPTIMIZATION_ROOT: str = "framework_optimization"
 
 
 def path_for_framework(framework: str) -> Path:
-    """Resolve the KB sub-partition path for a per-framework finding
-    bag.
+    """Resolve the KB sub-partition path for a per-framework finding bag.
 
-    Returns ``<KB_ROOT>/framework_optimization/<framework_lower>/``
-    for the active KB root. The framework name is
-    lowercased and stripped so call sites that pass ``"  Atom  "`` or
-    ``"ATOM"`` resolve to the same partition as ``"atom"``. The
-    partition directory may not exist on disk — callers MUST tolerate
-    the path being absent until ``contribute_to_kb_for_framework``
-    creates it.
-
-    Empty / whitespace-only framework names resolve to the
-    ``framework_optimization`` root itself; callers can treat that as
-    "framework partition not selected" and fall back to the cross-
-    framework ``framework`` domain bag.
-
-    Args:
-        framework (str): Framework name; lowercased and stripped before use.
-
-    Returns:
-        Path: The per-framework partition directory (which may not yet exist).
+    Returns ``<KB_ROOT>/framework_optimization/<framework_lower>/``; the name
+    is lowercased and stripped (``"  Atom  "`` and ``"ATOM"`` resolve to
+    ``"atom"``). The partition dir may not exist until
+    ``contribute_to_kb_for_framework`` creates it. Empty / whitespace-only
+    names resolve to the ``framework_optimization`` root (treat as "not
+    selected" and fall back to the ``framework`` domain bag).
     """
     fw = (framework or "").strip().lower()
     root = _resolve_kb_root()
@@ -83,22 +54,9 @@ def contribute_to_kb_for_framework(
     """Append a finding to the per-framework KB partition.
 
     Mirrors :func:`contribute_to_kb` but writes under
-    :func:`path_for_framework` instead of the per-domain bucket.
-    Useful for findings that are tied to a specific framework
-    (atom MTP recipe, sglang chunked-prefill knob settings) rather
-    than a cross-framework domain.
-
-    The partition directory is created lazily on first write so an
-    empty atom session leaves no stray directories behind.
-
-    Args:
-        framework (str): Framework name selecting the partition.
-        finding (str): Markdown finding body to append.
-        source (str): Source tag recorded in the entry header.
-        session_id (str): Session identifier recorded in the entry header.
-
-    Returns:
-        Path: The ``empirical_kb.md`` file the finding was appended to.
+    :func:`path_for_framework`, for findings tied to a specific framework
+    rather than a cross-framework domain. Partition dir is created lazily on
+    first write.
     """
     fw_dir = path_for_framework(framework)
     fw_dir.mkdir(parents=True, exist_ok=True)
@@ -144,18 +102,10 @@ class KBFile:
 
 
 def _resolve_kb_root() -> Path:
-    """Resolve the active KB root, preferring the env override.
+    """Resolve the active KB root each call (so tests can monkeypatch env).
 
-    Resolution order:
-
-    1. ``FRAMEWORK_AGENT_KB_DIR`` env var if set (set by ``install.sh``);
-    2. ``${FRAMEWORK_AGENT_ROOT}/kb`` if ``FRAMEWORK_AGENT_ROOT`` is set;
-    3. ``${repo}/framework-agent/kb`` derived from this file's location.
-
-    Resolved each call so tests can monkeypatch the environment.
-
-    Returns:
-        Path: The active KB root directory.
+    Order: (1) ``FRAMEWORK_AGENT_KB_DIR``; (2) ``${FRAMEWORK_AGENT_ROOT}/kb``;
+    (3) ``${repo}/framework-agent/kb`` derived from this file's location.
     """
     explicit = os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip()
     if explicit:
@@ -163,8 +113,7 @@ def _resolve_kb_root() -> Path:
     root = os.environ.get("FRAMEWORK_AGENT_ROOT", "").strip()
     if root:
         return Path(root).expanduser() / "kb"
-    # ``__file__`` is .../framework-agent/src/framework_agent/kb.py;
-    # parents[2] is .../framework-agent/.
+    # parents[2] of .../framework_agent/kb.py is .../framework-agent/.
     return Path(__file__).resolve().parents[2] / "kb"
 
 
@@ -385,20 +334,10 @@ def _render_finding_markdown(finding: Finding) -> str:
 
 
 def _synthesize_pure_python(domain: str, findings: list[Finding]) -> str:
-    """Pure-Python distillation: emit a stable markdown digest of findings.
+    """Pure-Python distillation: deterministic markdown digest of findings.
 
-    No LLM in the loop, so the output is deterministic and safe to use
-    in test assertions. Layout:
-        ## Synthesised findings - <domain>
-        <one ### section per finding>
-        ## Aggregate metrics (when metric keys repeat)
-
-    Args:
-        domain (str): Domain label used in the digest heading.
-        findings (list[Finding]): Findings to render.
-
-    Returns:
-        str: A deterministic markdown digest of the findings.
+    Layout: ``## Synthesised findings - <domain>``, one ``###`` section per
+    finding, then ``## Aggregate metrics`` when metric keys repeat.
     """
     if not findings:
         return f"## Synthesised findings - {domain}\n\n_no findings_\n"
@@ -406,7 +345,7 @@ def _synthesize_pure_python(domain: str, findings: list[Finding]) -> str:
     for f in findings:
         lines.append(_render_finding_markdown(f))
         lines.append("")
-    # Aggregate per-metric counts so a reader can spot repeat signals.
+    # Per-metric counts surface repeat signals across candidates.
     counts: dict[str, int] = {}
     for f in findings:
         for k in f.metrics:
@@ -448,25 +387,9 @@ def _synthesize_via_llm(
     *,
     model: str,
 ) -> str:
-    """Distil findings via claude_agent_sdk; raises if the SDK is missing.
-
-    Mirrors kernel-agent's lazy-import pattern: ImportError surfaces
-    a RuntimeError that tells the operator how to install the SDK.
-    Network / SDK errors are *not* caught - callers see the original
-    exception so misconfiguration is loud.
-
-    Args:
-        domain (str): Domain label passed through to the prompt.
-        findings (list[Finding]): Findings to distil.
-        model (str): LLM model identifier to query.
-
-    Returns:
-        str: The LLM-synthesised markdown, falling back to the pure-Python
-            digest when the model returns no text.
-
-    Raises:
-        RuntimeError: If ``claude_agent_sdk`` is missing or lacks the required
-            ``query`` / ``ClaudeAgentOptions`` attributes.
+    """Distil findings via claude_agent_sdk. ImportError surfaces a
+    RuntimeError with install hint; network / SDK errors are not caught so
+    misconfiguration is loud.
     """
     try:
         import claude_agent_sdk as sdk  # type: ignore  # noqa: F401
@@ -483,13 +406,11 @@ def _synthesize_via_llm(
     prompt = _build_llm_prompt(domain, findings)
     options = sdk.ClaudeAgentOptions(model=model, system_prompt="")
     chunks: list[str] = []
-    # claude_agent_sdk.query returns an async generator. We block on it
-    # synchronously via asyncio.run() to stay friendly to the existing
-    # explore --execute call site (no event loop running).
+    # sdk.query is an async generator; block via asyncio.run() since the
+    # explore --execute call site has no event loop running.
     import asyncio
 
     async def _drive() -> None:
-        """Async driver that drains the SDK's message stream."""
         async for message in sdk.query(prompt=prompt, options=options):
             for text in _iter_message_text(message):
                 if text:
@@ -500,17 +421,10 @@ def _synthesize_via_llm(
 
 
 def _iter_message_text(message) -> Iterable[str]:
-    """Best-effort extraction of text from a claude_agent_sdk message.
+    """Best-effort text extraction from a claude_agent_sdk message.
 
-    The SDK has changed message shape across versions; we accept any
-    of: a plain string, ``.text``, or a ``.content`` list of blocks
-    each with ``.text``. Anything else yields nothing.
-
-    Args:
-        message: A claude_agent_sdk message of any supported shape.
-
-    Yields:
-        str: Each text fragment discovered on the message.
+    Accepts a plain string, ``.text``, or a ``.content`` list of blocks each
+    with ``.text`` (SDK message shape varies across versions).
     """
     if isinstance(message, str):
         yield message
@@ -533,24 +447,10 @@ def synthesize_findings(
     with_llm: bool = False,
     model: str = _DEFAULT_MODEL,
 ) -> str:
-    """Distil ``findings`` into a markdown blob ready for ``contribute_to_kb``.
+    """Distil ``findings`` into a markdown blob for ``contribute_to_kb``.
 
-    Default path is pure-Python (no SDK, no network). Set
-    ``with_llm=True`` to route through claude_agent_sdk; the SDK is
-    lazy-imported on first use and raises RuntimeError with a clear
-    install hint when missing. Operators looking for full determinism
-    should keep the default.
-
-    Args:
-        domain (str): Domain label used in the digest heading / prompt.
-        findings (list[Finding]): Findings to distil.
-        with_llm (bool): Route through claude_agent_sdk when True, else use the
-            deterministic pure-Python digest. Defaults to False.
-        model (str): LLM model identifier used when ``with_llm`` is True.
-            Defaults to :data:`_DEFAULT_MODEL`.
-
-    Returns:
-        str: The synthesised markdown blob ready for ``contribute_to_kb``.
+    Default is pure-Python (deterministic, no SDK/network). ``with_llm=True``
+    routes through a lazy-imported claude_agent_sdk.
     """
     if not with_llm:
         return _synthesize_pure_python(domain, findings)
@@ -558,18 +458,10 @@ def synthesize_findings(
 
 
 def search_kb(query: str, *, domains: list[str] | None = None) -> list[KBFile]:
-    """Substring search across all (or selected) domains; case-insensitive.
+    """Case-insensitive substring search across all (or selected) domains.
 
-    Order follows :func:`_prioritized_files` within each domain.
-
-    Args:
-        query (str): The substring to search for (matched case-insensitively).
-        domains (list[str] | None): Domains to search, or ``None`` to scan all
-            domains under the KB root.
-
-    Returns:
-        list[KBFile]: Deduplicated KBFile records whose content contains the
-            query.
+    Returns deduplicated KBFile records whose ``content`` contains ``query``;
+    order follows :func:`_prioritized_files` within each domain.
     """
     needle = query.lower()
     domains = domains or list_domains()
