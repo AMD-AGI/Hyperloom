@@ -3687,9 +3687,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         phase_budget_pct=phase_budget_pct or None,
         # KnowledgePlane facade (None when --degraded-kb).
         knowledge_plane=knowledge_plane,
-        # Advisory multi-model proposal scorer (None when --no-proposal-scoring); never gates anything.
-        proposal_scorer=_build_proposal_scorer(args),
-        # Warm-recipe replay controls (default ON; manifest is resume-safe authority).
+        # Advisory multi-model specialist-proposal scorer. ``None`` when
+        # --no-proposal-scoring or an empty model list; otherwise scores
+        # each proposal_set and surfaces the results to Orchestration as
+        # one reference among many (never gates anything). ``session_dir``
+        # is forwarded so the scorer can append its per-model token usage
+        # to the full-trace ledger (component=proposal_scorer).
+        proposal_scorer=_build_proposal_scorer(args, session_dir),
+        # Warm-recipe replay controls. Default ON, fires when
+        # warm_start_recipe.confidence >= min_confidence and the
+        # measured gain reproduces at least min_reproduce_pct of the
+        # recipe's historical claim. Manifest is the persistent
+        # authority across restarts (resume-safe).
         warm_replay_enabled=_resume_safe_flag(
             args, "no_warm_replay", manifest, "warm_replay_enabled",
             default=True, invert=True,
