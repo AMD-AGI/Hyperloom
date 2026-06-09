@@ -164,14 +164,14 @@ def _default_kernel_batch_parallel() -> int:
 def _should_parallelize_backends(payload: dict, num_candidates: int) -> bool:
     """Decide whether to race GEAK against the OOB ladder per kernel.
 
-    Default policy ("GPU-aware"): only when the node has enough visible
-    GPUs to run GEAK *and* the OOB ladder side-by-side for every hot
-    kernel in the batch without queueing, i.e.
-    ``visible_gpus >= 2 * num_candidates * per_task_gpus``. Below that
-    threshold we keep the legacy sequential ladder (GEAK first, OOB only
-    as a fallback when GEAK misses a KEEP) so a couple of spare GPUs
-    don't make every kernel double-spend its OOB budget while siblings
-    starve behind the Ray GPU lease.
+    Default policy ("GPU-aware"): parallelize whenever the node has more
+    visible GPUs than a single sequential pass over the batch needs, i.e.
+    ``visible_gpus > num_candidates * per_task_gpus``. Any spare capacity
+    beyond one ladder's footprint is spent racing GEAK against the OOB
+    ladder (the second backend may queue briefly behind the Ray GPU lease,
+    which is fine). At or below that threshold there is no spare GPU, so we
+    keep the legacy sequential ladder (GEAK first, OOB only as a fallback
+    when GEAK misses a KEEP).
 
     Operators / tests can force the decision via payload
     ``parallel_backends`` or env ``KERNEL_OPT_PARALLEL_BACKENDS``
@@ -189,7 +189,7 @@ def _should_parallelize_backends(payload: dict, num_candidates: int) -> bool:
     n_gpus = _visible_gpu_count()
     if not n_gpus or n_gpus <= 0:
         return False
-    return n_gpus >= 2 * num_candidates * _per_task_gpus()
+    return n_gpus > num_candidates * _per_task_gpus()
 
 
 _CANDIDATE_ENV_KEYS = {
@@ -1629,13 +1629,13 @@ async def _run_optimization_batch(
     )
     max_parallel = max(1, max_parallel)
     sem = asyncio.Semaphore(max_parallel)
-    # GPU-rich mode: when the node has spare GPUs beyond one task per hot
-    # kernel, race GEAK against the OOB ladder per kernel and keep the
-    # stronger result instead of short-circuiting on GEAK's first KEEP.
-    # The threshold (``visible_gpus >= 2 * num_kernels * per_task``) makes
-    # sure both backends can actually run side-by-side without queueing on
-    # the Ray GPU lease, so each kernel still holds at most two concurrent
-    # sub-tasks and the cluster stays within its real GPU budget.
+    # GPU-rich mode: when the node has more visible GPUs than a single
+    # sequential pass needs (``visible_gpus > num_kernels * per_task``),
+    # race GEAK against the OOB ladder per kernel and keep the stronger
+    # result instead of short-circuiting on GEAK's first KEEP. The spare
+    # capacity absorbs the second backend; if it can't all fit at once the
+    # extra sub-tasks queue briefly on the Ray GPU lease rather than
+    # overcommitting the cluster's real GPU budget.
     parallel_backends = _should_parallelize_backends(payload, len(candidates))
 
     async def _guarded(candidate: dict[str, Any]) -> HandlerResult:

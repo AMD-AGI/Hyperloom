@@ -547,11 +547,11 @@ class TestDefaultKernelBatchParallel:
 # ---------------------------------------------------------------------------
 # _should_parallelize_backends
 #
-# GPU-rich mode: race GEAK against the OOB ladder per kernel only when the
-# node has enough visible GPUs to run both side-by-side for every hot
-# kernel without queueing (``visible_gpus >= 2 * num_candidates *
-# per_task``). Below that, keep the sequential GEAK-first / OOB-fallback
-# ladder. Operators / tests can force the decision via payload or env.
+# GPU-rich mode: race GEAK against the OOB ladder per kernel whenever the
+# node has more visible GPUs than a single sequential pass needs
+# (``visible_gpus > num_candidates * per_task``). At/below that there is no
+# spare GPU, so keep the sequential GEAK-first / OOB-fallback ladder.
+# Operators / tests can force the decision via payload or env.
 # ---------------------------------------------------------------------------
 
 class TestShouldParallelizeBackends:
@@ -574,16 +574,17 @@ class TestShouldParallelizeBackends:
     @pytest.mark.parametrize(
         "n_gpus, per_task, num_candidates, expected",
         [
-            # 8-GPU node, 1 GPU/task: room to double up to 4 kernels.
-            (8, 1, 3, True),    # 2*3*1=6 <= 8
-            (8, 1, 4, True),    # 2*4*1=8 <= 8 (boundary)
-            (8, 1, 5, False),   # 2*5*1=10 > 8
-            # 4-GPU GEAK reservations: barely room for a single kernel.
-            (8, 4, 1, True),    # 2*1*4=8 <= 8 (boundary)
-            (8, 4, 2, False),   # 2*2*4=16 > 8
+            # 8-GPU node, 1 GPU/task: parallelize while any GPU is spare.
+            (8, 1, 3, True),    # 3*1=3 < 8
+            (8, 1, 7, True),    # 7*1=7 < 8 (one spare GPU -> race backends)
+            (8, 1, 8, False),   # 8*1=8 == 8, no spare -> sequential
+            (8, 1, 9, False),   # 9*1=9 > 8
+            # 4-GPU GEAK reservations: need room for a second 4-GPU backend.
+            (8, 4, 1, True),    # 1*4=4 < 8
+            (8, 4, 2, False),   # 2*4=8 == 8, no spare -> sequential
             # Tiny pod.
-            (2, 1, 1, True),    # 2*1*1=2 <= 2
-            (2, 1, 2, False),   # 2*2*1=4 > 2
+            (2, 1, 1, True),    # 1*1=1 < 2
+            (2, 1, 2, False),   # 2*1=2 == 2, no spare -> sequential
         ],
     )
     def test_gpu_aware_threshold(
