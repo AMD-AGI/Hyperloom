@@ -112,7 +112,6 @@ class LLMClient(Protocol):
         Returns:
             str: The model's response text.
         """
-        ...
 
 
 @dataclass(frozen=True)
