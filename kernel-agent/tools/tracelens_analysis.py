@@ -1792,6 +1792,7 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
 
 _FLYDSL_TARGET_ARCH_BY_PLATFORM = {
     "mi300x": "gfx942",
+    "mi308x": "gfx942",
     "mi325x": "gfx942",
     "mi355x": "gfx950",
 }
