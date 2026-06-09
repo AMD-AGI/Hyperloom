@@ -223,7 +223,6 @@ class Source(Protocol):
         Raises:
             SourceUnavailable: When the backing service is unreachable.
         """
-        ...
 
 
 @dataclass
