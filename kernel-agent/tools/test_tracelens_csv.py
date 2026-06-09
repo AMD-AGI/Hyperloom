@@ -911,6 +911,150 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "Task" in captured["options"]["allowed_tools"]
 
 
+def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
+    """#266: the SDK runner must persist a full stream-JSON transcript
+    (text + tool_use/tool_result blocks) next to ``analysis.md`` so an
+    operator can inspect the agent's lifecycle and the artifacts it
+    produced *during* execution. The transcript path is surfaced via
+    ``artifact_paths`` so it flows into the kernel-agent status sidecar.
+
+    Granularity is top-level orchestrator only: ``Task``-tool subagent
+    turns are collapsed by the SDK into a single tool_use/tool_result
+    pair at this level, which is sufficient for lifecycle visibility.
+    """
+    import asyncio
+    import json as _json
+    from dataclasses import dataclass, field
+    from typing import Any
+
+    # Fakes named to match the real claude-agent-sdk class names so the
+    # serializer's class-name-based ``block`` tag mirrors production.
+    @dataclass
+    class TextBlock:
+        text: str
+
+    @dataclass
+    class ToolUseBlock:
+        name: str
+        input: dict
+        id: str = "tu_1"
+
+    @dataclass
+    class AssistantMessage:
+        content: list[Any]
+
+    @dataclass
+    class ResultMessage:
+        content: list[Any] = field(default_factory=list)
+        result: str = ""
+        usage: dict = field(default_factory=dict)
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield AssistantMessage(content=[TextBlock("starting analysis")])
+        yield AssistantMessage(content=[
+            ToolUseBlock(name="Bash", input={"command": "ls"}, id="tu_42"),
+        ])
+        yield ResultMessage(result="done", usage={"input_tokens": 10})
+
+    res = asyncio.run(tlr.run_tracelens_skill(
+        skill_path=tmp_path / "skill.md",
+        trace_path=tmp_path / "trace.json.gz",
+        output_dir=output_dir,
+        tracelens_root=tmp_path,
+        tracelens_internal_root=tmp_path / "TraceLens-internal",
+        platform="MI300X",
+        framework="sglang",
+        analysis_mode="default",
+        capture_folder=None,
+        budget_minutes=1,
+        sdk_query_factory=_fake_query,
+        sdk_options_cls=_FakeOptions,
+    ))
+
+    transcript_path = output_dir / "agent_transcript.jsonl"
+    assert transcript_path.exists(), "stream-JSON transcript must be written"
+    assert res.artifact_paths.get("tracelens_agent_transcript") == str(transcript_path)
+
+    lines = [
+        _json.loads(line)
+        for line in transcript_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(lines) == 3, f"one JSON object per SDK message, got {len(lines)}"
+
+    # The tool_use block must be captured with its name + input so an
+    # operator can see which command the agent ran (lifecycle visibility).
+    tool_blocks = [
+        b
+        for rec in lines
+        for b in rec.get("content", [])
+        if b.get("block") in ("ToolUseBlock", "ServerToolUseBlock")
+    ]
+    assert any(
+        b.get("name") == "Bash" and b.get("input", {}).get("command") == "ls"
+        for b in tool_blocks
+    ), f"tool_use block not captured: {tool_blocks}"
+
+    # Terminal ResultMessage usage is captured for token accounting.
+    assert any(rec.get("usage", {}).get("input_tokens") == 10 for rec in lines)
+
+
+def test_266_transcript_failure_never_aborts_run(tmp_path):
+    """#266: transcript capture is best-effort — a serialization or IO
+    error on the logging side must never abort an otherwise-successful
+    TraceLens run. ``analysis.md`` is still the contracted exit point."""
+    import asyncio
+    from typing import Any
+
+    class _Unserializable:
+        """A content block whose attributes raise on access."""
+
+        @property
+        def text(self):  # noqa: D401
+            raise RuntimeError("boom")
+
+    class _Message:
+        def __init__(self, content):
+            self.content = content
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_Unserializable()])
+
+    res = asyncio.run(tlr.run_tracelens_skill(
+        skill_path=tmp_path / "skill.md",
+        trace_path=tmp_path / "trace.json.gz",
+        output_dir=output_dir,
+        tracelens_root=tmp_path,
+        tracelens_internal_root=tmp_path / "TraceLens-internal",
+        platform="MI300X",
+        framework="sglang",
+        analysis_mode="default",
+        capture_folder=None,
+        budget_minutes=1,
+        sdk_query_factory=_fake_query,
+        sdk_options_cls=_FakeOptions,
+    ))
+
+    # Run still succeeds: report resolved, no crash from transcript path.
+    assert res.report_path.exists()
+
+
 # ===========================================================================
 # T2 — analysis.md is the only contracted TraceLens output.
 # ===========================================================================
