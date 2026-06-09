@@ -11,7 +11,8 @@ Deterministic Python executor (no LLM). Per Inv-5.1, this is the single
 allowed ``git apply`` channel against framework_source_roots (specialists
 author patches into their isolated worktree only).
 
-Inputs (``ctx.task.params``):
+Inputs (``ctx.task.params``)::
+
     specialist_task_id (str, required) — completed specialist task
         whose worktree under ``runs/specialist/<task_id>/`` carries
         the patches.
@@ -38,7 +39,8 @@ Inputs (``ctx.task.params``):
         ``status='applied_no_bench'`` so downstream bookkeeping can
         differentiate from a genuine KEEP/REVERT.
 
-Outputs (dict, returned to the bus as ``delegated_result.result``):
+Outputs (dict, returned to the bus as ``delegated_result.result``)::
+
     status: "kept" | "reverted" | "apply_failed" | "no_patches" |
             "applied_no_bench" | "failed"
     output_throughput: float | None

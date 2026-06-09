@@ -127,8 +127,8 @@ class StackFingerprint:
         """Serialise the fingerprint to a plain dict.
 
         Returns:
-            dict[str, str]: ``{vllm_version, aiter_commit,
-                rocm_version}``.
+            dict[str, str]: A dict with keys ``vllm_version``,
+                ``aiter_commit`` and ``rocm_version``.
         """
         return {
             "vllm_version": self.vllm_version,

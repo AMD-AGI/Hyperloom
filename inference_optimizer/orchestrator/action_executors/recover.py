@@ -18,7 +18,7 @@ We deliberately do NOT reload amdgpu, restart the pod/Ray head, or touch
 persistent runtime config (would kill the optimizer or need root). A
 failed recover surfaces as ``state == "needs_review"``.
 
-Returned dict (also persisted to ``runs/recover/<task_id>/result.json``):
+Returned dict (also persisted to ``runs/recover/<task_id>/result.json``)::
 
     {
         "state":                  "succeeded" | "needs_review",

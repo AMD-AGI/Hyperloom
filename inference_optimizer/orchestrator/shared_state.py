@@ -2,7 +2,7 @@
 
 """SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; enforces CORE_STATE_FIELDS guards.
 
-fields:
+Fields::
 
     session_id          str   — set by Coordinator at session creation
     model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"

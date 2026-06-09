@@ -29,6 +29,12 @@ for _path in (
     if _path.is_dir():
         sys.path.insert(0, str(_path))
 
+# Some runtime modules log an operator warning at import time when
+# ``USER_DATA_PATH`` is unset (it controls where session artefacts are
+# written). The docs build never writes artefacts, so point it at a throwaway
+# path to keep the build log clean.
+os.environ.setdefault("USER_DATA_PATH", str(DOCS_DIR / "_build" / "_docs_workspace"))
+
 # -- Project information -----------------------------------------------------
 project = "Hyperloom"
 author = "AMD AGI"
@@ -68,6 +74,13 @@ autodoc_default_options = {
     "undoc-members": True,
     "show-inheritance": True,
     "member-order": "bysource",
+    # Document each object only in the module that *defines* it. Without this,
+    # classes that a package re-exports from a submodule (e.g.
+    # ``robustness_agent.signals.Symptom`` <- ``...signals.symptom.Symptom``)
+    # get a second py:class target, which makes every type cross-reference to
+    # that name ambiguous ("more than one target found"). Ignoring ``__all__``
+    # keeps the re-exports off the package page so each name resolves uniquely.
+    "ignore-module-all": True,
 }
 autodoc_typehints = "description"     # render type hints in the description, not the signature
 autodoc_typehints_format = "short"
@@ -114,9 +127,22 @@ napoleon_preprocess_types = True
 # -- MyST (Markdown) ---------------------------------------------------------
 myst_enable_extensions = ["colon_fence", "deflist", "linkify", "tasklist"]
 myst_heading_anchors = 3
-# The repo's Markdown guides are top-level docs; suppress noisy warnings about
-# non-consecutive header levels in those hand-written files.
-suppress_warnings = ["myst.header"]
+# The repo's Markdown guides are top-level docs that intentionally link to
+# files which live at the repository root (README, CHANGELOG, per-agent
+# SKILL.md, dashboards/) rather than inside the Sphinx tree. Those links
+# resolve on GitHub where the guides are primarily read; suppress the
+# corresponding cross-reference / header warnings so the docs build stays
+# clean instead of flagging links that are correct by design.
+suppress_warnings = ["myst.header", "myst.xref_missing"]
+
+# A handful of short type names (``BackendTurnResult``, ``Intent``, ``schema``)
+# exist as *distinct* classes/modules in both ``inference_optimizer`` and
+# ``robustness_agent``. With ``autodoc_typehints = "description"`` Sphinx tries
+# to cross-link every annotation by its short name and cannot disambiguate
+# those cross-package collisions ("more than one target found"). The rendered
+# type text is still correct; only the hyperlink target is ambiguous, so
+# suppress this one category to keep the build clean.
+suppress_warnings += ["ref.python"]
 
 # -- intersphinx -------------------------------------------------------------
 intersphinx_mapping = {
