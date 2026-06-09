@@ -2,23 +2,13 @@
 
 """High-level KB write façade used by the decision reviewer.
 
-This module never raises to the caller for transport / 4xx errors — it
-catches them, dead-letters, and returns a typed :class:`WriteResult` so
-the Critic decision pipeline never blocks on KB issues
-(contract §6 — "writes must not block review_verdict").
-
-Three triggers map to three methods:
-
-* :meth:`write_verdict` (Trigger A)  — gate decisions that produced a
-  reusable lesson get an upsert; ``defer`` / ``inconclusive`` /
-  ``advise`` are skipped.
-* :meth:`write_kb_drafts` (Trigger B) — session-close kb_draft batch
-  insert with ``on_conflict=upsert``.
-* :meth:`add_contradiction` (Trigger C) — single-side contradicts edge
-  (KB service mirrors).
-
-Plus the read helper :meth:`list_priors` with TTL'd cache backed by
-:class:`runtime.session_memory.SessionMemory`.
+Never raises for transport / 4xx errors — catches, dead-letters, and
+returns a typed :class:`WriteResult` so the pipeline never blocks on KB
+issues (contract §6, "writes must not block review_verdict"). Triggers:
+:meth:`write_verdict` (A, upsert; defer/inconclusive/advise skipped),
+:meth:`write_kb_drafts` (B, batch insert ``on_conflict=upsert``),
+:meth:`add_contradiction` (C, contradicts edge). Plus :meth:`list_priors`
+(read, TTL'd cache backed by :class:`SessionMemory`).
 """
 
 from __future__ import annotations
@@ -64,11 +54,9 @@ _KB_RELEVANT_VERDICTS: frozenset[str] = frozenset({
 })
 
 
-# Circuit-breaker defaults: when the KB transport fails ``threshold`` times
-# in a row, every read / write short-circuits for ``cooldown`` seconds. The
-# defaults intentionally err on the side of "skip KB rather than wait" — a
-# single connection failure is enough to open the breaker, with a short
-# cooldown so a transient outage doesn't block the whole session.
+# Circuit-breaker defaults: after ``threshold`` consecutive transport
+# failures, reads/writes short-circuit for ``cooldown`` seconds. Defaults
+# favour "skip KB rather than wait" — one failure opens it, short cooldown.
 _DEFAULT_BREAKER_THRESHOLD = 1
 _DEFAULT_BREAKER_COOLDOWN_SECONDS = 60.0
 
@@ -197,9 +185,6 @@ class KBWriter:
         self.read_enabled = _read_bool_env("KB_READ_ENABLED", True)
         self._time_fn = time_fn
 
-        # Circuit-breaker state: when the KB transport fails ``threshold``
-        # times in a row, short-circuit reads + writes for ``cooldown``
-        # seconds so we don't block every proposal on a hung service.
         self._breaker_threshold = max(
             1, _read_int_env("CRITIC_KB_BREAKER_THRESHOLD", _DEFAULT_BREAKER_THRESHOLD)
         )

@@ -1,14 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the sweep grid builder's max-model-len filter.
-
-A sweep variant whose ``ISL + OSL`` exceeds the server's
-``--max-model-len`` is rejected by vLLM for every request
-(``VLLMValidationError: maximum context length``), so the benchmark
-always aborts with an invalid measurement. ``_build_grid`` now drops
-those combos up front and records them as ``skipped`` so the launch +
-warmup cost is never paid on a guaranteed failure.
-"""
+"""Unit tests for the sweep grid builder's max-model-len filter (drop ISL+OSL > max-model-len up front)."""
 
 from __future__ import annotations
 
@@ -28,8 +20,7 @@ class TestBuildGridMaxModelLenFilter:
         assert skipped == []
 
     def test_filters_combos_exceeding_context_window(self):
-        # max_model_len=6144 — the exact value that made every 8192-token
-        # sweep variant abort in the 20260602 session.
+        # max_model_len=6144 — the value that made every 8192-token variant abort.
         runnable, skipped = sweep._build_grid(
             conc_values=[4, 16],
             isl_osl_configs=["1024:1024", "8192:1024", "1024:8192"],
@@ -37,7 +28,7 @@ class TestBuildGridMaxModelLenFilter:
             base_extra_args="",
             max_model_len=6144,
         )
-        # Only the 1024:1024 combo (sum 2048 <= 6144) survives, once per conc.
+        # Only 1024:1024 (sum 2048 <= 6144) survives, once per conc.
         assert len(runnable) == 2
         assert all(v.extra_envs["ISL"] == "1024" for v in runnable)
         assert all(v.extra_envs["OSL"] == "1024" for v in runnable)

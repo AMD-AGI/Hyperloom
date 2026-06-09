@@ -1,17 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Contract test: keep envelope tables aligned with inference_optimizer.
-
-Skipped when ``inference_optimizer`` is not importable (the agent
-package keeps it as a soft dependency). CI environments that run
-against the upstream repo should add the inference_optimizer path to
-``PYTHONPATH`` so the test executes.
-
-Locations probed automatically:
-
-* anything already on ``sys.path``
-* ``~/lss/Hyperloom`` (the standard local checkout used in dev)
-"""
+"""Contract test: keep envelope tables aligned with inference_optimizer. Skipped when it is not importable (soft dependency); add its path to PYTHONPATH to run."""
 
 from __future__ import annotations
 
@@ -60,7 +49,7 @@ def test_payload_required_matches_upstream():
 
     upstream_ip, _, _ = _UPSTREAM  # type: ignore[misc]
     upstream_table = upstream_ip._PAYLOAD_REQUIRED  # noqa: SLF001
-    for it in IntentType:
+    for it in IntentType.__members__.values():
         local = PAYLOAD_REQUIRED[it]
         upstream = upstream_table[upstream_ip.IntentType(it.value)]
         assert local == upstream, f"{it} drift: local={local} upstream={upstream}"

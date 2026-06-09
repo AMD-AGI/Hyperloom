@@ -16,7 +16,12 @@ import subprocess
 import time
 from pathlib import Path
 
-from ray_runtime import ensure_ray_cluster, quiet_ray_init
+from ray_runtime import (
+    ensure_ray_cluster,
+    isolated_compile_cache_env,
+    quiet_ray_init,
+    safe_runtime_env,
+)
 
 
 def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,
@@ -128,29 +133,12 @@ def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
 
 
 def _parse_oob_init(stdout: str) -> dict[str, str]:
-    """Extract cwd / session_id / thread_id from oob run --json output.
-
-    `oob run --json` prints a final summary block of the form
-        {"task_id": "...", "status": "completed",
-         "workspace": "...tasks/cli/<uuid>/workspace",
-         "log_file": "...", "usage": ...}
-    Parse the trailing JSON object first; fall back to scanning ndjson
-    `system/init` events if the trailing block is missing (e.g. when the
-    run was killed mid-stream).
-
-    Args:
-        stdout (str): Full captured stdout from ``oob run --json``.
-
-    Returns:
-        dict[str, str]: Mapping with ``cli_workspace``, ``session_id``,
-            and ``thread_id`` keys; values default to empty strings when
-            not discoverable.
-    """
+    """Extract cwd / session_id / thread_id from oob run --json output (trailing summary, else ndjson init)."""
     info = {"cli_workspace": "", "session_id": "", "thread_id": ""}
     if not stdout:
         return info
 
-    # 1) Try the trailing oob-run JSON summary.
+    # Try the trailing oob-run JSON summary.
     end = stdout.rfind("}")
     if end != -1:
         depth = 0
@@ -184,7 +172,7 @@ def _parse_oob_init(stdout: str) -> dict[str, str]:
                         return info
                     break
 
-    # 2) Fall back to ndjson init line (raw stream from claude-code-sdk).
+    # Fall back to ndjson init line (raw stream from claude-code-sdk).
     for line in stdout.splitlines()[:200]:
         line = line.strip()
         if not line.startswith("{"):
@@ -239,31 +227,8 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
     def _task(agent: str, prompt_file_str: str, output_dir_str: str,
               source_file: str, max_turns: int, timeout_s: int,
               extra_files: list[str], system_prompt: str) -> dict:
-        """Ray worker body: run the ``oob`` CLI on this node's GPUs.
-
-        Self-contained (no kernel-agent imports) because Ray workers do
-        not inherit the driver's ``sys.path``.
-
-        Args:
-            agent (str): OOB agent to run.
-            prompt_file_str (str): Task prompt file path.
-            output_dir_str (str): Output directory path.
-            source_file (str): Optional input kernel file.
-            max_turns (int): Max agent turns.
-            timeout_s (int): Run timeout in seconds.
-            extra_files (list[str]): Additional files to copy in.
-            system_prompt (str): Pre-rendered safety system prompt.
-
-        Returns:
-            dict: Result mapping with ``returncode``, ``stdout_tail``,
-                ``stderr_tail``, ``stdout``, ``gpu_ids``, ``elapsed_s``,
-                and ``cmd``.
-        """
-        # Self-contained: workers don't share driver sys.path.
-        import os as _os
-        import shutil as _shutil
-        import subprocess as _sp
-        import time as _t
+        # Self-contained: workers don't share the driver sys.path.
+        import os as _os, shutil as _shutil, subprocess as _sp, time as _t
         if not _shutil.which("oob"):
             return {
                 "returncode": 127, "stdout_tail": "", "stdout": "",
@@ -274,6 +239,14 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
                    or _os.environ.get("HIP_VISIBLE_DEVICES")
                    or _os.environ.get("CUDA_VISIBLE_DEVICES")
                    or "0")
+        # Per-attempt compile caches so a co-running GEAK ladder can't clobber
+        # this run's aiter/triton/inductor artifacts (see isolated_compile_cache_env).
+        for _var, _sub in (("TRITON_CACHE_DIR", "triton"),
+                           ("AITER_ROOT_DIR", "aiter"),
+                           ("TORCHINDUCTOR_CACHE_DIR", "inductor")):
+            _cdir = _os.path.join(output_dir_str, ".cache", _sub)
+            _os.makedirs(_cdir, exist_ok=True)
+            _os.environ[_var] = _cdir
         cmd = ["oob", "run", "-a", agent,
                "--prompt-file", prompt_file_str,
                "--max-turns", str(max_turns),
@@ -298,8 +271,7 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
                 "cmd": cmd,
             }
         except _sp.TimeoutExpired as exc:
-            # Capture whatever oob already wrote so the driver can scan the
-            # workspace for partial outputs (optimized_versions/ etc.).
+            # Capture partial output so the driver can scan for partial artifacts.
             partial_out = ""
             try:
                 partial_out = (exc.stdout or "").decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -320,8 +292,7 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
         list(extra_files or []), system_prompt_text,
     )
     result = ray.get(ref)
-    # Attribution: parse the oob ndjson init line so the driver knows exactly
-    # which tasks/cli/<uuid>/workspace this attempt produced (no mtime races).
+    # Parse the oob init line for exact workspace attribution (no mtime races).
     result.update(_parse_oob_init(result.get("stdout", "")))
     return result
 
@@ -357,9 +328,12 @@ def run_via_cli(agent: str, prompt_file: Path, output_dir: Path, source_file: st
     gpu_ids = os.environ.get("ROCR_VISIBLE_DEVICES") \
         or os.environ.get("HIP_VISIBLE_DEVICES") \
         or os.environ.get("CUDA_VISIBLE_DEVICES") or "0"
+    # Per-attempt compile caches (see isolated_compile_cache_env).
+    child_env = isolated_compile_cache_env(output_dir)
     started = time.time()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 60)
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout_s + 60, env=child_env)
         result = {
             "returncode": proc.returncode,
             "stdout_tail": (proc.stdout or "")[-4000:],
@@ -418,9 +392,7 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
     if prefer_ray:
         try:
             import ray  # noqa: F401
-            # Don't burn 30 s of ray.init retries on a wedged cluster. If
-            # `ray status` fails, ``ensure_ray_cluster`` will start a fresh
-            # head node here (safe no-op when the cluster is already healthy).
+            # ensure_ray_cluster starts a fresh head if `ray status` fails (no-op when healthy).
             ensure_ray_cluster(num_gpus=num_gpus,
                                log_path=output_dir / "ray_lifecycle.log")
             return run_via_ray(agent, prompt_file, output_dir, source_file,

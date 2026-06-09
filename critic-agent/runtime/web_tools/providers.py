@@ -1,17 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Pluggable search backends — Tavily and Serper for the first cut.
+"""Pluggable search backends — Tavily and Serper.
 
-Each provider implements :class:`WebSearchProvider` and returns a
-normalized list of :class:`SearchHit`. The transport is a synchronous
-``httpx.Client`` injected through the constructor so unit tests can
-swap in an ``httpx.MockTransport`` without monkeypatching globals.
-
-We deliberately mirror the field mapping that Primus-Claw's
-``Claw/packages/brain/src/web-tools/search.ts`` uses for each backend so
-behaviour stays comparable across the two stacks. The Anthropic native
-"sub-LLM wrapper" provider is intentionally NOT ported — critic-agent
-talks to Codex / OpenAI, so a Claude-only path adds no value.
+Each implements :class:`WebSearchProvider` returning normalized
+:class:`SearchHit`s over an injected synchronous ``httpx.Client`` (so tests
+swap in ``httpx.MockTransport``). Field mappings mirror Primus-Claw's
+``web-tools/search.ts``; the Claude-only "sub-LLM wrapper" provider is not
+ported since critic-agent talks to Codex / OpenAI.
 """
 
 from __future__ import annotations
