@@ -183,9 +183,13 @@ _GFX_TO_RUNNER: dict[str, str] = {
 
 
 def _gpu_runner_type(gpu_type: str) -> str:
-    """Return the Magpie runner label for a resolved real GPU type."""
+    """Return the Magpie runner label for a resolved real GPU type.
+
+    MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
+    the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
+    """
     normalized = str(gpu_type or "").strip().lower()
-    if normalized == "mi325x":
+    if normalized in ("mi325x", "mi308x"):
         return "mi300x"
     return normalized
 
@@ -476,14 +480,14 @@ def _clean_stale_aiter_locks(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
+    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
     import subprocess
     try:
         out = subprocess.run(
             ["rocm-smi", "--showproductname"],
             capture_output=True, text=True, timeout=5,
         ).stdout.upper()
-        for tag in ("MI355X", "MI325X", "MI300X"):
+        for tag in ("MI355X", "MI325X", "MI308X", "MI300X"):
             if tag in out:
                 return tag.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
@@ -3403,8 +3407,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         runner_gpu_type = _gpu_runner_type(gpu_type)
         if gpu_type and runner_gpu_type != gpu_type:
             print(
-                "WARN: mi325x uses mi300x as Magpie runner_type (same arch; "
-                "Magpie has no sglang_mi325x.sh / vllm_mi325x.sh yet)",
+                f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
+                f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
+                f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
                 file=sys.stderr,
             )
         args.gpu_type = gpu_type or None
@@ -3879,7 +3884,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "quantization. Ignored if --quantize (free text) is also given.",
     )
     opt.add_argument(
-        "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
+        "--gpu-type", choices=["mi300x", "mi308x", "mi325x", "mi355x"], default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
              "wins when both are present and disagree; a WARN is "
              "emitted to stderr so the operator sees the typo. Used "
