@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Focused unit tests for ``SharedState`` helpers / audit trails.
-
-Covers pure-data helpers that only had integration coverage (policy-denial
-bookkeeping, kernel-patch identity resolution, prune-family mutators) plus
-the per-action attempt audit trail and the global ``last_action_failures``
-rolling log.
-"""
+"""Focused unit tests for ``SharedState`` helpers / audit trails (policy-denial bookkeeping, kernel-patch identity, prune families, attempt + failure logs)."""
 
 from __future__ import annotations
 
@@ -19,9 +13,7 @@ from inference_optimizer.orchestrator.shared_state import (
 )
 
 
-# ---------------------------------------------------------------------------
 # pruned families + policy denial book-keeping
-# ---------------------------------------------------------------------------
 
 class TestPolicyDenialAndPruned:
     def test_add_pruned_family_is_idempotent(self):
@@ -95,9 +87,7 @@ class TestPolicyDenialAndPruned:
         assert "a3" in summary
 
 
-# ---------------------------------------------------------------------------
 # apply_changes
-# ---------------------------------------------------------------------------
 
 class TestApplyChanges:
     def test_empty_changes_returns_empty(self):
@@ -115,9 +105,7 @@ class TestApplyChanges:
         assert s.model_name == "foo"
 
 
-# ---------------------------------------------------------------------------
 # kernel-patch identity helpers
-# ---------------------------------------------------------------------------
 
 class TestKernelPatchIdentity:
     def test_resolves_explicit_payload(self):
@@ -174,9 +162,7 @@ class TestKernelPatchIdentity:
         assert SharedState().find_rejected_kernel_patch({"kernel_id": "x"}) is None
 
 
-# ---------------------------------------------------------------------------
 # load_or_init / save round-trip
-# ---------------------------------------------------------------------------
 
 class TestPersistence:
     def test_load_or_init_returns_default_when_missing(self, tmp_path):
@@ -202,9 +188,7 @@ class TestPersistence:
         assert not hasattr(s, "unknown_field")
 
 
-# ---------------------------------------------------------------------------
 # Per-action attempt audit trail (record_action_attempt + <action>_attempts)
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "action,metric_key,metric_kind",
@@ -264,6 +248,35 @@ def test_record_action_attempt_failed_truncates_error_excerpt():
     assert last["error_excerpt"].startswith("boom!")
     assert last["reported_success"] is False
     assert last["key_metric"] is None
+    # no_report is not a subprocess failure -> no stderr_tail.
+    assert last["stderr_tail"] is None
+
+
+def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
+    """A subprocess_nonzero baseline attempt records stderr_tail into the
+    attempts history so the breakdown exporter can surface the raw crash
+    (regression: the field was only filled on the last_action_failures
+    path, leaving baseline_attempts[].stderr_tail always None)."""
+    s = SharedState()
+    big_err = "x" * 2000 + "torch.OutOfMemoryError: HIP out of memory"
+    s.record_action_attempt(
+        action="baseline",
+        task_id="t-oom",
+        status="failed",
+        decision="no_promote",
+        result={
+            "error_class": "subprocess_nonzero",
+            "error": big_err,
+            "reported_success": False,
+            "stderr_log_path": "/runs/baseline/t-oom/baseline_stderr.log",
+        },
+    )
+    attempt = s.baseline_attempts[-1]
+    assert attempt["error_class"] == "subprocess_nonzero"
+    assert attempt["stderr_tail"] is not None
+    assert len(attempt["stderr_tail"]) == 1000
+    assert attempt["stderr_tail"].endswith("HIP out of memory")
+    assert attempt["stderr_log_path"] == "/runs/baseline/t-oom/baseline_stderr.log"
 
 
 def test_attempts_history_caps_at_default():
@@ -337,9 +350,7 @@ def test_save_load_round_trips_attempt_fields(tmp_path):
     assert s2.profile_attempts[-1]["extras"]["trace_path"] == "/tmp/trace.json"
 
 
-# ---------------------------------------------------------------------------
 # Global last_action_failures rolling log
-# ---------------------------------------------------------------------------
 
 def test_record_action_failure_basic_fields():
     s = SharedState()

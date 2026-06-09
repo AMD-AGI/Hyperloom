@@ -90,7 +90,6 @@ def static_check(harness_path: str) -> tuple[bool, list[str]]:
         for kw in ("argparse",)
     ) or "ArgumentParser" in source
     if not has_argparse:
-        # Double-check: argparse might be imported but not as a string literal
         if "import argparse" not in source and "ArgumentParser" not in source:
             errors.append("Missing argparse / ArgumentParser")
 

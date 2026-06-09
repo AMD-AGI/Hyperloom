@@ -37,6 +37,7 @@ inference_optimizer/runs/
 .optimization_strategies.md
 optimization_report.md
 bench.py
+ci/claw-integration.md
 
 # IDE / editor
 .idea/
@@ -79,3 +80,4 @@ atom_boost_tutorials.md
 #clean-up files
 ./code-cleansing-plan
 code_cleansing.MD
+future_plan.MD

@@ -294,12 +294,6 @@ class RemoteRecipeClient:
 
     _transport: _HttpTransport | None = field(default=None, init=False, repr=False)
 
-    # Capability flag read by ``RecipeKB._normalize_remote_row``: the
-    # central kb-service returns the nested v2 envelope, so the dispatcher
-    # must run the v2->arbor projection on our rows. Bare (un-annotated)
-    # so the dataclass does not treat it as an init field.
-    returns_arbor_shape = False
-
     def __post_init__(self) -> None:
         if not self.kb_url:
             self.kb_url = (os.environ.get("CORTEX_KB_URL") or "").strip() or None
@@ -467,13 +461,21 @@ class RemoteRecipeClient:
         updated_since: str | None = None,
         order_by: str = C.ORDER_BY_UPDATED_AT_DESC,
         limit: int = 50,
+        prefer: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """``POST /recipe-snapshot/recipes/search``.
 
         Server-side validates ``order_by`` against the 6-value
         whitelist; we forward whatever was passed and trust the
         server to reject. Disabled client returns ``[]``.
+
+        ``prefer`` (workload-similarity hints) is accepted for the
+        unified KB-interface signature. The central kb-service has no
+        server-side prefer ranking, so the dispatcher applies a
+        client-side rerank over the returned rows; this client only
+        forwards the ``required`` filter.
         """
+        del prefer  # client-side rerank lives in RecipeKB
         if not self.enabled:
             return []
         body: dict[str, Any] = {

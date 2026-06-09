@@ -1,20 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Blocker #3 guard — LLM-facing prompts must not instruct the model to
-propose ``roofline`` / ``profile``.
+"""Blocker #3 guard — LLM-facing prompts must not instruct the model to propose ``roofline`` / ``profile``.
 
-After the single-path refactor the Coordinator owns the analysis
-lifecycle. PolicyGate denies any LLM-emitted
-``propose_action{action='roofline'|'profile'}`` /
-``delegate{action='roofline'|'profile'}`` with rule
-``analysis_action_not_llm_proposable``. Prompts that still tell the LLM
-to propose either cause a guaranteed denial loop on every session.
-
-This test scans every prompt-facing file (orchestration / specialist
-prompts, action ``*.md`` and ``_meta/*.yaml`` next-step strings) and
-fails if any of the forbidden imperatives slip back in. Negations such
-as *"never propose `profile`"* are allowed — the regex requires the
-verb to be unguarded.
+The Coordinator owns those analysis actions; PolicyGate R1 ``phase_incompatible``
+denies any LLM proposal, so prompts that tell the LLM to propose either cause a
+denial loop. This scans prompt-facing files and fails on unguarded imperatives.
 """
 
 from __future__ import annotations
@@ -24,37 +14,26 @@ from pathlib import Path
 
 
 
-# Files whose content is rendered into LLM context. Tests / docs /
-# code-comment files are excluded — the contract is "what the LLM
-# reads", not "what the codebase mentions".
+# Files whose content is rendered into LLM context.
 _PROMPT_ROOTS = (
     Path("inference_optimizer/actions"),
     Path("inference_optimizer/orchestrator/system_prompts"),
 )
 
-# Files outside the prompt directories whose user-visible string
-# literals end up inside the per-tick orchestration prompt via
-# ``SharedState.format_for_prompt()`` / runtime hint composition.
-# Scanned in addition to ``_PROMPT_ROOTS`` to catch the case where a
-# fallback message like "(no snapshot yet — propose `roofline` ...)"
-# is rendered straight into LLM context but lives in code rather than
-# a prompt template.
+# Code files whose string literals reach the orchestration prompt via
+# ``SharedState.format_for_prompt()``.
 _PROMPT_AUX_FILES = (
     Path("inference_optimizer/orchestrator/shared_state.py"),
 )
 
-# Allow-list: these files *describe* the denial rule and necessarily
-# quote the forbidden pattern in fenced code or inline backticks. They
-# are not instructing the LLM to propose — they are documenting that
-# proposing is denied.
+# Allow-list: these files document the denial rule and necessarily quote the
+# forbidden pattern.
 _DOC_ALLOWLIST = {
     Path("inference_optimizer/actions/roofline.md"),
     Path("inference_optimizer/actions/profile.md"),
 }
 
-# Negation guard: any line that contains one of these markers near the
-# forbidden phrase is interpreted as a *denial* note rather than an
-# instruction, and is skipped.
+# Negation guard: lines containing these markers are treated as denial notes and skipped.
 _NEGATION_MARKERS = (
     "never",
     "do not",
@@ -95,7 +74,6 @@ def _line_is_negation(line: str) -> bool:
 
 
 def test_no_prompt_instructs_llm_to_propose_analysis_action():
-    # Resolve repo root from this test file (tests/<file> → repo root).
     repo_root = Path(__file__).resolve().parents[2]
     hits: list[tuple[Path, int, str]] = []
     for path in _iter_prompt_files(repo_root):
@@ -122,13 +100,7 @@ def test_no_prompt_instructs_llm_to_propose_analysis_action():
 
 
 def test_shared_state_empty_analysis_md_does_not_tell_llm_to_propose():
-    """``SharedState._format_analysis_md_full`` renders straight into
-    the per-tick orchestration prompt via ``format_for_prompt``. When
-    no analysis snapshot exists yet, the fallback string must NOT tell
-    the LLM to propose ``roofline`` / ``profile`` — PolicyGate denies
-    that with ``analysis_action_not_llm_proposable``. Pin the exact
-    output so the grep guard above (line-based regex) is reinforced
-    by an end-to-end behaviour check."""
+    """The empty-snapshot ``_format_analysis_md_full`` fallback must NOT tell the LLM to propose ``roofline`` / ``profile``."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState()
@@ -139,11 +111,8 @@ def test_shared_state_empty_analysis_md_does_not_tell_llm_to_propose():
     assert "propose `profile`" not in low
     assert "propose roofline" not in low
     assert "propose profile" not in low
-    # Positive contract: the fallback must point at the auto-enqueue
-    # path or name the denial rule so the LLM knows why it cannot
-    # propose itself.
     assert (
         "auto-enqueued" in low
         or "coordinator" in low
-        or "analysis_action_not_llm_proposable" in low
+        or "phase_incompatible" in low
     )

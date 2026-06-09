@@ -1,11 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Conductor integration — read events from the Conductor SQLite DB.
-
-This module bridges the Robustness agent with the Conductor's SQLite database.
-It reads events (and task/lease state) to understand what other agents are
-doing. Intents are emitted via the validated ``intent_envelope`` subprocess
-transport in :mod:`robustness_agent.runtime.cli`, not by writing into the DB.
+"""Conductor integration — read events (and task/lease state) from the
+Conductor SQLite DB. Intents are emitted via the subprocess transport in
+:mod:`robustness_agent.runtime.cli`, not by writing into the DB.
 """
 
 from __future__ import annotations

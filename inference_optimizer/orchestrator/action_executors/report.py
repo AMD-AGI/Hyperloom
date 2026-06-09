@@ -1,17 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Real ``report`` ActionRunner report action.
+"""Real ``report`` ActionRunner.
 
-Reads the session's SharedState + bus event log and produces:
-
-* ``$SESSION_DIR/reports/final.json`` — machine-readable summary (the
-  same shape Hyperloom dashboards consume)
-* ``$SESSION_DIR/reports/final.md``   — human-readable Markdown summary
-
-Returned dict surfaces both paths so the bus event has actionable
-references. The generated files are intentionally compact: stop_reason,
-baseline + best, cumulative gain, action timeline (counts per kind),
-and a top-N highlight list of decisions / verdicts.
+Reads SharedState + the bus event log and writes
+``$SESSION_DIR/reports/final.json`` (machine-readable, dashboard shape) and
+``final.md`` (human-readable). The returned dict surfaces both paths. Files
+are compact: stop_reason, baseline + best, cumulative gain, event counts,
+and a top-N highlight list.
 """
 
 from __future__ import annotations
@@ -34,6 +29,18 @@ from ...storage.connection import SqliteConnection
 log = logging.getLogger(__name__)
 
 
+def _safe_call(state: Any, method: str, default: Any) -> Any:
+    """Call a zero-arg SharedState helper, returning ``default`` when absent
+    or raising."""
+    fn = getattr(state, method, None)
+    if not callable(fn):
+        return default
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001 — report must never crash on annotations
+        return default
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -49,9 +56,7 @@ def _build_summary_dict(
         "stop_reason":      state.stop_reason,
         "baseline_tput":    state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
-        # steward verdict + history. The final report's section
-        # 9.1 (remaining gaps) reads ``last_remaining_gaps_assessment``
-        # rationale verbatim.
+        # steward verdict + history (report §9.1 reads the rationale verbatim).
         "remaining_gaps_assessment": dict(
             state.last_remaining_gaps_assessment or {}
         ),
@@ -60,13 +65,17 @@ def _build_summary_dict(
         ),
         "current_best":     state.current_best,
         "cumulative_gain":  state.cumulative_gain,
-        # Phase 3 — separate the per-round-sum gain (kept as
-        # ``cumulative_gain`` for back-compat) from the validated
-        # cumulative gain, which is what the run actually delivered.
+        # Per-round-sum gain (back-compat) vs the validated gain (what the
+        # run actually delivered).
         "cumulative_gain_validated":          state.cumulative_gain_validated,
         "cumulative_gain_validated_ts":       state.cumulative_gain_validated_ts,
         "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
         "optimization_stack_len":             len(state.optimization_stack or []),
+        # Honesty annotations: surface unfinished/unvalidated work instead of
+        # blocking the report; read defensively for partial-state stubs.
+        "has_unvalidated_keeps":              _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
+        "untried_hot_reusable_kernels":       list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
+        "pending_keep_kernels":               list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
         "crash_count":      state.crash_count,
         "pruned_families":  state.pruned_families,
         "max_minutes":      state.max_minutes,
@@ -76,14 +85,9 @@ def _build_summary_dict(
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
-    # Roofline Comparison: PR #321 retired the legacy
-    # ``last_trace_analyze_baseline`` baseline-freeze field; we now
-    # walk the append-only ``state.roofline_snapshots`` list, where
-    # entry[0] is the baseline snapshot (PRELUDE bootstrap) and
-    # entry[-1] is the most recent watermark refresh. The block is
-    # only emitted when at least one snapshot was captured so older
-    # sessions (no roofline action ever completed) leave ``final.json``
-    # without a stale empty stub.
+    # Roofline Comparison (PR #321): walk the append-only
+    # ``state.roofline_snapshots`` (entry[0] baseline, entry[-1] latest);
+    # emit only when at least one snapshot exists.
     from ..roofline_snapshot import build_roofline_comparison_from_history
     cmp = build_roofline_comparison_from_history(
         getattr(state, "roofline_snapshots", None)
@@ -113,14 +117,13 @@ def _format_md(summary: dict[str, Any]) -> str:
     if cb_tput is not None:
         lines.append(f"- current_best        : `{cb_tput:.1f}` tok/s/GPU "
                       f"(action=`{cb.get('action','?')}`)")
-    # Per-round sum — useful for *seeing* what each step contributed,
-    # but doesn't reflect what's actually deliverable end-to-end.
+    # Per-round sum — informational, not end-to-end deliverable.
     lines.append(
         f"- cumulative_gain     : `{summary['cumulative_gain']:.2f}%`"
         f"  *(per-round sum — informational only)*"
     )
-    # Validated gain — the only honest number. We always print it so
-    # the report can never silently quote the (often inflated) raw sum.
+    # Validated gain — always printed so the report never quotes only the
+    # (often inflated) raw sum.
     val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
@@ -134,13 +137,14 @@ def _format_md(summary: dict[str, Any]) -> str:
     else:
         lines.append(
             f"- cumulative_gain_val : `0.00%` "
-            f"⚠ never validated — no `validate_stack` action ran in this session"
+            f"⚠ never validated — no full-stack rebench ran in this session"
         )
     if cb.get("ttft_mean_ms") is not None:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
         lines.append(f"- e2el_mean      : `{cb.get('e2el_mean_ms'):.1f}` ms")
     lines.append("")
+    lines.extend(_format_completeness_annotations(summary))
     lines.append("## Run summary")
     lines.append("")
     lines.append(f"- crash_count    : {summary['crash_count']}")
@@ -181,8 +185,41 @@ def _format_md(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
+    """Render honesty annotations for work left unfinished (unvalidated
+    KEEPs, untried hot kernels, KEEPs awaiting integrate)."""
+    unvalidated = bool(summary.get("has_unvalidated_keeps"))
+    untried = list(summary.get("untried_hot_reusable_kernels") or [])
+    pending_keeps = list(summary.get("pending_keep_kernels") or [])
+    if not (unvalidated or untried or pending_keeps):
+        return []
+    lines: list[str] = ["## Completeness annotations", ""]
+    if unvalidated:
+        lines.append(
+            "- ⚠ `optimization_stack` has KEEPs landed since the last "
+            "full-stack rebench — `cumulative_gain_validated` does not "
+            "yet reflect them (unvalidated)."
+        )
+    if pending_keeps:
+        lines.append(
+            f"- ⚠ kernel_opt KEEPs awaiting integrate: "
+            f"{', '.join(pending_keeps)}."
+        )
+    if untried:
+        lines.append(
+            f"- ⚠ reusable hot kernels with no kernel_opt attempt: "
+            f"{', '.join(untried)}."
+        )
+    lines.append("")
+    return lines
+
+
 def _format_steward_section(summary: dict[str, Any]) -> list[str]:
-    """IR-7 — render the session_steward verdict + history."""
+    """Render any legacy session_steward verdict + history.
+
+    Steward was retired in P3_17; kept for back-compat with older state.json
+    carrying a populated ``last_remaining_gaps_assessment``.
+    """
     assessment = summary.get("remaining_gaps_assessment") or {}
     history = summary.get("remaining_gaps_assessments_history") or []
     if not assessment and not history:
@@ -215,14 +252,9 @@ def _format_steward_section(summary: dict[str, Any]) -> list[str]:
 
 
 def _extract_executive_summary(analysis_md_path: str) -> str:
-    """Pull the ``## Executive Summary`` block out of analysis.md.
-
-    TraceLens's analysis.md always starts with a level-1 title then a
-    ``## Executive Summary`` section -- we extract from that heading
-    up to the next level-2 heading (typically ``## Compute Kernel
-    Optimizations`` or the metrics table). Best-effort: returns a
-    short marker string if the file is missing / unparseable rather
-    than crashing the report.
+    """Extract the ``## Executive Summary`` block (up to the next level-2
+    heading) from analysis.md. Best-effort: returns a marker string when the
+    file is missing / unparseable rather than crashing the report.
     """
     if not analysis_md_path:
         return "(no analysis.md path recorded)"
@@ -230,8 +262,7 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
         text = Path(analysis_md_path).read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return f"(could not read {analysis_md_path}: {exc})"
-    # Strip base64 image data URLs upfront so the report stays
-    # compact even if TraceLens regressed on inline images.
+    # Strip base64 image data URLs so the report stays compact.
     import re
     text = re.sub(
         r"!\[[^\]]*\]\(data:image/[^)]+\)",
@@ -252,29 +283,19 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
     if start is None:
         return "(analysis.md does not contain a `## Executive Summary` block)"
     block = "\n".join(lines[start:end]).strip()
-    # Cap the block at ~2KB so a single report doesn't bloat to MBs
-    # if Executive Summary ever grows. The full analysis.md is still
-    # on disk via ``analysis_md_path`` for anyone who wants details.
+    # Cap at ~2KB (full analysis.md remains on disk via ``analysis_md_path``).
     if len(block) > 2048:
         block = block[:2045] + "..."
     return block
 
 
 def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
-    """Render the ``## Roofline Comparison`` section.
+    """Render the ``## Roofline Comparison`` section from ``cmp`` (built by
+    :func:`roofline_snapshot.build_roofline_comparison_from_history`).
 
-    ``cmp`` is the dict materialised by
-    :func:`roofline_snapshot.build_roofline_comparison_from_history`
-    from :attr:`SharedState.roofline_snapshots` (the append-only
-    history that survived the PR #321 ``last_trace_analyze_baseline``
-    retirement). Two modes:
-
-    * ``single_snapshot`` — only the PRELUDE bootstrap roofline ran;
-      no +10% watermark crossing fired a refresh. The section shows
-      one Executive Summary plus the compact Base/—/— metric table.
-    * ``before_after`` — at least one watermark refresh produced a
-      distinct snapshot id. The section shows two Executive Summaries
-      side-by-side plus the compact Base/Opt/Δ metric table.
+    Two modes: ``single_snapshot`` (only the PRELUDE bootstrap ran; one
+    Executive Summary + Base metric table) and ``before_after`` (a watermark
+    refresh produced a distinct snapshot; two summaries + Base/Opt/Δ table).
     """
     from ..roofline_snapshot import format_roofline_metrics_table
 
@@ -382,22 +403,10 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
 def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     """Render the advisory external-baseline section (report-only).
 
-    ``ext`` is the dict materialised by
-    :func:`_load_external_baseline` from
-    ``$SESSION_DIR/target_analysis/target_baseline.json``. We render
-    facts only — no derived gap percentage, no "should reach" wording —
-    so this section never reads as an implicit KPI the next run is
-    expected to hit.
-
-    The section heading varies by ``ext['reason']``:
-
-    * ``ok``                       — full reference-best block.
-    * ``no_target_gpu_configured`` — "(not requested)" heading; explains
-                                      no ``--compare-against-gpu`` was
-                                      supplied so only a marker JSON was
-                                      written.
-    * everything else              — "(InferenceX, advisory)" heading
-                                      with the warning text.
+    ``ext`` comes from :func:`_load_external_baseline`. Facts only (no derived
+    gap %, no "should reach" wording) so it never reads as an implicit KPI.
+    Heading varies by ``ext['reason']``: ``ok`` (full reference-best),
+    ``no_target_gpu_configured`` ("(not requested)"), else "(advisory)".
     """
     lines: list[str] = []
     status = str(ext.get("status") or "unknown")
@@ -483,12 +492,9 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
 
 
 def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
-    """Best-effort load of ``target_analysis/target_baseline.json``.
-
-    Returns the parsed dict on success or ``None`` if the file does not
-    exist / is unreadable. Errors are swallowed: a corrupt baseline JSON
-    must never break report generation.
-    """
+    """Best-effort load of ``target_analysis/target_baseline.json``; ``None``
+    when missing / unreadable (errors swallowed so a corrupt JSON never
+    breaks report generation)."""
     try:
         from ...session_paths import target_baseline_json
         path = target_baseline_json(session_dir)
@@ -508,13 +514,11 @@ def _write_kernel_opt_summary(
     session_dir: Path,
     output_dir: Path,
 ) -> Path | None:
-    """Build + atomically write ``reports/kernel_optimization_summary.json``.
+    """Build + write ``reports/kernel_optimization_summary.json``.
 
-    Best-effort: any failure is logged and returns ``None`` so the
-    upstream ``final.json`` write still happens. The summary aggregates
-    :attr:`SharedState.kernel_opt_attempts` with per-kernel kernel-agent
-    ``results/<kid>.json`` so the front-end can answer "why did each
-    kernel-agent attempt not produce an optimized kernel?".
+    Best-effort (failure logged, returns ``None`` so the final.json write
+    still happens). Aggregates ``kernel_opt_attempts`` with per-kernel
+    ``results/<kid>.json`` for the "why no optimized kernel?" view.
     """
     try:
         from ..kernel_attempt_summary import build_kernel_optimization_summary
@@ -532,14 +536,9 @@ def _write_kernel_opt_summary(
 
 
 def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
-    """Build the ``conc_sweep_summary`` pointer block for ``final.json``.
-
-    Returns ``None`` when the conc_sweep action did not write a
-    summary (either disabled, skipped, or report write failed). The
-    pointer is small (report_path + status + summary) so the
-    front-end can decide whether to lazy-load the full
-    ``conc_sweep_summary.json`` payload.
-    """
+    """Build the small ``conc_sweep_summary`` pointer for ``final.json``
+    (report_path + status + summary); ``None`` when conc_sweep wrote no
+    summary."""
     from ...session_paths import reports_dir as _reports_dir
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
     if not json_path.exists():
@@ -565,8 +564,7 @@ def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
 
 
 def _read_ko_summary_totals(path: Path) -> dict[str, int]:
-    """Re-read the just-written totals so the pointer in final.json
-    doesn't drift from the on-disk file."""
+    """Re-read totals so the final.json pointer doesn't drift from disk."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         totals = data.get("totals") or {}
@@ -630,10 +628,6 @@ class ReportExecutor:
         self.max_highlights = int(max_highlights)
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        # Resolve session dir from db path (runner doesn't get session_dir
-        # directly — but the BaselineExecutor pattern means we infer from
-        # task.params or parent process env). For the CLI flow, the
-        # session_dir is the parent of `storage/coordinator.db`.
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             return {"status": "failed",
@@ -650,9 +644,7 @@ class ReportExecutor:
 
         state = SharedState.load_or_init(session_dir)
 
-        # Pull bus stats. We open a fresh read-only-ish connection (the
-        # Coordinator's connection is in the same process; SQLite WAL lets
-        # us share without contention).
+        # Pull bus stats over a fresh connection (SQLite WAL shares cleanly).
         db = SqliteConnection(db_path_for(session_dir))
         try:
             bus = MessageBus(db)
@@ -674,9 +666,8 @@ class ReportExecutor:
             external_baseline=external_baseline,
         )
 
-        # Kernel-optimization forensic summary — separate file so the
-        # front-end can poll it independently of final.json. The pointer
-        # is added to final.json for discoverability.
+        # Kernel-optimization forensic summary in a separate file (pointer
+        # added to final.json for discoverability).
         ko_summary_path = _write_kernel_opt_summary(state, session_dir, output_dir)
         if ko_summary_path is not None:
             try:
@@ -691,10 +682,8 @@ class ReportExecutor:
                     "totals": _read_ko_summary_totals(ko_summary_path),
                 }
 
-        # Post-sweep concurrency comparison pointer. The conc_sweep
-        # action (SWEEP-phase, off by default) writes its own JSON +
-        # CSV; we just surface a compact summary in final.json so the
-        # front-end discovers it without having to globbing reports/.
+        # Post-sweep concurrency comparison pointer (conc_sweep writes its
+        # own JSON/CSV; surface a compact summary for discoverability).
         cs_pointer = _read_conc_sweep_pointer(session_dir)
         if cs_pointer is not None:
             summary["conc_sweep_summary"] = cs_pointer
@@ -724,13 +713,9 @@ class ReportExecutor:
     def _resolve_session_dir(self, ctx) -> Path | None:
         """Best-effort session_dir resolution.
 
-        Strategy (in order):
-        1. ``ctx.extra['session_dir']``     — Coordinator injects this for in-process runs
-        2. ``task.params['session_dir']``   — explicit wins (e.g. tests)
-        3. :func:`paths.session_dir`        — honours ``$USER_DATA_PATH``
-           and otherwise returns ``/workspace/hyperloom``. Returns the
-           path only if it exists and contains ``state.json``.
-        4. None → runner returns failed status with an error
+        Order: ``ctx.extra['session_dir']`` → ``task.params['session_dir']``
+        → :func:`paths.session_dir` (only if it exists with ``state.json``)
+        → None (runner returns failed).
         """
         extra = getattr(ctx, "extra", None) or {}
         if extra.get("session_dir"):
@@ -745,12 +730,8 @@ class ReportExecutor:
         return None
 
     def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
-        """Best-effort publish hook for code-driven optimizer runs.
-
-        Prompt/skill-driven Web runs use actions/report.md directly. This hook
-        covers runs that execute the Python ReportExecutor. It is opt-in unless
-        the results service URL is explicitly configured.
-        """
+        """Best-effort publish hook for code-driven optimizer runs (opt-in
+        unless the results service URL is configured)."""
         service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
         auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()
         if not service_url and auto_publish not in {"1", "true", "yes"}:

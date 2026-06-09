@@ -1,24 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""End-to-end tests for :class:`runtime.kb_writer.KBWriter`, including
-circuit-breaker behaviour on KB unreachability.
-
-We use :class:`runtime.in_memory_kb_client.InMemoryKBClient` so the tests
-exercise the same surface a production HTTP client would, but without
-network IO. Dead-letter and session-memory paths use the temp fixtures.
-
-The breaker tests live in :class:`TestKbBreaker` below — they cover:
-
-* When the KB transport fails, ``KBWriter.list_priors`` short-circuits
-  on subsequent calls within the cooldown window, returning an empty
-  ``priors`` list with ``cache="kb_unreachable"`` and never raising.
-* Writes (``write_verdict`` / ``write_kb_drafts`` / ``add_contradiction``)
-  honour the open breaker and refuse to make remote calls.
-* A successful KB call resets the breaker.
-* ``DecisionReviewer.prepare_review`` reflects the breaker state in
-  ``judge_bundle.kb_read_skipped_reason`` so the SKILL knows priors are
-  missing because of an outage rather than a clean miss.
-"""
+"""End-to-end tests for :class:`runtime.kb_writer.KBWriter`, including circuit-breaker behaviour on KB unreachability."""
 
 from __future__ import annotations
 

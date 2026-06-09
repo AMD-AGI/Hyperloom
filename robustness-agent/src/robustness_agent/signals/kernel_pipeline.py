@@ -2,34 +2,14 @@
 
 """Kernel-pipeline / external-backend health signals (F1-F5).
 
-Five detectors catch the failure modes that K1 + K3 + remain_issue.md
-P2#7 documented:
-
-* **F1 ``ray_pending_starvation``** — ``ray status`` reports a non-zero
-  ``Pending`` count across at least ``min_pending_ticks`` consecutive
-  ticks. Indicates the cluster quota ledger is wedged (the canonical
-  P2#7 case: ``reported_used > total``) so ``kernel_opt`` / GEAK
-  submissions are accumulating without dispatch.
-
-* **F2 ``geak_budget_starvation``** — same kernel_id has its GEAK
-  backend attempt killed by SIGTERM/timeout markers in
-  ``optimization_attempts.jsonl`` across at least
-  ``min_geak_sigterm_attempts`` rows. Means the 90 min default budget
-  is too short for that kernel's ``select_patch`` round; extending it
-  or skipping the kernel is the only fix.
-
-* **F4 ``cursor_auth_storm``** — ``optimization_attempts.jsonl`` shows
-  ``backend=cursor`` AND ``report_text`` carrying a ``401`` /
-  authentication-failure marker across at least ``min_cursor_401_hits``
-  rows. The user wired ``--backends cursor`` without a ``CURSOR_API_KEY``
-  override; throttle further attempts.
-
-* **F5 ``kernel_opt_no_progress``** — at least
-  ``min_kernels_with_no_progress`` distinct kernel_ids see every
-  backend attempt land on PARTIAL/REVERT (no KEEP) within the recent
-  oob_attempts window. Means the kernel pipeline is structurally
-  unable to optimise this model; prune ``kernel_opt`` and let the
-  budget flow to params/sweep.
+* **F1 ``ray_pending_starvation``** — non-zero ``ray status`` Pending across
+  ``min_pending_ticks`` consecutive ticks (cluster quota ledger wedged).
+* **F2 ``geak_budget_starvation``** — same kernel_id's GEAK attempt SIGTERM'd across
+  ``min_geak_sigterm_attempts`` rows; budget too short for ``select_patch``.
+* **F4 ``cursor_auth_storm``** — ``backend=cursor`` + 401 marker across
+  ``min_cursor_401_hits`` rows (``--backends cursor`` without ``CURSOR_API_KEY``).
+* **F5 ``kernel_opt_no_progress``** — ``min_kernels_with_no_progress`` kernel_ids land
+  all backend attempts on PARTIAL/REVERT (no KEEP); prune kernel_opt toward params/sweep.
 """
 
 from __future__ import annotations
@@ -44,10 +24,7 @@ from .symptom import Symptom, SymptomSeverity
 
 
 
-# Markers we treat as "GEAK budget killed the run" in
-# ``optimization_attempts.jsonl::report_text``. Matches case-insensitive
-# because the kernel-agent / GEAK runner emits both ``SIGTERM`` and
-# ``signal 15`` variants.
+# "GEAK budget killed the run" markers in report_text (matched case-insensitive).
 _GEAK_SIGTERM_MARKERS: tuple[str, ...] = (
     "sigterm",
     "signal 15",
@@ -56,8 +33,7 @@ _GEAK_SIGTERM_MARKERS: tuple[str, ...] = (
     "killed by deadline",
 )
 
-# Markers we treat as "cursor authentication failed". The Cursor gateway
-# returns ``401`` or ``unauthorized`` literally; we match either form.
+# "cursor authentication failed" markers (401 / unauthorized).
 _CURSOR_AUTH_MARKERS: tuple[str, ...] = (
     "401",
     "unauthorized",
@@ -87,12 +63,7 @@ class KernelPipelineConfig:
 # ---------------------------------------------------------------------------
 
 class RayPendingDetector:
-    """Track the ``ray status`` pending count across ticks.
-
-    A single tick with pending > 0 is normal (tasks are about to
-    dispatch); ``min_pending_ticks`` consecutive ticks above the
-    threshold means the dispatcher is wedged.
-    """
+    """Track ``ray status`` pending across ticks; ``min_pending_ticks`` consecutive ticks above threshold = dispatcher wedged."""
 
     def __init__(
         self,
@@ -308,10 +279,7 @@ def _kernel_opt_no_progress_symptoms(
     if not isinstance(attempts, list) and not isinstance(integrate, list):
         return []
 
-    # Build per-kernel rollup from BOTH oob_attempts (per-backend) and
-    # recent_integrate (per-attempt KEEP/REVERT outcome). A kernel
-    # ``has_keep`` only when at least one row reports a positive
-    # speedup OR a KEEP decision.
+    # Roll up per kernel from oob_attempts + recent_integrate; ``has_keep`` only on a positive speedup OR a KEEP decision.
     rollups: dict[str, dict[str, Any]] = {}
     if isinstance(attempts, list):
         for entry in attempts:
@@ -397,12 +365,7 @@ def evaluate_kernel_pipeline_signals(
     *,
     config: KernelPipelineConfig | None = None,
 ) -> list[Symptom]:
-    """Stateless slice of F (F2 / F4 / F5).
-
-    F1 ``ray_pending_starvation`` is stateful (consecutive-tick streak)
-    and lives in :class:`RayPendingDetector`; the classifier instantiates
-    one and calls its ``evaluate`` separately.
-    """
+    """Stateless slice of F (F2 / F4 / F5); F1 is stateful in :class:`RayPendingDetector`."""
     cfg = config or KernelPipelineConfig()
     out: list[Symptom] = []
     out.extend(_geak_budget_symptoms(data, cfg))

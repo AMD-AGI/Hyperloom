@@ -1,20 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Objective abstraction
+"""Objective abstraction — the goal driving early-stop, pressure scoring, and the Orchestration prompt.
 
-The Objective is the goal that drives early-stop, pressure scoring, and
-the Orchestration prompt. The Coordinator's long-run loop checks
-`objective.reached(state)` after each tick to decide whether to stop.
-
-Four concrete implementations (DESIGN §11.2):
-
-* :class:`TargetGainObjective`     — reach `target_gain_pct` % over baseline
-* :class:`TargetTputObjective`     — reach `target_tput_per_gpu` absolute tok/s
-* :class:`TargetBaselineObjective` — match a referenced external baseline_dir
-* :class:`TimeOnlyObjective`       — only `MAX_HOURS` matters (never "reached")
-
-`build_objective(env)` mirrors §11.3 — at most one TARGET_* env var; if
-none, falls back to TimeOnly.
+Four implementations (DESIGN §11.2): TargetGain, TargetTput, TargetBaseline,
+TimeOnly. `build_objective(env)` (§11.3) takes at most one TARGET_* var.
 """
 
 from __future__ import annotations
@@ -36,12 +25,7 @@ class ObjectiveError(ValueError):
 # ---------------------------------------------------------------------------
 @dataclass
 class Objective(ABC):
-    """Goal that the Coordinator + Orchestration optimize against.
-
-    All implementations are pure functions of the SharedState — they don't
-    touch the bus, the DB, or the LLMs. PolicyGate / Coordinator read their
-    output to make stop / pressure / prompt decisions.
-    """
+    """Goal optimized against (pure functions of SharedState)."""
 
     @abstractmethod
     def kind(self) -> str: ...
@@ -59,12 +43,7 @@ class Objective(ABC):
 
     @abstractmethod
     def pressure_input(self, state: "SharedState") -> float:
-        """Feed to scheduler.pressure(): 0.0 = relaxed, 1.0 = max urgency.
-
-        Used by §12 Budget-Aware Scheduler. P2 doesn't run the full
-        scheduler yet but the Coordinator still surfaces this value in the
-        Orchestration prompt so the LLM can self-pace.
-        """
+        """Feed to scheduler.pressure() (§12): 0.0 = relaxed, 1.0 = max urgency."""
 
     @abstractmethod
     def describe(self) -> str:
@@ -74,10 +53,7 @@ class Objective(ABC):
 # ---------------------------------------------------------------------------
 @dataclass
 class TargetGainObjective(Objective):
-    """Reach ``target_gain_pct`` % over baseline_tput.
-
-    Progress = cumulative_gain / target_gain_pct, capped at 1.0.
-    """
+    """Reach ``target_gain_pct`` % over baseline_tput (progress = cumulative_gain / target, capped at 1.0)."""
 
     target_gain_pct: float
 
@@ -101,8 +77,7 @@ class TargetGainObjective(Objective):
         return state.cumulative_gain >= self.target_gain_pct
 
     def pressure_input(self, state: "SharedState") -> float:
-        # Linear ramp 0..1 as we approach target; remains 0 until we have
-        # any gain at all (avoids panic before baseline finishes).
+        # Stays 0 until baseline finishes.
         if state.baseline_tput <= 0:
             return 0.0
         return min(1.0, state.cumulative_gain / self.target_gain_pct)
@@ -113,10 +88,7 @@ class TargetGainObjective(Objective):
 
 @dataclass
 class TargetTputObjective(Objective):
-    """Reach an absolute tok/s/GPU number.
-
-    Progress is computed against the **best-so-far** tput, not baseline.
-    """
+    """Reach an absolute tok/s/GPU number (progress against best-so-far tput, not baseline)."""
 
     target_tput_per_gpu: float
 
@@ -158,11 +130,7 @@ class TargetTputObjective(Objective):
 
 @dataclass
 class TargetBaselineObjective(Objective):
-    """Match (or beat) the throughput recorded in another session's baseline.
-
-    The reference baseline file is a JSON of the same schema BaselineExecutor
-    writes to ``benchmark_report.json``. We only read ``output_throughput``.
-    """
+    """Match (or beat) the throughput recorded in another session's baseline (reads ``output_throughput``)."""
 
     baseline_dir: str
     _ref_tput: float = field(default=0.0, init=False)
@@ -241,13 +209,7 @@ class TimeOnlyObjective(Objective):
 
 # ---------------------------------------------------------------------------
 def build_objective(env: dict[str, Any]) -> Objective:
-    """Factory mirroring DESIGN §11.3.
-
-    Required: MAX_HOURS (validated as positive float; the Coordinator uses
-    it for the wall-clock stop, not us, but we still validate).
-    Optional: at most ONE of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU /
-    TARGET_DIR. None → TimeOnlyObjective.
-    """
+    """Factory (DESIGN §11.3): requires MAX_HOURS; at most one of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU / TARGET_DIR (none → TimeOnly)."""
     if "MAX_HOURS" not in env:
         raise ObjectiveError("build_objective: MAX_HOURS is required")
     try:

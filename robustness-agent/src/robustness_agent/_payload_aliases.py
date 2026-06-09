@@ -2,19 +2,8 @@
 
 """Sub-agent-local copy of Hyperloom's payload-rename compat shim.
 
-Mirrors :mod:`inference_optimizer.compat.payload_aliases` from the
-main Hyperloom orchestrator. The robustness-agent is a separately
-packaged Python project, so the shim is duplicated here rather than
-imported across package boundaries — this matches the existing
-isolation pattern (``framework_agent.repo_map``).
-
-The payload-surface field ``extra_sglang_args`` was renamed to
-``extra_server_args``. The ``repeated_payload`` signal hashes
-per-family payload projections to detect same-fingerprint retries; if
-a legacy event arrives mid-streak the helper lets the signal still
-produce a stable hash by reading either key transparently.
-
-Removal target: in lockstep with Hyperloom's own compat helper.
+``extra_sglang_args`` was renamed to ``extra_server_args``; reading either
+key keeps ``repeated_payload`` signal hashing stable across legacy events.
 """
 
 from __future__ import annotations

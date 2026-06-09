@@ -1,13 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Real ``sweep`` ActionRunner sweep action.
+"""Real ``sweep`` ActionRunner — full ISL/OSL/CONC Pareto sweep.
 
-Full ISL/OSL/CONC sweep with
-the optimized server config to map the Pareto frontier. P2-3 keeps the
-implementation simple — relaunches sglang once per (CONC, ISL, OSL)
-combo via the same Magpie shell. A future single-server mode (one
-launch, many bench calls) is a natural follow-up if wall time becomes
-the bottleneck.
+Relaunches one Magpie bench per (CONC, ISL, OSL) combo with the optimized
+server config (a single-server mode is a future follow-up).
 
 Inputs (task.params):
 
@@ -16,8 +12,7 @@ Inputs (task.params):
 * ``conc_values``      — list of int CONC, default [4, 16, 64]
 * ``isl_osl_configs``  — list of "<ISL>:<OSL>" str, default ["1024:1024",
                           "8192:1024", "1024:8192"]
-* ``num_prompts_factor`` — multiplier vs CONC (default 5; adaptive
-                            default for OSL ≤ 1024)
+* ``num_prompts_factor`` — multiplier vs CONC (default 5)
 
 Result::
 
@@ -77,20 +72,13 @@ def _build_grid(
     base_extra_args: str,
     max_model_len: int = 0,
 ) -> tuple[list[GridVariant], list[dict[str, Any]]]:
-    """Fan out CONC × (ISL, OSL) into per-combo Magpie variants.
+    """Fan out CONC × (ISL, OSL) into per-combo Magpie variants (each
+    overriding CONC / ISL / OSL envs).
 
-    Each variant overrides ``CONC`` / ``ISL`` / ``OSL`` envs in the YAML
-    so the same Magpie shell reuses our existing baseline machinery.
-
-    When ``max_model_len`` is positive, any combo whose ``ISL + OSL``
-    exceeds it is dropped up front: the server rejects every request in
-    that combo with ``VLLMValidationError: maximum context length`` so
-    the benchmark always aborts with an invalid measurement. Filtering
-    here avoids burning a launch + warmup on a guaranteed failure.
-
-    Returns ``(runnable_variants, skipped_records)`` where each skipped
-    record documents why a combo was dropped so the sweep result keeps
-    it visible instead of silently pretending it never existed.
+    Combos with ``ISL + OSL`` over a positive ``max_model_len`` are dropped
+    up front (the server would reject every request), avoiding a wasted
+    launch. Returns ``(runnable_variants, skipped_records)`` so dropped
+    combos stay visible in the result.
     """
     out: list[GridVariant] = []
     skipped: list[dict[str, Any]] = []
@@ -140,8 +128,7 @@ def _build_grid(
 
 def _result_dict(v: VariantResult) -> dict[str, Any]:
     d = v.to_dict()
-    # Pull conc/isl/osl out of extra_envs so consumers don't have to
-    # parse them.
+    # Surface conc/isl/osl from extra_envs so consumers needn't parse them.
     envs = v.extra_envs or {}
     d["conc"] = int(envs.get("CONC", 0))
     d["isl"] = int(envs.get("ISL", 0))
@@ -185,8 +172,7 @@ class SweepExecutor:
         default_num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
         variant_timeout_sec: int = 2400,
     ):
-        # None = resolve at call time from $FRAMEWORK (sglang/vllm). Tests
-        # that pass an explicit fixture path keep their override.
+        # None = resolve at call time from $FRAMEWORK; explicit fixture wins.
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
@@ -217,14 +203,10 @@ class SweepExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
-        # Workload-contract materialization. Sweep deliberately overrides
-        # CONC/ISL/OSL/NUM_PROMPTS per variant via _build_grid below, so
-        # those four envs are immaterial here, but TP/MAX_MODEL_LEN/
-        # PRECISION/RUN_EVAL/ROCR_VISIBLE_DEVICES still flow from process
-        # env onto the materialized YAML and become the per-variant base.
-        # Without this step `_build_variant_yaml` would silently inherit
-        # the shipped YAML's TP=1 default and run sweep variants single-
-        # GPU on a TP=8 model. Idempotent when input already matches env.
+        # Workload-contract materialization: sweep overrides CONC/ISL/OSL/
+        # NUM_PROMPTS per variant, but TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/
+        # ROCR_VISIBLE_DEVICES still flow from env onto the variant base
+        # (else variants inherit the YAML's TP=1 default on a TP=8 model).
         resolved_model = (
             str(params.get("model_path") or "").strip()
             or os.environ.get("MODEL_PATH", "").strip()
@@ -262,10 +244,8 @@ class SweepExecutor:
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
-        # Drop ISL+OSL combos that can't fit the server's context window
-        # before launching anything (see _build_grid). Resolved from the
-        # task params first, then the MAX_MODEL_LEN process env that the
-        # workload contract materializes onto every variant YAML.
+        # Drop ISL+OSL combos over the context window (see _build_grid);
+        # resolved from task params, then $MAX_MODEL_LEN.
         max_model_len = _coerce_int(
             params.get("max_model_len")
             or os.environ.get("MAX_MODEL_LEN")
@@ -279,9 +259,8 @@ class SweepExecutor:
             max_model_len=max_model_len,
         )
 
-        # `resolved_model` / `resolved_gpu` were resolved above for the
-        # materialization step; reuse them here. See baseline.py /
-        # _grid_runner.py for the rationale on why both must flow through.
+        # Reuse resolved_model / resolved_gpu from above (see baseline.py /
+        # _grid_runner.py for why both must flow through).
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args="",  # sweep variants carry args themselves
@@ -295,10 +274,8 @@ class SweepExecutor:
         )
 
         entries = [_result_dict(v) for v in results]
-        # Surface context-window-skipped combos alongside the run
-        # entries so the grid stays complete and consumers can see why a
-        # combo never ran. Skipped entries never enter the Pareto / best
-        # selections below (those filter on status == "succeeded").
+        # Surface skipped combos so the grid stays complete; they never enter
+        # Pareto / best selections (filtered on status == "succeeded").
         entries.extend(skipped_variants)
         front = _pareto_front(entries)
 

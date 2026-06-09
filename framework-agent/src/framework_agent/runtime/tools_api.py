@@ -2,8 +2,8 @@
 
 """Library entry-points for LLM specialists (Arbor / TBO / Hyperloom).
 
-Three high-level helpers that wrap framework-agent's internals without
-forcing the caller to construct a full :class:`ExploreRequest` JSON:
+Three helpers wrapping framework-agent internals without a full
+:class:`ExploreRequest` JSON:
 
 * :func:`find_relevant_prs_smart`  - cross-repo PR discovery via
   primus_cortex + (optional) anonymous GitHub Search.
@@ -12,12 +12,7 @@ forcing the caller to construct a full :class:`ExploreRequest` JSON:
 * :func:`evaluate_candidate_outcome` - stateless winner check given
   pre-computed benchmark/accuracy JSON blobs.
 
-These mirror the contract documented in
-``claw-dev/docs-zh/framework-agent-hyperloom-implementation-plan.md``
-§4.9 and §"Operation Protocol (for LLM specialists)". The CLI does
-NOT depend on this module so removing it would not break ``fa
-explore``; conversely callers of this module do not need argparse /
-JSON request files.
+The CLI does not depend on this module and vice versa.
 """
 
 from __future__ import annotations
@@ -59,21 +54,14 @@ def find_relevant_prs_smart(
     primus_label: str | None = None,
     include_github: bool = True,
 ) -> list[Candidate]:
-    """Discover candidate PRs across one or more repos.
+    """Discover candidate PRs across one or more repos (plain-arg version of
+    :func:`framework_agent.sources.enumerate_candidates`).
 
-    Behaviour mirrors :func:`framework_agent.sources.enumerate_candidates`
-    but takes plain arguments instead of an ExploreRequest:
-
-    * Each repo is queried via primus_cortex (hard-fail on transport
-      errors) when ``primus_cortex_url`` is provided.
-    * GitHub Search is consulted as a best-effort secondary source
-      when ``include_github=True`` (returns ``[]`` on rate-limit
-      or non-GitHub remote, never raises).
-    * Results are de-duped by ``(repo_url, ref)`` preserving the
-      first occurrence so primus_cortex entries win ties.
-
-    Returns an empty list when ``repos`` is empty / None and no
-    primus_cortex_url is set (no work to do).
+    Each repo is queried via primus_cortex (hard-fail) when
+    ``primus_cortex_url`` is set; GitHub Search is a best-effort secondary
+    when ``include_github=True`` (returns ``[]``, never raises). Results are
+    de-duped by ``(repo_url, ref)`` so primus_cortex wins ties. Returns ``[]``
+    when ``repos`` is empty.
     """
     if not repos:
         return []
@@ -121,18 +109,11 @@ def fetch_pr_audit_material(
     primus_cortex_url: str,
     primus_timeout_sec: float = 30.0,
 ) -> dict[str, str]:
-    """Download ``pr.patches`` and ``pr_files.json`` for a single PR.
+    """Download ``pr.patches`` (unified diff) and ``pr_files.json``
+    ({repo, number, files}) for a single PR under ``out_dir``.
 
-    Output layout (under ``out_dir``):
-
-      pr.patches          - unified diff (synthesized from primus's
-                            JSON patch array)
-      pr_files.json       - {repo, number, files: [...]} payload
-
-    Returns the absolute paths in a dict suitable for downstream
-    logging / metadata. Hard-fails (raises ``PrimusCortexError``)
-    when primus_cortex transport / parse errors occur, mirroring the
-    explorer's stage-3 policy.
+    Returns the absolute paths in a dict. Hard-fails (raises
+    ``PrimusCortexError``) on primus_cortex transport / parse errors.
     """
     out = Path(out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -200,15 +181,10 @@ def evaluate_candidate_outcome(
 ) -> dict:
     """Stateless winner check given pre-computed benchmark/accuracy data.
 
-    The gate logic matches :func:`framework_agent.explorer._winner_decision`
-    so library callers see the same verdict as the CLI. Inputs accept
-    either a dict, a Path to a JSON file, or a string path; missing /
-    invalid inputs trigger a ``False`` verdict with a reason rather
-    than raising.
-
-    Returns a dict with keys ``winner`` (bool), ``reason`` (str),
-    ``throughput``, ``accuracy``, ``throughput_ratio`` so callers can
-    log + decide without re-parsing the same fields.
+    Gate logic matches the CLI's winner decision. Inputs accept a dict, a
+    Path, or a string path; missing/invalid inputs yield a ``False`` verdict
+    with a reason rather than raising. Returns a dict with keys ``winner``,
+    ``reason``, ``throughput``, ``accuracy``, ``throughput_ratio``, ``completed``.
     """
     if baseline_throughput is None or baseline_throughput <= 0:
         raise ValueError("baseline_throughput must be a positive float")

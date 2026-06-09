@@ -2,32 +2,15 @@
 
 """Reverse-audit decision-quality signals (G1-G7).
 
-These rules complement Critic — which only sees *proposals* before they
-run — by inspecting the *persisted result* of decisions that already
-landed on disk. Many decisions in the inference_optimizer pipeline go
-through programmatic paths (the ``integrate`` executor, ``grid_runner``,
-``report_back/ci_metrics.py``) that bypass Critic entirely; without a
-reverse-audit layer the bad outcomes (empty-patch KEEP, microbench
-KEPT but E2E bypassed, schema-broken ci_metrics) sit in the artefact
-tree until a human reviewer catches them.
+Complements Critic (which only sees proposals) by inspecting the persisted result of
+decisions that bypassed Critic via programmatic paths (``integrate`` executor,
+``grid_runner``, ``report_back/ci_metrics.py``). All stateless; reads
+:attr:`SourceData.local_decision_audit` and short-circuits to ``[]`` when empty.
 
-All signals are stateless. The detector reads
-:attr:`SourceData.local_decision_audit` populated by
-:func:`local_probe._sample_decision_audit`; when the probe is disabled
-or no decision artefacts exist yet, every rule short-circuits to ``[]``.
-
-Severity matrix:
-
-* HIGH + escalate/prune — G1 empty patch KEEP, G3 dispatch bypassed,
-  G4 negative-delta kernel kept, G5 ci_metrics baseline=0 without
-  ``status=baseline_failed`` marker, G7 OOB expected-only proposal.
-* MEDIUM + alert — G2 sub-threshold KEEP (noise floor), G6 ci_metrics
-  schema drift.
-
-These signals deliberately do not auto-``delegate(report)`` — they are
-*audit*, not *recovery*. The ladder's escalate hints route the
-remediation through Orchestration (or the operator) so the right team
-owns the fix.
+Severity: HIGH + escalate/prune — G1 empty patch KEEP, G3 dispatch bypassed,
+G4 negative-delta kernel kept, G5 ci_metrics baseline=0 without
+``status=baseline_failed``, G7 OOB expected-only. MEDIUM + alert — G2 sub-threshold
+KEEP, G6 ci_metrics schema drift. These are audit, not recovery: no auto-delegate(report).
 """
 
 from __future__ import annotations
@@ -42,9 +25,6 @@ from .symptom import Symptom, SymptomSeverity
 
 
 # Canonical ci_metrics field set the report_back pipeline must produce.
-# Drift detection only fires when the file exists *and* schema_version
-# is set to a known value but a required field is missing — this keeps
-# the rule quiet for in-flight schema migration.
 _CI_METRICS_REQUIRED_FIELDS: frozenset[str] = frozenset({
     "model",
     "framework",
@@ -69,12 +49,9 @@ _CI_METRICS_LEGACY_FIELDS: frozenset[str] = frozenset({
 class DecisionAuditConfig:
     """Tunables for :func:`evaluate_decision_audit_signals`.
 
-    ``min_keep_gain_pct`` mirrors the upstream KEEP-threshold convention
-    (Coordinator's executors use 1.0% as the noise floor). Any KEEP'd
-    integrate with ``gain_pct < min_keep_gain_pct`` trips G2.
-    ``dispatch_bypass_pre_post_epsilon_pct`` is the absolute gain delta
-    below which we suspect the patched kernel was never actually called
-    (G3): a KEEP'd attempt where ``|gain_pct| < epsilon`` is suspicious.
+    ``min_keep_gain_pct`` (noise floor, G2) mirrors the upstream KEEP threshold (1.0%).
+    ``dispatch_bypass_pre_post_epsilon_pct`` (G3) is the |gain_pct| below which a KEEP
+    is suspected of never executing the patched kernel.
     """
 
     min_keep_gain_pct: float = 1.0
@@ -134,12 +111,7 @@ def _integrate_symptoms(
 
 
 def _g1_empty_patch_kept(entry: dict[str, Any]) -> list[Symptom]:
-    """G1: integrate KEEP/PARTIAL with patch_size_bytes == 0.
-
-    An empty patch cannot have produced any speedup; if the integrate
-    decision still landed KEEP, the executor's gain measurement is
-    almost certainly noise. Surface for immediate revert + KB rule.
-    """
+    """G1: integrate KEEP/PARTIAL with patch_size_bytes == 0 — empty patch, so any gain is noise."""
     patch_size = entry.get("patch_size_bytes")
     if not isinstance(patch_size, int) or patch_size > 0:
         return []
@@ -178,12 +150,7 @@ def _g1_empty_patch_kept(entry: dict[str, Any]) -> list[Symptom]:
 def _g2_decision_threshold_violated(
     entry: dict[str, Any], cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """G2: KEEP decision with gain_pct below ``min_keep_gain_pct``.
-
-    Noise-floor KEEPs (Dolphin-34B +0.07% etc.) pollute the optimization
-    stack. Medium severity because this is also a *configuration* fix:
-    upstream should raise its keep threshold. Robustness only flags.
-    """
+    """G2: KEEP with gain_pct below ``min_keep_gain_pct`` (noise-floor); MEDIUM since the real fix is upstream's threshold."""
     if entry.get("decision") != "KEEP":
         return []
     gain_pct = entry.get("gain_pct")
@@ -220,19 +187,9 @@ def _g2_decision_threshold_violated(
 def _g3_kernel_dispatch_bypassed(
     entry: dict[str, Any], cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """G3: KEEP'd patch likely never executed at dispatch time.
-
-    Two ways the executor's E2E benchmark can KEEP a no-op:
-
-    a) ``dispatched_count == 0`` — the integrate executor recorded that
-       no dispatch saw the patched kernel.
-    b) ``|gain_pct|`` is within ``dispatch_bypass_pre_post_epsilon_pct``
-       and ``dispatched_count`` is absent (i.e. the executor never
-       emitted dispatch evidence). Suspicious — the patch may have been
-       bypassed by aiter fast-path or sgl_kernel pre-compile.
-
-    Both fire HIGH because a KEEP without proof of execution is a
-    false-positive in the optimization_stack.
+    """G3: KEEP'd patch likely never executed — ``dispatched_count == 0``, or absent
+    with ``|gain_pct| < dispatch_bypass_pre_post_epsilon_pct``. HIGH: a KEEP without
+    proof of execution is a false-positive in the optimization_stack.
     """
     if entry.get("decision") != "KEEP":
         return []
@@ -302,13 +259,8 @@ def _ci_metrics_symptoms(
 def _g4_negative_delta_kernel_kept(
     ci_metrics: dict[str, Any], ci_metrics_path: str,
 ) -> list[Symptom]:
-    """G4: kernels_optimized > 0 AND optimized_kernel_delta_pct <= 0.
-
-    Qwen2.5-32B-AWQ shipped ``kernels_optimized=6`` while the delta was
-    ``-0.169%``. The metric advertises optimization but the actual
-    contribution is negative — equivalent to "I optimized 6 things and
-    made the model 0.17% slower". HIGH because downstream aggregators
-    (dashboards, PR submitters) treat the field as a win count.
+    """G4: kernels_optimized > 0 AND optimized_kernel_delta_pct <= 0 (net-negative).
+    HIGH because downstream aggregators treat kernels_optimized as a win count.
     """
     kernels_opt = ci_metrics.get("kernels_optimized")
     delta_pct = ci_metrics.get("optimized_kernel_delta_pct")
@@ -344,13 +296,8 @@ def _g4_negative_delta_kernel_kept(
 def _g5_baseline_zero_without_status(
     ci_metrics: dict[str, Any], ci_metrics_path: str,
 ) -> list[Symptom]:
-    """G5: baseline_tput == 0 AND no ``status="baseline_failed"`` marker.
-
-    Half-written ci_metrics during baseline failure looks identical to
-    "no optimization space" to downstream aggregators. The fix in
-    report_back is to write ``{status: "baseline_failed"}`` instead of
-    zeros; Robustness flags the bad row when ANY baseline-throughput-
-    style field is 0.0 without the marker.
+    """G5: any baseline-throughput field == 0 AND no ``status="baseline_failed"`` marker —
+    half-written ci_metrics that downstream mistakes for "no optimization space".
     """
     if str(ci_metrics.get("status") or "") == "baseline_failed":
         return []
@@ -400,11 +347,7 @@ def _g5_baseline_zero_without_status(
 def _g6_schema_drift(
     ci_metrics: dict[str, Any], ci_metrics_path: str,
 ) -> list[Symptom]:
-    """G6: ci_metrics is missing required schema fields OR uses legacy
-    field names. MEDIUM because the fix is in ``report_back/ci_metrics.py``;
-    Robustness only surfaces the drift so the aggregator dashboard
-    catches it before the data is graphed.
-    """
+    """G6: ci_metrics missing required schema fields OR using legacy names; MEDIUM (fix is in report_back)."""
     keys = set(ci_metrics.keys())
     missing = _CI_METRICS_REQUIRED_FIELDS - keys
     legacy = keys & _CI_METRICS_LEGACY_FIELDS
@@ -443,10 +386,7 @@ def _oob_symptoms(
     entries: list[dict[str, Any]],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """G7: OOB attempt advertises "expected speedup ~1.X" but never
-    measured. Surface HIGH so downstream pipeline can refuse to count
-    these towards ``kernels_optimized``.
-    """
+    """G7: OOB attempt advertises "expected speedup" but never measured; HIGH so downstream won't count it as kernels_optimized."""
     out: list[Symptom] = []
     by_kernel: dict[str, dict[str, Any]] = {}
     for entry in entries:
@@ -459,8 +399,7 @@ def _oob_symptoms(
         if not any(m.lower() in report for m in cfg.oob_no_harness_markers):
             continue
         kernel_id = entry.get("kernel_id") or "unknown"
-        # Collapse multiple offending entries per kernel_id so we don't
-        # spam the inbox with one symptom per OOB attempt.
+        # Collapse offending entries per kernel_id to avoid inbox spam.
         prior = by_kernel.get(str(kernel_id))
         if prior is None or (entry.get("ts") or "") > (prior.get("ts") or ""):
             by_kernel[str(kernel_id)] = entry

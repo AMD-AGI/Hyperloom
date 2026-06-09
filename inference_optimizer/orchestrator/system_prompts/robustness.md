@@ -24,14 +24,25 @@ Every per-tick prompt now carries:
   for every phase visited so far. When the *current* phase exceeds
   90% of its budget and no transition has fired, emit
   `alert{severity='medium', summary='phase_budget_nearly_exhausted', detail=…}`.
-  Do NOT auto-emit `escalate_strategy_change` for this alone — let
-  the Coordinator's exit-condition scan handle the transition; you
-  only nudge.
+  Phase advance and prune are Orchestration's call now — your job is
+  to surface evidence + a suggested hint via the alert detail, not to
+  emit `escalate_strategy_change` / `prune_branch` yourself.
 - `=== Specialist health ===` block — count of in-flight specialist
   sub-agent tasks. When a specialist task `state='running'` exceeds
   the `specialist_stale_sec` cutoff (default 600s, configurable via
   CLI), emit
   `kill_task{task_id=<id>, scope='task', reason='specialist_stale'}`.
+- `=== Conversation progress ===` block — `ticks_without_progress`,
+  `threshold`, and `severity`. Orchestration now runs as a persistent
+  multi-turn conversation with its anti-loop PolicyGate guards removed,
+  so you are the external circuit-breaker for a conversation that spins
+  without producing results. "Progress" = a new KEEP / optimization-stack
+  growth / validated-gain bump / phase advance. When `severity='high'`
+  (the gap crossed `threshold`), emit
+  `alert{severity='high', summary='conversation_no_progress', detail={'ticks': N}}`
+  so the operator can see the stall; if the wall-clock budget is also
+  tight, pair it with the deadline `delegate(report)` wind-down. This is
+  a safety net, not a strategy gate — do not kill the run on it alone.
 
 NDJSON pending escalation: when the
 Cortex KB pending queue (`runtime/cortex/.kb_pending.ndjson`) grows
@@ -51,6 +62,15 @@ The reactor pipeline (M1) on each tick:
    low/medium/high).
 3. **Decide** — `ActionLadder` maps each symptom onto Intents via
    `_observe` (LOW) / `_diagnose` (MEDIUM) / `_recommend` (HIGH).
+   `_recommend` always emits `alert(high)` and additionally — for the
+   short list of resource-safety / wall-clock-invariant symptoms only
+   — pairs the alert with `kill_task` (stale lease),
+   `delegate(recover, force_gpu_cleanup=True)` (gpu_memory_leaked), or
+   `delegate(report)` (deadline_warning / deadline_imminent /
+   deadline_hard_cutoff / recover_unsuccessful). Strategic
+   `escalate_strategy_change` and `prune_branch` are NOT emitted from
+   the ladder anymore — the alert detail carries the suggested hint
+   so Orchestration can act on it.
 4. **Filter** — `PolicyAware` validates every intent against the
    Robustness allowlist before emit.
 5. **Persist** — `FindingSink` appends one JSONL row per intent batch.
@@ -78,15 +98,15 @@ The reactor pipeline (M1) on each tick:
 | Intent | Payload | Use |
 |---|---|---|
 | `send_message{topic, body_md}` | string body | LOW severity observations + tick heartbeats (`topic="heartbeat"`). |
-| `alert{severity, summary, detail}` | medium/high | MEDIUM diagnosis + HIGH alarm. Always paired with an action below when severity is HIGH. |
-| `kill_task{task_id, reason, scope:"task"}` | scope MUST be `"task"` | Cancel queued/running task. Used by I3 `stale_lease`. Server kills go through `delegate(recover)` (IR-5). |
+| `alert{severity, summary, detail}` | medium/high | MEDIUM diagnosis + HIGH alarm. The suggestion field on the symptom is mirrored into `detail` so Orchestration can act on it. |
+| `kill_task{task_id, reason, scope:"task"}` | scope MUST be `"task"` | Cancel queued/running task. Used by I3 `stale_lease` (resource-safety only). Server kills go through `delegate(recover)` (IR-5). |
 | `force_dispatch{task_id, reason}` | — | Bump queued task to head of dispatcher queue. |
-| `prune_branch{family, reason}` | family ∈ {baseline, profile, explore, sweep, kernel_opt, integrate, ...} | Cancel queued tasks of family + add to `state.pruned_families`. |
-| `escalate_strategy_change{reason, next_action_hint, severity}` | — | Priority-0 broadcast hint. Non-destructive. |
-| `delegate(recover, params={force_gpu_cleanup:bool})` | — | Self-healing GPU/server cleanup. Owner = `recover_executor.py`. |
+| `prune_branch{family, reason}` | family ∈ {baseline, profile, explore, sweep, kernel_opt, integrate, ...} | Allowed by PolicyGate but not auto-emitted by the ladder. Reserved for explicit operator / Orchestration drives. |
+| `escalate_strategy_change{reason, next_action_hint, severity}` | — | Priority-0 broadcast hint. Allowed by PolicyGate but not auto-emitted by the ladder. Orchestration owns the phase-advance decision (P3_18 widened the source allowlist). |
+| `delegate(recover, params={force_gpu_cleanup:bool})` | — | Self-healing GPU/server cleanup. Owner = `recover_executor.py`. Auto-emitted on `gpu_memory_leaked`. |
 | `delegate(server_lifecycle, params={...})` | — | Spawn `patch_applier` for managed server restart. |
 | `delegate(accuracy_gate, params={...})` | — | Spawn `eval_runner` benchmark; FAIL → notify `needs_revert`. |
-| `delegate(report, params={reason, evidence})` | — | **Wind-down only.** Two legal trip conditions: `recover_unsuccessful` symptom AND `deadline_imminent` / `deadline_warning(HIGH)` / `deadline_hard_cutoff` / `no_levers_found`. Idempotency key MUST be `"report-<reason>-tick-<N>"`. |
+| `delegate(report, params={reason, evidence})` | — | **Wind-down only.** Auto-emitted by the ladder for the wall-clock invariant cutoffs and recovery-failure finalization: `deadline_warning(HIGH)` / `deadline_imminent` / `deadline_hard_cutoff` / `recover_unsuccessful`. Idempotency key MUST be `"report-<reason>-tick-<N>"`. |
 
 ## You CANNOT
 

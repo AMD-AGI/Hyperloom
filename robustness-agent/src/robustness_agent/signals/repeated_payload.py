@@ -2,32 +2,15 @@
 
 """Detect same-fingerprint action retries (B1 / same_payload_loop).
 
-The upstream ``Coordinator._baseline_self_loop_denial`` already guards
-the ``baseline`` action against param changes after failure (PolicyGate
-``rule="baseline_no_param_change"``), but the same trap can fire for any
-action the orchestration LLM proposes — most famously the 2026-05
-``validate_stack`` 11-retry loop where every attempt OOMed on a leaked
-GPU but the Coordinator viewed each as a fresh task because the
-``idempotency_key`` differed even though the underlying ``params``
-were identical.
-
-This signal generalises the upstream guard to the rest of the action
-catalogue. We accept the ``delegated_result`` stream from
-:data:`SourceData.coordinator_events` (and the robustness inbox), hash
-the action-defining subset of each payload, and fire
-``same_payload_loop`` when an action family produces ``N`` consecutive
-results sharing the same hash without an intervening success.
-
-Hash dimensions per action family:
-
-* ``validate_stack`` — ``optimization_stack`` content + ``config_path``
-* ``backends`` / ``params`` — sorted ``grid`` + ``extra_envs``
-* ``integrate`` — ``kernel_id`` + ``patch_path`` + ``extra_server_args``
-* ``baseline`` — falls back to ``_BASELINE_FINGERPRINT_KEYS`` so we
-  stay aligned with the upstream policy denial fingerprint.
-
-Other actions fall back to a generic ``params`` projection so a brand
-new action still benefits from the safety net.
+Generalises the upstream ``baseline_no_param_change`` guard to the whole
+action catalogue (motivated by the 2026-05 ``validate_stack`` 11-retry
+loop where each OOM looked fresh because ``idempotency_key`` differed but
+``params`` were identical). Hashes the action-defining subset of each
+``delegated_result`` payload (from coordinator_events + inbox) and fires
+``same_payload_loop`` when a family produces N consecutive same-hash
+results with no intervening success. Per-family hash dimensions live in
+``_FAMILY_PROJECTIONS``; unknown actions fall back to a generic ``params``
+projection.
 """
 
 from __future__ import annotations
@@ -49,9 +32,8 @@ from .symptom import Symptom, SymptomSeverity
 
 
 
-# Per-family payload projection. Each tuple lists the dotted keys we
-# care about in stable order; missing keys map to ``None`` so empty vs
-# default-empty payloads still hash identically.
+# Per-family payload projection: dotted keys (stable order) that define
+# the fingerprint; missing keys map to ``None`` so empties hash identically.
 _FAMILY_PROJECTIONS: dict[str, tuple[str, ...]] = {
     "validate_stack": (
         "params.optimization_stack",
@@ -92,17 +74,13 @@ _FAMILY_PROJECTIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Generic fallback used when ``family`` is unknown but the payload looks
-# action-shaped (i.e. has a ``params`` dict). Drops idempotency_key /
-# timestamps so renames do not bypass the dedup.
+# Generic fallback for unknown families with a ``params`` dict.
 _GENERIC_PROJECTION: tuple[str, ...] = (
     "params",
 )
 
-# Fields we always strip from any payload subtree before hashing —
-# these change every attempt by design (the Coordinator and the
-# orchestration LLM stamp them) and must not contribute to the
-# fingerprint or the signal turns into a no-op.
+# Per-attempt fields stripped before hashing; including them would make
+# the fingerprint always-unique and the signal a no-op.
 _HASH_BLACKLIST: frozenset[str] = frozenset({
     "idempotency_key",
     "task_id",
@@ -121,14 +99,9 @@ _HASH_BLACKLIST: frozenset[str] = frozenset({
 class RepeatedPayloadConfig:
     """Tunables for :func:`evaluate_repeated_payload_signals`.
 
-    ``streak_threshold`` is the number of consecutive same-hash failures
-    that must precede a fire. Default = 3 matches the on-call pain
-    point: at four identical attempts the operator should already be
-    suspicious; at three we still have one tick of warning before the
-    deadline. ``lookback_events`` caps how far back we walk the event
-    stream; the upstream Coordinator only emits one
-    ``delegated_result`` per task so 80 covers ~30 minutes of activity
-    at a typical 4-tasks-per-minute clip.
+    ``streak_threshold`` (consecutive same-hash failures before firing,
+    default 3) gives one tick of warning before the deadline.
+    ``lookback_events`` (default 80) caps the event walk at ~30 min.
     """
 
     streak_threshold: int = 3
@@ -162,14 +135,7 @@ def evaluate_repeated_payload_signals(
 def _walk_streaks(
     events: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group consecutive same-hash entries per family.
-
-    A successful (``state == "succeeded"``) entry resets the family's
-    streak — the LLM has made a different choice that worked, so any
-    prior loop has been broken. A streak of failures with the same
-    payload hash, by contrast, accumulates until a different hash or a
-    success appears.
-    """
+    """Group consecutive same-hash failures per family; a ``succeeded`` entry resets the streak."""
     by_family: dict[str, list[dict[str, Any]]] = {}
     current_hash: dict[str, str | None] = {}
     for ev in events:
@@ -178,8 +144,6 @@ def _walk_streaks(
             continue
         state = str(ev.get("state") or "")
         if state == "succeeded":
-            # Reset the streak; we don't even track the success in the
-            # streak buffer because the next failure is a fresh start.
             by_family[family] = []
             current_hash[family] = None
             continue
@@ -203,13 +167,7 @@ def _gather_events(
     coord_events: list[dict[str, Any]],
     cfg: RepeatedPayloadConfig,
 ) -> list[dict[str, Any]]:
-    """Build a single, time-ordered list of ``delegated_result`` rows.
-
-    Inbox items don't carry a timestamp but they're already ordered by
-    seq; coordinator_events ride the SQLite ``seq`` PK. We concatenate
-    them and trim to ``lookback_events`` so the hash compute stays O(N)
-    even after a long resume.
-    """
+    """Build a single time-ordered list of ``delegated_result`` rows, trimmed to ``lookback_events``."""
     inbox_rows = [
         {
             "topic": item.topic,
@@ -268,12 +226,8 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
     payload = event.get("payload") or {}
     if not isinstance(payload, dict):
         return None
-    # Legacy ``params.extra_sglang_args`` envelopes would otherwise walk
-    # to ``None`` for ``params.extra_server_args`` and the
-    # same-fingerprint loop guard would silently miss a legacy-keyed
-    # retry burst. Normalise the canonical key in a
-    # payload-local copy before projection so both legacy and
-    # canonical envelopes produce identical fingerprints.
+    # Normalise legacy extra-args key so legacy + canonical envelopes
+    # produce identical fingerprints (else a legacy-keyed retry burst is missed).
     payload = _normalise_extra_server_args_key(payload)
     projection = _FAMILY_PROJECTIONS.get(family, _GENERIC_PROJECTION)
     subset: dict[str, Any] = {}
@@ -285,15 +239,9 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
 
 
 def _normalise_extra_server_args_key(payload: dict[str, Any]) -> dict[str, Any]:
-    """Return a shallow copy of ``payload`` whose ``params`` dict carries
-    ``extra_server_args`` set from the canonical-or-legacy compat
-    helper. Originals are NOT mutated — the caller's view is preserved.
-
-    No-op when the params dict has no extra-args keys at all OR when
-    the canonical key is already present. The single
-    ``DeprecationWarning`` (stacklevel=3 from the shim) is the audit
-    channel for legacy envelopes — leaving it on so the live operator
-    sees one warning per legacy envelope class.
+    """Shallow copy with ``params.extra_server_args`` set from the compat
+    helper (originals not mutated). No-op when no extra-args key or canonical
+    already present; the shim's DeprecationWarning stays as the legacy audit channel.
     """
     params = payload.get("params")
     if not isinstance(params, dict):
@@ -310,13 +258,7 @@ def _normalise_extra_server_args_key(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _walk_path(payload: dict[str, Any], path: str) -> Any:
-    """Walk dotted ``a.b.c`` paths against nested dicts.
-
-    Lists short-circuit to ``None`` because lists rarely carry stable
-    keys we'd hash on; we let the projection caller include the list
-    container (e.g. ``params.grid``) and rely on JSON canonicalisation
-    to detect order-preserving identity.
-    """
+    """Walk dotted ``a.b.c`` paths against nested dicts (non-dicts short-circuit to ``None``)."""
     cur: Any = payload
     for token in path.split("."):
         if not isinstance(cur, dict):

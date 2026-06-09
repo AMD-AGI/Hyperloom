@@ -2,36 +2,10 @@
 
 """v0.8 §3.2 §5.4 / KB_gaps/Gap-05 — SWEEP phase auto-dispatch tests.
 
-KB_gaps/Gap-05 root cause: ``_advance_phase_if_needed`` updated the
-``phase`` field on EXPLORE/KERNEL → SWEEP transition but did not
-enqueue anything. KB_design §3.2 §5.4 says SWEEP entry must
-"自动构造 sweep grid (来自 SKILL.md 默认 grid + Cortex
-``recipe.sweep_grid`` 字段, 后者优先), 自动 enqueue ``sweep``
-action". Without this, SWEEP degrades to "LLM 自觉发 sweep" — and
-when ``max_minutes`` is tight, the run terminates with zero sweep
-coverage.
-
-This file covers:
-
-* ``_build_sweep_params_from_recipe`` static helper — defaults
-  fallback, full-recipe override, partial-recipe override,
-  malformed-recipe defensive fallback (per-field).
-* ``_enqueue_internal_sweep_task`` unit tests — params inheritance
-  + idempotency_key shape.
-* ``_on_enter_sweep`` hook — happy path enqueue + phase_history
-  evidence stamp; idempotent re-entry (Inv-2.1 defensive); error
-  branch records ``auto_sweep_error``.
-* End-to-end Coordinator path: real ``record_phase_transition`` +
-  ``_on_phase_entered`` lands a real ``sweep`` task on the
-  TaskRegistry with the expected idempotency_key.
-* PolicyGate ``sweep_phase_singleton`` rule: once the auto-enqueue
-  has stamped ``evidence.auto_sweep_task_id``, any LLM-emitted
-  ``delegate{action_name='sweep'}`` /
-  ``propose_action{action_name='sweep'}`` is denied (closing the
-  duplicate-task race that crashed both vllm engines on init).
-  The internal idempotency key shape is asserted as a structural
-  cross-check so a future refactor can't quietly let the LLM's
-  ``approved-<msg_id>`` key collide with the internal one.
+KB_gaps/Gap-05: SWEEP entry must auto-construct a grid and enqueue the
+``sweep`` action (recipe grid wins over SKILL.md defaults). Covers the
+grid-builder helper, the enqueue + ``_on_enter_sweep`` hook, the e2e
+Coordinator path, and the PolicyGate ``sweep_phase_singleton`` rule.
 """
 
 from __future__ import annotations
@@ -49,13 +23,10 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
 from inference_optimizer.orchestrator.coordinator import Coordinator
 
 
-# ===========================================================================
 # Fixtures
-# ===========================================================================
 @dataclass
 class _BareState:
-    """SharedState stand-in covering every attribute the SWEEP hook +
-    helper read."""
+    """SharedState stand-in covering every attribute the SWEEP hook + helper read."""
 
     warm_start_recipe: dict | None = None
     baseline_config_path: str = ""
@@ -116,9 +87,7 @@ def coord(tmp_path: Path):
     return c
 
 
-# ===========================================================================
 # 1. _build_sweep_params_from_recipe — pure static helper
-# ===========================================================================
 def test_build_sweep_params_defaults_when_no_recipe():
     """No warm_start_recipe → SKILL.md defaults + source='skill_md_default'."""
     from inference_optimizer.orchestrator.action_executors.sweep import (
@@ -152,9 +121,7 @@ def test_build_sweep_params_full_recipe_override():
 
 
 def test_build_sweep_params_partial_recipe_per_field_fallback():
-    """Recipe overriding only conc_values → conc_values from recipe,
-    isl_osl_configs / num_prompts_factor from defaults. source flips
-    to cortex_recipe (any successful field counts)."""
+    """Recipe overriding only conc_values → that field from recipe, the rest from defaults, source=cortex_recipe."""
     from inference_optimizer.orchestrator.action_executors.sweep import (
         DEFAULT_ISL_OSL, DEFAULT_NUM_PROMPTS_FACTOR,
     )
@@ -238,16 +205,13 @@ def test_build_sweep_params_rejects_non_positive_num_prompts_factor(bad):
     ids=["none", "string", "int", "list", "sweep_grid_not_dict"],
 )
 def test_build_sweep_params_non_dict_recipe_falls_back(bad):
-    """recipe is not a dict at all → defaults; recipe.sweep_grid not a dict
-    → defaults."""
+    """A non-dict recipe (or non-dict sweep_grid) → defaults."""
     state = _BareState(warm_start_recipe=bad)  # type: ignore[arg-type]
     out = Coordinator._build_sweep_params_from_recipe(state)
     assert out["source"] == "skill_md_default"
 
 
-# ===========================================================================
 # 2. _enqueue_internal_sweep_task — params inheritance
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_enqueue_internal_sweep_task_inherits_baseline_config(coord):
     coord.shared_state.baseline_config_path = "/tmp/baseline.yaml"
@@ -269,8 +233,7 @@ async def test_enqueue_internal_sweep_task_inherits_baseline_config(coord):
 
 @pytest.mark.asyncio
 async def test_enqueue_internal_sweep_task_omits_empty_strings(coord):
-    """Empty extra_server_args / benchmark_script must not land in params
-    (avoids stomping executor defaults with empty strings)."""
+    """Empty extra_server_args / benchmark_script must not land in params."""
     coord.shared_state.current_best = {"extra_server_args": ""}
     coord.shared_state.last_baseline = {"benchmark_script": ""}
     task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
@@ -293,13 +256,10 @@ async def test_enqueue_internal_sweep_task_cortex_recipe_propagates(coord):
     assert task.params["isl_osl_configs"] == ["1024:1024"]
 
 
-# ===========================================================================
 # 3. _on_enter_sweep hook
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_on_enter_sweep_enqueues_and_stamps_evidence(coord):
-    """Happy path: hook enqueues a sweep task and stamps every expected
-    field on phase_history evidence."""
+    """Happy path: the hook enqueues a sweep task and stamps the phase_history evidence."""
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
@@ -318,8 +278,7 @@ async def test_on_enter_sweep_enqueues_and_stamps_evidence(coord):
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_cortex_recipe_evidence(coord):
-    """Recipe-driven grid surfaces grid_source='cortex_recipe' on evidence
-    + combos count derived from the recipe shape."""
+    """Recipe-driven grid surfaces grid_source='cortex_recipe' + a recipe-derived combos count."""
     coord.shared_state.warm_start_recipe = {
         "sweep_grid": {
             "conc_values":     [8, 32],
@@ -337,9 +296,7 @@ async def test_on_enter_sweep_cortex_recipe_evidence(coord):
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_idempotent_on_reentry(coord):
-    """Re-entering SWEEP twice (Inv-2.1 forbids in production, but the
-    test exercises the defensive path) hits the same idempotency_key
-    and reuses the task."""
+    """Re-entering SWEEP twice hits the same idempotency_key and reuses the task."""
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
@@ -356,9 +313,7 @@ async def test_on_enter_sweep_idempotent_on_reentry(coord):
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
-    """If the underlying enqueue blows up (e.g. SqliteIntegrityError),
-    the hook records ``auto_sweep_error`` and returns without
-    propagating — phase transition stays committed."""
+    """If the enqueue raises, the hook records ``auto_sweep_error`` and returns without propagating."""
     async def _boom(*args, **kwargs):
         raise RuntimeError("simulated DB outage")
 
@@ -375,15 +330,10 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     assert coord.tasks._tasks == {}
 
 
-# ===========================================================================
 # 4. End-to-end via real Coordinator
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
-    """End-to-end: real Coordinator + real TaskRegistry + real phase
-    history. After triggering the SWEEP transition + the hook
-    dispatcher, the sweep task must be persisted under the v0.8
-    idempotency_key with the recipe-driven (or default) grid params."""
+    """End-to-end: a SWEEP transition + hook dispatcher persists the sweep task under the v0.8 idempotency_key."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -439,10 +389,7 @@ async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
-    """``--no-kernel`` runs go EXPLORE → SWEEP directly. SWEEP entry
-    hook must still enqueue (the from_phase doesn't affect the
-    enqueue decision; only ``last_profile_trace`` did, and that's
-    a KERNEL-specific check)."""
+    """``--no-kernel`` runs go EXPLORE → SWEEP directly; the SWEEP entry hook must still enqueue."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -473,16 +420,9 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
     assert len(rows) == 1, "SWEEP auto-enqueue must run in --no-kernel mode too"
 
 
-# ===========================================================================
 # 5. Idempotency key structural cross-check
-# ===========================================================================
 def test_internal_sweep_idempotency_key_does_not_collide_with_llm_path():
-    """The internal hook uses ``internal-sweep-<reason>``; the LLM
-    propose_action path uses ``approved-<proposal_msg_id>``. They
-    must NEVER collide structurally — but note that PolicyGate's
-    ``sweep_phase_singleton`` rule (next section) denies the
-    LLM-emitted sweep regardless, because two concurrent sweep
-    tasks crash both vllm engines on init."""
+    """The internal hook's ``internal-sweep-<reason>`` key must never collide with the LLM's ``approved-<msg_id>`` key."""
     internal_key = "internal-sweep-phase_entry"
     # Mirror the format _materialize_approved_proposal builds.
     llm_key = "approved-msg_abc123"
@@ -491,22 +431,16 @@ def test_internal_sweep_idempotency_key_does_not_collide_with_llm_path():
     assert not internal_key.startswith("approved-")
 
 
-# ===========================================================================
 # 6. PolicyGate sweep_phase_singleton rule
-# ===========================================================================
 class _SweepSingletonState:
-    """SharedState stand-in carrying just the fields the
-    ``sweep_phase_singleton`` rule reads. Keeps the test independent
-    of the full SharedState dataclass."""
+    """SharedState stand-in carrying just the fields the ``sweep_phase_singleton`` rule reads."""
 
     def __init__(self, phase_history=None):
         self.phase_history = list(phase_history or [])
 
 
 def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
-    """Build a phase_history row mirroring what
-    ``record_phase_transition`` + ``_record_phase_entry_evidence``
-    produce on SWEEP entry."""
+    """Build a phase_history row mirroring what ``record_phase_transition`` produces on SWEEP entry."""
     evidence: dict = {}
     if auto_sweep_task_id:
         evidence["auto_sweep_task_id"] = auto_sweep_task_id
@@ -520,10 +454,7 @@ def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
 
 
 def _make_policy_gate(*, shared_state):
-    """Plain PolicyGate wired only to the role registry + the test's
-    SharedState double — enough for ``_validate_sweep_singleton``,
-    ``_validate_phase_action`` is bypassed because we feed intents
-    through the helper directly."""
+    """Plain PolicyGate wired to the role registry + the test's SharedState double."""
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
@@ -535,10 +466,7 @@ def _make_policy_gate(*, shared_state):
 
 
 def test_sweep_singleton_denies_delegate_after_auto_enqueue_stamped():
-    """Happy path of the bug fix: SWEEP phase row carries
-    ``evidence.auto_sweep_task_id`` (Coordinator's auto-enqueue
-    finished), so any LLM-emitted ``delegate{action='sweep'}`` is
-    denied with the ``sweep_phase_singleton`` rule."""
+    """Once the SWEEP row carries ``evidence.auto_sweep_task_id``, an LLM ``delegate{action='sweep'}`` is denied via ``sweep_phase_singleton``."""
     from inference_optimizer.orchestrator.policy import PolicyDenied
 
     state = _SweepSingletonState(
@@ -552,8 +480,7 @@ def test_sweep_singleton_denies_delegate_after_auto_enqueue_stamped():
             intent_kind="delegate",
         )
     assert excinfo.value.rule == "sweep_phase_singleton"
-    # Hint must mention bypass switch so the operator-debug path is
-    # discoverable from the denial alone.
+    # Hint must mention the bypass switch so the operator-debug path is discoverable.
     assert "bypass_sweep_singleton" in (excinfo.value.hint or "")
 
 
@@ -575,13 +502,7 @@ def test_sweep_singleton_denies_propose_action_after_auto_enqueue_stamped():
 
 
 def test_sweep_singleton_inert_before_auto_enqueue_stamps_evidence():
-    """Race-window: SWEEP phase row exists but the auto-enqueue
-    hook hasn't yet stamped ``auto_sweep_task_id`` (e.g. an LLM
-    intent landed between ``record_phase_transition`` and
-    ``_on_enter_sweep``). The rule MUST stay inert so the
-    Coordinator's own subsequent auto-enqueue is not falsely
-    blocked. The ``_validate_phase_action`` rule (PHASE_SWEEP
-    allows ``sweep``) handles the LLM intent in this race window."""
+    """Race-window: a SWEEP row without a stamped ``auto_sweep_task_id`` keeps the rule inert so the Coordinator's auto-enqueue isn't falsely blocked."""
     state = _SweepSingletonState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="")],
     )
@@ -595,10 +516,7 @@ def test_sweep_singleton_inert_before_auto_enqueue_stamps_evidence():
 
 
 def test_sweep_singleton_inert_outside_sweep_phase():
-    """Phase_history's latest row is EXPLORE / KERNEL / CLOSE etc. —
-    rule stays silent so ``_validate_phase_action`` (R1
-    phase_incompatible) is the one that fires for sweep proposals
-    landing in the wrong phase."""
+    """When the latest phase row isn't SWEEP, the rule stays silent (``_validate_phase_action`` fires instead)."""
     explore_row = {
         "to_phase": "EXPLORE",
         "from_phase": "PRELUDE",
@@ -607,9 +525,7 @@ def test_sweep_singleton_inert_outside_sweep_phase():
     }
     state = _SweepSingletonState(phase_history=[explore_row])
     gate = _make_policy_gate(shared_state=state)
-    # Even though evidence carries a stale auto_sweep_task_id, the
-    # rule keys on phase_history[-1].to_phase=="SWEEP" so this is
-    # inert.
+    # The rule keys on phase_history[-1].to_phase=="SWEEP", so the stale id is inert.
     gate._validate_sweep_singleton(
         payload={"action_name": "sweep"},
         intent_kind="delegate",
@@ -617,8 +533,7 @@ def test_sweep_singleton_inert_outside_sweep_phase():
 
 
 def test_sweep_singleton_inert_when_phase_history_empty():
-    """Defensive: PolicyGate built without any phase_history yet
-    (e.g. P0 dev mode, or pre-PRELUDE replay) MUST not raise."""
+    """Defensive: an empty phase_history must not raise."""
     state = _SweepSingletonState(phase_history=[])
     gate = _make_policy_gate(shared_state=state)
     gate._validate_sweep_singleton(
@@ -628,8 +543,7 @@ def test_sweep_singleton_inert_when_phase_history_empty():
 
 
 def test_sweep_singleton_inert_when_shared_state_is_none():
-    """PolicyGate without a SharedState reference (legacy tests +
-    p0 dev) — rule self-defends with an early return."""
+    """PolicyGate without a SharedState reference self-defends with an early return."""
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
@@ -644,12 +558,7 @@ def test_sweep_singleton_inert_when_shared_state_is_none():
 
 
 def test_sweep_singleton_self_clears_at_sweep_to_close_transition():
-    """Once SWEEP→CLOSE happens, the latest phase_history row turns
-    over to CLOSE. The rule stops firing, so the LLM (in CLOSE
-    phase) is no longer denied by ``sweep_phase_singleton``. Note
-    that ``_validate_phase_action`` will still deny sweep in CLOSE
-    via R1 phase_incompatible — the singleton rule is just one
-    layer."""
+    """Once SWEEP→CLOSE happens, the latest row is CLOSE so the singleton rule stops firing."""
     state = _SweepSingletonState(
         phase_history=[
             _sweep_phase_row(auto_sweep_task_id="auto-sweep-abc"),
@@ -671,10 +580,7 @@ def test_sweep_singleton_self_clears_at_sweep_to_close_transition():
 
 
 def test_sweep_singleton_bypass_flag_lets_operator_force_second_sweep():
-    """Operator escape hatch: ``params.bypass_sweep_singleton=True``
-    silences the rule so a debug session can run a second sweep
-    with a custom grid. The audit trail still records the
-    proposal, so the override is observable."""
+    """Operator escape hatch: ``params.bypass_sweep_singleton=True`` silences the rule for a second sweep."""
     state = _SweepSingletonState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc")],
     )
@@ -692,15 +598,9 @@ def test_sweep_singleton_bypass_flag_lets_operator_force_second_sweep():
     )
 
 
-# ---------------------------------------------------------------------------
 # 6b. End-to-end through full validate_intent (delegate / propose_action)
-# ---------------------------------------------------------------------------
 def test_validate_intent_denies_llm_sweep_delegate_in_active_sweep_phase():
-    """Through the full ``PolicyGate.validate_intent`` path: a
-    ``delegate{action_name='sweep'}`` from orchestration in active
-    SWEEP phase fires the singleton rule before
-    ``_validate_phase_action`` even runs (orthogonality with
-    Inv-11.3: deeper / more diagnostic rules win)."""
+    """Through full ``validate_intent``: a sweep delegate in active SWEEP fires the singleton rule before ``_validate_phase_action``."""
     from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )

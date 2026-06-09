@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Cross-subprocess persistence integration tests.
-
-These tests simulate the M1 transport's "fresh subprocess per tick"
-behaviour by constructing N independent ``Classifier`` / ``ActionLadder``
-/ ``RcaThrottle`` instances against the same on-disk state file. They
-prove that consecutive-tick rules and cooldowns continue to work
-across what would be subprocess restarts in production.
-"""
+"""Cross-subprocess persistence tests: independent Classifier/ActionLadder/RcaThrottle instances against one state file prove consecutive-tick rules and cooldowns survive subprocess restarts."""
 
 from __future__ import annotations
 
@@ -47,8 +40,7 @@ def _fresh_classifier(
     gpu_leak_min_ticks: int = 2,
     ray_min_pending_ticks: int = 3,
 ) -> tuple[Classifier, DetectorStateStore]:
-    """Simulate one robustness-agent CLI subprocess: a brand-new
-    classifier reading state from disk, then will write at tick end."""
+    """Simulate one CLI subprocess: a fresh classifier reading state from disk, writing at tick end."""
     store = DetectorStateStore(session_dir=session_dir)
     classifier = Classifier(
         state_store=store,
@@ -124,15 +116,13 @@ def _ray_pending_data(pending: int = 7) -> SourceData:
 def test_gpu_leak_fires_only_after_2_subprocesses_see_leak(
     tmp_path: Path,
 ):
-    # Tick 1: fresh subprocess, sees one leak tick → no symptom (need 2).
+    # Tick 1: one leak tick → no symptom (need 2).
     c1, store1 = _fresh_classifier(tmp_path)
     syms1 = c1.classify(_leak_data(), _ctx_with_tick(1))
     assert all(s.name != "gpu_memory_leaked" for s in syms1)
     store1.flush_atomic()
 
-    # Tick 2: another fresh subprocess (the original bug — counter was
-    # lost). With the state store, the previous hit was preserved →
-    # this tick crosses the 2-tick threshold and fires.
+    # Tick 2: fresh subprocess; with the state store the prior hit is preserved (original bug lost it) → crosses threshold and fires.
     c2, store2 = _fresh_classifier(tmp_path)
     syms2 = c2.classify(_leak_data(), _ctx_with_tick(2))
     assert any(s.name == "gpu_memory_leaked" for s in syms2)
@@ -140,7 +130,6 @@ def test_gpu_leak_fires_only_after_2_subprocesses_see_leak(
 
 
 def test_gpu_leak_resets_when_owner_reappears(tmp_path: Path):
-    # Tick 1: leak with no owners.
     c1, store1 = _fresh_classifier(tmp_path)
     c1.classify(_leak_data(), _ctx_with_tick(1))
     store1.flush_atomic()
@@ -153,12 +142,8 @@ def test_gpu_leak_resets_when_owner_reappears(tmp_path: Path):
         ],
         sources_used=["local"],
     )
+    # Rebuild with a matching owner pattern to actually exercise reset (the default test classifier has owner_patterns=()).
     c2, store2 = _fresh_classifier(tmp_path)
-    # ``owner_patterns`` is () in the test classifier — to truly cover
-    # reset behaviour we need a classifier whose patterns match.
-    c2, store2 = _fresh_classifier(tmp_path)
-    # Custom GpuLeakDetector with owner pattern; we'll rebuild
-    # classifier with a matching pattern.
     classifier = Classifier(
         state_store=store2,
         gpu_leak_config=GpuLeakConfig(
@@ -201,11 +186,7 @@ def test_ray_pending_starvation_needs_three_subprocesses(tmp_path: Path):
 def test_gain_plateau_history_survives_subprocess_restarts(
     tmp_path: Path,
 ):
-    # Feed a flat 3-tick window across 3 fresh classifiers. PR #239
-    # added a "stack_size == 0 -> defer to no_levers" early-return to
-    # ``_gain_plateau_symptom`` so the two B-family symptoms can't fire
-    # twice on the same condition; seed stack_size=1 here to exercise
-    # the post-promotion plateau path this test targets.
+    # Flat 3-tick window across 3 fresh classifiers. Seed stack_size=1 to bypass the PR #239 "stack_size==0 -> defer to no_levers" early-return and hit the plateau path.
     for tick in (1, 2, 3):
         c, store = _fresh_classifier(tmp_path)
         ctx = _ctx_with_tick(
@@ -250,7 +231,6 @@ async def test_action_ladder_cooldown_persists(tmp_path: Path):
     result1 = await ladder1.decide(
         [sym], tick_index=10, now_unix=1.0,
     )
-    # MEDIUM emits an alert (not just the heartbeat).
     assert any(
         i.type.value == "alert" for i in result1.intents
     )
@@ -267,7 +247,6 @@ async def test_action_ladder_cooldown_persists(tmp_path: Path):
     )
     intent_types = [i.type.value for i in result2.intents]
     assert "alert" not in intent_types
-    # Should be heartbeat-only.
     assert intent_types == ["send_message"]
 
 
@@ -320,14 +299,12 @@ def test_classifier_without_state_store_is_in_memory(tmp_path: Path):
             owner_patterns=(),
         ),
     )
-    # First call sees 1 hit, no symptom yet.
     syms1 = classifier.classify(_leak_data(), _ctx_with_tick(1))
     assert all(s.name != "gpu_memory_leaked" for s in syms1)
-    # Same classifier instance keeps state in-memory → 2nd call fires.
+    # Same instance keeps state in-memory → 2nd call fires.
     syms2 = classifier.classify(_leak_data(), _ctx_with_tick(2))
     assert any(s.name == "gpu_memory_leaked" for s in syms2)
-    # A fresh classifier with no store would lose the counter — that's
-    # the original M1 bug. Verifying that explicitly:
+    # A fresh store-less classifier loses the counter (the original M1 bug):
     fresh = Classifier(
         state_store=None,
         gpu_leak_config=GpuLeakConfig(

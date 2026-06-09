@@ -525,9 +525,31 @@ ensure_magpie() {
     git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_DIR" "$MAGPIE_REF" "Magpie"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
-    "$PYTHON" -c "import Magpie" >/dev/null
-    log "Magpie installed OK from ${MAGPIE_DIR}"
+    # Idempotent reinstall guard. Magpie is editable-installed into the
+    # pod-level /opt/venv, which concurrent sessions on the same Claw pod
+    # SHARE. An unconditional `pip install -e` briefly tears the egg-link
+    # down/up; a sibling session mid-`python -m Magpie` benchmark then hits
+    # the gap and dies with "No module named Magpie" (intermittent, can
+    # follow an earlier successful run). The install lock lives under
+    # $HYPERLOOM_RUNTIME_DIR and does NOT cover the shared /opt/venv, so it
+    # cannot serialize this. Mirror ensure_inferencex (preserve existing) +
+    # ensure_bench_serving_deps (import-probe before pip): skip the reinstall
+    # only when the checkout exists under $MAGPIE_DIR AND `import Magpie`
+    # already resolves into it. The path check (not just import success)
+    # preserves the original guard against a stale editable from an older
+    # session masking a missing per-workspace checkout.
+    local magpie_real resolved
+    magpie_real="$(realpath "$MAGPIE_DIR" 2>/dev/null || echo "$MAGPIE_DIR")"
+    resolved="$("$PYTHON" -c 'import Magpie, os; print(os.path.realpath(os.path.dirname(Magpie.__file__)))' 2>/dev/null || true)"
+    if { [ -f "$MAGPIE_DIR/setup.py" ] || [ -f "$MAGPIE_DIR/pyproject.toml" ]; } \
+       && [ -n "$resolved" ] \
+       && case "$resolved" in "$magpie_real" | "$magpie_real"/*) true ;; *) false ;; esac; then
+      log "Magpie already installed from ${MAGPIE_DIR}; skipping editable reinstall (idempotent; avoids racing a shared /opt/venv reinstall)"
+    else
+      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
+      "$PYTHON" -c "import Magpie" >/dev/null
+      log "Magpie installed OK from ${MAGPIE_DIR}"
+    fi
   fi
 }
 
@@ -706,6 +728,52 @@ ensure_bench_serving_deps() {
   log "bench_serving deps installed OK"
 }
 
+# --- 4b. rocprof-compute (kernel roofline profiler) ---
+# kernel_optimization.py's before-GEAK roofline step shells out to
+# `rocprof-compute` (apt package rocprofiler-compute, ships under
+# /opt/rocm/bin). Without it every per-kernel roofline collection fails with
+# "rocprof-compute is not installed or not on PATH" and kernel_roofline.json
+# stays measurement-free. Detect first; install only when missing AND apt is
+# available. Fail-soft: a missing tool degrades roofline data, it does not
+# block optimization.
+# Command name + fallback path are overridable so tests can point them at
+# non-existent targets; production uses the canonical rocprof-compute / ROCm bin.
+ROCPROF_COMPUTE_BIN="${ROCPROF_COMPUTE_BIN:-rocprof-compute}"
+ROCPROF_COMPUTE_PATH="${HYPERLOOM_ROCPROF_COMPUTE_PATH:-${ROCPROF_COMPUTE_PATH:-/opt/rocm/bin/rocprof-compute}}"
+ROCPROF_APT_BIN="${ROCPROF_APT_BIN:-apt-get}"
+
+_rocprof_compute_present() {
+  command -v "$ROCPROF_COMPUTE_BIN" >/dev/null 2>&1 || [ -x "$ROCPROF_COMPUTE_PATH" ]
+}
+
+ensure_rocprof_compute() {
+  if _rocprof_compute_present; then
+    log "rocprof-compute present"
+    return 0
+  fi
+  if ! command -v "$ROCPROF_APT_BIN" >/dev/null 2>&1; then
+    warn "rocprof-compute missing and apt-get unavailable; kernel roofline data will be skipped"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute missing (check-only; would apt-get install rocprofiler-compute)"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install rocprofiler-compute via apt-get"
+    return 0
+  fi
+  log "installing rocprofiler-compute (provides rocprof-compute)"
+  export DEBIAN_FRONTEND=noninteractive
+  if "$ROCPROF_APT_BIN" update -qq >/dev/null 2>&1 \
+      && "$ROCPROF_APT_BIN" install -y --no-install-recommends rocprofiler-compute >/dev/null 2>&1 \
+      && _rocprof_compute_present; then
+    log "rocprofiler-compute installed OK"
+  else
+    warn "rocprofiler-compute install failed; kernel roofline data will be skipped (preinstall it in the image to fix)"
+  fi
+}
+
 # --- 5. Chain to kernel-agent ---
 chain_kernel_agent() {
   if [ "$SKIP_KERNEL_AGENT" -eq 1 ]; then
@@ -772,6 +840,7 @@ ensure_magpie
 ensure_magpie_atomic_scripts_patch
 ensure_inferencex
 ensure_bench_serving_deps
+ensure_rocprof_compute
 chain_kernel_agent
 chain_framework_agent
 

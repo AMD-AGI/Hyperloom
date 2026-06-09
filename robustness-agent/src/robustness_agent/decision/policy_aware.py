@@ -1,22 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Local payload-schema check matching upstream PolicyGate.
+"""Local payload-schema check mirroring upstream ``PolicyGate.validate_intent``.
 
-The Coordinator's ``PolicyGate.validate_intent`` is the source of truth.
-It runs server-side and rejects malformed intents with ``PolicyDenied``;
-the Coordinator then writes a ``policy_denied`` observation to the
-sender's inbox so the LLM can self-correct.
-
-For the robustness reactor that loop is wasteful: any payload bug
-manifests as silent inactivity for at least one tick. :class:`PolicyAware`
-performs the same checks locally and surfaces them as
-:class:`PolicyViolation` (raised, not swallowed) so unit tests catch
-schema drift immediately.
-
-The schema mirrored here is intentionally a subset of upstream rules
-limited to what the robustness role can emit. A contract test
-(``tests/test_role_contract.py``) cross-checks against the upstream
-``PolicyGate`` table when the inference_optimizer package is importable.
+PolicyGate is the server-side source of truth (rejects with ``PolicyDenied``
++ a ``policy_denied`` inbox observation), but that costs ≥1 silent tick.
+:class:`PolicyAware` runs the same checks locally and raises
+:class:`PolicyViolation` so unit tests catch schema drift immediately. The
+mirrored schema is a subset limited to robustness-emittable intents;
+``tests/test_role_contract.py`` cross-checks the upstream table when importable.
 """
 
 from __future__ import annotations
@@ -127,10 +118,8 @@ class PolicyAware:
             self._check_send_message(payload)
 
         if intent.type in ROBUSTNESS_ONLY_INTENTS:
-            # Locally we cannot validate ``source``, but we can record the
-            # invariant and ensure callers reach this code path; upstream
-            # PolicyGate enforces source=robustness with
-            # ``ROBUSTNESS_ONLY_SOURCE_ALLOWLIST``.
+            # ``source`` is not validatable locally; upstream PolicyGate
+            # enforces source=robustness via ROBUSTNESS_ONLY_SOURCE_ALLOWLIST.
             pass
 
     def _check_alert(self, payload: dict[str, Any]) -> None:
@@ -253,5 +242,4 @@ class PolicyAware:
             raise PolicyViolation(
                 "send_message.topic must be non-empty", rule="payload"
             )
-        # Upstream soft-degrades unknown topics to ``observation``; we do
-        # not reject, so callers can surface ad-hoc observations.
+        # Unknown topics are not rejected (upstream soft-degrades to observation).

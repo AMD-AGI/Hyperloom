@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Lightweight numerical-accuracy check for the explore --execute e2e path.
-
-Compares sglang's RMSNorm output against a reference torch implementation
-on the same input and emits accuracy.json compatible with
-framework_agent.explorer's ``_evaluate_candidate``. The reference is just
-a per-token L2 normalisation; we report the fraction of tokens whose
-relative error stays under 1e-2 as the ``accuracy`` field.
-"""
+"""Numerical-accuracy check for the explore --execute e2e path: compares sglang RMSNorm vs a reference torch impl and emits accuracy.json; ``accuracy`` is the fraction of tokens with relative error under rtol (default 1e-2)."""
 
 from __future__ import annotations
 

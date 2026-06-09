@@ -2,23 +2,10 @@
 
 """Accuracy gate — GSM8K eval integration for inference_optimizer.
 
-This module provides:
-1. `is_high_accuracy_risk` — decides whether a variant needs accuracy eval
-2. `parse_eval_results` — extracts the exact_match score from Magpie's
-   lm-eval output directory
-3. `accuracy_passed` — compares new score vs baseline with threshold
-
-The accuracy gate protocol:
-- Baseline ALWAYS runs GSM8K (RUN_EVAL=true injected into yaml envs)
-- High-risk params/backends variants also run GSM8K
-- Threshold: baseline_accuracy - new_accuracy <= 0.05 (5% tolerance)
-- REVERT if accuracy drops more than 5%
-
-High-risk parameters (accuracy_risk > 0, derived from KB + DESIGN v2):
-- Any flag that changes numeric precision (fp8, fp4, quantization)
-- Any flag that changes attention/compute implementation (aiter, triton rope)
-- Kernel patches / integrate (handled separately by kernel-agent)
-- Compilation mode changes (enforce-eager / compilation-config)
+Protocol: baseline always runs GSM8K; high-risk variants too. Threshold is
+``baseline_accuracy - new_accuracy <= 0.05`` (5% tolerance), REVERT otherwise.
+High-risk = precision/compute-path changes (fp8/fp4/quant, aiter/triton rope,
+enforce-eager/compilation-config); kernel patches handled by kernel-agent.
 """
 
 from __future__ import annotations
@@ -34,9 +21,8 @@ log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # 5% allowed deviation
 
-# Flags / env vars that indicate accuracy risk > 0.
-# If a variant's extra_server_args or extra_envs matches any of these
-# patterns, the variant must pass accuracy gate before being promoted.
+# Flags / env vars that indicate accuracy risk > 0; matching variants must
+# pass the accuracy gate before promotion.
 _HIGH_RISK_CLI_PATTERNS: tuple[str, ...] = (
     "--kv-cache-dtype",
     "--enforce-eager",
@@ -77,16 +63,14 @@ def is_high_accuracy_risk(
 def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
     """Extract accuracy score from Magpie workspace's eval output.
 
-    Magpie's `run_lm_eval` writes results to a subdirectory under the
-    benchmark workspace. We search for `results*.json` recursively and
-    extract the `exact_match,strict-match` metric (GSM8K primary).
+    Searches ``results*.json`` recursively for the GSM8K-primary
+    ``exact_match,strict-match`` metric.
 
     Returns:
         {"accuracy": float, "task": str, "source_file": str}
         or {"accuracy": None, "error": str} if not found.
     """
     workspace = Path(workspace)
-    # Magpie writes eval results in various locations; search broadly.
     search_paths = [
         workspace / "eval_*" / "**" / "results*.json",
         workspace / "**" / "results*.json",
@@ -106,7 +90,6 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
         return {"accuracy": None, "error": f"parse error: {exc}"}
 
     results = data.get("results", {})
-    # GSM8K primary metric
     for task_name, metrics in results.items():
         for key in ("exact_match,strict-match", "exact_match,flexible-extract",
                     "exact_match,none", "acc,none"):

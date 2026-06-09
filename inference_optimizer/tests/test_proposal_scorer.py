@@ -1,20 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the advisory specialist-proposal scorer (ProposalScorer).
-
-Covers:
-
-* Scorer unit — group prompt shape, JSON parse, per-model independent
-  degrade (timeout / bad JSON / one model raises / unknown-slug 404),
-  score clamping + unknown-name drop.
-* Coordinator wiring — ``_record_specialist_result`` attaches
-  ``ensemble_scores`` to the round entry when a scorer is present;
-  absent scorer → no key; scorer exception → entry still recorded.
-* Renderer — ``SharedState.to_proposal_scores_summary`` text + the
-  section is omitted when no round carries scores.
-* Resume idempotency — re-recording the same ``round_id`` does not
-  duplicate (delegated to existing ``record_specialist_round``).
-"""
+"""Tests for the advisory specialist-proposal scorer (ProposalScorer)."""
 
 from __future__ import annotations
 
@@ -33,9 +19,7 @@ from inference_optimizer.orchestrator.proposal_scorer import (
 from inference_optimizer.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
 
 
-# ===========================================================================
 # Fake OpenAI client (test seam)
-# ===========================================================================
 @dataclass
 class _FakeMessage:
     content: str
@@ -52,12 +36,7 @@ class _FakeResp:
 
 
 class _FakeCompletions:
-    """Per-model scripted behaviour keyed by ``model=``.
-
-    ``behaviour`` maps a model slug to either a string (returned as the
-    reply content) or an Exception instance (raised to simulate a
-    gateway error / 404 / timeout).
-    """
+    """Per-model scripted behaviour keyed by ``model=`` (string reply or Exception)."""
 
     def __init__(self, behaviour: dict[str, Any]):
         self._behaviour = behaviour
@@ -120,9 +99,7 @@ def _scores_json(*pairs: tuple[str, float, str]) -> str:
     return f'```json\n{{"scores": {{{body}}}}}\n```'
 
 
-# ===========================================================================
 # 1. Scorer unit
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_score_two_models_happy_path():
     behaviour = {
@@ -152,11 +129,10 @@ async def test_group_prompt_contains_all_proposals_and_gap():
     await scorer.score(gap=_GAP, proposals=_PROPOSALS)
     client = scorer._client
     sent = client.chat.completions.calls[0]["messages"][0]["content"]
-    # group scoring → one prompt names every proposal + the gap.
     assert "cuda_graph_bs_512" in sent
     assert "disable_radix" in sent
     assert "cuda graph capture stalls" in sent
-    assert "0 to 10" in sent  # instruction present
+    assert "0 to 10" in sent
 
 
 @pytest.mark.asyncio
@@ -205,7 +181,6 @@ async def test_empty_proposals_returns_empty_envelope():
     out = await scorer.score(gap=_GAP, proposals=[])
     assert out["models"] == {}
     assert out["errors"] == {}
-    # No model call should have been made.
     assert scorer._client.chat.completions.calls == []
 
 
@@ -226,9 +201,7 @@ def test_default_models_constant():
     )
 
 
-# ===========================================================================
 # 2. Coordinator wiring
-# ===========================================================================
 @dataclass
 class _StubTask:
     task_id: str
@@ -333,7 +306,6 @@ async def test_coordinator_scorer_exception_still_records(tmp_path):
         task=task, done_payload=_done(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
     )
-    # Round still recorded, just without scores.
     assert len(c.shared_state.specialist_rounds) == 1
     assert "ensemble_scores" not in c.shared_state.specialist_rounds[0]
 
@@ -354,9 +326,7 @@ async def test_coordinator_empty_proposals_not_scored(tmp_path):
     assert scorer._client.chat.completions.calls == []
 
 
-# ===========================================================================
 # 3. Renderer
-# ===========================================================================
 def _real_state():
     from inference_optimizer.orchestrator.shared_state import SharedState
     return SharedState()
@@ -394,14 +364,11 @@ def test_render_shows_per_model_side_by_side():
     text = st.to_proposal_scores_summary()
     assert "Advisory only" in text
     assert "cuda_graph_bs_512" in text
-    # Identities are anonymized: real model slugs MUST NOT leak into the
-    # orchestration-facing render. Sorted slugs map claude-opus-4-7 ->
-    # rater_1, gpt-5.4 -> rater_2 (stable within a render).
+    # Model slugs are anonymized to rater_N (sorted, stable).
     assert "claude-opus-4-7" not in text
     assert "gpt-5.4" not in text
     assert "rater_1=8.0" in text
     assert "rater_2=6.5" in text
-    # rater_2 omitted disable_radix → rendered as n/a.
     assert "rater_2=n/a" in text
 
 
@@ -418,15 +385,13 @@ def test_render_reports_unavailable_models():
         },
     }]
     text = st.to_proposal_scores_summary()
-    # Anonymized: the failing model slug "bad" must not leak; sorted
-    # slugs map bad -> rater_1, good -> rater_2.
+    # Anonymized: failing slug "bad" -> rater_1, must not leak.
     assert "bad" not in text
     assert "raters unavailable this round: rater_1" in text
 
 
 def test_render_rater_labels_stable_across_rounds():
-    """The same model maps to the same rater_N in every rendered round,
-    and no real model slug ever appears in the orchestration text."""
+    """The same model maps to the same rater_N across rounds; no slug leaks."""
     st = _real_state()
     st.specialist_rounds = [
         {
@@ -449,8 +414,7 @@ def test_render_rater_labels_stable_across_rounds():
             "ensemble_scores": {
                 "scale": "0-10",
                 "models": {
-                    # Deliberately different dict order to prove the label
-                    # is keyed on the slug, not on iteration order.
+                    # Different dict order: the label keys on slug, not order.
                     "gpt-5.5": {"v2": {"score": 5.0, "reason": "c"}},
                     "claude-opus-4-8": {"v2": {"score": 9.0, "reason": "d"}},
                 },
@@ -461,17 +425,14 @@ def test_render_rater_labels_stable_across_rounds():
     text = st.to_proposal_scores_summary(max_rounds=2)
     for slug in ("claude-opus-4-8", "gpt-5.5", "claude", "gpt"):
         assert slug not in text, f"model slug {slug!r} leaked into prompt"
-    # claude-opus-4-8 sorts before gpt-5.5 → rater_1 / rater_2, stable
-    # across both rounds: rater_1 carries claude's 8.0 then 9.0.
+    # claude-opus-4-8 sorts first → rater_1, stable across rounds.
     assert "rater_1=8.0" in text
     assert "rater_2=6.0" in text
     assert "rater_2=5.0" in text
     assert "rater_1=9.0" in text
 
 
-# ===========================================================================
 # 4. Resume idempotency
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_resume_idempotent_on_round_id(tmp_path):
     scorer = _make_scorer({
@@ -479,12 +440,10 @@ async def test_resume_idempotent_on_round_id(tmp_path):
     })
     c = _coord(tmp_path, scorer)
     task = _StubTask(task_id="t1", params={}, )
-    # round_id defaults to task_id; record twice.
     for _ in range(2):
         await c._record_specialist_result(
             task=task, done_payload=_done(),
             source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
         )
-    # Idempotent on round_id → exactly one row.
     assert len(c.shared_state.specialist_rounds) == 1
     assert "ensemble_scores" in c.shared_state.specialist_rounds[0]

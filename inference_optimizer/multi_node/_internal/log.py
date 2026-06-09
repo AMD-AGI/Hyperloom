@@ -1,13 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tiny stderr logger used by the rayjob CLIs.
+"""Tiny stderr logger for the rayjob CLIs.
 
-Why not :mod:`logging`? The rayjob CLIs are invoked from shell wrappers
-inside the Claw sandbox; the orchestrator agent reads each stderr line
-verbatim to learn progress. We want zero formatter surprises (no double
-prefix, no module name, no level handlers conflicting with anything
-imported transitively from :mod:`inference_optimizer`). A 6-line stderr
-helper is simpler and avoids the global :mod:`logging` config.
+Avoids :mod:`logging` so the agent reads each stderr line verbatim with no
+formatter surprises or global-config conflicts.
 """
 
 from __future__ import annotations
