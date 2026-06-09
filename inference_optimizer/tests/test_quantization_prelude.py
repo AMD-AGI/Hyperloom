@@ -385,12 +385,18 @@ def test_prelude_skips_on_gpu_scheme_mismatch(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
     monkeypatch.delenv("GPU_TYPE", raising=False)
+    # monkeypatch.setenv registers the key for restoration so the marker the
+    # prelude writes does not leak into other tests.
+    monkeypatch.setenv("HYPERLOOM_QUANTIZATION_SKIPPED", "")
     args = _Args(model="/models/src", quantize_scheme="mxfp4", gpu_type="mi300x")
     asyncio.run(cli._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"  # unchanged -> downstream un-quantized
-    err = capsys.readouterr().err
-    assert "MI355X" in err and "skipped" in err.lower()
+    captured = capsys.readouterr()
+    # Skip is detectable: stdout marker + env var, both naming the GPU reason.
+    assert "QUANTIZATION_SKIPPED" in captured.out
+    assert "MI355X" in (captured.out + captured.err)
+    assert os.environ.get("HYPERLOOM_QUANTIZATION_SKIPPED")
 
 
 def test_prelude_runs_mxfp4_on_mi355x(tmp_path, monkeypatch):

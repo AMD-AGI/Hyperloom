@@ -3531,6 +3531,9 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         and *skips* quantization, then continues optimizing the un-quantized
         model. The mismatch is a config error caught before any Quark work
         runs, not a mid-run failure, so the run proceeds rather than aborting.
+        The skip is made **detectable** so a launcher / UI never mistakes the
+        run for quantized: a ``QUANTIZATION_SKIPPED:`` marker line on stdout
+        plus the ``$HYPERLOOM_QUANTIZATION_SKIPPED`` env var (set to the reason).
     """
     # Free-text --quantize wins; otherwise resolve the structured
     # --quantize-scheme enum (the UI/backend path) to a prompt.
@@ -3551,12 +3554,20 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         try:
             validate_scheme(scheme, gpu_hint)
         except SchemeNotSupportedError as exc:
+            # Pre-flight config error (caught before any Quark work): per the
+            # documented contract we SKIP quantization and continue on the
+            # un-quantized model rather than hard-stopping. Make the skip
+            # explicit + machine-detectable (stdout marker + env var) so a
+            # launcher / UI surfaces "requested quantization was skipped"
+            # instead of silently believing the run is quantized.
+            reason = str(exc)
+            os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
             print(
-                f"ERROR: {exc}\n"
-                "Quantization skipped; continuing optimization on the "
-                "un-quantized model.",
-                file=sys.stderr,
+                f"QUANTIZATION_SKIPPED: {reason}; continuing optimization on the "
+                "un-quantized model. Pick a scheme supported by this GPU TYPE "
+                "(or change GPU_TYPE) to actually quantize."
             )
+            print(f"ERROR: quantization skipped — {reason}", file=sys.stderr)
             return
         prompt = resolve_scheme_prompt(scheme)
     if not prompt:

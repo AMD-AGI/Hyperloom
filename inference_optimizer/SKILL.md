@@ -465,19 +465,24 @@ inference_optimizer optimize \
   workspace root (`<workspace_root>/quantization/<model>/quantized`) into the
   prompt automatically.
 - **Structured path for UI/backends**: instead of free text, pass
-  `--quantize-scheme <enum>` (one of `none` / `fp8` / `int8` / `int4_wo_128` /
-  `mxfp4` / `mxfp4_fp8`); it resolves to a curated prompt internally
-  (`orchestrator/quantization_schemes.py`). `none` or omit = no quantization.
-  Free-text `--quantize` takes priority when both are given.
+  `--quantize-scheme <enum>` (one of `none` / `fp8` / `ptpc_fp8` / `mxfp4` /
+  `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` are **MI355X-only**. It resolves to a
+  curated prompt internally (`orchestrator/quantization_schemes.py`). `none` or
+  omit = no quantization. Free-text `--quantize` takes priority when both given.
 - **Keep `--precision` consistent with the quantization.** When a quantization
   scheme is requested, also set `--precision`/`PRECISION` to that scheme (e.g.
-  `--quantize-scheme int4_wo_128` → `--precision int4_wo_128`). Otherwise the
+  `--quantize-scheme fp8` → `--precision fp8`). Otherwise the
   benchmark configs, display names, and the optimization report carry the stale
   operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
   actually-quantized model. Never leave a conflicting precision when quantizing.
 - Behavior: one-shot, **skipped on `--resume`**. On a failed/unusable
   quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
+  The one exception is a **pre-flight scheme/GPU mismatch** via
+  `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**
+  (not a hard stop) and continues on the un-quantized model, emitting a
+  `QUANTIZATION_SKIPPED:` line on stdout and setting
+  `$HYPERLOOM_QUANTIZATION_SKIPPED` so the caller can detect it.
 - Prerequisites (in addition to the normal Setup): `$QUARK_ROOT` must point at
   a Quark checkout containing `.claude/skills/quark-torch-*`, and the installed
   `amd-quark` package version must match that checkout (install editable from
