@@ -31,7 +31,8 @@ PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
-TRACELENS_REF="${TRACELENS_REF:-c35c787ef31f0425fa0028a605ffc8c60a737c2c}"
+# TraceLens v0.6.0 integration (#474): head of release/hyperloom_integration_v0.6.0.
+TRACELENS_REF="${TRACELENS_REF:-0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9}"
 # Preferred container-local checkout for the public repo when operators install
 # TraceLens manually. The internal extension is private: Hyperloom keeps NO
 # repo URL, ref, or default path for it. It is used only when an operator
