@@ -249,7 +249,7 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     assert str(expected_deps / "Primus-Claw") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
-    assert "c35c787ef31f0425fa0028a605ffc8c60a737c2c" in result.stdout
+    assert "0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9" in result.stdout
 
 
 # install-harden: loud USER_DATA_PATH fallback notice + flock around the
