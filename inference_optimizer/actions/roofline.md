@@ -42,17 +42,19 @@ exactly two places:
    `cur_tput = baseline_tput * (1 + cumulative_gain_validated/100)`.
    Compound: 10% → 21% → 33% triggers.
 
-While the Coordinator-enqueued analysis task is in flight,
-`_auto_roofline_pending_denial` blocks `specialist` / `explore` /
-`kernel_opt` / `integrate` / `deep_kernel_analysis` /
-`operator_tuning` / `vendor_kernel_config` dispatches so downstream
-decisions always read the freshest snapshot.
+While the Coordinator-enqueued analysis task is in flight, downstream
+dispatches are no longer blocked: actions keep running against the
+current `analysis.md` snapshot and resource conflicts (concurrent
+profile / kernel work on the same GPU) are serialised by the lane /
+GPU lease rather than a policy deny.
 
 ## PolicyGate denies LLM proposals
 
 `propose_action{action_name='roofline'|'profile'}` and
 `delegate{action_name='roofline'|'profile'}` are denied at PolicyGate
-with `rule='analysis_action_not_llm_proposable'`. To run a profile
+with `rule='phase_incompatible'`: both names are Coordinator-managed
+and absent from `PHASE_LLM_PROPOSABLE_ACTIONS`, so the single LLM-
+facing R1 phase rule rejects any LLM-side proposal. To run a profile
 instead of a full roofline, the operator launches with
 `--no-enable-roofline` (the Coordinator then auto-enqueues a `profile`
 task in PRELUDE and at every watermark crossing); there is no

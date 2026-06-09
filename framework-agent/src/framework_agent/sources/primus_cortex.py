@@ -2,24 +2,11 @@
 
 """Primus Cortex PR Monitor client.
 
-Internal-network replacement for the anonymous GitHub Search path. Talks
-to the ``primus-cortex-pr-monitor`` REST service.
-
-Policy:
-
-* Zero external dependencies (stdlib ``urllib.request`` only).
-* **Hard-fail on errors** when ``base_url`` is configured (network errors,
-  non-200 status, malformed JSON). The CLI surfaces this as exit code 2
-  so misconfigured nodes do not silently fall back to an empty candidate
-  list.
-* Returns :class:`GitHubPr` records (shared with the GitHub backend), so
-  call sites can swap data sources without touching downstream
-  :class:`Candidate` plumbing.
-
-Ported from zhenggong/framework-agent with one local change: the shared
-``GitHubPr`` / ``_repo_slug`` helpers live in ``sources/_shared.py``
-instead of a sibling ``github_search`` module, so this file is usable
-before the github backend lands in PR-B.
+Internal-network replacement for anonymous GitHub Search; talks to the
+``primus-cortex-pr-monitor`` REST service. Stdlib-only (``urllib.request``).
+Hard-fails on errors (network / non-200 / bad JSON) so misconfigured nodes
+don't silently fall back to an empty list (CLI surfaces exit code 2). Returns
+:class:`GitHubPr` records shared with the GitHub backend.
 """
 
 from __future__ import annotations
@@ -34,11 +21,8 @@ from ._shared import GitHubPr, _repo_slug
 
 
 class PrimusCortexError(RuntimeError):
-    """Raised when a primus-cortex request cannot be completed.
-
-    Inherits from :class:`RuntimeError` so the CLI's blanket
-    ``except Exception`` translates it into exit code 2 with a clear
-    message.
+    """Raised when a primus-cortex request cannot be completed (CLI maps it to
+    exit code 2 via its blanket ``except Exception``).
     """
 
 
@@ -260,24 +244,8 @@ def list_perf_prs(
 ) -> list[GitHubPr]:
     """List PRs from primus-cortex; hard-fails on transport/parse errors.
 
-    The result type :class:`GitHubPr` is identical to what the public
-    GitHub Search backend returns, so the dispatcher can union both
-    sources without per-source branching.
-
-    Args:
-        repo_url (str): Git URL of the repo; parsed to an ``owner/name`` slug.
-        base_url (str): primus_cortex service base URL.
-        limit (int): Maximum number of PRs to return. Defaults to 5.
-        state (str): PR state filter. Defaults to ``"open"``.
-        label (str | None): Optional label filter.
-        timeout_sec (float): Per-request timeout. Defaults to 10.0.
-
-    Returns:
-        list[GitHubPr]: The matching PRs (at most ``limit``).
-
-    Raises:
-        PrimusCortexError: On an unparseable repo URL or any transport/parse
-            error.
+    Returns :class:`GitHubPr` (same as the GitHub backend) so the dispatcher
+    can union both sources without per-source branching.
     """
     try:
         repo_slug = _repo_slug(repo_url)
@@ -381,28 +349,10 @@ def pr_patches(
 ) -> str:
     """GET ``/v1/repos/{repo}/prs/{number}/patches`` and render as unified diff.
 
-    The primus-cortex service returns a JSON array
-    ``[{"file": {...}, "patch": "@@ ...", "patch_truncated": bool}]``
-    instead of raw unified-diff text. This helper synthesises ``diff --git`` /
-    ``--- a/<path>`` / ``+++ b/<path>`` headers per file so the result is a
-    valid unified patch that ``git apply`` can consume. Renamed and deleted
-    files honour ``previous_path`` and ``status``. Items missing the
-    ``patch`` field (e.g. binary diffs) emit only the file header and skip
-    the hunk body.
-
-    Args:
-        repo_slug (str): Repository slug in ``owner/name`` form.
-        number (int): PR number to fetch patches for.
-        base_url (str): primus_cortex service base URL.
-        timeout_sec (float): Per-request timeout. Defaults to 30.0.
-
-    Returns:
-        str: A synthesised unified diff (empty string when no patch content is
-            present); a raw string payload is returned verbatim.
-
-    Raises:
-        PrimusCortexError: On transport/parse errors or an unexpected response
-            shape.
+    The service returns a JSON patch array, not raw diff text; this synthesises
+    ``diff --git`` / ``--- a/`` / ``+++ b/`` headers per file so ``git apply``
+    can consume it. Honours ``previous_path`` / ``status`` for renames+deletes;
+    items missing ``patch`` (binary) emit only the file header.
     """
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}/patches")
     payload = _http_get_json(url, timeout_sec=timeout_sec)

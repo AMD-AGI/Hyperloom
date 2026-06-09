@@ -82,19 +82,9 @@ def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 # ---------------------------------------------------------------------------
 
 def _patch_baseline(data: Dict) -> List[str]:
-    """
-    `final` already exposes top-level `extra_server_args` / `extra_envs`.
-    `baseline` does not. Mirror them up from baseline.invocation when missing.
-
-    Read-tolerant for the legacy ``extra_sglang_args`` key on input
-    (renamed to ``extra_server_args``); the output always writes the
-    canonical name only.
-
-    Args:
-        data (Dict): The session breakdown dict, mutated in place.
-
-    Returns:
-        List[str]: Human-readable notes describing each patch applied.
+    """Mirror `extra_server_args` / `extra_envs` onto `baseline` (which lacks
+    them) from baseline.invocation. Reads the legacy ``extra_sglang_args`` key
+    but always writes the canonical ``extra_server_args``.
     """
     notes = []
     baseline = data.get("baseline")
@@ -102,8 +92,7 @@ def _patch_baseline(data: Dict) -> List[str]:
         return notes
 
     if "extra_server_args" not in baseline:
-        # Back-compat: prefer the legacy key's value if the
-        # input session_breakdown.json predates the rename.
+        # Back-compat: reuse the legacy key if the input predates the rename.
         if "extra_sglang_args" in baseline:
             baseline["extra_server_args"] = baseline.pop("extra_sglang_args")
             notes.append("baseline.extra_server_args <- extra_sglang_args (legacy)")
@@ -227,9 +216,8 @@ def _patch_phase_timeline(data: Dict) -> List[str]:
             and "extra_server_args" not in extras
             and "sglang_args" not in extras
         ):
-            # Back-compat: accept both ``candidate_extra_server_args``
-            # (post-rename) and ``candidate_extra_sglang_args`` (legacy
-            # pre-rename JSONs). Canonical key wins when both are present.
+            # Back-compat: canonical candidate_extra_server_args wins over the
+            # legacy candidate_extra_sglang_args.
             cand = extras.get("candidate_extra_server_args")
             if cand is None:
                 cand = extras.get("candidate_extra_sglang_args")

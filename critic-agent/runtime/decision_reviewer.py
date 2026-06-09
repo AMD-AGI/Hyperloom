@@ -2,28 +2,11 @@
 
 """Two-phase orchestration for the Critic decision pipeline.
 
-The Critic SKILL is hosted by an A2A chat server (Codex). Each turn looks
-roughly like:
-
-1. Codex receives a prompt from the Coordinator (or a dialogue-style
-   request). The SKILL extracts a request JSON and runs::
-
-       python -m runtime.cli prepare-review --request request.json --out judge.json
-
-   This produces a *judge bundle* with merged context, KB priors, and a
-   list of proposals to review (when applicable).
-
-2. The SKILL reasons over the judge bundle to produce a Critic-shaped
-   review JSON (one of the schemas in ``references/``).
-
-3. The SKILL runs::
-
-       python -m runtime.cli commit-review --request request.json --review review.json --out emit.json
-
-   to validate the review, persist it in session memory, optionally write
-   to KB, and emit the Coordinator-compatible intent envelope.
-
-This module hosts the deterministic logic for both phases.
+Phase 1 (``prepare-review``) builds a *judge bundle* with merged context,
+KB priors, and proposals to review. Phase 2 (``commit-review``) validates
+the SKILL's review JSON, persists it to session memory, optionally writes
+to KB, and emits the Coordinator-compatible intent envelope. This module
+hosts the deterministic logic for both phases.
 """
 
 from __future__ import annotations
@@ -79,37 +62,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-# ---------------------------------------------------------------------------
-# Per-action review-constraints taxonomy.
-#
-# The original ``_review_constraints`` returned a single approve_requires
-# checklist that demanded a comparable before/after benchmark + accuracy
-# gate for *every* proposal. That works for kernel-patch landing
-# (``integrate`` / ``integrate_patch`` / ``apply_patch``) where Critic is
-# the last gate before mutating ``optimization_stack`` or
-# ``framework_source_roots``, but it deadlocks the explore loop:
-# ``explore`` / ``specialist`` / ``profile`` / ``kernel_opt`` proposals
-# exist precisely to *produce* those benchmarks, so requiring them
-# upfront makes Critic permanently emit ``needs_review`` and the
-# explore family eventually gets pruned.
-#
-# Three classes:
-#   * ``patch_landing``       — strict; the original 4-item checklist.
-#   * ``evidence_producer``   — structural-only; approves so the action
-#                               can produce the missing evidence.
-#   * ``framework_op``        — empty checklist; Critic is not a useful
-#                               gatekeeper for these (baseline /
-#                               target_analysis / recover / report).
-#   * unknown action_name     → falls back to ``evidence_producer``
-#                               (cold-start safe; unknown actions are
-#                               treated as exploratory by default).
-#
-# The bundle-level ``approve_requires`` collapses the batch to the
-# *most conservative* class present (so a mixed batch with both
-# ``integrate`` and ``explore`` still gets the strict checklist as the
-# bundle default). The per-proposal classification is also exposed via
-# ``proposal_action_classes`` so the SKILL prompt can apply the right
-# bar per proposal in a heterogeneous batch.
+# Review-constraints taxonomy: a single strict checklist would deadlock the
+# explore loop, so proposals split into three classes (patch_landing strict;
+# evidence_producer structural-only; framework_op empty; unknown →
+# evidence_producer, cold-start safe). Bundle-level ``approve_requires``
+# collapses a batch to its strictest class.
 ACTION_CLASS_PATCH_LANDING = "patch_landing"
 ACTION_CLASS_EVIDENCE_PRODUCER = "evidence_producer"
 ACTION_CLASS_FRAMEWORK_OP = "framework_op"
@@ -120,10 +77,8 @@ _PATCH_LANDING_ACTIONS: frozenset[str] = frozenset({
     "apply_patch",
 })
 
-# Actions whose entire purpose is to produce the evidence patch_landing
-# expects. Keeping this set explicit (rather than "everything not in the
-# other two sets") makes it clear what the Critic is actively choosing
-# to default-approve when KB priors are silent.
+# Actions that produce the evidence patch_landing expects; explicit so it's
+# clear what Critic default-approves when KB priors are silent.
 _EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset({
     "explore",
     "specialist",
@@ -134,7 +89,6 @@ _EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset({
     "deep_kernel_analysis",
     "operator_tuning",
     "vendor_kernel_config",
-    "assess_remaining_gaps",
 })
 
 _FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset({
@@ -153,14 +107,11 @@ _APPROVE_REQUIRES_PATCH_LANDING: tuple[str, ...] = (
 )
 
 _APPROVE_REQUIRES_EVIDENCE_PRODUCER: tuple[str, ...] = (
-    # Variant must trace back to a specialist proposal_set or carry
-    # provenance='default_grid' (cold-start escape hatch).
+    # Trace to a specialist proposal_set or carry provenance='default_grid'.
     "specialist_or_default_grid_provenance",
-    # Action must be in the current phase's allowed_actions set
-    # (PolicyGate enforces this too; Critic mirrors it as a soft check).
+    # Soft mirror of PolicyGate's allowed_actions for the current phase.
     "in_phase_allowed_action",
-    # If KB has a contradicting prior (e.g. variant tried 3x and failed),
-    # Critic should reject. Absence of priors is NOT a blocker.
+    # Reject on a contradicting KB prior; absence of priors is NOT a blocker.
     "no_contradicting_kb_prior",
 )
 
@@ -182,22 +133,7 @@ _APPROVE_REQUIRES_BY_CLASS: dict[str, tuple[str, ...]] = {
 
 
 def classify_proposal_action(action_name: str | None) -> str:
-    """Map a proposal's ``action_name`` to one of the three review classes.
-
-    Unknown / missing action names fall through to
-    ``ACTION_CLASS_EVIDENCE_PRODUCER`` rather than ``patch_landing`` —
-    this is the cold-start-safe default. A genuinely unrecognised action
-    is more likely to be a new exploratory proposal than a new patch
-    landing path; if it is the latter, the Coordinator's PolicyGate
-    will reject it long before the patch reaches a real apply step.
-
-    Args:
-        action_name (str | None): The proposal's action name, or ``None``.
-
-    Returns:
-        str: One of ``ACTION_CLASS_PATCH_LANDING``,
-        ``ACTION_CLASS_EVIDENCE_PRODUCER`` or ``ACTION_CLASS_FRAMEWORK_OP``.
-    """
+    """Map ``action_name`` to a review class; unknown/missing → evidence_producer (cold-start safe)."""
     if not isinstance(action_name, str):
         return ACTION_CLASS_EVIDENCE_PRODUCER
     name = action_name.strip()
@@ -207,7 +143,6 @@ def classify_proposal_action(action_name: str | None) -> str:
         return ACTION_CLASS_PATCH_LANDING
     if name in _FRAMEWORK_OP_ACTIONS:
         return ACTION_CLASS_FRAMEWORK_OP
-    # Explicit evidence_producer set OR unknown → evidence_producer.
     return ACTION_CLASS_EVIDENCE_PRODUCER
 
 
@@ -215,36 +150,20 @@ def classify_proposal_action(action_name: str | None) -> str:
 # L4 helpers — Robustness finding discovery / load
 # ---------------------------------------------------------------------------
 
-# Severity rank: high > medium > low. Used by the "min_severity" filter
-# so callers can request "high or above" without enumerating strings.
+# Severity rank for the "min_severity" filter: high > medium > low.
 _SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
 
-# Subdirectory under a Robustness ``session_dir`` where the findings
-# sink writes its JSONL. Kept in sync with
-# ``robustness_agent.findings.sink.FindingSinkConfig.subdir``; if that
-# layout ever moves we'd update both ends in lockstep.
+# Findings-sink JSONL subdir; kept in sync with
+# ``robustness_agent.findings.sink.FindingSinkConfig.subdir``.
 _ROBUSTNESS_FINDINGS_SUBDIR: str = "agents/robustness/findings"
 
 
 def _discover_robustness_findings_path(session_id: str) -> Path | None:
-    """Locate ``<session>.jsonl`` written by the Robustness FindingSink.
+    """Locate ``<session>.jsonl`` from the Robustness FindingSink.
 
-    Resolution order:
-
-    1. ``$CRITIC_ROBUSTNESS_FINDINGS_DIR`` — explicit override; the
-       value is treated as the directory containing ``<session>.jsonl``.
-    2. ``$ROBUSTNESS_AGENT_SESSION_DIR`` — the Robustness factory sets
-       this to its ``config.session_dir`` so co-deployed Critic +
-       Robustness pick up each other automatically.
-
-    Returns ``None`` when neither env is set or the file does not exist.
-
-    Args:
-        session_id (str): The session id used to form ``<session>.jsonl``;
-            falls back to ``"default"`` when empty.
-
-    Returns:
-        Path | None: Path to the findings JSONL if it exists, else ``None``.
+    Resolution order: ``$CRITIC_ROBUSTNESS_FINDINGS_DIR`` (explicit override
+    dir) then ``$ROBUSTNESS_AGENT_SESSION_DIR`` (auto-discovery). Returns
+    ``None`` when neither env is set or the file does not exist.
     """
     explicit = os.environ.get("CRITIC_ROBUSTNESS_FINDINGS_DIR", "").strip()
     if explicit:
@@ -269,22 +188,7 @@ def _load_robustness_priors(
     limit: int,
     min_severity: str,
 ) -> list[dict[str, Any]]:
-    """Tail the JSONL and return up to ``limit`` priors matching severity.
-
-    The JSONL grows append-only, so the most recent priors live at the
-    end of the file. We read the entire file (capped) and filter — a
-    full session is in the low-MB range so this is cheap.
-
-    Args:
-        path (Path): The Robustness findings JSONL file to read.
-        limit (int): Maximum number of most-recent matching priors to return.
-        min_severity (str): Minimum severity (``low`` / ``medium`` / ``high``)
-            a finding must meet to be included.
-
-    Returns:
-        list[dict[str, Any]]: A narrowed projection of the most recent matching
-        findings, or an empty list if the file is unreadable or has no matches.
-    """
+    """Tail the JSONL and return up to ``limit`` priors matching severity."""
     min_rank = _SEVERITY_RANK.get(min_severity, _SEVERITY_RANK["high"])
     try:
         text = path.read_text(encoding="utf-8")
@@ -310,10 +214,8 @@ def _load_robustness_priors(
         rows.append(obj)
     if not rows:
         return []
-    # Most recent N (the writer appends in time order).
     selected = rows[-limit:]
-    # Project a narrow view — the Critic SKILL doesn't need the full
-    # evidence blob, just enough to reason about the prior failure.
+    # Narrow projection — only what the SKILL needs to reason about the failure.
     out: list[dict[str, Any]] = []
     for row in selected:
         out.append({
@@ -372,12 +274,8 @@ class JudgeBundle:
     decision: dict[str, Any] = field(default_factory=dict)
     kb_priors_by_proposal: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     kb_priors_for_decision: list[dict[str, Any]] = field(default_factory=list)
-    # L4 (2026-05-19): recent Robustness findings injected as priors so
-    # the Critic SKILL prompt can factor in "what's already gone wrong
-    # this session". Populated from
-    # ``$ROBUSTNESS_FINDINGS_DIR/<session>.jsonl`` (or auto-discovered
-    # from ``$ROBUSTNESS_AGENT_SESSION_DIR``); empty when no findings
-    # exist or the lookup is disabled.
+    # Recent Robustness findings so the SKILL can factor in what already broke;
+    # empty when absent or disabled.
     robustness_priors: list[dict[str, Any]] = field(default_factory=list)
     kb_read_skipped_reason: str | None = None
     review_constraints: dict[str, Any] = field(default_factory=dict)
@@ -485,7 +383,6 @@ class DecisionReviewer:
         self.session_memory = session_memory or SessionMemory()
         if kb_writer is None:
             if kb_client is None:
-                # Lazily import to avoid creating a registry when not needed.
                 from .in_memory_kb_client import InMemoryKBClient
 
                 kb_client = InMemoryKBClient()
@@ -638,8 +535,7 @@ class DecisionReviewer:
             })
             return bundle
 
-        # Breaker already open from an earlier failure → short-circuit
-        # before paying another timeout for this request.
+        # Breaker open from an earlier failure → skip another timeout.
         if self.kb_writer.is_kb_unreachable():
             bundle.kb_read_skipped_reason = "kb_unreachable"
             bundle.notes.append(
@@ -655,8 +551,7 @@ class DecisionReviewer:
             return bundle
 
         scope = build_scope(req.context, session_context=merge.merged, require_critical=False)
-        # Hide unknown values when listing priors so the service doesn't filter
-        # to literal "unknown" rows.
+        # Hide "unknown" so the service doesn't filter to literal "unknown" rows.
         scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
 
         topic_hits: dict[str, list[dict[str, Any]]] = {}
@@ -715,18 +610,14 @@ class DecisionReviewer:
             bundle.notes.append("scope partially unknown — proceed with caution")
         bundle.notes.append(f"scope_cache_key={scope_cache_key(scope_filter)}")
 
-        # L4 — Robustness findings injection (last-N high-severity).
-        # Best-effort: a missing file or unparseable line never blocks
-        # the review; we only set the field when at least one row is
-        # picked up. Disabled wholesale via
-        # ``CRITIC_ROBUSTNESS_PRIORS_DISABLED=1``.
+        # Best-effort last-N high-severity Robustness findings; never blocks
+        # the review. Disabled via ``CRITIC_ROBUSTNESS_PRIORS_DISABLED=1``.
         self._inject_robustness_priors(bundle)
         return bundle
 
     # ------------------------------------------------------------------
     # L4 helper: pull recent HIGH-severity Robustness findings into the
-    # bundle so the SKILL prompt can warn the LLM about "what already
-    # broke this session" before it produces a fresh proposal.
+    # bundle so the SKILL can warn about what already broke this session.
     # ------------------------------------------------------------------
     def _inject_robustness_priors(self, bundle: JudgeBundle) -> None:
         """Populate ``bundle.robustness_priors`` from recent findings.
@@ -751,9 +642,7 @@ class DecisionReviewer:
             )
         except ValueError:
             limit = 5
-        # Severity floor: HIGH by default to keep the prompt focused on
-        # actionable priors. Operators with quiet sessions can drop the
-        # bar to MEDIUM via the env knob.
+        # Severity floor: HIGH by default; drop to MEDIUM via the env knob.
         min_severity = os.environ.get(
             "CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY", "high"
         ).lower()
@@ -864,26 +753,9 @@ class DecisionReviewer:
     ) -> dict[str, Any]:
         """Return the per-bundle review constraints payload.
 
-        When ``proposals`` is supplied, the bundle-level
-        ``approve_requires`` is the checklist of the *strictest* action
-        class present in the batch (so a mixed ``integrate`` + ``explore``
-        batch still defaults to the strict patch-landing checklist). The
-        bundle additionally exposes ``proposal_action_classes`` —
-        ``{msg_id: class_name}`` — so the SKILL prompt can apply the
-        right per-proposal bar when the batch is heterogeneous.
-
-        When ``proposals`` is empty / None (e.g. a ``decision_request``
-        with no inbox proposals), we emit the strict ``patch_landing``
-        checklist as the default — historically the only consumer of
-        this branch was kernel-patch landing review.
-
-        Args:
-            proposals (list[Proposal] | None): The proposals in the batch, or
-                ``None``/empty for a decision-level review.
-
-        Returns:
-            dict[str, Any]: The constraints payload (allowed verdicts, ceiling
-            importance, ``approve_requires`` and per-proposal classes).
+        With ``proposals``, ``approve_requires`` is the batch's strictest
+        action class and ``proposal_action_classes`` carries the per-proposal
+        bar; empty/None defaults to the strict ``patch_landing`` checklist.
         """
         constraints: dict[str, Any] = {
             "allowed_verdicts": sorted(ALLOWED_VERDICTS),
@@ -1198,8 +1070,7 @@ class DecisionReviewer:
         verdict = verdict_item.get("verdict")
         if verdict not in {"reject", "redirect", "approve"}:
             return
-        # Only write to KB when the SKILL flagged the verdict as
-        # producing a reusable lesson — surface as ``persist_to_kb=True``.
+        # Only persist when the SKILL flagged a reusable lesson.
         if not verdict_item.get("persist_to_kb"):
             return
         ctx = WriteContext(

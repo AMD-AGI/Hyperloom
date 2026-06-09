@@ -1,23 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""In-memory KBClient used by tests + dry-run mode.
+"""In-memory KBClient for tests + dry-run mode (contract §7.3 faithful mock).
 
-This implementation honours the four behaviours the contract (§7.3)
-requires from a faithful mock:
-
-1. ``(scope, kind, slug)`` UNIQUE with upsert idempotency, partial merge
-   (G-1) and importance protection (G-2).
-2. ``contradicts`` auto-mirroring with ``mirrored_to`` / ``mirror_skipped``
-   bookkeeping (G-8).
-3. ``scope_filter`` containment with ``trim().lowercase()`` value
-   normalisation (G-3).
-4. ``metadata_filter`` supports nested paths and array-contains (G-7).
-
-It also exposes :meth:`simulate_failure` for fault injection so the
-caller can exercise dead-letter paths deterministically.
-
-Time semantics: ``updated_at`` increments are delegated to a ``time_fn``
-parameter so tests can pin them; production uses :func:`time.time`.
+Honours: ``(scope, kind, slug)`` UNIQUE with upsert idempotency, partial
+merge (G-1) and importance protection (G-2); ``contradicts`` auto-mirroring
+(G-8); ``scope_filter`` containment with ``trim().lowercase()`` (G-3);
+``metadata_filter`` nested + array-contains (G-7). :meth:`simulate_failure`
+injects faults for dead-letter tests. ``updated_at`` uses an injectable
+``time_fn`` so tests can pin time.
 """
 
 from __future__ import annotations
@@ -319,11 +309,10 @@ class InMemoryKBClient:
         edges_in = payload.get("edges") or {}
 
         warnings: list[str] = []
-        # Scope value normalisation (G-3): if any incoming value differs
-        # from its normalised form, surface a warning.
+        # Scope value normalisation (G-3): warn when an incoming value differs
+        # from its normalised form.
         for k, v in payload["scope"].items():
             if str(v).strip().lower() != _normalise_value(v) or _normalise_value(v) != _normalise_value(payload["scope"][k]):
-                # Heuristic: emit warning whenever value had upper-case or surrounding spaces.
                 if str(v) != _normalise_value(v):
                     warnings.append("scope_value_normalized")
                     break

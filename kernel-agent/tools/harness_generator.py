@@ -3,14 +3,8 @@
 
 """Generate GEAK-compatible test harnesses from existing benchmark files.
 
-Given a benchmark .py file (e.g. an AITER op_test), this module:
-1. Parses it with AST to find @perftest/@benchmark-decorated functions
-2. Classifies them as reference vs. optimized-kernel callables
-3. Extracts tensor-creation patterns from the test orchestrator function
-4. Wraps everything in the GEAK 4-mode harness template
-
-The generator is kernel-agnostic: it works by analyzing the benchmark
-file's structure rather than hardcoding kernel types.
+Kernel-agnostic: AST-analyzes a benchmark .py to classify reference vs kernel
+callables and tensor-creation patterns, then wraps them in the GEAK 4-mode template.
 """
 
 from __future__ import annotations
@@ -25,9 +19,7 @@ from types import SimpleNamespace
 from typing import Callable
 
 
-# ---------------------------------------------------------------------------
 # Data classes
-# ---------------------------------------------------------------------------
 
 @dataclass
 class FuncInfo:
@@ -82,9 +74,7 @@ class CallInfo:
     kwargs: dict[str, str]
 
 
-# ---------------------------------------------------------------------------
 # BenchmarkAnalyzer — generic AST-based benchmark file analyzer
-# ---------------------------------------------------------------------------
 
 class BenchmarkAnalyzer:
     """Analyze a benchmark Python file to extract structure for harness generation."""
@@ -107,8 +97,6 @@ class BenchmarkAnalyzer:
         self.tree = ast.parse(source)
         self.source_module = source_file_module
 
-    # -- imports -----------------------------------------------------------
-
     def get_imports(self) -> list[str]:
         """Return original source lines for all import statements.
 
@@ -123,8 +111,6 @@ class BenchmarkAnalyzer:
                 end = node.end_lineno or node.lineno
                 import_lines.append("\n".join(self.lines[start:end]))
         return import_lines
-
-    # -- decorated functions -----------------------------------------------
 
     def get_decorated_functions(self) -> dict[str, FuncInfo]:
         """Find all functions decorated with @perftest or @benchmark.
@@ -143,7 +129,6 @@ class BenchmarkAnalyzer:
                 if dec_name in self.PERF_DECORATORS:
                     params = [a.arg for a in node.args.args]
                     start = node.lineno - 1
-                    # include decorator line(s)
                     dec_start = node.decorator_list[0].lineno - 1
                     end = node.end_lineno or (start + 1)
                     src = "\n".join(self.lines[dec_start:end])
@@ -179,25 +164,10 @@ class BenchmarkAnalyzer:
             return dec.attr
         return ""
 
-    # -- classify reference vs kernel --------------------------------------
-
     def classify_functions(
         self, decorated: dict[str, FuncInfo]
     ) -> tuple[FuncInfo | None, FuncInfo | None]:
-        """Classify decorated functions into (reference, kernel).
-
-        Uses name-based heuristics + body content analysis, with a
-        fallback that guesses based on ``torch.nn.functional`` usage when
-        no clear classification emerges.
-
-        Args:
-            decorated (dict[str, FuncInfo]): Decorated functions from
-                :meth:`get_decorated_functions`.
-
-        Returns:
-            tuple[FuncInfo | None, FuncInfo | None]: ``(ref_func,
-                kernel_func)``; either element may be ``None``.
-        """
+        """Classify decorated functions into (reference, kernel); either can be None."""
         ref_candidates: list[FuncInfo] = []
         kernel_candidates: list[FuncInfo] = []
 
@@ -207,11 +177,9 @@ class BenchmarkAnalyzer:
             name_lower = fi.name.lower()
             body_lower = fi.source.lower()
 
-            # Name-based classification
             is_ref = any(h in name_lower for h in self.REF_HINTS)
             is_kernel = any(h in name_lower for h in self.KERNEL_HINTS)
 
-            # Body-based classification: torch.nn.functional / F.xxx = reference
             has_torch_functional = (
                 "torch.nn.functional" in fi.source
                 or "F.rms_norm" in fi.source
@@ -221,7 +189,6 @@ class BenchmarkAnalyzer:
                 or "F.scaled_dot_product_attention" in fi.source
             )
 
-            # Body-based: calls from source module = kernel
             has_source_module_call = False
             if self.source_module:
                 top_pkg = self.source_module.split(".")[0]
@@ -231,16 +198,13 @@ class BenchmarkAnalyzer:
                 ref_candidates.append(fi)
             elif is_kernel or has_source_module_call:
                 kernel_candidates.append(fi)
-            elif has_torch_functional:
-                ref_candidates.append(fi)
             else:
                 kernel_candidates.append(fi)
 
         ref = ref_candidates[0] if ref_candidates else None
         kernel = kernel_candidates[0] if kernel_candidates else None
 
-        # If we only found one function and couldn't classify, guess:
-        # the one that does NOT use torch.nn.functional is the kernel
+        # Fallback when classification found nothing.
         if ref is None and kernel is None and len(decorated) >= 1:
             perftest_funcs = [
                 fi for fi in decorated.values() if fi.decorator == "perftest"
@@ -253,28 +217,13 @@ class BenchmarkAnalyzer:
 
         return ref, kernel
 
-    # -- test/orchestrator function ----------------------------------------
-
     def get_test_function(self, decorated: dict[str, FuncInfo]) -> FuncInfo | None:
-        """Find the main test/benchmark orchestrator function.
-
-        This is typically a @benchmark-decorated function, or a function
-        named test_*/bench_* that calls the @perftest functions.
-
-        Args:
-            decorated (dict[str, FuncInfo]): Decorated functions from
-                :meth:`get_decorated_functions`.
-
-        Returns:
-            FuncInfo | None: The orchestrator's :class:`FuncInfo`, or
-                ``None`` if none is found.
-        """
-        # First: look for @benchmark decorated function
+        """Find the main test/benchmark orchestrator function."""
+        # Prefer a @benchmark-decorated function; else a top-level test_*/bench_* caller.
         for fi in decorated.values():
             if fi.decorator == "benchmark":
                 return fi
 
-        # Second: look for top-level functions calling decorated functions
         dec_names = set(decorated.keys())
         for node in ast.walk(self.tree):
             if not isinstance(node, ast.FunctionDef):
@@ -297,8 +246,6 @@ class BenchmarkAnalyzer:
                         lineno=node.lineno,
                     )
         return None
-
-    # -- tensor creation extraction ----------------------------------------
 
     def extract_tensor_creation(self, func: FuncInfo) -> list[TensorInfo]:
         """Extract torch.randn/empty/zeros/ones calls from a function.
@@ -331,7 +278,6 @@ class BenchmarkAnalyzer:
                 "torch.randn_like",
             ):
                 continue
-            # Get the target variable name
             target = node.targets[0]
             if isinstance(target, ast.Name):
                 var_name = target.id
@@ -356,8 +302,6 @@ class BenchmarkAnalyzer:
                 dtype_expr=dtype_expr,
             ))
         return results
-
-    # -- call extraction ---------------------------------------------------
 
     def extract_call_to(self, func: FuncInfo, callee_name: str) -> CallInfo | None:
         """Find a call to callee_name within func's body and extract its args.
@@ -410,8 +354,6 @@ class BenchmarkAnalyzer:
             return ".".join(reversed(parts))
         return ""
 
-    # -- top-level code extraction -----------------------------------------
-
     def get_toplevel_statements(self) -> list[str]:
         """Get top-level assignment statements (e.g. torch.set_default_device).
 
@@ -428,31 +370,15 @@ class BenchmarkAnalyzer:
         return results
 
 
-# ---------------------------------------------------------------------------
 # Config builder — from TraceLens input_shapes
-# ---------------------------------------------------------------------------
 
 def _build_configs(candidate: dict) -> tuple[str, str, str]:
-    """Build ALL_CONFIGS, cfg unpack, and config_str from candidate shapes.
-
-    Parses the candidate's ``input_shapes``, deduplicates by
-    (dims, dtype), synthesises scaled variants up to ~8 configs, and
-    emits the code fragments the harness template needs. Falls back to
-    :func:`_default_configs` when no usable shapes are present.
-
-    Args:
-        candidate (dict): A hot-kernel candidate, expected to carry an
-            ``input_shapes`` list of ``{"call_num", "shape"}`` entries.
-
-    Returns:
-        tuple[str, str, str]: ``(all_configs_code, cfg_unpack_code,
-            config_str_code)`` source fragments.
-    """
+    """Build (ALL_CONFIGS, cfg unpack, config_str) code from candidate shapes."""
     input_shapes = candidate.get("input_shapes") or []
     if not input_shapes:
         return _default_configs()
 
-    # Parse shapes: each is {"call_num": N, "shape": "(M, N) dtype"}
+    # Each shape is {"call_num": N, "shape": "(M, N) dtype"}.
     parsed: list[tuple[tuple[int, ...], str, int]] = []
     for entry in input_shapes:
         shape_str = entry.get("shape", "")
@@ -464,19 +390,17 @@ def _build_configs(candidate: dict) -> tuple[str, str, str]:
     if not parsed:
         return _default_configs()
 
-    # Sort by call_num descending (most frequent first)
+    # Most frequent first.
     parsed.sort(key=lambda x: -x[2])
 
-    # Use the highest-dimensional shape to determine config structure.
-    # Filter to only keep shapes with that dimensionality so all configs
-    # have the same tuple length.
+    # Keep only the highest-dimensional shapes so all configs share tuple length.
     max_ndim = max(len(p[0]) for p in parsed)
     parsed = [p for p in parsed if len(p[0]) == max_ndim]
 
     if not parsed:
         return _default_configs()
 
-    # Group by unique (dims, dtype)
+    # Group by unique (dims, dtype).
     seen: set[tuple] = set()
     unique_configs: list[tuple[tuple[int, ...], str]] = []
     for dims, dtype, _ in parsed:
@@ -485,7 +409,7 @@ def _build_configs(candidate: dict) -> tuple[str, str, str]:
             seen.add(key)
             unique_configs.append((dims, dtype))
 
-    # Scale variants to reach >= 6 configs
+    # Scale variants to reach >= 6 configs.
     base_configs = list(unique_configs)
     for dims, dtype in base_configs:
         if len(unique_configs) >= 8:
@@ -499,7 +423,6 @@ def _build_configs(candidate: dict) -> tuple[str, str, str]:
             if len(unique_configs) >= 8:
                 break
 
-    # Generate code
     dim_names = _dim_names(max_ndim)
     dtype_map = {"bf16": "torch.bfloat16", "fp16": "torch.float16",
                  "fp32": "torch.float32", "bfloat16": "torch.bfloat16",
@@ -575,9 +498,7 @@ def _dim_names(ndim: int) -> list[str]:
     return names[:ndim] if ndim <= len(names) else [f"D{i}" for i in range(ndim)]
 
 
-# ---------------------------------------------------------------------------
 # Adapter function generator
-# ---------------------------------------------------------------------------
 
 def _generate_setup_inputs(
     analyzer: BenchmarkAnalyzer,
@@ -586,24 +507,7 @@ def _generate_setup_inputs(
     ref_func: FuncInfo | None,
     kernel_func: FuncInfo | None,
 ) -> str:
-    """Generate the setup_inputs(cfg) function body.
-
-    Strategy: find how the test function calls the kernel, and only create
-    inputs for the arguments actually passed. This avoids creating tensors
-    for optional params with defaults (like q_dtype=None, quant_type=...).
-
-    Args:
-        analyzer (BenchmarkAnalyzer): Analyzer over the benchmark source.
-        test_func (FuncInfo | None): The orchestrator function, used to
-            inspect how the kernel is called.
-        cfg_unpack (str): The ``cfg`` unpack statement (e.g.
-            ``M, N, dtype = cfg``).
-        ref_func (FuncInfo | None): The reference function, if any.
-        kernel_func (FuncInfo | None): The kernel function, if any.
-
-    Returns:
-        str: The indented body source for the generated ``setup_inputs``.
-    """
+    """Generate the setup_inputs(cfg) body, creating inputs only for args the test actually passes."""
     dim_vars = cfg_unpack.replace(" = cfg", "").split(", ")
     dim_vars = [v.strip() for v in dim_vars if v.strip() != "dtype"]
 
@@ -617,19 +521,15 @@ def _generate_setup_inputs(
         lines.append('    return {"x": x}')
         return "\n".join(lines)
 
-    # Find the actual call in the test function to know which args are passed
     call = None
     if test_func:
         call = analyzer.extract_call_to(test_func, target_func.name)
 
     params = [p for p in target_func.params if p != "self"]
 
-    # Determine which params are actually used (have corresponding call args)
     if call:
-        # Only create inputs for params that correspond to actual call args
         used_params = _match_call_args_to_params(call, params)
     else:
-        # No call info — use all params (excluding ones with obvious defaults)
         used_params = [(p, None) for p in params]
 
     shape_2d = ", ".join(dim_vars[:2]) if len(dim_vars) >= 2 else dim_vars[0]
@@ -639,13 +539,12 @@ def _generate_setup_inputs(
     for param_name, call_value in used_params:
         p_lower = param_name.lower()
 
-        # If the call passes a literal (like 1e-5), store it directly
+        # A literal call arg is stored directly.
         if call_value and not _is_variable(call_value):
             lines.append(f"    {param_name} = {call_value}")
             inputs_items.append(f'"{param_name}": {param_name}')
             continue
 
-        # Classify the param by name
         if _is_scalar_param(p_lower):
             val = "1e-06" if "eps" in p_lower else "0"
             lines.append(f"    {param_name} = {val}")
@@ -668,30 +567,15 @@ def _generate_setup_inputs(
 def _match_call_args_to_params(
     call: CallInfo, params: list[str]
 ) -> list[tuple[str, str | None]]:
-    """Match call arguments to function parameters.
-
-    Conservative: includes all positional args plus only those kwargs
-    that are likely tensor-valued (skipping dtype/quant/mode/flag-style
-    keyword hints and explicit ``None`` values).
-
-    Args:
-        call (CallInfo): The captured call site.
-        params (list[str]): The target function's parameter names.
-
-    Returns:
-        list[tuple[str, str | None]]: ``(param_name, call_value)`` pairs
-            for each matched parameter; ``call_value`` is the unparsed
-            argument expression.
-    """
+    """Match call args to params, returning [(param, call_value_or_None), ...] (positional + tensor kwargs)."""
     result: list[tuple[str, str | None]] = []
 
-    # Match positional args (these are always required)
+    # Positional args are always required.
     for i, arg_val in enumerate(call.args):
         if i < len(params):
             result.append((params[i], arg_val))
 
-    # Only include kwargs that are likely tensor arguments.
-    # Skip kwargs for: dtypes, quant settings, modes, flags, etc.
+    # Skip kwargs for dtypes, quant settings, modes, flags, etc.
     SKIP_KWARG_HINTS = {
         "dtype", "q_dtype", "quant_dtype", "quant_type", "type",
         "mode", "model_sensitive", "use_model_sensitive", "group_size",
@@ -791,24 +675,7 @@ def _generate_run_func_body(
     test_func: FuncInfo | None,
     target_func: FuncInfo,
 ) -> str:
-    """Generate a function body that calls target_func with inputs dict values.
-
-    Only passes arguments that exist in the inputs dict. Other params
-    will use their default values. The result is unwrapped from any
-    nested ``(result, time)`` tuples produced by ``@perftest``.
-
-    Args:
-        analyzer (BenchmarkAnalyzer): Analyzer over the benchmark source.
-        test_func (FuncInfo | None): The orchestrator function, used to
-            mirror the original call's argument selection.
-        target_func (FuncInfo): The function to call (kernel or
-            reference).
-
-    Returns:
-        str: The indented body source that calls ``target_func`` and
-            returns its unwrapped result.
-    """
-    # Find the actual call in the test function
+    """Generate a body that calls target_func with inputs dict values; missing params use defaults."""
     call = None
     if test_func:
         call = analyzer.extract_call_to(test_func, target_func.name)
@@ -816,7 +683,6 @@ def _generate_run_func_body(
     params = [p for p in target_func.params if p != "self"]
 
     if call:
-        # Build call using the same args as the test function
         used = _match_call_args_to_params(call, params)
         args_parts: list[str] = []
         for param_name, call_value in used:
@@ -829,8 +695,7 @@ def _generate_run_func_body(
 
     call_str = f"    result = {target_func.name}({', '.join(args_parts)})"
     lines = [call_str]
-    # Unwrap nested tuples: @perftest returns (func_result, avg_time),
-    # and func_result itself may be a tuple (output, residual, ...).
+    # Unwrap nested @perftest tuples down to the func result.
     lines.append("    while isinstance(result, tuple) and len(result) >= 2:")
     lines.append("        result = result[0]")
     lines.append("    return result")
@@ -852,9 +717,7 @@ def _is_variable(s: str) -> bool:
     )
 
 
-# ---------------------------------------------------------------------------
 # HARNESS_TEMPLATE — GEAK FIXED boilerplate
-# ---------------------------------------------------------------------------
 
 HARNESS_TEMPLATE = '''\
 #!/usr/bin/env python3
@@ -1053,9 +916,7 @@ if __name__ == "__main__":
 '''
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def maybe_generate_harness(
     benchmark_file: str,
@@ -1111,7 +972,7 @@ def maybe_generate_harness(
         _log(f"benchmark file not found: {benchmark_file}")
         return None
 
-    # L1: Check if already a valid harness
+    # L1: skip generation if the benchmark is already a valid harness.
     try:
         validator_path = _Path(__file__).parent.parent / "skills" / "unittest" / "validate_harness.py"
         if validator_path.is_file():
@@ -1126,12 +987,10 @@ def maybe_generate_harness(
 
     source = benchmark_path.read_text()
 
-    # Determine source module from source_file path
+    # Derive the source module by finding the top-level package on the path.
     source_module = ""
     if source_file:
         sf = _Path(source_file)
-        # Try to derive module path: e.g. /sgl-workspace/aiter/aiter/ops/rmsnorm.py
-        # → look for a top-level package
         parts = sf.parts
         for i, p in enumerate(parts):
             if (
@@ -1140,7 +999,6 @@ def maybe_generate_harness(
                 and not p.startswith(".")
                 and _Path(*parts[: i + 1]).is_dir()
             ):
-                # Check if this looks like a package (has __init__.py)
                 pkg_dir = _Path(*parts[:i]) / p
                 if (pkg_dir / "__init__.py").exists():
                     module_parts = list(parts[i:])
@@ -1157,7 +1015,6 @@ def maybe_generate_harness(
         _log(f"AST parse failed: {exc}")
         return None
 
-    # Extract components
     imports = analyzer.get_imports()
     decorated = analyzer.get_decorated_functions()
     toplevel = analyzer.get_toplevel_statements()
@@ -1177,10 +1034,8 @@ def maybe_generate_harness(
         _log("could not identify kernel or reference function")
         return None
 
-    # Build configs from TraceLens data
     all_configs, cfg_unpack, config_str_code = _build_configs(candidate)
 
-    # Generate adapter function bodies
     setup_body = _generate_setup_inputs(
         analyzer, test_func, cfg_unpack, ref_func, kernel_func,
     )
@@ -1191,31 +1046,24 @@ def maybe_generate_harness(
         analyzer, test_func, ref_func, kernel_func,
     )
 
-    # Collect function definitions to copy (excluding test orchestrator to avoid
-    # its argparse conflicting with the harness argparse)
+    # Copy decorated defs, excluding the test orchestrator (its argparse would conflict).
     func_defs_to_copy: list[str] = []
     for fi in decorated.values():
         if fi.decorator != "benchmark":
             func_defs_to_copy.append(fi.source)
 
-    # Determine repo root
     repo_root = kernel_repo or ""
     if not repo_root and source_file:
-        # Guess repo root from source file
         sf = _Path(source_file)
         for parent in sf.parents:
             if (parent / ".git").exists() or (parent / "setup.py").exists() or (parent / "pyproject.toml").exists():
                 repo_root = str(parent)
                 break
 
-    # Filter imports: remove lines that import argparse (we provide our own)
-    # or that reference the test_common decorators (we don't need them)
     filtered_imports: list[str] = []
     for imp in imports:
-        # Keep all imports — the decorator functions might be needed at runtime
         filtered_imports.append(imp)
 
-    # Render the harness
     harness_code = HARNESS_TEMPLATE.format(
         repo_root=repo_root,
         imports_section="\n".join(filtered_imports),
@@ -1229,7 +1077,6 @@ def maybe_generate_harness(
         config_str_code=config_str_code,
     )
 
-    # Write the harness
     harness_dir = out_dir / "unittest"
     harness_dir.mkdir(parents=True, exist_ok=True)
     harness_path = harness_dir / f"harness_{benchmark_path.stem}.py"
@@ -1242,17 +1089,13 @@ def maybe_generate_harness(
         ok, errs = static_check(str(harness_path))
         if not ok:
             _log(f"generated harness failed static_check: {errs}")
-            # L4: Don't delete — keep for debugging, but return None
+            # Keep the file for debugging.
             return None
         _log("generated harness passed static_check")
     except Exception as exc:
         _log(f"static_check validation failed: {exc}")
-        # Can't validate, but the harness was generated — try it anyway
-        pass
+        # Can't validate, but the harness was generated — try it anyway.
 
-    # Append --correctness so GEAK's SaveAndTest patch validator (which runs
-    # the test_command verbatim, without appending a mode flag) can execute
-    # the harness. GEAK's preprocessor still re-invokes with all 4 modes
-    # explicitly when collecting baselines.
+    # Append --correctness so GEAK's SaveAndTest validator (runs test_command verbatim) can execute it.
     test_command = f"python {harness_path} --correctness"
     return SimpleNamespace(harness_path=str(harness_path), test_command=test_command)
