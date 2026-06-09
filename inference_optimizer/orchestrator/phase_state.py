@@ -244,6 +244,13 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "model_context_window_too_small",
     # Model-arch preflight: multimodal/vision model unsupported.
     "unsupported_model_arch",
+    # Pre-run model-config compatibility preflight
+    # (``cli._preflight_model_config_compat``): config.json is present but
+    # corrupt/non-dict, or declares RoPE scaling without any max-position
+    # field — both make vLLM/transformers crash at config load (e.g.
+    # "'PreTrainedConfig' object has no attribute 'max_position_embeddings'").
+    # Fail fast instead of booting a server that dies in engine init.
+    "model_config_incompatible",
 })
 
 
