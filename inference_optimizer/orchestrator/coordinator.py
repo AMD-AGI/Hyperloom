@@ -7597,7 +7597,36 @@ class Coordinator:
         if task_kind == "baseline":
             tput = result.get("output_throughput")
             if isinstance(tput, (int, float)) and tput > 0:
-                self.shared_state.baseline_tput = float(tput)
+                # Fair-comparison anchor (measurement-parity fix).
+                # The baseline cold-start guard runs a warmup round on a
+                # fresh server (discarded for *reporting*) then a measure
+                # round that REUSES the now-hot server — the measure
+                # number (``output_throughput``) is systematically ~10-15%
+                # higher than a single fresh-server round, because an
+                # 8-request client warmup does not fully warm vLLM/SGLang
+                # (graph capture, scheduler, allocator) the way a full
+                # prior benchmark does. Every ``explore`` / ``sweep``
+                # variant, by contrast, RESTARTS the server and runs a
+                # single round, so judging them against the hot measure
+                # number penalizes each variant by that same ~10-15% and
+                # genuinely-good params can never clear the KEEP threshold.
+                # Use the warmup round's single-fresh-server tput as the
+                # comparison ANCHOR (apples-to-apples with variants) when
+                # the double-run captured it; keep the hot number for
+                # ``current_best`` / reporting below.
+                warmup_anchor = result.get("warmup_round_tput")
+                if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
+                    self.shared_state.baseline_tput = float(warmup_anchor)
+                    self.shared_state.baseline_hot_tput = float(tput)
+                    log.info(
+                        "baseline anchor: using single-round warmup tput "
+                        "%.1f as comparison anchor (hot measure %.1f kept "
+                        "for reporting) — measurement parity with explore/"
+                        "sweep variants",
+                        float(warmup_anchor), float(tput),
+                    )
+                else:
+                    self.shared_state.baseline_tput = float(tput)
                 self.shared_state.baseline_failure_streak = 0
                 changed = True
             acc = result.get("accuracy")
@@ -7625,9 +7654,26 @@ class Coordinator:
             if isinstance(runtime_sec_raw, (int, float)) and runtime_sec_raw > 0:
                 self.shared_state.baseline_runtime_sec = float(runtime_sec_raw)
                 changed = True
+            # current_best.tput is the comparison ANCHOR every explore /
+            # sweep variant is judged against (the Coordinator injects it
+            # as ``params['base_tput']`` in _handle_delegate /
+            # _materialize_approved_proposal). It MUST be the fair
+            # single-fresh-server anchor (``baseline_tput``, which the
+            # block above set to the warmup-round number under the
+            # double-run), NOT the hot measure round — otherwise every
+            # cold-restarted variant is judged against an unbeatable hot
+            # baseline and can never KEEP. Keep the hot number under a
+            # separate ``hot_tput`` field for reporting.
+            anchor_tput = float(self.shared_state.baseline_tput or 0.0)
             self.shared_state.current_best = {
                 "action": "baseline",
-                "tput": float(tput) if isinstance(tput, (int, float)) else None,
+                "tput": (
+                    anchor_tput if anchor_tput > 0
+                    else (float(tput) if isinstance(tput, (int, float)) else None)
+                ),
+                "hot_tput": (
+                    float(tput) if isinstance(tput, (int, float)) else None
+                ),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),

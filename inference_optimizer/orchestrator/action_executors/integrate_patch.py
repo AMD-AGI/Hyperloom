@@ -64,6 +64,7 @@ from typing import Any
 
 from ...session_paths import runs_dir
 from ..framework_paths import resolve_source_file_allowlist
+from ..specialist_patch_safety import patch_targets_missing
 from ._accuracy_gate import accuracy_passed, parse_eval_results
 from ._grid_runner import (
     GridVariant,
@@ -114,13 +115,21 @@ def _resolve_framework_root(explicit: str | None) -> Path | None:
     return None
 
 
-def _git_apply(
-    framework_root: Path, patch_path: Path, *, three_way: bool = False,
-    check_only: bool = False,
+# Candidate ``-p`` strip levels, tried in priority order. ``-p1`` is the
+# git-native default and stays first for backward-compat; specialists author
+# patches with heterogeneous path prefixes (``a/vllm/...`` -> -p1,
+# ``b/_aiter_ops.py`` -> -p0/-p2, full absolute
+# ``b/usr/local/lib/python3.12/dist-packages/vllm/...`` -> -p7), so we must
+# auto-detect rather than assume a single level.
+_P_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
+
+
+def _run_git_apply(
+    framework_root: Path, patch_path: Path, *, p_level: int,
+    three_way: bool, check_only: bool,
 ) -> tuple[bool, str]:
-    """Run ``git apply [-3] -p1 [--check] <patch>`` inside
-    ``framework_root``. Returns ``(ok, stderr)``."""
-    cmd = ["git", "-C", str(framework_root), "apply", "-p1"]
+    """Single ``git apply`` invocation at an explicit strip level."""
+    cmd = ["git", "-C", str(framework_root), "apply", f"-p{p_level}"]
     if three_way:
         cmd.append("-3")
     if check_only:
@@ -135,21 +144,102 @@ def _git_apply(
     return cp.returncode == 0, cp.stderr.strip()
 
 
+def _preflight_missing_targets(
+    framework_root: Path, patch_paths: list[Path],
+) -> list[dict[str, Any]]:
+    """Return per-patch records for patches whose modify/delete targets are
+    absent from ``framework_root`` at every ``-p`` strip level.
+
+    A hallucinated-layout patch (e.g. modifying a CUDA-only file on a ROCm
+    build) can never apply; flagging it here yields an actionable advisory
+    instead of an opaque ``git_apply_failed`` after a wasted apply attempt.
+    Defense-in-depth: ``specialist_patch_safety`` already drops these at
+    authoring time, but patches supplied directly via ``params.patches``
+    bypass that gate.
+    """
+    records: list[dict[str, Any]] = []
+    for patch in patch_paths:
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        missing = patch_targets_missing(text, framework_root)
+        if missing:
+            records.append({"patch": str(patch), "missing_targets": missing})
+    return records
+
+
+def _detect_p_level(
+    framework_root: Path, patch_path: Path, *, three_way: bool,
+) -> int | None:
+    """Return the first ``-p`` level whose ``--check`` applies cleanly."""
+    for lvl in _P_LEVELS:
+        ok, _ = _run_git_apply(
+            framework_root, patch_path, p_level=lvl,
+            three_way=three_way, check_only=True,
+        )
+        if ok:
+            return lvl
+    return None
+
+
+def _git_apply(
+    framework_root: Path, patch_path: Path, *, three_way: bool = False,
+    check_only: bool = False,
+) -> tuple[bool, str]:
+    """Run ``git apply [-3] -p<auto> [--check] <patch>`` inside
+    ``framework_root``, auto-detecting the strip level. Returns
+    ``(ok, stderr)``."""
+    lvl = _detect_p_level(framework_root, patch_path, three_way=three_way)
+    if lvl is None:
+        # Surface a representative error at the git-native default level.
+        return _run_git_apply(
+            framework_root, patch_path, p_level=1,
+            three_way=three_way, check_only=check_only,
+        )
+    if check_only:
+        return True, ""
+    return _run_git_apply(
+        framework_root, patch_path, p_level=lvl,
+        three_way=three_way, check_only=False,
+    )
+
+
 def _git_apply_reverse(
     framework_root: Path, patch_path: Path,
 ) -> tuple[bool, str]:
-    """Reverse-apply ``patch_path`` (``git apply -R -p1``) as the REVERT
-    path; caller falls back to ``git checkout`` on failure."""
-    cmd = ["git", "-C", str(framework_root), "apply", "-R", "-p1", str(patch_path)]
-    try:
-        cp = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120.0, check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"git apply -R spawn failed: {exc!r}"
-    if cp.returncode == 0:
-        return True, ""
-    return False, cp.stderr.strip()
+    """Reverse-apply ``patch_path`` (``git apply -R -p<auto>``) as the REVERT
+    path; caller falls back to ``git checkout`` on failure. Auto-detects the
+    same strip level the forward apply used via ``-R --check``."""
+    for lvl in _P_LEVELS:
+        check = [
+            "git", "-C", str(framework_root), "apply", "-R", f"-p{lvl}",
+            "--check", str(patch_path),
+        ]
+        try:
+            cp = subprocess.run(
+                check, capture_output=True, text=True, timeout=120.0,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return False, f"git apply -R spawn failed: {exc!r}"
+        if cp.returncode != 0:
+            continue
+        real = [
+            "git", "-C", str(framework_root), "apply", "-R", f"-p{lvl}",
+            str(patch_path),
+        ]
+        try:
+            cp2 = subprocess.run(
+                real, capture_output=True, text=True, timeout=120.0,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return False, f"git apply -R spawn failed: {exc!r}"
+        if cp2.returncode == 0:
+            return True, ""
+        return False, cp2.stderr.strip()
+    return False, f"git apply -R: no matching -p level for {patch_path}"
 
 
 def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
@@ -331,6 +421,33 @@ class IntegratePatchExecutor:
                 "patches_reverted": [],
                 "config_changes_applied": {},
             }
+
+        # Preflight: reject patches whose modify/delete targets do not exist in
+        # the framework tree before spending a benchmark on a doomed apply.
+        if patch_paths and framework_root is not None:
+            missing_records = _preflight_missing_targets(framework_root, patch_paths)
+            if missing_records:
+                await self._maybe_write_framework_pr_kb_record(
+                    done_payload=done_payload,
+                    outcome="rejected_apply_fail",
+                    tps_delta_pct=0.0,
+                    extra=extra,
+                )
+                return {
+                    "status": "apply_failed",
+                    "error_class": "patch_target_missing",
+                    "error": missing_records,
+                    "advisory": (
+                        "patch target file(s) absent from framework_source_root "
+                        f"{framework_root}; author patches only against files that "
+                        "exist in the installed framework tree (inspect it with "
+                        "Glob/Grep before writing the diff)."
+                    ),
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [],
+                    "config_changes_applied": {},
+                }
 
         # Per-action workspace under runs/integrate_patch/<task_id>/.
         output_root = Path(
@@ -742,9 +859,11 @@ __all__ = [
     "DEFAULT_KEEP_THRESHOLD_PCT",
     "DEFAULT_VARIANT_TIMEOUT_SEC",
     "IntegratePatchExecutor",
+    "_detect_p_level",
     "_git_apply",
     "_git_apply_reverse",
     "_git_checkout_clean",
+    "_run_git_apply",
     "_resolve_framework_root",
     "_resolve_patch_paths",
     "_read_done_payload",

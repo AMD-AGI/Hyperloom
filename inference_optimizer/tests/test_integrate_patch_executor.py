@@ -58,7 +58,25 @@ index 0000000..1111111 100644
 """
 
 
+# Targets an *existing* file (src.py) but with context lines that do not match
+# the tree — exercises the genuine ``git_apply_failed`` path (file exists, hunk
+# is stale), distinct from the ``patch_target_missing`` preflight below.
 _BAD_PATCH = """\
+diff --git a/src.py b/src.py
+index 0000000..1111111 100644
+--- a/src.py
++++ b/src.py
+@@ -1,2 +1,2 @@
+ def f():
+-    return 999
++    return 2
+"""
+
+
+# Targets a file that does not exist in the framework tree at all — a
+# hallucinated layout (e.g. a CUDA-only file on a ROCm build). Must be caught
+# by the missing-target preflight, not a wasted ``git apply``.
+_MISSING_TARGET_PATCH = """\
 diff --git a/nonexistent.py b/nonexistent.py
 index 0000000..1111111 100644
 --- a/nonexistent.py
@@ -199,6 +217,40 @@ def test_git_apply_reverse_rolls_back(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
+# Specialists author patches whose ``+++ b/<path>`` prefix is *not* a simple
+# ``-p1`` strip (they read framework files at deep absolute paths, e.g.
+# ``b/usr/local/lib/python3.12/dist-packages/vllm/src.py``). The executor must
+# auto-detect the strip level instead of hardcoding ``-p1``; otherwise every
+# such Critic-approved patch fails to apply (regression seen in production).
+def _deep_prefix_patch(depth: int) -> str:
+    prefix = "/".join(f"d{i}" for i in range(depth))
+    return (
+        f"diff --git a/{prefix}/src.py b/{prefix}/src.py\n"
+        "index 0000000..1111111 100644\n"
+        f"--- a/{prefix}/src.py\n"
+        f"+++ b/{prefix}/src.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def f():\n"
+        "-    return 1\n"
+        "+    return 2\n"
+    )
+
+
+def test_git_apply_auto_detects_deep_p_level(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    # ``b/d0/.../d6/src.py`` needs -p7 (1 for ``b/`` + 6 for d0..d5).
+    patch = tmp_path / "deep.patch"
+    patch.write_text(_deep_prefix_patch(6), encoding="utf-8")
+    ok, err = _git_apply(repo, patch)
+    assert ok, f"auto -p detection should apply deep-prefix patch: {err}"
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+    # Reverse must auto-detect the same level and roll back cleanly.
+    ok_r, err_r = _git_apply_reverse(repo, patch)
+    assert ok_r, err_r
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
 # 3. Framework root resolution
 def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path):
     repo = tmp_path / "repo"
@@ -267,6 +319,33 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
 
     assert result["status"] == "apply_failed"
     assert result["error_class"] == "git_apply_failed"
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_missing_target_preflight_short_circuits(tmp_path: Path):
+    """A patch targeting a file absent from the framework tree is rejected by
+    the preflight with ``patch_target_missing`` before any ``git apply`` runs."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    _write_specialist_workspace(
+        session_dir, "t-spec-miss", patch_contents=[_MISSING_TARGET_PATCH],
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx("t-int-miss", {
+        "specialist_task_id": "t-spec-miss",
+        "framework_source_root": str(repo),
+        "apply_only": True,
+    })
+    result = await executor(ctx)
+    assert result["status"] == "apply_failed"
+    assert result["error_class"] == "patch_target_missing"
+    assert result["error"][0]["missing_targets"] == ["a/nonexistent.py"]
+    assert "advisory" in result
+    # Nothing was applied or reverted; the tree is untouched.
+    assert result["patches_applied"] == []
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 

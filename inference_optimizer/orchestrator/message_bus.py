@@ -31,6 +31,14 @@ TOPIC_ALLOWLIST = frozenset({
     "review_verdict", "advice", "strategy_change",
     # Robustness scheduling-police mirror (audit trail).
     "kill",
+    # Dynamic-specialist dispatch audit trail (free-form CPU-only
+    # specialist dispatch via dynamic_dispatch_tools). These are
+    # write-only observation-style records the Coordinator emits so the
+    # dispatch / poll / collect lifecycle is visible in the bus; no
+    # consumer keys off them, but they must be allow-listed or
+    # ``append_and_seq`` rejects them with ``unknown topic``.
+    "dynamic_specialist_dispatched", "dynamic_specialist_status",
+    "dynamic_specialist_results", "dynamic_specialist_error",
 })
 
 

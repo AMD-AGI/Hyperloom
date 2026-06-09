@@ -101,6 +101,25 @@ def _initial_explore_search_state() -> dict[str, Any]:
     }
 
 
+def _coerce_args_str(value: Any) -> str:
+    """Coerce a payload ``extra_args`` / ``extra_server_args`` value into a
+    shell-arg string.
+
+    The Orchestration/specialist LLM sometimes emits the server flags as a
+    JSON list (``["--max-num-batched-tokens", "32768"]``) instead of a single
+    string. A naive ``str(list)`` yields the Python repr
+    (``"['--max-num-batched-tokens', '32768']"``) which Magpie's
+    ``vllm serve ... $EXTRA_VLLM_ARGS`` splices verbatim, so the server rejects
+    it as ``unrecognized arguments`` and every server-arg variant aborts.
+    Lists/tuples are space-joined into individual tokens.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value)
+
+
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects.
 
@@ -125,7 +144,9 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     for raw in payload or []:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
-        args = str(raw.get("extra_args") or raw.get("extra_server_args") or "").strip()
+        args = _coerce_args_str(
+            raw.get("extra_args") or raw.get("extra_server_args") or ""
+        ).strip()
         envs_raw = raw.get("extra_envs") or {}
         envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
         gv = GridVariant(

@@ -239,6 +239,13 @@ class SharedState:
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Hot-server measure-round tput from the baseline cold-start double-run
+    # (kept for reporting only). ``baseline_tput`` is the single-fresh-server
+    # warmup-round number used as the fair comparison ANCHOR for explore /
+    # sweep variants (which each restart the server + run one round). When
+    # the double-run is disabled / ineligible, this stays 0.0 and
+    # ``baseline_tput`` carries the only measured number.
+    baseline_hot_tput: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.

@@ -389,6 +389,10 @@ class SpecialistSubprocessDispatcher:
             "error": "",
         }
         last_heartbeat_seen: float = started
+        # The subprocess streams stream-json (model tokens / tool calls) to
+        # process.log; its mtime is a reliable "still working" signal even
+        # when the agent never self-writes heartbeat.json.
+        process_log = workspace / "process.log"
 
         while True:
             await asyncio.sleep(cfg.poll_interval_seconds)
@@ -412,16 +416,24 @@ class SpecialistSubprocessDispatcher:
                 outcome["elapsed"] = elapsed
                 break
 
-            # Heartbeat staleness check (advisory — only fires after the
-            # agent has at least once written a heartbeat).
-            if heartbeat_file.exists():
+            # Liveness check. The subprocess counts as alive if EITHER the
+            # agent refreshed heartbeat.json OR it is still streaming output
+            # to process.log (model tokens / tool calls). Relying on
+            # heartbeat.json alone reaps productive specialists that stay in
+            # a single long tool-call turn without self-writing a heartbeat
+            # (common under gateway latency) — the original cause of
+            # 100%-stale_heartbeat specialist failures. The hard wall-clock
+            # cap below still bounds genuinely hung / runaway subprocesses.
+            for activity_file in (heartbeat_file, process_log):
                 try:
-                    hb_mtime = heartbeat_file.stat().st_mtime
+                    if not activity_file.exists():
+                        continue
+                    a_mtime = activity_file.stat().st_mtime
                 except OSError:
-                    hb_mtime = 0.0
-                age = max(0.0, time.time() - hb_mtime)
-                if age <= cfg.heartbeat_stale_seconds:
+                    continue
+                if max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
                     last_heartbeat_seen = now
+                    break
 
             if (now - last_heartbeat_seen) > cfg.heartbeat_stale_seconds:
                 outcome["stale_heartbeat"] = True

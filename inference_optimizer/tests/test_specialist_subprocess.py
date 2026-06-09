@@ -9,10 +9,12 @@ PR-A2 tool whitelist change. Uses a hermetic fake ``claude`` shell script.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,7 @@ from inference_optimizer.orchestrator.specialist_runner import (
 )
 from inference_optimizer.orchestrator.specialist_subprocess import (
     SpecialistSubprocessConfig,
+    SpecialistSubprocessDispatcher,
     _pick_worktree_base,
     _setup_worktree,
 )
@@ -457,3 +460,101 @@ async def test_subprocess_path_isolates_writes_to_worktree(
     assert (worktree / "patches" / "001_test.patch").exists()
     assert not (fake_framework_repo / "patches" / "001_test.patch").exists()
     assert not (fake_framework_repo / "dummy.txt").exists()
+
+
+class _FakeProc:
+    """Minimal stand-in for ``subprocess.Popen`` for reaper unit tests."""
+
+    def __init__(self) -> None:
+        self.pid = os.getpid()
+        self.returncode: int | None = None
+        self.alive = True
+
+    def poll(self) -> int | None:
+        if self.alive:
+            return None
+        self.returncode = 0
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_process_log_activity_prevents_stale_kill(
+    tmp_path: Path,
+):
+    """A specialist that streams to process.log but never self-writes
+    heartbeat.json must NOT be reaped as stale (regression: 100% of
+    specialists were killed mid-turn under gateway latency)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    process_log = workspace / "process.log"
+    process_log.write_text("start\n", encoding="utf-8")
+    heartbeat_file = workspace / "heartbeat.json"  # intentionally never written
+
+    cfg = SpecialistSubprocessConfig(
+        heartbeat_stale_seconds=1.0, poll_interval_seconds=0.2,
+    )
+    disp = SpecialistSubprocessDispatcher(config=cfg)
+    proc = _FakeProc()
+
+    async def _keep_streaming() -> None:
+        # Touch process.log well past the 1.0s stale threshold, then let
+        # the process "exit" cleanly so the reaper breaks on poll().
+        for i in range(15):  # ~3s, 3x the stale threshold
+            process_log.write_text(f"line {i}\n", encoding="utf-8")
+            await asyncio.sleep(0.2)
+        proc.alive = False
+
+    writer = asyncio.create_task(_keep_streaming())
+    outcome = await disp._reap_loop(
+        proc=proc,
+        workspace=workspace,
+        done_files=(),
+        heartbeat_file=heartbeat_file,
+        max_seconds=60.0,
+        started=time.monotonic(),
+    )
+    await writer
+
+    assert outcome["stale_heartbeat"] is False, outcome
+    assert outcome["timed_out"] is False, outcome
+    assert outcome["exit_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_kills_when_no_activity_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """With neither heartbeat.json nor process.log activity, the reaper
+    still reaps a silent/hung subprocess as stale."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # No process.log, no heartbeat.json — total silence.
+    heartbeat_file = workspace / "heartbeat.json"
+
+    cfg = SpecialistSubprocessConfig(
+        heartbeat_stale_seconds=0.5, poll_interval_seconds=0.2,
+    )
+    disp = SpecialistSubprocessDispatcher(config=cfg)
+    proc = _FakeProc()  # stays alive; only staleness can stop it
+
+    # Stub _kill so the reaper never signals a real process group.
+    killed = {"v": False}
+
+    def _fake_kill(p: Any) -> None:
+        killed["v"] = True
+        p.alive = False
+
+    monkeypatch.setattr(
+        SpecialistSubprocessDispatcher, "_kill", staticmethod(_fake_kill),
+    )
+
+    outcome = await disp._reap_loop(
+        proc=proc,
+        workspace=workspace,
+        done_files=(),
+        heartbeat_file=heartbeat_file,
+        max_seconds=60.0,
+        started=time.monotonic(),
+    )
+    assert outcome["stale_heartbeat"] is True, outcome
+    assert killed["v"] is True

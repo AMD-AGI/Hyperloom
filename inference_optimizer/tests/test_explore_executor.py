@@ -1322,3 +1322,29 @@ def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
         f"compatibility filter dropped seed variants when help-text "
         f"probe is empty; dropped={dropped}"
     )
+
+
+def test_grid_variants_from_payload_coerces_list_extra_args():
+    """Regression: the LLM may emit ``extra_args`` as a JSON list. It must be
+    space-joined into a shell-arg string, not stringified into a Python repr
+    (which Magpie would splice verbatim into ``vllm serve`` -> the server
+    rejects it as ``unrecognized arguments`` and the variant aborts)."""
+    from inference_optimizer.orchestrator.action_executors.explore import (
+        _grid_variants_from_payload,
+    )
+
+    payload = [
+        {"name": "list_args", "extra_args": ["--max-num-batched-tokens", "32768"]},
+        {"name": "str_args", "extra_args": "--block-size 64"},
+        {"name": "tuple_server_args",
+         "extra_server_args": ("--distributed-executor-backend", "mp")},
+    ]
+    by_name = {v.name: v for v in _grid_variants_from_payload(payload)}
+
+    assert by_name["list_args"].extra_server_args == "--max-num-batched-tokens 32768"
+    assert "[" not in by_name["list_args"].extra_server_args
+    assert by_name["str_args"].extra_server_args == "--block-size 64"
+    assert (
+        by_name["tuple_server_args"].extra_server_args
+        == "--distributed-executor-backend mp"
+    )
