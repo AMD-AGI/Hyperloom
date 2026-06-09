@@ -50,7 +50,6 @@ class Objective(ABC):
         Returns:
             str: Stable kind identifier (e.g. ``"gain_pct"`` or ``"time_only"``).
         """
-        ...
 
     @abstractmethod
     def progress(self, state: "SharedState") -> float:
@@ -84,7 +83,6 @@ class Objective(ABC):
         Returns:
             bool: ``True`` if the objective is satisfied, otherwise ``False``.
         """
-        ...
 
     @abstractmethod
     def pressure_input(self, state: "SharedState") -> float:
