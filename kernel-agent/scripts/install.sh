@@ -680,6 +680,14 @@ PY
 _pip_install_editable() {
   local root="$1"
   local label="$2"
+  # Optional 3rd arg: extra pip flags. Pass "--no-deps" for TraceLens-internal,
+  # whose only declared dep is "TraceLens @ git+https://..." -- which pip would
+  # otherwise FRESH-CLONE from GitHub on every install (--no-cache-dir), a step
+  # observed to hang for >13min on this network and never reach the coordinator.
+  # The public TraceLens is already installed editable from $TRACELENS_ROOT
+  # immediately before the internal install, so its requirement is already
+  # satisfied; --no-deps skips the redundant git clone entirely.
+  local extra="${3:-}"
   if [ ! -d "$root" ]; then
     if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
       warn "${label} checkout not found: ${root}"
@@ -687,10 +695,10 @@ _pip_install_editable() {
     fi
     die "${label} checkout not found: ${root}"
   fi
-  log "ensuring ${label} editable install from ${root}"
+  log "ensuring ${label} editable install from ${root}${extra:+ (${extra})}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
     # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
-    run sh -c "cd '$root' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
+    run sh -c "cd '$root' && python3 -m pip install -q --no-cache-dir --break-system-packages ${extra} -e ."
   fi
   return 0
 }
@@ -785,7 +793,9 @@ ensure_tracelens() {
       rm -f "$TRACELENS_INTERNAL_ROOT/.hl_write_test"
     fi
   fi
-  _pip_install_editable "$TRACELENS_INTERNAL_ROOT" "TraceLens-internal"
+  # --no-deps: the public TraceLens (its sole dependency) was installed editable
+  # from $TRACELENS_ROOT just above, so skip pip's redundant git+https re-clone.
+  _pip_install_editable "$TRACELENS_INTERNAL_ROOT" "TraceLens-internal" "--no-deps"
   export TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
   if [ "$DRY_RUN" -eq 0 ]; then
     # TraceLens #124: only the inference variant is accepted (the correct
