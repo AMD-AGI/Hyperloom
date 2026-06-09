@@ -3712,7 +3712,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "quantization. Ignored if --quantize (free text) is also given.",
     )
     opt.add_argument(
-        "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
+        "--gpu-type", choices=["mi300x", "mi308x", "mi325x", "mi355x"], default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
              "wins when both are present and disagree; a WARN is "
              "emitted to stderr so the operator sees the typo. Used "
