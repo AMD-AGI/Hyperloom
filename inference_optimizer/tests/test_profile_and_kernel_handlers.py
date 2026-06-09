@@ -44,9 +44,7 @@ from inference_optimizer.paths import make_session_dir
 from inference_optimizer.storage import SqliteConnection
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -96,18 +94,12 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
 
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
-    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so
-    Baseline/ProfileExecutor's always-on artifact harvest does not
-    pick up the host's real ``/workspace`` during the stubbed
-    subprocess runs exercised here.
-    """
+    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so the artifact harvest doesn't pick up the host's ``/workspace``."""
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
-# ===========================================================================
 # ProfileExecutor
-# ===========================================================================
 def test_profile_default_config_path_is_in_assets():
     assert "profile_sglang.yaml" in str(PROFILE_DEFAULT_CONFIG)
     assert PROFILE_DEFAULT_CONFIG.exists(), \
@@ -122,20 +114,9 @@ def test_profile_yaml_has_torch_profiler_enabled():
     assert cfg["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
 
 
-# ===========================================================================
-# Regression: model_path injection beats the YAML's hardcoded fallback.
-#
-# Bug: the shipped baseline_sglang.yaml / profile_sglang.yaml pin
-# `benchmark.model: /wekafs/models/Qwen-Qwen3-8B` as a fallback for offline
-# Magpie use. The CLI's --model arg only flowed into SharedState.model_path;
-# if the executor did not propagate it into the materialized YAML, Magpie
-# silently benchmarked Qwen3-8B no matter what the user asked for.
-# _materialize_config_with_envs(model_path=...) is the single seam that
-# prevents this — locking it down here.
-# ===========================================================================
+# Regression: model_path injection beats the YAML's hardcoded fallback (else Magpie silently benchmarks the shipped Qwen3-8B).
 def test_materialize_config_injects_model_path(tmp_path):
-    """Default YAML's hardcoded Qwen3-8B must be overridden when caller
-    passes ``model_path`` — otherwise the silent fallback bug returns."""
+    """Default YAML's hardcoded Qwen3-8B must be overridden when caller passes ``model_path``."""
     import yaml
     out = _materialize_config_with_envs(
         PROFILE_DEFAULT_CONFIG,
@@ -148,8 +129,7 @@ def test_materialize_config_injects_model_path(tmp_path):
 
 
 def test_materialize_config_leaves_model_alone_without_override(tmp_path, monkeypatch):
-    """When no model_path is passed, the materialized YAML still has the
-    original model field from the source YAML (not overwritten)."""
+    """When no model_path is passed, the materialized YAML keeps the source model field."""
     import yaml
     # Clear ISL/OSL/MAX_MODEL_LEN env so they don't inject
     for k in ("ISL", "OSL", "MAX_MODEL_LEN", "PRECISION"):
@@ -161,8 +141,7 @@ def test_materialize_config_leaves_model_alone_without_override(tmp_path, monkey
 
 
 def test_materialize_config_injects_model_with_other_overrides(tmp_path):
-    """Co-existence: model_path + extra_envs should both land in the
-    materialized YAML."""
+    """model_path + extra_envs should both land in the materialized YAML."""
     import yaml
     out = _materialize_config_with_envs(
         PROFILE_DEFAULT_CONFIG,
@@ -176,13 +155,7 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     assert rendered["benchmark"]["envs"]["FOO"] == "bar"
 
 
-# ===========================================================================
-# Regression: gpu_type injection sets runner_type AND force-pins the generic
-# `{framework}_{gpu_type}.sh` so Magpie's resolver hits priority 1 (explicit
-# user override) and never falls through to the InferenceX native script
-# (which hardcodes `--result-dir /workspace/`). See
-# `design/magpie-generic-script-and-user-data-path.md` §3.
-# ===========================================================================
+# Regression: gpu_type injection sets runner_type AND force-pins the generic `{framework}_{gpu_type}.sh` (Magpie priority 1). See `design/magpie-generic-script-and-user-data-path.md` §3.
 def test_materialize_config_injects_runner_type(tmp_path):
     """gpu_type kwarg must land in benchmark.runner_type as-is."""
     import yaml
@@ -197,11 +170,7 @@ def test_materialize_config_injects_runner_type(tmp_path):
 
 
 def test_materialize_config_forces_generic_benchmark_script(tmp_path):
-    """When `gpu_type` is supplied, `benchmark.benchmark_script` MUST be
-    pinned to the generic `{framework}_{gpu_type}.sh` so Magpie's
-    resolver hits priority 1 (explicit override) and never silently
-    falls through to the InferenceX native script (e.g.
-    `dsr1_fp8_mi300x.sh`) which hardcodes `--result-dir /workspace/`."""
+    """`gpu_type` pins `benchmark_script` to the generic `{framework}_{gpu_type}.sh` (Magpie priority 1)."""
     import yaml
     src_yaml = tmp_path / "src.yaml"
     src_yaml.write_text(yaml.safe_dump({
@@ -226,9 +195,7 @@ def test_materialize_config_forces_generic_benchmark_script(tmp_path):
 def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
     tmp_path,
 ):
-    """Even when the source YAML doesn't carry a `benchmark_script`, the
-    renderer MUST still write one explicitly — otherwise Magpie's
-    resolver would fall through to the InferenceX native script."""
+    """Even with no source `benchmark_script`, the renderer must write one explicitly."""
     import yaml
     src_yaml = tmp_path / "src.yaml"
     src_yaml.write_text(yaml.safe_dump({
@@ -248,11 +215,7 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
     assert rendered["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
-# ===========================================================================
-# Regression: TP / CONC env override yaml hardcode (DSR1-0528 verification
-# was deadlooping because TP=8 env was silently ignored, vllm ran with
-# yaml-hardcoded TP=1 and OOM-ed retry forever).
-# ===========================================================================
+# Regression: TP / CONC env override yaml hardcode (DSR1-0528 deadlooped when TP=8 env was silently ignored).
 def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
     """TP env var must override yaml hardcode (was 1, becomes 8)."""
     import yaml
@@ -308,9 +271,7 @@ def test_materialize_config_rocr_visible_devices_explicit_env_wins_when_enough(
 def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
     tmp_path, monkeypatch,
 ):
-    """If explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires,
-    `_workload_envs` auto-expands to 0..TP-1 and logs a warning, so SGLang
-    actually sees enough GPUs to start."""
+    """When explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires, `_workload_envs` auto-expands to 0..TP-1."""
     import yaml
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -347,27 +308,9 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
 
 
-# ===========================================================================
-# Regression #194: steady-state window must follow the TraceLens magpie
-# skill formulas, not the old `delay = 5*CONC; max = clamp(16*OSL/CONC,4,64)`
-# placeholders.
-#
-# Skill:
-#   max_iters   = min(1024, max(256, OSL * 16 / CONC))
-#   delay_iters = OSL * (RANDOM_RANGE_RATIO + 1) * 3 - max_iters / 2
-#
-# Worked example used in the issue: OSL=1024, CONC=32, R=1
-#   max_iters   = min(1024, max(256, 1024*16/32))   = max(256, 512) = 512
-#   delay_iters = 1024 * (1+1) * 3 - 512/2          = 6144 - 256    = 5888
-#
-# Previous Hyperloom code gave (160, 64) for the same inputs — roughly 1/8
-# of the skill window and ignored R entirely, so issue #194 §1 flagged
-# Optimizer-driven profiles as under-representing decode-heavy steady state.
-# ===========================================================================
+# Regression #194: steady-state window must follow the TraceLens magpie skill formulas (max_iters/delay_iters), not the old placeholders.
 def _profile_yaml(tmp_path, framework: str, envs: dict) -> Path:
-    """Synthesize a minimal profile YAML the materializer recognises as
-    PROFILE=1 + torch_profiler.enabled=True.
-    """
+    """Synthesize a minimal profile YAML the materializer recognises as PROFILE=1 + torch_profiler.enabled=True."""
     import yaml as _yaml
     src = tmp_path / f"src_{framework}.yaml"
     src.write_text(_yaml.safe_dump({
@@ -441,12 +384,7 @@ def test_materialize_profile_window_sglang_skill_formula(
 def test_materialize_persists_inferencex_path_for_magpie(
     tmp_path, monkeypatch,
 ):
-    """$INFERENCEX_PATH must be written into benchmark.inferencex_path.
-
-    Otherwise Magpie resolves an empty value to its sibling checkout
-    ($MAGPIE_DIR/InferenceX), while Hyperloom's profile patcher may have
-    patched a different checkout.
-    """
+    """$INFERENCEX_PATH must be written into benchmark.inferencex_path so Magpie uses the patched checkout."""
     import yaml
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/InferenceX")
@@ -459,11 +397,7 @@ def test_materialize_persists_inferencex_path_for_magpie(
 def test_materialize_profile_window_clamps_to_skill_floor(
     tmp_path, monkeypatch,
 ):
-    """Skill: max_iters has a floor of 256 (not 4) and a ceiling of 1024.
-
-    OSL=256, CONC=64 ⇒ 16*OSL/CONC = 64, so the floor must kick in.
-    Old formula clamped to 64; new formula must clamp to 256.
-    """
+    """Skill: max_iters floors at 256 (OSL=256, CONC=64 ⇒ 16*OSL/CONC=64, so the floor kicks in)."""
     import yaml
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 64, "ISL": 256, "OSL": 256})
@@ -473,20 +407,7 @@ def test_materialize_profile_window_clamps_to_skill_floor(
     assert "--profiler-config.max_iterations 256" in extra, extra
 
 
-# ===========================================================================
-# Regression #194 §2: NUM_PROMPTS must be sized to cover the steady-state
-# window. With the skill formulas, delay_iters reaches into the thousands
-# for non-trivial OSL — an under-sized NUM_PROMPTS makes the engine exit
-# before the profile window opens, yielding empty traces.
-#
-# The formula (from `_workload_envs`):
-#   required_iters    = delay_iters + max_iters
-#   iters_to_prompts  = ceil(required_iters * CONC / OSL)   # batch math
-#   NUM_PROMPTS       = max(CONC, iters_to_prompts * 2)     # 2x buffer
-#
-# Profile mode FORCE-overrides any caller-supplied NUM_PROMPTS — we own
-# the floor and an under-sized value silently kills the trace.
-# ===========================================================================
+# Regression #194 §2: NUM_PROMPTS must be sized to cover the steady-state window (profile mode force-overrides any caller-supplied value).
 def test_materialize_profile_num_prompts_covers_steady_state_window(
     tmp_path, monkeypatch,
 ):
@@ -503,8 +424,7 @@ def test_materialize_profile_num_prompts_covers_steady_state_window(
 def test_materialize_profile_num_prompts_floors_at_conc_for_tiny_osl(
     tmp_path, monkeypatch,
 ):
-    """Tiny OSL with skill floor max_iters=256 still produces a sane
-    NUM_PROMPTS (covers the floor's delay+max window)."""
+    """Tiny OSL with skill floor max_iters=256 still produces a sane NUM_PROMPTS."""
     import yaml
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 64, "OSL": 64})
@@ -536,10 +456,7 @@ def test_materialize_profile_force_overrides_user_num_prompts(
 def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
     tmp_path, monkeypatch,
 ):
-    """The §2 override is profile-only. Baseline / sweep paths must
-    still get the existing seq_cost-based NUM_PROMPTS (or honour a
-    caller-supplied value), so the §2 fix can't accidentally explode
-    baseline run lengths."""
+    """The §2 override is profile-only; baseline / sweep paths keep the seq_cost-based NUM_PROMPTS."""
     import yaml
     _clear_workload_env(monkeypatch)
     src = tmp_path / "baseline.yaml"
@@ -557,29 +474,9 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
     assert envs["NUM_PROMPTS"] == 160, envs.get("NUM_PROMPTS")
 
 
-# ===========================================================================
-# Regression #194 §4 / §5: when the runtime patcher (server_patcher)
-# successfully applies TraceLens's patches to the in-container vLLM /
-# SGLang install, materialize must auto-append the flags that only
-# exist in the patched build:
-#
-#   * vLLM:   --profiler-config.capture_torch_profiler_dir <dir>
-#   * vLLM:   --profiler-config.detailed_trace_annotation True
-#   * SGLang: --enable-shape-discovery-for-cuda-graph-profile
-#
-# When the patcher fails-soft (returns False), materialize must NOT
-# inject any of those — otherwise unpatched vLLM rejects them as
-# unknown JSON keys and crashes the entire profile.
-#
-# The kill switch HYPERLOOM_ENABLE_PATCH=0 must short-circuit the
-# patcher entirely so users can disable runtime patching when their
-# image is a custom fork / read-only / under audit.
-# ===========================================================================
+# Regression #194 §4 / §5: when the runtime patcher succeeds, materialize auto-appends the patched-build profiler flags; when it fails-soft, none are injected. HYPERLOOM_ENABLE_PATCH=0 short-circuits the patcher.
 def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
-    """Replace the two patcher symbols on `_workload_envs` with stubs
-    that record invocation counts so we can assert per-framework
-    dispatch (vLLM path must not invoke the SGLang patcher and vice
-    versa)."""
+    """Replace the two patcher symbols on `_workload_envs` with stubs that record invocation counts for per-framework dispatch asserts."""
     from inference_optimizer.orchestrator.action_executors import _workload_envs
     counts = {"vllm": 0, "sglang": 0}
 
@@ -603,9 +500,7 @@ def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
 def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     tmp_path, monkeypatch,
 ):
-    """Patcher returns True for vLLM ⇒ EXTRA_VLLM_ARGS gains
-    capture_torch_profiler_dir + detailed_trace_annotation, on top of
-    the §1 delay/max iterations."""
+    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler_dir + detailed_trace_annotation on top of §1 iterations."""
     import yaml
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
@@ -616,18 +511,14 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     assert "--profiler-config.max_iterations 512" in extra, extra
     assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
-    # Per-framework dispatch: the SGLang patcher must NOT be invoked
-    # when the YAML's framework is vLLM (saves an unnecessary file
-    # probe + lock acquisition).
+    # Per-framework dispatch: the SGLang patcher must NOT run for a vLLM YAML.
     assert counts == {"vllm": 1, "sglang": 0}, counts
 
 
 def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     tmp_path, monkeypatch,
 ):
-    """Patcher returns False (unpatchable image) ⇒ EXTRA_VLLM_ARGS
-    keeps only the §1 safe set. Otherwise unpatched vLLM would
-    crash on `unknown JSON key`."""
+    """Patcher False ⇒ EXTRA_VLLM_ARGS keeps only the §1 safe set (else unpatched vLLM crashes on unknown JSON key)."""
     import yaml
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
@@ -677,11 +568,7 @@ def test_materialize_profile_sglang_omits_shape_discovery_when_patch_fails(
 def test_materialize_profile_kill_switch_skips_patcher_entirely(
     tmp_path, monkeypatch,
 ):
-    """HYPERLOOM_ENABLE_PATCH=0 must short-circuit the patcher call
-    entirely — neither vLLM nor SGLang patcher should be touched, and
-    no TraceLens-only flags should land in the YAML. This is the
-    escape hatch for users with custom forks / read-only filesystems
-    / compliance requirements."""
+    """HYPERLOOM_ENABLE_PATCH=0 short-circuits the patcher entirely; no TraceLens-only flags land in the YAML."""
     import yaml
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
@@ -701,10 +588,7 @@ def test_materialize_profile_kill_switch_skips_patcher_entirely(
 def test_materialize_profile_kill_switch_default_is_on(
     tmp_path, monkeypatch,
 ):
-    """Unset HYPERLOOM_ENABLE_PATCH == default-on. The patcher must
-    be invoked so users on TraceLens-patched images get the enhanced
-    flags without any opt-in step. Symmetric to the kill-switch test
-    above."""
+    """Unset HYPERLOOM_ENABLE_PATCH == default-on; the patcher must be invoked."""
     _clear_workload_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
@@ -716,10 +600,7 @@ def test_materialize_profile_kill_switch_default_is_on(
 def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
     tmp_path, monkeypatch,
 ):
-    """If EXTRA_SGLANG_ARGS already mentions
-    --enable-shape-discovery-for-cuda-graph-profile (e.g. user
-    pre-populated it in the YAML or via env), the materializer must
-    NOT append a duplicate copy."""
+    """If EXTRA_SGLANG_ARGS already has --enable-shape-discovery-for-cuda-graph-profile, the materializer must NOT duplicate it."""
     import yaml
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
@@ -739,25 +620,12 @@ def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
 
 
 def test_profile_executor_calls_benchmark_lib_patcher():
-    """ProfileExecutor must patch the materialized InferenceX checkout before
-    launching Magpie, or the steady-state NUM_PROMPTS / PROFILE_EXTRA_BODY we
-    just computed gets stomped by upstream InferenceX and the trace is
-    silently empty.
-
-    We don't run the full subprocess machinery — that's gated by
-    BaselineExecutor.__call__ which already has its own coverage.
-    Here we just lock down the seam: the symbols are imported by name
-    in profile.py and invoked from the post-materialization hook.
-    """
+    """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
     import inference_optimizer.orchestrator.action_executors.profile as profile_mod
-    # The symbol must be re-exportable from the module (so monkey-
-    # patching in tests / integration sites is straightforward).
+    # The symbols must be re-exportable for monkey-patching.
     assert profile_mod.ensure_benchmark_lib_patched is not None
     assert profile_mod.ensure_benchmark_serving_patched is not None
-    # And the source of the hook must reference both patchers; this is a cheap
-    # regression guard against silent removal during refactors. The hook runs
-    # after YAML materialization so it can patch the exact
-    # benchmark.inferencex_path that Magpie will execute.
+    # The hook source must reference both patchers (regression guard against silent removal).
     import inspect
     src = inspect.getsource(profile_mod.ProfileExecutor._after_materialize_config)
     assert "ensure_benchmark_lib_patched" in src, (
@@ -772,12 +640,7 @@ def test_profile_executor_calls_benchmark_lib_patcher():
     )
 
 
-# ===========================================================================
-# Regression: $FRAMEWORK env switches the default yaml between sglang/vllm
-# without anyone passing config_path explicitly. Locks down the entry-layer
-# fix for vLLM support — the optimizer used to be sglang-only because all 5
-# executors hardcoded baseline_sglang.yaml.
-# ===========================================================================
+# Regression: $FRAMEWORK env switches the default yaml between sglang/vllm without an explicit config_path (entry-layer fix for vLLM support).
 def test_default_baseline_config_resolves_sglang_by_default(monkeypatch):
     monkeypatch.delenv("FRAMEWORK", raising=False)
     assert _default_baseline_config().name == "baseline_sglang.yaml"
@@ -789,28 +652,19 @@ def test_default_baseline_config_resolves_vllm_when_env_set(monkeypatch):
 
 
 def test_default_baseline_config_falls_back_on_unknown_value(monkeypatch):
-    """Unknown $FRAMEWORK is treated as sglang (matches CLI default).
-    The CLI fail-fasts on unknown values, but if a user shell has a stale
-    or weird FRAMEWORK env, we should not blow up — sglang is the safe
-    default."""
+    """Unknown $FRAMEWORK falls back to sglang (the safe default)."""
     monkeypatch.setenv("FRAMEWORK", "tensorrt")
     assert _default_baseline_config().name == "baseline_sglang.yaml"
 
 
 def test_default_baseline_config_resolves_atom_when_env_set(monkeypatch):
-    """B1: FRAMEWORK=atom selects baseline_atom.yaml. Single-source-of-truth
-    selector — every executor (baseline/params/sweep/backends) routes through
-    this so an env flip propagates everywhere without per-executor changes."""
+    """B1: FRAMEWORK=atom selects baseline_atom.yaml (the single-source-of-truth selector for every executor)."""
     monkeypatch.setenv("FRAMEWORK", "atom")
     assert _default_baseline_config().name == "baseline_atom.yaml"
 
 
 def test_server_args_env_name_atom():
-    """B1: atom maps to EXTRA_ATOM_ARGS, matching the env contract consumed
-    by Magpie's atom_mi*x.sh wrapper. Ordering note: the atom branch sits
-    before vllm so a future framework name containing 'vllm' as a substring
-    cannot accidentally win — even though 'atom' itself is not a vllm
-    substring today."""
+    """B1: atom maps to EXTRA_ATOM_ARGS (the atom branch sits before vllm to avoid substring collisions)."""
     from inference_optimizer.orchestrator.action_executors._grid_runner import (
         server_args_env_name,
     )
@@ -824,11 +678,7 @@ def test_server_args_env_name_atom():
 def test_materialize_config_atom_profile_skips_tracelens_flags(
     tmp_path, monkeypatch,
 ):
-    """B1: PROFILE=1 + framework=atom must NOT inject sglang/vllm-specific
-    profiler CLI flags (--profiler-config.*) into EXTRA_ATOM_ARGS — atom's
-    argparse would reject them. The executor short-circuits before this
-    code path on a real run, but we defend in depth so direct callers
-    (params/sweep) can't accidentally render a broken atom YAML."""
+    """B1: PROFILE=1 + framework=atom must NOT inject sglang/vllm profiler CLI flags into EXTRA_ATOM_ARGS (atom's argparse rejects them)."""
     import yaml
     monkeypatch.setenv("FRAMEWORK", "atom")
     monkeypatch.setenv("PROFILE", "1")
@@ -854,13 +704,10 @@ def test_default_profile_config_tracks_framework(monkeypatch):
 
 
 def test_baseline_executor_picks_framework_yaml_at_call_time(tmp_path, monkeypatch):
-    """No config_path override + FRAMEWORK=vllm => baseline_vllm.yaml is
-    the resolved default, NOT baseline_sglang.yaml. This is the very
-    regression that was blocking vllm users."""
+    """No config_path override + FRAMEWORK=vllm resolves to baseline_vllm.yaml (the regression that blocked vllm users)."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
     pe = BaselineExecutor()
-    # Default constructor leaves default_config_path=None so the resolver
-    # is consulted at call time.
+    # default_config_path=None so the resolver is consulted at call time.
     assert pe.default_config_path is None
     assert pe._resolve_default_config().name == "baseline_vllm.yaml"
 
@@ -1008,9 +855,7 @@ async def test_coordinator_promotes_valid_baseline_even_with_failed_status(sessi
 
 @pytest.mark.asyncio
 async def test_profile_executor_extracts_trace_dir(tmp_path):
-    """When the workspace contains torch_trace/*.trace.json.gz, the
-    runner surfaces them in the result so downstream consumers can
-    feed them into tracelens_analysis.py."""
+    """When the workspace has torch_trace/*.trace.json.gz, the runner surfaces them in the result."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -1067,13 +912,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
 async def test_profile_executor_patches_configured_inferencex_path(
     tmp_path, monkeypatch,
 ):
-    """ProfileExecutor must patch the InferenceX checkout Magpie will use.
-
-    Regression for the Qwen3-32B TraceLens run where $INFERENCEX_PATH pointed
-    at /wekafs/InferenceX but Magpie's rendered YAML had an empty
-    benchmark.inferencex_path, so Magpie used $MAGPIE_DIR/InferenceX and lost
-    NUM_PROMPTS / PROFILE_EXTRA_BODY.
-    """
+    """ProfileExecutor must patch the InferenceX checkout Magpie will use (Qwen3-32B regression: empty benchmark.inferencex_path lost NUM_PROMPTS)."""
     fake_ix = tmp_path / "InferenceX"
     (fake_ix / "benchmarks").mkdir(parents=True)
     (fake_ix / "utils" / "bench_serving").mkdir(parents=True)
@@ -1182,14 +1021,10 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     db.close()
 
 
-# ===========================================================================
 # kernel_request_handlers — direct unit
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_dry_run_returns_structured_result(session_dir):
-    """Tracelens tool always emits structured JSON (even on validation
-    failure). Our handler must surface it verbatim — including ``status``
-    + run_id + session_id — so callers can debug without parsing logs."""
+    """The handler surfaces the tool's structured JSON verbatim (status + run_id + session_id)."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     payload = {
@@ -1202,8 +1037,7 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
         "budget_minutes": 1,
     }
     res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
-    # The tool will return failed because the dir has no trace files,
-    # but the response must be structured (not generic returncode-only).
+    # No trace files → failed, but the response must still be structured.
     assert res["status"] in ("ok", "succeeded", "failed")
     assert "tool" in res or "run_id" in res or "error" in res
     assert res.get("session_id") == session_dir.name or "run_id" in res
@@ -1245,10 +1079,7 @@ async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monke
 async def test_trace_analyze_handler_backfills_workload_context_from_state(
     session_dir, monkeypatch,
 ):
-    """When the payload omits framework/gpu_type/model, the handler must
-    fall back to SharedState so tracelens_analysis.py receives the real
-    workload context (vllm/MI300X/Qwen3-30B-A3B/inference) instead of
-    the script defaults (""/MI355X/default)."""
+    """When the payload omits framework/gpu_type/model, the handler falls back to SharedState for the real workload context."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1499,8 +1330,7 @@ async def test_trace_analyze_handler_missing_trace_input(session_dir):
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, monkeypatch):
-    # N15 made HYPERLOOM_KERNEL_AGENT_ROOT a lazy env read; delenv is
-    # the correct way to exercise the "not configured" branch.
+    # N15: HYPERLOOM_KERNEL_AGENT_ROOT is a lazy env read; delenv exercises the "not configured" branch.
     monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
     res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir)},
@@ -1511,24 +1341,13 @@ async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, mon
     assert "HYPERLOOM_KERNEL_AGENT_ROOT is not set" in res["error"]
 
 
-# ===========================================================================
-# T4 — TraceLens permanent failure stays failed (no fallback)
-# ===========================================================================
-# A failed TraceLens run must not be rewritten into ok+empty kernels. That
-# fallback hid split/annotation problems as a valid "no candidates" result and
-# let Orchestration continue down params/backends. The handler now preserves
-# ``status=failed`` and only appends structured diagnostics so operators can
-# see the upstream rc / error / stderr.
+# T4 — TraceLens permanent failure stays failed (no fallback): the handler preserves ``status=failed`` and appends structured diagnostics instead of rewriting to ok+empty kernels.
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_t4_keeps_tool_failure_failed(
     session_dir, monkeypatch,
 ):
-    """When tracelens_analysis.py returns ``status=failed`` the handler must
-    keep the failure status. Older code demoted this to ok+empty kernels, which
-    let Orchestration keep walking params/backends as if TraceLens had
-    completed. We still clear stale candidates and append a diagnostic warning.
-    """
+    """When tracelens_analysis.py returns ``status=failed`` the handler keeps the failure status, clears stale candidates, and appends a diagnostic warning."""
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
             "status": "failed",
@@ -1536,9 +1355,7 @@ async def test_trace_analyze_handler_t4_keeps_tool_failure_failed(
             "error": "RuntimeError: TraceLens perf CLI crashed",
             "returncode": 1,
             "stderr_tail": "RuntimeError: graph capture folder missing",
-            # The tool also emits an empty hot_kernels[] on failure in
-            # some paths — we explicitly seed a non-empty list here to
-            # prove the handler clears it.
+            # Seed a non-empty list to prove the handler clears stale candidates on failure.
             "hot_kernels": [{"kernel_id": "stale_1"}],
         }
         return 1, json.dumps(payload), "stderr noise"
@@ -1566,10 +1383,7 @@ async def test_trace_analyze_handler_t4_keeps_tool_failure_failed(
 async def test_trace_analyze_handler_t4_passes_through_idle_warning(
     session_dir, monkeypatch,
 ):
-    """When tracelens_analysis emits a ``trace_health_warnings`` from
-    the T3 idle gate (status=ok, empty hot_kernels), the handler must
-    pass it through verbatim. No de-duplication, no rewriting — that
-    warning is the routing signal the Coordinator reads."""
+    """A T3 idle-gate ``trace_health_warnings`` (status=ok, empty hot_kernels) must pass through verbatim."""
     idle_warning = {
         "code": "high_gpu_idle_pct",
         "severity": "warning",
@@ -1602,10 +1416,7 @@ async def test_trace_analyze_handler_t4_passes_through_idle_warning(
 async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
     session_dir, monkeypatch,
 ):
-    """When the tool emits no ``trace_health_warnings`` (steady state),
-    the handler still surfaces an empty list — downstream code (the
-    Coordinator's branching, the prompt-summary renderer) can iterate
-    without a ``None`` guard."""
+    """With no ``trace_health_warnings`` (steady state), the handler still surfaces an empty list (no ``None`` guard needed downstream)."""
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
             "status": "ok",
@@ -1623,19 +1434,10 @@ async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
     assert res["trace_health_warnings"] == []
 
 
-# ===========================================================================
-# T5 (this PR) — trace_health_warnings must reach the Orchestration LLM
-# ===========================================================================
-# Handler-boundary plumbing alone is not enough: the Orchestration LLM
-# only sees what ``SharedState._format_*`` renders into its prompt. Pin
-# that record_trace_analyze keeps the warning list AND that
-# _format_last_trace_analyze surfaces it inline so the LLM grounds its
-# next ACTION on the routing signal (params vs kernel-opt vs re-profile).
+# T5 — trace_health_warnings must reach the Orchestration LLM: record_trace_analyze keeps the warning list and _format_last_trace_analyze surfaces it inline.
 
 def test_record_trace_analyze_persists_trace_health_warnings(session_dir):
-    """``record_trace_analyze`` must keep ``trace_health_warnings`` from
-    the handler result verbatim in ``last_trace_analyze`` so prompt
-    rendering can see it on the next tick."""
+    """``record_trace_analyze`` keeps ``trace_health_warnings`` verbatim in ``last_trace_analyze`` for next-tick rendering."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1659,10 +1461,7 @@ def test_record_trace_analyze_persists_trace_health_warnings(session_dir):
 
 
 def test_record_trace_analyze_defaults_warnings_to_empty_list(session_dir):
-    """Steady-state (no warnings emitted) — the cached entry must still
-    expose ``trace_health_warnings`` as an empty list rather than the
-    field being absent, so iteration code in renderers / consumers
-    doesn't need a ``KeyError`` guard."""
+    """Steady-state: the cached entry exposes ``trace_health_warnings`` as an empty list, not an absent field."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1677,17 +1476,7 @@ def test_record_trace_analyze_defaults_warnings_to_empty_list(session_dir):
 
 
 def test_record_trace_analyze_persists_task_groups(session_dir):
-    """893bc6f: ``task_groups`` must flow from the handler result into
-    ``last_trace_analyze`` so the multi-KEEP queue's
-    ``untried_hot_reusable_kernels`` / ``next_pending_keep_kernel_id``
-    can collapse members of the same AST function into one slot.
-
-    Without this, Qwen3-30B-A3B-Base session 20260523T035235Z saw
-    k001/k003/k005 (non-primary members of moe_op + rmsnorm groups
-    already covered by k002/k004/k009) re-dispatched as a separate
-    second batch, wasting GEAK->Claude->Codex wall-clock on patches
-    that targeted the same source functions as the first batch.
-    """
+    """893bc6f: ``task_groups`` must flow into ``last_trace_analyze`` so the multi-KEEP queue collapses members of the same AST function into one slot."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1715,8 +1504,7 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
         },
     )
     assert state.last_trace_analyze.get("task_groups") == groups
-    # After k002 + k004 attempted, group-aware collapse should report
-    # NO untried hot kernels even though k001/k003 have attempts=0.
+    # After k002 + k004 attempted, group-aware collapse reports no untried kernels.
     state.record_kernel_opt({
         "status": "failed", "kernel_id": "k002",
         "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
@@ -1737,9 +1525,7 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
 
 
 def test_record_trace_analyze_defaults_task_groups_to_empty_list(session_dir):
-    """When the handler result has no ``task_groups`` field (legacy
-    TraceLens output), the cached entry must default to an empty
-    list so downstream readers never get a KeyError."""
+    """With no ``task_groups`` field (legacy TraceLens output), the cached entry defaults to an empty list."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1756,10 +1542,7 @@ def test_record_trace_analyze_defaults_task_groups_to_empty_list(session_dir):
 
 
 def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
-    """Defensive: a buggy tool emitting non-dict entries or dicts
-    missing the ``code`` field shouldn't poison ``last_trace_analyze``.
-    We accept only well-formed dicts with at least a ``code`` key so
-    the prompt renderer never has to defensively coerce types."""
+    """Defensive: only well-formed warning dicts with a ``code`` key are accepted into ``last_trace_analyze``."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1783,9 +1566,7 @@ def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
 
 
 def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
-    """Prompt rendering: when an idle warning was persisted, the
-    Orchestration prompt line must surface it with the numeric context
-    so the LLM can ground its routing on the actual percentages."""
+    """Prompt rendering: a persisted idle warning surfaces inline with its numeric context."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1814,9 +1595,7 @@ def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
 
 
 def test_format_last_trace_analyze_renders_failure_warning_with_rc(session_dir):
-    """Tool-failure warning carries ``returncode``; the prompt must
-    surface that too so an operator-or-LLM can distinguish 'TraceLens
-    crashed' (rc=1) from a benign skip."""
+    """Tool-failure warning carries ``returncode``; the prompt must surface ``rc=N`` to distinguish a crash from a benign skip."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1842,11 +1621,7 @@ def test_format_last_trace_analyze_renders_failure_warning_with_rc(session_dir):
 
 
 def test_format_last_trace_analyze_omits_warnings_suffix_in_steady_state(session_dir):
-    """Format-stability guard: when no warnings were recorded (the
-    common case), the prompt line MUST NOT gain a gratuitous
-    ``warnings=[]`` suffix. Prompt format stability matters because
-    we have downstream prompt-snapshot tests pinned to the legacy
-    format; growing the line in the steady state would break them."""
+    """Format-stability guard: with no warnings, the prompt line must NOT gain a ``warnings=[]`` suffix (snapshot tests pin the legacy format)."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1868,12 +1643,7 @@ def test_format_last_trace_analyze_omits_warnings_suffix_in_steady_state(session
 async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
     session_dir, monkeypatch,
 ):
-    """End-to-end pinning of the routing signal path:
-       tracelens_analysis (T3)  →  handler result.trace_health_warnings
-                                →  SharedState.last_trace_analyze (this PR)
-                                →  Orchestration prompt line  (this PR)
-    Without ALL three steps the LLM cannot route on idle %, and the
-    upstream T3 work is wasted."""
+    """End-to-end: T3 idle warning flows handler → SharedState.last_trace_analyze → Orchestration prompt line."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
@@ -1917,9 +1687,7 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
 async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
     session_dir, monkeypatch,
 ):
-    """Same path for T4: when TraceLens fails permanently, the
-    failure warning must reach the Orchestration prompt so the LLM
-    doesn't keep re-trying TraceLens or guessing why ``hot_kernels=[]``."""
+    """T4: a permanent TraceLens failure warning must reach the Orchestration prompt."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
@@ -1948,10 +1716,7 @@ async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
 async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     session_dir, monkeypatch,
 ):
-    """Edge case: the tool emits BOTH ``status=failed`` AND a pre-
-    existing ``trace_health_warnings`` list (e.g. the idle gate fired
-    AND then a later step crashed). The handler must preserve the
-    existing entries and APPEND the failure warning, not overwrite."""
+    """When the tool emits ``status=failed`` plus a pre-existing warnings list, the handler appends the failure warning rather than overwriting."""
     pre_existing = {
         "code": "high_gpu_idle_pct",
         "severity": "warning",
@@ -1985,9 +1750,7 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
 
 
 def test_optimization_wrapper_timeout_sec_geak_default_full_mode_130min(monkeypatch):
-    # Default tracks ``$GEAK_RUN_MODE`` (full -> 130 min) so the
-    # orchestrator wrapper agrees with the kernel-agent installer /
-    # driver defaults (PR #301 + matching orchestrator-side fix).
+    # Default tracks ``$GEAK_RUN_MODE`` (full -> 130 min) to match the kernel-agent defaults (PR #301).
     monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
     monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
     assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 130 * 60 + 180
@@ -2010,7 +1773,10 @@ def test_optimization_wrapper_timeout_sec_geak_env_override(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_optimization_handler_missing_kernel_id(session_dir):
-    res = await krh.run_optimization_handler({}, session_dir=session_dir)
+    # ``source_file`` short-circuits the ``missing_trace_analyze`` guard so the legacy missing-kernel_id path is exercised.
+    res = await krh.run_optimization_handler(
+        {"source_file": "/tmp/dummy.py"}, session_dir=session_dir,
+    )
     assert res["status"] == "failed"
     assert "kernel_id" in res["error"]
 
@@ -2086,17 +1852,14 @@ def test_run_optimization_handler_backfills_target_platform_from_state(session_d
 
 
 def test_handlers_dispatch_table():
-    """P2-2 only registered trace_analyze + run_optimization. P2-4
-    added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
+    """Dispatch table includes trace_analyze / run_gemm_tuning / run_optimization, not unknown kinds."""
     assert krh.has_handler("trace_analyze")
     assert krh.has_handler("run_gemm_tuning")
     assert krh.has_handler("run_optimization")
     assert not krh.has_handler("totally_unknown_kind")
 
 
-# ===========================================================================
 # PR-B §1: _batch_kernel_candidates collapses task_group members
-# ===========================================================================
 def _write_candidates_json(tmp_path, payload):
     p = tmp_path / "kernel_candidates.json"
     p.write_text(json.dumps(payload), encoding="utf-8")
@@ -2104,11 +1867,8 @@ def _write_candidates_json(tmp_path, payload):
 
 
 def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
-    """Two reusable kernels in the same task_group must dispatch as ONE
-    candidate (the primary), with the full group attached for
-    build_prompt to render multi-row benchmark cases."""
-    # PR-I: default min_gpu_pct is 3.0; rows must carry gpu_pct >= 3.0
-    # to pass the dispatcher's hot-kernel gate.
+    """Two reusable kernels in the same task_group dispatch as ONE candidate (the primary), with the full group attached."""
+    # PR-I: rows must carry gpu_pct >= 3.0 to pass the default hot-kernel gate.
     candidates_path = _write_candidates_json(tmp_path, {
         "hot_kernels": [
             {
@@ -2159,12 +1919,8 @@ def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
 
 
 def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_path):
-    """If the group's primary_kernel_id was rejected by classify_patchability
-    (e.g. vendor BLAS name marker landed on the heaviest row), dispatch
-    falls back to the first reusable member instead of dropping the
-    whole group."""
-    # PR-I: default min_gpu_pct is 3.0, so rows must carry gpu_pct >= 3.0
-    # to be retained by the dispatcher (matches production fixtures).
+    """When the group's primary_kernel_id is non-reusable, dispatch falls back to the first reusable member instead of dropping the group."""
+    # PR-I: rows must carry gpu_pct >= 3.0 to be retained by the dispatcher.
     candidates_path = _write_candidates_json(tmp_path, {
         "hot_kernels": [
             {
@@ -2200,13 +1956,8 @@ def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_pat
 
 
 def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_path):
-    """When kernel_candidates.json has no task_groups[] (older runs,
-    raw-trace fallback, LLama70B fixture path), the candidate list is
-    byte-identical to pre-PR-B behaviour."""
-    # PR-I: default min_gpu_pct is 3.0; legacy fixture now carries
-    # gpu_pct >= 3.0 so the dispatcher's hot-kernel gate doesn't drop
-    # k001. We're testing the *legacy task_groups-absent path*, not the
-    # gpu_pct filter, so this stays orthogonal to PR-I's intent.
+    """With no task_groups[] (legacy runs), the candidate list matches pre-PR-B behaviour."""
+    # PR-I: legacy fixture carries gpu_pct >= 3.0 so the hot-kernel gate doesn't drop k001 (orthogonal to PR-I).
     candidates_path = _write_candidates_json(tmp_path, {
         "hot_kernels": [
             {
@@ -2228,14 +1979,10 @@ def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_p
     assert "task_group" not in selected[0]
 
 
-# ===========================================================================
 # Coordinator — REQUEST programmatic handler integration
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
-    """When Orchestration emits REQUEST{kind=trace_analyze}, the Coordinator
-    should run the registered handler programmatically and emit RESPONSE
-    on the bus *without* waiting for the Kernel LLM."""
+    """REQUEST{kind=trace_analyze} runs the registered handler programmatically and emits RESPONSE without the Kernel LLM."""
     c = Coordinator(session_dir, backends=_backends_silent())
 
     captured: dict = {}
@@ -2279,8 +2026,7 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_request_unknown_kind_routes_to_llm(session_dir):
-    """REQUEST whose kind has no handler is mirrored to kernel inbox
-    (LLM responder path) — no auto-RESPONSE."""
+    """REQUEST with no handler is mirrored to the kernel inbox (LLM responder path), no auto-RESPONSE."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         await c._handle_intent("orchestration", Intent(
@@ -2324,18 +2070,7 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
             await c.stop()
 
 
-# ===========================================================================
-# PR-X: batch dispatch enablers
-#   1) _DEFAULT_KERNEL_BATCH_PARALLEL is sized for a full MI300X-class node
-#      so a single ``run_optimization`` batch fans out to one GEAK / OOB
-#      attempt per GPU (Ray then schedules against actual ``num_gpus``).
-#   2) Coordinator force-injects ``candidates_path`` from SharedState into
-#      every ``run_optimization`` payload so the batch path
-#      (``_run_optimization_batch``) fires deterministically regardless of
-#      whether the LLM remembered to include the field. LLM-supplied
-#      values still win, so future prompts can target a different
-#      TraceLens snapshot.
-# ===========================================================================
+# PR-X: batch dispatch enablers — _DEFAULT_KERNEL_BATCH_PARALLEL sized for a full node, and Coordinator force-injects candidates_path so the batch path fires deterministically (LLM values still win).
 def test_default_kernel_batch_parallel_matches_full_node():
     """Default fanout is sized for a single MI300X / MI355X node (8 GPU)
     so a typical ``run_optimization`` batch (TraceLens emits 3-8 reusable
@@ -2347,17 +2082,13 @@ def test_default_kernel_batch_parallel_matches_full_node():
 
 @pytest.mark.asyncio
 async def test_coordinator_injects_candidates_path_for_run_optimization(
-    session_dir, monkeypatch,
+    session_dir,
 ):
     """When the LLM emits ``run_optimization`` without ``candidates_path``,
     the Coordinator must pull it from ``state.last_trace_analyze`` and
     inject it into the handler payload so ``_run_optimization_batch``
     fires instead of silently collapsing to ``_run_optimization_single``
     (which would waste 7 idle GPUs on an 8-GPU node)."""
-    # Bypass the N13/N19c sequence gate that normally denies
-    # ``run_optimization`` until a roofline snapshot + cheap exploration
-    # exist; this test focuses purely on the injection path.
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
     c = Coordinator(session_dir, backends=_backends_silent())
     # ``_sequence_denial_for_request`` requires both baseline_tput > 0
     # and last_profile_trace to be set (kernel requests are denied with
@@ -2406,20 +2137,7 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
             await c.stop()
 
 
-# ===========================================================================
-# PR-B: multi-KEEP integrate queue + streaming batch record
-# ---------------------------------------------------------------------------
-# Tests for the Coordinator <-> kernel_request_handlers wiring that
-# implements:
-#   1) Streaming record_partial callback so each batch sub-attempt's
-#      KEEP/REVERT lands in SharedState *before* asyncio.gather() wait-all
-#      unblocks (mid-batch visibility).
-#   2) batch_mode dedup so the post-gather record_kernel_opt(best) call
-#      doesn't double-count attempts already recorded via the callback.
-#   3) base_tput auto-injection from current_best.tput on ``integrate``
-#      requests where the LLM forgot to populate it (a routine miss on
-#      the 2nd/3rd integrate of a multi-KEEP drain).
-# ===========================================================================
+# PR-B: multi-KEEP integrate queue + streaming batch record — streaming record_partial callback, batch_mode dedup, and base_tput auto-injection on integrate.
 @pytest.mark.asyncio
 async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     session_dir,
@@ -2545,8 +2263,7 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
             session_dir=session_dir,
         )
 
-    # Ladder MUST keep walking past GEAK NEEDS_REVIEW and Claude REVERT,
-    # then break on Codex KEEP.
+    # Ladder walks past GEAK NEEDS_REVIEW + Claude REVERT, then breaks on Codex KEEP.
     assert calls == ["geak", "claude", "codex"], calls
     assert (best.get("proposal") or {}).get("decision") == "KEEP", best
     assert (best.get("verification") or {}).get("micro_speedup") == 1.17
@@ -2555,8 +2272,7 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
 
 @pytest.mark.asyncio
 async def test_backend_ladder_breaks_on_first_keep(session_dir):
-    """When GEAK already KEEPs, ladder must short-circuit (not waste
-    Claude/Codex wall-clock chasing a higher number)."""
+    """When GEAK already KEEPs, the ladder short-circuits (no Claude/Codex)."""
     calls: list[str] = []
 
     async def fake_single(child, *, session_dir):
@@ -2590,9 +2306,7 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
 async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
     session_dir,
 ):
-    """If NO backend KEEPs, ladder picks the highest-micro non-KEEP
-    so the per-kernel ledger at least records the strongest signal
-    (the prior behaviour, kept under the new tuple-key)."""
+    """If NO backend KEEPs, the ladder picks the highest-micro non-KEEP."""
     async def fake_single(child, *, session_dir):
         backend = child["backends"]
         if backend == "geak":
@@ -2635,21 +2349,7 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
 async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
     session_dir,
 ):
-    """Sub-task exceptions must NOT propagate out of ``asyncio.gather`` while
-    sibling tasks are still in flight.
-
-    Default ``asyncio.gather(return_exceptions=False)`` re-raises on the
-    first exception while the other coroutines keep running in the
-    background. That would unblock the Coordinator mid-batch, let it
-    dispatch an integrate, and collide with the still-running
-    kernel_opt subprocesses on the same GPU lease.
-
-    The fix wraps each sub-task in a try/except inside ``_guarded`` so
-    exceptions surface as structured ``failed`` results. gather then
-    behaves as true wait-all and ``record_partial`` sees every
-    candidate -- including the failed one -- with a stamped kernel_id
-    so the per-kernel attempts ledger stays consistent.
-    """
+    """Sub-task exceptions surface as structured ``failed`` results so ``gather`` stays true wait-all and doesn't unblock the Coordinator mid-batch."""
     candidates = [
         {"kernel_id": "kFast", "source_file": "/p/fast.py", "reusable_native_kernel": True},
         {"kernel_id": "kCrash", "source_file": "/p/crash.py", "reusable_native_kernel": True},
@@ -2706,9 +2406,7 @@ async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
     # Gather MUST have waited for all three (kSlow finishes last).
     assert completion_order == ["kFast", "kCrash", "kSlow"], completion_order
 
-    # record_partial got exactly one call per candidate, in completion
-    # order, and the crashed sibling came through as a structured
-    # ``status=failed`` with kernel_id preserved (NOT swallowed).
+    # record_partial got one call per candidate; the crash surfaced as a structured failed with kernel_id preserved.
     assert [r["kernel_id"] for r in recorded] == ["kFast", "kCrash", "kSlow"]
     crash_record = next(r for r in recorded if r["kernel_id"] == "kCrash")
     assert crash_record["status"] == "failed"
@@ -2723,19 +2421,9 @@ async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
 
 @pytest.mark.asyncio
 async def test_coordinator_streams_batch_results_and_dedups_final_record(
-    session_dir, monkeypatch,
+    session_dir,
 ):
-    """End-to-end through Coordinator._handle_request:
-
-    * record_partial is wired so each sub-attempt records once via
-      ``record_kernel_opt`` while the batch is in flight, and
-    * the post-gather ``record_kernel_opt(best)`` call is skipped when
-      ``result["batch_mode"]`` is True (no double-counting).
-
-    Verified by counting how many times SharedState.record_kernel_opt is
-    invoked relative to the number of batch sub-results.
-    """
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
+    """End-to-end: record_partial records each sub-attempt in flight, and the post-gather record_kernel_opt(best) is skipped in batch_mode (no double-counting)."""
     c = Coordinator(session_dir, backends=_backends_silent())
     c.shared_state.baseline_tput = 1234.5
     c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
@@ -2743,8 +2431,7 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": "/wekafs/cached/candidates.json",
     }
-    # The sequence gate on this branch still consults
-    # ``last_select_kernels`` (M3 will rename it to ``trace_analyze``).
+    # The sequence gate still consults ``last_select_kernels`` (to be renamed ``trace_analyze`` in M3).
     c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
     c.shared_state.current_best = {
         "action": "integrate",
@@ -2786,9 +2473,7 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
 async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
     session_dir,
 ):
-    """Explicit operator-supplied ``base_tput`` must NOT be clobbered by
-    the auto-injection -- some flows (e.g. resume from a saved snapshot)
-    intentionally pin a different baseline."""
+    """Explicit operator-supplied ``base_tput`` must NOT be clobbered by the auto-injection."""
     c = Coordinator(session_dir, backends=_backends_silent())
     c.shared_state.baseline_tput = 4319.5
     c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
@@ -2846,10 +2531,7 @@ def _candidates_factory(tmp_path):
 def test_batch_candidates_filters_rejected_kernel_ids(
     session_dir, _candidates_factory,
 ):
-    """PR-C: a kernel that's already on rejected_kernel_ids must not
-    show up in the next batch's candidate list, even though it's still
-    in kernel_candidates.json.
-    """
+    """PR-C: a kernel on rejected_kernel_ids must not appear in the next batch, even if still in kernel_candidates.json."""
     from inference_optimizer.orchestrator.shared_state import SharedState
     cpath = _candidates_factory([
         {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
@@ -2871,10 +2553,7 @@ def test_batch_candidates_filters_rejected_kernel_ids(
 def test_batch_candidates_filters_kernels_with_recorded_attempts(
     session_dir, _candidates_factory,
 ):
-    """PR-C max_attempts=1 default: any prior attempt -> kernel skipped
-    in the next batch. Defends against the LLM re-proposing the same
-    run_optimization batch after a previous one returned all failures.
-    """
+    """PR-C max_attempts=1 default: any prior attempt skips the kernel in the next batch."""
     from inference_optimizer.orchestrator.shared_state import SharedState
     cpath = _candidates_factory([
         {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
@@ -2883,8 +2562,7 @@ def test_batch_candidates_filters_kernels_with_recorded_attempts(
          "source_file": "/p/moe_op.py"},
     ])
     state = SharedState.load_or_init(session_dir)
-    # k001 has an attempt recorded but is not (yet) on rejected list
-    # (e.g. PARTIAL that hasn't yet hit max_partial).
+    # k001 has an attempt recorded but is not yet on the rejected list (PARTIAL below max_partial).
     state.kernel_opt_attempts = {
         "k001": {"attempts": 1, "partial_count": 1, "last_decision": "PARTIAL"},
     }
@@ -2899,11 +2577,7 @@ def test_batch_candidates_filters_kernels_with_recorded_attempts(
 def test_batch_candidates_task_group_falls_back_to_live_member(
     session_dir, _candidates_factory,
 ):
-    """When primary (k002) is rejected, the task_group should still
-    dispatch via the next live member (k001), because k001 patches the
-    same AST function -- not falling back here is how the 12h session
-    silently lost half its kernel leverage.
-    """
+    """When the primary (k002) is rejected, the task_group still dispatches via the next live member (k001)."""
     from inference_optimizer.orchestrator.shared_state import SharedState
     cpath = _candidates_factory(
         hot_kernels=[
@@ -2932,9 +2606,7 @@ def test_batch_candidates_task_group_falls_back_to_live_member(
 def test_batch_candidates_skips_group_when_all_members_rejected(
     session_dir, _candidates_factory,
 ):
-    """If every member of a task_group is unusable, the group must
-    skip cleanly -- legacy code would have errored out trying to
-    dispatch a rejected primary."""
+    """If every member of a task_group is unusable, the group skips cleanly."""
     from inference_optimizer.orchestrator.shared_state import SharedState
     cpath = _candidates_factory(
         hot_kernels=[
@@ -2964,10 +2636,7 @@ def test_batch_candidates_skips_group_when_all_members_rejected(
 def test_batch_candidates_skips_in_flight_kernels(
     session_dir, _candidates_factory,
 ):
-    """In-flight defense: a status/ko-*.json with state=running for k004
-    must keep k004 out of the next batch -- prevents the 5-concurrent-
-    Claude-process pile-up the 12h session hit.
-    """
+    """In-flight defense: a status/ko-*.json with state=running for k004 keeps it out of the next batch."""
     cpath = _candidates_factory([
         {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
@@ -3015,17 +2684,7 @@ def test_batch_candidates_below_min_gpu_pct_skipped(
 def test_batch_candidates_default_min_gpu_pct_matches_sharedstate_gate(
     session_dir, _candidates_factory,
 ):
-    """PR-I: ``_batch_kernel_candidates`` default must match
-    ``SharedState.untried_hot_reusable_kernels``'s default (3.0).
-
-    Repro: Qwen3-30B-A3B-Base session 20260523T035235Z third batch
-    round dispatched k006 (gpu_pct=1.3%) via task_group fallback even
-    though it was below the SharedState gate's 3.0% threshold; LLM
-    couldn't even see k006 in untried_hot_reusable_kernels yet the
-    batch wasted ~30-90 min on its ladder. The two layers now share
-    the same default so a kernel that's invisible to the gate is also
-    rejected by the batch dispatcher.
-    """
+    """PR-I: ``_batch_kernel_candidates`` default (3.0) must match ``SharedState.untried_hot_reusable_kernels``'s gate so a sub-threshold kernel can't sneak in via task_group fallback."""
     cpath = _candidates_factory([
         {"kernel_id": "k001", "gpu_pct": 38.0, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
@@ -3034,8 +2693,7 @@ def test_batch_candidates_default_min_gpu_pct_matches_sharedstate_gate(
         {"kernel_id": "k008", "gpu_pct": 3.13, "reusable_native_kernel": True,
          "source_file": "/p/rmsnorm.py"},
     ])
-    # No env set -> default 3.0 must filter out k006 (1.3 < 3.0)
-    # but keep k001 (38) and k008 (3.13).
+    # Default 3.0 filters out k006 (1.3) but keeps k001 (38) and k008 (3.13).
     out = krh._batch_kernel_candidates(
         {"candidates_path": cpath}, session_dir=session_dir,
     )
@@ -3067,15 +2725,10 @@ def test_in_flight_kernel_ids_returns_running_only(session_dir):
 def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
     session_dir,
 ):
-    """The multi-KEEP queue drains kernel_ids that aren't the current
-    ``last_kernel_opt`` slot. ``_resolve_integrate_payload`` must look up
-    patch_path / source_file from the per-kernel ``kernel_opt_attempts``
-    ledger so any queued KEEP can integrate.
-    """
+    """``_resolve_integrate_payload`` looks up patch_path / source_file from the per-kernel ``kernel_opt_attempts`` ledger so any queued KEEP can integrate."""
     from inference_optimizer.orchestrator.shared_state import SharedState
     state = SharedState.load_or_init(session_dir)
-    # Pretend the streaming record path landed two KEEPs but
-    # last_kernel_opt only holds the strongest (k009).
+    # Two KEEPs landed but last_kernel_opt only holds the strongest (k009).
     state.last_kernel_opt = {
         "kernel_id": "k009",
         "decision": "KEEP",
@@ -3094,8 +2747,7 @@ def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
     }
     state.save(session_dir)
 
-    # Orch sends integrate(k001) with only the kernel_id -- it's the
-    # *second* KEEP from the queue, not last_kernel_opt.
+    # integrate(k001) carries only the kernel_id (the second queued KEEP, not last_kernel_opt).
     resolved, missing = krh._resolve_integrate_payload(
         {"kernel_id": "k001", "base_tput": 4500.0},
         session_dir=session_dir,

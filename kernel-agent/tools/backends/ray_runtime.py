@@ -30,9 +30,7 @@ def ray_status_ok() -> bool:
 def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> bool:
     """Ensure a Ray cluster is reachable.
 
-    Returns True if this call started Ray (so caller may stop it later).
-    Returns False if Ray was already running.
-    Raises RuntimeError if Ray fails to start.
+    Returns True if this call started Ray, False if already running; raises on failure.
     """
     if ray_status_ok():
         return False
@@ -64,38 +62,14 @@ def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
 
 
 def _is_ray_version_mismatch(text: str) -> bool:
-    """True when Ray refused the job because the reachable cluster was
-    started under a different Python / Ray than this process (issue #432).
-
-    Ray raises a RuntimeError whose message reads e.g.::
-
-        Version mismatch: The cluster was started with:
-            Ray: 2.44.1
-            Python: 3.10.12
-        This process on node ... was started with:
-            Ray: 2.44.1
-            Python: 3.12.13
-
-    Matching on the stable ``Version mismatch`` banner keeps this robust to
-    the surrounding Ray/Python version numbers.
-    """
+    """True when Ray refused the job due to a cluster started under a different Python/Ray (issue #432); matches the stable ``Version mismatch`` banner."""
     return "version mismatch" in (text or "").lower()
 
 
 def force_restart_local_cluster(
     num_gpus: Optional[int] = None, log_path: Optional[Path] = None,
 ) -> None:
-    """Tear down any reachable Ray cluster and start a fresh local head
-    under THIS interpreter.
-
-    Recovers from a stale/foreign cluster started under a different Python
-    (issue #432): reusing it makes ``ray.init`` fail in ~0.8s with a
-    "Version mismatch" RuntimeError that otherwise surfaces as a mislabeled
-    "compile failed" REVERT. ``ray stop --force`` also clears raylet
-    zombies, so this doubles as wedged-cluster recovery.
-
-    Raises RuntimeError if the fresh head fails to start.
-    """
+    """Tear down any reachable Ray cluster and start a fresh local head under THIS interpreter. Recovers from a stale/foreign cluster (issue #432) whose version mismatch otherwise mislabels as a "compile failed" REVERT; also clears raylet zombies. Raises RuntimeError if the fresh head fails to start."""
     stop_cmd = ["ray", "stop", "--force"]
     start_cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=0.0.0.0"]
     if num_gpus is not None:
@@ -117,19 +91,11 @@ def force_restart_local_cluster(
         )
 
 
-# Env vars safe to forward to Ray workers. Notice we do NOT include
-# HIP_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES; those are
-# Ray's responsibility and forcing them from the driver triggers
-# `set_visible_accelerator_ids` IndexError on ROCm.
+# Env vars safe to forward to Ray workers; excludes *_VISIBLE_DEVICES (Ray-owned; forcing them triggers set_visible_accelerator_ids IndexError on ROCm).
 SAFE_ENV_KEYS = (
     "PATH", "HOME", "LD_LIBRARY_PATH",
     "HYPERLOOM_KERNEL_AGENT_ROOT", "KERNEL_AGENT_ROOT",
-    # USER_DATA_PATH is the single artefact root; HYPERLOOM_RUNTIME_DIR /
-    # KERNEL_AGENT_ENV / MAGPIE_DIR / INFERENCEX_PATH all default under it.
-    # WORKSPACE_ROOT / WORKSPACE_PATH / AGENT_WORKSPACE_ROOT were retired
-    # during the "all artefacts under USER_DATA_PATH" migration — drop them
-    # from the propagate list so we don't accidentally leak stale values
-    # into Ray workers.
+    # USER_DATA_PATH is the single artefact root others default under.
     "USER_DATA_PATH", "HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV",
     "MAGPIE_DIR", "INFERENCEX_PATH",
     "SAFE_API_KEY",
