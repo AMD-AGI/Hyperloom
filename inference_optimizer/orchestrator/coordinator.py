@@ -73,6 +73,7 @@ from .resource_lock import (
 from .shared_state import SharedState
 from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
+from .trace.conversation_trace import ConversationRecord, append_conversation
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .action_executors.benchmark_result import is_valid_measurement
 from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
@@ -4418,6 +4419,10 @@ class Coordinator:
         # metadata (ClaudeBackend + CodexBackend). Best-effort: a trace
         # failure must never affect intent routing.
         self._trace_reactor_llm_call(agent_name, result)
+        # Full-trace (conversations): persist the full, redacted
+        # prompt+response for this reactor turn. Separate file from the
+        # token ledger; same best-effort posture.
+        self._record_reactor_conversation(agent_name, result)
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
 
@@ -4462,6 +4467,43 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — trace must never break the loop
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",
+                agent_name, exc_info=True,
+            )
+
+    def _record_reactor_conversation(
+        self, agent_name: str, result: BackendTurnResult,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a reactor turn.
+
+        Persists the full (redacted) prompt + completion the backend put on
+        ``metadata`` (``prompt`` / ``response``). Only rows that actually
+        carry conversation text are written, so subprocess-backed reactors
+        (critic / robustness) that don't surface text here don't emit empty
+        rows — their conversation is captured by their own workdir artefacts.
+
+        Best-effort: any failure degrades to a logged warning rather than
+        breaking the tick loop.
+        """
+        try:
+            metadata = result.metadata or {}
+            prompt = metadata.get("prompt")
+            response = metadata.get("response")
+            if not prompt and not response:
+                return
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component=agent_name,
+                role=agent_name,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                model=metadata.get("model"),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: reactor conversation append failed for %s",
                 agent_name, exc_info=True,
             )
 
