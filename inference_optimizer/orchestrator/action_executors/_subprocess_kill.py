@@ -333,11 +333,13 @@ def run_with_session_kill(
             # `except:` doesn't see a still-running tree.
             kill_my_spawned_server(proc)
             try:
-                # Drain whatever the pipes have so the exception carries
-                # the partial output (subprocess.run does the same).
-                stdout, stderr = proc.communicate(timeout=2.0)
+                # Drain the pipes so the reaped child fully exits; the
+                # original TimeoutExpired (with its own captured output) is
+                # what we re-raise, so the drained values are intentionally
+                # discarded.
+                proc.communicate(timeout=2.0)
             except subprocess.TimeoutExpired:
-                stdout, stderr = "", ""
+                pass
             raise
         except _SoftDeadlineExceeded as exc:
             kill_my_spawned_server(proc)
