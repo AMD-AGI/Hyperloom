@@ -240,7 +240,7 @@ class _CidLock:
         # ``a+`` so the file is created if missing and the position
         # is at the end (we don't actually write to it; the lock is
         # advisory and the file's contents are irrelevant).
-        self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         except OSError:

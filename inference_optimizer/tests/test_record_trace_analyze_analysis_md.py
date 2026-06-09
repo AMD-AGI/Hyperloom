@@ -1,26 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Roofline-v2 C1: ``record_trace_analyze`` caches TraceLens analysis.md.
-
-These tests pin the contract the downstream ``roofline`` action (C4) and
-the prompt renderer (C5) depend on:
-
-* When the kernel handler surfaces ``trace_report_path`` in its result,
-  ``SharedState.last_trace_analyze`` must contain the **full** text of
-  that file under ``analysis_md_text`` (Decision A3: no truncation).
-* ``analysis_md_path`` must always be a string (never ``None``) so prompt
-  formatters can render it verbatim without a ``None`` guard.
-* ``roofline_snapshot_id`` must monotonically increase on each call so
-  re-profile guidance (C5) can detect "new snapshot available" and so
-  audit (C6) can pair every roofline-action invocation with the specific
-  TraceLens report it analyzed.
-* ``roofline_baseline_gain_at_snapshot`` must capture
-  ``cumulative_gain_validated`` **at the moment the snapshot is taken**
-  so the prompt can show "gain since snapshot: current − baseline".
-* Read failures (missing file, permission denied, decode error) must
-  degrade silently — empty ``analysis_md_text`` signals "no report
-  available" without breaking the existing trace_analyze path.
-"""
+"""Roofline-v2 C1: ``record_trace_analyze`` caches TraceLens analysis.md (full text, monotonic snapshot id, point-in-time gain capture, silent read failures)."""
 
 from __future__ import annotations
 
@@ -93,13 +73,7 @@ def test_unreadable_analysis_md_degrades_silently(tmp_path: Path) -> None:
 
 
 def test_caches_large_analysis_md_without_truncation(tmp_path: Path) -> None:
-    """Real-world 200 KB report (Case A-D scale) round-trips intact.
-
-    Decision A3: no truncation. The cache must hold the full text even
-    for the largest analysis.md a TraceLens run can produce, because the
-    roofline action (C4) reads it once and the structured analyzer
-    output replaces verbatim prompt injection from C5 onward.
-    """
+    """Real-world 200 KB report round-trips intact (Decision A3: no truncation)."""
     analysis_md = tmp_path / "big_analysis.md"
     big_content = "# Analysis\n" + ("filler line\n" * 20000)
     analysis_md.write_text(big_content, encoding="utf-8")
@@ -120,12 +94,7 @@ def test_caches_large_analysis_md_without_truncation(tmp_path: Path) -> None:
 
 
 def test_snapshot_id_monotonically_increases(tmp_path: Path) -> None:
-    """Every successful call bumps ``roofline_snapshot_id`` by exactly 1.
-
-    The counter lives inside ``last_trace_analyze`` itself (rather than
-    a new top-level SharedState field) so a stale ``last_trace_analyze``
-    is reset implicitly by the next ``record_trace_analyze`` call.
-    """
+    """Every successful call bumps ``roofline_snapshot_id`` by exactly 1."""
     analysis_md = tmp_path / "analysis.md"
     analysis_md.write_text("first", encoding="utf-8")
 
@@ -157,13 +126,7 @@ def test_snapshot_id_starts_at_one_after_empty_state() -> None:
 
 
 def test_baseline_gain_captured_at_snapshot_time() -> None:
-    """``roofline_baseline_gain_at_snapshot`` reflects cumulative_gain
-    at the **moment** the snapshot is recorded.
-
-    Later mutations of ``cumulative_gain_validated`` must not retroact
-    onto the cached snapshot — the prompt's "gain since snapshot" delta
-    depends on this being a true point-in-time capture.
-    """
+    """``roofline_baseline_gain_at_snapshot`` is a point-in-time capture of cumulative_gain; later mutations don't retroact."""
     state = SharedState()
     state.cumulative_gain_validated = 0.0
     state.record_trace_analyze(
@@ -184,11 +147,7 @@ def test_baseline_gain_captured_at_snapshot_time() -> None:
 
 
 def test_non_dict_result_is_ignored() -> None:
-    """``result`` not being a dict short-circuits without raising.
-
-    Pre-existing contract — re-pinned here so a future refactor cannot
-    accidentally regress the type-guard while wiring in the new fields.
-    """
+    """A non-dict ``result`` short-circuits without raising."""
     state = SharedState()
     state.record_trace_analyze({"trace_input": "x"}, None)  # type: ignore[arg-type]
     assert state.last_trace_analyze == {}
@@ -299,23 +258,12 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     assert row["suggestion"] == "reduce memory traffic"
     assert row["rocprof_roofline"]["before_kernel_opt"]["roofline_efficiency_pct"] == 31.2
     assert row["rocprof_roofline"]["after_kernel_opt"]["roofline_efficiency_pct"] == 44.0
-    # kernel_category propagates from TraceLens hot_kernels so downstream
-    # consumers (kernel_attempt_summary.by_kernel[].kernel_category) get
-    # the bucket label instead of an empty string.
+    # kernel_category propagates from TraceLens hot_kernels to kernel_attempt_summary.by_kernel[].kernel_category.
     assert row["kernel_category"] == "LayerNorm"
     assert cached["kernel_roofline_top15"][0] == row
 
 
-# ---------------------------------------------------------------------------
-# skipped_kernels projection + prompt rendering (GEAK kernel-id routing)
-#
-# When TraceLens routes every candidate to ``skipped_kernels`` (e.g. all
-# ``aten::mm`` with "source file not resolved"), ``hot_kernels`` is empty and
-# the prompt's candidate list renders ``top=[] reusable_native=[]``. With no
-# real ``k00x`` id visible, the Orchestration LLM echoes analysis.md operator
-# names as a hallucinated kernel_id. Projecting the skipped candidates lets
-# the prompt show they were detected-but-unoptimizable instead.
-# ---------------------------------------------------------------------------
+# skipped_kernels projection + prompt rendering: when all candidates are skipped, project them so the prompt shows detected-but-unoptimizable kernels instead of an empty list the LLM hallucinates over.
 
 
 def _result_with_skipped(skipped: list[dict]) -> dict:
