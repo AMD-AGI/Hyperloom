@@ -905,6 +905,43 @@ def _model_has_dual_chunk_attention(model_path: str) -> bool:
     )
 
 
+def _model_is_moe(model_path: str) -> bool:
+    """Best-effort detect a Mixture-of-Experts model from config.json.
+
+    MoE checkpoints declare an expert count (``num_experts`` /
+    ``num_local_experts`` / ``n_routed_experts``), a ``moe_intermediate_size``,
+    or carry a ``moe`` marker in ``architectures`` / ``model_type`` (e.g.
+    Qwen3MoeForCausalLM / qwen3_moe). On ROCm/aiter, sglang's default
+    ``--moe-runner-backend auto`` routes these through aiter's CK 2-stage
+    fused-MoE kernel, whose first-request JIT build is broken in some images;
+    callers use this to switch to a ROCm-capable MoE runner. Checks the top
+    level and a nested ``text_config``. Soft-degrades to False on any missing
+    / unreadable / invalid config.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    expert_keys = ("num_experts", "num_local_experts", "n_routed_experts")
+    for cfg in candidates:
+        for key in expert_keys:
+            val = cfg.get(key)
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, int) and val > 1:
+                return True
+        if cfg.get("moe_intermediate_size"):
+            return True
+        if "moe" in str(cfg.get("model_type") or "").lower():
+            return True
+        if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
+            return True
+    return False
+
+
 def _context_headroom_tokens() -> int:
     """Resolve the context headroom (tokens); env override, else default."""
     raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()

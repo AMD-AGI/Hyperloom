@@ -846,6 +846,64 @@ def inject_sglang_attention_backend(
     )
 
 
+# sglang MoE runner backend injection: on MI300X/MI355X with aiter, sglang's
+# default ``--moe-runner-backend auto`` routes Mixture-of-Experts models
+# through aiter's CK 2-stage fused-MoE kernel. Its first-request JIT build
+# (``module_moe_ck2stages_*``) is broken in some ROCm images — ``thrust`` pulls
+# in a missing ``<cub/detail/detect_cuda_runtime.cuh>`` so hipcc fails to
+# compile, and the killed build leaves a stale lock that makes the next
+# attempts hang on "waiting for baton release" until sglang's 600s warmup
+# read-timeout fires -> baseline_failed. ``triton`` is the ROCm-capable
+# fused-MoE backend sglang itself falls back to (same "aiter CK kernel doesn't
+# support all GEMM dimensions" reason), so inject it for MoE models on AMD
+# unless the operator already pinned a backend. Override via
+# ``$HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND``.
+HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV = "HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND"
+DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND = "triton"
+_SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
+# Matches space- or equals-separated form so a user-pinned value suppresses
+# injection without false-matching a longer flag.
+_SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
+
+
+def inject_sglang_moe_runner_backend(
+    server_args: str | None,
+    framework: str | None,
+    model_path: str | None,
+    gpu_type: str | None = None,
+) -> str:
+    """Append a ``--moe-runner-backend`` for MoE sglang models on AMD/ROCm.
+
+    Returns ``server_args`` unchanged when: framework is not sglang, a
+    ``--moe-runner-backend`` is already pinned (operator wins), the GPU is not
+    an AMD/ROCm runner, or the model is not Mixture-of-Experts (fail-safe:
+    inject nothing). Otherwise appends the backend from
+    ``$HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND`` (default ``triton``); only this
+    flag is added.
+    """
+    args = str(server_args or "").strip()
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args
+    if _SGLANG_MOE_RUNNER_BACKEND_RE.search(args):
+        return args
+    from ...cli import _model_is_moe, _resolve_amd_gpu_type
+    if not _resolve_amd_gpu_type(gpu_type):
+        return args
+    if not _model_is_moe(str(model_path or "")):
+        return args
+    backend = (
+        os.environ.get(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "").strip()
+        or DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND
+    )
+    log.info(
+        "MoE model on AMD/ROCm: injecting --moe-runner-backend %s (aiter CK "
+        "2-stage fused-MoE JIT build is broken in this image).", backend,
+    )
+    return merge_server_args(
+        args, f"{_SGLANG_MOE_RUNNER_BACKEND_FLAG} {backend}",
+    )
+
+
 def apply_runtime_benchmark_overrides(
     bench: dict[str, Any],
     *,
