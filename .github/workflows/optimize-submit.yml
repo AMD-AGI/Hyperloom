@@ -44,7 +44,7 @@ on:
     - cron: '0 4,12,20 * * *'
   workflow_dispatch:
     inputs:
-      # ── Model source (priority: models > candidates_file > hf_top) ──────
+      # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
       models:
         description: 'Explicit HF repo IDs (space-separated). HIGHEST priority.'
         required: false
@@ -71,10 +71,6 @@ on:
         type: boolean
         required: false
         default: false
-      hf_top:
-        description: 'Live HuggingFace top-N (LEGACY fallback; used only if models AND candidates_file are empty)'
-        required: false
-        default: '20'
       min_params:
         description: 'Min parameter count in Billions (e.g. 7 for >=7B). 0 to skip filter.'
         required: false
@@ -312,7 +308,7 @@ jobs:
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-sandbox,core42-sandbox,core42-sandbox' || github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
