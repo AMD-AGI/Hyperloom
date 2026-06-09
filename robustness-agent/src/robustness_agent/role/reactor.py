@@ -2,19 +2,11 @@
 
 """Reactor: the heart of the robustness role.
 
-A single :meth:`Reactor.tick` runs the M1 pipeline:
-
-1. :class:`DegradeRouter` produces one :class:`SourceData` snapshot.
-2. :class:`Classifier` distils the snapshot into :class:`Symptom` list.
-3. :class:`ActionLadder` maps symptoms onto Intents + Findings.
-4. :class:`PolicyAware` filters every intent through PolicyGate-equivalent
-   checks before they leave the agent.
-5. :class:`FindingSink` persists the findings to disk.
-6. The reactor returns the validated intents.
-
-The Reactor holds tick state (tick index, last data snapshot) but no
-business logic; that lives in classifier + ladder so transports can be
-swapped without recompiling rules.
+A single :meth:`Reactor.tick` runs the M1 pipeline: :class:`DegradeRouter` ->
+:class:`Classifier` -> :class:`ActionLadder` -> :class:`PolicyAware` filter ->
+:class:`FindingSink` persist -> return validated intents. The Reactor holds tick
+state but no business logic (that lives in classifier + ladder) so transports
+can be swapped.
 """
 
 from __future__ import annotations
@@ -36,8 +28,6 @@ from .envelope import Intent
 from .prompt_inputs import ReactorContext
 
 
-# Shielded asyncio.to_thread import — only needed for the L1+L2 finalize
-# hook below. Keeping it at module scope avoids re-importing per tick.
 import asyncio  # noqa: E402  — local import keeps the diff readable
 
 
@@ -54,17 +44,11 @@ class ReactorComponents:
     policy: PolicyAware
     sink: FindingSink | None = None
     rca: RcaEngine | None = None
-    # L1 + L2: session-end finalizer. When set, the reactor watches
-    # ``ctx.shared_state.stop_reason`` for an empty→non-empty
-    # transition and invokes the finalizer exactly once via the
-    # per-instance ``_finalize_fired`` latch. Idempotency at disk
-    # level is enforced by the finalizer's marker file.
+    # Session-end finalizer: invoked once on ``stop_reason`` empty→non-empty
+    # via the ``_finalize_fired`` latch; disk-level idempotency via marker file.
     finalizer: PostmortemFinalizer | None = None
-    # Cross-tick state persistence. The subprocess-per-tick transport
-    # spawns a fresh Python per tick — without this store, every detector /
-    # ladder / throttle starts empty each tick and consecutive-tick
-    # rules can never fire. The reactor flushes the store at the end
-    # of every successful tick. ``None`` disables persistence (tests).
+    # Cross-tick state persistence (subprocess-per-tick transport loses memory
+    # otherwise, so consecutive-tick rules can't fire). ``None`` disables (tests).
     state_store: DetectorStateStore | None = None
 
 
@@ -88,9 +72,8 @@ class Reactor:
         self._tick_index = 0
         self._last_symptoms: list[Symptom] = []
         self._last_data_summary: dict[str, Any] = {}
-        # In-memory latch — guarantees ``finalizer.finalize`` is called
-        # at most once per reactor instance, complementing the disk-
-        # level marker the finalizer maintains for cross-process resume.
+        # In-memory latch: ``finalizer.finalize`` runs at most once per instance,
+        # complementing the finalizer's disk marker for cross-process resume.
         self._finalize_fired: bool = False
 
     @property
@@ -107,12 +90,8 @@ class Reactor:
 
         data = await self._router.collect(ctx)
         symptoms = self._classifier.classify(data, ctx)
-        # ``ctx.shared_state.tick`` (set by the Coordinator prompt
-        # parser) is the authoritative tick index across subprocess
-        # restarts; ``self._tick_index`` only counts ticks within this
-        # Python process. Prefer the Coordinator value when present so
-        # ladder cooldowns and finding tick_index stamps match the
-        # session-wide timeline.
+        # Prefer the Coordinator's session-wide ``ctx.shared_state.tick`` so ladder
+        # cooldowns and finding stamps survive subprocess restarts.
         authoritative_tick = self._resolve_authoritative_tick(ctx)
         result = await self._ladder.decide(
             symptoms,
@@ -145,15 +124,11 @@ class Reactor:
             except Exception:  # noqa: BLE001 — sink already swallows IO errors
                 log.exception("reactor tick=%d sink.append_many failed", self._tick_index)
 
-        # L1 + L2: detect stop_reason transition and trigger the
-        # postmortem finalizer once. The check runs *after* the sink
-        # write so the most recent findings of this tick are part of
-        # the postmortem corpus.
+        # Run after the sink write so this tick's findings are in the corpus.
         await self._maybe_finalize(ctx)
 
-        # Flush any detector / ladder / throttle state mutated this
-        # tick. Done last so even if downstream raises, we record
-        # what we observed. Off the event loop because fsync blocks.
+        # Flush mutated detector/ladder/throttle state last; off the event loop
+        # because fsync blocks.
         await self._flush_state_store()
 
         self._last_symptoms = symptoms
@@ -161,16 +136,9 @@ class Reactor:
         return validated_intents
 
     def _resolve_authoritative_tick(self, ctx: ReactorContext) -> int:
-        """Pick the most reliable tick index for this turn.
-
-        Order of preference:
-
-        1. ``ctx.shared_state.tick`` — the Coordinator's session-wide
-           tick counter, propagated through the prompt. Survives
-           subprocess restarts so cooldowns stay coherent.
-        2. ``self._tick_index`` — in-memory counter incremented per
-           ``tick()`` call. Used by ad-hoc tests and the first tick of
-           a session before the Coordinator has written the prompt.
+        """Pick the most reliable tick index: prefer the Coordinator's
+        session-wide ``ctx.shared_state.tick``, else the in-memory counter
+        (tests / first tick before the prompt is written).
         """
         shared_tick = getattr(ctx.shared_state, "tick", 0) or 0
         if shared_tick > 0:
@@ -193,9 +161,8 @@ class Reactor:
         stop_reason = str(ctx.shared_state.stop_reason or "").strip()
         if not stop_reason:
             return
-        # In-memory latch first — even if the disk write fails we will
-        # not retry within this reactor instance, matching the spec
-        # ("fire at most once per session").
+        # Latch before the disk write so a failed write isn't retried this
+        # instance (spec: fire at most once per session).
         self._finalize_fired = True
         try:
             await asyncio.to_thread(
