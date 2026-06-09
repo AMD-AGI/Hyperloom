@@ -525,9 +525,31 @@ ensure_magpie() {
     git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_DIR" "$MAGPIE_REF" "Magpie"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
-    "$PYTHON" -c "import Magpie" >/dev/null
-    log "Magpie installed OK from ${MAGPIE_DIR}"
+    # Idempotent reinstall guard. Magpie is editable-installed into the
+    # pod-level /opt/venv, which concurrent sessions on the same Claw pod
+    # SHARE. An unconditional `pip install -e` briefly tears the egg-link
+    # down/up; a sibling session mid-`python -m Magpie` benchmark then hits
+    # the gap and dies with "No module named Magpie" (intermittent, can
+    # follow an earlier successful run). The install lock lives under
+    # $HYPERLOOM_RUNTIME_DIR and does NOT cover the shared /opt/venv, so it
+    # cannot serialize this. Mirror ensure_inferencex (preserve existing) +
+    # ensure_bench_serving_deps (import-probe before pip): skip the reinstall
+    # only when the checkout exists under $MAGPIE_DIR AND `import Magpie`
+    # already resolves into it. The path check (not just import success)
+    # preserves the original guard against a stale editable from an older
+    # session masking a missing per-workspace checkout.
+    local magpie_real resolved
+    magpie_real="$(realpath "$MAGPIE_DIR" 2>/dev/null || echo "$MAGPIE_DIR")"
+    resolved="$("$PYTHON" -c 'import Magpie, os; print(os.path.realpath(os.path.dirname(Magpie.__file__)))' 2>/dev/null || true)"
+    if { [ -f "$MAGPIE_DIR/setup.py" ] || [ -f "$MAGPIE_DIR/pyproject.toml" ]; } \
+       && [ -n "$resolved" ] \
+       && case "$resolved" in "$magpie_real" | "$magpie_real"/*) true ;; *) false ;; esac; then
+      log "Magpie already installed from ${MAGPIE_DIR}; skipping editable reinstall (idempotent; avoids racing a shared /opt/venv reinstall)"
+    else
+      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
+      "$PYTHON" -c "import Magpie" >/dev/null
+      log "Magpie installed OK from ${MAGPIE_DIR}"
+    fi
   fi
 }
 
