@@ -1,63 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Per-session optimization journal — structured JSON record of every
-KEEP / REVERT / no_promote decision taken during an
-``inference_optimizer optimize`` run.
+"""Per-session optimization journal — structured JSON record of every KEEP / REVERT / no_promote decision.
 
-The journal lives at ``<session_dir>/reports/optimization_journal.json``
-and is rewritten *incrementally* after each decision (atomic tmp +
-``os.replace``) so a crash mid-session still leaves a usable artifact.
-
-Shape (stable contract; downstream dashboards may depend on these
-field names):
-
-.. code-block:: json
-
-    {
-      "session_id": "...",
-      "model": "DeepSeek-R1",
-      "hardware": "MI300X",
-      "framework": "sglang",
-      "baseline_throughput": 603.6,
-      "final_throughput": 875.0,
-      "total_gain_pct": 44.9,
-      "entries": [
-        {
-          "phase": "EXPLORE",
-          "iter": 1,
-          "kind": "backend",
-          "change": "--attention-backend ROCM_AITER_UNIFIED_ATTN",
-          "outcome": "KEEP",
-          "gain_pct": 12.3,
-          "throughput_after": 678.0,
-          "ts": "2026-05-26T08:48:00Z"
-        },
-        {
-          "phase": "EXPLORE",
-          "iter": 4,
-          "kind": "env",
-          "change": "VLLM_ROCM_USE_AITER_FP4BMM=1",
-          "outcome": "REVERT",
-          "error_class": "crash",
-          "reason": "gfx942 不支持",
-          "ts": "..."
-        }
-      ]
-    }
-
-Design rationale:
-
-* **JSON over markdown** — structured so a downstream tool can diff /
-  filter / aggregate across sessions. Render-to-markdown is a separate
-  concern (a future ``render_journal.py`` script).
-* **Append-only entries** — every decision lands as one entry; finalize
-  only mutates the top-level summary fields.
-* **No KB dependency** — works even with ``--degraded-kb`` /
-  ``--no-fact-writes``; the journal is local-only so operators always
-  get a session report.
-* **Idempotency** — :meth:`Journal.append_entry` dedupes by
-  ``(phase, iter, kind, change, outcome)`` so a resume that replays the
-  event log doesn't double-write entries.
+Lives at ``<session_dir>/reports/optimization_journal.json``; rewritten
+incrementally (atomic tmp + ``os.replace``) so a mid-session crash leaves a usable artifact.
+:meth:`Journal.append_entry` dedups for resume safety.
 """
 
 from __future__ import annotations
@@ -78,15 +25,12 @@ log = logging.getLogger(__name__)
 # Stable filename so dashboards / report scripts can hard-code it.
 JOURNAL_FILENAME: str = "optimization_journal.json"
 
-# Outcome literals — keep stable; consumed by render scripts and KB
-# fact-write hooks (KEEP → propose_lesson; REVERT → maybe propose_pitfall).
+# Outcome literals — keep stable (consumed by render scripts + KB fact-write hooks).
 OUTCOME_KEEP:        str = "KEEP"
 OUTCOME_REVERT:      str = "REVERT"
 OUTCOME_NO_PROMOTE:  str = "no_promote"
 
-# Change-kind vocabulary — coarse classification so a downstream
-# dashboard can group entries without parsing free-text. Extend by
-# appending; don't reuse old strings.
+# Change-kind vocabulary — coarse dashboard grouping. Extend by appending; don't reuse old strings.
 KIND_BACKEND:      str = "backend"      # --attention-backend, kv_cache_dtype, ...
 KIND_PARAM:        str = "param"        # --max-num-batched-tokens, --gpu-memory-utilization, ...
 KIND_ENV:          str = "env"          # ROCm / vLLM env vars
@@ -99,12 +43,7 @@ KIND_OTHER:        str = "other"
 
 @dataclass
 class JournalEntry:
-    """One row in the journal — exactly one KEEP / REVERT / no_promote
-    decision recorded by the Coordinator.
-
-    All fields are JSON-serialisable; ``None`` is preserved so a
-    consumer can distinguish "not measured" from "measured zero".
-    """
+    """One KEEP / REVERT / no_promote decision (``None`` distinguishes "not measured" from "measured zero")."""
 
     phase:             str
     iter:              int
@@ -142,20 +81,7 @@ class JournalEntry:
         )
 
     def dedupe_key(self) -> tuple[str, int, str, str, str, str, str]:
-        """Tuple used by :meth:`Journal.append_entry` to skip duplicates
-        on resume replay.
-
-        Both ``variant_name`` and ``task_id`` participate in the key:
-
-        * ``variant_name`` — an explore round emits multiple entries per
-          ``(phase, iter)`` that differ only by which variant was tried.
-        * ``task_id`` — two independent non-explore tasks scheduled in
-          the same tick (e.g. two baseline / profile / kernel_opt runs)
-          legitimately collide on ``(phase, iter, kind, change, outcome)``
-          when :func:`summarize_change` falls back to the task kind
-          string; without ``task_id`` in the key the second entry would
-          be silently dropped as a "resume replay".
-        """
+        """Dedup tuple for resume replay (includes variant_name + task_id so same-tick siblings don't collide)."""
         return (
             self.phase, self.iter, self.kind, self.change,
             self.outcome, self.variant_name, self.task_id,
@@ -164,12 +90,7 @@ class JournalEntry:
 
 @dataclass
 class Journal:
-    """In-memory representation of the journal file.
-
-    Construct via :meth:`load_or_create`; mutate via
-    :meth:`append_entry` / :meth:`finalize`; both methods write through
-    to disk before returning so a crash never loses state.
-    """
+    """In-memory representation of the journal file (mutations write through to disk before returning)."""
 
     session_id:           str
     model:                str
@@ -181,9 +102,7 @@ class Journal:
     entries:              list[JournalEntry] = field(default_factory=list)
     path:                 Path = field(default_factory=Path)
 
-    # ------------------------------------------------------------------
     # Construction
-    # ------------------------------------------------------------------
     @classmethod
     def load_or_create(
         cls,
@@ -195,15 +114,7 @@ class Journal:
         framework: str = "",
         baseline_throughput: float = 0.0,
     ) -> Journal:
-        """Return the existing journal if one is on disk, else mint a new
-        one.
-
-        Header fields (``session_id`` / ``model`` / ``hardware`` /
-        ``framework`` / ``baseline_throughput``) are updated from the
-        on-disk file's defaults *only* when the caller leaves them empty,
-        so a resume call that doesn't know the baseline yet won't blow
-        away an earlier write that captured it.
-        """
+        """Return the existing journal if on disk, else mint a new one (on-disk header fields win only when the caller leaves them empty)."""
         path = cls._journal_path(session_dir)
         if path.exists():
             try:
@@ -242,16 +153,9 @@ class Journal:
         reports.mkdir(parents=True, exist_ok=True)
         return reports / JOURNAL_FILENAME
 
-    # ------------------------------------------------------------------
     # Mutation
-    # ------------------------------------------------------------------
     def append_entry(self, entry: JournalEntry) -> bool:
-        """Append a decision row and flush to disk.
-
-        Returns ``True`` when the entry was new (and the file was
-        rewritten), ``False`` when a duplicate dedupe_key was found
-        (resume replay safety).
-        """
+        """Append a decision row and flush; ``False`` on duplicate dedupe_key (resume replay safety)."""
         if not entry.ts:
             entry.ts = _now_iso()
         key = entry.dedupe_key()
@@ -268,12 +172,7 @@ class Journal:
         final_throughput: float | None = None,
         total_gain_pct: float | None = None,
     ) -> None:
-        """Update top-level summary fields and flush.
-
-        Intended to be called once at CLOSE (T4). Both arguments are
-        optional so a partial finalize (e.g. only ``final_throughput``
-        known) is allowed.
-        """
+        """Update top-level summary fields and flush (called once at CLOSE; partial finalize allowed)."""
         if final_throughput is not None:
             self.final_throughput = float(final_throughput)
         if total_gain_pct is not None:
@@ -281,29 +180,14 @@ class Journal:
         self._flush()
 
     def update_baseline(self, baseline_throughput: float) -> None:
-        """Late-binding setter for the baseline measurement.
-
-        T0 typically runs before the baseline action completes, so the
-        constructor receives ``0.0`` and we backfill once the baseline
-        executor finishes. No-op when the new value is non-positive
-        (avoids erasing a real measurement with a stale 0).
-        """
+        """Late-binding setter for the baseline measurement (no-op on non-positive, to avoid erasing a real value with a stale 0)."""
         if baseline_throughput and baseline_throughput > 0:
             self.baseline_throughput = float(baseline_throughput)
             self._flush()
 
-    # ------------------------------------------------------------------
     # Persistence
-    # ------------------------------------------------------------------
     def _flush(self) -> None:
-        """Atomic write of the whole journal to disk.
-
-        Uses ``tmp + os.replace`` so a reader never observes a partially
-        written file. Best-effort: an IOError is logged at warning
-        level and swallowed — the journal is a forensic aid, not a
-        correctness invariant, and the coordinator must not abort
-        a session because of a disk hiccup.
-        """
+        """Atomic write (tmp + os.replace); best-effort — IOError logged and swallowed (forensic aid, not a correctness invariant)."""
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             payload = self.to_dict()
@@ -330,9 +214,7 @@ class Journal:
         return out
 
 
-# ---------------------------------------------------------------------------
 # helpers
-# ---------------------------------------------------------------------------
 def _now_iso() -> str:
     """ISO-8601 UTC timestamp (seconds precision) used for entry ``ts``."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
@@ -341,16 +223,7 @@ def _now_iso() -> str:
 
 
 def _variant_args(variant: dict[str, Any]) -> str:
-    """Read a variant's server-arg string, canonical-first.
-
-    The field was renamed ``extra_sglang_args`` -> ``extra_server_args``
-    (framework-neutral; see compat.payload_aliases). Explore / stack
-    ledger entries now carry the canonical key, so reading only the
-    legacy name would silently classify every param/backend variant as
-    ``KIND_OTHER`` and emit an empty journal ``change`` string. Read
-    canonical first, keep a read-only legacy fallback for any
-    pre-rename caller.
-    """
+    """Read a variant's server-arg string, canonical (``extra_server_args``) first with a legacy ``extra_sglang_args`` fallback."""
     return str(
         variant.get("extra_server_args")
         or variant.get("extra_sglang_args")
@@ -359,12 +232,7 @@ def _variant_args(variant: dict[str, Any]) -> str:
 
 
 def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) -> str:
-    """Map a task / variant to one of the ``KIND_*`` vocab values.
-
-    Coarse heuristic; the inputs are noisy (variants can mix backend +
-    param + env in one cell) so we pick the most prominent dimension
-    in the order: env-only > kernel_file > integrate > backend > param.
-    """
+    """Map a task / variant to a ``KIND_*`` value (priority: env-only > kernel_file > integrate > backend > param)."""
     kind = (task_kind or "").lower()
     if kind in ("kernel_opt", "deep_kernel_analysis", "operator_tuning"):
         return KIND_KERNEL_FILE
@@ -374,7 +242,6 @@ def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) 
         return KIND_BASELINE
     if kind == "profile":
         return KIND_PROFILE
-    # explore variants — peek inside to refine.
     if isinstance(variant, dict):
         args = _variant_args(variant)
         if variant.get("extra_envs") and not args:
@@ -391,11 +258,7 @@ def summarize_change(
     variant: dict[str, Any] | None = None,
     result_dict: dict[str, Any] | None = None,
 ) -> str:
-    """Human-readable one-line description of what was changed.
-
-    Caller-friendly summary used as the ``change`` field. Falls back to
-    the task kind when nothing more informative is available.
-    """
+    """Human-readable one-line description used as the ``change`` field (falls back to task kind)."""
     if isinstance(variant, dict):
         name = str(variant.get("name") or "").strip()
         args = _variant_args(variant).strip()

@@ -2,16 +2,10 @@
 
 """Append-only JSONL sink for ladder findings.
 
-File layout::
-
-    {session_dir}/agents/robustness/findings/{session_id}.jsonl
-
-Each line is one :class:`Finding`, serialised by :func:`finding_to_row`.
-Writes go through :func:`asyncio.to_thread` so the reactor's tick
-budget is not blocked on disk I/O.
-
-The sink is best-effort: a write failure logs a single WARN per error
-class but never raises into the reactor.
+Writes one :class:`Finding` per line to
+``{session_dir}/agents/robustness/findings/{session_id}.jsonl`` via
+:func:`asyncio.to_thread` (keeps the tick off the disk I/O path).
+Best-effort: write failures log one WARN per error class, never raise.
 """
 
 from __future__ import annotations

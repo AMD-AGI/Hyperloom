@@ -3,17 +3,11 @@
 """WebFetchClient — single-URL fetcher with SSRF guard, HTML→Markdown
 conversion, redirect handling and a TTL+LRU cache.
 
-Mirrors the safety posture documented in Primus-Claw's
-``Claw/docs/builtin-tools-design.md`` §5.2 — in particular the DNS-based
-SSRF rejection (stronger than claude-code) and the same-host-only
-redirect policy. Summarization (Haiku) is **not** ported because critic-
-agent is already inside a reasoning loop; double-summarization wastes
-tokens and obscures attribution.
-
-Synchronous on purpose: the CriticAgentBackend wraps ``execute`` in
-``asyncio.to_thread``. Keeping the client sync avoids leaking the asyncio
-loop into provider mocks and matches how Primus-Claw's TS version is
-structured per-request.
+Mirrors Primus-Claw ``builtin-tools-design.md`` §5.2: DNS-based SSRF
+rejection and same-host-only redirects. Summarization is not ported
+(critic-agent is already in a reasoning loop). Synchronous on purpose —
+the backend wraps ``execute`` in ``asyncio.to_thread``, keeping the loop
+out of provider mocks.
 """
 
 from __future__ import annotations

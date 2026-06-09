@@ -2,42 +2,20 @@
 
 """State-integrity signals (I1-I5).
 
-Five detectors guard the **session itself** — the files Coordinator
-relies on and the process Coordinator runs as. When any of them
-silently break the run can keep producing intents but no longer have
-the safety net it thinks it does:
+Five detectors guard the session files Coordinator relies on and the
+process it runs as:
 
-* **I1 ``state_json_corrupt``** — ``state.json`` failed to load as
-  JSON, OR the file is now smaller than the previous known-good size
-  (partial write during crash). Coordinator's resume path uses this
-  file to restore baseline / current_best / explore_search ledgers;
-  losing it during a long run silently throws away progress.
-
-* **I2 ``coordinator_wal_bloat``** — ``coordinator.db-wal`` crossed a
-  configurable size threshold (default 1 GiB). The WAL is *supposed*
-  to be checkpointed periodically; left to grow it tanks every
-  SQLite read/write at the worst possible time (mid-handoff between
-  agents).
-
-* **I3 ``stale_lease``** — a row in the ``leases`` table is held by a
-  PID that no longer exists. The Coordinator's resource-lock layer
-  would normally release the lease on graceful task exit; a crashed
-  task leaves the lane locked, freezing every downstream proposal
-  that requires it.
-
-* **I4 ``inbox_bloat``** — any role's ``inbox.jsonl`` or
-  ``outbox.jsonl`` exceeded the configured size threshold. Past
-  ~100 MiB the per-tick parsers slow down dramatically; past ~500 MiB
-  the agent backends start timing out.
-
-* **I5 ``coordinator_zombie``** — the recorded Coordinator PID is no
-  longer alive but ``state.json`` doesn't carry a ``stop_reason``.
-  This is the worst case Robustness can see: the run is technically
-  dead, but session files still claim it's running, so external
-  monitors think everything is fine. Robustness escalates HIGH
-  immediately; the operator has to restart manually because
-  Robustness lives in the same process tree (its own subprocess
-  will exit alongside the Coordinator).
+* **I1 ``state_json_corrupt``** — ``state.json`` failed to parse or
+  shrank below known-good size (partial write); resume would lose
+  baseline / current_best / explore_search ledgers.
+* **I2 ``coordinator_wal_bloat``** — ``coordinator.db-wal`` past the
+  size threshold (default 1 GiB); un-checkpointed WAL tanks SQLite I/O.
+* **I3 ``stale_lease``** — a ``leases`` row held by a dead PID, freezing
+  every downstream proposal on that lane.
+* **I4 ``inbox_bloat``** — a role's ``inbox/outbox.jsonl`` past the
+  threshold; per-tick JSONL parsing slows then agent backends time out.
+* **I5 ``coordinator_zombie``** — recorded PID dead but ``state.json``
+  has no ``stop_reason``; HIGH, operator must restart manually.
 """
 
 from __future__ import annotations
@@ -56,15 +34,10 @@ from .symptom import Symptom, SymptomSeverity
 class StateIntegrityConfig:
     """Tunables for :func:`evaluate_state_integrity_signals`."""
 
-    # I2 — WAL size at which we surface a MEDIUM alert. The actual
-    # WAL-checkpoint trigger is owned by the Coordinator; Robustness
-    # only nags when it grows past a clearly-unhealthy footprint.
+    # I2 — WAL size warn/crit; Robustness only nags, Coordinator owns checkpointing.
     wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
-    # I3 — minimum age of a stale lease before we fire. Short-lived
-    # crashes can momentarily leave a lease un-released between the
-    # process kill and the Coordinator's reaper tick; the wait keeps
-    # the rule from racing the cleanup path.
+    # I3 — min stale-lease age before firing, to avoid racing the reaper.
     stale_lease_min_age_s: float = 60.0
     # I4 — agent-file thresholds.
     inbox_bloat_warn_bytes: int = 100 * 1024 * 1024     # 100 MiB
@@ -98,16 +71,11 @@ def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
     state = si.get("state_json")
     if not isinstance(state, dict) or not state:
         return []
-    # ``valid=True`` → JSON parsed and is a dict; nothing to do.
     if state.get("valid"):
         return []
     error = str(state.get("error") or "unknown")
-    # "missing" is normal on tick 0 (Coordinator writes state.json on
-    # first persist). We surface corruption (json_parse_failed / read
-    # errors) but stay silent for absent files so a fresh sandbox or
-    # an early reactor tick doesn't false-fire. The Coordinator-zombie
-    # signal (I5) catches the case where state.json *should* exist but
-    # the run died first.
+    # "missing" is normal pre-first-persist; stay silent so a fresh
+    # sandbox doesn't false-fire (I5 covers the should-exist-but-died case).
     if error == "missing":
         return []
     return [
@@ -200,9 +168,8 @@ def _stale_lease_symptoms(
             continue
         if entry.get("alive") is not False:
             continue
-        # Skip leases whose acquired_at is recent — the reaper hasn't
-        # had a chance yet. ``acquired_at`` may be unix seconds or
-        # ISO-ish; we coerce both.
+        # Skip recently-acquired leases (reaper hasn't run); coerce
+        # unix-seconds or ISO ``acquired_at``.
         acquired_unix = _coerce_unix(entry.get("acquired_at"))
         age_s = (
             (now - acquired_unix)
@@ -327,8 +294,7 @@ def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
         return []
     pid = coord.get("recorded_pid")
     alive = coord.get("alive")
-    # Skip cases we can't judge: no PID file, or alive==None (probe
-    # didn't run / ``os.kill`` API missing on this platform).
+    # Skip cases we can't judge: no PID file or alive==None (probe didn't run).
     if pid is None or alive is None:
         return []
     if alive:
@@ -337,8 +303,7 @@ def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
     if isinstance(state, dict) and state.get("valid"):
         stop_reason = str(state.get("stop_reason") or "")
     if stop_reason:
-        # Clean wind-down — Coordinator already wrote a terminal
-        # stop_reason; the missing PID is just "the process exited".
+        # Clean wind-down — terminal stop_reason already written.
         return []
     return [
         Symptom(

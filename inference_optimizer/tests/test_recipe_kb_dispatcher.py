@@ -2,27 +2,10 @@
 
 """Tests for :class:`RecipeKB` — the local-write / remote-read dispatcher.
 
-Covers the contract documented at the top of ``recipe_kb/dispatcher.py``:
-
-* writes (put_recipe / append_attempt / delete_recipe) NEVER touch
-  the remote — verified with a spy ``RemoteRecipeClient`` that
-  raises if any read method is called during a write;
-* reads (get_recipe / get_history / search / list_recent /
-  list_attempts / list_session_attempts):
-    * remote-first when configured AND enabled;
-    * remote-success result returned verbatim;
-    * remote 404 / empty falls THROUGH to local (so a freshly-
-      bootstrapped remote can't shadow our authoritative local
-      writes);
-    * remote raise → local fallback + ``on_remote_failure`` callback;
-* ``remote=None`` → local-only mode (no fallback ladder, no
-  network calls);
-* ``remote.enabled=False`` → equivalent to ``remote=None`` (the
-  client itself short-circuits, dispatcher never even tries).
-
-Also covers integration with the actual :class:`RemoteRecipeClient`
-+ :class:`LocalRecipeStore` so the dispatcher's contract is tested
-end-to-end at least once (no all-mocks unit testing).
+Covers: writes never touch the remote; reads are remote-first with local
+fallback (empty/404/raise all fall through to authoritative local writes);
+``remote=None`` and ``remote.enabled=False`` are local-only. Includes one
+end-to-end pass against the real client + local store.
 """
 
 from __future__ import annotations
@@ -59,9 +42,7 @@ def _cid(model: str = "m") -> str:
     )
 
 
-# ===========================================================================
 # Fixtures
-# ===========================================================================
 @pytest.fixture
 def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in (
@@ -91,12 +72,9 @@ def kb(local_store: LocalRecipeStore, remote: RemoteRecipeClient) -> RecipeKB:
     return RecipeKB(local=local_store, remote=remote)
 
 
-# ===========================================================================
 # Writes — local-only
-# ===========================================================================
 class _ReadOnlyRemoteSpy:
-    """A ``RemoteRecipeClient``-shaped sentinel that raises if any
-    read method is invoked. Used to assert writes never touch remote."""
+    """A ``RemoteRecipeClient``-shaped sentinel that raises if any read method is invoked."""
 
     enabled = True
 
@@ -147,16 +125,10 @@ def test_delete_recipe_never_touches_remote(
     assert kb.delete_recipe(canonical_id=cid) is True
 
 
-# ===========================================================================
 # Reads — remote-first, local fallback (real remote via respx)
-# ===========================================================================
 def test_get_recipe_returns_remote_when_remote_hits(kb: RecipeKB) -> None:
-    """Remote is reached through the SINGLE /recipes/search route (the
-    5-tuple label_match); dispatcher returns the top row translated to
-    arbor shape (top-level ``model``/``hardware``/``best_throughput``)."""
+    """A remote /recipes/search hit is returned translated to arbor shape."""
     cid = _cid()
-    # Simulate the central kb-service v2 wire shape: identity goes
-    # in ``labels``, throughput in ``metrics``, best_config in body.
     v2_payload = {
         "canonical_id": cid,
         "version":      5,
@@ -170,8 +142,6 @@ def test_get_recipe_returns_remote_when_remote_hits(kb: RecipeKB) -> None:
         )
         out = kb.get_recipe(canonical_id=cid)
     assert out is not None
-    # Translated arbor shape — top-level identity + best_config /
-    # best_throughput pulled out of v2's nested body / metrics.
     assert out["canonical_id"]     == cid
     assert out["version"]          == 5
     assert out["model"]            == "remote-model"
@@ -181,14 +151,11 @@ def test_get_recipe_returns_remote_when_remote_hits(kb: RecipeKB) -> None:
 
 
 def test_v2_framework_version_label_is_read(kb: RecipeKB) -> None:
-    """Both the remote kb-service and the local store standardise on
-    ``framework_version`` for the 4th identity dimension. A remote row
-    that uses it is surfaced directly. The top-level recipe ``version``
-    (row revision) stays independent of it."""
+    """A remote row's ``framework_version`` label is surfaced; the row ``version`` stays independent."""
     cid = _cid()
     v2_payload = {
         "canonical_id": cid,
-        "version":      7,  # row revision — must NOT leak into framework_version
+        "version":      7,
         "labels": {
             "model":             "remote-model",
             "hardware":          "mi300x",
@@ -210,20 +177,16 @@ def test_v2_framework_version_label_is_read(kb: RecipeKB) -> None:
 
 
 def test_v2_legacy_version_label_is_not_read(kb: RecipeKB) -> None:
-    """The remote KB has migrated the 4th identity dimension to
-    ``framework_version``; the legacy ``labels.version`` key is no
-    longer read. A row carrying only the legacy key yields an empty
-    ``framework_version`` (no fallback). The top-level row revision
-    ``version`` stays independent."""
+    """The legacy ``labels.version`` key is no longer read; a row with only it yields empty ``framework_version``."""
     cid = _cid()
     v2_payload = {
         "canonical_id": cid,
-        "version":      7,  # row revision — independent of identity
+        "version":      7,
         "labels": {
             "model":     "remote-model",
             "hardware":  "mi300x",
             "framework": "sglang",
-            "version":   "0.4.5",  # legacy key — must be ignored now
+            "version":   "0.4.5",
             "precision": "fp8",
         },
         "body":    {},
@@ -242,8 +205,7 @@ def test_v2_legacy_version_label_is_not_read(kb: RecipeKB) -> None:
 def test_get_recipe_falls_through_to_local_when_remote_empty(
     kb: RecipeKB, local_store: LocalRecipeStore,
 ) -> None:
-    """Remote search finds no match → must NOT shadow a local write —
-    the dispatcher's invariant is "local is authoritative for writes"."""
+    """Remote search finding no match must NOT shadow an authoritative local write."""
     cid = _cid()
     local_store.put_recipe(
         canonical_id=cid, model="local-marker",
@@ -288,10 +250,7 @@ def test_get_recipe_returns_none_when_neither_has_it(
 
 
 def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
-    """Core design: the remote read calls /recipes/search ONCE with the
-    full 5-tuple (decoded from canonical_id) as label_match; the server
-    is responsible for exact-vs-relative fallback. The client does not
-    walk a ladder and does not hit GET /recipes/{cid}."""
+    """The remote read calls /recipes/search ONCE with the full 5-tuple as label_match."""
     import json as _json
     cid = _cid()
     captured: dict = {}
@@ -304,9 +263,6 @@ def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
         mock.post(PATH_RECIPES_SEARCH).mock(side_effect=_capture)
         kb.get_recipe(canonical_id=cid)
     label_match = captured.get("label_match") or {}
-    # Remote kb-service and local store both key the 4th identity
-    # dimension as ``framework_version``; the decoded label_match uses
-    # that key directly (no translation).
     assert set(label_match) == {
         "model", "hardware", "framework", "framework_version", "precision",
     }
@@ -316,12 +272,10 @@ def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
 def test_get_history_is_local_only(
     kb: RecipeKB, local_store: LocalRecipeStore,
 ) -> None:
-    """get_history is LOCAL only — remote is reached through the single
-    /recipes/search route, never /history. No HTTP mock needed: the
-    dispatcher must not touch ``kb`` (the unreachable test remote)."""
+    """get_history is LOCAL only; the dispatcher must not touch the remote."""
     cid = _cid()
     local_store.put_recipe(canonical_id=cid)
-    local_store.put_recipe(canonical_id=cid)  # creates v1 history
+    local_store.put_recipe(canonical_id=cid)
     rows = kb.get_history(canonical_id=cid)
     assert len(rows) == 1
     assert rows[0]["version"] == 1
@@ -348,8 +302,7 @@ def test_search_falls_through_to_local_on_remote_failure(
 def test_list_recent_is_local_only(
     kb: RecipeKB, local_store: LocalRecipeStore,
 ) -> None:
-    """list_recent is LOCAL only (remote = /recipes/search route only;
-    bare GET /recipes is not used)."""
+    """list_recent is LOCAL only."""
     cid_local = _cid(model="local-only")
     local_store.put_recipe(canonical_id=cid_local)
     rows = kb.list_recent()
@@ -359,7 +312,7 @@ def test_list_recent_is_local_only(
 def test_list_attempts_is_local_only(
     kb: RecipeKB, local_store: LocalRecipeStore,
 ) -> None:
-    """list_attempts is LOCAL only (remote = /recipes/search only)."""
+    """list_attempts is LOCAL only."""
     cid = _cid()
     local_store.append_attempt(
         canonical_id=cid, session_id="s", outcome="kept",
@@ -372,7 +325,7 @@ def test_list_attempts_is_local_only(
 def test_list_session_attempts_is_local_only(
     kb: RecipeKB, local_store: LocalRecipeStore,
 ) -> None:
-    """list_session_attempts is LOCAL only (remote = /recipes/search only)."""
+    """list_session_attempts is LOCAL only."""
     cid = _cid()
     local_store.append_attempt(
         canonical_id=cid, session_id="sess-7", outcome="kept",
@@ -382,15 +335,11 @@ def test_list_session_attempts_is_local_only(
     assert rows[0]["session_id"] == "sess-7"
 
 
-# ===========================================================================
 # remote=None / remote disabled — local-only mode
-# ===========================================================================
 def test_no_remote_means_local_only_for_reads(
     local_store: LocalRecipeStore,
 ) -> None:
-    """``--degraded-kb`` / no ``--cortex-kb-url`` path: dispatcher
-    constructed with ``remote=None`` reads only from the local
-    store and never makes a network call."""
+    """``remote=None`` reads only from the local store and never makes a network call."""
     kb = RecipeKB(local=local_store, remote=None)
     cid = _cid()
     local_store.put_recipe(canonical_id=cid, model="local-marker")
@@ -402,8 +351,7 @@ def test_no_remote_means_local_only_for_reads(
 def test_disabled_remote_treated_as_no_remote(
     local_store: LocalRecipeStore, env_clean: None,
 ) -> None:
-    """A ``remote.enabled=False`` client behaves identically to
-    ``remote=None`` from the dispatcher's perspective."""
+    """A ``remote.enabled=False`` client behaves identically to ``remote=None``."""
     disabled = RemoteRecipeClient(kb_url=KB_URL, enabled=False)
     kb = RecipeKB(local=local_store, remote=disabled)
     cid = _cid()
@@ -413,14 +361,11 @@ def test_disabled_remote_treated_as_no_remote(
     assert out["model"] == "local-marker"
 
 
-# ===========================================================================
 # Lifecycle
-# ===========================================================================
 def test_close_releases_remote_transport(
     local_store: LocalRecipeStore, remote: RemoteRecipeClient,
 ) -> None:
-    """``RecipeKB.close`` must call ``remote.close`` (free up
-    socket / keepalive connection pool)."""
+    """``RecipeKB.close`` must call ``remote.close``."""
     closed_marker: list[bool] = []
     remote.close = lambda: closed_marker.append(True)  # type: ignore[method-assign]
     kb = RecipeKB(local=local_store, remote=remote)

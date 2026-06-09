@@ -34,26 +34,15 @@ from inference_optimizer.paths import make_session_dir
 from inference_optimizer.storage import SqliteConnection
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     # Point HYPERLOOM_KERNEL_AGENT_ROOT at the repo's kernel-agent tree so
-    # ``integrate_handler`` -> ``_maybe_apply_kernel_patch`` ->
-    # ``_load_apply_tool`` can resolve ``apply_kernel_patch.py`` without
-    # requiring the operator to source ``$KERNEL_AGENT_ENV`` before
-    # running pytest. ``krh`` is already imported at module top — no
-    # inline reimport. Same convention as test_p2_2_profile_and_handlers.py.
+    # ``integrate_handler`` can resolve ``apply_kernel_patch.py``.
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
-    # Keep the unit test hermetic: stub the interpreter resolver so it never
-    # spawns a real ``python3 -c "import Magpie"`` probe. (Setting
-    # MAGPIE_PYTHON alone no longer short-circuits the probe — the resolver
-    # validates the env value via run_with_session_kill since the
-    # stale-interpreter self-heal landed.) The mocked Magpie launch only ever
-    # sees this fixed interpreter as ``cmd[0]``.
+    # Stub the interpreter resolver so the unit test never spawns a real probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from inference_optimizer.orchestrator.action_executors import _grid_runner
     monkeypatch.setattr(
@@ -120,15 +109,12 @@ def _write_patch_pair(
     return target, patch_file
 
 
-# ===========================================================================
 # integrate_handler
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_integrate_handler_keep_decision(session_dir, tmp_path):
     """re-baseline returns 900 vs base 800 → KEEP."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
-    target, patch_file = _write_patch_pair(tmp_path)
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -203,7 +189,6 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
     """re-baseline returns 700 vs base 800 → REVERT."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
-    target, patch_file = _write_patch_pair(tmp_path)
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -433,12 +418,8 @@ async def test_integrate_handler_injects_extra_server_args(
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "KEEP"
-    # The operator-supplied extra_server_args must be preserved verbatim, and
-    # the shared materialization choke point auto-appends the sglang
-    # scheduler ``--watchdog-timeout`` (MI300X cold-compile guard) on top of
-    # it. Assert both rather than exact equality so the watchdog default
-    # (1800s, or $SGLANG_WATCHDOG_TIMEOUT) can evolve without breaking this
-    # test. See ``inject_sglang_watchdog_timeout`` / test_watchdog_injection.
+    # extra_server_args is preserved verbatim and the watchdog timeout is
+    # auto-appended; assert both rather than exact equality.
     sglang_args = seen["envs"]["EXTRA_SGLANG_ARGS"]
     assert "--cuda-graph-max-bs 8" in sglang_args
     assert "--watchdog-timeout" in sglang_args
@@ -485,17 +466,13 @@ async def test_integrate_handler_rejects_zero_base_tput(session_dir):
 def test_integrate_registered_under_two_aliases():
     assert krh.has_handler("integrate")
     assert krh.has_handler("apply_patch")
-    # Both must point to the same callable.
     assert krh.get_handler("integrate") is krh.get_handler("apply_patch")
 
 
-# ===========================================================================
 # Coordinator wiring of integrate request
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_coordinator_integrate_request_emits_keep_response(session_dir, tmp_path):
-    """End-to-end coordinator flow: REQUEST{kind=integrate} → handler runs →
-    RESPONSE on bus contains KEEP/REVERT decision."""
+    """REQUEST{kind=integrate} → handler runs → RESPONSE carries KEEP/REVERT."""
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     target, patch_file = _write_patch_pair(tmp_path)
@@ -570,7 +547,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
         run_calls += 1
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
-        _fake_workspace(slot, tput=805.0)  # +0.625%, below KEEP threshold.
+        _fake_workspace(slot, tput=805.0)  # +0.625%, below KEEP threshold
         return subprocess.CompletedProcess(
             args=cmd, returncode=0, stdout="ok", stderr="",
         )
@@ -614,17 +591,8 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
             if r.payload.get("kind") == "integrate_done"
         ]
         assert len(integrate_results) == 4
-        # Cap verification: the first 3 attempts run the integrate path
-        # (each spawning the rebaseline benchmark subprocess and any
-        # apply-side helper subprocesses), and the 4th attempt is
-        # short-circuited before any subprocess runs. The exact subprocess
-        # count per attempt is an implementation detail (today it's 2 —
-        # apply pre-flight + rebaseline — totalling 6 over the first 3
-        # attempts), so assert proportionally: ``run_calls`` must be a
-        # positive multiple of the 3 non-capped attempts, with no
-        # additional growth past the 3rd attempt (i.e. the 4th attempt
-        # contributes zero, which is what ``status == "skipped"`` below
-        # also pins).
+        # Cap: first 3 attempts run the integrate path, the 4th is short-circuited.
+        # Assert proportionally since per-attempt subprocess count is an impl detail.
         assert run_calls > 0, "first 3 attempts must spawn subprocess"
         assert run_calls % 3 == 0, (
             f"first 3 attempts should contribute equal subprocess counts; "
@@ -646,13 +614,10 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
         await c.stop()
 
 
-# ===========================================================================
 # ReportExecutor
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_report_executor_writes_md_and_json(session_dir):
-    """Pre-load the session with realistic state + a few bus events,
-    then run the report runner and assert both files exist + parse."""
+    """Run the report runner against seeded state + bus events; both files parse."""
     state = SharedState(
         session_id=session_dir.name,
         model_name="Qwen-Qwen3-8B",
@@ -667,7 +632,6 @@ async def test_report_executor_writes_md_and_json(session_dir):
     )
     state.save(session_dir)
 
-    # Make the coordinator seed the bus with a few realistic events.
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         await c._handle_intent("orchestration", Intent(
@@ -685,7 +649,6 @@ async def test_report_executor_writes_md_and_json(session_dir):
     finally:
         await c.stop()
 
-    # Build a Task ourselves and invoke the runner.
     db = SqliteConnection(tmp_path_helper(session_dir))
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -720,21 +683,14 @@ async def test_report_executor_writes_md_and_json(session_dir):
 
 
 def tmp_path_helper(session_dir: Path) -> Path:
-    """ReportExecutor needs its own SqliteConnection — point it at the
-    session's DB."""
+    """Point ReportExecutor's SqliteConnection at the session's DB."""
     return session_dir / "storage" / "coordinator.db"
 
 
 @pytest.mark.asyncio
 async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path,
                                                                       monkeypatch):
-    """Without an explicit session_dir param + nothing under env override,
-    the runner reports a structured failure (not a crash). Note the
-    SubAgentRunner state stays "succeeded" because the runner returned
-    a dict (didn't raise) — the failure signal is inside result['status']."""
-    # Pin USER_DATA_PATH at a path with no state.json so
-    # ReportExecutor's resolution returns None (canonical default would
-    # also work, but we use tmp_path to keep the test hermetic).
+    """An unresolvable session_dir yields a structured failure, not a crash."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "noses"))
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
