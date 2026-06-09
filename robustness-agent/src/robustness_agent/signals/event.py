@@ -2,19 +2,11 @@
 
 """Coordinator-event-driven signals.
 
-Two patterns the robustness role watches per:
-
-* Repeated ``policy_denied`` observations from the same source within
-  a short window indicate either a misconfigured agent or a
-  systemically-rejected action — emit a medium-severity alert
-  suggesting the operator review the ActionRegistry.
-* ``delegated_result`` events with ``state == "failed"`` clustering on
-  the same action family hint at a stuck branch, suggesting a
-  ``prune_branch`` action.
-
-Inputs come from both ``ctx.inbox`` (rendered into the prompt) and
-``data.coordinator_events`` (read directly from the local conductor.db
-when robustness-server is unavailable).
+Watches repeated ``policy_denied`` observations from the same source
+(misconfigured / systemically-rejected agent → MEDIUM alert) and
+``delegated_result`` failures clustering on one action family (stuck
+branch → ``prune_branch``). Reads both ``ctx.inbox`` and
+``data.coordinator_events``.
 """
 
 from __future__ import annotations
@@ -34,16 +26,10 @@ class EventConfig:
 
     policy_denied_threshold: int = 3
     delegated_failure_threshold: int = 2
-    # Window we look back over inbox + coordinator_events for the most
-    # recent recover result. The Coordinator only emits one
-    # ``delegated_result`` per recover task, so a small window is enough.
+    # Lookback over inbox + coordinator_events for the most recent recover result.
     recover_lookback_events: int = 50
-    # B4: ``idempotency_replay``. The Coordinator de-dupes ``delegate``
-    # intents by ``idempotency_key``, so a malformed LLM that bumps the
-    # key while keeping the payload identical can spam fresh tasks
-    # inside one tick. We aggregate inbox-side ``delegate`` payloads per
-    # tick and fire when ``>= threshold`` distinct keys share the same
-    # action+payload hash.
+    # B4 ``idempotency_replay``: fire when >= threshold distinct idempotency_keys
+    # share the same action+payload hash within one tick (LLM bypassing Coordinator dedup).
     idempotency_replay_threshold: int = 2
 
 
@@ -167,13 +153,9 @@ def _idempotency_replay_symptoms(
 ) -> list[Symptom]:
     """Detect distinct-key, same-payload ``delegate`` proposals in inbox.
 
-    The Coordinator's de-dup is keyed off ``idempotency_key`` only. An
-    LLM that mints a fresh key per attempt while keeping the payload
-    identical (the smoking-gun in the 2026-05-18 GPU-leak post-mortem:
-    "4 validate_stack attempts in 3 minutes") slips through unchallenged.
-    We hash the projected payload + action_name and fire when the same
-    hash carries ``>= idempotency_replay_threshold`` distinct keys
-    within a single tick's inbox view.
+    Coordinator dedup keys only off ``idempotency_key``, so an LLM minting fresh keys
+    per attempt with identical payload slips through. Fire when one action+payload hash
+    carries ``>= idempotency_replay_threshold`` distinct keys within a tick.
     """
     if not ctx.inbox:
         return []
@@ -192,9 +174,7 @@ def _idempotency_replay_symptoms(
             continue
         key = str(payload.get("idempotency_key") or "").strip()
         if not key:
-            # No key at all — the Coordinator's own dedup catches this
-            # via ``payload`` hashing; the duplicate-payload signal
-            # would emit a noisy false positive here. Skip.
+            # No key — Coordinator's payload-hash dedup already covers this; skip to avoid false positives.
             continue
         params = payload.get("params") or {}
         try:
@@ -244,21 +224,9 @@ def _recover_unsuccessful_symptoms(
     events: list[dict[str, Any]],
     cfg: EventConfig,
 ) -> list[Symptom]:
-    """Emit ``recover_unsuccessful`` when the latest recover hit needs_review.
-
-    The :mod:`recover` action returns ``state == "needs_review"`` with a
-    ``gpu_unhealthy_*`` ``error_class`` when its best-effort cleanup
-    (SIGTERM/SIGKILL + optional ``rocm-smi --gpureset``) failed to free
-    VRAM back above the healthy threshold. That outcome is terminal for
-    the current session — no further recover round will fix it without
-    an out-of-band pod reset — so we emit a high-severity symptom that
-    the ActionLadder turns into ``delegate(report)`` to finalize at the
-    last validated gain instead of burning the remaining budget on
-    doomed ``validate_stack`` retries.
-
-    The function inspects only the latest ``delegated_result`` for the
-    ``recover`` action; older recover attempts that succeeded already
-    cleared the leak so we don't second-guess them.
+    """Emit ``recover_unsuccessful`` (HIGH → delegate(report)) when the latest recover
+    hit ``state == "needs_review"`` — cleanup failed to free VRAM, terminal for this budget.
+    Inspects only the latest recover ``delegated_result``; earlier successes are not second-guessed.
     """
     head = events[-cfg.recover_lookback_events:] if events else []
     latest: dict[str, Any] | None = None
@@ -277,10 +245,7 @@ def _recover_unsuccessful_symptoms(
     if state != "needs_review":
         return []
     error_class = str(latest.get("error_class") or "")
-    # We treat any needs_review from recover as terminal; the
-    # ``error_class`` discriminator just feeds evidence to the LLM /
-    # operator. ``gpu_unhealthy_after_*`` is the dominant code surfaced
-    # by :class:`RecoverExecutor`.
+    # Any needs_review from recover is terminal; error_class only feeds evidence.
     return [
         Symptom(
             name="recover_unsuccessful",
@@ -298,9 +263,6 @@ def _recover_unsuccessful_symptoms(
                 "error_class": error_class,
                 "force_gpu_cleanup": latest.get("force_gpu_cleanup"),
                 "gpureset_attempted": latest.get("gpureset_attempted"),
-                # Caller may have flattened the executor result into the
-                # delegated_result payload — pass through the per-GPU
-                # diagnostic so the report stage has full context.
                 "post_free_mb_per_gpu": latest.get("post_free_mb_per_gpu"),
             },
             subject={},  # session-wide; cooldown collapses across ticks
@@ -313,21 +275,14 @@ def _recover_unsuccessful_symptoms(
 
 
 def _is_recover_payload(payload: dict[str, Any]) -> bool:
-    """Best-effort check that a ``delegated_result`` came from ``recover``.
-
-    Coordinator may tag the action via ``kind`` (canonical), or the
-    payload may carry executor-specific fields like ``force_gpu_cleanup``
-    that betray the action even when ``kind`` is missing.
-    """
+    """Best-effort check that a ``delegated_result`` came from ``recover`` (via ``kind`` or recover-only fields)."""
     if str(payload.get("kind") or "").strip() == "recover":
         return True
     if str(payload.get("action_name") or "").strip() == "recover":
         return True
     if str(payload.get("family") or "").strip() == "recover":
         return True
-    # Executor signature — recover-only fields the Coordinator forwards
-    # verbatim when the delegated_result was emitted from the recover
-    # workspace's result.json.
+    # Executor signature — recover-only fields forwarded from result.json.
     if "force_gpu_cleanup" in payload and "gpureset_attempted" in payload:
         return True
     return False
@@ -364,11 +319,7 @@ def _normalise_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _family_of(payload: dict[str, Any]) -> str:
-    """Best-effort family inference from a delegated_result payload.
-
-    Coordinator does not always tag a family; fall back to ``kind``
-    when present so the rule still groups by action name.
-    """
+    """Best-effort family inference from a delegated_result payload; falls back to ``kind``."""
     family = payload.get("family")
     if isinstance(family, str) and family.strip():
         return family.strip()
