@@ -1,21 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Directed + cross-repo + dedup coverage for the FRAMEWORK_PR discover
-batch builder.
-
-Complements ``test_framework_pr_discover_retry.py`` (which pins discovery
-to a single repo for the per-batch failure-counter semantics). Here we
-exercise the *enhanced* behaviour:
-
-  - ``compose_gap`` drives a directed gap + keywords that are threaded
-    into the ``phase_discover`` request.
-  - The cross-repo loop queries every repo the ``pr_intel_specialist``
-    domain tracks (FRAMEWORK_PR and EXPLORE share that repo set; neither
-    owns it privately) and merges the candidates into one batch.
-  - Cross-batch / cross-repo de-dup: a PR already discovered earlier is
-    dropped from a later batch.
-  - ``framework_pr_max_candidates`` overrides the per-repo cap.
-"""
+"""Directed + cross-repo + dedup coverage for the FRAMEWORK_PR discover batch builder."""
 
 from __future__ import annotations
 
@@ -55,9 +40,7 @@ class _StateStub:
 
 
 class _CoordinatorStub:
-    """Binds the *real* Coordinator discover + helper methods (including
-    the cross-repo fan-out) so the enhanced behaviour is exercised end to
-    end against a mocked ``phase_discover``."""
+    """Binds the real Coordinator discover + helper methods against a mocked ``phase_discover``."""
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
@@ -81,19 +64,15 @@ def _call_discover(stub: _CoordinatorStub) -> bool:
 
 
 def test_repo_urls_cover_pr_intel_set_with_framework_primary():
-    """The FRAMEWORK_PR repo set leads with the framework's own repo and
-    includes every pr_intel_specialist repo (the shared discovery
-    surface), de-duplicated and order-preserving."""
+    """The repo set leads with the framework's own repo, includes every pr_intel_specialist repo, de-duplicated and order-preserving."""
     stub = _CoordinatorStub(Path("/tmp"))
     urls = stub._framework_pr_discover_repo_urls("sglang")
 
     assert urls[0] == _fa_client.repo_url_for_framework("sglang")
-    # Every pr_intel repo is represented.
     domain = get_domain("pr_intel_specialist")
     for repo in domain.pr_repos:
         expected = f"https://github.com/{repo}.git"
         assert expected in urls or repo in "".join(urls)
-    # No duplicates.
     assert len(urls) == len(set(urls))
 
 

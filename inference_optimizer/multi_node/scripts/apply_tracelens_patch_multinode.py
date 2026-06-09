@@ -3,55 +3,14 @@
 
 """Multi-node TraceLens SGLang patch fan-out.
 
-Counterpart to ``kernel_patch_multinode.py``. Submitted via Ray Dashboard
-REST by ``inference_optimizer.multi_node apply-tracelens-patch`` when the
-workload has ``nodes >= 2``.
-
-Why this script exists
-----------------------
-
-The single-node ``_server_patcher.ensure_sglang_patched_for_tracelens``
-runs inside the same Python process that imports SGLang (Hyperloom + SGLang
-share the host). On multi-node, Hyperloom runs in the sandbox controller
-and SGLang runs in head/worker pods; the controller cannot ``import
-sglang`` so the local patcher silently skips ('sglang not importable').
-Without the TraceLens patches SGLang's torch.profiler emits step
-boundaries named ``step[DECODE bs=N]`` / ``step[EXTEND bs=N toks=M]``
-which the TraceLens splitter does not recognise — splitter returns 0
-steady-state chunks and ``tracelens_analysis.py`` raises
-``trace_split_no_steady_state``, hanging the orchestration agent in a
-``proposals=0`` loop.
-
-This entrypoint mirrors ``kernel_patch_multinode.py``'s actor fan-out
-pattern so the patches apply inside every pod (head + workers) where
-SGLang actually lives. ``apply-tracelens-patch`` is idempotent: if the
-sentinel marker is already present the actor returns ``status=skipped``
-without re-applying, so calling it on every ``restart_server_for_round``
-costs only the network round-trip + sentinel grep on already-patched
-pods.
-
-Algorithm
----------
-
-  1. ``ray.init()`` (no address; in-pod).
-  2. Enumerate all alive nodes (one actor per pod).
-  3. For each pod, in a NodeAffinity-pinned actor:
-     a. ``import sglang`` → resolve installed version and apply root.
-     b. Resolve ``$TRACELENS_ROOT/<patch_tree>/sglang_<X_Y_Z>/*.patch``
-        (public TraceLens checkout; ``$TRACELENS_INTERNAL_ROOT`` is plumbed
-        but not consumed by current patch logic).
-        Per-version subdirs are the v0.3.1+ layout; flat fallback is NOT
-        supported here (matches Hyperloom main's
-        ``_resolve_sglang_patches_dir`` post-c839a20 simplification).
-     c. Sentinel check: if every required marker substring is already
-        present in ``scheduler_profiler_mixin.py``, ``return
-        status=skipped`` (already patched).
-     d. ``git apply --check`` every patch; if any pre-check fails fall
-        back to ``patch -p<N> --fuzz=2 --dry-run`` (point-release drift
-        tolerance, same policy as ``_server_patcher._apply_atomic``).
-     e. Apply every patch in order. On mid-set failure, reverse-apply
-        the ones we already committed so the install stays consistent.
-  4. Collect per-node results; emit a single JSON document on stdout.
+The single-node patcher can't reach SGLang across pods, so this fans out
+one NodeAffinity-pinned actor per alive pod to apply the TraceLens
+roofline patches where SGLang lives (else the trace splitter sees no
+steady-state and the agent hangs at proposals=0). Each actor resolves the
+sglang version + apply root, skips if the sentinel markers are already
+present (idempotent), ``git apply --check``s then applies every
+``$TRACELENS_ROOT/.../sglang_<X_Y_Z>/*.patch`` (rolling back on mid-set
+failure). Emits one JSON summary on stdout.
 """
 
 from __future__ import annotations
@@ -71,20 +30,15 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
-# ---------------------------------------------------------------------------
-# Sentinel markers — keep in sync with _server_patcher._discover_sglang_plan.
-# A pod is treated as "already patched" iff every marker below is present in
-# the sentinel file. PR-D §4: requiring ALL N markers raises the bar for
-# false positives if upstream merges one identifier but not the whole patch.
-# ---------------------------------------------------------------------------
+# Sentinel markers (keep in sync with _server_patcher._discover_sglang_plan).
+# A pod counts as patched iff ALL markers are present (PR-D §4: avoids false
+# positives when upstream merges one identifier but not the whole patch).
 _SENTINEL_RELPATH = "python/sglang/srt/managers/scheduler_profiler_mixin.py"
 _SENTINEL_MARKERS: tuple[str, ...] = (
     "shape_discovery",
     "roofline_annotations",
 )
-# Extra check: the io_struct patch adds the field on the request schema. If
-# only scheduler_profiler_mixin is patched but io_struct is missing, the
-# request body fails to deserialise — guard against that partial state.
+# Extra check: io_struct must also be patched, else the request body fails to deserialise.
 _EXTRA_SENTINEL_RELPATH = "python/sglang/srt/managers/io_struct.py"
 _EXTRA_SENTINEL_MARKERS: tuple[str, ...] = (
     "shape_discovery",
@@ -97,38 +51,19 @@ _PATCH_TREE_REL = (
     "sglang_roofline_patches",
 )
 
-# Per ``git apply`` invocation timeout. ``git apply`` on a single SGLang
-# patch is <1s in practice; allow generous headroom for I/O hiccups.
+# Per ``git apply`` timeout (a single patch is <1s; headroom for I/O hiccups).
 _GIT_TIMEOUT_SEC = 30
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line.
-
-    stdout is reserved for the final JSON document the dashboard caller
-    parses, so all progress chatter goes to stderr.
-
-    Args:
-        msg (str): The message text to emit.
-    """
+    """Stderr-only timestamped log line (stdout is reserved for the final JSON)."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[tracelens_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _versioned_patches_subdir_name(version: str) -> str | None:
-    """Derive the per-version patches subdir name from a version string.
-
-    ``0.5.11`` -> ``sglang_0_5_11``. Tolerates ``-rc1`` / ``+local``
-    suffixes (same logic as _server_patcher._versioned_patches_subdir_name).
-
-    Args:
-        version (str): The installed sglang version string.
-
-    Returns:
-        str | None: The subdir name (e.g. ``sglang_0_5_11``), or ``None`` if
-        the version cannot be parsed into dotted numeric components.
-    """
+    """``0.5.11`` -> ``sglang_0_5_11`` (tolerates ``-rc1`` / ``+local`` suffixes)."""
     text = (version or "").strip()
     if not text:
         return None
@@ -140,48 +75,16 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
 
 
 def _resolve_sglang_install(sglang_module_path: Path) -> tuple[Path, int] | None:
-    """Decide ``(apply_root, -p<N> strip)`` from any sglang anchor path.
-
-    Accepts three input shapes:
-
-    1. Top-level ``sglang/__init__.py`` (legacy wheel install). Walks up
-       to land on ``site-packages/sglang/``, returns ``(<pkg_dir>, 3)``.
-    2. A submodule ``__file__`` like
-       ``.../python/sglang/srt/managers/scheduler_profiler_mixin.py``.
-       Walks up to find the ``sglang/`` package dir, returns
-       ``(<repo_root>, 1)`` for editable / ``(<pkg_dir>, 3)`` for wheel.
-    3. A bare namespace-package directory like ``/sgl-workspace/sglang``
-       (where ``sglang.__path__[0]`` points when the docker image ships
-       sglang via ``sys.path`` insertion without ``__init__.py``).
-       Probes ``<dir>/python/sglang/srt`` for editable layout and
-       ``<dir>/srt`` for wheel-shape inside that dir.
-
-    Returns ``None`` only if none of these layouts match — caller fail-softs.
-    Mirrors the intent of ``_server_patcher._resolve_sglang_apply_root``
-    but adds namespace-dir handling.
-
-    Args:
-        sglang_module_path (Path): An anchor path into the sglang install
-            (a module ``__file__`` or a namespace-package directory).
-
-    Returns:
-        tuple[Path, int] | None: ``(apply_root, strip)`` where ``strip`` is
-        the ``-p<N>`` level for ``git apply``, or ``None`` if no known
-        layout matched.
-    """
+    """Decide ``(apply_root, -p<N> strip)`` from any sglang anchor (wheel/editable/namespace-dir layouts); ``None`` if unrecognised."""
     resolved = sglang_module_path.resolve()
-    # Pass 1: walk up the ancestor chain looking for the ``sglang/``
-    # package dir (the one that contains a ``srt/`` subdir, which is the
-    # canonical "this is really sglang" marker).
+    # Pass 1: walk up to the ``sglang/`` package dir (the one with a ``srt/`` subdir).
     pkg_dir: Path | None = None
     for ancestor in (resolved, *resolved.parents):
         if ancestor.name == "sglang" and (ancestor / "srt").is_dir():
             pkg_dir = ancestor
             break
 
-    # Pass 2: anchor is a namespace dir (no ``__init__.py``); search a few
-    # well-known child paths for the real package root. ``__path__[0]`` of
-    # a namespace-packaged sglang typically points HERE.
+    # Pass 2: anchor is a namespace dir; probe well-known child paths.
     if pkg_dir is None and resolved.is_dir():
         editable_inside = resolved / "python" / "sglang"
         wheel_inside = resolved / "sglang"  # rare: anchor is site-packages parent
@@ -220,17 +123,7 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
 
 
 def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
-    """Run ``git <args>`` and capture its result.
-
-    Never raises for a non-zero exit — caller inspects ``rc`` to branch.
-
-    Args:
-        args (tuple[str, ...]): Arguments appended after ``git``.
-        cwd (Path): Working directory for the git invocation.
-
-    Returns:
-        tuple[int, str, str]: ``(returncode, stdout, stderr)``.
-    """
+    """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit)."""
     proc = subprocess.run(  # noqa: S603
         ["git", *args],
         cwd=str(cwd),
@@ -248,27 +141,7 @@ def _apply_on_pod(
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
 ) -> dict[str, Any]:
-    """Apply (or verify) the TraceLens SGLang patch set on THIS pod.
-
-    *tracelens_root* is the public TraceLens checkout (patch source).
-    *tracelens_internal_root* is plumbed for future use
-    but not consumed by current logic.
-
-    Returns a dict summary (host, status, version, patches, skipped reason
-    if any). Never raises — wraps failures into ``status=failed`` so the
-    caller sees them via ``ray.get`` without exception propagation.
-
-    Args:
-        tracelens_root (str): Path to the TraceLens checkout that hosts the
-            sglang roofline patch sets.
-        sglang_version_pin (str | None): Optional advisory version pin;
-            logged on mismatch but never enforced.
-
-    Returns:
-        dict[str, Any]: Per-pod summary including ``host``, ``status``
-        (``applied`` / ``skipped`` / ``failed``), ``sglang_version``,
-        ``patches_applied``, and ``error`` / ``elapsed_sec`` fields.
-    """
+    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``)."""
     host = socket.gethostname()
     started = time.time()
     result: dict[str, Any] = {
@@ -288,15 +161,8 @@ def _apply_on_pod(
             result["error"] = f"sglang not importable: {e}"
             return result
 
-        # Version resolution: SGLang ships as a namespace package in the
-        # standard MI300X/MI355X docker images, so ``sglang.__version__``
-        # and ``sglang.__file__`` are both ``None``. Fall through a chain:
-        #   1. ``sglang.version.__version__`` (the real version module the
-        #      package itself imports lazily)
-        #   2. ``importlib.metadata.version("sglang")`` (PEP 566 / pip
-        #      metadata; works for wheel installs)
-        #   3. ``getattr(sglang, "__version__", "")`` (legacy editable
-        #      installs that DO set it on the top-level module)
+        # Version resolution chain (namespace-packaged sglang has __version__
+        # = None): sglang.version, then pip metadata, then top-level attr.
         version = ""
         try:
             from sglang.version import __version__ as _sv  # type: ignore[import-not-found]
@@ -318,14 +184,8 @@ def _apply_on_pod(
                 "— proceeding (pin is advisory)"
             )
 
-        # Install-root resolution: pick the most reliable ``__file__`` we
-        # can grab. Namespace-packaged sglang has ``sglang.__file__ ==
-        # None``; submodule ``__file__`` is always populated, so we pull
-        # the location from ``sglang.srt.managers.scheduler_profiler_mixin``
-        # which is the file we'll be patching anyway. Fall through to
-        # ``sglang.__path__[0]`` if scheduler_profiler_mixin is not
-        # importable (e.g. older sglang point release that ships the file
-        # under a different path).
+        # Install-root anchor: sglang.__file__ (editable), else the
+        # scheduler_profiler_mixin submodule file, else sglang.__path__[0].
         anchor_path: Path | None = None
         if sglang.__file__:  # legacy editable layout
             anchor_path = Path(sglang.__file__)
@@ -357,19 +217,12 @@ def _apply_on_pod(
             )
             return result
         apply_root, strip = layout
-        # The strip count tells us how deep the patch ``a/`` prefix is
-        # relative to ``apply_root``. Use the same path math the patches
-        # themselves use to locate the sentinel:
-        #   strip=1: apply_root is the repo root; sentinel under
-        #       apply_root/python/sglang/srt/managers/...
-        #   strip=3: apply_root is the wheel sglang/ dir; sentinel under
-        #       apply_root/srt/managers/...
+        # strip=1: apply_root is the repo root; strip=3: the wheel sglang/ dir
+        # (drop the leading "python/sglang/" segments for the sentinel path).
         if strip == 1:
             sentinel_path = apply_root / _SENTINEL_RELPATH
             extra_sentinel = apply_root / _EXTRA_SENTINEL_RELPATH
         else:
-            # _SENTINEL_RELPATH starts with "python/sglang/"; strip two
-            # leading segments to land under the wheel sglang/ dir.
             sentinel_path = apply_root / Path(*Path(_SENTINEL_RELPATH).parts[2:])
             extra_sentinel = apply_root / Path(*Path(_EXTRA_SENTINEL_RELPATH).parts[2:])
 

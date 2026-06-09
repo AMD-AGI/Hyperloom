@@ -1,26 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for :class:`LocalRecipeStore`.
-
-Covers the full surface of the on-disk recipe-snapshot store:
-
-* canonical_id <-> 5-level path round-trip;
-* atomic put_recipe (live + history archival, version monotonicity,
-  ``replaced_by`` provenance stamping);
-* get_recipe live + ``?version=N`` (history + live-version-via-?version);
-* get_history (live excluded, sorted ascending by version, limit);
-* delete_recipe (history preserved);
-* list_recent / search (label_match containment, metric_filters
-  bounds, updated_since cutoff, order_by whitelist + coverage of all
-  six values);
-* append_attempt + list_attempts (append-only, monotonic id,
-  newest-first read);
-* list_session_attempts (cross-recipe view, oldest first);
-* concurrent put_recipe under the cid lock;
-* malformed canonical_id rejected;
-* malformed on-disk content (corrupt JSON, missing fields) handled
-  defensively rather than crashing readers.
-"""
+"""Unit tests for :class:`LocalRecipeStore` (on-disk recipe-snapshot store)."""
 
 from __future__ import annotations
 
@@ -44,9 +24,7 @@ from inference_optimizer.recipe_kb import (
 )
 
 
-# ===========================================================================
 # canonical_id <-> path components
-# ===========================================================================
 def _cid(
     *,
     model: str = "deepseek-r1",
@@ -71,9 +49,7 @@ def test_cid_to_path_components_roundtrip() -> None:
 
 
 def test_cid_to_path_components_rejects_legacy_4_segment_id() -> None:
-    """Pre-Commit-1 ids like ``inference:m:fw:hw`` must NOT be accepted
-    by the local store — would route to a 3-level dir and silently
-    shadow real recipes."""
+    """Pre-Commit-1 4-segment ids like ``inference:m:fw:hw`` must NOT be accepted (would shadow real recipes)."""
     with pytest.raises(InvalidCanonicalIdError):
         cid_to_path_components("inference:m:fw:hw")
 
@@ -99,9 +75,7 @@ def test_canonical_id_for_path_inverse_of_cid_decomposition(
     assert canonical_id_for_path(root=tmp_path, recipe_dir=recipe_dir) == cid
 
 
-# ===========================================================================
 # put_recipe — happy path + history archival
-# ===========================================================================
 def test_put_recipe_first_call_creates_live_at_version_1(
     tmp_path: Path,
 ) -> None:
@@ -153,9 +127,7 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     archive = history[0]
     assert archive["version"] == 1
     assert archive["snapshot"]["best_throughput"] == 1000.0
-    # ``replaced_by`` MUST carry the triggering write's provenance —
-    # this is how an audit can trace which session wrote the
-    # supplanting row (boundary doc §4.2).
+    # ``replaced_by`` carries the triggering write's provenance for audit (boundary doc §4.2).
     assert archive["replaced_by"] == {
         "source": "second", "generator": "ut",
     }
@@ -169,8 +141,7 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
 def test_put_recipe_preserves_created_at_across_updates(
     tmp_path: Path,
 ) -> None:
-    """``created_at`` reflects the FIRST put for this cid; only
-    ``updated_at`` advances on subsequent puts."""
+    """``created_at`` reflects the first put; only ``updated_at`` advances on subsequent puts."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid, best_throughput=1000.0)
@@ -199,9 +170,7 @@ def test_put_recipe_rejects_malformed_canonical_id(tmp_path: Path) -> None:
         store.put_recipe(canonical_id="inference:bogus")
 
 
-# ===========================================================================
 # get_recipe — live + ?version=N
-# ===========================================================================
 def test_get_recipe_returns_none_for_unknown_cid(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     assert store.get_recipe(canonical_id=_cid(model="never-seen")) is None
@@ -210,8 +179,7 @@ def test_get_recipe_returns_none_for_unknown_cid(tmp_path: Path) -> None:
 def test_get_recipe_with_version_returns_live_when_versions_match(
     tmp_path: Path,
 ) -> None:
-    """Spec: ``?version=N`` where N == live.version returns the live
-    row (not a 404). Mirror that behaviour locally."""
+    """``?version=N`` where N == live.version returns the live row (not a 404)."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)
@@ -242,9 +210,7 @@ def test_get_recipe_with_unknown_version_returns_none(tmp_path: Path) -> None:
     assert store.get_recipe(canonical_id=cid, version=99) is None
 
 
-# ===========================================================================
 # get_history
-# ===========================================================================
 def test_get_history_excludes_live(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
@@ -256,8 +222,7 @@ def test_get_history_excludes_live(tmp_path: Path) -> None:
 
 
 def test_get_history_empty_for_unknown_cid(tmp_path: Path) -> None:
-    """Mirrors the central server's contract — ``GET /history``
-    never raises 404, returns an empty array instead."""
+    """Mirrors the server contract: ``GET /history`` returns an empty array, never 404."""
     store = LocalRecipeStore(root=tmp_path)
     assert store.get_history(canonical_id=_cid(model="absent")) == []
 
@@ -272,9 +237,7 @@ def test_get_history_respects_limit(tmp_path: Path) -> None:
     assert [r["version"] for r in rows] == [1, 2]
 
 
-# ===========================================================================
 # delete_recipe
-# ===========================================================================
 def test_delete_recipe_removes_live_preserves_history(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
@@ -293,17 +256,9 @@ def test_delete_recipe_returns_false_for_unknown_cid(tmp_path: Path) -> None:
     assert store.delete_recipe(canonical_id=_cid(model="absent")) is False
 
 
-# ===========================================================================
 # list_recent / search
-# ===========================================================================
 def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
-    """Create three recipes spanning different identity / metrics and
-    return their cids keyed by short alias for assertions.
-
-    ``task`` and ``mfu`` go through ``extras`` (they're not in the
-    well-known arbor schema but the search filters look at every
-    top-level field, so ``extras`` are first-class for filtering).
-    """
+    """Create three recipes spanning different identity/metrics, keyed by short alias."""
     cid_a = recipe_canonical_id(
         model="m-a", hardware="mi300x", framework="sglang",
         framework_version="0.4.5", precision="fp8",
@@ -394,12 +349,10 @@ def test_search_with_metric_filters_two_bounds(tmp_path: Path) -> None:
 
 
 def test_search_excludes_rows_missing_the_metric_key(tmp_path: Path) -> None:
-    """Mirrors the central server: a row without the metric key
-    cannot be proven to satisfy the filter and is excluded."""
+    """A row without the metric key cannot satisfy the filter and is excluded."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid(model="no-tput")
-    # ``best_throughput`` defaults to 0.0; we use a high min to trip
-    # the "missing key" path since 0.0 obviously fails the bound.
+    # ``best_throughput`` defaults to 0.0; a high min trips the "missing key" path.
     store.put_recipe(canonical_id=cid, extras={"mfu": 0.5})
     rows = store.search(metric_filters={"throughput": {"min": 100}})
     assert rows == []
@@ -456,9 +409,7 @@ def test_search_limit_is_clamped_to_1_to_1000(tmp_path: Path) -> None:
     assert len(rows) == 2
 
 
-# ===========================================================================
 # attempts
-# ===========================================================================
 def test_append_attempt_creates_attempts_file(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
@@ -478,8 +429,7 @@ def test_append_attempt_creates_attempts_file(tmp_path: Path) -> None:
 
 
 def test_append_attempt_does_not_require_parent_recipe(tmp_path: Path) -> None:
-    """Mirrors central server: attempts are filed even if the recipe
-    row doesn't exist (no FK)."""
+    """Attempts are filed even if the recipe row doesn't exist (no FK)."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid(model="orphan")
     out = store.append_attempt(
@@ -538,9 +488,7 @@ def test_list_session_attempts_aggregates_across_recipes(
     assert {r["recipe_canonical_id"] for r in rows} == {cid_a, cid_b}
 
 
-# ===========================================================================
 # Concurrency
-# ===========================================================================
 def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     tmp_path: Path,
 ) -> None:
@@ -583,32 +531,24 @@ def test_append_attempt_concurrent_keeps_ids_unique(tmp_path: Path) -> None:
     assert sorted(ids) == list(range(1, n + 1))
 
 
-# ===========================================================================
 # Defensive: malformed on-disk content
-# ===========================================================================
 def test_search_skips_directories_with_corrupt_recipe_json(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A truncated / hand-edited recipe.json must not crash search;
-    it should be reported and skipped (the central server has no
-    such row, so excluding it is the conservative choice)."""
+    """A corrupt recipe.json must surface as LocalRecipeStoreError, not silently lie about the corpus."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)
-    # Corrupt one of the seeded files.
     bad_path = tmp_path.joinpath(*cid_to_path_components(cid)) / RECIPE_FILENAME
     bad_path.write_text("{this is not json")
 
-    # Reading via search() must surface as LocalRecipeStoreError —
-    # we'd rather propagate than silently lie about the corpus.
     with pytest.raises(LocalRecipeStoreError):
         store.search()
 
 
 def test_list_attempts_skips_malformed_lines(tmp_path: Path) -> None:
-    """A single corrupt line in attempts.ndjson must not lose every
-    valid row that came after it."""
+    """A single corrupt line in attempts.ndjson must not lose valid rows after it."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.append_attempt(
@@ -617,7 +557,6 @@ def test_list_attempts_skips_malformed_lines(tmp_path: Path) -> None:
     attempts_path = (
         tmp_path.joinpath(*cid_to_path_components(cid)) / ATTEMPTS_FILENAME
     )
-    # Inject a malformed line + a second valid row.
     with attempts_path.open("a", encoding="utf-8") as f:
         f.write("not json at all\n")
         f.write(json.dumps({
@@ -634,9 +573,7 @@ def test_list_attempts_skips_malformed_lines(tmp_path: Path) -> None:
 
 
 def test_walk_skips_non_5level_directories(tmp_path: Path) -> None:
-    """Operator-created stray directory at the wrong depth must NOT
-    be picked up by list_recent (silent shadowing would corrupt the
-    search corpus)."""
+    """A stray directory at the wrong depth must NOT be picked up by list_recent."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)
@@ -650,9 +587,7 @@ def test_walk_skips_non_5level_directories(tmp_path: Path) -> None:
     assert "stray" not in cids_found
 
 
-# ===========================================================================
 # Maintenance
-# ===========================================================================
 def test_purge_recipe_removes_everything(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
@@ -677,8 +612,7 @@ def test_construction_does_not_create_root(tmp_path: Path) -> None:
 
 
 def test_str_root_accepted(tmp_path: Path) -> None:
-    """``LocalRecipeStore(root=str(...))`` still works (defensive
-    coercion in __post_init__)."""
+    """``LocalRecipeStore(root=str(...))`` still works (defensive coercion in __post_init__)."""
     store = LocalRecipeStore(root=str(tmp_path))
     cid = _cid(model="m-x")
     store.put_recipe(canonical_id=cid)

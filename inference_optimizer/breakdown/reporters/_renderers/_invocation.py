@@ -2,14 +2,9 @@
 
 """Shared invocation-block renderer for baseline / final sections.
 
-Centralised here because both renderers need the exact same five-line
-markdown block (``image``, ``config``, ``command``, ``envs``, ``server
-log``). Keeping the layout identical across sections makes diffs across
-two reports easy to scan.
-
-Filename starts with ``_`` to keep it out of the auto-imported renderer
-list (``compose.py`` walks ``_renderers/*.py`` looking for
-``@register_renderer`` decorators; this module has none).
+Centralised so both renderers emit the identical five-line block. The
+``_`` prefix keeps it out of ``compose.py``'s auto-imported renderer walk
+(it registers no renderer).
 """
 
 from __future__ import annotations
@@ -19,9 +14,7 @@ from typing import Any
 __all__ = ["render_invocation_block"]
 
 
-# Hard cap for the framework_args echo. Real launch commands fit
-# comfortably in ~250 chars; pathologically long ones (10+ args, weka
-# paths) get truncated so they don't blow the markdown column width.
+# Hard cap for the framework_args echo so long commands don't blow the column width.
 _FRAMEWORK_ARGS_MAX = 200
 _ENVS_MAX_DISPLAY = 12
 
@@ -66,23 +59,7 @@ def render_invocation_block(
     invocation: Any,
     session_image: Any,
 ) -> str:
-    """Render an ``### Invocation`` markdown block (or "" when absent).
-
-    Returns the empty string when ``invocation`` is missing / has no
-    fields populated, so callers can ``if inv_md: ...`` to skip the
-    sub-section gracefully on V1 breakdown JSONs that predate the
-    invocation field.
-
-    Args:
-        invocation (Any): The invocation record (expected to be a dict);
-            non-dict or empty values yield an empty string.
-        session_image (Any): The container image string for the session, used
-            for the ``image`` line.
-
-    Returns:
-        str: The ``### Invocation`` markdown block, or an empty string when no
-            invocation fields are populated.
-    """
+    """Render an ``### Invocation`` markdown block, or "" when absent/empty."""
     if not isinstance(invocation, dict):
         return ""
     framework_args = str(invocation.get("framework_args") or "").strip()
@@ -111,10 +88,7 @@ def render_invocation_block(
         lines.append(f"- **config**: `{config_path}`")
     if framework_args:
         lines.append(f"- **command**: `{_truncate(framework_args, _FRAMEWORK_ARGS_MAX)}`")
-    # Lineage label sits directly under ``command`` so an operator can
-    # see at a glance whether the echoed string came from a parsed
-    # ``Server arguments:`` line, a literal python invocation, the
-    # config yaml, or no source at all (extraction failed).
+    # Lineage label under ``command`` shows where the echoed string came from.
     if framework_args_source:
         suffix = (
             "  (extraction failed; try server.log or config yaml)"

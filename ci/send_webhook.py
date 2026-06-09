@@ -3,10 +3,8 @@
 
 """Send Hyperloom CI summary to Teams / Power Automate webhook.
 
-Power Automate accepts large JSON bodies (256 KB) but the downstream Teams
-card renderer fails when a single Adaptive Card contains too many Table rows.
-Keep cards small: 10 model rows per card, each rendered as a bordered
-Adaptive Card Table.
+The Teams card renderer fails when an Adaptive Card has too many Table rows, so keep cards
+small: 10 model rows per card, each a bordered Adaptive Card Table.
 """
 
 from __future__ import annotations
@@ -300,11 +298,8 @@ def _build_payload(
         "rows": table_rows,
     })
 
-    # Footer: per-model perf-leaderboard publish count, on the LAST card only
-    # (avoid spam-repeating the same number across every chunk for big batches).
-    # Counts are computed by the workflow's "Count perf-leaderboard publish
-    # status" step (walks task-artifacts-merged/**/perf_publish_marker.txt)
-    # and injected via the PERF_PUBLISH_OK / PERF_PUBLISH_TOTAL env vars.
+    # Footer: perf-leaderboard publish count on the LAST card only (avoid repeating across chunks).
+    # Counts come from the workflow's count step via PERF_PUBLISH_OK / PERF_PUBLISH_TOTAL env vars.
     if part == total_parts:
         try:
             perf_ok    = int(os.environ.get("PERF_PUBLISH_OK")    or 0)

@@ -48,10 +48,8 @@ log = logging.getLogger("build-candidates")
 
 HF_BASE = "https://huggingface.co"
 
-# Hardcoded blocklist patterns — repo IDs matching any of these are dropped
-# even if HF API reports them as text-generation. These are non-standard
-# quant formats / niche export types our toolchain (vllm/sglang on ROCm)
-# does not support.
+# Drop repos matching these non-standard quant formats our toolchain
+# (vllm/sglang on ROCm) does not support, even if HF reports text-generation.
 QUANT_FORMAT_BLOCKLIST = re.compile(
     r"(?i)(NVFP4|"             # NVIDIA modelopt FP4 — ROCm has no kernels
     r"GGUF|"                   # llama.cpp format
@@ -64,9 +62,8 @@ QUANT_FORMAT_BLOCKLIST = re.compile(
     r")"
 )
 
-# Tasks/heads our pipeline can't optimize (vision-only, embedding, etc.).
-# These show pipeline_tag=text-generation in some cases via tag pollution
-# but aren't true causal LMs.
+# Tasks/heads our pipeline can't optimize (vision-only, embedding, etc.) that
+# can show pipeline_tag=text-generation via tag pollution but aren't causal LMs.
 NON_LM_BLOCKLIST = re.compile(
     r"(?i)(embedding|reranker|rerank|"
     r"-VL-|"                   # Qwen3-VL, vision-language
@@ -81,11 +78,9 @@ NON_LM_BLOCKLIST = re.compile(
     r")"
 )
 
-# Family-level blocklist — models that fit under max_weight_gb but the team
-# has explicitly de-prioritized (extreme MoE families that consume disproportionate
-# sandbox time / storage for marginal CI value, or new architectures sglang/vllm
-# don't support yet on ROCm).
-# Pattern matches inside repo_id (full path), case-insensitive.
+# Family-level blocklist — fit under max_weight_gb but de-prioritized (extreme
+# MoE families costing disproportionate sandbox time/storage, or archs sglang/vllm
+# don't support yet on ROCm). Matches inside repo_id, case-insensitive.
 FAMILY_BLOCKLIST = re.compile(
     r"(?i)("
     r"DeepSeek-V4|"     # all V4 variants (Pro/Flash/Base/FP8-test)
@@ -207,17 +202,10 @@ class HFClient:
         return r.json()
 
     def listing(self, limit: int) -> list[dict]:
-        """Top-N text-generation by downloads. Returns raw HF API records.
+        """Top-N text-generation by downloads (raw HF API records).
 
-        HuggingFace caps one page at 1000 entries and exposes a cursor in the
-        HTTP ``Link`` header. Follow it until ``limit`` raw entries are fetched
-        so cron can build a stable top-2000 candidate pool.
-
-        Args:
-            limit (int): Maximum number of raw model records to fetch.
-
-        Returns:
-            list[dict]: Raw HF API model records (truncated to ``limit``).
+        HF caps one page at 1000 entries; follow the ``Link`` header cursor
+        until ``limit`` entries are fetched.
         """
         out: list[dict] = []
         page_limit = min(max(limit, 1), 1000)
@@ -347,9 +335,7 @@ def classify_candidate(
 
     total = (info.get("safetensors") or {}).get("total", 0)
     if not total:
-        # No safetensors index — can't size-check. Skip rather than guess
-        # (most large modern repos publish safetensors index, so absence
-        # often correlates with old/niche repos).
+        # No safetensors index — can't size-check; skip rather than guess.
         log.info("skip %s: no safetensors.total (likely pt/bin only)", repo_id)
         return None
 
