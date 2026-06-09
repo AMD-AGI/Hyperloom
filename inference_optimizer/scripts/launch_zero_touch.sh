@@ -37,7 +37,13 @@ export HYPERLOOM_AUTO_INTEGRATE="${HYPERLOOM_AUTO_INTEGRATE:-1}"
 export ALLOW_GEAK_MULTIGPU="${ALLOW_GEAK_MULTIGPU:-1}"
 export HYPERLOOM_GEAK_COST_LIMIT="${HYPERLOOM_GEAK_COST_LIMIT:-0.0}"
 export HYPERLOOM_FUSED_MOE_GEAK_BUDGET_MIN="${HYPERLOOM_FUSED_MOE_GEAK_BUDGET_MIN:-240}"
-export GEAK_SKIP_PREPROCESS_PROFILE="${GEAK_SKIP_PREPROCESS_PROFILE:-1}"
+# Use GEAK's STANDARD preprocess (not the Path-A fastpath): the fastpath skips
+# run_discovery + profiling, so it never writes discovery.json /
+# CODEBASE_CONTEXT.md / profile.json -- the task-generation agent then reads
+# empty context and emits zero tasks (LimitsExceeded). Standard preprocess
+# generates all three. Profiling ON so the planner gets roofline direction.
+export GEAK_SKIP_PATH_A_FASTPATH="${GEAK_SKIP_PATH_A_FASTPATH:-1}"
+export GEAK_SKIP_PREPROCESS_PROFILE="${GEAK_SKIP_PREPROCESS_PROFILE:-0}"
 export GEAK_BENCHMARK_WARMUP="${GEAK_BENCHMARK_WARMUP:-10}"
 export GEAK_BENCHMARK_ITERATIONS="${GEAK_BENCHMARK_ITERATIONS:-40}"
 export GEAK_BENCH_TIMEOUT="${GEAK_BENCH_TIMEOUT:-300}"
@@ -160,7 +166,13 @@ export HYPERLOOM_AUTO_INTEGRATE="${HYPERLOOM_AUTO_INTEGRATE:-1}"
 export ALLOW_GEAK_MULTIGPU="${ALLOW_GEAK_MULTIGPU:-1}"
 export HYPERLOOM_GEAK_COST_LIMIT="${HYPERLOOM_GEAK_COST_LIMIT:-0.0}"
 export HYPERLOOM_FUSED_MOE_GEAK_BUDGET_MIN="${HYPERLOOM_FUSED_MOE_GEAK_BUDGET_MIN:-240}"
-export GEAK_SKIP_PREPROCESS_PROFILE="${GEAK_SKIP_PREPROCESS_PROFILE:-1}"
+# Use GEAK's STANDARD preprocess (not the Path-A fastpath): the fastpath skips
+# run_discovery + profiling, so it never writes discovery.json /
+# CODEBASE_CONTEXT.md / profile.json -- the task-generation agent then reads
+# empty context and emits zero tasks (LimitsExceeded). Standard preprocess
+# generates all three. Profiling ON so the planner gets roofline direction.
+export GEAK_SKIP_PATH_A_FASTPATH="${GEAK_SKIP_PATH_A_FASTPATH:-1}"
+export GEAK_SKIP_PREPROCESS_PROFILE="${GEAK_SKIP_PREPROCESS_PROFILE:-0}"
 export GEAK_BENCHMARK_WARMUP="${GEAK_BENCHMARK_WARMUP:-10}"
 export GEAK_BENCHMARK_ITERATIONS="${GEAK_BENCHMARK_ITERATIONS:-40}"
 export GEAK_BENCH_TIMEOUT="${GEAK_BENCH_TIMEOUT:-300}"
