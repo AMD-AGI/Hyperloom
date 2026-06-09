@@ -2,23 +2,9 @@
 
 """Integration + unit tests for :class:`TargetAnalysisExecutor`.
 
-Integration tests (full-flow reading the LLM-authored competitor target):
-
-* ``test_no_flag_writes_skipped_marker`` — without ``--compare-against-gpu``
-  the executor still runs (it is wired unconditionally in
-  ``cli._register_executors``) and writes a structured
-  ``reason='no_target_gpu_configured'`` marker JSON.
-* ``test_no_competitor_target_graceful`` — when no ``competitor_target.json``
-  exists the task still returns ``status=succeeded`` and
-  ``baseline_status=no_match``.
-* ``test_model_mapping_miss`` — unknown model name persists a ``skipped``
-  summary.
-* ``test_happy_path_writes_files`` — full pipeline reading a sourced
-  competitor target; verifies JSON + MD on disk and the bus payload.
-
-Unit tests (TestEnvHelpers / TestResolveSessionDir / TestExecutor) cover
-the small helper utilities (env coercion, ctx fallbacks) and the failure
-branches so the "never fail" guarantee for the runner stays locked.
+Integration tests cover the no-flag / no-target / mapping-miss / happy paths;
+unit tests cover the env/ctx helpers and failure branches that lock the
+executor's "never fail" guarantee.
 """
 
 from __future__ import annotations
@@ -36,9 +22,7 @@ from inference_optimizer.orchestrator.action_executors import target_analysis as
 from inference_optimizer.orchestrator.task_registry import Task
 
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 @dataclass
 class _Ctx:
     task: Task
@@ -67,18 +51,10 @@ def session_dir(tmp_path: Path) -> Path:
     return sd
 
 
-# ---------------------------------------------------------------------------
 # Tests
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_no_flag_writes_skipped_marker(session_dir):
-    """Without --compare-against-gpu, ``cli._register_executors`` still
-    wires the real :class:`TargetAnalysisExecutor` (the `_noop_prep`
-    fallback was removed). The executor must run end-to-end and persist
-    a structured ``reason='no_target_gpu_configured'`` marker JSON so the
-    coordinator gate opens and the report has a deterministic External
-    baseline section to render.
-    """
+    """Without --compare-against-gpu, the executor still runs and persists a ``no_target_gpu_configured`` marker JSON."""
     executor = TargetAnalysisExecutor(compare_against_gpu="",
                                        session_dir=session_dir)
     result = await executor(_ctx(session_dir, {"model_path": "MiniMax-M2.5"}))
@@ -115,10 +91,7 @@ async def test_no_competitor_target_graceful(session_dir):
 @pytest.mark.asyncio
 async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
     """Unknown model → skipped without any HTTP traffic."""
-    # Even if the env var points somewhere broken, the mapping miss must
-    # short-circuit BEFORE the fetch attempt. We deliberately point the
-    # URL at a port that would hang if hit; the test will still finish
-    # because no HTTP call is made.
+    # URL points at a hang-if-hit port; the mapping miss must short-circuit before any fetch.
     monkeypatch.setenv("INFERENCEX_BASE_URL", "http://127.0.0.1:1")
     monkeypatch.setenv("INFERENCEX_TIMEOUT_SEC", "5.0")
     monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "1")
@@ -188,8 +161,7 @@ async def test_happy_path_writes_files(session_dir):
 async def test_report_executor_renders_external_baseline_section(
     tmp_path: Path, monkeypatch
 ):
-    """ReportExecutor must read target_baseline.json and inject an
-    advisory section into final.md / final.json without touching SharedState."""
+    """ReportExecutor reads target_baseline.json and injects an advisory section without touching SharedState."""
     from inference_optimizer.orchestrator.action_executors import ReportExecutor
     from inference_optimizer.orchestrator.shared_state import SharedState
     from inference_optimizer.storage.connection import SqliteConnection
@@ -244,14 +216,10 @@ async def test_report_executor_renders_external_baseline_section(
     assert final_json["external_baseline"]["status"] == "ok"
 
 
-# ===========================================================================
 # Unit tests (formerly test_target_analysis_units.py)
-# ===========================================================================
 
 
-# ---------------------------------------------------------------------------
 # env helpers
-# ---------------------------------------------------------------------------
 
 class TestEnvHelpers:
     def test_env_int_uses_default_when_missing(self, monkeypatch):
@@ -271,9 +239,7 @@ class TestEnvHelpers:
         assert ta._env_str("TARGET_STR_TEST") == "value"
 
 
-# ---------------------------------------------------------------------------
 # session_dir resolution
-# ---------------------------------------------------------------------------
 
 class _DummySummary:
     status = "ok"
@@ -329,9 +295,7 @@ class TestResolveSessionDir:
         assert ex._resolve_session_dir(_unit_ctx()) is None
 
 
-# ---------------------------------------------------------------------------
 # Execution branches
-# ---------------------------------------------------------------------------
 
 class TestExecutor:
     @pytest.mark.asyncio
@@ -354,7 +318,6 @@ class TestExecutor:
         result = await ex(_unit_ctx())
         assert result["status"] == "succeeded"
         assert result["baseline_status"] == "ok"
-        # Best fields propagate through.
         assert result["best_tput_per_gpu"] == 10.0
 
     @pytest.mark.asyncio
@@ -410,5 +373,4 @@ class TestExecutor:
         )
         result = await ex(_unit_ctx(params={"model_path": "/m"}))
         assert result["baseline_status"] == "no_data"
-        # Best metrics are absent when ``best`` is None.
         assert "best_tput_per_gpu" not in result

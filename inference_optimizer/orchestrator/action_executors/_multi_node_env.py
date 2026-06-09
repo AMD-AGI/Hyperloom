@@ -2,41 +2,17 @@
 
 """Helper that bridges the multi-node CLI state into Magpie subprocesses.
 
-Why this lives here (orchestrator/action_executors/), not in
-``inference_optimizer/multi_node/``:
+Lives in the executors package (called by ``baseline.py`` / ``_grid_runner.py``
+before they launch Magpie) so the dependency edge stays one-way: executors
+import this; ``multi_node/`` knows nothing about them.
 
-* ``multi_node/`` is the agent-facing CLI (subcommands the LLM types).
-* This module is the executor-side glue called by ``baseline.py`` and
-  ``_grid_runner.py`` right before they ``subprocess.run(magpie ...)``.
-  Putting it next to those callers keeps the dependency edge one-way
-  (executors ``import _multi_node_env``; ``multi_node/`` knows nothing
-  about the executors).
-
-What the bridge does:
-
-1. Read ``$INFERENCE_OPTIMIZER_NODES`` (set by ``cli._run_optimize``).
-2. If ``< 2``: return ``{}`` — single-pod path is preserved bit-for-bit.
-3. If ``>= 2``: read ``/tmp/multi_node_state.json`` (written by
-   ``inference_optimizer.multi_node create-rayjob`` or by
-   ``inference_optimizer optimize --nodes N`` provisioning). If present and
-   ``service_url`` is set, return the two env vars Magpie's
-   ``scripts/benchmark/{sglang,vllm}_mi*x.sh`` honour::
-
-       MAGPIE_RUN_PHASE   = "client"
-       BENCHMARK_BASE_URL = state["service_url"]
-
-   This makes Magpie skip its own server launch and just point
-   ``benchmark_serving --base-url ...`` at the head pod's ClusterIP.
-
-4. The same state file may carry ``ray_address`` (``<head_ip>:6379``) so
-   kernel-agent can ``ray.init`` into the RayJob cluster from the CPU
-   sandbox. :func:`export_ray_address_to_os` copies it into
-   ``os.environ["RAY_ADDRESS"]`` for the optimizer process and any
-   subprocess that inherits its environment.
-5. If ``>= 2`` but state file is missing: log a single WARN and return
-   ``{}``. The executor will then try to launch a local server (which
-   will fail in the no-GPU sandbox) and surface a clear failure — which
-   is preferable to silently benchmarking an unrelated localhost URL.
+Reads ``$INFERENCE_OPTIMIZER_NODES`` + ``/tmp/multi_node_state.json``. Single
+node (< 2): returns ``{}`` (single-pod path preserved). Multi-node (>= 2) with
+a ``service_url``: returns ``MAGPIE_RUN_PHASE=client`` +
+``BENCHMARK_BASE_URL=<service_url>`` so Magpie skips its own server launch and
+points ``benchmark_serving`` at the head pod. Missing state file: WARN + ``{}``.
+:func:`export_ray_address_to_os` also copies ``ray_address`` into
+``RAY_ADDRESS`` for kernel-agent ``ray.init``.
 """
 
 from __future__ import annotations
@@ -49,10 +25,8 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Mirror the constant baked into multi_node/cli.py. Keeping it duplicated
-# (rather than importing from multi_node) avoids pulling httpx into the
-# single-node import path; multi_node/_internal/safe_client imports httpx
-# at module load time.
+# Mirror of the multi_node/cli.py constant; duplicated (not imported) to avoid
+# pulling httpx into the single-node import path.
 _DEFAULT_STATE_PATH = "/tmp/multi_node_state.json"
 
 
@@ -77,21 +51,9 @@ def _read_state() -> dict[str, Any]:
 def is_multi_node() -> bool:
     """True iff the optimizer is operating on a >=2-node RayJob cluster.
 
-    Resolution order (state file wins over env so ``--resume`` works):
-
-    1. ``/tmp/multi_node_state.json`` ``nodes`` field (>= 2 wins
-       immediately). This file is written by
-       ``inference_optimizer.multi_node create-rayjob`` and persists
-       across sandbox shells / orchestrator restarts. Without this
-       probe, a ``--resume``-launched optimizer would fall through to
-       ``$INFERENCE_OPTIMIZER_NODES`` -- which argparse defaults to 1
-       because manifest.json (schema v1) does not persist ``nodes`` --
-       making ``magpie_remote_env`` return ``{}`` and silently shipping
-       every Magpie subprocess into PHASE=all + local sglang launch
-       (ADDENDUM-14 in the multi_node SKILL).
-    2. ``$INFERENCE_OPTIMIZER_NODES`` env (set by ``cli._run_optimize``
-       when ``--nodes`` is passed on the CLI). Honoured when the state
-       file is absent or has no usable ``nodes``.
+    State file wins over env so ``--resume`` works (manifest.json doesn't
+    persist ``nodes``): ``/tmp/multi_node_state.json`` ``nodes`` >= 2 wins;
+    else fall back to ``$INFERENCE_OPTIMIZER_NODES``.
     """
     state = _read_state()
     try:
@@ -122,13 +84,9 @@ def ray_gcs_address_from_state() -> str:
 def rayjob_id_from_state() -> str:
     """Return the SaFE-allocated RayJob workload id, or ``""`` if absent.
 
-    Reads from the same ``$MULTI_NODE_STATE_FILE`` checkpoint that
-    ``inference_optimizer.multi_node create-rayjob`` writes after SaFE
-    returns. Used by call sites that need to scope per-RayJob shared
-    artefacts (e.g. profile-trace dir) when
-    ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` was not exported in-process —
-    typically when the optimizer was launched out of band from
-    ``cli._provision_multi_node_rayjob_stack``.
+    Reads the ``$MULTI_NODE_STATE_FILE`` checkpoint. Used to scope per-RayJob
+    shared artefacts when ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` was not exported
+    in-process.
     """
     return str(_read_state().get("rayjob_id") or "").strip()
 
@@ -145,26 +103,11 @@ def export_ray_address_to_os() -> None:
 def magpie_remote_env() -> dict[str, str]:
     """Return env vars to inject into a Magpie ``benchmark`` subprocess.
 
-    Single-node (``--nodes`` 1, default): returns ``{}`` so the caller's
-    ``env`` dict is untouched and Magpie's ``--run-mode local`` path
-    behaves exactly as before this module existed.
-
-    Multi-node (``--nodes >= 2``): if ``/tmp/multi_node_state.json`` has
-    a non-empty ``service_url``, returns::
-
-        {"MAGPIE_RUN_PHASE": "client",
-         "BENCHMARK_BASE_URL": "<service_url>"}
-
-    The Magpie shell scripts (``Magpie/scripts/benchmark/{sglang,vllm}_mi*x.sh``)
-    detect ``BENCHMARK_BASE_URL`` and force PHASE=client, skipping the
-    local server launch and pointing ``benchmark_serving --base-url`` at
-    the multi_node RayJob's head pod ClusterIP.
-
-    Multi-node WITHOUT state file: returns ``{}`` and emits a WARN log.
-    The downstream Magpie call will then try to start a local server,
-    fail in the no-GPU sandbox, and surface a clear ``magpie_nonzero``
-    error to the agent — which is preferable to silently benchmarking
-    against an unrelated local URL.
+    Single-node: ``{}`` (Magpie's ``--run-mode local`` untouched). Multi-node
+    with a ``service_url``: ``{"MAGPIE_RUN_PHASE": "client",
+    "BENCHMARK_BASE_URL": "<service_url>"}`` so Magpie skips its local server
+    launch and points ``benchmark_serving`` at the head pod. Multi-node without
+    a state file: ``{}`` + WARN (the local-launch failure surfaces clearly).
     """
     if not is_multi_node():
         return {}
@@ -202,27 +145,11 @@ def log_mn_banner(
 ) -> None:
     """Print a one-line ``[MN ...]`` banner when multi-node, no-op single-node.
 
-    Why this helper exists: executors (baseline/profile/grid_runner) and
-    server lifecycle code all log a generic "launching X" line that does
-    NOT tell the operator whether the run is single-pod or multi-node
-    RayJob. Without this signal an operator tailing the optimizer log
-    cannot tell which code path the round is taking — especially
-    important when triaging restart loops where multi-node restart
-    failures look indistinguishable from single-pod magpie failures.
-
-    Single-node path is preserved bit-for-bit: the helper short-circuits
-    via ``is_multi_node()`` before touching the logger, so callers get
-    zero added output when ``nodes < 2``.
-
-    Multi-node path: prints
-    ``[MN component=<name> nodes=N head=<ip> service_url=<url> key=value ...]``
-    The ``head_pod_ip`` and ``service_url`` come from
-    ``/tmp/multi_node_state.json`` (best-effort; both default to empty
-    string when the state file is missing or partial). ``**extra``
-    keys are appended in insertion order so callers can surface
-    round-specific context (e.g. ``trace_dir=...`` for profile rounds,
-    ``variant=...`` for grid rows) without each call site having to
-    format the banner itself.
+    Lets an operator tailing the log tell single-pod from multi-node RayJob
+    rounds. No-op (short-circuits via ``is_multi_node()``) when ``nodes < 2``.
+    Multi-node prints ``[MN component=<name> nodes=N head=<ip>
+    service_url=<url> key=value ...]``; ``**extra`` keys are appended for
+    round-specific context (e.g. ``trace_dir=`` / ``variant=``).
     """
     if not is_multi_node():
         return

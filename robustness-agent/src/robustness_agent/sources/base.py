@@ -2,27 +2,16 @@
 
 """Source protocol + DegradeRouter.
 
-The reactor pulls a single :class:`SourceData` snapshot per tick. The
-DegradeRouter routes to a primary source (typically
-``robustness-server``) and falls back to a secondary (typically
-``local_probe``) when the primary fails repeatedly. State transitions
-emit one WARN log; in-state retries are silent so we do not flood the
-log stream.
-
-State machine
-~~~~~~~~~~~~~
-
-::
+DegradeRouter routes to a primary source and falls back to a secondary
+on repeated failure. State transitions emit one WARN log; in-state
+retries are silent. State machine::
 
     HEALTHY  --(fail_streak >= fail_threshold)-->  DEGRADED
     DEGRADED --(success after recheck_interval_s)--> HEALTHY
     DEGRADED --(consecutive failures still over budget)--> FAILED  (M2+)
 
-For M1 we use only the HEALTHY/DEGRADED two-state form: DEGRADED simply
-means "use the fallback for this tick"; the next tick re-probes after
-``recheck_interval_s`` has elapsed. FAILED is reserved for cases where
-the fallback itself is unhealthy and the reactor should report a
-degraded heartbeat (M2 wires this up).
+M1 uses only HEALTHY/DEGRADED: DEGRADED means "use the fallback this
+tick"; the next tick re-probes after ``recheck_interval_s``.
 """
 
 from __future__ import annotations
@@ -47,9 +36,8 @@ class HealthState(str, Enum):
 class SourceUnavailable(RuntimeError):
     """Raised by a :class:`Source` when its backing service is not reachable.
 
-    DegradeRouter catches this exception type and treats it as a
-    countable failure. Other exceptions propagate so genuine bugs are
-    not masked.
+    DegradeRouter treats it as a countable failure; other exceptions
+    propagate so genuine bugs are not masked.
     """
 
 
@@ -57,10 +45,9 @@ class SourceUnavailable(RuntimeError):
 class SourceData:
     """Per-tick snapshot the reactor consumes.
 
-    Every field defaults to an empty container so downstream signals can
+    Every field defaults to an empty container so downstream signals
     treat "no data" uniformly. ``sources_used`` records which source
-    produced each tick's data; ``degraded_reason`` is set when the
-    primary was skipped or failed and the fallback served the request.
+    produced each tick; ``degraded_reason`` is set on fallback.
     """
 
     session_pods: list[dict[str, Any]] = field(default_factory=list)
@@ -74,82 +61,32 @@ class SourceData:
     local_log_tail: list[str] = field(default_factory=list)
     local_log_errors: list[dict[str, Any]] = field(default_factory=list)
     local_server_health: list[dict[str, Any]] = field(default_factory=list)
-    # 2026-05-18 LocalProbe extras (A5 / A6 / A7).
-    # ``local_ray`` carries ``{"healthy": bool, "reason": str, "stderr": str,
-    # "returncode": int}`` from :func:`local_probe._probe_ray_head`.
-    # ``local_fd`` carries ``{"pid": int, "used": int, "limit": int,
-    # "used_pct": float}`` from :func:`local_probe._sample_fd_usage`.
-    # ``local_aiter_jit`` carries ``{"jit_dir": str, "so_count": int,
-    # "build_count": int}`` from :func:`local_probe._sample_aiter_jit`;
-    # the cross-tick regression detector reads it.
+    # LocalProbe extras: local_ray ``{healthy, reason, stderr, returncode}``;
+    # local_fd ``{pid, used, limit, used_pct}``; local_aiter_jit ``{jit_dir, so_count, build_count}``.
     local_ray: dict[str, Any] = field(default_factory=dict)
     local_fd: dict[str, Any] = field(default_factory=dict)
     local_aiter_jit: dict[str, Any] = field(default_factory=dict)
-    # G-section decision-audit probe (2026-05-18). Carries persisted
-    # decision artefacts:
-    #   ``recent_integrate`` — last N integrate result.json entries
-    #     (decision/gain_pct/patch_path/patch_size_bytes/base_tput/new_tput/
-    #      kernel_id/dispatched_count/ts).
-    #   ``ci_metrics`` — most recent ci_metrics{,_final}.json content as-is
-    #     (or ``{}`` when absent — the file is produced by an external
-    #     report_back system, not Hyperloom proper).
-    #   ``oob_attempts`` — tail of optimization_attempts.jsonl entries
-    #     (kernel_id / backend / report_text / microbench_speedup).
+    # Decision-audit: ``recent_integrate``, ``ci_metrics`` ({} if absent), ``oob_attempts``.
     local_decision_audit: dict[str, Any] = field(default_factory=dict)
-    # C-section preflight inputs (2026-05-19). The two slots are read by
-    # ``signals/preflight.py`` to detect impossible model-GPU configs,
-    # low Amdahl ceilings for kernel optimization, and cold-start vs
-    # remaining-budget mismatches.
-    #
-    # ``local_manifest`` is the raw ``manifest.json`` dict written by
-    # ``inference_optimizer/manifest.py`` at session boot — empty when
-    # absent (resume from broken session, or non-Hyperloom host).
-    #
-    # ``local_kernel_breakdown`` aggregates
-    # ``<session>/profiles/kernel_breakdown.json`` into the projection
-    # ``{tier_pcts: {T1_TRITON, T2_AITER_CK, ...}, total_kernels,
-    # total_gpu_pct, mtime}``. Empty when the profile action has not
-    # produced a breakdown yet.
+    # Preflight inputs (signals/preflight.py): ``local_manifest`` raw manifest.json;
+    # ``local_kernel_breakdown`` ``{tier_pcts, total_kernels, total_gpu_pct, mtime}``.
     local_manifest: dict[str, Any] = field(default_factory=dict)
     local_kernel_breakdown: dict[str, Any] = field(default_factory=dict)
-    # E-section critic health (2026-05-19). Carries:
-    #   ``recent_judges`` — last N ``critic-workdir/<turn>/judge_bundle.json``
-    #     entries projected to ``{turn_dir, kb_read_skipped_reason,
-    #     proposal_count, mtime}``.
-    #   ``workdir_count`` — total ``<turn>/`` subdirs under ``critic-workdir/``
-    #     (used by E4 ``critic_prune_stuck``).
+    # Critic health: ``recent_judges`` + ``workdir_count`` (subdirs under critic-workdir/, E4).
     local_critic_health: dict[str, Any] = field(default_factory=dict)
-    # I-section state-integrity probe (2026-05-19). Aggregates the
-    # five C-side state slots into one payload so a single LocalProbe
-    # tick scans them all without re-doing IO per signal:
-    #   ``state_json`` — ``{valid, size_bytes, mtime, error}`` for state.json.
-    #   ``wal``        — ``{wal_bytes, db_bytes, db_path}`` for coordinator.db-wal.
-    #   ``leases``     — list of ``{task_id, holder_pid, alive, ts}`` rows
-    #                    (cross-referenced against ``os.kill(pid, 0)``).
-    #   ``agents``     — ``{<role>: {inbox_bytes, outbox_bytes}}``.
-    #   ``coordinator``— ``{recorded_pid, alive, pid_file}`` (from
-    #                    ``optimizer_runs/run_*.pid``).
+    # State-integrity slots: ``state_json``, ``wal`` {wal_bytes, db_bytes, db_path},
+    # ``leases`` (pid liveness), ``agents`` {<role>: {inbox_bytes, outbox_bytes}},
+    # ``coordinator`` {recorded_pid, alive, pid_file}.
     local_state_integrity: dict[str, Any] = field(default_factory=dict)
-    # J-section external-deps probe (2026-05-19). Carries:
-    #   ``gateway``    — ``{url, reachable, status_code, error}`` for
-    #                    ``OPENAI_BASE_URL/models``.
-    #   ``mounts``     — list of ``{path, latency_ms, ok, error}`` for
-    #                    ``$TRACELENS_ROOT`` / ``$TRACELENS_INTERNAL_ROOT`` /
-    #                    ``$INFERENCEX_PATH`` / ``$OOB_SRC``.
-    #   ``tracelens_cli`` — ``{cli_names, found, any_present}`` — whether
-    #                    each CLI name is found via ``shutil.which``.
+    # External-deps: ``gateway`` (OPENAI_BASE_URL/models), ``mounts`` (stat latency for
+    # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH / OOB_SRC), ``tracelens_cli``.
     local_external_deps: dict[str, Any] = field(default_factory=dict)
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
     sources_used: list[str] = field(default_factory=list)
     degraded_reason: str | None = None
 
     def merge_from(self, other: "SourceData") -> None:
-        """Merge another snapshot in, preserving non-empty existing fields.
-
-        Used by callers that want to enrich a primary result with extra
-        fallback data; M1 does not exercise this path but keeps the
-        helper available for M2 ``signals/*`` evolution.
-        """
+        """Merge another snapshot in, preserving non-empty existing fields."""
         for slot in (
             "session_pods",
             "session_events",
@@ -257,10 +194,7 @@ class DegradeRouter:
             except SourceUnavailable as exc:
                 self._record_failure(primary_state, str(exc))
             except Exception:
-                # Treat unexpected errors as failures too, but re-raise
-                # if the source is supposed to never raise: per Source
-                # contract, unexpected exceptions go through but still
-                # count as failures so we eventually degrade.
+                # Count unexpected errors as failures so we eventually degrade.
                 self._record_failure(primary_state, "unexpected_exception")
                 log.exception("primary source %s raised unexpectedly", self._primary.name)
             else:
