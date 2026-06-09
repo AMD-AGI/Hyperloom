@@ -740,6 +740,11 @@ _UNSUPPORTED_CONFIG_KEYS = (
 )
 
 
+_TEXT_COMPAT_MULTIMODAL_EXCEPTIONS = frozenset({
+    ("kimi_k25", "KimiK25ForConditionalGeneration"),
+})
+
+
 def _arch_is_supported_text_generation(arch: str) -> bool:
     """True when an architecture class name denotes a supported text-generation
     (decoder-only causal LM) model."""
@@ -747,6 +752,24 @@ def _arch_is_supported_text_generation(arch: str) -> bool:
     if not a:
         return False
     return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
+
+
+def _is_text_compatible_multimodal_exception(
+    model_type_l: str,
+    architectures: list[str],
+) -> bool:
+    """Allow known multimodal configs whose text path is benchmark-compatible.
+
+    Kimi-K2.6 ships as ``KimiK25ForConditionalGeneration`` with
+    ``vision_config`` even when used as a text-only checkpoint. SGLang can serve
+    its text-generation path for our benchmark; the generic multimodal gate was
+    too broad and rejected it before baseline could start. Keep this list exact
+    so ordinary VLMs remain fail-fast.
+    """
+    return any(
+        (model_type_l, arch) in _TEXT_COMPAT_MULTIMODAL_EXCEPTIONS
+        for arch in architectures
+    )
 
 
 def _detect_unsupported_model(model_path: str) -> dict | None:
@@ -761,6 +784,9 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     architectures = _config_architectures(config)
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
+
+    if _is_text_compatible_multimodal_exception(model_type_l, architectures):
+        return None
 
     for arch in architectures:
         if arch in _UNSUPPORTED_ARCHITECTURES:
