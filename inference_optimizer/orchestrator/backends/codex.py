@@ -1,32 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""CodexBackend
+"""CodexBackend — GPT-style models via the OpenAI SDK.
 
-Codex roles talk to GPT-style models via the OpenAI SDK; they're
-**no-tools by default**, so the intent transport is JSON-in-text:
+No-tools by default, so the intent transport is a JSON-in-text envelope
+(``{"intents": [...]}``) validated with the same ``validate_envelope`` the
+Claude path uses. The AMD gateway serves both Claude and OpenAI models from
+one URL, so ``ANTHROPIC_*`` env vars are accepted alongside ``OPENAI_*``
+(``OPENAI_BASE_URL`` canonical; ``ANTHROPIC_BASE_URL`` legacy fallback).
 
-    {"intents": [{"intent_type": "...", "payload": {...}}]}
-
-    The model is told (via prompt suffix) to wrap its reply in a JSON
-    envelope. CodexBackend extracts the envelope (handles fenced
-    ``json`` blocks or bare JSON), validates with the same
-    ``validate_envelope`` the Claude path uses, and returns the same
-    :class:`BackendTurnResult` shape. The Coordinator never has to know
-    which backend produced the intents.
-
-Authentication:
-
-* `OPENAI_BASE_URL` (or `ANTHROPIC_BASE_URL`) — gateway endpoint
-* `ANTHROPIC_AUTH_TOKEN` (or `OPENAI_API_KEY`) — auth token
-  The AMD gateway serves both Claude AND OpenAI models from the same URL,
-  hence we accept the ANTHROPIC_* env vars too. OPENAI_BASE_URL is the
-  canonical (install.sh agrees); ANTHROPIC_BASE_URL is kept as a legacy
-  fallback.
-
-Test seam:
-
-* `client_factory: Callable[[], openai.AsyncOpenAI]` — replace the SDK
-  client so unit tests don't need real credentials or network.
+Test seam: ``client_factory`` replaces the SDK client so unit tests need no
+real credentials or network.
 """
 
 from __future__ import annotations
@@ -79,8 +62,7 @@ For Critic specifically: when reviewing a proposal, emit
 """.strip()
 
 
-# Match a fenced ```json ... ``` block (preferred), falling back to a bare
-# top-level {...}. We compile both up-front; runtime cost is negligible.
+# Prefer a fenced ```json block, falling back to a bare top-level {...}.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 
@@ -89,7 +71,6 @@ def _extract_envelope(text: str) -> dict | None:
     """Pull the first valid JSON envelope out of a model reply."""
     if not text:
         return None
-    # Prefer fenced — least ambiguous.
     for m in _FENCED_JSON_RE.finditer(text):
         try:
             data = json.loads(m.group(1))
@@ -97,9 +78,8 @@ def _extract_envelope(text: str) -> dict | None:
             continue
         if isinstance(data, dict) and "intents" in data:
             return data
-    # Fall back to bare JSON containing "intents". We try greedy and
-    # progressively shorten the string from the right until json.loads
-    # accepts it — handles trailing prose without a fence.
+    # Bare JSON fallback: shrink from the right until json.loads accepts it
+    # (handles trailing prose without a fence).
     for m in _BARE_JSON_RE.finditer(text):
         candidate = m.group(1)
         for end in range(len(candidate), 0, -1):
@@ -119,22 +99,11 @@ class CodexBackend:
 
     model: str = "gpt-5.4"
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
-    # Canonical LiteLLM env (install.sh agrees). When two base-URL envs
-    # coexist, OPENAI_BASE_URL wins; ANTHROPIC_BASE_URL is the legacy
-    # fallback.
     base_url_env: str = "OPENAI_BASE_URL"
     max_completion_tokens: int = 2000
     name: str = "codex"
-    # Wall-clock cap for one ``run()`` call. Mirrors ClaudeBackend's
-    # ``call_timeout_s``: the AsyncOpenAI client honours per-request
-    # timeouts internally but a stalled gateway can still block the
-    # ``await create(...)`` for the full TCP timeout. Bounding it at
-    # asyncio level guarantees the orchestrator reactor never sits idle
-    # past this budget.
-    #
-    # Env-var override ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC`` mirrors
-    # the claude backend knob; same rationale (heavy critic / kernel prompts
-    # may exceed 120 s on the AMD gateway under load).
+    # Wall-clock cap for one ``run()`` call; bounds a stalled-gateway hang at
+    # asyncio level. Env override: ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC``.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",

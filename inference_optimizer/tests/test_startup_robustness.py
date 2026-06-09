@@ -1,26 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the startup-robustness preflight + launch-info wire format.
-
-Covers five independent surfaces that all live in ``cli.py``:
-
-* ``_validate_credentials`` — fail-fast gate for missing
-  ``SAFE_API_KEY`` / ``OPENAI_BASE_URL``. Strict by design: no bypass
-  flag or env var; specialist agents and the catalog probe both need
-  live credentials so a run without them cannot finish anyway.
-* ``_resolve_gpu_type`` — probe-first gpu_type resolution. The probe
-  always wins on disagreement; the user-supplied value is only used
-  when the probe fails (CPU sandbox / no rocm-smi).
-* ``_emit_launch_info`` — machine-readable stdout sentinel +
-  optional JSON dump for launcher scripts.
-* ``_clean_stale_aiter_locks`` — sweep stale aiter JIT lock files
-  left behind by killed runs (root cause of the three failed
-  Qwen3-30B-A3B mi355x launches).
-
-These are pure-function entry points; the heavier integration of these
-helpers into ``_run_optimize`` is exercised by the broader cli + auth
-override tests.
-"""
+"""Tests for the startup-robustness preflight + launch-info wire format (cli.py)."""
 
 from __future__ import annotations
 
@@ -33,9 +13,7 @@ import pytest
 from inference_optimizer import cli
 
 
-# ---------------------------------------------------------------------------
 # _validate_credentials
-# ---------------------------------------------------------------------------
 @pytest.fixture
 def clean_creds_env(monkeypatch):
     for var in ("SAFE_API_KEY", "OPENAI_BASE_URL"):
@@ -83,21 +61,14 @@ def test_validate_credentials_lists_both_missing(clean_creds_env, capsys):
 
 
 def test_validate_credentials_no_bypass_paths(clean_creds_env):
-    """Sanity check: setting HYPERLOOM_SKIP_CREDS_CHECK does NOT bypass.
-
-    The bypass path was removed deliberately — credentials are required
-    for any real run, so a "skip" knob would only ever mask the same
-    failure showing up further into the pipeline.
-    """
+    """HYPERLOOM_SKIP_CREDS_CHECK does NOT bypass — the bypass path was removed."""
     clean_creds_env.setenv("HYPERLOOM_SKIP_CREDS_CHECK", "1")
     with pytest.raises(SystemExit) as exc_info:
         cli._validate_credentials()
     assert exc_info.value.code == 2
 
 
-# ---------------------------------------------------------------------------
 # _resolve_gpu_type
-# ---------------------------------------------------------------------------
 def test_resolve_gpu_type_probe_only():
     """No --gpu-type passed; probe wins."""
     gpu, warns = cli._resolve_gpu_type(user_specified="", probed="mi355x")
@@ -119,11 +90,7 @@ def test_resolve_gpu_type_agreement_silent():
 
 
 def test_resolve_gpu_type_disagreement_probe_always_wins():
-    """The historical footgun: --gpu-type mi300x on an MI355X host. New
-    behaviour: probe wins unconditionally, warn loudly. No override
-    knob; corrupting baseline + KB rows by trusting a wrong hint is
-    worse than any plausible escape-hatch use case.
-    """
+    """On disagreement the probe wins unconditionally and warns loudly."""
     gpu, warns = cli._resolve_gpu_type(
         user_specified="mi300x", probed="mi355x",
     )
@@ -134,17 +101,13 @@ def test_resolve_gpu_type_disagreement_probe_always_wins():
 
 
 def test_resolve_gpu_type_no_inputs_returns_empty():
-    """No probe, no user value — caller will fall back to Magpie's own
-    detection or treat gpu_type as unset.
-    """
+    """No probe, no user value → empty gpu_type."""
     gpu, warns = cli._resolve_gpu_type(user_specified="", probed="")
     assert gpu == ""
     assert warns == []
 
 
-# ---------------------------------------------------------------------------
 # _emit_launch_info
-# ---------------------------------------------------------------------------
 def test_emit_launch_info_prints_kv_sentinel(tmp_path, capsys):
     session_dir = tmp_path / "model" / "20260101T000000Z"
     session_dir.mkdir(parents=True)
@@ -215,9 +178,7 @@ def test_emit_launch_info_no_file_no_extra_print(tmp_path, capsys):
     assert "Launch info file" not in out
 
 
-# ---------------------------------------------------------------------------
 # CLI flag wiring (parser end-to-end)
-# ---------------------------------------------------------------------------
 def test_parser_accepts_launch_info_file():
     parser = cli._build_parser()
     ns = parser.parse_args([
@@ -235,10 +196,7 @@ def test_parser_default_launch_info_file_is_none():
 
 
 def test_parser_does_not_expose_removed_bypass_flags():
-    """Regression guard: --no-creds-check and --gpu-type-force were
-    removed when the bypass design was rejected. Re-adding them would
-    re-open the silent-wrong-baseline footgun. Lock the absence.
-    """
+    """Regression guard: --no-creds-check and --gpu-type-force must stay removed."""
     parser = cli._build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args([
@@ -250,27 +208,9 @@ def test_parser_does_not_expose_removed_bypass_flags():
         ])
 
 
-# ---------------------------------------------------------------------------
 # _clean_stale_aiter_locks
-# ---------------------------------------------------------------------------
 def _make_aiter_tree(root):
-    """Build a minimal aiter jit/build/ layout with mixed lock ages.
-
-    Layout::
-
-        <root>/
-          lock_module_moe_stale            (stale, top-level)
-          lock_module_moe_fresh            (fresh, top-level)
-          module_moe/
-            build/
-              lock                         (stale)
-              .ninja_lock                  (stale)
-              compile_commands.json        (not a lock)
-          module_other/
-            build/
-              lock                         (fresh)
-          some_random.so                   (not a lock)
-    """
+    """Build a minimal aiter jit/build/ layout with mixed lock ages."""
     stale_mtime = time.time() - 30 * 60  # 30 min ago
 
     (root / "module_moe" / "build").mkdir(parents=True)
@@ -351,9 +291,7 @@ def test_clean_stale_aiter_locks_respects_stale_minutes(tmp_path):
 def test_clean_stale_aiter_locks_auto_discovers_via_env_override(
     tmp_path, monkeypatch,
 ):
-    """``$INFERENCE_OPTIMIZER_AITER_JIT_DIR`` should resolve when no
-    explicit ``aiter_jit_dir`` argument is passed.
-    """
+    """``$INFERENCE_OPTIMIZER_AITER_JIT_DIR`` resolves when no explicit dir is passed."""
     (tmp_path / "build").mkdir()
     stale_lock = tmp_path / "build" / "lock_module_z"
     stale_lock.write_text("x")

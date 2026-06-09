@@ -1,16 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""In-process metrics shim.
-
-In production the Critic agent will export the metrics enumerated in
-``kb-critic-integration-contract`` Appendix E via Prometheus. The runtime
-here keeps a process-local registry so unit tests can assert that the
-right counters fire without requiring a Prometheus client dependency.
-
-If Prometheus support is later wired in, replace
-:func:`get_registry` with a real client and keep the API surface
-(``inc`` / ``observe``) identical.
-"""
+"""In-process metrics shim (process-local registry; swap :func:`get_registry` for a real Prometheus client while keeping the ``inc``/``observe`` API)."""
 
 from __future__ import annotations
 
