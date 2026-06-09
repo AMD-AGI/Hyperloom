@@ -250,6 +250,20 @@ def decision_trace_path(session_dir: Path) -> Path:
     return trace_dir(session_dir) / "decision_trace.jsonl"
 
 
+def conversations_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/conversations.jsonl`` — append-only record of the
+    full prompt + completion text for every in-process LLM call.
+
+    Sibling of :func:`llm_calls_path`: that ledger holds the *token* account
+    (kept small, no prompt text — see FULL_TRACE_DESIGN §9), while this file
+    carries the *conversation* (redacted full prompt/response) so a session
+    can be replayed or exported (e.g. to Langfuse) after the fact. Both share
+    the same ``session_id`` / ``component`` / ``tick`` / ``phase`` join keys
+    so the two streams line up against ``decision_trace``.
+    """
+    return trace_dir(session_dir) / "conversations.jsonl"
+
+
 def research_hints_md(session_dir: Path) -> Path:
     """``<sd>/research_hints.md`` — human-readable proven-prior hints
     collected by the research scout."""
@@ -568,6 +582,7 @@ __all__ = [
     "agent_persona",
     "agent_prompt_snapshot",
     "competitor_target_json",
+    "conversations_path",
     "cortex_audit_jsonl",
     "cortex_dead_letter_ndjson",
     "cortex_dir",

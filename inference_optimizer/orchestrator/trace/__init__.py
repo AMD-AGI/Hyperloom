@@ -22,6 +22,12 @@ The collector that joins this ledger with the decision streams lives in
 ``inference_optimizer/breakdown/collectors.py`` (``collect_decision_trace``).
 """
 
+from .conversation_trace import (
+    ConversationRecord,
+    ConversationRowError,
+    append_conversation,
+    redact_secrets,
+)
 from .llm_trace import (
     LLMCallRecord,
     LLMTraceRowError,
@@ -35,11 +41,15 @@ from .parse_usage import (
 )
 
 __all__ = [
+    "ConversationRecord",
+    "ConversationRowError",
     "LLMCallRecord",
     "LLMTraceRowError",
+    "append_conversation",
     "append_llm_call",
     "normalize_usage",
     "parse_claude_stream_json_usage",
     "parse_geak_usage",
     "parse_oob_json_usage",
+    "redact_secrets",
 ]
