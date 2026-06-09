@@ -34,12 +34,14 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Production large-B pool: 100 models twice a day, firing at UTC
-  # 00:00 / 12:00 (Beijing 08:00 / 20:00). The matrix generator rotates
-  # deterministically by UTC 12-hour slot — these hours map cleanly to
-  # hour//12 -> 0 / 1 so the rotation stays continuous.
+  # Rolling un-run pool: 100 models three times a day, firing at UTC
+  # 04:00 / 12:00 / 20:00 (Beijing 12:00 / 20:00 / 04:00). Each run submits the
+  # next 100 models from ci/candidates/unrun_excluding_manual_100.json that are
+  # NOT yet on the leaderboard AND not already running (exclude_leaderboard +
+  # exclude_active below), so the priority pool drains toward empty. Manual
+  # workflow_dispatch is unaffected.
   schedule:
-    - cron: '0 0,12 * * *'
+    - cron: '0 4,12,20 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
@@ -81,6 +83,17 @@ on:
         description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 100 to match the 100-model batch).'
         required: false
         default: '60'
+      submit_jitter_sec:
+        # Anti-thundering-herd. When the whole matrix fans out at once, every
+        # job hits SaFE register/submit (Claw-session creation) in the same
+        # instant and the backend sheds load with HTTP 500 'failed to create
+        # Claw session' / 504. Each job instead sleeps random(0..N) seconds
+        # before submitting, spreading the herd across an N-second window. The
+        # optimize task runs for hours, so a worst-case N-second head start is
+        # negligible. 0 = off.
+        description: 'Per-job random pre-submit delay window in seconds (random(0..N)) to de-sync the matrix and avoid Claw-session HTTP 500/504 herds. 0=off.'
+        required: false
+        default: '600'
       submit_workspaces:
         # Comma-separated round-robin pool. Default spreads the batch across
         # hyperloom + sandbox instead of sending every task to sandbox. Set
@@ -97,6 +110,15 @@ on:
         description: 'Output sequence length'
         required: false
         default: '1024'
+      tp:
+        # Optional override for tensor parallelism. Empty (default) keeps the
+        # script's auto-detect (params -> tp). Set explicitly to spread a
+        # model's weights + KV cache across more GPUs — e.g. tp=2 rescues the
+        # 12B Mistral-Nemo merges that OOM at tp=1 because their ~1M native
+        # context blows the KV cache to ~127 GiB on a single GPU.
+        description: 'Tensor parallelism override (1/2/4/8/16/32). Leave empty to auto-detect from model size.'
+        required: false
+        default: ''
       mode:
         description: 'Execution mode forwarded to SaFE'
         required: false
@@ -186,22 +208,24 @@ jobs:
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      # Production cron rotates over a fixed pool of models that already have
-      # real leaderboard data, so we can compare week-over-week. The file is
-      # generated manually via ci/build_production_leaderboard_pool.py and
-      # refreshed only when we want to bring in newly-published models.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_hf_2026-05-25.json' || github.event.inputs.candidates_file }}
-      INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
+      # Rolling cron prioritizes the current not-on-leaderboard pool generated
+      # by ci/build_rolling_pool.py. The full merged corpus lives in
+      # ci/candidates/production_1000_from_hf_2026-05-25.json; the top-100 are
+      # reserved in manual_100.json for operator-triggered dispatch.
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/unrun_excluding_manual_100.json' || github.event.inputs.candidates_file }}
+      # Schedule pins batch_index=0: every cron pulls the FIRST 100 of the
+      # (dynamically shrinking) un-run + not-active list, so rotation is driven
+      # by the leaderboard/active exclusions instead of a clock slot.
+      INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '0' || github.event.inputs.batch_index }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '100' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
-      # Schedule no longer excludes leaderboard-known models — that was for
-      # the discovery cron. We now WANT to re-run the production pool.
-      # Batch index for schedule is computed by generate_hf_matrix.py from the
-      # UTC 00:00/12:00 half-day slot, not GITHUB_RUN_NUMBER, so manual
-      # dispatches do not perturb cron rotation. We still exclude active
-      # workflows so cron does not double-submit a model already running.
-      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
+      # Schedule EXCLUDES leaderboard-known models: the rolling cron only
+      # submits models with no leaderboard data yet, so each run makes forward
+      # progress and the pool drains to empty. We also exclude active workflows
+      # so cron never double-submits a model already running — the two
+      # exclusions together advance the "first 100" window every run.
+      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_leaderboard }}
       INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
@@ -281,6 +305,8 @@ jobs:
           MODEL_REPO:             ${{ matrix.model }}
           INPUT_ISL:              ${{ github.event.inputs.isl }}
           INPUT_OSL:              ${{ github.event.inputs.osl }}
+          INPUT_TP:               ${{ github.event.inputs.tp }}
+          INPUT_SUBMIT_JITTER_SEC: ${{ github.event.inputs.submit_jitter_sec }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
@@ -314,6 +340,14 @@ jobs:
           set -euo pipefail
           ARGS=(--model "${MODEL_REPO}")
           ARGS+=(--isl "${INPUT_ISL:-1024}" --osl "${INPUT_OSL:-1024}")
+          # Anti-herd: spread parallel submits across a random window so the
+          # backend's Claw-session creation isn't hit by the whole matrix at
+          # once. Schedule passes no input -> falls back to the 600s default.
+          ARGS+=(--submit-jitter-sec "${INPUT_SUBMIT_JITTER_SEC:-600}")
+          # Optional tp override — empty keeps the script's auto-detect.
+          if [ -n "${INPUT_TP:-}" ]; then
+            ARGS+=(--tp "${INPUT_TP}")
+          fi
           ARGS+=(--mode "${INPUT_MODE:-local}")
           if [ -n "${INPUT_GPU_TYPE:-}" ]; then
             ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
@@ -464,30 +498,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p task-artifacts
-          if [ -f submit-output/submission_manifest.json ]; then
-            READY=$(python3 - <<'PY'
-          import json
-          with open("submit-output/submission_manifest.json", encoding="utf-8") as f:
-              data = json.load(f)
-          records = data.get("records") if isinstance(data.get("records"), list) else []
-          ok = any(
-              (
-                  r.get("final_status") == "Succeeded"
-                  or r.get("ci_success")
-                  or r.get("ci_status") == "Delivered"
-              )
-              for r in records
-              if isinstance(r, dict)
-          )
-          print("yes" if ok else "no")
-          PY
-            )
-            if [ "$READY" != "yes" ]; then
-              echo "::warning::no Succeeded or Delivered task in submission_manifest.json; skipping sbd-ingester publish"
-              echo "SKIP non-delivered-task" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
-              exit 0
-            fi
-          fi
+          # ALWAYS-PUBLISH policy: we deliberately DO NOT gate on
+          # final_status==Succeeded / ci_success / ci_status==Delivered here.
+          # Any session_breakdown that was collected — even for Timeout / Failed
+          # / Interrupted sessions — is pushed to the sbd-ingester so pulse never
+          # leaves a model stuck in `awaiting_collector`. The ingester still
+          # decides show_on_leaderboard from data quality (no-gain / non-final
+          # snapshots stay hidden), so this never pollutes the leaderboard.
+          # The only remaining natural guard is "a breakdown file must exist":
+          # the selection step below exits cleanly when there is nothing to send.
           # Select only within this matrix job's collected task directory. The
           # flat task-artifacts/<task_id>/ci_metrics.json is backfilled by
           # optimize_submit.py with current task/model metadata; nested
