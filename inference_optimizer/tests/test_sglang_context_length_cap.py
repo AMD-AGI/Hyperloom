@@ -94,7 +94,9 @@ def _write_model(tmp_path: Path, max_pos: int | None, *, nested: bool = False) -
     return str(model_dir)
 
 
-def _write_yaml(path: Path, *, framework: str, model: str) -> None:
+def _write_yaml(
+    path: Path, *, framework: str, model: str, runner_type: str | None = None,
+) -> None:
     cfg: dict = {
         "benchmark": {
             "framework": framework,
@@ -111,6 +113,8 @@ def _write_yaml(path: Path, *, framework: str, model: str) -> None:
             "gpu_selection": {"auto": False},
         }
     }
+    if runner_type:
+        cfg["benchmark"]["runner_type"] = runner_type
     with path.open("w") as f:
         yaml.safe_dump(cfg, f)
 
@@ -122,10 +126,11 @@ def _materialize_envs(
     model: str,
     extra_server_args: str = "",
     extra_envs: dict | None = None,
+    runner_type: str | None = None,
 ) -> dict:
     """Render a YAML via the production choke point and return its envs map."""
     base = tmp_path / "base.yaml"
-    _write_yaml(base, framework=framework, model=model)
+    _write_yaml(base, framework=framework, model=model, runner_type=runner_type)
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
@@ -320,6 +325,7 @@ def _default_non_amd_gpu(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         "inference_optimizer.cli._autodetect_gpu_type", lambda: None,
     )
+    monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.delenv("HYPERLOOM_DUAL_CHUNK_BACKEND", raising=False)
 
 
@@ -366,6 +372,16 @@ def test_dual_chunk_falls_back_to_triton_on_amd(tmp_path, monkeypatch):
     assert "--foo bar" in out
 
 
+def test_dual_chunk_uses_explicit_gpu_type_before_autodetect(tmp_path):
+    """The caller's runner gpu_type must win when runtime probing is unavailable."""
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    out = inject_sglang_attention_backend(
+        "--foo bar", "sglang", model, gpu_type="mi300x",
+    )
+    assert "--attention-backend triton" in out
+    assert "dual_chunk_flash_attn" not in out
+
+
 def test_dual_chunk_backend_env_override(tmp_path, monkeypatch):
     """HYPERLOOM_DUAL_CHUNK_BACKEND wins over hardware detection."""
     monkeypatch.setattr(
@@ -409,3 +425,13 @@ def test_materialize_sglang_injects_dual_chunk_backend(tmp_path):
     envs = _materialize_envs(tmp_path, framework="sglang", model=model)
     sglang_args = envs["EXTRA_SGLANG_ARGS"]
     assert "--attention-backend dual_chunk_flash_attn" in sglang_args
+
+
+def test_materialize_sglang_uses_runner_type_for_dual_chunk_backend(tmp_path):
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    envs = _materialize_envs(
+        tmp_path, framework="sglang", model=model, runner_type="mi300x",
+    )
+    sglang_args = envs["EXTRA_SGLANG_ARGS"]
+    assert "--attention-backend triton" in sglang_args
+    assert "dual_chunk_flash_attn" not in sglang_args

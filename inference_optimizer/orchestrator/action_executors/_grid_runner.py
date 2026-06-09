@@ -1148,7 +1148,7 @@ def inject_sglang_context_length(
     )
 
 
-def _resolve_dual_chunk_backend() -> str:
+def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
     """Pick the dual-chunk attention backend for the current hardware.
 
     ``dual_chunk_flash_attn`` is an sgl-kernel flash-attn path that only
@@ -1156,15 +1156,17 @@ def _resolve_dual_chunk_backend() -> str:
     gfx9) sglang raises ``flash_attn at sgl-kernel is only supported on
     sm90 and above`` and the server is killed before baseline. ``triton``
     is the ROCm-capable backend that still honours dual-chunk attention,
-    so we fall back to it on any detected AMD GPU. Non-AMD / undetectable
-    hardware keeps the upstream ``dual_chunk_flash_attn``. Override via
-    ``$HYPERLOOM_DUAL_CHUNK_BACKEND``.
+    so we fall back to it on any AMD GPU. The hardware is resolved from the
+    explicit ``gpu_type`` first (the caller already knows it and writes it
+    into the runner), then ``GPU_TYPE``, then a runtime autodetect, so a
+    missing ``rocm-smi``/torch probe at this call site cannot silently fall
+    back to the sm90-only kernel. Override via ``$HYPERLOOM_DUAL_CHUNK_BACKEND``.
     """
     override = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip()
     if override:
         return override
-    from ...cli import _autodetect_gpu_type
-    if _autodetect_gpu_type():
+    from ...cli import _resolve_amd_gpu_type
+    if _resolve_amd_gpu_type(gpu_type):
         return "triton"
     return _SGLANG_DUAL_CHUNK_BACKEND
 
@@ -1173,6 +1175,7 @@ def inject_sglang_attention_backend(
     server_args: str | None,
     framework: str | None,
     model_path: str | None,
+    gpu_type: str | None = None,
 ) -> str:
     """Append an ``--attention-backend`` for dual-chunk sglang models.
 
@@ -1181,7 +1184,8 @@ def inject_sglang_attention_backend(
     chunk attention is enabled, but attention backend is set to aiter.``.
     On NVIDIA sm90+ the fix is ``dual_chunk_flash_attn``; on AMD/ROCm that
     kernel is unsupported (``sm90 and above``), so we inject ``triton``
-    instead (see :func:`_resolve_dual_chunk_backend`).
+    instead (see :func:`_resolve_dual_chunk_backend`). ``gpu_type`` (when
+    known by the caller) takes precedence over runtime autodetect.
 
     Returns ``server_args`` unchanged when: framework is not sglang, an
     ``--attention-backend`` is already pinned (operator wins), or the model
@@ -1195,7 +1199,7 @@ def inject_sglang_attention_backend(
     from ...cli import _model_has_dual_chunk_attention
     if not _model_has_dual_chunk_attention(str(model_path or "")):
         return args
-    backend = _resolve_dual_chunk_backend()
+    backend = _resolve_dual_chunk_backend(gpu_type)
     if backend != _SGLANG_DUAL_CHUNK_BACKEND:
         log.info(
             "dual-chunk model on AMD/ROCm: injecting "

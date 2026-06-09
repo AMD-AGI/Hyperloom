@@ -702,6 +702,29 @@ def _autodetect_gpu_type() -> str | None:
         return None
 
 
+# AMD/ROCm runner types (gfx9). dual_chunk_flash_attn (sm90+) is unsupported
+# here, and some upstream archs (DSA) are not adapted to AMD yet.
+_AMD_GPU_TYPES = frozenset({"mi300x", "mi325x", "mi355x"})
+
+
+def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
+    """Resolve the current AMD GPU type, or None when not on AMD/unknown.
+
+    Resolution order (most authoritative first): an explicit ``gpu_type``
+    argument, the ``GPU_TYPE`` env, then a best-effort runtime autodetect.
+    Returning the resolved value only when it names a known AMD runner lets
+    callers gate AMD-specific behaviour on real hardware while still honouring
+    a launcher/CI-supplied ``gpu_type`` even if ``rocm-smi``/torch probing is
+    unavailable at the call site.
+    """
+    for cand in (explicit, os.environ.get("GPU_TYPE")):
+        norm = str(cand or "").strip().lower()
+        if norm in _AMD_GPU_TYPES:
+            return norm
+    detected = (_autodetect_gpu_type() or "").strip().lower()
+    return detected if detected in _AMD_GPU_TYPES else None
+
+
 def _resume_safe_flag(
     args: argparse.Namespace,
     arg_name: str,
@@ -1281,13 +1304,20 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
 
 # RoPE-config signals: their presence means the model uses extended/scaled
 # positions, so transformers/vLLM read a max-position field during rope init.
-# A config that ships these but no max-position key (DeepSeek-V3.2-Exp shape)
-# crashes with "'PreTrainedConfig' object has no attribute
-# 'max_position_embeddings'" deep in engine init.
+# A config that ships these but no max-position key crashes with
+# "'PreTrainedConfig' object has no attribute 'max_position_embeddings'" deep
+# in engine init.
 _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 
+# Architectures whose runtime path is not adapted to AMD/ROCm yet.
+# Matched case-insensitively against model_type and architectures.
+_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32"})
+_AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 
-def _detect_incompatible_model_config(model_path: str) -> str | None:
+
+def _detect_incompatible_model_config(
+    model_path: str, gpu_type: str | None = None,
+) -> str | None:
     """Detect a statically-knowable model-config incompatibility.
 
     Returns a human-readable reason string when the model's ``config.json``
@@ -1317,6 +1347,22 @@ def _detect_incompatible_model_config(model_path: str) -> str | None:
             f"(corrupt JSON or not a JSON object); the framework would crash "
             f"at config load."
         )
+    # Reject DSA-like architectures only on AMD/ROCm.
+    # The same model can still run on vendor-supported NVIDIA engines.
+    if _resolve_amd_gpu_type(gpu_type):
+        model_type = str(data.get("model_type") or "").strip().lower()
+        arches = {a.lower() for a in _config_architectures(data)}
+        if (
+            model_type in _AMD_UNSUPPORTED_MODEL_TYPES
+            or arches & _AMD_UNSUPPORTED_ARCHITECTURES
+        ):
+            label = model_type or (next(iter(arches), "") if arches else "?")
+            return (
+                f"model architecture '{label}' has no AMD/ROCm runtime path "
+                f"(needs a vendor engine on NVIDIA Hopper/Blackwell, e.g. "
+                f"DeepSeek Sparse Attention); it crashes in engine init on "
+                f"this hardware."
+            )
     scopes = [data]
     nested = data.get("text_config")
     if isinstance(nested, dict):
@@ -1352,7 +1398,9 @@ def _preflight_model_config_compat(
     Returns True when incompatible (caller should exit); False otherwise.
     """
     model = str(getattr(args, "model", "") or "")
-    detail = _detect_incompatible_model_config(model)
+    detail = _detect_incompatible_model_config(
+        model, str(getattr(args, "gpu_type", "") or "") or None,
+    )
     if detail is None:
         return False
     name = Path(model).name or model

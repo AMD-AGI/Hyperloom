@@ -25,8 +25,8 @@ def _write_config(model_dir: Path, **fields) -> None:
     (model_dir / "config.json").write_text(json.dumps(fields), encoding="utf-8")
 
 
-def _args(model: str) -> argparse.Namespace:
-    return argparse.Namespace(model=model, isl=1024, osl=1024)
+def _args(model: str, *, gpu_type: str | None = None) -> argparse.Namespace:
+    return argparse.Namespace(model=model, isl=1024, osl=1024, gpu_type=gpu_type)
 
 
 def _seed_state(session_dir: Path, monkeypatch):
@@ -38,6 +38,13 @@ def _seed_state(session_dir: Path, monkeypatch):
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "reports").mkdir(parents=True, exist_ok=True)
     SharedState(session_id="t", model_name="m", model_path="m").save(session_dir)
+
+
+@pytest.fixture(autouse=True)
+def _default_non_amd_gpu(monkeypatch):
+    """Keep config checks hermetic unless a test passes gpu_type explicitly."""
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: None)
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +62,34 @@ def test_detect_rope_with_maxpos_ok(tmp_path):
         m, model_type="llama", max_position_embeddings=8192,
         rope_scaling={"type": "yarn", "factor": 4.0},
     )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_amd_unsupported_arch_with_maxpos_blocks(tmp_path):
+    m = tmp_path / "deepseek_v32_amd"
+    _write_config(
+        m,
+        model_type="deepseek_v32",
+        architectures=["DeepseekV32ForCausalLM"],
+        max_position_embeddings=163840,
+        rope_scaling={"type": "yarn", "factor": 40.0},
+    )
+
+    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    assert reason is not None
+    assert "AMD/ROCm" in reason
+
+
+def test_detect_amd_unsupported_arch_not_blocked_off_amd(tmp_path):
+    m = tmp_path / "deepseek_v32_non_amd"
+    _write_config(
+        m,
+        model_type="deepseek_v32",
+        architectures=["DeepseekV32ForCausalLM"],
+        max_position_embeddings=163840,
+        rope_scaling={"type": "yarn", "factor": 40.0},
+    )
+
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
@@ -119,6 +154,27 @@ def test_preflight_passes_for_healthy_model(tmp_path, monkeypatch):
 
     assert cli._preflight_model_config_compat(_args(str(model)), sd) is False
     assert not (sd / "reports" / "final.json").exists()
+
+
+def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
+    tmp_path, monkeypatch,
+):
+    model = tmp_path / "deepseek_v32"
+    _write_config(
+        model,
+        model_type="deepseek_v32",
+        architectures=["DeepseekV32ForCausalLM"],
+        max_position_embeddings=163840,
+        rope_scaling={"type": "yarn", "factor": 40.0},
+    )
+    sd = tmp_path / "session_amd_arch"
+    _seed_state(sd, monkeypatch)
+
+    assert cli._preflight_model_config_compat(
+        _args(str(model), gpu_type="mi300x"), sd,
+    ) is True
+    final = json.loads((sd / "reports" / "final.json").read_text())
+    assert final["stop_reason"] == "model_config_incompatible"
 
 
 def test_stop_reason_is_canonical_vocab():
