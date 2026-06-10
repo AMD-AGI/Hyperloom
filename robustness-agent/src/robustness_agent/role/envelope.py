@@ -165,6 +165,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
+    # operator-facing lifecycle event log (#266); Coordinator-only writer.
+    "lifecycle",
     # specialist sub-agent ledger.
     "specialist_rounds",
     "specialist_domain_empty_streak",
