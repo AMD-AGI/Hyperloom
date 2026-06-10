@@ -1,32 +1,40 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Backfill a hyperloom session's trace JSONL into Langfuse (offline).
+"""Backfill one hyperloom session's trace JSONL into Langfuse (offline).
 
 Sibling of the *live* emitter
 (:mod:`inference_optimizer.orchestrator.trace.langfuse_emitter`): the live
-path mirrors calls into Langfuse while a run is in flight, this CLI replays a
-finished session's ``reports/trace/`` after the fact. Both share the same
+path mirrors calls into Langfuse while a run is in flight, this CLI replays
+one finished session's ``reports/trace/`` after the fact. Both share the same
 projection (:mod:`inference_optimizer.orchestrator.trace.langfuse_mapping`)
 so a backfilled trace and a live-pushed trace are shaped identically.
 
-Mapping::
+Mapping (trace -> phase span -> agent span -> generation)::
 
-    Trace            = one session (trace_id derived from session id)
-      Generation     = one LLM call (llm_calls.jsonl; prompt/response paired
-                       from conversations.jsonl when available)
-      Score          = one decision (decision_trace.jsonl):
-                         - gain_pct (NUMERIC)  when present
-                         - outcome  (CATEGORICAL: KEEP / REVERT / no_promote)
+    Trace                 = one session
+      phase span          = PRELUDE / EXPLORE / KERNEL / SWEEP / ...
+        agent span        = component (orchestration / kernel / specialist /
+                            critic / geak / oob / proposal_scorer / ...)
+          Generation      = one LLM call (llm_calls.jsonl; prompt/response
+                            paired from conversations.jsonl when available)
+      Score               = one decision (decision_trace.jsonl), attached to
+                            the agent span that produced it (trace-level
+                            fallback):
+                              - gain_pct (NUMERIC)  when present
+                              - outcome  (CATEGORICAL: KEEP/REVERT/no_promote)
 
-Source files
-------------
-* ``llm_calls.jsonl``      -- every LLM call (model + token usage + phase).
-* ``conversations.jsonl``  -- prompt+response text for the subset that
-                            recorded it; paired by (component, tick, role,
-                            UTC-second of ts).
-* ``decision_trace.jsonl`` -- per-action KEEP/REVERT/no_promote + gain_pct.
-* ``manifest.json``        -- trace-level metadata (model, gpu, framework).
+Source files (under the session dir)
+-------------------------------------
+* ``reports/trace/llm_calls.jsonl``      -- every LLM call (model + token
+                            usage + phase).
+* ``reports/trace/conversations.jsonl``  -- prompt+response text for the
+                            subset that recorded it; paired by (component,
+                            tick, role, UTC-second of ts).
+* ``reports/trace/decision_trace.jsonl`` -- per-action
+                            KEEP/REVERT/no_promote + gain_pct.
+* ``manifest.json``                      -- trace-level metadata +
+                            claw_session_id.
 
 Usage
 -----
@@ -36,7 +44,7 @@ Usage
     python -m inference_optimizer.scripts.backfill_langfuse \\
         --session-dir <SD> --dry-run
 
-    # Real backfill (needs the langfuse SDK + env/keys).
+    # Real backfill (needs the langfuse SDK + env keys).
     export LANGFUSE_HOST=https://langfuse.<your-domain>
     export LANGFUSE_PUBLIC_KEY=pk-...
     export LANGFUSE_SECRET_KEY=sk-...
@@ -44,8 +52,10 @@ Usage
 
 Notes
 -----
-* Idempotent-ish: ``trace_id`` is derived from the session id so re-runs (and
-  the live emitter) update the same trace rather than duplicating it.
+* Correlation: ``trace_id`` and the Langfuse ``session_id`` grouping are
+  derived from ``claw_session_id`` (fallback the internal session id), so a
+  re-run, the live emitter, and this backfill of one PrimusClaw session all
+  update the same trace rather than duplicating it.
 * Historical backfill preserves original timestamps via explicit
   ``start_time`` / ``end_time`` on every observation.
 """
