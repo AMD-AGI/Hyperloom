@@ -61,10 +61,14 @@ def ensure_fd_limit(
     """
     if min_soft is None:
         min_soft = _min_nofile_target()
+    inf = resource.RLIM_INFINITY
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    if soft >= min_soft:
+    # RLIM_INFINITY (-1) means "unlimited". Guard against treating it as a
+    # tiny number: an unlimited soft limit is already sufficient, and an
+    # unlimited hard cap imposes no ceiling on the target (issue #433).
+    if soft == inf or soft >= min_soft:
         return soft, hard
-    target = min(min_soft, hard)
+    target = min_soft if hard == inf else min(min_soft, hard)
     try:
         resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
         soft = target
@@ -75,7 +79,7 @@ def ensure_fd_limit(
             f"(issue #433). Launch the container with --ulimit nofile=1048576."
         )
         return soft, hard
-    if hard < min_soft:
+    if hard != inf and hard < min_soft:
         _fd_limit_warn(
             f"RLIMIT_NOFILE hard cap {hard} is below the raylet target "
             f"{min_soft}; raised soft to {soft} but this may still be too low "

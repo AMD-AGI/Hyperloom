@@ -55,11 +55,21 @@ class _FakeResource:
     matching the unprivileged container case)."""
 
     RLIMIT_NOFILE = 7  # value is irrelevant; kept distinct + truthy
+    RLIM_INFINITY = -1  # matches the stdlib resource module sentinel
 
     def __init__(self, soft: int, hard: int, events: list):
         self._soft = soft
         self._hard = hard
         self._events = events
+
+    def _exceeds_hard(self, value: int) -> bool:
+        """True when ``value`` is above the current hard cap, treating
+        ``RLIM_INFINITY`` (-1) as +infinity on either side."""
+        if self._hard == self.RLIM_INFINITY:
+            return False  # no ceiling
+        if value == self.RLIM_INFINITY:
+            return True   # asking for unlimited under a finite cap
+        return value > self._hard
 
     def getrlimit(self, which):
         assert which == self.RLIMIT_NOFILE
@@ -69,7 +79,9 @@ class _FakeResource:
     def setrlimit(self, which, limits):
         assert which == self.RLIMIT_NOFILE
         soft, hard = limits
-        if soft > self._hard or (hard != self._hard and hard > self._hard):
+        # Unprivileged rule: soft may rise up to the hard cap; the hard cap
+        # may be lowered but not raised. RLIM_INFINITY is treated as +inf.
+        if self._exceeds_hard(soft) or (hard != self._hard and self._exceeds_hard(hard)):
             raise ValueError("current limit exceeds maximum limit")
         self._soft = soft
         self._hard = hard
@@ -141,6 +153,53 @@ def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
     assert ("setrlimit", (4096, 4096)) in events
     assert soft == 4096 and hard == 4096
     assert warnings, "must warn when hard cap is below the raylet fd target"
+
+
+def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeypatch):
+    """An unlimited hard cap (RLIM_INFINITY = -1) must be treated as "no
+    ceiling": raise soft to exactly ``min_soft`` (NOT min(min_soft, -1) = -1)
+    and emit NO warning. Regressing this re-introduces the issue #433
+    boundary bug where -1 was mistaken for a tiny cap."""
+    events: list = []
+    fake = _FakeResource(soft=1024, hard=_FakeResource.RLIM_INFINITY, events=events)
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+
+    warnings: list = []
+    monkeypatch.setattr(
+        ray_runtime, "_fd_limit_warn", lambda msg: warnings.append(msg),
+        raising=False,
+    )
+
+    soft, hard = ray_runtime.ensure_fd_limit(TARGET_NOFILE)
+
+    assert ("setrlimit", (TARGET_NOFILE, _FakeResource.RLIM_INFINITY)) in events
+    assert soft == TARGET_NOFILE
+    assert hard == _FakeResource.RLIM_INFINITY
+    assert not warnings, "unlimited hard cap must NOT trigger a false 'too low' warning"
+
+
+def test_ensure_fd_limit_unlimited_soft_is_noop(monkeypatch):
+    """An already-unlimited soft limit (RLIM_INFINITY = -1) must be treated
+    as already-sufficient: no setrlimit, no warning."""
+    events: list = []
+    fake = _FakeResource(
+        soft=_FakeResource.RLIM_INFINITY,
+        hard=_FakeResource.RLIM_INFINITY,
+        events=events,
+    )
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+
+    warnings: list = []
+    monkeypatch.setattr(
+        ray_runtime, "_fd_limit_warn", lambda msg: warnings.append(msg),
+        raising=False,
+    )
+
+    soft, _hard = ray_runtime.ensure_fd_limit(TARGET_NOFILE)
+
+    assert all(kind != "setrlimit" for kind, _ in events)
+    assert soft == _FakeResource.RLIM_INFINITY
+    assert not warnings
 
 
 def test_ensure_ray_cluster_runs_fd_preflight_before_ray_start(monkeypatch):
