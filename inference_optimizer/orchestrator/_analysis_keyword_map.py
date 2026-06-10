@@ -142,7 +142,15 @@ ANALYSIS_KEYWORD_TO_VARIANTS: dict[str, tuple[str, ...]] = {
 
 
 def _normalize(text: str) -> str:
-    """Lowercase + collapse whitespace; preserves substring semantics."""
+    """Lowercase + collapse whitespace; preserves substring semantics.
+
+    Args:
+        text (str): The raw text to normalize.
+
+    Returns:
+        str: The lowercased text with runs of whitespace collapsed to single
+        spaces.
+    """
     return re.sub(r"\s+", " ", text.lower())
 
 
@@ -158,6 +166,19 @@ def extract_required_variants_from_analysis(
 
     Text is normalized (lowercase + whitespace collapsed) before matching.
     Empty / None text -> ([], []).
+
+    Args:
+        analysis_md_text (str): Raw analysis.md content to scan for keywords.
+        available_variants (Iterable[str]): The variants available for the
+            current framework; matches are narrowed to this set so SGLang-only
+            variants don't surface on a vLLM run and vice versa.
+
+    Returns:
+        tuple[list[str], list[tuple[str, tuple[str, ...]]]]: A pair of:
+        (1) a sorted list of variant names that the analysis implies, narrowed
+        to ``available_variants``; and (2) a list of ``(keyword,
+        variants_tuple)`` for every match found, useful for showing the LLM
+        exactly which keyword triggered which variant.
     """
     if not analysis_md_text:
         return [], []
@@ -189,9 +210,19 @@ def format_missing_variants_advice(
     """Build the operator-facing advice string for a propose with
     keyword-implied variants that aren't in the LLM's variants list.
 
-    Returns None when there is nothing to advise (all required variants
-    are already included, or the analysis didn't mention any tracked
-    keyword).
+    Args:
+        proposed_variants (list[str]): The variants the LLM proposed.
+        required_variants (list[str]): Variants implied by analysis keywords.
+        matches (list[tuple[str, tuple[str, ...]]]): ``(keyword, variants_tuple)``
+            pairs used to build a per-keyword breakdown of why each variant is
+            implied.
+        action_name (str): Name of the action being proposed, embedded in the
+            advice message.
+
+    Returns:
+        str | None: The advice string, or None when there is nothing to advise
+        (all required variants are already included, or the analysis didn't
+        mention any tracked keyword).
     """
     if not required_variants:
         return None

@@ -35,6 +35,15 @@ _KERNEL_AGENT_ROOT_ENV = "HYPERLOOM_KERNEL_AGENT_ROOT"
 
 
 def _kernel_agent_root_from_env() -> Path | None:
+    """Read the kernel-agent install root from the environment at call time.
+
+    Resolved lazily on every call (rather than snapshotted at import) so a
+    late ``os.environ`` injection by the CLI preflight still wins.
+
+    Returns:
+        Path | None: The kernel-agent root as a :class:`~pathlib.Path`, or
+            ``None`` when ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset or empty.
+    """
     raw = os.environ.get(_KERNEL_AGENT_ROOT_ENV)
     if not raw:
         return None
@@ -154,6 +163,10 @@ def _default_kernel_batch_parallel() -> int:
     monkeypatch torch / env must call ``cache_clear()``; the
     ``inference_optimizer/tests/conftest.py`` autouse fixture handles
     this for every test.
+
+    Returns:
+        int: The adaptive maximum number of concurrent sibling kernel
+        attempts, ``min(cap, visible_gpus // per_task_gpus)``.
     """
     n_gpus = _visible_gpu_count()
     if not n_gpus or n_gpus <= 0:
@@ -220,6 +233,13 @@ _SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
 def _kernel_agent_root_error() -> str | None:
+    """Validate that the kernel-agent install root is configured and present.
+
+    Returns:
+        str | None: A human-readable error message when the root env var is
+            unset or points at a missing directory, or ``None`` when the root
+            exists and is usable.
+    """
     root = _kernel_agent_root_from_env()
     if root is None:
         return (
@@ -233,6 +253,19 @@ def _kernel_agent_root_error() -> str | None:
 
 
 def _kernel_agent_tool_path(tool_name: str) -> Path:
+    """Resolve the absolute path to a kernel-agent shell tool.
+
+    Args:
+        tool_name (str): File name of the tool under ``<root>/tools/`` (for
+            example ``tracelens_analysis.py``).
+
+    Returns:
+        Path: The resolved path to the requested tool.
+
+    Raises:
+        RuntimeError: If the kernel-agent root is unset/missing, or the named
+            tool does not exist under ``<root>/tools/``.
+    """
     err = _kernel_agent_root_error()
     if err:
         raise RuntimeError(err)
@@ -245,6 +278,21 @@ def _kernel_agent_tool_path(tool_name: str) -> Path:
 
 
 def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
+    """Detect torch.compile/Inductor/Triton runtime-generated kernels.
+
+    Such kernels are regenerated each run, so patching them would not yield a
+    reusable optimization. A name matching a compile-generated marker is only
+    treated as runtime-generated when its source path is *not* under a known
+    reusable framework root.
+
+    Args:
+        name (str): Kernel name (e.g. ``triton_poi_fused_...``).
+        source_file (str): Resolved source path for the kernel.
+
+    Returns:
+        bool: ``True`` if the kernel appears runtime-generated and therefore
+            non-reusable, ``False`` otherwise.
+    """
     lower_name = (name or "").lower()
     lower_file = (source_file or "").lower()
     if any(marker in lower_file for marker in _RUNTIME_GENERATED_SOURCE_MARKERS):
@@ -255,7 +303,20 @@ def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
 
 
 def _load_candidate_metadata(payload: dict) -> dict[str, Any]:
-    """Find candidate metadata for the requested kernel_id if available."""
+    """Find candidate metadata for the requested ``kernel_id`` if available.
+
+    Prefers an inline ``payload['candidate']`` dict; otherwise reads the
+    ``candidates_path`` JSON artifact and looks up the matching entry in its
+    ``hot_kernels`` list by ``kernel_id``.
+
+    Args:
+        payload (dict): Request payload, expected to carry either a
+            ``candidate`` dict or both ``candidates_path`` and ``kernel_id``.
+
+    Returns:
+        dict[str, Any]: The candidate metadata dict, or an empty dict when no
+            match is found or the artifact cannot be read/parsed.
+    """
     if isinstance(payload.get("candidate"), dict):
         return payload["candidate"]
     candidates_path = payload.get("candidates_path")
@@ -278,6 +339,19 @@ def _load_candidate_metadata(payload: dict) -> dict[str, Any]:
 
 
 def _coerce_runtime_value(value: Any) -> Any:
+    """Best-effort coercion of a string runtime value to ``int`` or ``float``.
+
+    Integer-looking strings become ``int``; strings containing ``.`` that
+    parse as a float become ``float``. Anything else (including unparseable
+    strings and non-string inputs) is returned unchanged.
+
+    Args:
+        value (Any): The raw value to coerce.
+
+    Returns:
+        Any: The coerced numeric value, or the original value when no safe
+            numeric coercion applies.
+    """
     if isinstance(value, str):
         stripped = value.strip()
         if stripped.isdigit():
@@ -290,6 +364,18 @@ def _coerce_runtime_value(value: Any) -> Any:
 
 
 def _candidate_env_allowed(key: str) -> bool:
+    """Decide whether an env var may be forwarded as candidate metadata.
+
+    Rejects anything that looks sensitive (keys, tokens, secrets, passwords,
+    credentials); otherwise allows the key if it is in the explicit allowlist
+    or starts with a known safe prefix (e.g. ``SGLANG_``, ``VLLM_``).
+
+    Args:
+        key (str): Environment variable name to test.
+
+    Returns:
+        bool: ``True`` if the env var is safe to surface, ``False`` otherwise.
+    """
     upper = key.upper()
     if any(part in upper for part in _SENSITIVE_ENV_PARTS):
         return False
@@ -299,6 +385,15 @@ def _candidate_env_allowed(key: str) -> bool:
 
 
 def _split_server_args(raw: str) -> list[str]:
+    """Tokenize a raw server-args string into an argv list.
+
+    Args:
+        raw (str): Raw shell-style server argument string.
+
+    Returns:
+        list[str]: The parsed argv tokens, or an empty list when ``raw`` is
+            falsy or cannot be parsed (a warning is logged on parse failure).
+    """
     try:
         return shlex.split(raw) if raw else []
     except ValueError:
@@ -307,6 +402,21 @@ def _split_server_args(raw: str) -> list[str]:
 
 
 def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
+    """Extract runtime workload context from a materialized Magpie YAML config.
+
+    Reads the config's ``benchmark`` block and derives the per-framework
+    server-args env name, the allowed candidate env vars, and a normalized
+    ``runtime_args`` view (framework, model, precision, server args, and the
+    coerced workload knobs such as ``tp`` / ``conc`` / ``isl`` / ``osl``).
+
+    Args:
+        config_path (str): Path to the materialized workload YAML config.
+
+    Returns:
+        dict[str, Any]: A dict with ``env_vars`` and ``runtime_args`` keys, or
+            an empty dict when the path is missing/unreadable. Empty/``None``
+            ``runtime_args`` entries are dropped.
+    """
     if not config_path:
         return {}
     path = Path(config_path)
@@ -366,6 +476,22 @@ def _enrich_candidate_runtime_metadata(
     candidates: Any,
     metadata: dict[str, Any],
 ) -> None:
+    """Backfill runtime env/args metadata onto each candidate kernel in place.
+
+    For every dict candidate, sets default ``env_vars`` and ``runtime_args``
+    entries from ``metadata`` without overwriting values the candidate already
+    carries (uses ``setdefault`` semantics).
+
+    Args:
+        candidates (Any): Expected to be a list of candidate dicts; ignored if
+            not a list.
+        metadata (dict[str, Any]): Metadata with ``env_vars`` / ``runtime_args``
+            sub-dicts as produced by
+            :func:`_load_materialized_workload_metadata`.
+
+    Returns:
+        None: The ``candidates`` list is mutated in place.
+    """
     if not isinstance(candidates, list) or not metadata:
         return
     env_vars = metadata.get("env_vars") if isinstance(metadata.get("env_vars"), dict) else {}
@@ -386,6 +512,17 @@ def _enrich_candidate_runtime_metadata(
 
 
 def _enrich_candidate_trace_report(candidates: Any, report_path: str) -> None:
+    """Stamp the TraceLens report path onto each candidate kernel in place.
+
+    Args:
+        candidates (Any): Expected to be a list of candidate dicts; ignored if
+            not a list.
+        report_path (str): Path to the TraceLens ``analysis.md`` report; ignored
+            if empty.
+
+    Returns:
+        None: Each dict candidate gains a default ``trace_report_path`` entry.
+    """
     if not isinstance(candidates, list) or not report_path:
         return
     for item in candidates:
@@ -399,6 +536,22 @@ def _enrich_candidates_artifact(
     *,
     trace_report_path: str = "",
 ) -> None:
+    """Rewrite the on-disk candidates artifact with enriched metadata.
+
+    Loads the ``candidates_path`` JSON, enriches its ``hot_kernels`` and
+    ``hot_kernels_top15`` lists with runtime metadata and (optionally) the
+    TraceLens report path, then writes the artifact back out (pretty-printed,
+    key-sorted). No-op when the path is missing or unreadable.
+
+    Args:
+        candidates_path (str): Path to the candidates JSON artifact to update.
+        metadata (dict[str, Any]): Runtime metadata to merge into each kernel.
+        trace_report_path (str): Optional TraceLens report path to record at
+            both the top level and on each kernel entry.
+
+    Returns:
+        None: The artifact file is rewritten in place when changes apply.
+    """
     if not candidates_path:
         return
     path = Path(candidates_path)
@@ -427,7 +580,24 @@ def _enrich_candidates_artifact(
 
 
 def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
-    """Reject compile-generated or otherwise non-reusable kernel targets."""
+    """Reject compile-generated or otherwise non-reusable kernel targets.
+
+    Validates the requested kernel before optimization: it must not be marked
+    ``reusable_native_kernel=False``, must have a resolved ``source_file``,
+    must not be runtime-generated, and that source must live under a known
+    reusable framework root. On success, defaults ``payload['source_file']``
+    to the resolved source.
+
+    Args:
+        payload (dict): Request payload describing the target kernel (carries
+            ``kernel_id`` and optionally ``candidate`` / ``source_file``).
+
+    Returns:
+        HandlerResult | None: A structured ``status="failed"`` result (with an
+            ``error_class`` such as ``non_reusable_kernel`` or
+            ``runtime_generated_kernel``) when the kernel is rejected, or
+            ``None`` when the kernel passes validation.
+    """
     candidate = _load_candidate_metadata(payload)
     kernel_id = str(payload.get("kernel_id") or "")
     name = str(candidate.get("name") or payload.get("kernel_name") or kernel_id)
@@ -563,6 +733,18 @@ def _validate_kernel_shape_and_paths(
 
 
 def _load_apply_tool() -> Any:
+    """Lazily import and cache the kernel-agent ``apply_kernel_patch.py`` module.
+
+    Loaded by file path via :mod:`importlib.util` and memoized in the module
+    global ``_APPLY_TOOL_MODULE`` so subsequent calls reuse the same module.
+
+    Returns:
+        Any: The imported ``apply_kernel_patch`` module object.
+
+    Raises:
+        RuntimeError: If the kernel-agent root/tool path cannot be resolved.
+        ImportError: If the module cannot be loaded from its resolved path.
+    """
     global _APPLY_TOOL_MODULE
     if _APPLY_TOOL_MODULE is not None:
         return _APPLY_TOOL_MODULE
@@ -577,6 +759,17 @@ def _load_apply_tool() -> Any:
 
 
 def _artifact_paths_from_payload(payload: dict) -> list[str]:
+    """Normalize compiled-artifact paths from a payload into a list of strings.
+
+    Accepts either ``artifact_paths`` or ``compiled_artifact_paths``; a single
+    string is wrapped into a one-element list and falsy entries are dropped.
+
+    Args:
+        payload (dict): Request payload that may carry artifact path(s).
+
+    Returns:
+        list[str]: The collected artifact paths (possibly empty).
+    """
     raw = payload.get("artifact_paths") or payload.get("compiled_artifact_paths") or []
     if isinstance(raw, str):
         return [raw]
@@ -591,6 +784,23 @@ def _maybe_apply_kernel_patch(
     session_dir: Path,
     kernel_id: str | None,
 ) -> HandlerResult:
+    """Apply a kernel patch via the kernel-agent ``apply_kernel_patch`` tool.
+
+    Resolves a backup root under the session's patches dir when none is given,
+    then delegates to the tool with rebuild / dry-run / target options pulled
+    from the payload.
+
+    Args:
+        payload (dict): Request payload carrying ``patch_path`` plus
+            ``target_file`` / ``source_file`` and optional apply/rebuild flags.
+        session_dir (Path): Session directory used to derive the backup root.
+        kernel_id (str | None): Kernel identifier for backup namespacing;
+            falls back to ``payload['kernel_id']`` or ``"anon"``.
+
+    Returns:
+        HandlerResult: A ``status="skipped"`` result when required inputs are
+            missing, otherwise the tool's apply result dict.
+    """
     patch_path = str(payload.get("patch_path") or "").strip()
     target_file = str(
         payload.get("target_file")
@@ -623,6 +833,17 @@ def _maybe_apply_kernel_patch(
 
 
 def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
+    """Revert a previously applied kernel patch using its apply manifest.
+
+    Args:
+        apply_result (HandlerResult): The result returned by
+            :func:`_maybe_apply_kernel_patch`; must be ``status="ok"`` with a
+            ``manifest_path`` to be revertible.
+
+    Returns:
+        HandlerResult: A ``status="skipped"`` result when there is no applied
+            manifest, otherwise the tool's revert result dict.
+    """
     if apply_result.get("status") != "ok" or not apply_result.get("manifest_path"):
         return {"status": "skipped", "reason": "no applied patch manifest"}
     tool = _load_apply_tool()
@@ -630,6 +851,19 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
 
 
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
+    """Look up a kernel's source file from the last trace-analyze result.
+
+    Searches ``state.last_trace_analyze`` (preferring ``hot_kernels_top15``,
+    falling back to ``hot_kernels``) for the entry matching ``kernel_id``.
+
+    Args:
+        state (Any): SharedState snapshot exposing ``last_trace_analyze``.
+        kernel_id (str): Kernel identifier to match.
+
+    Returns:
+        str: The matching candidate's ``source_file``, or an empty string when
+            no match is found.
+    """
     kernels = (
         (state.last_trace_analyze or {}).get("hot_kernels_top15")
         or (state.last_trace_analyze or {}).get("hot_kernels")
@@ -751,6 +985,16 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
 async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str, str]:
     """asyncio-friendly wrapper around blocking subprocess.run (keeps the reactor responsive)."""
     def _run() -> subprocess.CompletedProcess[str]:
+        """Run the command synchronously in a worker thread.
+
+        Copies the current environment, injects the Ray GCS address when running
+        in multi-node mode, and prepends the venv ``bin`` directory to ``PATH``
+        before invoking the command with output capture and the timeout.
+
+        Returns:
+            subprocess.CompletedProcess[str]: The completed process with captured
+                text stdout/stderr.
+        """
         env = os.environ.copy()
         from .action_executors._multi_node_env import (
             is_multi_node,
@@ -770,10 +1014,31 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
 
 
 def _normalize_precision(value: Any) -> str:
+    """Normalize a precision label to a trimmed lower-case string.
+
+    Args:
+        value (Any): Raw precision value (e.g. ``"FP8"``, ``None``).
+
+    Returns:
+        str: The lower-cased, whitespace-stripped precision, or an empty
+            string for falsy input.
+    """
     return str(value or "").strip().lower()
 
 
 def _gemm_tuning_timeout_sec(payload: dict) -> int:
+    """Resolve the GEMM-tuning subprocess timeout in seconds.
+
+    Reads ``payload['timeout_sec']`` then the
+    ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var, falling back to the module
+    default; the result is floored at 60 seconds.
+
+    Args:
+        payload (dict): Request payload that may carry ``timeout_sec``.
+
+    Returns:
+        int: The resolved timeout in seconds (>= 60).
+    """
     raw = payload.get("timeout_sec") or os.environ.get(
         "HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC",
         "",
@@ -786,6 +1051,20 @@ def _gemm_tuning_timeout_sec(payload: dict) -> int:
 
 
 def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
+    """Resolve the workspace directory for a GEMM-tuning run.
+
+    Honors an explicit ``payload['workspace_path']``; otherwise builds a path
+    under ``<session_dir>/runs/gemm_tuning/`` keyed by ``task_id`` /
+    ``request_id`` (or a timestamped fallback).
+
+    Args:
+        payload (dict): Request payload that may carry ``workspace_path``,
+            ``task_id`` or ``request_id``.
+        session_dir (Path): Session directory used to build the default path.
+
+    Returns:
+        Path: The resolved (not yet created) workspace directory.
+    """
     raw = payload.get("workspace_path")
     if raw:
         return Path(raw)
@@ -941,6 +1220,12 @@ async def trace_analyze_handler(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
     """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir.
+
+    Args:
+        payload (dict): Request payload (see ``Required payload`` /
+            ``Optional payload`` below for the recognized keys).
+        session_dir (Path): Session root used for resolving inputs and writing
+            the analysis outputs.
 
     Required payload:
         trace_input: path to a torch_trace dir or single .trace.json.gz file.
@@ -1177,6 +1462,17 @@ async def run_optimization_handler(
 
 
 def _geak_budget_minutes(payload: dict) -> float:
+    """Resolve the per-GEAK-attempt budget in minutes.
+
+    Priority: ``payload['geak_budget_min']`` > ``HYPERLOOM_GEAK_BUDGET_MIN``
+    env > the mode-derived default from :func:`_default_geak_budget_minutes`.
+
+    Args:
+        payload (dict): Request payload that may carry ``geak_budget_min``.
+
+    Returns:
+        float: The GEAK budget in minutes.
+    """
     return float(
         payload.get("geak_budget_min")
         or os.environ.get("HYPERLOOM_GEAK_BUDGET_MIN")
@@ -1185,7 +1481,19 @@ def _geak_budget_minutes(payload: dict) -> float:
 
 
 def _optimization_budget_minutes(payload: dict) -> float:
-    """Wall-clock budget mirrored by the kernel_optimization.py wrapper."""
+    """Wall-clock budget mirrored by the kernel_optimization.py wrapper.
+
+    Picks the OOB budget for Claude/Codex/Cursor, the GEAK budget for GEAK,
+    and the max of both for empty/multi-backend payloads (which may still run
+    GEAK first in the ladder).
+
+    Args:
+        payload (dict): Request payload carrying ``backends`` and optional
+            ``budget_minutes`` / GEAK budget hints.
+
+    Returns:
+        float: The wall-clock budget in minutes for this optimization.
+    """
     oob_budget = float(payload.get("budget_minutes", _DEFAULT_OOB_BUDGET_MINUTES))
     geak_budget = _geak_budget_minutes(payload)
     backend = str(payload.get("backends") or "").strip().lower()
@@ -1198,11 +1506,37 @@ def _optimization_budget_minutes(payload: dict) -> float:
 
 
 def _optimization_wrapper_timeout_sec(payload: dict) -> int:
+    """Compute the subprocess timeout for the kernel_optimization.py wrapper.
+
+    Converts the optimization budget to seconds and adds a 180s grace window
+    so the wrapper can salvage partial artifacts before being killed.
+
+    Args:
+        payload (dict): Request payload used to derive the optimization budget.
+
+    Returns:
+        int: The subprocess timeout in seconds.
+    """
     # +180s grace so kernel_optimization.py can salvage partial artifacts.
     return int(_optimization_budget_minutes(payload) * 60) + 180
 
 
 def _backend_order(payload: dict) -> list[str]:
+    """Resolve the ordered list of optimization backends to try.
+
+    Uses an explicit ``payload['backend_order']`` or
+    ``KERNEL_OPT_BACKEND_ORDER`` env if present; otherwise falls back to the
+    default GEAK-first ladder. Unknown backends are filtered out, and
+    ``cursor`` is dropped from the auto-derived ladder when ``CURSOR_API_KEY``
+    is unset (explicit orders are respected as-is).
+
+    Args:
+        payload (dict): Request payload that may carry ``backend_order``.
+
+    Returns:
+        list[str]: The filtered, ordered backend names (subset of
+            ``{"claude", "codex", "cursor", "geak"}``).
+    """
     raw = payload.get("backend_order") or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
     if raw:
         order = [item.strip() for item in str(raw).split(",") if item.strip()]
@@ -1328,6 +1662,27 @@ def _batch_kernel_candidates(
     *,
     session_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
+    """Select the reusable native kernels to dispatch for a batch run.
+
+    Reads the ``candidates_path`` artifact and builds the dispatch list,
+    collapsing kernels that share a source function into single ``task_group``
+    dispatches and falling back to a legacy per-kernel pass for ungrouped
+    kernels. Applies the "live" filters (not rejected, not in-flight, under the
+    per-source attempt cap) and the minimum GPU-percentage gate. When
+    ``session_dir`` is omitted, the SharedState-derived filters degrade to
+    empty sets.
+
+    Args:
+        payload (dict): Request payload carrying ``candidates_path``.
+        session_dir (Path | None): Session directory used to load SharedState
+            for rejection / attempt / in-flight filters; optional for legacy
+            and dry-run paths.
+
+    Returns:
+        list[dict[str, Any]]: The selected candidate dicts (each a shallow copy
+            carrying its ``task_group`` when grouped), or an empty list when
+            the artifact is missing/unreadable or nothing is eligible.
+    """
     candidates_path = payload.get("candidates_path")
     if not candidates_path:
         return []
@@ -1650,6 +2005,21 @@ async def _run_optimization_batch(
     sem = asyncio.Semaphore(max_parallel)
 
     async def _guarded(candidate: dict[str, Any]) -> HandlerResult:
+        """Run one candidate's backend sequence under the concurrency semaphore.
+
+        Acquires the shared ``max_parallel`` semaphore, runs the backend
+        sequence for a single candidate, and converts any exception into a
+        failed :class:`HandlerResult` so a sub-task error never propagates out
+        of ``asyncio.gather`` while sibling tasks are still in flight.
+
+        Args:
+            candidate (dict[str, Any]): The kernel candidate descriptor to run
+                (expects ``kernel_id`` and ``source_file`` keys when a dict).
+
+        Returns:
+            HandlerResult: The backend-sequence result, or a failed result if
+                the sub-task raised.
+        """
         cand_kid = str(candidate.get("kernel_id") or "") if isinstance(candidate, dict) else ""
         cand_src = (
             str(candidate.get("source_file") or "")
@@ -1839,7 +2209,19 @@ def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:
 
 
 def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
-    """Tool stdout SHOULD be a single JSON object; survive other shapes."""
+    """Parse a tool's stdout into a dict, surviving non-JSON noise.
+
+    Tries the whole stdout as a JSON object first; if that fails, scans
+    backwards for the last line that is a standalone JSON object. As a last
+    resort returns the stdout tail under ``raw_stdout_tail``.
+
+    Args:
+        stdout (str): Captured standard output from a kernel-agent tool.
+
+    Returns:
+        dict[str, Any]: The parsed JSON object, an empty dict for empty input,
+            or ``{"raw_stdout_tail": ...}`` when no JSON object is found.
+    """
     text = stdout.strip()
     if not text:
         return {}
@@ -2130,7 +2512,6 @@ async def integrate_handler(
     """
     from .action_executors.baseline import BaselineExecutor
     from .action_executors.benchmark_result import is_valid_measurement
-    from .shared_state import SharedState
     from .sub_agent_runner import RunnerContext
     from .task_registry import Task
 
@@ -2373,10 +2754,27 @@ KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
 
 
 def has_handler(kind: str) -> bool:
+    """Report whether a programmatic handler is registered for a request kind.
+
+    Args:
+        kind (str): The kernel request ``kind`` to check.
+
+    Returns:
+        bool: ``True`` if a handler is registered for ``kind``, else ``False``.
+    """
     return kind in KERNEL_REQUEST_HANDLERS
 
 
 def get_handler(kind: str) -> HandlerFn | None:
+    """Look up the programmatic handler registered for a request kind.
+
+    Args:
+        kind (str): The kernel request ``kind`` to resolve.
+
+    Returns:
+        HandlerFn | None: The registered handler coroutine function, or
+            ``None`` when no handler is registered for ``kind``.
+    """
     return KERNEL_REQUEST_HANDLERS.get(kind)
 
 

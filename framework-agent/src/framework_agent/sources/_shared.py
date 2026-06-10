@@ -29,7 +29,11 @@ class GitHubPr:
 
     @property
     def ref(self) -> str:
-        """Stable candidate ref used downstream (`Candidate.ref`)."""
+        """Stable candidate ref used downstream (`Candidate.ref`).
+
+        Returns:
+            str: The ref string of the form ``"PR:<number>"``.
+        """
         return f"PR:{self.number}"
 
 

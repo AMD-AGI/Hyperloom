@@ -23,6 +23,11 @@ from .role.prompt_inputs import ReactorContext, SharedStateSnapshot
 
 
 def _setup_logging() -> None:
+    """Configure root logging for the daemon.
+
+    Sets up a basic stderr handler at INFO level with a timestamped
+    format shared by both run modes.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -42,6 +47,11 @@ async def _run_reactor_mode(config: Config) -> None:
     loop = asyncio.get_running_loop()
 
     def _shutdown(sig: signal.Signals) -> None:
+        """Signal handler that requests a graceful loop shutdown.
+
+        Args:
+            sig (signal.Signals): The received signal triggering shutdown.
+        """
         log.info("Received %s, shutting down", sig.name)
         stop.set()
 
@@ -80,17 +90,38 @@ async def _run_reactor_mode(config: Config) -> None:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse daemon command-line arguments.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse. Defaults to
+            ``None``, which uses ``sys.argv``.
+
+    Returns:
+        argparse.Namespace: Parsed arguments including the selected
+        ``mode``.
+    """
     parser = argparse.ArgumentParser(prog="robustness-agent")
     return parser.parse_args(argv)
 
 
 async def _async_main(argv: list[str] | None = None) -> None:
+    """Discover configuration and run the selected mode.
+
+    Args:
+        argv (list[str] | None): Argument vector forwarded to
+            :func:`_parse_args`. Defaults to ``None``.
+    """
     args = _parse_args(argv)
     config = await Config.discover()
     await _run_reactor_mode(config)
 
 
 def main() -> None:
+    """Synchronous process entry point for the daemon.
+
+    Configures logging and runs the async main loop, treating a
+    keyboard interrupt as a clean exit.
+    """
     _setup_logging()
     try:
         asyncio.run(_async_main())

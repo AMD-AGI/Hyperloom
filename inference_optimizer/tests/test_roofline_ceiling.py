@@ -13,7 +13,6 @@ import pytest
 from inference_optimizer.orchestrator.roofline_ceiling import (
     HW_SPECS,
     ModelMeta,
-    RooflineBreakdown,
     _resolve_dtype_bytes,
     _resolve_peak_tflops,
     apply_runtime_dtype,

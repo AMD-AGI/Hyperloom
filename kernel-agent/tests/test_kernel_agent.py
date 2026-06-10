@@ -695,7 +695,8 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
 
     def test_geak_config_for_run_falls_back_to_3600(self) -> None:
         ko = self._import_ko()
-        import tempfile, argparse
+        import tempfile
+        import argparse
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

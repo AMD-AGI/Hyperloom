@@ -78,15 +78,39 @@ def slug(repo_id: str) -> str:
       meta-llama/Llama-3.1-8B            → meta-llama-Llama-3.1-8B
       deepseek-ai/DeepSeek-R1            → deepseek-ai-DeepSeek-R1
       dphn/dolphin-2.9.1-yi-1.5-34b      → dphn-dolphin-2.9.1-yi-1.5-34b
+
+    Args:
+        repo_id (str): The HuggingFace repo id (``owner/repo``).
+
+    Returns:
+        str: The slug with ``/`` replaced by ``-``.
     """
     return repo_id.replace("/", "-")
 
 
 def dest_dir(target_root: Path, repo_id: str) -> Path:
+    """Compute the final destination directory for a repo.
+
+    Args:
+        target_root (Path): Root directory holding per-model folders.
+        repo_id (str): The HuggingFace repo id.
+
+    Returns:
+        Path: ``target_root/<slug>`` for the repo.
+    """
     return target_root / slug(repo_id)
 
 
 def tmp_dir(target_root: Path, repo_id: str) -> Path:
+    """Compute the in-flight temporary directory for a repo download.
+
+    Args:
+        target_root (Path): Root directory holding per-model folders.
+        repo_id (str): The HuggingFace repo id.
+
+    Returns:
+        Path: ``target_root/.tmp/<slug>.part`` used before the atomic rename.
+    """
     return target_root / ".tmp" / f"{slug(repo_id)}.part"
 
 
@@ -118,7 +142,14 @@ def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str) -> bool:
 
 
 def _dir_stats(p: Path) -> tuple[int, float]:
-    """Return (n_files, total_GB) under p, ignoring .part suffixes."""
+    """Return (n_files, total_GB) under p, ignoring .part suffixes.
+
+    Args:
+        p (Path): Directory to walk recursively.
+
+    Returns:
+        tuple[int, float]: The file count and total size in gigabytes.
+    """
     n = 0
     total = 0
     for f in p.rglob("*"):
@@ -132,7 +163,19 @@ def download_one(repo_id: str, target_root: Path, hf_token: str,
                  inner_workers: int = 4) -> dict:
     """Download a single HF repo to <target_root>/<slug>/.
 
-    Returns a dict: status (OK/SKIP/FAIL), size_gb, n_files, elapsed_s, reason.
+    Skips already-complete destinations, downloads into a temporary ``.part``
+    directory, then atomically swaps it into place. Failures are reported in
+    the return dict rather than raised.
+
+    Args:
+        repo_id (str): The HuggingFace repo id to download.
+        target_root (Path): Root directory for per-model folders.
+        hf_token (str): HF token for authenticated/gated repos.
+        inner_workers (int): Parallel file workers for ``snapshot_download``.
+
+    Returns:
+        dict: A result dict with ``status`` (OK/SKIP/FAIL), ``size_gb``,
+        ``n_files``, ``elapsed_s``, and an optional ``reason``.
     """
     start = time.time()
     dest = dest_dir(target_root, repo_id)
@@ -200,6 +243,14 @@ def download_one(repo_id: str, target_root: Path, hf_token: str,
 
 
 def _load_candidates(path: Path) -> list[str]:
+    """Load repo ids from a candidates JSON file.
+
+    Args:
+        path (Path): Path to the candidates JSON produced by build_candidates.
+
+    Returns:
+        list[str]: The ``repo_id`` of each candidate entry.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     cands = data.get("candidates", [])
     return [c["repo_id"] for c in cands if c.get("repo_id")]
@@ -218,6 +269,20 @@ def _slice_repos(repos: list[str], batch_index: int | None,
 
 
 def load_repos(args: argparse.Namespace) -> list[str]:
+    """Resolve the list of repos to prewarm from CLI args or stdin.
+
+    Precedence: explicit ``--repos``, then ``--candidates`` (with optional
+    batch slicing), then newline-delimited repo ids piped on stdin.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments.
+
+    Returns:
+        list[str]: The repo ids to download.
+
+    Raises:
+        SystemExit: If no input source provides any repos.
+    """
     if args.repos:
         return list(args.repos)
     if args.candidates:
@@ -238,6 +303,15 @@ def load_repos(args: argparse.Namespace) -> list[str]:
 
 
 def _format_extras(result: dict) -> str:
+    """Build a compact one-line summary of a download result for logging.
+
+    Args:
+        result (dict): A result dict from :func:`download_one`.
+
+    Returns:
+        str: A space-joined summary of size, file count, elapsed time, and
+        any reason.
+    """
     parts = [f"{result.get('size_gb', 0):.1f}GB"]
     if result.get("n_files", 0) > 0:
         parts.append(f"{result['n_files']}f")
@@ -253,6 +327,14 @@ def _format_extras(result: dict) -> str:
 
 
 def main() -> int:
+    """Parse CLI arguments and prewarm the requested repos concurrently.
+
+    Resolves the repo list, optionally excludes already-done models, downloads
+    each repo across a thread pool, and logs a final ok/skip/fail summary.
+
+    Returns:
+        int: ``0`` if no downloads failed, otherwise ``1``.
+    """
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--candidates", type=Path,

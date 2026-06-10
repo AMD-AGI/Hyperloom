@@ -78,6 +78,11 @@ class Proposal:
     predicted_gain_pct: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the proposal as a plain dict via :func:`dataclasses.asdict`.
+
+        Returns:
+            dict[str, Any]: All proposal fields keyed by name.
+        """
         return asdict(self)
 
 
@@ -105,6 +110,14 @@ class CriticRequest:
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the request as a plain JSON-serialisable dict.
+
+        The raw payload (``raw``) is intentionally omitted; proposals are
+        converted via :meth:`Proposal.to_dict`.
+
+        Returns:
+            dict[str, Any]: The request fields keyed by name.
+        """
         out: dict[str, Any] = {
             "kind": self.kind,
             "session_id": self.session_id,
@@ -123,6 +136,20 @@ class CriticRequest:
 # Parsing
 # ---------------------------------------------------------------------------
 def _require_str(d: dict[str, Any], key: str, *, where: str) -> str:
+    """Extract a required non-empty string field.
+
+    Args:
+        d (dict[str, Any]): The source mapping.
+        key (str): The field name to read.
+        where (str): Context label used in error messages.
+
+    Returns:
+        str: The field value.
+
+    Raises:
+        RequestValidationError: If the key is missing or not a non-empty
+            string.
+    """
     if key not in d:
         raise RequestValidationError(f"{where}: missing required field {key!r}")
     value = d[key]
@@ -134,6 +161,19 @@ def _require_str(d: dict[str, Any], key: str, *, where: str) -> str:
 
 
 def _optional_str(d: dict[str, Any], key: str, *, where: str) -> str | None:
+    """Extract an optional string field.
+
+    Args:
+        d (dict[str, Any]): The source mapping.
+        key (str): The field name to read.
+        where (str): Context label used in error messages.
+
+    Returns:
+        str | None: The string value, or ``None`` when absent/``None``.
+
+    Raises:
+        RequestValidationError: If present but not a string.
+    """
     if key not in d or d[key] is None:
         return None
     value = d[key]
@@ -145,6 +185,20 @@ def _optional_str(d: dict[str, Any], key: str, *, where: str) -> str | None:
 
 
 def _optional_dict(d: dict[str, Any], key: str, *, where: str) -> dict[str, Any]:
+    """Extract an optional object field.
+
+    Args:
+        d (dict[str, Any]): The source mapping.
+        key (str): The field name to read.
+        where (str): Context label used in error messages.
+
+    Returns:
+        dict[str, Any]: A copy of the dict value, or ``{}`` when
+        absent/``None``.
+
+    Raises:
+        RequestValidationError: If present but not a dict.
+    """
     if key not in d or d[key] is None:
         return {}
     value = d[key]
@@ -156,6 +210,19 @@ def _optional_dict(d: dict[str, Any], key: str, *, where: str) -> dict[str, Any]
 
 
 def _optional_list(d: dict[str, Any], key: str, *, where: str) -> list[Any]:
+    """Extract an optional list field.
+
+    Args:
+        d (dict[str, Any]): The source mapping.
+        key (str): The field name to read.
+        where (str): Context label used in error messages.
+
+    Returns:
+        list[Any]: A copy of the list value, or ``[]`` when absent/``None``.
+
+    Raises:
+        RequestValidationError: If present but not a list.
+    """
     if key not in d or d[key] is None:
         return []
     value = d[key]
@@ -173,6 +240,16 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
     but strict about required ones, mirroring contract §14.4 — invalid
     requests should fail fast so the SKILL never produces a bogus
     verdict.
+
+    Args:
+        raw (dict[str, Any]): The raw request payload.
+
+    Returns:
+        CriticRequest: The validated, normalised request.
+
+    Raises:
+        RequestValidationError: If the payload shape, ``kind``, required
+            fields, or nested proposals/messages are invalid.
     """
     if not isinstance(raw, dict):
         raise RequestValidationError(

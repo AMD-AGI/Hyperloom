@@ -62,6 +62,14 @@ class InvalidCanonicalIdError(ValueError):
     """
 
     def __init__(self, raw: str, reason: str) -> None:
+        """Build the error from the offending id and a reason.
+
+        Args:
+            raw (str): The string that failed to parse as a canonical
+                id.
+            reason (str): Human-readable parse-failure reason; folded
+                into the message and stored on ``self.reason``.
+        """
         super().__init__(f"invalid canonical_id {raw!r}: {reason}")
         self.raw = raw
         self.reason = reason
@@ -79,6 +87,19 @@ def cid_to_path_components(canonical_id: str) -> tuple[str, str, str, str, str]:
     ``(model, hardware, framework, framework_version, precision)``,
     matching :func:`recipe_canonical_id`'s keyword order so callers
     can splat the result directly into a downstream call.
+
+    Args:
+        canonical_id (str): The canonical id to decompose.
+
+    Returns:
+        tuple[str, str, str, str, str]: The five identity slugs in
+            ``(model, hardware, framework, framework_version,
+            precision)`` order.
+
+    Raises:
+        InvalidCanonicalIdError: If the id is empty, has the wrong
+            number of segments, has a bad prefix, or contains an empty
+            segment.
     """
     raw = (canonical_id or "").strip()
     if not raw:
@@ -122,6 +143,16 @@ def canonical_id_from_components(
 
     Kept here (rather than inlining the upstream helper at every
     call-site) so the recipe_kb package remains self-contained.
+
+    Args:
+        model (str): Model identity slug.
+        hardware (str): Hardware identity slug.
+        framework (str): Framework identity slug.
+        framework_version (str): Framework version identity slug.
+        precision (str): Precision identity slug.
+
+    Returns:
+        str: The canonical id built from the five slugs.
     """
     return recipe_canonical_id(
         model=model,
@@ -143,6 +174,18 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
     The five directory names ARE the five canonical_id slugs (no
     extra slugging is applied — they were already slug-clean when
     :func:`recipe_canonical_id` produced them).
+
+    Args:
+        root (Path): Store root the recipe directory lives under.
+        recipe_dir (Path): Directory of the recipe, exactly five
+            levels below ``root``.
+
+    Returns:
+        str: The canonical id of the recipe at ``recipe_dir``.
+
+    Raises:
+        InvalidCanonicalIdError: If ``recipe_dir`` is not under
+            ``root`` or is not exactly five levels deep.
     """
     try:
         rel = recipe_dir.relative_to(root)
