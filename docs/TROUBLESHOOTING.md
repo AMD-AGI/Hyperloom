@@ -80,6 +80,9 @@ defaults to 0 on some images). GEAK and OOB submit tasks with
 ```bash
 RAY_NUM_GPUS="${RAY_NUM_GPUS:-$(python3 -c 'import torch; print(torch.cuda.device_count() or 1)')}"
 ray stop --force || true
+# issue #433: raise the soft open-files limit before `ray start` so the
+# raylet stays up (see "Ray raylet unstable / zombie" below).
+ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true
 ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 ray status
 ```
