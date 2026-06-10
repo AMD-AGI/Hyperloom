@@ -118,7 +118,12 @@ def _resolve_kb_root() -> Path:
 
 
 def list_domains() -> list[str]:
-    """List domain directories under the active KB root (sorted)."""
+    """List domain directories under the active KB root (sorted).
+
+    Returns:
+        list[str]: Sorted domain directory names, or an empty list when the KB
+            root does not exist.
+    """
     root = _resolve_kb_root()
     if not root.is_dir():
         return []
@@ -126,7 +131,15 @@ def list_domains() -> list[str]:
 
 
 def get_domain_files(domain: str) -> list[Path]:
-    """List all files in a given domain directory (sorted)."""
+    """List all files in a given domain directory (sorted).
+
+    Args:
+        domain (str): Domain directory name under the KB root.
+
+    Returns:
+        list[Path]: Sorted entries in the domain directory, or an empty list
+            when the directory does not exist.
+    """
     root = _resolve_kb_root()
     domain_dir = root / domain
     if not domain_dir.is_dir():
@@ -135,7 +148,15 @@ def get_domain_files(domain: str) -> list[Path]:
 
 
 def _prioritized_files(domain: str) -> list[Path]:
-    """Return domain files with priority entries (empirical / pitfalls) first."""
+    """Return domain files with priority entries (empirical / pitfalls) first.
+
+    Args:
+        domain (str): Domain directory name under the KB root.
+
+    Returns:
+        list[Path]: Files with :data:`_PRIORITY_FILES` ordered first, followed
+            by the remaining files; empty when the directory does not exist.
+    """
     root = _resolve_kb_root()
     domain_dir = root / domain
     if not domain_dir.is_dir():
@@ -151,7 +172,14 @@ def _prioritized_files(domain: str) -> list[Path]:
 
 
 def _match_domains(task_description: str) -> list[str]:
-    """Match domains by keyword (case-insensitive) against the task text."""
+    """Match domains by keyword (case-insensitive) against the task text.
+
+    Args:
+        task_description (str): Free-text task description to match.
+
+    Returns:
+        list[str]: Sorted domain names whose keywords appear in the text.
+    """
     lower = task_description.lower()
     matched: set[str] = set()
     for domain, keywords in DOMAIN_KEYWORDS.items():
@@ -161,7 +189,16 @@ def _match_domains(task_description: str) -> list[str]:
 
 
 def _load_file(path: Path, domain: str) -> KBFile | None:
-    """Best-effort read of a single KB file; OSErrors swallowed."""
+    """Best-effort read of a single KB file; OSErrors swallowed.
+
+    Args:
+        path (Path): File to read.
+        domain (str): Domain the file belongs to, recorded on the record.
+
+    Returns:
+        KBFile | None: The loaded record, or ``None`` if the file cannot be
+            read.
+    """
     try:
         content = path.read_text()
     except OSError:
@@ -178,6 +215,16 @@ def select_kb(
     If ``domains`` is None, derive them from ``task_description`` via
     keyword match; if keywords don't hit anything, fall back to a
     full-text scan across all domains' priority files.
+
+    Args:
+        task_description (str): Task text used to derive domains when
+            ``domains`` is None.
+        domains (list[str] | None): Explicit domain list, or ``None`` to
+            auto-derive.
+
+    Returns:
+        list[KBFile]: Deduplicated, prioritised KB files for the resolved
+            domains.
     """
     if domains is None:
         domains = _match_domains(task_description)
@@ -205,7 +252,15 @@ def select_kb(
 
 
 def load_kb_content(paths: list[Path]) -> str:
-    """Concatenate the contents of multiple KB files with blank-line separation."""
+    """Concatenate the contents of multiple KB files with blank-line separation.
+
+    Args:
+        paths (list[Path]): Files to read and concatenate; unreadable files are
+            skipped.
+
+    Returns:
+        str: The concatenated file contents joined by blank lines.
+    """
     parts: list[str] = []
     for p in paths:
         try:
@@ -223,8 +278,16 @@ def contribute_to_kb(
 ) -> Path:
     """Append a single finding to ``${KB}/<domain>/empirical_kb.md``.
 
-    Creates the domain directory and the file if missing. Returns the
-    file path so callers can log/audit the location.
+    Creates the domain directory and the file if missing.
+
+    Args:
+        domain (str): Domain directory name under the KB root.
+        finding (str): Markdown finding body to append.
+        source (str): Source tag recorded in the entry header.
+        session_id (str): Session identifier recorded in the entry header.
+
+    Returns:
+        Path: The ``empirical_kb.md`` file the finding was appended to.
     """
     root = _resolve_kb_root()
     domain_dir = root / domain
@@ -244,7 +307,15 @@ def contribute_to_kb(
 
 
 def _render_finding_markdown(finding: Finding) -> str:
-    """Render a single Finding into a markdown subsection."""
+    """Render a single Finding into a markdown subsection.
+
+    Args:
+        finding (Finding): The finding to render.
+
+    Returns:
+        str: A markdown subsection with the title, optional metadata, metrics,
+            and body.
+    """
     lines = [f"### {finding.title or 'untitled finding'}"]
     if finding.source:
         lines.append(f"- source: `{finding.source}`")
@@ -289,7 +360,15 @@ def _synthesize_pure_python(domain: str, findings: list[Finding]) -> str:
 
 
 def _build_llm_prompt(domain: str, findings: list[Finding]) -> str:
-    """Build the prompt fed to claude_agent_sdk when ``with_llm=True``."""
+    """Build the prompt fed to claude_agent_sdk when ``with_llm=True``.
+
+    Args:
+        domain (str): Domain label included in the prompt.
+        findings (list[Finding]): Raw findings rendered into the prompt body.
+
+    Returns:
+        str: The full curator prompt string.
+    """
     raw = _synthesize_pure_python(domain, findings)
     return (
         "You are a curator for the framework-agent knowledge base. "

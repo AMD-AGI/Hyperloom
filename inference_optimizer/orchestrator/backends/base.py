@@ -72,7 +72,22 @@ class Backend(Protocol):
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         max_turns: int = 1,
-    ) -> BackendTurnResult: ...
+    ) -> BackendTurnResult:
+        """Run one logical turn for the given prompt and return its intents.
+
+        Args:
+            prompt (str): The user/turn prompt to send to the backend.
+            system_prompt (str | None): Optional system prompt establishing the
+                backend's role and rules for this turn.
+            tools (list[str] | None): Optional list of tool names the backend is
+                allowed to use this turn.
+            max_turns (int): Maximum number of internal agentic sub-turns the
+                backend may take to produce its result.
+
+        Returns:
+            BackendTurnResult: The intents emitted this turn plus any raw text
+            and metadata.
+        """
 
 
 __all__ = ["Backend", "BackendError", "BackendTurnResult", "parse_call_timeout_env"]

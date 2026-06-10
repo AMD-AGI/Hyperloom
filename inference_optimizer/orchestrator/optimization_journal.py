@@ -82,12 +82,25 @@ class JournalEntry:
     tick:              int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Strip ``None`` values so the file stays compact and JSON-diffable."""
+        """Strip ``None`` values so the file stays compact and JSON-diffable.
+
+        Returns:
+            dict[str, Any]: The entry as a dict with ``None``/empty fields
+                removed.
+        """
         raw = dataclasses.asdict(self)
         return {k: v for k, v in raw.items() if v is not None and v != ""}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> JournalEntry:
+        """Reconstruct a :class:`JournalEntry` from a plain dict.
+
+        Args:
+            d (dict[str, Any]): The serialised entry.
+
+        Returns:
+            JournalEntry: The reconstructed entry with coerced field types.
+        """
         return cls(
             phase=str(d.get("phase", "")),
             iter=int(d.get("iter", 0)),
@@ -173,6 +186,14 @@ class Journal:
 
     @staticmethod
     def _journal_path(session_dir: Path) -> Path:
+        """Resolve (and create) the journal file path under a session dir.
+
+        Args:
+            session_dir (Path): The session directory root.
+
+        Returns:
+            Path: The path to the journal file inside ``reports/``.
+        """
         reports = Path(session_dir) / "reports"
         reports.mkdir(parents=True, exist_ok=True)
         return reports / JOURNAL_FILENAME
@@ -225,6 +246,11 @@ class Journal:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the whole journal (header + entries) to a dict.
+
+        Returns:
+            dict[str, Any]: The journal as a JSON-serialisable dict.
+        """
         out: dict[str, Any] = {
             "session_id":          self.session_id,
             "model":               self.model,
@@ -240,7 +266,11 @@ class Journal:
 
 # helpers
 def _now_iso() -> str:
-    """ISO-8601 UTC timestamp (seconds precision) used for entry ``ts``."""
+    """ISO-8601 UTC timestamp (seconds precision) used for entry ``ts``.
+
+    Returns:
+        str: The current UTC timestamp with a ``Z`` suffix.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z",
     )

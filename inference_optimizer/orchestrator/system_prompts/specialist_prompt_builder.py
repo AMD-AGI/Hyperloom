@@ -44,6 +44,18 @@ def _is_atom(inp: SpecialistPromptInputs) -> bool:
 
 
 def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the domain-focus block for the serving specialist.
+
+    Selects atom-flavoured or canonical sglang/vllm "what to read / winning
+    techniques / pitfalls" hints based on the active framework.
+
+    Args:
+        inp (SpecialistPromptInputs): The prompt inputs (used to pick the
+            framework flavour).
+
+    Returns:
+        list[str]: Markdown lines for the serving specialist's focus block.
+    """
     if _is_atom(inp):
         return [
             "You target **atom scheduler / cuda_graph / kv_cache** code.",
@@ -125,6 +137,19 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the domain-focus block for the kernel-switch specialist.
+
+    Selects atom-flavoured or canonical sglang/vllm kernel (attention / MoE /
+    GEMM) hints based on the active framework.
+
+    Args:
+        inp (SpecialistPromptInputs): The prompt inputs (used to pick the
+            framework flavour).
+
+    Returns:
+        list[str]: Markdown lines for the kernel-switch specialist's focus
+        block.
+    """
     if _is_atom(inp):
         return [
             "You target **aiter / atom kernels / triton** code (attention,",
@@ -180,6 +205,19 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the domain-focus block for the communication specialist.
+
+    Selects atom-flavoured (single-node, intra-node collectives) or canonical
+    multi-node RCCL/NCCL/QuickReduce hints based on the active framework.
+
+    Args:
+        inp (SpecialistPromptInputs): The prompt inputs (used to pick the
+            framework flavour).
+
+    Returns:
+        list[str]: Markdown lines for the communication specialist's focus
+        block.
+    """
     if _is_atom(inp):
         return [
             "You target **intra-node RCCL / NCCL / QuickReduce / "
@@ -238,6 +276,16 @@ def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_compiler_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the domain-focus block for the compiler specialist.
+
+    Args:
+        inp (SpecialistPromptInputs): The prompt inputs (unused beyond protocol
+            parity; this block is framework-agnostic).
+
+    Returns:
+        list[str]: Markdown lines covering torch.compile / inductor / triton /
+        AMDGCN codegen hints.
+    """
     return [
         "You target **torch.compile / inductor / triton / AMDGCN** codegen",
         "and register-pressure tuning.",
@@ -262,6 +310,16 @@ def _focus_compiler_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_system_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the domain-focus block for the system specialist.
+
+    Covers KFD driver / ROCm runtime / memory / dispatch-overhead hints.
+
+    Args:
+        inp (SpecialistPromptInputs): The prompt inputs for this dispatch.
+
+    Returns:
+        list[str]: Markdown lines for the system specialist's focus block.
+    """
     return [
         "You target **KFD driver / ROCm runtime / memory / dispatch overhead**.",
         "",
@@ -283,6 +341,17 @@ def _focus_system_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the domain-focus block for the PR-intel specialist.
+
+    Frames the specialist as a cross-repo PR researcher that surfaces
+    upstream PRs / commits / issues rather than proposing config knobs.
+
+    Args:
+        inp (SpecialistPromptInputs): The prompt inputs for this dispatch.
+
+    Returns:
+        list[str]: Markdown lines for the PR-intel specialist's focus block.
+    """
     return [
         "You are a **cross-repo PR researcher**. Your role is NOT to propose",
         "configuration knobs — it is to surface PRs / commits / issues from",
@@ -479,6 +548,17 @@ class SpecialistPromptInputs:
 
 # Section 1 — Identity & autonomy
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
+    """Render Section 1 (identity & autonomy) of the specialist prompt.
+
+    Appends the per-domain focus block from :data:`_DOMAIN_FOCUS_TEMPLATES`
+    when one is registered for the active domain.
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs.
+
+    Returns:
+        list[str]: Markdown lines for the identity section.
+    """
     body: list[str] = [
         "## 1. IDENTITY & AUTONOMY",
         "",
@@ -495,7 +575,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "worktree**, and use as many of your ``max_turns`` LLM turns as you need",
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
         "are discouraged when a real bottleneck is on the table. Quality is",
-        f"scored over quantity: cap your final ``proposal_set`` at the",
+        "scored over quantity: cap your final ``proposal_set`` at the",
         f"**top-{inp.max_proposals}** ranked picks (see Section 8).",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
@@ -648,6 +728,17 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 2 — Hardware context
 def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
+    """Render Section 2 (hardware + workload context) of the prompt.
+
+    Emits GPU type, TP, HBM, peak TFLOPs, and any populated workload
+    fields (precision, concurrency, ISL/OSL, max_model_len, arch notes).
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs.
+
+    Returns:
+        list[str]: Markdown lines for the hardware-context section.
+    """
     rows: list[str] = ["## 2. HARDWARE CONTEXT", ""]
     if inp.gpu_type:
         rows.append(f"- gpu_type: {inp.gpu_type}")
@@ -697,6 +788,17 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 3 — Gap statement
 def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
+    """Render Section 3 (gap statement) of the specialist prompt.
+
+    Emits the canonical gap id, layer, symptom, and most-recent evidence
+    JSON, or a ``(none)`` placeholder when no gap is set.
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs.
+
+    Returns:
+        list[str]: Markdown lines for the gap-statement section.
+    """
     rows = ["## 3. GAP STATEMENT", ""]
     if not inp.gap_canonical_id:
         rows.append(_NONE_PLACEHOLDER)
@@ -928,6 +1030,17 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 5 — Recipe summary
 def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
+    """Render Section 5 (warm-start recipe summary) of the prompt.
+
+    Dumps the ``find-recipe`` result as JSON, or a ``(none)`` placeholder
+    when no warm-start recipe was supplied.
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs.
+
+    Returns:
+        list[str]: Markdown lines for the recipe-summary section.
+    """
     rows = ["## 5. WARM-START RECIPE SUMMARY", ""]
     if not inp.warm_start_recipe:
         rows.append(_NONE_PLACEHOLDER)
@@ -1061,6 +1174,17 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 6 — PR feed
 def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
+    """Render Section 6 (PR feed) of the specialist prompt.
+
+    Lists the pre-warmed PR-monitor entries (title, URL, labels), or an
+    ``unavailable`` / ``(none)`` placeholder when no feed is present.
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs.
+
+    Returns:
+        list[str]: Markdown lines for the PR-feed section.
+    """
     rows = ["## 6. PR FEED", ""]
     if not inp.pr_monitor_available:
         rows.append("(empty: pr_monitor unavailable)")
@@ -1082,6 +1206,17 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 7 — Local source navigation hint
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
+    """Render Section 7 (local source navigation hint) of the prompt.
+
+    Lists the read-only framework source roots and per-domain focus
+    directories, or a ``(none)`` placeholder when neither is supplied.
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs.
+
+    Returns:
+        list[str]: Markdown lines for the source-hint section.
+    """
     rows = ["## 7. LOCAL SOURCE NAVIGATION HINT", ""]
     if not inp.framework_source_roots and not inp.source_hint_directories:
         rows.append(_NONE_PLACEHOLDER)
@@ -1105,6 +1240,18 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 8 — Output protocol
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
+    """Render Section 8 (output protocol) of the specialist prompt.
+
+    Describes the two equivalent ``specialist_done`` exit channels, the
+    payload schema, field contract, heartbeat rules, and the turn cap.
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs (source
+            of workspace path, gap id, domain, max proposals, and turns).
+
+    Returns:
+        list[str]: Markdown lines for the output-protocol section.
+    """
     workspace = inp.workspace_path or "<workspace>"
     return [
         "## 8. OUTPUT PROTOCOL",
@@ -1198,6 +1345,19 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 9 — Iron rules
 def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
+    """Render Section 9 (iron rules) of the specialist prompt.
+
+    Emits the immutable capability boundary (no serving-GPU control,
+    worktree-only patches, no KB writes, allowed intents, turn cap, and
+    workspace confinement).
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs (source
+            of the workspace path interpolated into the rules).
+
+    Returns:
+        list[str]: Markdown lines for the iron-rules section.
+    """
     workspace = inp.workspace_path or "<runs/specialist/<task_id>/>"
     if inp.allocated_gpu_ids:
         gpu_rule = [
@@ -1258,7 +1418,20 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
 
 # Top-level assembler
 def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
-    """Return ``(system_prompt, user_prompt)`` for one specialist task."""
+    """Assemble the full specialist prompt from its section builders.
+
+    The system prompt carries the immutable contract (identity, output
+    protocol, iron rules) and the user prompt carries the per-task context
+    (hardware, gap, KB, roofline, recipe, lessons, pitfalls, PR feed,
+    source hint, optional session snapshot and orchestration notes). The
+    split lets the LLM backend cache the system prompt across specialists.
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs.
+
+    Returns:
+        tuple[str, str]: The ``(system_prompt, user_prompt)`` pair.
+    """
 
     system_sections = [
         _section_identity(inp),
@@ -1284,6 +1457,17 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         ])
 
     def _flatten(sections: list[list[str]]) -> str:
+        """Join section line-lists into a single newline-separated string.
+
+        Inserts one blank line between non-empty sections and appends a
+        trailing newline.
+
+        Args:
+            sections (list[list[str]]): The per-section lists of lines.
+
+        Returns:
+            str: The flattened prompt text.
+        """
         out: list[str] = []
         for sec in sections:
             if out:
@@ -1300,7 +1484,24 @@ def build_specialist_prompts_for_domain(
     domain_key: str,
     **kwargs: Any,
 ) -> tuple[str, str]:
-    """Helper that resolves ``domain_key`` to a SpecialistDomain first."""
+    """Build specialist prompts by resolving a domain key to a domain.
+
+    Convenience wrapper that looks up ``domain_key`` via
+    :func:`get_domain`, constructs a :class:`SpecialistPromptInputs`, and
+    delegates to :func:`build_specialist_prompts`.
+
+    Args:
+        task_id (str): Identifier for the specialist task.
+        domain_key (str): Key naming the specialist domain to resolve.
+        **kwargs (Any): Additional fields forwarded to
+            :class:`SpecialistPromptInputs`.
+
+    Returns:
+        tuple[str, str]: The ``(system_prompt, user_prompt)`` pair.
+
+    Raises:
+        ValueError: If ``domain_key`` does not resolve to a known domain.
+    """
     domain = get_domain(domain_key)
     if domain is None:
         raise ValueError(

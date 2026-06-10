@@ -195,6 +195,14 @@ class ModelGpuFitDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
+        """Initialise the detector and restore any persisted dedup state.
+
+        Args:
+            config (ModelGpuFitConfig | None): Tunables; defaults to
+                :class:`ModelGpuFitConfig` when ``None``.
+            state_view (DetectorStateView | None): Disk-backed state view
+                used to load/persist the fired fingerprint across ticks.
+        """
         self._config = config or ModelGpuFitConfig()
         self._state_view = state_view
         # Disk-backed dedup so "fire once per session" survives the subprocess-per-tick transport.
@@ -206,6 +214,7 @@ class ModelGpuFitDetector:
             self._fired_fingerprint = None
 
     def _persist(self) -> None:
+        """Write the current fired fingerprint to the state view, if any."""
         if self._state_view is None:
             return
         # tuple → list for JSON round-tripping.
@@ -220,6 +229,21 @@ class ModelGpuFitDetector:
     def evaluate(
         self, ctx: ReactorContext, data: SourceData,
     ) -> list[Symptom]:
+        """Emit ``model_gpu_infeasible`` once per session if the model won't fit.
+
+        Computes the per-GPU HBM headroom from the manifest and fires when it
+        falls below the configured threshold. The fingerprint is recorded so
+        subsequent ticks with the same manifest stay quiet.
+
+        Args:
+            ctx (ReactorContext): Reactor context for the current tick.
+            data (SourceData): Collected source data including the local
+                manifest used for the feasibility check.
+
+        Returns:
+            list[Symptom]: A single ``model_gpu_infeasible`` symptom when the
+                model is infeasible, otherwise an empty list.
+        """
         manifest = data.local_manifest
         if not isinstance(manifest, dict) or not manifest:
             return []
@@ -245,6 +269,17 @@ class ModelGpuFitDetector:
     def _build_symptom(
         self, manifest: dict[str, Any], breakdown: HeadroomBreakdown,
     ) -> Symptom:
+        """Construct the ``model_gpu_infeasible`` symptom from the projection.
+
+        Args:
+            manifest (dict[str, Any]): Session manifest, used to populate
+                evidence (model name, GPU type, tp, workload).
+            breakdown (HeadroomBreakdown): Computed per-GPU HBM budget.
+
+        Returns:
+            Symptom: A HIGH-severity symptom describing the OOM-at-start risk
+                with full evidence and a TP/GPU remediation suggestion.
+        """
         cfg = self._config
         return Symptom(
             name="model_gpu_infeasible",
@@ -285,6 +320,16 @@ class ModelGpuFitDetector:
 
 
 def _manifest_fingerprint(manifest: dict[str, Any]) -> tuple[Any, ...]:
+    """Build a stable dedup key from the feasibility-relevant manifest fields.
+
+    Args:
+        manifest (dict[str, Any]): Session manifest.
+
+    Returns:
+        tuple[Any, ...]: A tuple of ``(model_name, model_class, gpu_type, tp,
+            precision, max_model_len, conc)`` suitable for equality comparison
+            across ticks.
+    """
     workload = manifest.get("workload") or {}
     return (
         str(manifest.get("model_name") or ""),
@@ -337,6 +382,14 @@ class AmdahlCeilingDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
+        """Initialise the detector and restore the persisted fire mtime.
+
+        Args:
+            config (AmdahlCeilingConfig | None): Tunables; defaults to
+                :class:`AmdahlCeilingConfig` when ``None``.
+            state_view (DetectorStateView | None): Disk-backed state view used
+                to load/persist the last fired ``kernel_breakdown.json`` mtime.
+        """
         self._config = config or AmdahlCeilingConfig()
         self._state_view = state_view
         # Disk-backed dedup; ``fired_mtime`` re-evaluates only on a fresh kernel_breakdown.json.
@@ -349,6 +402,7 @@ class AmdahlCeilingDetector:
         )
 
     def _persist(self) -> None:
+        """Write the last fired breakdown mtime to the state view, if any."""
         if self._state_view is None:
             return
         self._state_view.save({"fired_mtime": self._fired_mtime})
@@ -356,6 +410,21 @@ class AmdahlCeilingDetector:
     def evaluate(
         self, ctx: ReactorContext, data: SourceData,
     ) -> list[Symptom]:
+        """Fire ``amdahl_kernel_ceiling_low`` when kernel opt can't move E2E.
+
+        Re-evaluates only when the kernel breakdown file's mtime advances,
+        computes the Amdahl E2E ceiling for the optimizable tier, and fires
+        when that ceiling falls below the configured percentage.
+
+        Args:
+            ctx (ReactorContext): Reactor context for the current tick.
+            data (SourceData): Collected source data including the local
+                kernel breakdown.
+
+        Returns:
+            list[Symptom]: A single ``amdahl_kernel_ceiling_low`` symptom when
+                the ceiling is too low, otherwise an empty list.
+        """
         breakdown = data.local_kernel_breakdown
         if not isinstance(breakdown, dict) or not breakdown:
             return []
@@ -399,6 +468,18 @@ class AmdahlCeilingDetector:
         ceiling_pct: float,
         breakdown: dict[str, Any],
     ) -> Symptom:
+        """Construct the ``amdahl_kernel_ceiling_low`` symptom.
+
+        Args:
+            tier_pcts (dict[str, float]): Per-tier percentage of GPU time.
+            optimizable_pct (float): Summed percentage across optimizable tiers.
+            ceiling_pct (float): Computed best-case E2E percentage gain.
+            breakdown (dict[str, Any]): Raw kernel breakdown, used for evidence.
+
+        Returns:
+            Symptom: A HIGH-severity symptom recommending kernel_opt be pruned
+                in favour of higher-ceiling branches.
+        """
         cfg = self._config
         return Symptom(
             name="amdahl_kernel_ceiling_low",
@@ -443,6 +524,17 @@ class ColdStartConfig:
 
 
 def _resolve_cold_start_minutes(cfg: ColdStartConfig) -> float:
+    """Resolve the cold-start cycle duration in minutes.
+
+    Uses the explicit config value when set, otherwise reads the
+    ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC`` env var (default 3600s).
+
+    Args:
+        cfg (ColdStartConfig): Cold-start tunables.
+
+    Returns:
+        float: Estimated cold-start cycle length in minutes.
+    """
     if cfg.cold_start_minutes is not None:
         return float(cfg.cold_start_minutes)
     raw = os.environ.get(
@@ -460,6 +552,22 @@ def evaluate_cold_start_signals(
     *,
     config: ColdStartConfig | None = None,
 ) -> list[Symptom]:
+    """Fire ``cold_start_budget_exhausted`` when a cold JIT cache won't finish.
+
+    Detects the C3 failure mode: the aiter JIT cache is cold and the remaining
+    wall-clock budget is shorter than one cold-start compile cycle, so the next
+    baseline would be SIGTERM'd mid-``hipcc``.
+
+    Args:
+        ctx (ReactorContext): Reactor context, providing budget/phase state.
+        data (SourceData): Collected source data including ``local_aiter_jit``.
+        config (ColdStartConfig | None): Tunables; defaults to
+            :class:`ColdStartConfig` when ``None``.
+
+    Returns:
+        list[Symptom]: A single ``cold_start_budget_exhausted`` symptom when the
+            cache is cold and budget is insufficient, otherwise an empty list.
+    """
     cfg = config or ColdStartConfig()
     snap = ctx.shared_state
     if snap.budget_minutes < cfg.min_budget_minutes:

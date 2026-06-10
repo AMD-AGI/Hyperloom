@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import warnings
 
-import pytest
 
 from inference_optimizer.compat import payload_aliases as pa
 from inference_optimizer.compat.payload_aliases import (

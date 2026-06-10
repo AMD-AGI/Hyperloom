@@ -68,7 +68,19 @@ _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 
 
 def _extract_envelope(text: str) -> dict | None:
-    """Pull the first valid JSON envelope out of a model reply."""
+    """Pull the first valid JSON envelope out of a model reply.
+
+    Prefers a fenced ```json block (least ambiguous), then falls back to a bare
+    top-level object containing ``"intents"``, progressively trimming trailing
+    prose until ``json.loads`` accepts the candidate.
+
+    Args:
+        text (str): The raw model reply that may contain a JSON envelope.
+
+    Returns:
+        dict | None: The first dict envelope containing an ``"intents"`` key, or
+        ``None`` when no parseable envelope is found.
+    """
     if not text:
         return None
     for m in _FENCED_JSON_RE.finditer(text):
@@ -118,6 +130,17 @@ class CodexBackend:
     _client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Construct the OpenAI client (or use the test factory).
+
+        When ``client_factory`` is set it builds the client directly (test
+        seam). Otherwise it imports the OpenAI SDK, resolves the API key and
+        base URL from the configured env vars (with legacy fallbacks), and
+        creates an :class:`AsyncOpenAI` client.
+
+        Raises:
+            BackendError: If the ``openai`` SDK is not installed or no API key
+                is found in the environment.
+        """
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
@@ -155,6 +178,29 @@ class CodexBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,  # ignored — single API call per turn
     ) -> BackendTurnResult:
+        """Run one turn via a single chat-completion call and parse intents.
+
+        Appends the JSON-envelope output instructions to ``prompt``, issues one
+        bounded chat-completion request, extracts and validates the returned
+        envelope, and records call telemetry.
+
+        Args:
+            prompt (str): The composed turn prompt.
+            system_prompt (str | None): Optional system prompt sent as the
+                leading system message.
+            tools (list[str] | None): Unused; Codex roles are no-tools by
+                default.
+            max_turns (int): Ignored; one API call is made per turn.
+
+        Returns:
+            BackendTurnResult: The validated intents plus raw reply text and
+            model/finish metadata.
+
+        Raises:
+            BackendError: If the API call times out or otherwise fails.
+            NoIntentEmitted: If the reply has no parseable envelope or the
+                envelope fails intent validation.
+        """
         full_prompt = f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
         messages: list[dict[str, Any]] = []
         if system_prompt:

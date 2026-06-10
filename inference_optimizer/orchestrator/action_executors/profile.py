@@ -340,7 +340,14 @@ def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path
 
 
 def _candidate_trace_dirs(workspace: Path) -> list[Path]:
-    """Trace directories to probe for a Magpie profile workspace."""
+    """Trace directories to probe for a Magpie profile workspace.
+
+    Args:
+        workspace (Path): The Magpie profile workspace directory.
+
+    Returns:
+        list[Path]: Candidate trace directories, in probe order.
+    """
     return [
         workspace / "torch_trace",
         workspace / "capture_traces",
@@ -349,7 +356,14 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
 
 
 def _safe_mtime(p: Path) -> float:
-    """Return st_mtime, or 0 on stat() failure (e.g. NFS stale handle)."""
+    """Return st_mtime, or 0 on stat() failure (e.g. NFS stale handle).
+
+    Args:
+        p (Path): Path to stat.
+
+    Returns:
+        float: The modification time, or ``0.0`` if ``stat()`` fails.
+    """
     try:
         return p.stat().st_mtime
     except OSError:
@@ -387,6 +401,19 @@ class ProfileExecutor(BaselineExecutor):
         default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
+        """Initialize the profile executor with profile-specific defaults.
+
+        Args:
+            magpie_python (str | None): Python interpreter for the Magpie
+                shell-out; ``None`` uses the base resolver.
+            default_config_path (Path | str | None): Override config path;
+                ``None`` defers to :meth:`_resolve_default_config`.
+            session_dir (Path | str | None): Session output directory.
+            default_timeout_sec (int): Wall-clock cap for the profile run.
+                Defaults to :data:`PROFILE_DEFAULT_TIMEOUT_SEC`.
+            cwd (Path | str): Working directory for the subprocess.
+                Defaults to ``"/tmp"``.
+        """
         super().__init__(
             magpie_python=magpie_python,
             default_config_path=default_config_path,
@@ -396,7 +423,11 @@ class ProfileExecutor(BaselineExecutor):
         )
 
     def _resolve_default_config(self) -> Path:
-        """Override BaselineExecutor's resolver to pick the profile yaml."""
+        """Override BaselineExecutor's resolver to pick the profile yaml.
+
+        Returns:
+            Path: The framework-specific profile YAML config path.
+        """
         return _default_profile_config()
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
@@ -480,6 +511,15 @@ class ProfileExecutor(BaselineExecutor):
         serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"
 
         def _contains(path: Path, needle: str) -> bool:
+            """Check whether ``needle`` appears in ``path``'s text.
+
+            Args:
+                path (Path): File to read.
+                needle (str): Substring to search for.
+
+            Returns:
+                bool: ``True`` if found; ``False`` on miss or read error.
+            """
             try:
                 return needle in path.read_text(encoding="utf-8")
             except OSError:

@@ -31,12 +31,22 @@ _DEFAULT_STATE_PATH = "/tmp/multi_node_state.json"
 
 
 def _state_path() -> Path:
-    """Resolve where the multi_node CLI dropped its state file."""
+    """Resolve where the multi_node CLI dropped its state file.
+
+    Returns:
+        Path: The state-file path from ``$MULTI_NODE_STATE_FILE`` or the
+            default ``/tmp/multi_node_state.json``.
+    """
     return Path(os.environ.get("MULTI_NODE_STATE_FILE", _DEFAULT_STATE_PATH))
 
 
 def _read_state() -> dict[str, Any]:
-    """Best-effort read of the state file. Returns {} on any failure."""
+    """Best-effort read of the state file. Returns {} on any failure.
+
+    Returns:
+        dict[str, Any]: The parsed state dict, or ``{}`` if the file is
+            missing, unreadable, or not a JSON object.
+    """
     p = _state_path()
     if not p.is_file():
         return {}
@@ -70,7 +80,12 @@ def is_multi_node() -> bool:
 
 
 def ray_gcs_address_from_state() -> str:
-    """Ray GCS address for ``ray.init`` (head pod IP + default GCS port)."""
+    """Ray GCS address for ``ray.init`` (head pod IP + default GCS port).
+
+    Returns:
+        str: The explicit ``ray_address`` from state, ``<head_pod_ip>:6379``
+            when only the head IP is known, or ``""`` if neither is present.
+    """
     state = _read_state()
     addr = str(state.get("ray_address") or "").strip()
     if addr:
