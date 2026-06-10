@@ -10,6 +10,7 @@ capture directories, and has a dry-run path that works without TraceLens install
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import csv
 import functools
@@ -1012,21 +1013,94 @@ def _rank_paths(paths: list[Path]) -> list[Path]:
     return sorted(paths, key=score)
 
 
+def _compound_subwindow_keywords(name: str) -> list[str]:
+    """Trailing snake_case sub-windows of a compound/profiler-wrapped symbol.
+
+    A profiler-wrapped op name like
+    ``sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427``
+    never appears verbatim in source: the recorded identifier is
+    ``<file_stem>_<func>_<line>``. :func:`_candidate_keywords` returns only the
+    full compound token, which greps to nothing. This yields progressively
+    shorter trailing windows (longest first, most specific) so the embedded
+    function symbol (e.g. ``invoke_fused_moe_kernel``) still resolves. The
+    namespace/profiler prefix and a trailing numeric id are stripped first.
+    """
+    cleaned = _strip_template_args(name.strip())
+    if "::" in cleaned:
+        cleaned = cleaned.split("::")[-1]
+    cleaned = re.sub(r"_\d+$", "", cleaned)  # drop a trailing launcher line number
+    segs = [s for s in cleaned.split("_") if s]
+    if len(segs) < 3:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    # Windows anchored at the end, dropping leading segments one at a time, down
+    # to the last two segments. Longest (most specific) first.
+    for start in range(0, len(segs) - 1):
+        window = "_".join(segs[start:])
+        if len(window) >= 6 and not window.isdigit() and window not in seen:
+            seen.add(window)
+            out.append(window)
+    return out[:6]
+
+
+def _file_defines_symbol(path: Path, keyword: str) -> bool:
+    """True when ``path`` *defines* ``keyword`` (vs merely mentioning it).
+
+    Distinguishes a kernel's definition site (``def invoke_fused_moe_kernel``,
+    a Triton ``@triton.jit`` function, or a C/HIP ``__global__``) from a file
+    that only calls/wraps it (e.g. sglang's ``kernel_shape_profiler.py`` dispatch
+    shim). Best-effort: returns False on read errors.
+    """
+    kw = re.escape(keyword)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    patterns = (
+        r"\bdef\s+" + kw + r"\b",            # Python (incl. @triton.jit) def
+        r"\b" + kw + r"\s*=",                # kernel bound to a module-level name
+        r"__global__[^\n;{]*\b" + kw + r"\b",  # CUDA/HIP global kernel
+    )
+    return any(re.search(p, text) for p in patterns)
+
+
+def _prefer_symbol_definition(keyword: str, hits: list[Path]) -> list[Path]:
+    """Rank definition sites of ``keyword`` ahead of mere mentions."""
+    definers = [h for h in hits if _file_defines_symbol(h, keyword)]
+    return _rank_paths(definers) if definers else _rank_paths(hits)
+
+
 def locate_source_via_grep(name: str) -> str:
     """Locate a kernel source file by grepping known repos.
 
     Returns "" when no confident match exists. Never fabricates a path.
     """
-    keywords = _candidate_keywords(name)
-    if not keywords:
-        return ""
-    for keyword in keywords:
+    tried: set[str] = set()
+    # Primary pass: established keyword extraction + ranking (unchanged).
+    for keyword in _candidate_keywords(name):
+        if not keyword or keyword in tried:
+            continue
+        tried.add(keyword)
         hits: list[Path] = []
         for root in KNOWN_SEARCH_ROOTS:
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
-            ranked = _rank_paths(hits)
-            return str(ranked[0])
+            return str(_rank_paths(hits)[0])
+    # Fallback pass: trailing sub-windows of a compound/profiler-wrapped symbol
+    # (e.g. sglang_profiler::..._invoke_fused_moe_kernel_427) whose full
+    # identifier never appears verbatim in source — needed so recovered
+    # ops_summary.csv candidates (#515 fallback) resolve to their kernel source.
+    # Prefer the file that *defines* the embedded function over dispatch shims.
+    for keyword in _compound_subwindow_keywords(name):
+        if not keyword or keyword in tried:
+            continue
+        tried.add(keyword)
+        hits = []
+        for root in KNOWN_SEARCH_ROOTS:
+            hits.extend(_grep_for_keyword(keyword, Path(root)))
+        if hits:
+            return str(_prefer_symbol_definition(keyword, hits)[0])
     return ""
 
 
@@ -1504,21 +1578,30 @@ _OPS_RANKING_JSON_RELPATHS = (
 
 _RANK_NAME_KEYS = ("name", "operation", "op", "kernel", "kernel_name", "op_name")
 _RANK_CATEGORY_KEYS = (
-    "op category", "op_category", "category", "tracelens_category",
+    # ``categories`` is the real ops_summary.csv column (stored as a list-repr
+    # string like ``['MoE_fused']``; see _clean_category_label).
+    "op category", "op_category", "category", "categories", "tracelens_category",
 )
 # GPU-time column/field names → multiplier to microseconds (most specific first).
+# ``total_direct_kernel_time_ms`` is the real ops_summary.csv per-op GPU-time
+# column (its ``_sum`` sibling holds the same value in microseconds, handled by
+# _RANK_TIME_US_KEYS below).
 _RANK_TIME_MS_KEYS = (
     "gpu time total (ms)", "total gpu time (ms)", "gpu time (ms)",
-    "self gpu time (ms)", "gpu_time_ms", "gpu_time_total_ms", "duration (ms)",
-    "dur (ms)", "time (ms)", "time_ms", "duration_ms",
+    "self gpu time (ms)", "total_direct_kernel_time_ms",
+    "total_direct_kernel_time_ms_sum", "gpu_time_ms", "gpu_time_total_ms",
+    "duration (ms)", "dur (ms)", "time (ms)", "time_ms", "duration_ms",
 )
 _RANK_TIME_US_KEYS = (
-    "gpu time (us)", "self gpu time (us)", "gpu_time_us", "gpu_time_total_us",
+    "gpu time (us)", "self gpu time (us)", "total_direct_kernel_time_sum",
+    "total_direct_kernel_time_us", "gpu_time_us", "gpu_time_total_us",
     "duration_us", "dur (us)", "time (us)", "time_us", "dur",
 )
 _RANK_PCT_KEYS = (
+    # ``percentage (%)`` is the real ops_summary.csv % column.
     "% gpu time", "gpu time %", "gpu %", "gpu_pct", "gpu_time_pct",
-    "% of compute time", "% of compute", "%e2e", "% e2e", "percent", "pct",
+    "% of compute time", "% of compute", "%e2e", "% e2e",
+    "percentage (%)", "percentage", "percent", "pct",
 )
 
 
@@ -1547,6 +1630,26 @@ def _first_present(low: dict[str, Any], keys: tuple[str, ...]) -> str:
         if v is not None and str(v).strip():
             return str(v).strip()
     return ""
+
+
+def _clean_category_label(raw: str) -> str:
+    """Normalize a category cell to a bare label.
+
+    The real ``ops_summary.csv`` stores the category as a Python list-repr
+    string, e.g. ``['MoE_fused']`` or ``['GEMM', 'Reduce']`` — return the first
+    element (``MoE_fused`` / ``GEMM``). Plain labels pass through unchanged.
+    """
+    s = str(raw or "").strip()
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            val = ast.literal_eval(s)
+            if isinstance(val, (list, tuple)) and val:
+                return str(val[0]).strip()
+            if isinstance(val, (list, tuple)):
+                return ""
+        except (ValueError, SyntaxError):
+            s = s.strip("[]")
+    return s.strip().strip("'\"").strip()
 
 
 def _record_gpu_us(low: dict[str, Any]) -> float | None:
@@ -1580,7 +1683,7 @@ def _ranking_record(raw: dict) -> dict[str, Any] | None:
         return None
     return {
         "name": name,
-        "category": _first_present(low, _RANK_CATEGORY_KEYS),
+        "category": _clean_category_label(_first_present(low, _RANK_CATEGORY_KEYS)),
         "gpu_us": _record_gpu_us(low),
         "gpu_pct": _record_gpu_pct(low),
     }
@@ -1681,18 +1784,26 @@ def recover_other_bucket_candidates(
     min_gpu_pct: float | None = None,
     log: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Recover HIGH-GPU-time ``other``-bucket ops missing from analysis.md.
+    """Recover HIGH-GPU-time ops missing from analysis.md (any category).
 
     Defense-in-depth fallback for the candidate-extraction gap: surfaces ops
-    TraceLens filed under the un-roofline'd ``other`` category (no
-    reasoning-candidate block, so ``parse_analysis_md`` drops them) as raw
-    candidates, ranked by the per-op sidecar GPU time, so each flows through
-    ``_finalize_candidates`` -> ``classify_patchability``. Only fires for ops
-    that are (a) absent from ``existing_candidates`` by name, (b) in an
-    ``other``/unknown category, and (c) at or above ``min_gpu_pct`` of total
-    GPU time (env ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT``, default 10%). Returns
-    ``[]`` when no sidecar is available or nothing qualifies, so analysis.md
-    stays the primary source.
+    that have no analysis.md reasoning-candidate block (so ``parse_analysis_md``
+    dropped them) as raw candidates, ranked by per-op sidecar GPU time, so each
+    flows through ``_finalize_candidates`` -> ``classify_patchability``.
+
+    Originally scoped to the un-roofline'd ``other`` bucket; broadened so **any**
+    high-GPU-time op missing from ``existing_candidates`` is eligible. This is
+    required for categories like ``MoE_fused`` whose dominant fused-MoE kernel is
+    correctly categorized but whose roofline is null (so TraceLens emits no
+    reasoning-candidate block and the kernel is otherwise dropped). The
+    patchability gate downstream still rejects vendor / native ops, so widening
+    the recovery net does not route non-patchable kernels to GEAK.
+
+    Fires for ops that are (a) absent from ``existing_candidates`` by name and
+    (b) at or above ``min_gpu_pct`` of total GPU time (env
+    ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT``, default 10%). Returns ``[]`` when no
+    sidecar is available or nothing qualifies, so analysis.md stays the primary
+    source.
     """
     ranking = load_ops_ranking(skill_output_dir)
     if not ranking:
@@ -1721,8 +1832,9 @@ def recover_other_bucket_candidates(
         name_l = str(rec.get("name") or "").strip().lower()
         if not name_l or name_l in have:
             continue
-        if not _is_other_like_category(rec.get("category") or ""):
-            continue
+        # Gate broadened from "other-like category only" to "any high-GPU-time op
+        # missing from existing candidates" so MoE_fused (and any other modeled-
+        # but-unsurfaced category) is eligible.
         pct = _pct(rec)
         if pct is None or pct < min_gpu_pct:
             continue
@@ -1748,10 +1860,10 @@ def recover_other_bucket_candidates(
         })
         if log is not None:
             log(
-                f"other-bucket fallback (#514): recovered high-GPU-time op "
-                f"{rec['name']!r} (~{pct:.1f}% GPU time, category="
-                f"{rec.get('category') or 'other'!r}) that has no analysis.md "
-                f"reasoning-candidate block; routing through "
+                f"candidate recovery fallback (#514/#515): recovered "
+                f"high-GPU-time op {rec['name']!r} (~{pct:.1f}% GPU time, "
+                f"category={rec.get('category') or 'other'!r}) that has no "
+                f"analysis.md reasoning-candidate block; routing through "
                 f"classify_patchability so a reusable native kernel still "
                 f"reaches GEAK"
             )
