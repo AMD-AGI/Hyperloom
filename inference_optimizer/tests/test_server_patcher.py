@@ -1135,3 +1135,124 @@ def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
         assert "sglang_0_5_11" in p.parts, (
             f"versioned layout should be selected, got patch path {p}"
         )
+
+
+# Issue #505: a "new file" member patch whose target is ALREADY pre-baked into
+# the sglang 0.5.11 image (byte-identical post-image) must be reverse-check
+# detected and SKIPPED from the atomic set — so the remaining annotation
+# patches still apply — instead of the whole set fail-soft skipping (which
+# silently disabled per-step kernel-shape annotations -> empty kernel shape ->
+# kernel-opt/GEAK never dispatched for the whole run).
+@_REQUIRES_GIT
+def test_sglang_0511_already_applied_member_is_skipped_not_failsoft(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    apply_root = _make_fake_sglang_install(tmp_path)
+    sgl_init = apply_root / "python" / "sglang" / "__init__.py"
+    sgl_init.write_text('__version__ = "0.5.11"\n', encoding="utf-8")
+    # 3 patches: kernel_shape_profiler.patch (the sentinel new-file), plus
+    # misc_1 (extra_1.py) and misc_2 (extra_2.py) annotation new-files.
+    _write_versioned_sglang_patches(tracelens_root, "sglang_0_5_11", count=3)
+
+    # Force the fuzzy `patch` fallback OFF (git stays on PATH) so an
+    # already-applied new-file member deterministically routes through the
+    # reverse `git apply -R --check` skip branch rather than `patch --dry-run`.
+    real_which = shutil.which
+    monkeypatch.setattr(
+        _server_patcher.shutil,
+        "which",
+        lambda name: real_which("git") if name == "git" else None,
+    )
+
+    utils_dir = apply_root / "python" / "sglang" / "srt" / "utils"
+    # Pre-bake ONE non-sentinel member byte-identically (== already applied in
+    # the image). We deliberately do NOT pre-bake the sentinel
+    # kernel_shape_profiler.py, so the idempotency sentinel check does not
+    # short-circuit before _apply_atomic runs.
+    prebaked = utils_dir / "extra_1.py"
+    prebaked.write_text("# extra_1 stub\n", encoding="utf-8")
+
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = "0.5.11"  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(sgl_init)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    rc = ensure_sglang_patched_for_tracelens()
+    assert rc is True, (
+        "an already-applied member must be skipped so the remaining patches "
+        "still apply; got fail-soft False (the #505 regression that left "
+        "kernel-shape annotations disabled and GEAK never dispatched)"
+    )
+    # The sentinel + the other annotation patch landed despite the skip.
+    assert (utils_dir / "kernel_shape_profiler.py").exists()
+    assert (utils_dir / "extra_2.py").exists()
+    # The pre-baked member is untouched (skipped — not rewritten or rolled back).
+    assert prebaked.read_text(encoding="utf-8") == "# extra_1 stub\n"
+
+
+@_REQUIRES_GIT
+def test_apply_atomic_skips_already_applied_member(tmp_path, monkeypatch):
+    """Unit-level: ``_apply_atomic`` returns True and applies the pending
+    member while skipping the already-applied one (no ``patch`` binary needed).
+    """
+    real_which = shutil.which
+    monkeypatch.setattr(
+        _server_patcher.shutil,
+        "which",
+        lambda name: real_which("git") if name == "git" else None,
+    )
+    apply_root = tmp_path / "tree"
+    apply_root.mkdir()
+    # already.py is pre-baked identical to its patch's post-image.
+    (apply_root / "already.py").write_text("# already applied\n", encoding="utf-8")
+
+    patches_dir = tmp_path / "patches"
+    patches_dir.mkdir()
+    already_patch = patches_dir / "01_already.patch"
+    already_patch.write_text(
+        textwrap.dedent(
+            """\
+            diff --git a/already.py b/already.py
+            new file mode 100644
+            index 000000000..1111111
+            --- /dev/null
+            +++ b/already.py
+            @@ -0,0 +1 @@
+            +# already applied
+            """
+        ),
+        encoding="utf-8",
+    )
+    pending_patch = patches_dir / "02_pending.patch"
+    pending_patch.write_text(
+        textwrap.dedent(
+            """\
+            diff --git a/pending.py b/pending.py
+            new file mode 100644
+            index 000000000..2222222
+            --- /dev/null
+            +++ b/pending.py
+            @@ -0,0 +1 @@
+            +# freshly applied
+            """
+        ),
+        encoding="utf-8",
+    )
+    plan = _server_patcher._PatchPlan(
+        framework="sglang",
+        version="0.5.11",
+        apply_root=apply_root,
+        patches=(already_patch, pending_patch),
+        sentinel_file=apply_root / "pending.py",
+        sentinel_text=("freshly applied",),
+        apply_strip=1,
+    )
+    assert _server_patcher._apply_atomic(plan) is True
+    assert (apply_root / "pending.py").exists()
+    assert (apply_root / "already.py").read_text(encoding="utf-8") == (
+        "# already applied\n"
+    )
