@@ -4,7 +4,8 @@ import json
 import sys
 from pathlib import Path
 
-_CI_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CI_DIR = _REPO_ROOT / "ci"
 if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
 
@@ -58,6 +59,23 @@ def test_find_nfs_state_session_dir_rejects_mismatched_state_model(tmp_path, mon
     monkeypatch.setenv("NFS_ROOT", str(tmp_path))
 
     assert opt._find_nfs_state_session_dir(rec) is None
+
+
+def test_reports_final_md_does_not_end_nfs_liveness_wait(tmp_path):
+    rec = _record()
+    session = _session(tmp_path, rec)
+    (session / "state.json").write_text(
+        json.dumps({"phase": "CLOSE", "model_name": "Qwen3.6-35B-A3B-Instruct"}),
+        encoding="utf-8",
+    )
+    reports = session / "reports"
+    reports.mkdir()
+    (reports / "final.md").write_text("final report before breakdown", encoding="utf-8")
+
+    assert opt._session_has_terminal_marker(session) is False
+
+    (session / "session_breakdown.json").write_text("{}", encoding="utf-8")
+    assert opt._session_has_terminal_marker(session) is True
 
 
 def test_wait_for_nfs_session_delivery_waits_until_terminal_marker(

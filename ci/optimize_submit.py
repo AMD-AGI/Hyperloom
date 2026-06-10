@@ -1888,8 +1888,6 @@ def _session_has_terminal_marker(session_dir: str | Path) -> bool:
         return True
     if (root / "complete").is_file():
         return True
-    if (root / "reports" / "final.md").is_file():
-        return True
     state = _read_session_state(root)
     if state.get("close_sequence_done") is True:
         return True
