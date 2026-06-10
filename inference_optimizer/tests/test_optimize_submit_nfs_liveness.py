@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CI_DIR = _REPO_ROOT / "ci"
 if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
+
+if "requests" not in sys.modules:
+    try:
+        import requests as _requests  # noqa: E402,F401
+    except ModuleNotFoundError:
+        requests_stub = types.ModuleType("requests")
+        requests_stub.HTTPError = Exception
+        requests_stub.exceptions = types.SimpleNamespace(RequestException=Exception)
+        requests_stub.utils = types.SimpleNamespace(quote=lambda path, safe="": path)
+        sys.modules["requests"] = requests_stub
 
 import optimize_submit as opt  # noqa: E402
 
