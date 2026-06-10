@@ -45,11 +45,28 @@ from .session_memory import SessionMemory
 
 # ---------------------------------------------------------------------------
 def _read_json(path: str | Path) -> Any:
+    """Read a UTF-8 JSON file, returning ``None`` for an empty file.
+
+    Args:
+        path (str | Path): Path to the JSON file.
+
+    Returns:
+        Any: The decoded JSON value, or ``None`` if the file is blank.
+    """
     text = Path(path).read_text(encoding="utf-8")
     return json.loads(text) if text.strip() else None
 
 
 def _emit_json(obj: Any, out: str | None) -> None:
+    """Serialise ``obj`` to JSON, writing to a file and/or stdout.
+
+    Always writes to stdout; additionally writes to ``out`` when it is a path
+    other than ``"-"``.
+
+    Args:
+        obj (Any): A JSON-serialisable value.
+        out (str | None): Output path, ``"-"``/``None`` for stdout only.
+    """
     serialised = json.dumps(obj, ensure_ascii=False, indent=2)
     if out and out != "-":
         Path(out).write_text(serialised + "\n", encoding="utf-8")
@@ -58,6 +75,18 @@ def _emit_json(obj: Any, out: str | None) -> None:
 
 
 def _resolve_kb_client() -> KBClient:
+    """Build the KB client selected by ``CRITIC_KB_CLIENT_MODE``.
+
+    ``live`` builds an :class:`HTTPKBClient` from the ``KB_*`` environment
+    variables; any other value yields an :class:`InMemoryKBClient`.
+
+    Returns:
+        KBClient: The resolved KB client.
+
+    Raises:
+        RuntimeAdapterError: If ``CRITIC_KB_CLIENT_MODE=live`` but
+            ``KB_BASE_URL`` is unset.
+    """
     mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
     if mode == "live":
         base_url = os.environ.get("KB_BASE_URL")
@@ -75,6 +104,12 @@ def _resolve_kb_client() -> KBClient:
 
 
 def _resolve_reviewer() -> DecisionReviewer:
+    """Build a fully wired :class:`DecisionReviewer` for CLI commands.
+
+    Returns:
+        DecisionReviewer: A reviewer backed by a fresh ``SessionMemory``, the
+        env-selected KB client and a matching ``KBWriter``.
+    """
     sm = SessionMemory()
     client = _resolve_kb_client()
     writer = KBWriter(client, session_memory=sm)
@@ -83,6 +118,11 @@ def _resolve_reviewer() -> DecisionReviewer:
 
 # ---------------------------------------------------------------------------
 def _cmd_init_session(args: argparse.Namespace) -> None:
+    """Handle ``init-session``: merge a request's context and emit it.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (``request``, ``out``).
+    """
     request = _read_json(args.request)
     reviewer = _resolve_reviewer()
     out = reviewer.init_session(request)
@@ -90,6 +130,11 @@ def _cmd_init_session(args: argparse.Namespace) -> None:
 
 
 def _cmd_prepare_review(args: argparse.Namespace) -> None:
+    """Handle ``prepare-review``: emit the phase-1 judge bundle.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (``request``, ``out``).
+    """
     request = _read_json(args.request)
     reviewer = _resolve_reviewer()
     bundle = reviewer.prepare_review(request)
@@ -97,6 +142,15 @@ def _cmd_prepare_review(args: argparse.Namespace) -> None:
 
 
 def _cmd_commit_review(args: argparse.Namespace) -> None:
+    """Handle ``commit-review``: validate a review and emit the outcome.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (``request``, ``review``,
+            ``out``).
+
+    Raises:
+        RuntimeAdapterError: If ``--review`` is not a JSON object.
+    """
     request = _read_json(args.request)
     review = _read_json(args.review)
     if not isinstance(review, dict):
@@ -107,6 +161,12 @@ def _cmd_commit_review(args: argparse.Namespace) -> None:
 
 
 def _cmd_close_session(args: argparse.Namespace) -> None:
+    """Handle ``close-session``: close a session, optionally flushing drafts.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (``request``, ``kb_draft``,
+            ``out``).
+    """
     request = _read_json(args.request)
     kb_draft = _read_json(args.kb_draft) if args.kb_draft else None
     reviewer = _resolve_reviewer()
@@ -116,6 +176,12 @@ def _cmd_close_session(args: argparse.Namespace) -> None:
 
 # ---------------------------------------------------------------------------
 def _cmd_list_priors(args: argparse.Namespace) -> None:
+    """Handle ``list-priors``: look up KB priors for a packet's scope.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (``packet``, ``kind``,
+            ``topic``, ``limit``, ``session``, ``out``).
+    """
     packet = _read_json(args.packet) or {}
     context = packet.get("context") or packet.get("environment") or {}
     scope = build_scope(context, require_critical=False)
@@ -134,6 +200,12 @@ def _cmd_list_priors(args: argparse.Namespace) -> None:
 
 
 def _cmd_write_verdict(args: argparse.Namespace) -> None:
+    """Handle ``write-verdict``: write a single verdict lesson to KB.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (``packet``, ``verdict``,
+            ``ctx``, ``out``).
+    """
     packet = _read_json(args.packet) or {}
     verdict = _read_json(args.verdict) or {}
     ctx_raw = _read_json(args.ctx) or {}
@@ -157,6 +229,12 @@ def _cmd_write_verdict(args: argparse.Namespace) -> None:
 
 
 def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
+    """Handle ``write-kb-drafts``: batch-write KB drafts from a packet.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (``packet``, ``kb_draft``,
+            ``ctx``, ``out``).
+    """
     packet = _read_json(args.packet) or {}
     kb_draft = _read_json(args.kb_draft) or {}
     ctx_raw = _read_json(args.ctx) or {}
@@ -179,6 +257,12 @@ def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
 
 
 def _cmd_add_contradiction(args: argparse.Namespace) -> None:
+    """Handle ``add-contradiction``: add contradicts edges between rows.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (``new_id``, ``old_ids``
+            comma-separated, ``ctx``, ``out``).
+    """
     ctx_raw = _read_json(args.ctx) or {}
     client = _resolve_kb_client()
     writer = KBWriter(client)
@@ -193,6 +277,12 @@ def _cmd_add_contradiction(args: argparse.Namespace) -> None:
 
 
 def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
+    """Handle ``replay-dead-letter``: re-dispatch queued failed KB writes.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (``dir``,
+            ``keep_on_success``, ``out``).
+    """
     dlq = DeadLetter(root=args.dir or os.environ.get("KB_DEAD_LETTER_DIR"))
     client = _resolve_kb_client()
     summary = dlq.replay(
@@ -203,6 +293,17 @@ def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
 
 
 def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -> None:
+    """Re-dispatch a single dead-lettered KB request to ``client``.
+
+    Args:
+        client (KBClient): The KB client to replay against.
+        endpoint (str): The original endpoint name (``upsert``,
+            ``batch_insert``, ``edges/add`` or ``list``).
+        payload (dict[str, Any]): The stored request payload.
+
+    Raises:
+        RuntimeAdapterError: If ``endpoint`` is unknown.
+    """
     if endpoint == "upsert":
         client.upsert(payload)
     elif endpoint == "batch_insert":
@@ -217,6 +318,12 @@ def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -
 
 # ---------------------------------------------------------------------------
 def _make_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser with all Critic CLI subcommands.
+
+    Returns:
+        argparse.ArgumentParser: A parser whose subcommands each set ``func``
+        to the matching handler.
+    """
     p = argparse.ArgumentParser(prog="runtime.cli", description="Critic runtime CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -285,6 +392,16 @@ def _make_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse arguments and run the selected subcommand.
+
+    Args:
+        argv (list[str] | None): Argument vector; defaults to ``sys.argv`` when
+            ``None``.
+
+    Returns:
+        int: ``0`` on logical success (including dead-lettered outcomes) or
+        ``2`` when a :class:`RuntimeAdapterError` propagates from the handler.
+    """
     parser = _make_parser()
     args = parser.parse_args(argv)
     try:

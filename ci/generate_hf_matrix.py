@@ -5,7 +5,9 @@
 or a pre-built candidates file (preferred for batch-driven dispatch).
 
 Inputs (env vars, set by the workflow), in priority order:
-  INPUT_MODELS           Space-separated HF repo IDs (overrides everything)
+  INPUT_MODELS           Space-separated HF repo IDs. When INPUT_CANDIDATES_FILE
+                         is also set, this filters candidates[] while preserving
+                         fixed per-model config; otherwise it overrides discovery.
   INPUT_CANDIDATES_FILE  Path to JSON built by ci/build_candidates.py
                          + INPUT_BATCH_INDEX (0-based) + INPUT_BATCH_SIZE
                          takes the matching slice from candidates[].
@@ -30,8 +32,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Reuse HuggingFaceClient from the existing script — single source of truth
-# for the pool-then-filter logic.
+# Reuse HuggingFaceClient for the pool-then-filter logic.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient   # noqa: E402
 
@@ -41,7 +42,15 @@ DEFAULT_CRON_CANDIDATES_FILE = (
 
 
 def slugify(repo_id: str) -> str:
-    """Turn 'Qwen/Qwen3-8B' into 'qwen-qwen3-8b' for use as artifact key."""
+    """Turn 'Qwen/Qwen3-8B' into 'qwen-qwen3-8b' for use as artifact key.
+
+    Args:
+        repo_id (str): HuggingFace repo id (``owner/name``).
+
+    Returns:
+        str: A lowercase, hyphenated slug safe for artifact names; ``"model"``
+            if the input reduces to empty.
+    """
     s = repo_id.lower().replace("/", "-").replace(".", "-")
     s = re.sub(r"[^a-z0-9-]+", "-", s)
     s = re.sub(r"-+", "-", s).strip("-")
@@ -49,6 +58,15 @@ def slugify(repo_id: str) -> str:
 
 
 def _truthy(value: str | None) -> bool:
+    """Interpret a string env value as a boolean flag.
+
+    Args:
+        value (str | None): Raw value (e.g. from an env var).
+
+    Returns:
+        bool: ``True`` for ``1/true/yes/y/on`` (case-insensitive), else
+            ``False``.
+    """
     return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
@@ -61,6 +79,16 @@ def _paginate_models(api_path: str) -> tuple[set[str], set[str]]:
     The service caps each response at 500 rows even when a larger ``limit`` is
     supplied, so we follow ``pagination.has_more`` / ``next_offset`` until the
     cursor is exhausted, with a paranoid 50-page / offset 10000 safety stop.
+
+    Args:
+        api_path (str): Leaderboard API path (may include a query string).
+
+    Returns:
+        tuple[set[str], set[str]]: ``(models, task_ids)`` collected across all
+            pages, with model ids lowercased.
+
+    Raises:
+        RuntimeError: If a page request fails or returns an unexpected shape.
     """
     models: set[str] = set()
     task_ids: set[str] = set()
@@ -108,11 +136,27 @@ def _resolve_task_models(task_ids: list[str], max_workers: int = 16) -> set[str]
     Single-GET still returns the row even when the list filter hides it, so we
     use this to recover entries (typically gain >200% rows) that the public
     list endpoints suppress.
+
+    Args:
+        task_ids (list[str]): Task ids to resolve.
+        max_workers (int): Thread-pool size for concurrent single-GETs.
+
+    Returns:
+        set[str]: Lowercased model ids recovered from the tasks.
     """
     if not task_ids:
         return set()
 
     def _one(tid: str) -> str | None:
+        """Fetch one task and return its model id.
+
+        Args:
+            tid (str): Task id to fetch.
+
+        Returns:
+            str | None: The lowercased model id, or ``None`` on failure or if
+                absent.
+        """
         try:
             with urllib.request.urlopen(
                 f"{_LB_BASE}/api/v1/tasks/{tid}", timeout=15,
@@ -140,6 +184,9 @@ def _dashboard_task_ids() -> set[str]:
 
     The server-side dashboard exposes rows that the list APIs hide (gain
     >200% etc). We use it purely as a discovery source for hidden task ids.
+
+    Returns:
+        set[str]: Task ids scraped from the dashboard HTML pages.
     """
     tids: set[str] = set()
     pages_seen = 0
@@ -161,7 +208,6 @@ def _dashboard_task_ids() -> set[str]:
         new_count = len(page_tids - tids)
         tids.update(page_tids)
         pages_seen += 1
-        # 500-row pages; stop when we've drained
         if new_count == 0 or pages_seen >= 20:
             break
         offset += 500
@@ -177,6 +223,9 @@ def _leaderboard_models() -> set[str]:
     * Paginated ``/api/v1/tasks`` — covers tasks the leaderboard collapses.
     * ``/dashboard`` HTML scrape + single-GET — recovers ~24 rows the list
       APIs hide (typically gain >200%); single-GET still returns them.
+
+    Returns:
+        set[str]: The union of all known leaderboard model ids (lowercased).
     """
     models, lb_tids = _paginate_models("/api/v1/leaderboard?sort_by=gain&order=desc")
     task_models, task_tids = _paginate_models("/api/v1/tasks")
@@ -200,6 +249,10 @@ def _active_workflow_slugs() -> set[str]:
     This prevents cron from dispatching a model that is already queued/running
     in another optimize-submit invocation but not yet visible in the
     leaderboard.
+
+    Returns:
+        set[str]: Matrix slugs (job-name suffixes) of optimize jobs currently
+            queued or in progress; empty when GitHub auth env is missing.
     """
     token = os.environ.get("GITHUB_TOKEN", "")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
@@ -214,6 +267,14 @@ def _active_workflow_slugs() -> set[str]:
     slugs: set[str] = set()
 
     def _get(url: str) -> dict:
+        """GET a GitHub API URL with auth headers and parse JSON.
+
+        Args:
+            url (str): Fully-qualified GitHub API URL.
+
+        Returns:
+            dict: The parsed JSON response.
+        """
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
@@ -250,16 +311,84 @@ def _active_workflow_slugs() -> set[str]:
 
 
 def _entry_repo(entry: dict | str) -> str:
+    """Return the repo id for a candidate entry (dict or bare string).
+
+    Args:
+        entry (dict | str): Candidate dict (``repo_id``/``model``) or a plain
+            repo id string.
+
+    Returns:
+        str: The repo id, or an empty string if none is present.
+    """
     if isinstance(entry, dict):
         return str(entry.get("repo_id") or entry.get("model") or "")
     return str(entry or "")
 
 
 def _entry_slug(entry: dict | str) -> str:
+    """Return the artifact slug for a candidate entry.
+
+    Args:
+        entry (dict | str): Candidate dict or bare repo id string.
+
+    Returns:
+        str: The slugified repo id.
+    """
     return slugify(_entry_repo(entry))
 
 
+def _parse_explicit_models(value: str) -> list[str]:
+    # Whitespace OR comma separated, both supported (workflow_dispatch UI is
+    # space-friendly; downstream callers may comma-list).
+    return [r for r in re.split(r"[\s,]+", value.strip()) if r]
+
+
+def _filter_entries_by_explicit_models(
+    entries: list[dict | str],
+    explicit_repos: list[str],
+) -> list[dict | str]:
+    """Filter candidate entries by repo id while preserving fixed config.
+
+    Historically INPUT_MODELS returned bare repo strings and therefore lost
+    framework / precision / tp / conc from candidates JSON. For manual reruns
+    of a small subset from a fixed pool, keep the candidate dicts intact.
+    """
+    if not explicit_repos:
+        return entries
+    by_repo: dict[str, dict | str] = {
+        _entry_repo(entry).lower(): entry
+        for entry in entries
+        if _entry_repo(entry)
+    }
+    out: list[dict | str] = []
+    missing: list[str] = []
+    for repo in explicit_repos:
+        entry = by_repo.get(repo.lower())
+        if entry is None:
+            missing.append(repo)
+            continue
+        out.append(entry)
+    if missing:
+        print(
+            "WARNING: INPUT_MODELS requested repo(s) not present in "
+            f"candidates file: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+    return out
+
+
 def _apply_exclusions_to_entries(entries: list[dict | str]) -> list[dict | str]:
+    """Drop entries excluded by leaderboard and/or active-workflow filters.
+
+    Exclusions are controlled by the ``INPUT_EXCLUDE_LEADERBOARD`` and
+    ``INPUT_EXCLUDE_ACTIVE_WORKFLOWS`` env vars.
+
+    Args:
+        entries (list[dict | str]): Candidate entries to filter.
+
+    Returns:
+        list[dict | str]: The surviving entries (input order preserved).
+    """
     excluded_models: set[str] = set()
     excluded_slugs: set[str] = set()
     if _truthy(os.environ.get("INPUT_EXCLUDE_LEADERBOARD")):
@@ -286,17 +415,22 @@ def _apply_exclusions_to_entries(entries: list[dict | str]) -> list[dict | str]:
 
 
 def _apply_exclusions(repos: list[str]) -> list[str]:
+    """Apply the exclusion filters to a list of bare repo ids.
+
+    Args:
+        repos (list[str]): Repo ids to filter.
+
+    Returns:
+        list[str]: The surviving repo ids.
+    """
     return [_entry_repo(e) for e in _apply_exclusions_to_entries(repos)]
 
 
 def _load_candidate_entries(cands_path: Path) -> list[dict]:
-    """Load candidates.json (built by build_candidates.py) and take a batch
-    slice based on INPUT_BATCH_INDEX (0-based) + INPUT_BATCH_SIZE.
+    """Load candidates.json and take an INPUT_BATCH_INDEX/INPUT_BATCH_SIZE slice.
 
-    If INPUT_BATCH_SIZE is unset or 0, returns all candidates (whole-batch
-    run). The slice is ordered as the candidates list appears in the JSON
-    (which is HF download rank). Use this for deterministic, reproducible
-    batch dispatch.
+    BATCH_SIZE unset/0 returns all candidates. Slice order follows the JSON
+    (HF download rank) for deterministic batch dispatch.
     """
     try:
         data = json.loads(cands_path.read_text(encoding="utf-8"))
@@ -318,6 +452,18 @@ def _load_candidate_entries(cands_path: Path) -> list[dict]:
 
 
 def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
+    """Determine which batch slice to dispatch for this run.
+
+    Honors an explicit ``INPUT_BATCH_INDEX``; otherwise derives the index from
+    the cron half-day slot (schedule events) or the GitHub run number.
+
+    Args:
+        pool_size (int): Total number of candidate entries.
+        batch_size (int): Entries per batch.
+
+    Returns:
+        int: The 0-based batch index.
+    """
     raw = (os.environ.get("INPUT_BATCH_INDEX") or "").strip()
     if raw:
         try:
@@ -334,8 +480,7 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
     except ValueError:
         return 0
     batches = max((pool_size + batch_size - 1) // batch_size, 1)
-    # GITHUB_RUN_NUMBER is 1-based; subtract one so the first run maps to
-    # slice 0 rather than slice 1.
+    # GITHUB_RUN_NUMBER is 1-based; subtract one so run 1 maps to slice 0.
     return (rn - 1) % batches
 
 
@@ -374,6 +519,19 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
 
 
 def _slice_entries(entries: list[dict | str]) -> list[dict | str]:
+    """Select this run's batch slice from the candidate entries.
+
+    Reads ``INPUT_BATCH_SIZE`` (0/unset returns all). When a partial tail slice
+    results, it wraps to the front of the pool to keep the batch full, and
+    annotates dict entries with the selected batch index/size.
+
+    Args:
+        entries (list[dict | str]): All candidate entries in pool order.
+
+    Returns:
+        list[dict | str]: The selected slice (or all entries when no batch
+            size is set).
+    """
     all_count = len(entries)
 
     batch_size_raw = (os.environ.get("INPUT_BATCH_SIZE") or "").strip()
@@ -411,6 +569,14 @@ def _slice_entries_with_active_refill(
     This preserves the production pool ordering. Unlike filtering the whole
     pool first, a model that is active in a future slice does not shift today's
     slice boundaries.
+
+    Args:
+        entries (list[dict | str]): All candidate entries in pool order.
+        excluded_slugs (set[str]): Slugs of currently-active jobs to skip.
+
+    Returns:
+        list[dict | str]: The selected slice with active entries skipped and
+            forward-refilled, annotated with batch index/size.
     """
     batch_size_raw = (os.environ.get("INPUT_BATCH_SIZE") or "").strip()
     try:
@@ -455,10 +621,26 @@ def _slice_entries_with_active_refill(
 
 
 def _slice_from_candidates(cands_path: Path) -> list[str]:
+    """Load a candidates file and return the batch slice as repo ids.
+
+    Args:
+        cands_path (Path): Path to the candidates JSON file.
+
+    Returns:
+        list[str]: Repo ids in the selected batch slice.
+    """
     return [_entry_repo(e) for e in _slice_entries(_load_candidate_entries(cands_path))]
 
 
 def _all_from_candidates(cands_path: Path) -> list[str]:
+    """Load a candidates file and return all repo ids (no slicing).
+
+    Args:
+        cands_path (Path): Path to the candidates JSON file.
+
+    Returns:
+        list[str]: Every candidate repo id, for exclusion-first selection.
+    """
     all_repos = [_entry_repo(e) for e in _load_candidate_entries(cands_path)]
     print(f"candidates: loaded all {len(all_repos)} repos for exclusion-first selection",
           file=sys.stderr)
@@ -466,21 +648,29 @@ def _all_from_candidates(cands_path: Path) -> list[str]:
 
 
 def collect_entries() -> list[dict | str]:
-    explicit = (os.environ.get("INPUT_MODELS") or "").strip()
-    if explicit:
-        # Whitespace OR comma separated, both supported (workflow_dispatch UI is
-        # space-friendly; downstream callers may comma-list).
-        repos = re.split(r"[\s,]+", explicit)
-        return [r for r in repos if r]
+    """Resolve the model entries to run from env-var inputs.
 
+    Selection priority: explicit ``INPUT_MODELS`` > candidates file
+    (``INPUT_CANDIDATES_FILE``, or the cron default on schedule events) with
+    batch slicing and optional leaderboard/active-workflow exclusions > live
+    HuggingFace top-N fallback.
+
+    Returns:
+        list[dict | str]: Candidate entries (dicts and/or repo id strings);
+            empty if nothing is selected.
+    """
+    explicit = (os.environ.get("INPUT_MODELS") or "").strip()
+    explicit_repos = _parse_explicit_models(explicit) if explicit else []
     cands_file = (os.environ.get("INPUT_CANDIDATES_FILE") or "").strip()
+    if explicit_repos and not cands_file:
+        return explicit_repos
+
     if not cands_file and os.environ.get("GITHUB_EVENT_NAME") == "schedule":
         cands_file = DEFAULT_CRON_CANDIDATES_FILE
     if cands_file:
         cands_path = Path(cands_file)
         if not cands_path.is_absolute():
-            # Relative to repo root (workflow `working-directory: ci` means
-            # CWD = ci/, so resolve from there's parent).
+            # Resolve relative to CWD and its parent (workflow CWD is ci/).
             cwd = Path.cwd()
             for base in [cwd, cwd.parent]:
                 p = base / cands_file
@@ -492,11 +682,13 @@ def collect_entries() -> list[dict | str]:
                   f"(tried as relative + absolute)", file=sys.stderr)
             return []
         entries = _load_candidate_entries(cands_path)
+        if explicit_repos:
+            entries = _filter_entries_by_explicit_models(entries, explicit_repos)
+            return _apply_exclusions_to_entries(entries)
         exclude_leaderboard = _truthy(os.environ.get("INPUT_EXCLUDE_LEADERBOARD"))
         exclude_active = _truthy(os.environ.get("INPUT_EXCLUDE_ACTIVE_WORKFLOWS"))
         if exclude_leaderboard:
-            # Leaderboard exclusion is only for discovery mode; production
-            # reruns set this false. Apply globally when requested.
+            # Discovery mode only; production reruns set this false.
             excluded_models = _leaderboard_models()
             print(f"leaderboard exclusion: {len(excluded_models)} models",
                   file=sys.stderr)
@@ -522,10 +714,24 @@ def collect_entries() -> list[dict | str]:
 
 
 def collect_repos() -> list[str]:
+    """Resolve the selected entries and return them as bare repo ids.
+
+    Returns:
+        list[str]: Repo ids for the selected models.
+    """
     return [_entry_repo(e) for e in collect_entries()]
 
 
 def _matrix_entry(entry: dict | str) -> dict:
+    """Build one GitHub Actions matrix include entry from a candidate.
+
+    Args:
+        entry (dict | str): Candidate dict or bare repo id.
+
+    Returns:
+        dict: A matrix entry with at least ``model`` and ``key``, plus any
+            available pool/benchmark metadata and batch index/size.
+    """
     repo = _entry_repo(entry)
     out = {"model": repo, "key": slugify(repo)}
     if isinstance(entry, dict):
@@ -552,11 +758,15 @@ def _matrix_entry(entry: dict | str) -> dict:
 
 
 def main() -> int:
+    """Build the matrix JSON and emit it to ``GITHUB_OUTPUT`` or stdout.
+
+    Returns:
+        int: Process exit code (always ``0``).
+    """
     entries = collect_entries()
     if not entries:
         print("no models selected — empty matrix", file=sys.stderr)
-        # GitHub Actions errors on empty matrix; emit a sentinel that the
-        # downstream job can detect and skip.
+        # Empty include sentinel; GitHub Actions errors on a truly empty matrix.
         matrix = {"include": []}
     else:
         matrix = {"include": [_matrix_entry(e) for e in entries]}

@@ -215,11 +215,12 @@ brief:
   research-backed variants when available, but `llm_direct`,
   `default_grid`, `specialist:<domain-or-tag>`, and `dynamic` provenance
   values are all accepted audit labels when phase and sequence gates pass.
-  Specialist-sourced variants are capped by `research_lane_capacity`
-  (clamped to the `2 × visible GPU count` ceiling); dynamic variants use
-  their own per-round cap. Specialists author patches into an isolated
-  worktree; `integrate_patch` does the actual `git apply` +
-  throughput/accuracy gate after Critic review.
+  Specialist- and dynamic-sourced variants are not grid-size capped;
+  per-round breadth is bounded by the `research_lane` / GPU pool leases
+  (the `research_lane` scales with the `2 × visible GPU count` ceiling).
+  Specialists author patches into an isolated worktree; `integrate_patch`
+  does the actual `git apply` + throughput/accuracy gate after Critic
+  review.
   Optional GPU specialists are off by default: launch with
   `--gpu-specialist-capacity N` (or
   `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) before Orchestration may
@@ -230,10 +231,12 @@ brief:
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable
   — leaves buffer for KERNEL → SWEEP → CLOSE + report.
-- **IR-7 honest self-stop**: on EXPLORE plateau a
-  `session_steward_specialist` recommends `stop_session` /
-  `advance_to_kernel` / `continue_explore` (at most one continuation per
-  session). Disable with `--steward-disabled`. IR-6 always overrides it.
+- **Plateau advisory**: EXPLORE / KERNEL / FRAMEWORK_PR plateau signals
+  are computed every tick and rendered as advisory in the orchestration
+  prompt. They do NOT drive phase advance — the LLM may emit
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
+  when it judges further effort unproductive. IR-6 force-exit and the
+  per-phase budget remain the only hard advance gates.
 
 ### FRAMEWORK_PR phase (Coordinator-internal)
 
@@ -272,13 +275,17 @@ Rules that look reasonable but break the current flow:
   specialist-informed flow.
   Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
   before EXPLORE; the LLM never proposes the `framework_pr`
-  action (PolicyGate denies it via
-  `framework_pr_action_not_llm_proposable`). Use `--no-framework`
-  to skip the phase entirely.
-- **`kernel_opt` sequencing** is gated by
-  `explore_attempts_minimum_before_kernel_opt`, which reads
-  `gain_per_stack_entry` (at least one successful explore round on
-  record) rather than any per-action attempt counter.
+  action — it is Coordinator-managed and absent from
+  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any
+  LLM-side propose / delegate with `rule='phase_incompatible'`.
+  Use `--no-framework` to skip the phase entirely.
+- **`kernel_opt` sequencing** is no longer gated by an
+  explore-minimum check (the
+  `explore_attempts_minimum_before_kernel_opt` rule was retired
+  in loosen_plan P1_06). KERNEL phase may propose `kernel_opt`
+  directly; the `trace_analyze → run_optimization` data
+  dependency (P2_11 handler-level check) and the reusable
+  `kernel_id` validation still keep the inputs valid.
 
 ## Setup
 
@@ -994,9 +1001,12 @@ The optimizer should:
   PRELUDE (after baseline) and at each validated-tput watermark
   (`current_tput / last_roofline_tput >= 1.10`; compound). Default is
   `roofline` (profile + trace_analyze + analysis.md); `--no-enable-roofline`
-  switches to plain `profile`. The LLM cannot propose either
-  (`analysis_action_not_llm_proposable`), and while one is in flight all
-  explore / kernel dispatches are deferred (`wait_for_auto_roofline`).
+  switches to plain `profile`. The LLM cannot propose either —
+  both names are Coordinator-managed and absent from
+  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 returns
+  `rule='phase_incompatible'`. Concurrent GPU work is
+  serialised by the lane / GPU lease rather than a policy deny, so
+  explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
   (`orchestrator/roofline_ceiling.py`) for the report's
   `## Roofline Comparison` section.

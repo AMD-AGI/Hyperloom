@@ -1,18 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``orchestrator.roofline_ceiling``.
-
-Pins three contracts:
-
-1. **Formula correctness against published numbers.** The decode-only
-   memory-bound peak matches ITK Research's worked B200 + 70 B FP8
-   example (≈ 114 tok/s) and the MI300X scaling of that example.
-2. **Graceful degrade.** Unknown ``gpu_type``, empty ``model_path``,
-   missing HF index, and ``concurrency=0`` all return ``0.0`` (never
-   raise, never produce inf / NaN).
-3. **HF metadata parsing.** ``load_model_meta`` reads ``total_size`` /
-   layer / KV / dtype from a minimal HF dir laid out under ``tmp_path``.
-"""
+"""Tests for ``orchestrator.roofline_ceiling`` (formula correctness, graceful degrade, HF metadata parsing)."""
 
 from __future__ import annotations
 
@@ -25,7 +13,6 @@ import pytest
 from inference_optimizer.orchestrator.roofline_ceiling import (
     HW_SPECS,
     ModelMeta,
-    RooflineBreakdown,
     _resolve_dtype_bytes,
     _resolve_peak_tflops,
     apply_runtime_dtype,
@@ -40,21 +27,12 @@ from inference_optimizer.orchestrator.roofline_ceiling import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Formula correctness against published numbers.
-# ---------------------------------------------------------------------------
 class TestPeakFormulaAgainstPublishedNumbers:
-    """Worked examples from ITK Research and arXiv 2402.16363.
-
-    The cited B200 + 70 B FP8 example uses ``HBM_BW / weight_bytes``
-    with KV-cache treated as negligible relative to weights. We
-    replicate that by injecting a synthetic spec into ``HW_SPECS`` and
-    setting ``num_layers=0`` so the KV term is zero.
-    """
+    """Worked examples from ITK Research and arXiv 2402.16363 (KV-cache treated as negligible via num_layers=0)."""
 
     def test_itk_b200_70b_fp8_matches_cited_114_tok_s(self, monkeypatch):
-        # ITK Research: B200 (8 TB/s HBM) + 70 GB FP8 weights.
-        # 8e12 / 70e9 ≈ 114.28 tok/s. Inject B200 spec for this test only.
+        # ITK Research B200: 8e12 / 70e9 ≈ 114.28 tok/s. Inject the B200 spec for this test only.
         monkeypatch.setitem(
             HW_SPECS, "b200_test", {"hbm_gb": 192.0, "hbm_bw_gbps": 8000.0}
         )
@@ -92,12 +70,9 @@ class TestPeakFormulaAgainstPublishedNumbers:
         assert peak_fp4 == pytest.approx(228.57, rel=0.01)
 
 
-# ---------------------------------------------------------------------------
 # MI300X realistic sanity (Llama-70B-style dense model).
-# ---------------------------------------------------------------------------
 class TestMI300XRealistic:
-    """Llama-3-70B BF16 on 1×MI300X: literature places single-stream
-    decode at 30-40 tok/s (5.3 TB/s / 140 GB ≈ 37.8)."""
+    """Llama-3-70B BF16 on 1×MI300X: single-stream decode ≈ 30-40 tok/s (5.3 TB/s / 140 GB ≈ 37.8)."""
 
     def test_llama70b_bf16_single_mi300x(self):
         peak = compute_theoretical_peak_output_tok_per_sec(
@@ -115,8 +90,7 @@ class TestMI300XRealistic:
         assert 25.0 < peak < 45.0
 
     def test_concurrency_scales_throughput_in_weight_dominated_regime(self):
-        """With small isl/osl, weight reads dominate; batching N requests
-        amortizes weight reads N× so peak should be near-linearly higher."""
+        """With small isl/osl, batching N requests amortizes weight reads N× so peak is near-linearly higher."""
         kwargs = dict(
             gpu_type="mi300x",
             num_gpus=8,
@@ -134,14 +108,11 @@ class TestMI300XRealistic:
         p20 = compute_theoretical_peak_output_tok_per_sec(
             **kwargs, concurrency=20
         )
-        # Weight reads amortize: 20× concurrency should give >10× peak
-        # (not exactly 20× because KV term doesn't amortize).
+        # 20× concurrency gives >10× peak (KV term doesn't amortize, so not exactly 20×).
         assert p20 / max(p1, 1e-9) > 10.0
 
 
-# ---------------------------------------------------------------------------
 # Graceful degrade.
-# ---------------------------------------------------------------------------
 class TestGracefulDegrade:
     def test_unknown_gpu_type_returns_zero(self):
         peak = compute_theoretical_peak_output_tok_per_sec(
@@ -205,9 +176,7 @@ class TestGracefulDegrade:
         assert peak == 0.0
 
 
-# ---------------------------------------------------------------------------
 # Dtype + KV helpers.
-# ---------------------------------------------------------------------------
 class TestResolveDtypeBytes:
     @pytest.mark.parametrize(
         "tag,expected",
@@ -231,8 +200,7 @@ class TestResolveDtypeBytes:
 
 class TestComputeKVBytesPerToken:
     def test_factor_two_for_k_plus_v(self):
-        # 2 (K+V) × 80 layers × 8 KV heads × 128 head_dim × 2 bytes
-        #   = 327_680 bytes per token, summed over all layers
+        # 2 (K+V) × 80 layers × 8 KV heads × 128 head_dim × 2 bytes = 327_680 bytes/token.
         assert compute_kv_bytes_per_token(
             num_layers=80,
             num_kv_heads=8,
@@ -249,9 +217,7 @@ class TestComputeKVBytesPerToken:
         ) == 163_840
 
 
-# ---------------------------------------------------------------------------
 # HF metadata extraction.
-# ---------------------------------------------------------------------------
 def _write_synthetic_model(
     model_dir: Path,
     *,
@@ -270,18 +236,7 @@ def _write_synthetic_model(
     quant_method: str | None = None,
     dtype: str | None = None,
 ) -> None:
-    """Lay down a minimal HF-shaped model dir.
-
-    Pass ``num_kv_heads=None`` to omit ``num_key_value_heads`` (MHA
-    branch). Pass ``num_experts`` / ``num_experts_per_tok`` /
-    ``moe_intermediate_size`` to emit an MoE config (Qwen3-A3B style).
-    Pass ``n_routed_experts`` to emit a DeepSeek-V3-style alias instead
-    of ``num_experts``. Pass ``num_local_experts`` to emit a gpt-oss-
-    style alias (GptOssForCausalLM). Pass ``quant_method``
-    (e.g. ``"fp8"``) to emit a ``quantization_config`` block. Pass
-    ``dtype`` to write the DeepSeek-style activation-dtype field
-    alongside / instead of the standard ``torch_dtype``.
-    """
+    """Lay down a minimal HF-shaped model dir; optional kwargs emit MHA / MoE / quant / alias variants."""
     model_dir.mkdir(parents=True, exist_ok=True)
     config: dict = {
         "num_hidden_layers": num_layers,
@@ -456,9 +411,7 @@ class TestLoadModelMeta:
         assert meta.weight_dtype_bytes == 1.0
 
 
-# ---------------------------------------------------------------------------
 # State-driven entry point.
-# ---------------------------------------------------------------------------
 class TestComputePeakFromState:
     def test_happy_path_yields_positive(self, tmp_path):
         _write_synthetic_model(
@@ -509,9 +462,7 @@ class TestComputePeakFromState:
         assert compute_peak_from_state(state) == 0.0
 
 
-# ---------------------------------------------------------------------------
 # MoE active weight bytes (PR: MoE-aware decode ceiling).
-# ---------------------------------------------------------------------------
 def _write_qwen3_moe_model(model_dir: Path, *, total_size: int) -> None:
     """Lay down a Qwen3-30B-A3B-shaped MoE HF dir for ceiling tests."""
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -535,14 +486,10 @@ def _write_qwen3_moe_model(model_dir: Path, *, total_size: int) -> None:
 
 
 class TestMoEActiveWeightBytes:
-    """MoE models route a small subset of experts per token; the
-    decode-roofline divisor must use the active subset or the ceiling
-    drops below measured throughput (within_roofline_pct > 100%)."""
+    """MoE models route a subset of experts per token; the decode divisor must use the active subset (else within_roofline_pct > 100%)."""
 
     def test_qwen3_30b_a3b_active_is_small_fraction_of_total(self, tmp_path):
-        """Qwen3-30B-A3B: 128 experts, 8 active. Active weight bytes
-        should land in the ~8-15% range of total (experts dominate the
-        weight budget; non-expert + 8/128 × experts is the active set)."""
+        """Qwen3-30B-A3B: 128 experts, 8 active → active weight bytes land in the ~8-15% range of total."""
         _write_qwen3_moe_model(tmp_path / "m", total_size=61_064_245_248)
         meta = load_model_meta(tmp_path / "m")
         assert meta is not None
@@ -554,8 +501,7 @@ class TestMoEActiveWeightBytes:
         )
 
     def test_dense_model_active_equals_total(self, tmp_path):
-        """Dense (no num_experts / num_experts_per_tok) → active = total,
-        preserves legacy behaviour for Qwen3-8B / Llama-70B style configs."""
+        """Dense (no num_experts) → active = total."""
         _write_synthetic_model(
             tmp_path / "m",
             total_size=16_381_470_720,
@@ -569,9 +515,7 @@ class TestMoEActiveWeightBytes:
         assert meta.active_weight_bytes == meta.weight_bytes
 
     def test_moe_ceiling_higher_than_dense_equivalent(self, tmp_path):
-        """Same total bytes, but MoE active routing → ceiling several
-        × higher than naive dense ceiling. Pins the property the PR
-        actually delivers (fixes 'within_roofline_pct > 100%' on MoE)."""
+        """Same total bytes, MoE active routing → ceiling several × higher than naive dense (fixes within_roofline_pct > 100%)."""
         _write_qwen3_moe_model(tmp_path / "m", total_size=61_064_245_248)
         meta = load_model_meta(tmp_path / "m")
         assert meta is not None
@@ -600,8 +544,7 @@ class TestMoEActiveWeightBytes:
         )
 
     def test_active_weight_bytes_zero_falls_back_to_weight_bytes(self):
-        """Backward-compat: callers that don't know about MoE leave
-        active_weight_bytes=0; the function must behave as before."""
+        """Backward-compat: active_weight_bytes=0 behaves as before (uses weight_bytes)."""
         without = compute_theoretical_peak_output_tok_per_sec(
             gpu_type="mi300x",
             num_gpus=1,
@@ -630,9 +573,7 @@ class TestMoEActiveWeightBytes:
         assert without == with_zero
 
     def test_moe_geometry_overshoots_safe_degrade(self, tmp_path):
-        """If computed expert bytes >= safetensors total_size (config /
-        quantization mismatch), helper must clamp to weight_bytes
-        instead of producing negative non_expert_bytes."""
+        """When computed expert bytes >= total_size, the helper clamps to weight_bytes (no negative non_expert_bytes)."""
         model_dir = tmp_path / "m"
         model_dir.mkdir()
         # huge num_experts but tiny total_size → expert_bytes > total
@@ -655,13 +596,9 @@ class TestMoEActiveWeightBytes:
         assert meta.active_weight_bytes == meta.weight_bytes
 
 
-# ---------------------------------------------------------------------------
 # HW_SPECS table sanity.
-# ---------------------------------------------------------------------------
 class TestResolveEffectiveConcurrency:
-    """Concurrency fallback chain (PR-A): state.conc -> baseline yaml
-    envs.CONC -> 1. The yaml path covers the SharedState-default-8 vs
-    ci-config-CONC=64 mismatch the e2e exposed on Qwen3-30B-A3B."""
+    """Concurrency fallback chain (PR-A): state.conc -> baseline yaml envs.CONC -> 1."""
 
     def test_state_conc_wins_when_positive(self):
         from inference_optimizer.orchestrator.roofline_ceiling import (
@@ -693,13 +630,7 @@ class TestResolveEffectiveConcurrency:
     def test_baseline_yaml_conc_is_authoritative_over_stale_state_conc(
         self, tmp_path,
     ):
-        """P0 fix (priority inverted): the materialized baseline yaml's
-        ``CONC`` is the ground truth the Magpie subprocess actually ran
-        with, so it wins over ``state.conc`` even when the latter is
-        positive. This reproduces the e2e bug where ``state.conc`` stayed
-        at the SharedState default 8 while the run actually used CONC=64
-        (session 095726Z): the old code returned 8 and under-counted the
-        ceiling ~8x; the fix returns 64."""
+        """P0 fix: the materialized baseline yaml's ``CONC`` wins over ``state.conc`` (session 095726Z: state stayed at default 8 while the run used 64)."""
         from inference_optimizer.orchestrator.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
@@ -763,8 +694,7 @@ class TestResolveEffectiveConcurrency:
         assert _resolve_effective_concurrency(state) == 1
 
     def test_compute_peak_from_state_uses_yaml_fallback(self, tmp_path):
-        """End-to-end: state.conc=0 + yaml envs.CONC=64 →
-        peak computed with batch=64 (not 1, not 8)."""
+        """End-to-end: state.conc=0 + yaml envs.CONC=64 → peak computed with batch=64."""
         _write_synthetic_model(
             tmp_path / "m",
             total_size=140_000_000_000,
@@ -788,21 +718,16 @@ class TestResolveEffectiveConcurrency:
             last_baseline={"extras": {"materialized_config": str(yaml_path)}},
         )
         peak_with_yaml = compute_peak_from_state(state)
-        # Drop the yaml so resolution falls through to state.conc=1 (yaml is
-        # authoritative under the P0 fix, so it would otherwise still win).
+        # Drop the yaml so resolution falls through to state.conc=1.
         state.last_baseline = {}
         state.conc = 1
         peak_with_conc_1 = compute_peak_from_state(state)
-        # batch=64 amortizes weight reads 64×, so the yaml-resolved peak
-        # must be substantially higher than the conc=1 peak.
+        # batch=64 amortizes weight reads, so the yaml-resolved peak is much higher.
         assert peak_with_yaml > 10 * peak_with_conc_1
 
 
 class TestMoEBatchSaturation:
-    """P1 fix: the MoE weight-read term grows with batch as the union of
-    activated experts saturates toward all experts. A constant
-    ``active_weight_bytes`` (B=1 routing) over-amortizes at high batch and
-    inflates the ceiling (within% collapses below the real value)."""
+    """P1 fix: the MoE weight-read term grows with batch as activated experts saturate toward all experts (a constant active_weight_bytes over-amortizes at high batch)."""
 
     _COMMON = dict(
         gpu_type="mi355x", num_gpus=1, weight_bytes=60_000_000_000,
@@ -811,11 +736,7 @@ class TestMoEBatchSaturation:
     )
 
     def test_saturates_to_dense_at_high_batch(self):
-        # 128 experts, top-8 → activated_fraction = 1-(1-8/128)^B (coupon
-        # union). It asymptotes to 1.0 (all experts read == dense) as B
-        # grows; at B=512, (0.9375)^512≈4e-15 so the union is dense to
-        # machine precision. (At mid batch it stays strictly below dense —
-        # see TestMoEUnionUpperBound — which is the bug fix.)
+        # 128 experts top-8: activated_fraction = 1-(1-8/128)^B (coupon union) asymptotes to dense as B grows (~dense at B=512); strictly below dense at mid batch (see TestMoEUnionUpperBound).
         moe = compute_theoretical_peak_output_tok_per_sec(
             **self._COMMON, concurrency=512,
             num_experts=128, experts_per_tok=8,
@@ -838,8 +759,7 @@ class TestMoEBatchSaturation:
             num_experts=128, experts_per_tok=8,
             expert_weight_bytes=53_000_000_000,
         )
-        # Larger effective weight -> lower ceiling -> within% rises to a
-        # sensible value instead of collapsing.
+        # Larger effective weight -> lower ceiling -> within% rises to a sensible value.
         assert new < old
 
     def test_batch1_matches_active(self):
@@ -858,15 +778,7 @@ class TestMoEBatchSaturation:
 
 
 class TestMoEUnionUpperBound:
-    """The decode ceiling must stay an upper bound on real throughput at
-    every batch. Anchored to real InferenceX data: Qwen3-30B-A3B on
-    1×MI300X (TP=1, ISL=OSL=1024) measured output_throughput=1754.16 tok/s
-    at conc=16. The linear ``min(1, B*k/n)`` expert-union estimate declares
-    all 128 experts active at B=16 (16*8/128=1.0), inflating the per-token
-    weight read and dropping the ceiling below the measured value
-    (within%>100%). The expected union fraction under uniform routing is
-    ``1-(1-k/n)^B`` (coupon/occupancy), which keeps the ceiling above the
-    measurement."""
+    """Decode ceiling must stay an upper bound on real throughput at every batch (Qwen3-30B-A3B 1xMI300X measured 1754.16 tok/s at conc=16); the coupon union ``1-(1-k/n)^B`` keeps the ceiling above the measurement where the linear ``min(1,B*k/n)`` bound under-estimates it."""
 
     # Real Qwen3-30B-A3B geometry (config.json) + safetensors total_size.
     _NUM_LAYERS = 48
@@ -925,6 +837,7 @@ class TestMoEUnionUpperBound:
         assert self._ceiling(16) > dense
 
 
+# HW_SPECS table sanity
 class TestHWSpecsTable:
     def test_mi_series_present(self):
         for key in ("mi300x", "mi325x", "mi355x"):
@@ -963,9 +876,7 @@ class TestHWSpecsTable:
         )
 
 
-# ---------------------------------------------------------------------------
 # Two-sided roofline: T_cmp formula + RooflineBreakdown classification.
-# ---------------------------------------------------------------------------
 class TestResolvePeakTFLOPS:
     """``_resolve_peak_tflops`` lookup with safe degrade on miss."""
 
@@ -995,16 +906,10 @@ class TestResolvePeakTFLOPS:
 
 
 class TestComputeBoundCeiling:
-    """T_cmp = (F_peak * G * dtype_bytes) / (2 * active_weight_bytes_B1).
-
-    The divisor is the **B=1 active** weight, not a batch-saturated value
-    — per-token compute is batch-invariant even when memory traffic is
-    not (see helper docstring for the physical justification).
-    """
+    """T_cmp = (F_peak * G * dtype_bytes) / (2 * active_weight_bytes_B1); the divisor is the B=1 active weight (per-token compute is batch-invariant)."""
 
     def test_matches_hand_calculation_mi355x_bf16_a3b_like(self):
-        # 095726Z-style A3B: 2516.6 TFLOPS * 1 GPU * 2 bytes / (2 * 6.7 GB)
-        # = 5033.2e12 / 13.4e9 ≈ 375 600 tok/s.
+        # A3B: 2516.6 TFLOPS * 2 bytes / (2 * 6.7 GB) ≈ 375 600 tok/s.
         cmp = compute_compute_bound_ceiling_tok_per_sec(
             gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
             active_weight_bytes=6_700_000_000,
@@ -1038,10 +943,7 @@ class TestComputeBoundCeiling:
         assert cmp_zero == pytest.approx(cmp_explicit, rel=1e-9)
 
     def test_moe_uses_active_b1_not_batch_saturated(self):
-        # Anti-regression: if a future refactor reroutes T_cmp through a
-        # batch-saturated effective_weight, the divisor would jump ~10x
-        # on this MoE shape (active=6.7G vs weight=61G) and T_cmp would
-        # drop ~10x. Lock the helper to active_weight_bytes.
+        # Anti-regression: T_cmp must divide by active_weight_bytes (6.7G), not a batch-saturated 61G.
         cmp_active = compute_compute_bound_ceiling_tok_per_sec(
             gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
             active_weight_bytes=6_700_000_000,
@@ -1078,14 +980,10 @@ class TestComputeBoundCeiling:
 
 
 class TestRooflineBreakdownClassification:
-    """``compute_roofline_breakdown_from_state`` integration: routes the
-    correct ``bound_kind`` for every (mem, cmp) ordering and degrades
-    safely when one or both ceilings are unavailable."""
+    """``compute_roofline_breakdown_from_state`` routes the correct ``bound_kind`` for every (mem, cmp) ordering and degrades safely."""
 
     def _mock_state_and_helpers(self, monkeypatch, mem_val, cmp_val):
-        """Stub out ``load_model_meta`` + both ceilings so we control
-        the (mem, cmp) ordering directly without standing up a
-        synthetic HF model."""
+        """Stub ``load_model_meta`` + both ceilings to control the (mem, cmp) ordering directly."""
         from inference_optimizer.orchestrator import roofline_ceiling
         meta = ModelMeta(
             weight_bytes=10_000_000_000, num_layers=48, num_kv_heads=4,
@@ -1132,9 +1030,7 @@ class TestRooflineBreakdownClassification:
         assert br.bound_kind == "unknown"
 
     def test_degrades_to_memory_when_cmp_unavailable(self, monkeypatch):
-        # T_cmp == 0 typically means precision missing from HW_SPECS;
-        # the result must keep T_mem visible as the ceiling and label
-        # the side memory-bound (matches pre-PR behaviour).
+        # T_cmp == 0 (precision missing from HW_SPECS) → keep T_mem as the ceiling, label memory-bound.
         state = self._mock_state_and_helpers(monkeypatch, 8000.0, 0.0)
         br = compute_roofline_breakdown_from_state(state)
         assert br.peak_tok_per_sec == 8000.0
@@ -1200,13 +1096,7 @@ class TestRooflineBreakdownClassification:
 
 
 class TestPhysicalInterpretation095726Z:
-    """End-to-end anchor for the formula change using real session
-    parameters from 20260528T095726Z (Qwen3-30B-A3B, MI355X, bf16,
-    yaml CONC=64, ISL=OSL=256, achieved output_throughput=6244.3 tok/s).
-
-    Pins the within% interpretation: decode-stage MoE at conc=64 stays
-    memory-bound, so adding T_cmp must NOT change T_peak — the within%
-    that PR-9749520 anchored at 77.4 % is preserved end-to-end."""
+    """End-to-end anchor (session 095726Z, Qwen3-30B-A3B/MI355X/bf16/CONC=64): decode-stage MoE stays memory-bound so adding T_cmp doesn't change T_peak (within% ~77%)."""
 
     _A3B_META = dict(
         gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
@@ -1231,8 +1121,7 @@ class TestPhysicalInterpretation095726Z:
         assert cmp / mem > 10
 
     def test_breakdown_stays_memory_bound_with_cmp_visible(self, tmp_path):
-        # Stand up a minimal HF-like model dir so load_model_meta works
-        # without monkeypatching, exercising the full code path.
+        # Real HF-like model dir so load_model_meta exercises the full code path.
         _write_synthetic_model(
             tmp_path / "a3b",
             total_size=61_000_000_000,
@@ -1254,41 +1143,23 @@ class TestPhysicalInterpretation095726Z:
             last_baseline={"extras": {"materialized_config": str(yaml_path)}},
         )
         br = compute_roofline_breakdown_from_state(state)
-        # T_cmp must be present (formula change requirement) AND must
-        # NOT cap the ceiling at decode — bound stays memory.
+        # T_cmp must be present but must NOT cap the ceiling at decode (bound stays memory).
         assert br.cmp_tok_per_sec > br.mem_tok_per_sec
         # PerfModel (FusedMoE coupon formula) now drives peak_tok_per_sec;
         # it agrees with the legacy T_mem ceiling within < 1% here, so the
         # within% anchor remains valid. The peak must stay > measured.
         assert br.bound_kind == "memory"
         assert br.peak_tok_per_sec >= self._ACHIEVED_TOK_S
-        # within% recomputed from achieved must still match the
-        # PR-9749520 anchor (~77 %, fixed by P0+P1 ceiling correctness).
+        # within% recomputed from achieved must still match the PR-9749520 anchor (~77%).
         within_pct = 100.0 * self._ACHIEVED_TOK_S / br.peak_tok_per_sec
         assert 70.0 < within_pct < 85.0
 
 
 class TestDeepSeekV3ConfigAliases:
-    """DeepSeek-V3-derived models (DeepSeek V3 / GigaChat3.1-A1.8B …)
-    use HF config aliases the original Qwen-A3B path didn't cover:
-
-      * ``n_routed_experts`` instead of ``num_experts``
-      * ``quantization_config.quant_method = "fp8"`` with bf16
-        activation dtype recorded in the legacy ``dtype`` field.
-
-    Without the aliases the helper treats these models as dense and
-    keeps the un-shrunken ``weight_bytes`` divisor (over-counts active
-    params ~10x at decode), AND mis-reads the activation dtype as the
-    weight dtype (over-counts byte size ~2x). This test pins both
-    routes so DeepSeek-V3 family ceilings stay accurate."""
+    """DeepSeek-V3-derived models use HF aliases (``n_routed_experts``, ``quant_method=fp8`` + bf16 ``dtype``) that must be resolved so ceilings stay accurate."""
 
     def test_n_routed_experts_alias_equivalent_to_num_experts(self, tmp_path):
-        # Two model dirs, identical geometry, differ only in the field
-        # name used for the routed-expert count. The breakdown must be
-        # identical — anti-regression for the alias resolver.
-        # ``total_size`` is the bf16-equivalent (~26 GB so the expert
-        # pool ~19.6 GB fits inside; real GigaChat ships as fp8 ≈12.3 GB
-        # but this test isolates the alias logic from the dtype path).
+        # Identical geometry differing only in the routed-expert field name must give an identical breakdown.
         common = dict(
             total_size=26_000_000_000,
             num_layers=26, num_kv_heads=32,
@@ -1313,10 +1184,7 @@ class TestDeepSeekV3ConfigAliases:
         assert qwen.active_weight_bytes == ds.active_weight_bytes
 
     def test_fp8_quantization_config_drives_weight_dtype(self, tmp_path):
-        # GigaChat3.1-A1.8B fingerprint: quant_method=fp8 + dtype=bfloat16
-        # (the bf16 is the *activation* dtype, weights are block fp8).
-        # Without the quant_method short-circuit ``load_model_meta``
-        # picks up the bf16 dtype and over-counts weight bytes 2x.
+        # quant_method=fp8 + dtype=bfloat16 (activation): without the quant short-circuit, load_model_meta over-counts weight bytes 2x.
         _write_synthetic_model(
             tmp_path / "gigachat",
             total_size=12_000_000_000,
@@ -1339,9 +1207,7 @@ class TestDeepSeekV3ConfigAliases:
         assert meta.expert_weight_bytes > 0
 
     def test_quant_method_overrides_torch_dtype(self, tmp_path):
-        # quant_method must win even when torch_dtype is set to
-        # something inconsistent — the safetensors data is fp8 once
-        # the quant config says so.
+        # quant_method wins even when torch_dtype is inconsistent.
         _write_synthetic_model(
             tmp_path / "fp8_model",
             total_size=12_000_000_000,
@@ -1355,8 +1221,7 @@ class TestDeepSeekV3ConfigAliases:
         assert meta.weight_dtype_bytes == 1.0  # fp8 wins
 
     def test_dtype_field_fallback_when_torch_dtype_missing(self, tmp_path):
-        # No torch_dtype, no quant_method — the DeepSeek-style ``dtype``
-        # field should still be consulted before the precision_hint.
+        # With no torch_dtype/quant_method, the DeepSeek-style ``dtype`` field is consulted before the precision_hint.
         _write_synthetic_model(
             tmp_path / "ds_no_qd",
             total_size=4_000_000_000,
@@ -1376,27 +1241,12 @@ class TestDeepSeekV3ConfigAliases:
         assert meta.weight_dtype_bytes == 2.0  # fp16
 
     def test_mxfp4_alias_in_dtype_table(self):
-        # HW_SPECS uses ``mxfp4`` as a key for MI355X; the byte-size
-        # table must agree (0.5 byte/param), otherwise the active-
-        # params arithmetic in compute_compute_bound_ceiling_tok_per_sec
-        # would silently fall back to bf16.
+        # ``mxfp4`` must map to 0.5 byte/param to match the HW_SPECS key (else the ceiling arithmetic falls back to bf16).
         assert _resolve_dtype_bytes("mxfp4") == 0.5
 
     def test_num_local_experts_alias_equivalent_to_num_experts(self, tmp_path):
-        # gpt-oss family (GptOssForCausalLM) writes the routed-expert
-        # count under ``num_local_experts``. Without the alias the helper
-        # degraded to dense on gpt-oss-120b and inflated the active-
-        # weight divisor ~13x (full 65 GB instead of routed 5 GB),
-        # collapsing within% to ~28% on a memory-bound decode that
-        # should sit ~70-80%. Two synthetic configs identical except
-        # for the field name must produce identical ModelMeta.
-        # bf16-equiv total_size has to be larger than the routed pool
-        # (128 experts × 36 layers × 3 × 2880 × 2880 × 2 bytes ≈ 229 GB),
-        # otherwise ``_compute_expert_decomposition`` triggers its
-        # "expert pool ≥ weight_bytes" safe-degrade and the test would
-        # falsely fail. Real gpt-oss-120b ships as mxfp4 (~65 GB on
-        # disk); the bf16 equivalent is ~260 GB, which we use here so
-        # the MoE decomposition path executes.
+        # gpt-oss (GptOssForCausalLM) writes the routed-expert count under ``num_local_experts``; the alias must resolve so it isn't treated as dense.
+        # total_size is the ~260 GB bf16-equivalent (above the routed pool) so the MoE decomposition path executes.
         common = dict(
             total_size=260_000_000_000,
             num_layers=36, num_kv_heads=8,

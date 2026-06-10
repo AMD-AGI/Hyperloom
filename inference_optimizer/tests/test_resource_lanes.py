@@ -1,27 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""v0.8 M6 — research_lane capacity + concurrent dispatcher tests.
-
-Covers KB_design §3.7 (resource lane redesign) + §3.13 M6:
-
-* Schema migration: legacy v1 (PK=lane) → v2 (PK=(lane, holder_id))
-  preserves row data.
-* ``lane_capacity`` table is seeded with defaults; ``set_lane_capacity``
-  upserts.
-* Multi-holder ``research_lane`` (capacity > 1) admits the configured
-  number of holders, then ``LaneFull`` (not ``LaneBusy``) on overflow.
-* Single-holder serving lanes (capacity=1) still raise ``LaneBusy``
-  for cross-lane conflicts (Inv-7.1).
-* ``try_acquire_many`` is the non-blocking variant — returns ``None``
-  on conflict / full.
-* Same-holder idempotent retry refreshes the lease without raising.
-* Heartbeat / release / reap_expired all key on (lane, holder_id) so a
-  busy lane reaps only the expired holder.
-* ``ResourceLockManager`` counters track per-lane acquire / busy /
-  full counts.
-* ``lane_holders`` / ``lane_capacities`` observability helpers.
-* ``breakdown.telemetry.lane_timeline`` exposes per-lane summary.
-"""
+"""v0.8 M6 — research_lane capacity + concurrent dispatcher tests (KB_design §3.7 + §3.13 M6)."""
 
 from __future__ import annotations
 
@@ -50,9 +29,7 @@ from inference_optimizer.storage.schema import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 @pytest.fixture
 def db_path(tmp_path):
     return tmp_path / "coordinator.db"
@@ -71,9 +48,7 @@ def locks(conn):
     return ResourceLockManager(SqliteLeaseBackend(conn))
 
 
-# ===========================================================================
 # 1. Schema — v1 → v2 migration + defaults
-# ===========================================================================
 def test_schema_version_is_v3():
     """v3 adds the specialist GPU pool leases table."""
     assert SCHEMA_VERSION == 3
@@ -156,7 +131,7 @@ def test_v1_to_v2_migration_preserves_rows(tmp_path):
 
 def test_v2_ensure_schema_is_idempotent(conn):
     """Calling ensure_schema twice on the same DB doesn't lose data."""
-    cur = conn.raw.execute(
+    conn.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
         "acquired_at, expires_at, heartbeat_at) "
         "VALUES (?,?,?,?,?,?,?,?)",
@@ -173,9 +148,7 @@ def test_v2_ensure_schema_is_idempotent(conn):
     assert int(cur.fetchone()["n"]) == 1
 
 
-# ===========================================================================
 # 2. acquire_many: capacity, LaneFull vs LaneBusy
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_serving_lane_capacity_1_raises_LaneBusy(locks):
     a = await locks.acquire_many(
@@ -293,13 +266,10 @@ async def test_same_holder_retry_is_idempotent(conn, locks):
     await locks.release(b)
 
 
-# ===========================================================================
 # 3. Cross-lane conflicts (Inv-7.2): research_lane independent of serving
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_research_lane_independent_of_benchmark_lane(conn, locks):
-    """KB_design §3.7 Inv-7.2: research_lane has no LANE_CONFLICTS so a
-    benchmark task and a specialist can coexist on the same tick."""
+    """Inv-7.2: research_lane has no LANE_CONFLICTS, so a benchmark task and a specialist coexist."""
     set_lane_capacity(conn.raw, "research_lane", 6)
     bench = await locks.acquire_many(
         ["benchmark_lane"], holder_id="hb", task_id="tb",
@@ -321,9 +291,7 @@ def test_lane_conflicts_research_lane_isolated():
         assert "research_lane" not in conflicts
 
 
-# ===========================================================================
 # 4. try_acquire_many: non-blocking variant
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_try_acquire_many_returns_lease_on_success(locks):
     lease = await locks.try_acquire_many(
@@ -352,8 +320,7 @@ async def test_try_acquire_many_returns_none_on_conflict(conn, locks):
 
 @pytest.mark.asyncio
 async def test_try_acquire_many_returns_none_on_full(conn, locks):
-    """Multi-holder lane reaching capacity → ``try_acquire_many`` returns
-    None (LaneFull swallowed)."""
+    """A multi-holder lane at capacity → ``try_acquire_many`` returns None (LaneFull swallowed)."""
     set_lane_capacity(conn.raw, "research_lane", 2)
     leases = [
         await locks.acquire_many(
@@ -371,9 +338,7 @@ async def test_try_acquire_many_returns_none_on_full(conn, locks):
         await locks.release(l)
 
 
-# ===========================================================================
 # 5. Multi-holder heartbeat / release / reap_expired
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_heartbeat_only_extends_own_holder_row(conn, locks):
     set_lane_capacity(conn.raw, "research_lane", 2)
@@ -418,12 +383,9 @@ async def test_release_only_drops_own_holder_row(conn, locks):
 
 @pytest.mark.asyncio
 async def test_reap_expired_keys_on_holder_id(conn, locks):
-    """``reap_expired`` deletes only the expired ``(lane, holder_id)``
-    row, not the whole lane (KB_design §3.7 §4.1 multi-holder atomic
-    release)."""
+    """``reap_expired`` deletes only the expired ``(lane, holder_id)`` row, not the whole lane."""
     set_lane_capacity(conn.raw, "research_lane", 2)
-    # Insert one already-expired and one live holder directly so we
-    # bypass acquire_many's own expired-row reap pass.
+    # Insert one expired and one live holder directly to bypass acquire_many's reap pass.
     conn.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
         "acquired_at, expires_at, heartbeat_at) "
@@ -459,14 +421,10 @@ async def test_reap_expired_keys_on_holder_id(conn, locks):
     assert surviving == ["live"]
 
 
-# ===========================================================================
 # 6. Manager counters + observability
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_manager_counters_track_acquire_busy_full(conn, locks):
-    # Multi-holder lane (cap >= 2) raises LaneFull on overflow so the
-    # dispatcher can distinguish "wait for capacity slot" from
-    # "wait for cross-lane mutex".
+    # A multi-holder lane raises LaneFull on overflow (distinct from cross-lane LaneBusy).
     set_lane_capacity(conn.raw, "research_lane", 2)
     a = await locks.acquire_many(
         ["research_lane"], holder_id="s0", task_id="t0",
@@ -481,8 +439,7 @@ async def test_manager_counters_track_acquire_busy_full(conn, locks):
             ["research_lane"], holder_id="s2", task_id="t2",
             action="specialist", ttl_sec=60,
         )
-    # v0.6 single-holder semantics preserved: capacity-1 lanes raise
-    # LaneBusy (not LaneFull) so existing v0.6 tests still match.
+    # capacity-1 lanes still raise LaneBusy (not LaneFull), preserving v0.6 semantics.
     b = await locks.acquire_many(
         ["benchmark_lane"], holder_id="hb", task_id="tb",
         action="bench", ttl_sec=60,
@@ -496,8 +453,7 @@ async def test_manager_counters_track_acquire_busy_full(conn, locks):
     assert counters["research_lane"]["acquire_count"] == 2
     assert counters["research_lane"]["lane_full_count"] == 1
     assert counters["benchmark_lane"]["acquire_count"] >= 1
-    # The cross-lane conflict shows up on profile_lane (the requested
-    # lane that we couldn't acquire) AND on its conflict expansions.
+    # The cross-lane conflict shows up on profile_lane (the requested lane).
     assert "lane_busy_count" in counters.get("profile_lane", {})
     await locks.release(a)
     await locks.release(a2)
@@ -531,9 +487,7 @@ async def test_lane_capacities_returns_full_table(conn, locks):
     assert caps["research_lane"] == DEFAULT_LANE_CAPACITIES["research_lane"]
 
 
-# ===========================================================================
 # 7. breakdown.telemetry.lane_timeline
-# ===========================================================================
 def _make_session_with_db(tmp_path: Path) -> tuple[Path, SqliteConnection]:
     session_dir = tmp_path / "session"
     (session_dir / "storage").mkdir(parents=True)
@@ -588,8 +542,7 @@ def test_collect_lane_timeline_missing_db_returns_empty(tmp_path):
 
 
 def test_collect_lane_timeline_legacy_db_without_lane_capacity(tmp_path):
-    """Legacy (pre-M6) DBs without ``lane_capacity`` still produce a
-    sensible lane_timeline using the default capacity table."""
+    """Legacy DBs without ``lane_capacity`` still produce a sensible lane_timeline using the default table."""
     from inference_optimizer.breakdown.collectors import _collect_lane_timeline
 
     session_dir = tmp_path / "legacy"
@@ -617,9 +570,7 @@ def test_collect_lane_timeline_legacy_db_without_lane_capacity(tmp_path):
         assert by_lane[lane]["capacity"] == cap
 
 
-# ===========================================================================
 # 8. Concurrent acquire_many under asyncio.gather
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_concurrent_acquires_respect_capacity(conn, locks):
     """Three async acquires racing for capacity=2; exactly one fails."""

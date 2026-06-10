@@ -2,23 +2,12 @@
 
 """High-level builders that turn a :class:`Config` into a running reactor.
 
-Single entry point:
-
-* :func:`build_reactor_components` returns a :class:`ReactorBundle` that
-  bundles the reactor, the :class:`~robustness_agent.role.reactor.ReactorComponents`,
-  the underlying :class:`~robustness_agent.findings.sink.FindingSink` and
-  :class:`~robustness_agent.sources.server_client.RobustnessServerClient`
-  so callers can manage their lifecycles (e.g. ``await bundle.aclose()``
-  on shutdown).
-
-Hosts (the Coordinator, the standalone ``main.py`` reactor loop, the
-``robustness_agent.runtime.cli`` subprocess transport) all build a
-bundle directly and drive ``bundle.reactor.tick(ctx)`` per tick. There
-is no in-process Backend adapter anymore — the architecturally-blessed
-transport is the subprocess CLI, mirroring the critic-agent layout.
-
-The factory never blocks on remote services — :class:`Config.discover`
-already probed reachability and recorded the URLs.
+:func:`build_reactor_components` returns a :class:`ReactorBundle` (reactor +
+ReactorComponents + FindingSink + RobustnessServerClient) so callers can
+manage lifecycles via ``await bundle.aclose()``. All hosts drive
+``bundle.reactor.tick(ctx)`` per tick; the blessed transport is the
+subprocess CLI (mirrors critic-agent), no in-process Backend adapter. The
+factory never blocks on remote services — ``Config.discover`` already probed.
 """
 
 from __future__ import annotations
@@ -89,6 +78,11 @@ class ReactorBundle:
     sink: FindingSink
 
     async def aclose(self) -> None:
+        """Release lifecycle resources held by the bundle.
+
+        Closes the underlying robustness-server HTTP client when one was
+        created; a no-op in local-only mode.
+        """
         if self.server_client is not None:
             await self.server_client.aclose()
 
@@ -101,18 +95,21 @@ def build_reactor_components(
 ) -> ReactorBundle:
     """Construct everything the reactor needs.
 
-    Parameters
-    ----------
-    config:
-        Discovered :class:`Config` — typically the result of
-        ``await Config.discover()``.
-    rca:
-        Optional RCA engine override. Defaults to :class:`NoopRcaEngine`
-        because M1 ships RCA disabled.
-    session_id:
-        Override for the FindingSink filename.  Defaults to
-        ``config.session_dir.name`` so each per-session sandbox writes
-        to a stable file.
+    Wires the primary/fallback sources, degrade router, detectors,
+    state store, finding sink, and RCA engine into a single bundle.
+
+    Args:
+        config (Config): Discovered configuration — typically the result
+            of ``await Config.discover()``.
+        rca (RcaEngine | None): Optional RCA engine override. Defaults to
+            an auto-selected engine (Noop unless LLM RCA is enabled).
+        session_id (str | None): Override for the FindingSink filename.
+            Defaults to ``config.session_dir.name`` so each per-session
+            sandbox writes to a stable file.
+
+    Returns:
+        ReactorBundle: The assembled reactor plus the lifecycle handles
+        (components, server client, and sink) the caller must manage.
     """
     # Primary source: robustness-server (omitted in local-only mode).
     server_client: RobustnessServerClient | None = None
@@ -136,9 +133,7 @@ def build_reactor_components(
         )
 
     # Auto-include the local inference server health endpoint so an
-    # SGLang/vLLM/Magpie SIGSTOP fires a symptom — without it, the
-    # default ``health_probe_targets`` list is empty and operators
-    # routinely forget to populate it.
+    # SGLang/vLLM/Magpie SIGSTOP fires a symptom (operators forget to add it).
     probe_targets = list(config.health_probe_targets)
     if (
         config.auto_probe_inference_server
@@ -162,13 +157,10 @@ def build_reactor_components(
             *(g.strip() for g in config.server_log_extra_globs.split(":") if g.strip()),
         )
 
-    # Multi-node guard: when ``disable_local_probe`` is on we swap the
-    # LocalProbe for a quiet stub so per-pod sandbox probes (ps,
-    # rocm-smi, local HTTP) cannot emit false-positive symptoms on Ray
-    # workers that legitimately do not run the inference server. The
-    # router still degrades on primary failure but the fallback then
-    # yields an empty SourceData with a descriptive ``degraded_reason``
-    # instead of a high-severity local symptom.
+    # Multi-node guard: ``disable_local_probe`` swaps LocalProbe for a quiet
+    # stub so per-pod probes (ps, rocm-smi, local HTTP) can't false-fire on
+    # Ray workers without the inference server; the stub yields empty
+    # SourceData with a degraded_reason instead of a high-severity symptom.
     fallback: Source
     if config.disable_local_probe:
         fallback = _QuietFallback(
@@ -214,11 +206,9 @@ def build_reactor_components(
         recheck_interval_s=config.source_recheck_interval_s,
     )
 
-    # Disk-backed state store — single source of truth for any
-    # subsystem that needs to survive a subprocess restart (detectors,
-    # ladder cooldown, RCA throttle). Built before the classifier so
-    # we can pass it in once and Classifier wires it to all stateful
-    # sub-detectors.
+    # Disk-backed state store surviving subprocess restarts (detectors,
+    # ladder cooldown, RCA throttle). Built before the classifier, which
+    # wires it to all stateful sub-detectors.
     state_store: DetectorStateStore | None = (
         DetectorStateStore(session_dir=config.session_dir)
         if config.state_store_enabled
@@ -391,7 +381,18 @@ def _build_rca_engine(
     *,
     state_store: DetectorStateStore | None = None,
 ) -> RcaEngine:
-    """Choose between Noop and Llm based on config + env override."""
+    """Choose between Noop and Llm based on config + env override.
+
+    Args:
+        config (Config): Configuration carrying LLM RCA enablement,
+            credentials, and throttle settings.
+        state_store (DetectorStateStore | None): Optional store backing
+            the RCA throttle's cross-tick cooldown state.
+
+    Returns:
+        RcaEngine: A :class:`LlmRcaEngine` when LLM RCA is enabled and
+        credentials are present, otherwise a :class:`NoopRcaEngine`.
+    """
     if os.environ.get("ROBUSTNESS_LLM_RCA_DISABLED", "").lower() in {"1", "true", "yes"}:
         log.info("LLM RCA disabled via ROBUSTNESS_LLM_RCA_DISABLED env override")
         return NoopRcaEngine()
@@ -431,6 +432,16 @@ def _build_rca_engine(
 
 
 def _parse_severity(value: str) -> SymptomSeverity:
+    """Map a severity string to a :class:`SymptomSeverity`.
+
+    Args:
+        value (str): A severity label such as ``"low"``, ``"medium"``,
+            or ``"high"`` (case-insensitive; synonyms accepted).
+
+    Returns:
+        SymptomSeverity: The matching severity, defaulting to ``HIGH``
+        for unrecognised values.
+    """
     normalized = (value or "").strip().lower()
     if normalized in {"low", "info", "observe"}:
         return SymptomSeverity.LOW
@@ -451,6 +462,17 @@ class _NoServerSource:
     reason: str
 
     async def fetch(self, ctx: Any) -> SourceData:
+        """Always fail, signalling the source is unavailable.
+
+        Args:
+            ctx (Any): The fetch context (ignored).
+
+        Returns:
+            SourceData: Never returns normally.
+
+        Raises:
+            SourceUnavailable: Always, with the configured reason.
+        """
         raise SourceUnavailable(self.reason)
 
 
@@ -458,14 +480,10 @@ class _NoServerSource:
 class _QuietFallback:
     """Silent fallback used when ``disable_local_probe`` is on.
 
-    Returns an empty :class:`SourceData` instead of raising so the
-    DegradeRouter does not enter the ``FAILED`` state — it just keeps
-    serving empty snapshots while the primary recovers. The agent's
-    signal layer treats empty fields as "no data" and stays quiet,
-    which is exactly the multi-node policy: no LocalProbe-driven
-    symptoms when robustness-server is down. Operators still see the
-    transition via the router's ``primary_state`` and the
-    ``degraded_reason`` we attach.
+    Returns empty :class:`SourceData` (not raising) so DegradeRouter never
+    enters FAILED; the signal layer treats empty fields as "no data" and
+    stays quiet — the multi-node policy of no LocalProbe symptoms. The
+    transition is still visible via ``primary_state`` / ``degraded_reason``.
     """
 
     name: str
