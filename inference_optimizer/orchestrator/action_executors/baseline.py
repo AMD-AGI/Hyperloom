@@ -143,6 +143,10 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
         is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
                        None when probe failed.
         probe_status   "found" | "not_found" | "error".
+
+    Returns:
+        dict[str, Any]: Probe info with keys ``path``, ``kernel_count``,
+            ``size_mb``, ``is_cold`` and ``probe_status``.
     """
     info: dict[str, Any] = {
         "path": None,
@@ -208,6 +212,18 @@ class BaselineExecutor:
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
+        """Initialize the baseline executor with launch defaults.
+
+        Args:
+            magpie_python (str | None): Python interpreter used to invoke
+                Magpie; resolved automatically when ``None``.
+            default_config_path (Path | str | None): Default Magpie YAML config
+                path; resolved from ``$FRAMEWORK`` at call time when ``None``.
+            session_dir (Path | str | None): Canonical session root for
+                per-task workspaces; resolved automatically when ``None``.
+            default_timeout_sec (int): Default (warm-start) subprocess timeout.
+            cwd (Path | str): Working directory for the Magpie subprocess.
+        """
         from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
         self.magpie_python = magpie_python or _resolve_magpie_python()
         # None = resolve from $FRAMEWORK at call time; explicit fixture path wins.
@@ -219,7 +235,11 @@ class BaselineExecutor:
         self.cwd = Path(cwd)
 
     def _resolve_default_config(self) -> Path:
-        """Hook for subclasses (ProfileExecutor) to swap the resolver."""
+        """Hook for subclasses (ProfileExecutor) to swap the resolver.
+
+        Returns:
+            Path: The default baseline Magpie YAML config path.
+        """
         return _default_baseline_config()
 
     def _resolve_workspace(self, ctx: RunnerContext, action: str) -> Path:
@@ -297,6 +317,28 @@ class BaselineExecutor:
         return None
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the Magpie baseline benchmark and parse its result.
+
+        Materializes the workload config, resolves the timeout (with cold-start
+        detection), restarts the multi-node server when required, launches
+        Magpie via ``run_with_session_kill``, harvests leaked artifacts, parses
+        ``benchmark_report.json`` and the accuracy eval, and returns a result
+        dict the Coordinator promotes into SharedState.
+
+        Args:
+            ctx (RunnerContext): The runner context carrying ``task.params``
+                (config / model / timeout knobs) and ``extra`` (workspace).
+
+        Returns:
+            dict[str, Any]: On success, a ``status="succeeded"`` dict with
+                throughput / latency / accuracy measurements and artifact
+                paths; on failure, a ``status="failed"`` dict with an
+                ``error_class`` (``timeout``, ``subprocess_nonzero``,
+                ``no_workspace``, ``no_report``, ``invalid_measurement`` ...).
+
+        Raises:
+            FileNotFoundError: If the resolved baseline config does not exist.
+        """
         params = ctx.task.params or {}
         config_path = Path(
             params.get("config_path")

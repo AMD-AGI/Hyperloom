@@ -50,8 +50,8 @@ class DecisionAuditConfig:
     """Tunables for :func:`evaluate_decision_audit_signals`.
 
     ``min_keep_gain_pct`` (noise floor, G2) mirrors the upstream KEEP threshold (1.0%).
-    ``dispatch_bypass_pre_post_epsilon_pct`` (G3) is the |gain_pct| below which a KEEP
-    is suspected of never executing the patched kernel.
+    ``dispatch_bypass_pre_post_epsilon_pct`` (G3) is the ``|gain_pct|`` (absolute
+    gain) below which a KEEP is suspected of never executing the patched kernel.
     """
 
     min_keep_gain_pct: float = 1.0
@@ -67,6 +67,22 @@ def evaluate_decision_audit_signals(
     *,
     config: DecisionAuditConfig | None = None,
 ) -> list[Symptom]:
+    """Run the G1-G7 reverse-audit rules over persisted decision artefacts.
+
+    Inspects integrate result entries, ci_metrics, and OOB attempts collected
+    into :attr:`SourceData.local_decision_audit` and aggregates any symptoms.
+
+    Args:
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected source data including the decision-audit
+            sample.
+        config (DecisionAuditConfig | None): Tunables; defaults to
+            :class:`DecisionAuditConfig` when ``None``.
+
+    Returns:
+        list[Symptom]: All decision-quality symptoms found this tick, possibly
+            empty.
+    """
     cfg = config or DecisionAuditConfig()
     audit = data.local_decision_audit
     if not isinstance(audit, dict) or not audit:
@@ -97,6 +113,15 @@ def _integrate_symptoms(
     entries: list[dict[str, Any]],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
+    """Apply the G1/G2/G3 integrate-result rules to recent KEEP/PARTIAL entries.
+
+    Args:
+        entries (list[dict[str, Any]]): Recent integrate result records.
+        cfg (DecisionAuditConfig): Audit tunables.
+
+    Returns:
+        list[Symptom]: Symptoms from the G1/G2/G3 checks across all entries.
+    """
     out: list[Symptom] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -247,6 +272,16 @@ def _g3_kernel_dispatch_bypassed(
 def _ci_metrics_symptoms(
     ci_metrics: dict[str, Any], ci_metrics_path: str,
 ) -> list[Symptom]:
+    """Apply the G4/G5/G6 ci_metrics audit rules when the file is present.
+
+    Args:
+        ci_metrics (dict[str, Any]): Parsed ci_metrics document.
+        ci_metrics_path (str): Filesystem path of the ci_metrics file, used in
+            evidence.
+
+    Returns:
+        list[Symptom]: Symptoms from the G4/G5/G6 checks, possibly empty.
+    """
     if not ci_metrics:
         return []
     out: list[Symptom] = []

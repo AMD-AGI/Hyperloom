@@ -29,6 +29,15 @@ _FAMILY_ORDER: tuple[str, ...] = (
 
 
 def _read_rules_fragment(path: Path | None) -> str:
+    """Read the ``critic.md`` rules fragment, tolerating absence.
+
+    Args:
+        path (Path | None): Path to the rules fragment, or ``None`` to skip.
+
+    Returns:
+        str: The stripped fragment text, or an empty string when the path is
+        ``None`` or unreadable.
+    """
     if path is None:
         return ""
     try:
@@ -38,6 +47,11 @@ def _read_rules_fragment(path: Path | None) -> str:
 
 
 def _section_mission() -> list[str]:
+    """Build the MISSION section lines.
+
+    Returns:
+        list[str]: Markdown lines describing the Critic's review mandate.
+    """
     return [
         "## 1. MISSION",
         "",
@@ -53,6 +67,16 @@ def _section_run_context(
     kernel_enabled: bool,
     max_minutes: int,
 ) -> list[str]:
+    """Build the RUN CONTEXT section lines.
+
+    Args:
+        framework (str): The framework name (e.g. ``sglang``) shown verbatim.
+        kernel_enabled (bool): Whether kernel-owned actions are enabled.
+        max_minutes (int): Wall-clock budget for the run, in minutes.
+
+    Returns:
+        list[str]: Markdown lines describing the static run context.
+    """
     return [
         "## 2. RUN CONTEXT",
         "",
@@ -127,6 +151,16 @@ def _section_phase_review_contract() -> list[str]:
 
 
 def _actions_by_family(actions: list[ActionMetadata]) -> list[tuple[str, list[ActionMetadata]]]:
+    """Group actions by family in stable display order.
+
+    Args:
+        actions (list[ActionMetadata]): The enabled actions to group.
+
+    Returns:
+        list[tuple[str, list[ActionMetadata]]]: ``(family, sorted_actions)``
+        pairs ordered by :data:`_FAMILY_ORDER`, with any unlisted families
+        appended alphabetically.
+    """
     bucket: dict[str, list[ActionMetadata]] = {}
     for meta in actions:
         bucket.setdefault(meta.family, []).append(meta)
@@ -145,6 +179,15 @@ def _actions_by_family(actions: list[ActionMetadata]) -> list[tuple[str, list[Ac
 
 
 def _section_known_actions(actions: list[ActionMetadata]) -> list[str]:
+    """Build the KNOWN ACTIONS catalogue section, grouped by family.
+
+    Args:
+        actions (list[ActionMetadata]): The actions enabled for this run.
+
+    Returns:
+        list[str]: Markdown lines listing each action with its accuracy risk,
+        family, and description.
+    """
     lines: list[str] = [
         "## 3. KNOWN ACTIONS",
         "",
@@ -166,6 +209,16 @@ def _section_known_actions(actions: list[ActionMetadata]) -> list[str]:
 
 
 def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
+    """Build the DEFAULT VERDICT section, including the high-risk action list.
+
+    Args:
+        actions (list[ActionMetadata]): The actions enabled for this run; those
+            with ``accuracy_risk > 0.30`` are surfaced as high-risk.
+
+    Returns:
+        list[str]: Markdown lines describing the default verdict rules by
+        accuracy risk and family.
+    """
     high_risk = sorted(
         a.name for a in actions if a.accuracy_risk > 0.30
     )
@@ -197,6 +250,12 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
 
 
 def _section_kernel_owned_carveout() -> list[str]:
+    """Build the KERNEL-OWNED CARVE-OUT section.
+
+    Returns:
+        list[str]: Markdown lines listing the kernel-owned actions and noting
+        that hard E2E gating is enforced by the Kernel agent, not the verdict.
+    """
     owned = ", ".join(sorted(KERNEL_OWNED_ACTIONS))
     return [
         "## 5b. KERNEL-OWNED CARVE-OUT",
@@ -212,6 +271,15 @@ def _section_kernel_owned_carveout() -> list[str]:
 
 
 def _section_rules(rules_md: str) -> list[str]:
+    """Build the RULES section wrapping the ``critic.md`` fragment.
+
+    Args:
+        rules_md (str): The raw rules-fragment markdown; a placeholder is used
+            when empty.
+
+    Returns:
+        list[str]: Markdown lines for the RULES section.
+    """
     body = rules_md.strip() or (
         "(critic.md rules fragment not found — honor judge_bundle constraints.)"
     )
@@ -219,6 +287,12 @@ def _section_rules(rules_md: str) -> list[str]:
 
 
 def _section_output_protocol() -> list[str]:
+    """Build the OUTPUT PROTOCOL section.
+
+    Returns:
+        list[str]: Markdown lines documenting the single-proposal and batch
+        ``verdict_map`` reply shapes and their rules.
+    """
     return [
         "## 7. OUTPUT PROTOCOL",
         "",

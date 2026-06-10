@@ -48,16 +48,32 @@ class TraceLensCliFiredOnce:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
+        """Initialise the latch, restoring the fired flag from state if present.
+
+        Args:
+            state_view (DetectorStateView | None): Disk-backed state view used to
+                persist the latch across subprocess restarts.
+        """
         self._state_view = state_view
         loaded = state_view.load() if state_view is not None else {}
         self._value: bool = bool(loaded.get("fired", False))
 
     @property
     def value(self) -> bool:
+        """Whether the J3 symptom has already fired this session.
+
+        Returns:
+            bool: ``True`` once the latch has tripped, otherwise ``False``.
+        """
         return self._value
 
     @value.setter
     def value(self, new_value: bool) -> None:
+        """Set the latch flag and persist it to the state view, if any.
+
+        Args:
+            new_value (bool): The new latch state.
+        """
         self._value = bool(new_value)
         if self._state_view is not None:
             self._state_view.save({"fired": self._value})
@@ -70,6 +86,21 @@ def evaluate_external_deps_signals(
     config: ExternalDepsConfig | None = None,
     tracelens_latch: TraceLensCliFiredOnce | None = None,
 ) -> list[Symptom]:
+    """Run the J1/J2/J3 external-dependency rules and aggregate symptoms.
+
+    Args:
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected source data including
+            ``local_external_deps``.
+        config (ExternalDepsConfig | None): Tunables; defaults to
+            :class:`ExternalDepsConfig` when ``None``.
+        tracelens_latch (TraceLensCliFiredOnce | None): One-shot latch for the
+            J3 rule; when ``None`` the J3 check is skipped.
+
+    Returns:
+        list[Symptom]: All external-dependency symptoms found this tick,
+            possibly empty.
+    """
     cfg = config or ExternalDepsConfig()
     deps = data.local_external_deps
     if not isinstance(deps, dict) or not deps:
@@ -91,6 +122,16 @@ def evaluate_external_deps_signals(
 def _gateway_symptoms(
     gateway: dict[str, Any], cfg: ExternalDepsConfig,
 ) -> list[Symptom]:
+    """J1: fire ``gateway_auth_outage`` when the LLM gateway returns 401/403.
+
+    Args:
+        gateway (dict[str, Any]): Gateway probe result (status/status_code/url).
+        cfg (ExternalDepsConfig): Tunables.
+
+    Returns:
+        list[Symptom]: A one-element list with the ``gateway_auth_outage``
+            symptom on an auth failure, otherwise an empty list.
+    """
     if not isinstance(gateway, dict) or not gateway:
         return []
     status = str(gateway.get("status") or "")
@@ -131,6 +172,19 @@ def _gateway_symptoms(
 def _mount_symptoms(
     mounts: list[Any], cfg: ExternalDepsConfig,
 ) -> list[Symptom]:
+    """J2: fire ``wekafs_degraded`` for unreachable or slow external mounts.
+
+    Unreachable mounts (``ok`` falsey) fire HIGH; reachable-but-slow mounts
+    fire HIGH/MEDIUM based on the configured latency thresholds.
+
+    Args:
+        mounts (list[Any]): Per-mount probe results.
+        cfg (ExternalDepsConfig): Tunables (provides latency thresholds).
+
+    Returns:
+        list[Symptom]: One ``wekafs_degraded`` symptom per degraded mount,
+            possibly empty.
+    """
     if not isinstance(mounts, list) or not mounts:
         return []
     out: list[Symptom] = []
@@ -212,6 +266,18 @@ def _tracelens_symptoms(
     cli_info: dict[str, Any],
     latch: TraceLensCliFiredOnce,
 ) -> list[Symptom]:
+    """J3: fire ``tracelens_cli_missing`` once when no TraceLens CLI is on PATH.
+
+    Latches via ``latch`` so the symptom is emitted at most once per session.
+
+    Args:
+        cli_info (dict[str, Any]): TraceLens CLI probe result.
+        latch (TraceLensCliFiredOnce): One-shot latch tracking prior fires.
+
+    Returns:
+        list[Symptom]: A one-element list with the ``tracelens_cli_missing``
+            symptom on the first detection, otherwise an empty list.
+    """
     if not isinstance(cli_info, dict) or not cli_info:
         return []
     if latch.value:

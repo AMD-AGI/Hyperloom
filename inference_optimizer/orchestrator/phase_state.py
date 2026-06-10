@@ -255,10 +255,32 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
 
 
 def is_valid_stop_reason(value: str) -> bool:
+    """Return True when ``value`` is a member of :data:`STOP_REASON_VOCAB`.
+
+    PolicyGate uses this to reject any write of ``stop_reason`` that is not
+    in the closed vocabulary. The value is stripped before comparison.
+
+    Args:
+        value (str): Candidate stop-reason string.
+
+    Returns:
+        bool: True if the stripped value is a recognized stop reason.
+    """
     return (value or "").strip() in STOP_REASON_VOCAB
 
 
 def is_valid_phase_exit_reason(value: str) -> bool:
+    """Return True when ``value`` is a member of :data:`PHASE_EXIT_REASONS`.
+
+    PolicyGate cross-checks any ``phase_history.reason`` write against this
+    closed vocabulary. The value is stripped before comparison.
+
+    Args:
+        value (str): Candidate phase-exit reason string.
+
+    Returns:
+        bool: True if the stripped value is a recognized phase-exit reason.
+    """
     return (value or "").strip() in PHASE_EXIT_REASONS
 
 
@@ -326,6 +348,21 @@ ESCALATE_HINT_BUDGET_BUMP_CAP:   float = 0.80   # absolute ceiling
 
 # True when a hint string is structurally a pause-specialist directive.
 def is_pause_specialist_hint(hint: str) -> bool:
+    """Return True when ``hint`` is a ``pause_specialist_<domain>`` directive.
+
+    Recognizes the structural shape only: the hint must start with
+    :data:`ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX` and carry a non-empty
+    suffix (the domain key). Whether that suffix is a valid domain is
+    validated by the Coordinator handler, not here, so this module stays
+    pure.
+
+    Args:
+        hint (str): Candidate escalate hint string; stripped before check.
+
+    Returns:
+        bool: True when the hint has the pause-specialist prefix plus a
+        non-empty domain suffix.
+    """
     h = (hint or "").strip()
     return h.startswith(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX) and len(h) > len(
         ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
@@ -386,6 +423,17 @@ def _now_unix(state: Any) -> float:
 
 
 def _phase_started_unix(state: Any) -> float:
+    """Return the Unix timestamp the current phase started, defensively coerced.
+
+    Reads ``state.phase_started_unix`` and returns ``0.0`` when the field is
+    missing or non-numeric (e.g. legacy / partially-initialized state).
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float: Phase start time in seconds since the epoch, or ``0.0``.
+    """
     raw = getattr(state, "phase_started_unix", 0.0)
     try:
         return float(raw or 0.0)
@@ -404,6 +452,18 @@ def _pending_escalate_hint(state: Any) -> str:
 
 
 def _max_minutes(state: Any) -> float:
+    """Return the session's configured ``max_minutes`` budget, defensively coerced.
+
+    A value of ``0.0`` is the conventional "unlimited run" sentinel and is
+    also returned when the field is missing or non-numeric.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float: Maximum wall-clock minutes for the session, or ``0.0`` for
+        unlimited / unparseable.
+    """
     try:
         return float(getattr(state, "max_minutes", 0) or 0)
     except (TypeError, ValueError):
@@ -411,7 +471,19 @@ def _max_minutes(state: Any) -> float:
 
 
 def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float:
-    """Return wall-clock seconds spent in current phase. 0 if not started."""
+    """Return wall-clock seconds spent in the current phase.
+
+    Returns ``0.0`` when the phase start timestamp is unset (phase not yet
+    entered) so callers can treat "not started" as zero elapsed.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``phase_started_unix``.
+        now_unix (float | None): Override for the current time; defaults to
+            :func:`_now_unix` resolution when None.
+
+    Returns:
+        float: Non-negative seconds elapsed in the current phase.
+    """
     started = _phase_started_unix(state)
     if started <= 0:
         return 0.0
@@ -572,6 +644,15 @@ def compute_plateau_explore(
         specialist_rounds = []
 
     def _round_is_empty(row: Any) -> bool:
+        """Return True when a specialist-round summary produced no work.
+
+        Args:
+            row (Any): A specialist-round summary; non-dicts count as
+                non-empty (False) so malformed rows break the streak.
+
+        Returns:
+            bool: True when both the proposal and kept counts are zero.
+        """
         if not isinstance(row, dict):
             return False
         # Fall back to proposal_count for older round summaries.
@@ -739,6 +820,18 @@ def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
 
 
 def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
+    """Decide the PRELUDE terminal exit on repeated baseline failures.
+
+    Fires once the consecutive baseline-failure streak reaches 3, routing
+    the session straight to CLOSE with ``prelude_baseline_failed``.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``baseline_failure_streak``.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``("prelude_baseline_failed",
+        evidence)`` when the streak threshold is met, else ``None``.
+    """
     streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
     if streak >= 3:
         return "prelude_baseline_failed", {"baseline_failure_streak": streak}

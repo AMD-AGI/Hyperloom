@@ -39,6 +39,22 @@ def evaluate_event_signals(
     *,
     config: EventConfig | None = None,
 ) -> list[Symptom]:
+    """Evaluate all Coordinator-event-driven signals for this tick.
+
+    Combines inbox items and ``data.coordinator_events`` and runs the
+    policy-denied, delegated-failure, recover-unsuccessful, and
+    idempotency-replay rules.
+
+    Args:
+        ctx (ReactorContext): Reactor context providing the inbox.
+        data (SourceData): Collected source data including coordinator events.
+        config (EventConfig | None): Tunables; defaults to :class:`EventConfig`
+            when ``None``.
+
+    Returns:
+        list[Symptom]: All event-driven symptoms found this tick, possibly
+            empty.
+    """
     cfg = config or EventConfig()
     inbox_view = _normalise_inbox(ctx.inbox)
     coord_view = _normalise_events(data.coordinator_events)
@@ -56,6 +72,16 @@ def _policy_denied_symptoms(
     events: list[dict[str, Any]],
     cfg: EventConfig,
 ) -> list[Symptom]:
+    """Fire ``repeated_policy_denied`` for sources over the denial threshold.
+
+    Args:
+        events (list[dict[str, Any]]): Normalised inbox + coordinator events.
+        cfg (EventConfig): Tunables (provides the policy-denied threshold).
+
+    Returns:
+        list[Symptom]: One ``repeated_policy_denied`` symptom per offending
+            source, possibly empty.
+    """
     sources: Counter[str] = Counter()
     rules: Counter[str] = Counter()
     for ev in events:
@@ -102,6 +128,16 @@ def _delegated_failure_symptoms(
     events: list[dict[str, Any]],
     cfg: EventConfig,
 ) -> list[Symptom]:
+    """Fire ``repeated_failure`` for action families over the failure threshold.
+
+    Args:
+        events (list[dict[str, Any]]): Normalised inbox + coordinator events.
+        cfg (EventConfig): Tunables (provides the delegated-failure threshold).
+
+    Returns:
+        list[Symptom]: One ``repeated_failure`` symptom per offending action
+            family, possibly empty.
+    """
     family_counts: Counter[str] = Counter()
     last_evidence: dict[str, dict[str, Any]] = {}
     for ev in events:
@@ -293,6 +329,15 @@ def _is_recover_payload(payload: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 def _normalise_inbox(inbox: list[InboxItem]) -> list[dict[str, Any]]:
+    """Convert inbox items to the common event-dict shape used by the rules.
+
+    Args:
+        inbox (list[InboxItem]): Inbox items from the reactor context.
+
+    Returns:
+        list[dict[str, Any]]: Event dicts with ``agent``/``topic``/``payload``/
+            ``ts`` keys (``ts`` is always ``None`` for inbox items).
+    """
     return [
         {
             "agent": item.from_agent,
@@ -305,6 +350,15 @@ def _normalise_inbox(inbox: list[InboxItem]) -> list[dict[str, Any]]:
 
 
 def _normalise_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalise raw coordinator events to the common event-dict shape.
+
+    Args:
+        events (list[dict[str, Any]]): Raw events read from conductor.db.
+
+    Returns:
+        list[dict[str, Any]]: Event dicts with ``agent``/``topic``/``payload``/
+            ``ts`` keys.
+    """
     out: list[dict[str, Any]] = []
     for ev in events:
         out.append(

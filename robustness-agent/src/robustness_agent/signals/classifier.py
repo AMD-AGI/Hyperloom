@@ -124,6 +124,12 @@ class Classifier:
     _tracelens_cli_latch: TraceLensCliFiredOnce = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Construct the stateful sub-detectors with their persistence views.
+
+        Each stateful detector receives a per-name state view from
+        ``state_store`` (or ``None`` for in-memory-only operation) so it can
+        survive subprocess restarts.
+        """
         store = self.state_store
         self._gpu_leak_detector = GpuLeakDetector(
             self.gpu_leak_config,
@@ -154,6 +160,19 @@ class Classifier:
         )
 
     def classify(self, data: SourceData, ctx: ReactorContext) -> list[Symptom]:
+        """Run every configured signal evaluator and return de-duplicated symptoms.
+
+        Invokes the pure-function rules and the stateful detectors, appends any
+        ``extra_evaluators``, then folds duplicates via :func:`_dedup`.
+
+        Args:
+            data (SourceData): Collected source data for this tick.
+            ctx (ReactorContext): Reactor context for this tick.
+
+        Returns:
+            list[Symptom]: De-duplicated symptoms ordered by severity (HIGH
+                first) then name and subject.
+        """
         symptoms: list[Symptom] = []
         symptoms.extend(
             evaluate_stall_signals(ctx, data, config=self.stall_config)
@@ -230,6 +249,15 @@ class Classifier:
 
 
 def _dedup(symptoms: list[Symptom]) -> list[Symptom]:
+    """Collapse symptoms sharing a dedup key, keeping the highest severity.
+
+    Args:
+        symptoms (list[Symptom]): Raw symptoms from all evaluators.
+
+    Returns:
+        list[Symptom]: De-duplicated symptoms sorted by descending severity,
+            then name, then subject.
+    """
     by_key: dict[tuple[str, ...], Symptom] = {}
     for sym in symptoms:
         key = sym.dedup_key()
