@@ -182,11 +182,15 @@ class RooflineExecutor:
         profile_result: dict[str, Any] | None = None
         trace_path = ""
         last_error = ""
+        # Track the last failure kind so the no-trace contract is preserved
+        # (profile_no_trace_failed) instead of collapsing into profile_failed.
+        last_phase = "profile"
         for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
             profile_ctx = self._wrap_profile_ctx(ctx)
             try:
                 profile_result = await profile_executor(profile_ctx)
             except Exception as exc:  # noqa: BLE001
+                last_phase = "profile"
                 last_error = f"profile_executor raised: {exc!r}"
                 log.warning(
                     "roofline profile attempt %d/%d failed (exception): %s",
@@ -194,6 +198,7 @@ class RooflineExecutor:
                 )
                 continue
             if not isinstance(profile_result, dict):
+                last_phase = "profile"
                 last_error = (
                     f"profile_executor returned non-dict: "
                     f"{type(profile_result).__name__}"
@@ -204,6 +209,7 @@ class RooflineExecutor:
                 )
                 continue
             if profile_result.get("status") != "succeeded":
+                last_phase = "profile"
                 last_error = str(
                     profile_result.get("error") or "profile sub-step failed"
                 )
@@ -214,6 +220,7 @@ class RooflineExecutor:
                 continue
             trace_path = _extract_trace_path(profile_result)
             if not trace_path:
+                last_phase = "profile_no_trace"
                 last_error = (
                     "profile succeeded but no trace_path in result "
                     "(missing both main_trace_path and trace_files[0])"
@@ -232,7 +239,7 @@ class RooflineExecutor:
             break
         else:
             return _failed(
-                "profile",
+                last_phase,
                 f"all {_PROFILE_MAX_ATTEMPTS} profile attempts failed; "
                 f"last: {last_error}",
                 sub_result=profile_result,
