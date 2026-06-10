@@ -3987,6 +3987,28 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 log.exception(
                     "emergency final report write failed (non-fatal)"
                 )
+            # Safety-net artifact package -> /workspace. The CLOSE phase
+            # sequencer normally packages at step 2.6, but the wall-clock
+            # deadline path (_enter_closing_phase) and crash paths leave
+            # close_sequence_done False and never run the sequencer, so the
+            # bundle would be missing without this. Best-effort: failures
+            # must not mask stop_reason. Runs after the SBD/final.md
+            # safety-net writes so the freshest products are bundled.
+            try:
+                from .breakdown import package_session_artifacts
+                pkg_path = package_session_artifacts(
+                    session_dir,
+                    session_id=str(
+                        getattr(coordinator.shared_state, "session_id", "")
+                        or "",
+                    ),
+                )
+                if pkg_path is not None:
+                    print(f"Artifact package  : {pkg_path}")
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "session artifact package failed (non-fatal)"
+                )
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
