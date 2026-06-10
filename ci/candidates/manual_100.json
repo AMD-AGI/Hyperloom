@@ -1,0 +1,814 @@
+{
+  "schema_version": "hyperloom.production_corpus.v1",
+  "pool_id": "manual_100",
+  "note": "Top-100 by downloads, RESERVED for manual workflow_dispatch (operator triggers these by hand; NOT in the cron priority pool).",
+  "generated_at": "2026-06-09T13:24:49+00:00",
+  "sort": "downloads desc",
+  "sources": [
+    "production_1000_from_hf_2026-05-25.json",
+    "new_models_to_run.json"
+  ],
+  "count": 100,
+  "candidates": [
+    {
+      "repo_id": "openai/gpt-oss-20b",
+      "params_b": 21.512,
+      "downloads": 8082595,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 0
+    },
+    {
+      "repo_id": "Qwen/Qwen3-32B",
+      "params_b": 32.762,
+      "downloads": 7015753,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 1
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1",
+      "params_b": 684.531,
+      "downloads": 4448742,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 2
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3.2",
+      "params_b": 685.397,
+      "downloads": 4330875,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 3
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-14B-Instruct",
+      "params_b": 14.77,
+      "downloads": 2435000,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 4
+    },
+    {
+      "repo_id": "nvidia/Gemma-4-31B-IT-NVFP4",
+      "params_b": 20.869,
+      "downloads": 2407708,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 5
+    },
+    {
+      "repo_id": "moonshotai/Kimi-K2-Instruct-0905",
+      "params_b": 1026.471,
+      "downloads": 2297328,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 6
+    },
+    {
+      "repo_id": "Qwen/Qwen3-14B",
+      "params_b": 14.768,
+      "downloads": 2172554,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 7
+    },
+    {
+      "repo_id": "Qwen/Qwen3-30B-A3B",
+      "params_b": 30.532,
+      "downloads": 2023953,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 8
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "params_b": 30.532,
+      "downloads": 1743808,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 9
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-14B-Instruct",
+      "params_b": 14.77,
+      "downloads": 1703554,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 10
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3",
+      "params_b": 684.531,
+      "downloads": 1203324,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 11
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Coder-Next",
+      "params_b": 79.674,
+      "downloads": 1078382,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 12
+    },
+    {
+      "repo_id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+      "params_b": 30.532,
+      "downloads": 1019123,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 13
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-32B-Instruct",
+      "params_b": 32.764,
+      "downloads": 942511,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 14
+    },
+    {
+      "repo_id": "meta-llama/Llama-3.3-70B-Instruct",
+      "params_b": 70.554,
+      "downloads": 940426,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 15
+    },
+    {
+      "repo_id": "zai-org/GLM-4.7-Flash",
+      "params_b": 31.221,
+      "downloads": 913301,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 16
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-72B-Instruct",
+      "params_b": 72.706,
+      "downloads": 913224,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 17
+    },
+    {
+      "repo_id": "MiniMaxAI/MiniMax-M2.7",
+      "params_b": 228.704,
+      "downloads": 902445,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 18
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-32B-Instruct",
+      "params_b": 32.764,
+      "downloads": 888111,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 19
+    },
+    {
+      "repo_id": "moonshotai/Kimi-K2-Instruct",
+      "params_b": 1026.471,
+      "downloads": 807260,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 20
+    },
+    {
+      "repo_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+      "params_b": 123.611,
+      "downloads": 776556,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 21
+    },
+    {
+      "repo_id": "meta-llama/Llama-3.1-70B-Instruct",
+      "params_b": 70.554,
+      "downloads": 759361,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 22
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+      "params_b": 32.764,
+      "downloads": 634417,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 23
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+      "params_b": 14.77,
+      "downloads": 578279,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 24
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3-0324",
+      "params_b": 684.531,
+      "downloads": 566474,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 25
+    },
+    {
+      "repo_id": "zerofata/L3.3-GeneticLemonade-Final-v2-70B",
+      "params_b": 70.554,
+      "downloads": 541296,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 26
+    },
+    {
+      "repo_id": "huihui-ai/Qwen2.5-72B-Instruct-abliterated",
+      "params_b": 72.706,
+      "downloads": 465619,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 27
+    },
+    {
+      "repo_id": "Qwen/Qwen3-235B-A22B",
+      "params_b": 235.094,
+      "downloads": 434771,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 28
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+      "params_b": 81.325,
+      "downloads": 394916,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 29
+    },
+    {
+      "repo_id": "zai-org/GLM-4.5-Air",
+      "params_b": 110.469,
+      "downloads": 381108,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 30
+    },
+    {
+      "repo_id": "stepfun-ai/Step-3.5-Flash",
+      "params_b": 199.384,
+      "downloads": 304890,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 31
+    },
+    {
+      "repo_id": "moonshotai/Kimi-K2-Thinking",
+      "params_b": 1058.118,
+      "downloads": 207684,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 32
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3.1",
+      "params_b": 684.531,
+      "downloads": 202518,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 33
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3.2-Exp",
+      "params_b": 685.397,
+      "downloads": 183608,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 34
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+      "params_b": 480.184,
+      "downloads": 166462,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 35
+    },
+    {
+      "repo_id": "meta-llama/Llama-3.1-405B",
+      "params_b": 405.853,
+      "downloads": 152934,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 36
+    },
+    {
+      "repo_id": "google/gemma-2-27b-it",
+      "params_b": 27.227,
+      "downloads": 137255,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 37
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-32B",
+      "params_b": 32.764,
+      "downloads": 135637,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 38
+    },
+    {
+      "repo_id": "zai-org/GLM-4.5",
+      "params_b": 358.338,
+      "downloads": 134848,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 39
+    },
+    {
+      "repo_id": "deepcogito/cogito-v1-preview-qwen-32B",
+      "params_b": 32.76,
+      "downloads": 126463,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 40
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+      "params_b": 70.554,
+      "downloads": 121952,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 41
+    },
+    {
+      "repo_id": "cais/HarmBench-Llama-2-13b-cls",
+      "params_b": 13.016,
+      "downloads": 119485,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 42
+    },
+    {
+      "repo_id": "meta-llama/Meta-Llama-3-70B",
+      "params_b": 70.554,
+      "downloads": 119125,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 43
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-14B",
+      "params_b": 14.77,
+      "downloads": 115166,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 44
+    },
+    {
+      "repo_id": "MiniMaxAI/MiniMax-M2",
+      "params_b": 228.704,
+      "downloads": 114908,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 45
+    },
+    {
+      "repo_id": "meta-llama/Llama-2-13b-chat-hf",
+      "params_b": 13.016,
+      "downloads": 114532,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 46
+    },
+    {
+      "repo_id": "huihui-ai/DeepSeek-R1-Distill-Qwen-32B-abliterated",
+      "params_b": 32.764,
+      "downloads": 113899,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 47
+    },
+    {
+      "repo_id": "meta-llama/Meta-Llama-3-70B-Instruct",
+      "params_b": 70.554,
+      "downloads": 111064,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 48
+    },
+    {
+      "repo_id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "params_b": 235.094,
+      "downloads": 110695,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 49
+    },
+    {
+      "repo_id": "meta-llama/Llama-3.1-70B",
+      "params_b": 70.554,
+      "downloads": 98410,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 50
+    },
+    {
+      "repo_id": "XiaomiMiMo/MiMo-V2-Flash",
+      "params_b": 309.785,
+      "downloads": 95182,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 51
+    },
+    {
+      "repo_id": "OpenPipe/Qwen3-14B-Instruct",
+      "params_b": 14.768,
+      "downloads": 86685,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 52
+    },
+    {
+      "repo_id": "Qwen/Qwen3-14B-Base",
+      "params_b": 14.768,
+      "downloads": 83097,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 53
+    },
+    {
+      "repo_id": "inflatebot/MN-12B-Mag-Mell-R1",
+      "params_b": 12.248,
+      "downloads": 76951,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 54
+    },
+    {
+      "repo_id": "zai-org/GLM-4.7-FP8",
+      "params_b": 358.458,
+      "downloads": 76298,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 55
+    },
+    {
+      "repo_id": "Qwen/QwQ-32B",
+      "params_b": 32.764,
+      "downloads": 64783,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 56
+    },
+    {
+      "repo_id": "moonshotai/Kimi-Linear-48B-A3B-Instruct",
+      "params_b": 49.123,
+      "downloads": 63815,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 57
+    },
+    {
+      "repo_id": "google/medgemma-27b-text-it",
+      "params_b": 27.009,
+      "downloads": 62902,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 58
+    },
+    {
+      "repo_id": "zai-org/GLM-4.7",
+      "params_b": 358.338,
+      "downloads": 58477,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 59
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-14B-Instruct-1M",
+      "params_b": 14.77,
+      "downloads": 50524,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 60
+    },
+    {
+      "repo_id": "huihui-ai/Qwen2.5-14B-Instruct-abliterated",
+      "params_b": 14.77,
+      "downloads": 45221,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 61
+    },
+    {
+      "repo_id": "Qwen/Qwen3-235B-A22B-Thinking-2507",
+      "params_b": 235.094,
+      "downloads": 44511,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 62
+    },
+    {
+      "repo_id": "openai/gpt-oss-safeguard-20b",
+      "params_b": 21.512,
+      "downloads": 42123,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 63
+    },
+    {
+      "repo_id": "unsloth/Llama-3.3-70B-Instruct",
+      "params_b": 70.554,
+      "downloads": 40817,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 64
+    },
+    {
+      "repo_id": "zai-org/GLM-4.6",
+      "params_b": 356.786,
+      "downloads": 40680,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 65
+    },
+    {
+      "repo_id": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+      "params_b": 335.039,
+      "downloads": 39864,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 66
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Next-80B-A3B-Thinking",
+      "params_b": 81.325,
+      "downloads": 32838,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 67
+    },
+    {
+      "repo_id": "Qwen/Qwen2-72B-Instruct",
+      "params_b": 72.706,
+      "downloads": 30696,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 68
+    },
+    {
+      "repo_id": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+      "params_b": 480.155,
+      "downloads": 29731,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 69
+    },
+    {
+      "repo_id": "swiss-ai/Apertus-70B-Instruct-2509",
+      "params_b": 70.6,
+      "downloads": 27428,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 70
+    },
+    {
+      "repo_id": "unsloth/gemma-2-27b-it",
+      "params_b": 27.227,
+      "downloads": 23158,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 71
+    },
+    {
+      "repo_id": "Qwen/Qwen2-72B",
+      "params_b": 72.706,
+      "downloads": 22644,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 72
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-32B",
+      "params_b": 32.764,
+      "downloads": 22625,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 73
+    },
+    {
+      "repo_id": "zai-org/GLM-4-32B-0414",
+      "params_b": 32.566,
+      "downloads": 21796,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 74
+    },
+    {
+      "repo_id": "lmstudio-community/Devstral-Small-2507-MLX-bf16",
+      "params_b": 23.572,
+      "downloads": 20422,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 75
+    },
+    {
+      "repo_id": "arcee-ai/Trinity-Large-Thinking",
+      "params_b": 398.635,
+      "downloads": 19139,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 76
+    },
+    {
+      "repo_id": "RedHatAI/Mistral-Nemo-Instruct-2407-FP8",
+      "params_b": 12.248,
+      "downloads": 19012,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 77
+    },
+    {
+      "repo_id": "Qwen/Qwen2.5-Coder-14B",
+      "params_b": 14.77,
+      "downloads": 14265,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 78
+    },
+    {
+      "repo_id": "Qwen/QwQ-32B-Preview",
+      "params_b": 32.764,
+      "downloads": 13353,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 79
+    },
+    {
+      "repo_id": "DreamFast/gemma-3-12b-it-heretic",
+      "params_b": 12.187,
+      "downloads": 13316,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 80
+    },
+    {
+      "repo_id": "dphn/Dolphin-Mistral-24B-Venice-Edition",
+      "params_b": 24.011,
+      "downloads": 13062,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 81
+    },
+    {
+      "repo_id": "haoranxu/ALMA-13B-R",
+      "params_b": 13.016,
+      "downloads": 12325,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 82
+    },
+    {
+      "repo_id": "deepseek-ai/DeepSeek-V3.2-Speciale",
+      "params_b": 685.397,
+      "downloads": 12186,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 83
+    },
+    {
+      "repo_id": "unsloth/Qwen2.5-14B-Instruct",
+      "params_b": 14.77,
+      "downloads": 11048,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 84
+    },
+    {
+      "repo_id": "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF",
+      "params_b": 70.554,
+      "downloads": 10921,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 85
+    },
+    {
+      "repo_id": "MiniMaxAI/MiniMax-M2.1",
+      "params_b": 228.704,
+      "downloads": 10884,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 86
+    },
+    {
+      "repo_id": "cyberagent/Mistral-Nemo-Japanese-Instruct-2408",
+      "params_b": 12.248,
+      "downloads": 10870,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 87
+    },
+    {
+      "repo_id": "alpindale/WizardLM-2-8x22B",
+      "params_b": 140.621,
+      "downloads": 10710,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 88
+    },
+    {
+      "repo_id": "VAGOsolutions/SauerkrautLM-Nemo-12b-Instruct",
+      "params_b": 12.248,
+      "downloads": 9872,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 89
+    },
+    {
+      "repo_id": "lmstudio-community/magistral-small-2506-mlx-bf16",
+      "params_b": 23.572,
+      "downloads": 9529,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 90
+    },
+    {
+      "repo_id": "CohereLabs/aya-expanse-32b",
+      "params_b": 32.296,
+      "downloads": 9416,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 91
+    },
+    {
+      "repo_id": "nvidia/Llama-3.1-70B-Instruct-FP8",
+      "params_b": 70.554,
+      "downloads": 9112,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 92
+    },
+    {
+      "repo_id": "failspy/Meta-Llama-3-70B-Instruct-abliterated-v3.5",
+      "params_b": 70.554,
+      "downloads": 8792,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 93
+    },
+    {
+      "repo_id": "dphn/dolphin-2.9.1-llama-3-70b",
+      "params_b": 70.554,
+      "downloads": 8591,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 94
+    },
+    {
+      "repo_id": "TeichAI/Qwen3-14B-Claude-4.5-Opus-High-Reasoning-Distill",
+      "params_b": 14.768,
+      "downloads": 8514,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 95
+    },
+    {
+      "repo_id": "Duxiaoman-DI/XuanYuan-70B",
+      "params_b": 69.099,
+      "downloads": 8466,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 96
+    },
+    {
+      "repo_id": "failspy/llama-3-70B-Instruct-abliterated",
+      "params_b": 70.554,
+      "downloads": 8464,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 97
+    },
+    {
+      "repo_id": "abacusai/Smaug-Llama-3-70B-Instruct",
+      "params_b": 70.554,
+      "downloads": 8387,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 98
+    },
+    {
+      "repo_id": "chujiezheng/Smaug-Llama-3-70B-Instruct-ExPO",
+      "params_b": 70.554,
+      "downloads": 8381,
+      "pipeline_tag": "text-generation",
+      "source": "production_1000",
+      "pool_index": 99
+    }
+  ]
+}

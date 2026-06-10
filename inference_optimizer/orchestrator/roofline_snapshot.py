@@ -22,6 +22,15 @@ _PCT_NUM_RE = re.compile(r"([-+]?\d+(?:\.\d+)?)")
 
 
 def _parse_pct(raw: str | None) -> float | None:
+    """Extract a leading percentage number from a raw table cell.
+
+    Args:
+        raw (str | None): The raw cell text (e.g. ``"28.78%"``), or ``None``.
+
+    Returns:
+        float | None: The parsed number rounded to two decimals, or ``None``
+            when the input is missing or unparseable.
+    """
     if raw is None:
         return None
     m = _PCT_NUM_RE.search(str(raw).replace(",", ""))
@@ -34,6 +43,16 @@ def _parse_pct(raw: str | None) -> float | None:
 
 
 def _parse_executive_table(text: str) -> dict[str, str]:
+    """Parse a markdown Executive Summary table into a label→value map.
+
+    Skips header and separator rows.
+
+    Args:
+        text (str): The markdown text containing the two-column table.
+
+    Returns:
+        dict[str, str]: Mapping of row label to its raw value cell.
+    """
     rows: dict[str, str] = {}
     for m in _TABLE_ROW_RE.finditer(text):
         label = m.group("label").strip()
@@ -45,6 +64,14 @@ def _parse_executive_table(text: str) -> dict[str, str]:
 
 
 def _parse_top_bottleneck(raw: str | None) -> str | None:
+    """Strip the trailing ``(pct%)`` annotation from a bottleneck label.
+
+    Args:
+        raw (str | None): Raw cell such as ``"MoE_fused (28.78%)"``.
+
+    Returns:
+        str | None: The bare category name, or ``None`` when empty.
+    """
     if not raw:
         return None
     # ``MoE_fused (28.78%)`` -> ``MoE_fused``
@@ -53,7 +80,16 @@ def _parse_top_bottleneck(raw: str | None) -> str | None:
 
 
 def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
-    """Best-effort workload-level metrics from Executive Summary table."""
+    """Best-effort workload-level metrics from Executive Summary table.
+
+    Args:
+        analysis_md_path (str | Path): Path to a TraceLens ``analysis.md``.
+
+    Returns:
+        dict[str, Any]: Mapping with ``compute_pct`` / ``idle_pct`` /
+            ``comm_pct`` / ``top_bottleneck`` keys; values are ``None`` when
+            the file is missing or a metric cannot be parsed.
+    """
     path = Path(analysis_md_path)
     out: dict[str, Any] = {
         "compute_pct": None,
@@ -79,13 +115,8 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # F3-4 — saturation per direction (soft advisory feed)
-# ---------------------------------------------------------------------------
-#: Direction → list of Executive Summary table label aliases. The
-#: aliases mirror what TraceLens' analyzer emits today; missing labels
-#: degrade silently to ``0.0`` so a partial / experimental analysis.md
-#: never produces a false saturation hint.
+#: Direction → Executive Summary label aliases; missing labels degrade to ``0.0``.
 _SATURATION_LABEL_MAP: dict[str, tuple[str, ...]] = {
     "compute": ("Compute %", "Compute Bound %", "Compute Bound"),
     "memory": ("Memory %", "Memory Bound %", "Memory Bound"),
@@ -93,29 +124,12 @@ _SATURATION_LABEL_MAP: dict[str, tuple[str, ...]] = {
     "comm": ("Exposed Communication %", "Communication %", "Comm %"),
 }
 
-#: Saturation threshold (%) above which the prompt-side advisory
-#: surfaces a direction. Single source of truth for the threshold so
-#: the SharedState advisory renderer + tests share one constant.
+#: Saturation threshold (%) above which the advisory surfaces a direction (single source for renderer + tests).
 SATURATION_ADVISORY_THRESHOLD_PCT: float = 80.0
 
 
 def derive_saturation_per_direction(analysis_md_text: str) -> dict[str, float]:
-    """Parse Executive Summary cells from analysis.md and return
-    ``{direction: saturation_pct}`` for the four canonical directions
-    (compute / memory / host_overhead / comm).
-
-    F3-4 (Roofline-v2): the resulting dict is appended to
-    :attr:`SharedState.roofline_saturation_history` after every
-    successful ``roofline`` action so the prompt advisory renderer can
-    flag directions ≥ :data:`SATURATION_ADVISORY_THRESHOLD_PCT` as
-    "diminishing returns" hints.
-
-    Soft contract: any direction whose label is missing from the
-    Executive Summary (or whose value cannot be parsed as a percentage)
-    degrades silently to ``0.0`` — an empty / partial analysis.md must
-    never produce a false saturation hint that could mis-steer the
-    LLM toward dropping a direction.
-    """
+    """Return ``{direction: saturation_pct}`` for the four canonical directions (F3-4 Roofline-v2; missing/unparseable degrades to ``0.0``)."""
     out: dict[str, float] = {k: 0.0 for k in _SATURATION_LABEL_MAP}
     if not analysis_md_text:
         return out
@@ -131,6 +145,14 @@ def derive_saturation_per_direction(analysis_md_text: str) -> dict[str, float]:
 
 
 def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
+    """Return the TraceLens output directory containing an ``analysis.md``.
+
+    Args:
+        analysis_md_path (Path): Path to an ``analysis.md`` file.
+
+    Returns:
+        Path: The parent directory holding the TraceLens artifacts.
+    """
     # ``.../tracelens/analysis.md`` -> ``.../tracelens/``
     if analysis_md_path.name == "analysis.md" and analysis_md_path.parent.name:
         return analysis_md_path.parent
@@ -138,7 +160,19 @@ def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
 
 
 def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
-    """Return the highest ``percent_of_total`` operation across category metrics."""
+    """Return the highest ``percent_of_total`` operation across category metrics.
+
+    Scans the sibling ``category_data/*_metrics.json`` files for the operation
+    with the largest share of total GPU time.
+
+    Args:
+        analysis_md_path (str | Path): Path to a TraceLens ``analysis.md``.
+
+    Returns:
+        dict[str, Any] | None: The top kernel descriptor (``name`` / ``gpu_pct``
+            / ``efficiency_pct`` / ``bound_type`` / ``category``), or ``None``
+            when no category data is available or no named op was found.
+    """
     md_path = Path(analysis_md_path)
     cat_dir = _tracelens_dir_for_analysis_md(md_path) / "category_data"
     if not cat_dir.is_dir():
@@ -188,9 +222,7 @@ def _compute_within_and_gap(
     peak: float,
     achieved: float,
 ) -> tuple[float | None, float | None]:
-    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both
-    ``None`` when either input is non-positive so the renderer stays
-    placeholder-friendly."""
+    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive."""
     if peak <= 0 or achieved <= 0:
         return None, None
     within = round(achieved / peak * 100.0, 2)
@@ -210,18 +242,7 @@ def build_roofline_snapshot(
 ) -> dict[str, Any]:
     """Materialise one side (baseline or latest) of the comparison.
 
-    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling
-    produced by ``roofline_ceiling.compute_roofline_breakdown_from_state``.
-    The decomposition is also
-    persisted via ``roofline_mem_ceiling_tok_per_sec`` /
-    ``roofline_cmp_ceiling_tok_per_sec`` / ``roofline_bound_kind`` so
-    reports can show which side dominated (``"memory"`` / ``"compute"``
-    / ``"unknown"``). ``achieved_tok_per_sec`` is the benchmark
-    ``output_throughput`` measured at the time the snapshot was recorded
-    (baseline_tput for snapshot #1, current_best.tput afterwards).
-    All five default to 0/"unknown" so legacy callers that don't pass
-    them produce ``None`` in the derived percentage fields, preserving
-    the existing placeholder-friendly renderer contract.
+    ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling (from ``roofline_ceiling.compute_roofline_breakdown_from_state``); mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
     """
     within, gap = _compute_within_and_gap(
         peak=theoretical_peak_tok_per_sec,
@@ -230,17 +251,14 @@ def build_roofline_snapshot(
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
         "ts": ts or "",
-        # 9fe4609 sidecar pointer — caller (SharedState.record_trace_analyze)
-        # overwrites with the real path; stays empty for offline /
-        # synthetic callers that only have an analysis.md.
+        # 9fe4609 sidecar pointer — overwritten by record_trace_analyze; empty for offline callers.
         "kernel_roofline_path": "",
         "compute_pct": None,
         "idle_pct": None,
         "comm_pct": None,
         "top_bottleneck": None,
         "top_kernel": None,
-        # Primary decode roofline ceiling plus its memory/compute sides.
-        # All ``None`` when the ceiling is unavailable.
+        # Primary decode roofline ceiling plus its memory/compute sides; all None when the ceiling is unavailable.
         "theoretical_peak_tok_per_sec": (
             float(theoretical_peak_tok_per_sec)
             if theoretical_peak_tok_per_sec > 0 else None
@@ -282,6 +300,14 @@ def build_roofline_snapshot(
 
 
 def _snapshot_id_from_meta(meta: dict[str, Any]) -> int | None:
+    """Extract an integer snapshot id from a metadata dict.
+
+    Args:
+        meta (dict[str, Any]): Snapshot metadata.
+
+    Returns:
+        int | None: The first integer-valued id found, or ``None``.
+    """
     for key in ("snapshot_id", "roofline_snapshot_id"):
         raw = meta.get(key)
         if isinstance(raw, int):
@@ -290,6 +316,16 @@ def _snapshot_id_from_meta(meta: dict[str, Any]) -> int | None:
 
 
 def _num_delta(latest: float | None, baseline: float | None) -> float | None:
+    """Return ``latest - baseline`` rounded to two decimals.
+
+    Args:
+        latest (float | None): The latest value.
+        baseline (float | None): The baseline value.
+
+    Returns:
+        float | None: The rounded delta, or ``None`` if either input is
+            ``None``.
+    """
     if latest is None or baseline is None:
         return None
     return round(latest - baseline, 2)
@@ -298,21 +334,10 @@ def _num_delta(latest: float | None, baseline: float | None) -> float | None:
 def build_roofline_comparison_from_history(
     snapshots: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    """Build the ``roofline_comparison`` block straight from
-    :attr:`SharedState.roofline_snapshots` (preferred entry point post
-    PR #321).
+    """Build the ``roofline_comparison`` block from :attr:`SharedState.roofline_snapshots` (preferred entry point post PR #321).
 
-    Each entry in ``snapshots`` is the already-parsed dict written by
-    :meth:`SharedState.record_trace_analyze` (shape:
-    ``snapshot_id`` / ``ts`` / ``analysis_md_path`` / ``trace_input``
-    / ``compute_pct`` / ``idle_pct`` / ``comm_pct`` / ``top_bottleneck``
-    / ``top_kernel``). Returns ``None`` when history is empty so the
-    report-side caller can omit the section.
-
-    The list is append-only with ``snapshots[0]`` carrying the baseline
-    snapshot; ``snapshots[-1]`` carries the most recent watermark
-    refresh. Same snapshot_id (i.e. history length 1) → single_snapshot
-    mode; distinct ids → before_after with a populated ``delta`` block.
+    Append-only: ``snapshots[0]`` is baseline, ``snapshots[-1]`` the latest refresh.
+    Same snapshot_id → single_snapshot mode; distinct ids → before_after with ``delta``. ``None`` when history empty.
     """
     snapshots = list(snapshots or [])
     if not snapshots:
@@ -350,8 +375,7 @@ def build_roofline_comparison_from_history(
                 latest.get("within_roofline_pct"),
                 baseline.get("within_roofline_pct"),
             ),
-            # Dashboard surfaces gap-to-roofline shrinkage as the main
-            # "X% within roofline" delta (negative = closer to ceiling).
+            # Dashboard's main "X% within roofline" delta (negative = closer to ceiling).
             "gap_to_roofline_pct": _num_delta(
                 latest.get("gap_to_roofline_pct"),
                 baseline.get("gap_to_roofline_pct"),
@@ -364,7 +388,17 @@ def build_roofline_comparison(
     baseline_meta: dict[str, Any],
     latest_meta: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Build ``roofline_comparison`` block for ``final.json``."""
+    """Build ``roofline_comparison`` block for ``final.json``.
+
+    Args:
+        baseline_meta (dict[str, Any]): Baseline snapshot metadata (must carry
+            ``analysis_md_path`` / ``ts`` / ``snapshot_id``).
+        latest_meta (dict[str, Any]): Latest snapshot metadata.
+
+    Returns:
+        dict[str, Any] | None: The comparison block, or ``None`` when neither
+            side has an ``analysis_md_path``.
+    """
     base_path = str(baseline_meta.get("analysis_md_path") or "")
     latest_path = str(latest_meta.get("analysis_md_path") or "")
     if not base_path and not latest_path:
@@ -409,8 +443,7 @@ def build_roofline_comparison(
                 latest.get("within_roofline_pct"),
                 baseline.get("within_roofline_pct"),
             ),
-            # Dashboard surfaces gap-to-roofline shrinkage as the main
-            # "X% within roofline" delta (negative = closer to ceiling).
+            # Dashboard's main "X% within roofline" delta (negative = closer to ceiling).
             "gap_to_roofline_pct": _num_delta(
                 latest.get("gap_to_roofline_pct"),
                 baseline.get("gap_to_roofline_pct"),
@@ -420,6 +453,14 @@ def build_roofline_comparison(
 
 
 def _fmt_delta(val: float | None) -> str:
+    """Format a signed delta cell with one decimal place.
+
+    Args:
+        val (float | None): The delta value, or ``None``.
+
+    Returns:
+        str: A signed string (e.g. ``"+1.2"``), or ``"—"`` when ``None``.
+    """
     if val is None:
         return "—"
     sign = "+" if val > 0 else ""
@@ -427,30 +468,45 @@ def _fmt_delta(val: float | None) -> str:
 
 
 def _fmt_tput(v: float | None) -> str:
-    """Format ``output_throughput`` cell; one decimal place + tok/s unit."""
+    """Format ``output_throughput`` cell; one decimal place + tok/s unit.
+
+    Args:
+        v (float | None): The throughput value (tok/s).
+
+    Returns:
+        str: The formatted cell, or ``"—"`` when missing/non-positive.
+    """
     if not isinstance(v, (int, float)) or v <= 0:
         return "—"
     return f"{float(v):.1f} tok/s"
 
 
 def _fmt_pct_cell(v: float | None) -> str:
-    """Format a percentage cell; ``—`` when missing."""
+    """Format a percentage cell; ``—`` when missing.
+
+    Args:
+        v (float | None): The percentage value.
+
+    Returns:
+        str: The formatted cell, or ``"—"`` when not numeric.
+    """
     if not isinstance(v, (int, float)):
         return "—"
     return f"{float(v):.1f}%"
 
 
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
-    """Render the compact Base / Opt / Δ markdown table.
-
-    The decode-roofline ceiling (``theoretical_peak_tok_per_sec``) is a
-    session-level constant — same value on every history snapshot — so
-    we render it once as a single full-width row above the Base/Opt
-    columns. Achieved / within / gap then vary across snapshots and
-    use the regular Base/Opt/Δ layout.
-    """
+    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns)."""
 
     def cell(v: float | None) -> str:
+        """Format a percentage value for a table cell.
+
+        Args:
+            v (float | None): The percentage value.
+
+        Returns:
+            str: The formatted cell, or ``"—"`` when not a float.
+        """
         return f"{v:.1f}%" if isinstance(v, float) else "—"
 
     baseline = cmp.get("baseline") or {}
@@ -458,8 +514,7 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     delta = cmp.get("delta") or {}
     mode = cmp.get("mode") or "single_snapshot"
 
-    # Ceiling stays constant across snapshots; surface once before the
-    # Base/Opt table. Fall back to whichever side carries it.
+    # Ceiling is session-constant; surface once before the Base/Opt table.
     peak = baseline.get("theoretical_peak_tok_per_sec")
     if not isinstance(peak, (int, float)) or peak <= 0:
         peak = latest.get("theoretical_peak_tok_per_sec")

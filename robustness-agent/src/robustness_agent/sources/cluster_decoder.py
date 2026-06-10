@@ -2,15 +2,10 @@
 
 """Decode robust-api raw responses into LocalProbe-equivalent schemas.
 
-robust-api emits Prometheus-style time-series via
-``pod-metrics/batch`` (proxied as ``/api/v1/cluster/pods/.../metrics``
-in M2). The agent's local signals consume a flatter snapshot — one
-row per device with the latest value of each metric — so this module
-bridges the two so ``signals/local_health.py`` does not have to
-care which source filled :data:`SourceData.local_gpu`.
-
-We currently decode GPU metrics only; disk / log mappings can be
-added the same way once we have a stable upstream catalogue.
+robust-api emits Prometheus-style time-series via ``pod-metrics/batch``;
+this module flattens them to one row per device (latest value per
+metric) so ``signals/local_health.py`` is agnostic to which source
+filled :data:`SourceData.local_gpu`. GPU metrics only for now.
 """
 
 from __future__ import annotations
@@ -18,11 +13,9 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
-# Map of metric_name -> SourceData.local_gpu field. Adding a new
-# metric is a one-line addition; the signal layer never sees this.
-# Keys cover the three exporter conventions we currently meet on
-# core42 (rocm exporter, DCGM, generic) so signals work uniformly
-# across nodes regardless of who scraped the raw counter.
+# Map of metric_name -> SourceData.local_gpu field. Keys cover the three
+# exporter conventions seen on core42 (rocm exporter, DCGM, generic) so
+# signals work uniformly regardless of who scraped the raw counter.
 _GPU_METRIC_FIELD: Mapping[str, str] = {
     # rocm-exporter
     "rocm_temperature_celsius": "temperature_c",
@@ -46,9 +39,8 @@ _GPU_METRIC_FIELD: Mapping[str, str] = {
 }
 
 
-# Series labels we look at to deduce gpu_id; first match wins.
-# robust-api / Prometheus exporters disagree on the label name so we
-# accept all three conventions.
+# Series labels used to deduce gpu_id; first match wins. Exporters
+# disagree on the label name so we accept all conventions.
 _GPU_ID_LABELS: tuple[str, ...] = (
     "gpu",
     "device",
@@ -65,11 +57,21 @@ def decode_gpu_snapshot(
 ) -> dict[str, Any]:
     """Decode pod-metrics/batch response into LocalProbe local_gpu shape.
 
-    Returns ``{"gpus": [...], "tool": "robust-api"}`` or ``{}`` when
-    no GPU metric is found. Each gpu row carries the same fields the
-    LocalProbe rocm-smi parser produces (``gpu_id``, ``temperature_c``,
-    ``util_gpu_pct`` etc.) plus ``pod_namespace`` / ``pod_name`` so
-    signals can pinpoint where the heat is coming from.
+    Each gpu row carries the same fields the LocalProbe rocm-smi parser
+    produces (``gpu_id``, ``temperature_c``, ``util_gpu_pct`` etc.) plus
+    ``pod_namespace`` / ``pod_name`` so signals can pinpoint where the
+    heat is coming from. Rows are keyed by ``(namespace, name, gpu_id)``
+    so two pods sharing a GPU id on one node do not collide.
+
+    Args:
+        response (Mapping[str, Any] | None): The raw
+            ``pod-metrics/batch`` response, expected to nest the per-pod
+            results under ``data.pods``. Any other shape yields ``{}``.
+
+    Returns:
+        dict[str, Any]: ``{"gpus": [...], "tool": "robust-api"}`` with
+        one row per decoded device, or ``{}`` when no GPU metric is
+        found.
     """
 
     if not isinstance(response, Mapping):
@@ -105,10 +107,7 @@ def decode_gpu_snapshot(
                 latest = _latest_value(series.get("values"))
                 if latest is None:
                     continue
-                # Key by (ns, name, gpu_id) so two pods on the same
-                # node with overlapping GPU IDs don't collide. The
-                # caller can flatten this if it wants a single
-                # node-wide list.
+                # Key by (ns, name, gpu_id) so same-node pods with overlapping IDs don't collide.
                 key = (ns, name, gpu_id)
                 snap = by_id.setdefault(
                     key,
@@ -133,11 +132,8 @@ def merge_gpu_snapshots(
 ) -> dict[str, Any]:
     """Combine multiple per-pod snapshots into a single ``local_gpu``.
 
-    Used by :class:`RobustnessServerSource` when fan-out across the
-    session's pods produces one decoded snapshot each. Later writes
-    win on field clashes per (pod, gpu_id), but distinct pods stay
-    distinct so the signal evidence keeps the namespace / name the
-    GPU lived under.
+    Later writes win on field clashes per (pod, gpu_id); distinct pods
+    stay distinct so signal evidence keeps the GPU's namespace / name.
     """
 
     rows: list[dict[str, Any]] = []
@@ -152,8 +148,7 @@ def merge_gpu_snapshots(
                 rows.append(dict(row))
     if not rows:
         return {}
-    # Stable ordering: by (pod_namespace, pod_name, gpu_id) so test
-    # assertions are deterministic.
+    # Stable ordering by (pod_namespace, pod_name, gpu_id).
     rows.sort(
         key=lambda r: (
             str(r.get("pod_namespace") or ""),
@@ -165,6 +160,19 @@ def merge_gpu_snapshots(
 
 
 def _extract_gpu_id(labels: Any) -> str:
+    """Deduce a GPU id string from a Prometheus series' labels.
+
+    Walks :data:`_GPU_ID_LABELS` in priority order so the differing
+    exporter conventions (rocm / DCGM / generic) resolve to one id.
+
+    Args:
+        labels (Any): The ``labels`` mapping from a metric series.
+            Non-mapping values yield an empty string.
+
+    Returns:
+        str: The first matching label's value as a string, or ``""``
+        when no known label is present.
+    """
     if not isinstance(labels, Mapping):
         return ""
     for key in _GPU_ID_LABELS:
@@ -174,6 +182,15 @@ def _extract_gpu_id(labels: Any) -> str:
 
 
 def _coerce_int_id(raw: str) -> int | str:
+    """Coerce a GPU id to ``int`` when numeric, else keep it as a string.
+
+    Args:
+        raw (str): The raw GPU id extracted from a series label.
+
+    Returns:
+        int | str: The integer form when ``raw`` parses as an int,
+        otherwise ``raw`` unchanged.
+    """
     try:
         return int(raw)
     except (TypeError, ValueError):
@@ -181,6 +198,19 @@ def _coerce_int_id(raw: str) -> int | str:
 
 
 def _latest_value(values: Any) -> float | None:
+    """Return the most recent numeric value from a metric series.
+
+    Scans the ``values`` list for the entry with the highest
+    ``timestamp`` whose ``value`` coerces to ``float``.
+
+    Args:
+        values (Any): The series ``values`` list, each entry expected
+            to be a mapping with ``timestamp`` and ``value`` keys.
+
+    Returns:
+        float | None: The value at the latest timestamp, or ``None``
+        when the list is empty or carries no usable entry.
+    """
     if not isinstance(values, list) or not values:
         return None
     best_ts = -1

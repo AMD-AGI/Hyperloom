@@ -2,18 +2,9 @@
 
 """Regression tests for the kernel-agent tracelens_analysis filter fixes.
 
-Locks the raw trace filtering fix uncovered by the resume3/resume4 1h
-validation:
-
-* **A path** ``is_kernel_event`` previously did fuzzy substring matching
-  on `KERNEL_HINTS=("kernel","triton","hip","cuda",...)` against both the
-  event name AND category. That accidentally promoted `cat='python_function'`
-  rows like ``torch/cuda/streams.py(222): synchronize`` (a CPU wait that
-  accumulates the entire wrapped GPU duration) to be the #1 hot kernel —
-  88ms attributed to a CPU sync. Fix: require ``cat == 'kernel'`` strictly.
-
-The production TraceLens interface now consumes only ``analysis.md``. Legacy
-``priority_data`` / ``category_data`` / CSV fallbacks are intentionally gone.
+Locks the ``is_kernel_event`` fix to require strict ``cat == 'kernel'`` (fuzzy
+name/category matching had promoted a CPU sync to the #1 hot kernel). Production
+TraceLens now consumes only ``analysis.md``; legacy CSV fallbacks are gone.
 """
 
 from __future__ import annotations
@@ -33,9 +24,7 @@ import tracelens_analysis as tla  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
-# ===========================================================================
 # A path — is_kernel_event strict cat == 'kernel'
-# ===========================================================================
 def test_a_filters_python_function_synchronize():
     """The exact event that ranked #1 in the buggy resume3/4 trace."""
     sync_event = {
@@ -117,9 +106,7 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         assert "synchronize" not in n.lower()
 
 
-# ===========================================================================
 # Native-only kernel-opt targeting
-# ===========================================================================
 def test_compile_generated_kernel_is_not_reusable_native():
     candidate = {
         "name": "triton_poi_fused_add_mul_0",
@@ -161,14 +148,7 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
 
 
 def test_recommend_backends_includes_geak_for_python_source():
-    """Policy: every kernel Claude/Codex can rewrite, GEAK can rewrite
-    too. Pre-fix, ``python`` source_type returned ``["claude", "codex"]``
-    and dropped GEAK — that excluded e.g. the hottest kernel on a
-    Qwen3-30B-A3B run (`fused_moe_kernel` mis-resolved to a Python
-    benchmark harness) from ever reaching GEAK. Post-fix GEAK is in
-    the ladder for python too; the AST resolver (PR-B.1) addresses
-    the underlying misclassification but the policy change is the
-    safety net for cases the resolver can't disambiguate."""
+    """GEAK must be in the ladder for ``python`` source_type too (pre-fix it was dropped)."""
     candidate = {
         "name": "some_python_dispatcher",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/dispatcher.py",
@@ -179,10 +159,7 @@ def test_recommend_backends_includes_geak_for_python_source():
 
 
 def test_recommend_backends_includes_geak_for_unknown_source():
-    """Fallback / unknown source_type path: GEAK must still be in the
-    ladder. The capability differences are GEAK-side, not
-    Hyperloom-side — let GEAK decide what to handle rather than
-    pre-filtering by extension."""
+    """Unknown source_type: GEAK must still be in the ladder (let GEAK decide, don't pre-filter by extension)."""
     candidate = {
         "name": "some_unrecognised_kernel",
         "source_file": "/some/path/kernel.xyz",
@@ -193,9 +170,7 @@ def test_recommend_backends_includes_geak_for_unknown_source():
 
 
 def test_recommend_backends_geak_is_first_in_ladder():
-    """Invariant: when GEAK is in the ladder, it is FIRST. High-priority
-    handoff means GEAK gets the swing before Claude/Codex; the
-    fallback order matters at runtime if GEAK times out or rejects."""
+    """Invariant: when GEAK is in the ladder, it is FIRST."""
     candidate = {
         "name": "some_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
@@ -254,11 +229,7 @@ def test_125_derive_category_normalizations():
         ("moe_dispatch_kernel", "MoE"),
         ("softmax_kernel_v2", "Softmax"),
         ("all_reduce_xgmi_kernel", "Communication"),
-        # PyTorch GEMM op-name variants. The csv-priority path catches
-        # these when unified_perf_summary.csv carries the op category,
-        # but the heuristic must also resolve them so raw-trace sessions
-        # / sessions where the csv has empty op category for these ops
-        # do not fall through to "unknown".
+        # PyTorch GEMM op-name variants the heuristic must also resolve (not just the CSV path).
         ("aten::mm", "GEMM"),
         ("aten::addmm", "GEMM"),
         ("aten::bmm", "GEMM"),
@@ -283,15 +254,7 @@ def test_125_finalize_outputs_source_path_field():
 
 
 def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
-    """Layer-2 fix: aten::mm gets GEMM via TraceLens csv, not heuristic.
-
-    derive_kernel_category's priority-1 branch (use upstream TraceLens
-    category) was dead: tracelens_category was never populated from
-    TraceLens's unified_perf_summary.csv, so aten::mm fell through to
-    the name heuristic and landed as "unknown". This pins the wiring:
-    pass perf_report_csv_dir to _finalize_candidates and aten::mm must
-    classify as GEMM via the csv lookup.
-    """
+    """Layer-2 fix: aten::mm classifies as GEMM via the TraceLens CSV op-category lookup, not the name heuristic."""
     csv_dir = tmp_path / "perf_report_csvs"
     csv_dir.mkdir()
     (csv_dir / "unified_perf_summary.csv").write_text(
@@ -316,11 +279,7 @@ def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
 
 
 def test_load_op_category_map_parses_unified_perf_summary(tmp_path):
-    """load_op_category_map: {name -> raw TraceLens op category}.
-
-    Keeps the first non-empty op category per name (rows are per-shape;
-    categories are stable across shapes for one op).
-    """
+    """load_op_category_map: {name -> raw TraceLens op category}, first non-empty per name."""
     csv_dir = tmp_path / "perf_report_csvs"
     csv_dir.mkdir()
     (csv_dir / "unified_perf_summary.csv").write_text(
@@ -341,19 +300,14 @@ def test_load_op_category_map_parses_unified_perf_summary(tmp_path):
 
 
 def test_load_op_category_map_missing_returns_empty(tmp_path):
-    """csv absent / wrong path => {} so callers degrade to the
-    name heuristic. Backward-compatible with sessions that never
-    produced a perf_report_csvs/ dir (TraceLens pre-5/30 flow)."""
+    """csv absent / wrong path => {} so callers degrade to the name heuristic."""
     assert tla.load_op_category_map(tmp_path / "nonexistent") == {}
     (tmp_path / "perf_report_csvs").mkdir()
     assert tla.load_op_category_map(tmp_path / "perf_report_csvs") == {}
 
 
 def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
-    """Backward compatibility: no csv => exact same behavior as today.
-
-    Without perf_report_csv_dir the heuristic still tags aiter::ck_moe_*
-    as MoE via name substring, proving the csv path is purely additive."""
+    """Backward compatibility: no csv => the name heuristic still tags aiter::ck_moe_* as MoE (csv path is additive)."""
     candidates = [{
         "name": "aiter::ck_moe_stage1",
         "duration_us": 100.0,
@@ -371,8 +325,7 @@ def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
 
 
 def test_normalize_upstream_category_handles_moe_aux_and_collective():
-    """New mappings let TraceLens csv values normalize cleanly:
-    MoE_aux (moe_sorting / topk) and CustomCollective (reg_all_gather)."""
+    """New mappings: MoE_aux -> MoE and CustomCollective -> Communication normalize cleanly."""
     from tracelens_skill_runner import normalize_upstream_category
     assert normalize_upstream_category("MoE_aux") == "MoE"
     assert normalize_upstream_category("moe_aux") == "MoE"
@@ -386,9 +339,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
 
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
-    # write_reports now requires the upstream TraceLens analysis.md
-    # (see #203). Provide a stub so the function reaches the JSON-writing
-    # branch we are exercising here.
+    # write_reports requires the upstream analysis.md (#203); provide a stub.
     analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
     analysis_md.parent.mkdir(parents=True, exist_ok=True)
     analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
@@ -402,14 +353,8 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
         "num_gpus_recommended": 1,
-        # Per AMD-AGI/Hyperloom#314, ``kernel_candidates.json::hot_kernels``
-        # now only carries candidates that ``classify_patchability`` marked
-        # routable. In production this field is set by
-        # ``_finalize_candidates`` before ``write_reports`` runs; this
-        # unit test bypasses ``_finalize_candidates`` and passes a raw
-        # candidate straight into ``write_reports``, so set the routing
-        # marker explicitly to mirror the production fixture and keep
-        # the downstream assertions on ``hot_kernels[0]`` valid.
+        # Hyperloom#314: hot_kernels carries only routable candidates; set the marker
+        # explicitly since this test bypasses _finalize_candidates.
         "reusable_native_kernel": True,
     }
     args = Namespace(
@@ -617,10 +562,7 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
     assert payload["hot_kernels"][0]["kernel_params"]["HEAD_SIZE"] == 128
 
 
-# ===========================================================================
-# #203 — write_reports must surface the upstream analysis.md as-is
-# (no copies, no aliases, no inline fabricated fallback)
-# ===========================================================================
+# #203 — write_reports surfaces the upstream analysis.md as-is (no copies/aliases/fabrication)
 def _make_write_reports_args(trace_path):
     from argparse import Namespace
 
@@ -636,11 +578,7 @@ def _make_write_reports_args(trace_path):
 
 
 def test_write_reports_raises_when_analysis_md_missing(tmp_path):
-    """#203: write_reports refuses to fabricate a Markdown when the
-    TraceLens SDK orchestrator failed to produce analysis.md.
-    The legacy inline bullet-list fallback silently masked upstream
-    failures (see #144 mis-resolution chain) and is gone.
-    """
+    """#203: write_reports refuses to fabricate a Markdown when analysis.md is missing."""
     import pytest
 
     trace = tmp_path / "trace.json"
@@ -658,10 +596,7 @@ def test_write_reports_raises_when_analysis_md_missing(tmp_path):
 
 
 def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
-    """#203: even if a path is passed, the file must actually exist —
-    a non-existent path is treated as orchestrator failure, not as a
-    cue to fabricate a stand-in.
-    """
+    """#203: a passed-but-nonexistent report path is treated as orchestrator failure, not a cue to fabricate."""
     import pytest
 
     trace = tmp_path / "trace.json"
@@ -680,11 +615,7 @@ def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
 
 
 def test_write_reports_does_not_create_filename_aliases(tmp_path):
-    """#203: ``analysis.md`` is the single contracted exit. The legacy
-    ``standalone_analysis.md`` / ``tracelens_report.md`` aliases were
-    removed because they wrote byte-identical copies of the same file
-    under different names. This test pins that hygiene fix.
-    """
+    """#203: ``analysis.md`` is the single exit; legacy aliases must not be written."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     run_dir = tmp_path / "run"
@@ -712,10 +643,7 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
 
 
 def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
-    """#203: Hyperloom must not rewrite the upstream report's contents.
-    Verifying byte-identity here prevents a future refactor from
-    sneaking a re-render in.
-    """
+    """#203: Hyperloom must not rewrite the upstream report's contents (byte-identity check)."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     run_dir = tmp_path / "run"
@@ -738,9 +666,7 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
 
 
-# ===========================================================================
 # #124 — SDK runner for TraceLens analysis-orchestrator skill
-# ===========================================================================
 def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     skill = tmp_path / "analysis-orchestrator.md"
     trace = tmp_path / "mixed_steady_state_0_trace.json.gz"
@@ -770,7 +696,8 @@ def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
 
 
 def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path):
-    import gzip, json as _json
+    import gzip
+    import json as _json
     cpu_only = tmp_path / "cpu_only.json.gz"
     with gzip.open(cpu_only, "wt") as f:
         _json.dump({"traceEvents": [
@@ -792,10 +719,7 @@ def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path
 
 
 def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
-    """Issue #126/#124 regression: when the upstream profile run produces
-    a CPU-only trace (e.g. PMC LD_PRELOAD steals the rocprofiler-sdk slot
-    from torch.profiler), tracelens_analysis must fail loudly *before*
-    spending time on TraceLens install / split / SDK orchestrator runs."""
+    """#126/#124 regression: a CPU-only trace must fail loudly before TraceLens install / split / SDK runs."""
     import gzip
     import json as _json
     from unittest.mock import patch
@@ -911,9 +835,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "Task" in captured["options"]["allowed_tools"]
 
 
-# ===========================================================================
 # T2 — analysis.md is the only contracted TraceLens output.
-# ===========================================================================
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
     import asyncio
@@ -969,9 +891,7 @@ def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
 
 
 def test_t2_missing_analysis_md_still_raises(tmp_path):
-    """Negative control: ``analysis.md`` itself is still the contracted
-    single source of truth, so its absence is still a hard error. T2
-    only relaxes the sidecars, not the report."""
+    """Negative control: a missing ``analysis.md`` is still a hard error (T2 only relaxes sidecars)."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -992,9 +912,7 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
 
     async def _fake_query(*, prompt, options):
         output_dir.mkdir(parents=True, exist_ok=True)
-        # Deliberately write ONLY a sidecar (no analysis.md). The wrapper
-        # must still fail loudly because analysis.md is the contracted
-        # report (docx §2 "single source of truth").
+        # Write ONLY a sidecar (no analysis.md); the wrapper must still fail loudly.
         (output_dir / "priority_data.json").write_text("{}", encoding="utf-8")
         yield _Message(content=[_TextBlock("done")])
 
@@ -1015,12 +933,8 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         ))
 
 
-# ===========================================================================
-# #127 — TraceLens splitter CLI must match the real
-# split_inference_trace_annotation interface (positional trace_path,
-# -o/--output-dir, --find-steady-state). The previous --input/--platform
-# form failed at runtime against a real Magpie/SGLang trace.
-# ===========================================================================
+# #127 — splitter CLI must match the real split_inference_trace_annotation interface
+# (positional trace_path, -o, --find-steady-state); the old --input/--platform form failed.
 def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
@@ -1040,9 +954,7 @@ def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
 def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     tmp_path, capsys,
 ):
-    """The end-to-end split path must call the real splitter interface,
-    not the broken --input/--platform form. Drives a mock subprocess.run
-    and asserts argv shape."""
+    """The end-to-end split path must call the real splitter interface, not the broken --input/--platform form."""
     import gzip
     import json as _json
     from unittest.mock import patch
@@ -1144,18 +1056,10 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     assert "trace_split_no_steady_state" in result["error"]
 
 
-# ===========================================================================
-# #194 §3 — splitter must receive --R so mixed-window selection uses the
-# analytic PD ratio. Source: tracelens_analysis must pass --R when given
-# either via --split-r CLI arg or via the RANDOM_RANGE_RATIO env var (the
-# same env Hyperloom propagates from the YAML config to the benchmark
-# subprocess). Without --R the splitter falls back to an empirical
-# heuristic, drifting from the benchmark-contract ratio the skill aligns
-# the rest of the pipeline to.
-# ===========================================================================
+# #194 §3 — splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window
+# selection uses the analytic PD ratio instead of an empirical heuristic.
 def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
-    """Helper: stage a TraceLens-ish tree, stub subprocess.run + which,
-    drive tla.main() once, and return the list of captured argvs."""
+    """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs."""
     import gzip
     import json as _json
     import os as _os
@@ -1230,10 +1134,7 @@ def _find_splitter_cmd(captured):
 
 
 def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
-    """`--split-r 0.5` on the wrapper must produce `--R 0.5` on the
-    splitter argv. Floating-point ratios must survive verbatim — the
-    splitter declares `type=float` and any string coercion to int
-    would silently truncate fractional R."""
+    """`--split-r 0.5` must produce `--R 0.5` on the splitter argv (fractional ratios survive verbatim)."""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=[
@@ -1281,11 +1182,7 @@ def test_194_3_splitter_omits_R_when_unset(tmp_path):
 
 
 def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
-    """A malformed env value must NOT be propagated to the splitter —
-    the splitter would `argparse.error` and abort the whole pipeline
-    on a value error. Silently dropping (with a log line) is the
-    least-bad option; it falls back to the splitter's default heuristic
-    which is exactly the pre-#194-§3 behaviour."""
+    """A malformed env --R value must be dropped (not propagated, which would argparse.error the splitter)."""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=["--split-conc", "32", "--split-osl", "1024"],
@@ -1296,9 +1193,7 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
     assert "--R" not in splitter_cmd, splitter_cmd
 
 
-# ===========================================================================
 # parse_analysis_md — TraceLens final-report contract (#155 review)
-# ===========================================================================
 _FIXTURE_LLAMA70B_ANALYSIS_MD = (
     Path(__file__).resolve().parents[1]
     / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
@@ -1306,13 +1201,7 @@ _FIXTURE_LLAMA70B_ANALYSIS_MD = (
 
 
 def test_parse_analysis_md_llama70b_fixture_yields_21_compute_candidates():
-    """Round-trip the TraceLens reference fixture for Llama-3 70B.
-
-    The fixture (TraceLens-internal ``evals/analysis_tests/e2e_tests/
-    llama_70b/analysis_output_ref/analysis.md``) is the official golden
-    output, so its 9-column Detailed Analysis tables are the contract our
-    parser must round-trip without loss.
-    """
+    """Round-trip the official Llama-3 70B golden analysis.md fixture into 21 compute candidates."""
     cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
     assert len(cands) == 21, (
         f"expected 21 candidates (18 GEMM + 2 SDPA_fwd + 1 SDPA_bwd) from "
@@ -1387,10 +1276,7 @@ def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
     assert all(c["tracelens_pitem_rank"] == 1 for c in cands)
 
 
-# ===========================================================================
-# docx §2 Recommended Interfacing Approach — Filter for GEAK based on
-# budget (Higher P-item, Lower Efficiency)
-# ===========================================================================
+# docx §2 — Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
 def _write_two_pitem_analysis_md(md: Path) -> None:
     md.write_text(
         "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
@@ -1437,10 +1323,7 @@ def _write_two_pitem_analysis_md(md: Path) -> None:
 
 
 def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
-    """docx §2 Recommended Interfacing Approach: ``Filter for GEAK based
-    on budget (Higher P-item, Lower Efficiency)``. Within a P-item, rows
-    with lower efficiency must come first so they survive the ``top_k``
-    budget cap. Cross-P-item order is still rank-based (P1 before P2)."""
+    """docx §2: within a P-item, lower-efficiency rows sort first (survive top_k); P1 before P2 across items."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -1459,10 +1342,7 @@ def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
 
 
 def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
-    """docx §2 budget cap: after sorting by efficiency within a P-item,
-    the ``top_k`` slice must keep the lowest-efficiency rows. Without
-    the sort, a budget of 2 would drop the kernel with the most
-    headroom — exactly the regression docx §2 calls out."""
+    """docx §2 budget cap: top_k keeps the lowest-efficiency rows within a P-item."""
     md = tmp_path / "analysis.md"
     _write_two_pitem_analysis_md(md)
 
@@ -1474,9 +1354,7 @@ def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
     )
 
 
-# ===========================================================================
 # normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
-# ===========================================================================
 @pytest.mark.parametrize("raw,expected", [
     ("gemm", "GEMM"),
     ("groupedgemm_fwd", "GEMM"),
@@ -1536,9 +1414,7 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
 
-# ===========================================================================
 # PR-A §1: _extract_pitem_prose extracts Reasoning / Resolution / Impact
-# ===========================================================================
 _SYNTHETIC_PITEM_BODY = """\
 #### 🔴 P1: RMSNorm fused with quantization (Triton)
 
@@ -1579,10 +1455,7 @@ def test_extract_pitem_prose_pulls_all_sections():
 
 
 def test_extract_pitem_prose_identification_stops_at_data_marker():
-    """Identification ends at ``**Data:**`` — must NOT leak the
-    9-column table or any subsequent prose into the identification
-    field. Without the Data end-marker the identification would
-    swallow everything up to ``**Reasoning for Slowdown:**``."""
+    """Identification ends at ``**Data:**`` — must not leak the 9-column table into the field."""
     body = (
         "**Identification:** Three ops flagged at 0.5% efficiency. "
         "(source: gemm_metrics.json)\n\n"
@@ -1599,8 +1472,7 @@ def test_extract_pitem_prose_identification_stops_at_data_marker():
 
 
 def test_extract_pitem_prose_returns_empty_strings_when_markers_absent():
-    """Bodies without the four labels must still return the full dict
-    shape so downstream consumers can rely on key presence."""
+    """Bodies without the four labels still return the full dict shape (key presence guaranteed)."""
     prose = tlr._extract_pitem_prose("**Data:**\n| ... | ... |\n")
     assert prose["identification"] == ""
     assert prose["reasoning_for_slowdown"] == ""
@@ -1612,8 +1484,7 @@ def test_extract_pitem_prose_returns_empty_strings_when_markers_absent():
 
 
 def test_extract_pitem_prose_reasoning_stops_at_resolution_marker():
-    """Reasoning should not leak into Resolution when both are present —
-    the end-marker ordering is what guarantees a clean split."""
+    """Reasoning must not leak into Resolution when both are present."""
     body = (
         "**Reasoning for Slowdown:**\nFirst paragraph.\n\n"
         "**Resolution:**\nSecond paragraph.\n\n"
@@ -1633,11 +1504,7 @@ def test_extract_between_returns_empty_when_start_marker_missing():
 
 
 def test_parse_analysis_md_attaches_prose_from_fixture():
-    """Round-trip the LLama70B fixture and verify every parsed candidate
-    carries the new prose fields populated from its parent P-item block.
-    The fixture has 4 Detailed Analysis blocks (P1 GEMM, P2 SDPA_fwd, etc.),
-    each with all three sections, so every candidate must end up with
-    non-empty reasoning / resolution / both impact halves."""
+    """Every parsed LLama70B fixture candidate carries non-empty prose fields from its parent P-item block."""
     cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
     assert cands, "fixture must produce at least one candidate"
     # All 21 fixture candidates share P-item prose with their group.
@@ -1663,20 +1530,8 @@ def test_parse_analysis_md_attaches_prose_from_fixture():
     ), "P1 resolution should mention wave-occupancy tuning (from fixture)"
 
 
-# ===========================================================================
-# parse_analysis_md — TraceLens v0.3 spec § Operations Table Schema
-# tolerance for trailing category-specific extra columns.
-#
-# The spec at TraceLens-internal/.../utils/templates/sub_agent_spec.md
-# (Operations Table Schema, compute tier) explicitly allows sub-agents to
-# "append extra columns at the end when needed (e.g. Sub-Category in the
-# generic-op analyzer)" as long as the first 9 canonical columns are
-# present in order. Real TraceLens runs on attention-bound models append
-# 3 extras (Dominant Kernel / Workload / Attention Pattern) for the
-# inferenceattention category; generic-op-analyzer appends 1 extra
-# (Sub-Category). The parser must accept those rows verbatim, not skip
-# them silently.
-# ===========================================================================
+# parse_analysis_md — spec allows trailing category-specific extra columns after the 9 canonical
+# ones (attention appends 3, generic-op appends Sub-Category); the parser must accept them, not skip.
 _FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
     Path(__file__).resolve().parents[1]
     / "tests"
@@ -1686,17 +1541,7 @@ _FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
 
 
 def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
-    """Real-world reproducer: Qwen3-30B MoE inferenceattention P-item.
-
-    TraceLens emitted a 12-column ``**Data:**`` table for the attention
-    category (canonical 9 + ``Dominant Kernel`` + ``Workload`` +
-    ``Attention Pattern``). The previous strict-equality header check
-    skipped the block entirely, returning ``hot_kernels=[]`` and
-    starving a 1.5h KERNEL phase of any candidate to optimize. Per
-    ``sub_agent_spec.md`` (Operations Table Schema, compute tier),
-    appending extra columns at the end is spec-compliant, so the parser
-    must consume the row using only the first 9 cells.
-    """
+    """A 12-column attention ``**Data:**`` table (9 canonical + 3 spec-allowed extras) must parse using the first 9 cells."""
     cands = tlr.parse_analysis_md(_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD, top_k=10)
     assert len(cands) == 1, (
         f"expected 1 attention candidate from the 12-column fixture; got "
@@ -1719,20 +1564,13 @@ def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
     # Kernel Path is a real launcher string (not "—"), so source_file
     # must round-trip the relative path (resolution happens downstream).
     assert "qwen3_moe.py" in c["source_file"]
-    # The three trailing extra cells (Dominant Kernel / Workload /
-    # Attention Pattern) are SPEC-allowed extras (sub_agent_spec.md
-    # § Operations Table Schema: "Agents may append extra columns at
-    # the end when needed"). The parser preserves them verbatim under
-    # ``tracelens_extra_columns`` so downstream consumers (GEAK / OOB)
-    # have programmatic access to category-specific metadata without
-    # re-parsing analysis.md.
+    # The three trailing extra cells are spec-allowed extras, preserved under tracelens_extra_columns.
     extras = c.get("tracelens_extra_columns")
     assert extras is not None, "tracelens_extra_columns missing for 12-col row"
     assert extras.get("dominant kernel") == "`_fwd_kernel` (93.61%)"
     assert extras.get("workload") == "unknown"
     assert extras.get("attention pattern") == "GQA (8:1)"
-    # Canonical fields must NOT leak into extras (they belong on the
-    # candidate top-level as typed fields).
+    # Canonical fields must NOT leak into extras.
     for canonical_key in (
         "operation", "args", "kernel path", "time (ms)", "%e2e",
         "count", "flops/byte", "efficiency", "bound",
@@ -1741,11 +1579,7 @@ def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
 
 
 def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_path):
-    """The generic-op analyzer appends a ``Sub-Category`` column for
-    uncategorized ops (`other` category). The parser must accept the
-    row using only the first 9 cells, dropping the Sub-Category cell
-    as expected.
-    """
+    """A 10-column table with a trailing ``Sub-Category`` must parse using the first 9 cells."""
     md = tmp_path / "analysis.md"
     md.write_text(
         "<!-- impact-begin kind=p_item category=other mid=4.0 low=2.0 high=8.0 -->\n"
@@ -1770,8 +1604,7 @@ def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_pa
     assert c["tracelens_category"] == "other"
     assert c["bound_type"] == "compute-bound"
     assert c["call_count"] == 10
-    # ``Sub-Category`` is preserved verbatim for downstream GEAK / OOB
-    # access; it never leaks into the candidate top-level.
+    # ``Sub-Category`` is preserved in extras, never the candidate top-level.
     extras = c.get("tracelens_extra_columns")
     assert extras is not None
     assert extras.get("sub-category") == "scatter_gather"
@@ -1779,12 +1612,7 @@ def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_pa
 
 
 def test_parse_analysis_md_canonical_9_column_table_has_no_extras_key():
-    """Regression guard: candidates parsed from a canonical 9-column
-    table (the Llama70B fixture) must NOT carry the
-    ``tracelens_extra_columns`` field. Adding the key with an empty
-    dict would force downstream consumers to special-case "extras
-    present but empty" vs "extras absent".
-    """
+    """Canonical 9-column candidates must NOT carry a ``tracelens_extra_columns`` key."""
     cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
     assert cands, "Llama70B fixture must produce candidates"
     for c in cands:
@@ -1795,10 +1623,7 @@ def test_parse_analysis_md_canonical_9_column_table_has_no_extras_key():
 
 
 def test_parse_analysis_md_rejects_fewer_than_canonical_columns(tmp_path):
-    """Regression guard: a table missing any of the 9 canonical columns
-    must still be skipped — silent wrong-mapping would be worse than a
-    missed candidate. Here ``Bound`` is dropped (8 columns total).
-    """
+    """A table missing a canonical column (here ``Bound``, 8 cols) must be skipped, not mis-mapped."""
     md = tmp_path / "analysis.md"
     md.write_text(
         "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
@@ -1820,11 +1645,7 @@ def test_parse_analysis_md_rejects_fewer_than_canonical_columns(tmp_path):
 
 
 def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
-    """Regression guard: spec requires the 9 canonical columns ``in this
-    order``. Swapping any two breaks the row→field mapping silently, so
-    the parser must skip the block instead of producing rows whose
-    ``efficiency`` / ``bound`` are misread.
-    """
+    """Reordered canonical columns (Bound/Efficiency swapped) must be skipped, not mis-mapped."""
     md = tmp_path / "analysis.md"
     md.write_text(
         "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
@@ -1845,9 +1666,7 @@ def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
     assert tlr.parse_analysis_md(md, top_k=10) == []
 
 
-# ===========================================================================
 # PR-A §2: classify_patchability gate + skip_reason audit field
-# ===========================================================================
 def test_classify_patchability_accepts_stable_triton_source():
     """Previously-reusable candidate stays reusable; skip_reason is empty."""
     cand = {
@@ -1869,8 +1688,7 @@ def test_classify_patchability_rejects_missing_source_file():
 
 
 def test_classify_patchability_rejects_vendor_blas_name_markers():
-    """Folded from feature branch _NON_PATCHABLE_MARKERS: rocblas/hipblas/etc.
-    rejected even when source_file resolves under a reusable framework root."""
+    """Vendor BLAS / collective name markers are rejected even under a reusable framework root."""
     for marker_name in (
         "rocblas_sgemm_kernel",
         "hipblas_gemm_strided",
@@ -1948,9 +1766,7 @@ def test_is_reusable_native_kernel_delegates_to_classify():
 
 
 def test_build_audit_summary_splits_tasks_and_skipped():
-    """``build_audit_summary`` must surface kernel name + skip_reason for
-    every dropped candidate so operators can answer 'why didn't GEAK see
-    kernel X?' from the sidecar alone."""
+    """``build_audit_summary`` surfaces kernel name + skip_reason for every dropped candidate."""
     finalized = [
         {
             "kernel_id": "k001",
@@ -2003,9 +1819,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
     assert "rocblas" in rocblas_entry["skip_reason"]
     aten_entry = next(s for s in summary["skipped"] if s["name"] == "aten::mm")
     assert "source file" in aten_entry["skip_reason"]
-    # Reusable tasks must carry recommended_backends so an operator can
-    # see which backend each task is routed to without reloading
-    # kernel_candidates.json.
+    # Reusable tasks carry recommended_backends so the audit shows routing without reloading candidates.
     assert summary["tasks"][0]["recommended_backends"] == ["geak", "claude", "codex"]
 
 
@@ -2015,9 +1829,9 @@ def test_build_audit_summary_handles_empty_input():
     assert summary["skipped_count"] == 0
     assert summary["tasks"] == []
     assert summary["skipped"] == []
-# ===========================================================================
+
+
 # PR-B §1: source-function aggregation
-# ===========================================================================
 def test_parse_launcher_path_extracts_python_frame():
     """``<path>(<line>): <fn>`` is the canonical TraceLens shape."""
     path, line, func = tlr._parse_launcher_path(
@@ -2039,18 +1853,12 @@ def test_parse_launcher_path_handles_hash_l_form():
 
 
 def test_parse_launcher_path_returns_none_for_empty_and_garbage():
-    """Empty / placeholder Kernel Path values must collapse to
-    ``("", None, None)`` so source-function aggregation skips the row
-    instead of grouping every placeholder under a bogus ``Path("—")``.
-    Real bare paths still pass through (caller may resolve them at the
-    AST layer)."""
+    """Empty / placeholder Kernel Path values collapse to ``("", None, None)``; bare paths pass through."""
     assert tlr._parse_launcher_path("") == ("", None, None)
     assert tlr._parse_launcher_path("—") == ("", None, None)
     assert tlr._parse_launcher_path("-") == ("", None, None)
     assert tlr._parse_launcher_path("N/A") == ("", None, None)
-    # Bare path with no line / fn: function_name resolution falls back
-    # to file stem at the _resolve_source_target layer, but the parser
-    # itself should leave both fields None.
+    # Bare path: line/fn stay None (stem fallback happens downstream).
     path, line, func = tlr._parse_launcher_path("just/a/path.py")
     assert path == "just/a/path.py"
     assert line is None
@@ -2059,24 +1867,11 @@ def test_parse_launcher_path_returns_none_for_empty_and_garbage():
 
 # ---------------------------------------------------------------------------
 # _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
-#
-# torch.profiler strips ``sys.path`` prefixes from ``__file__`` before
-# writing Python frame names, so TraceLens forwards strings like
-# ``aiter/ops/rmsnorm.py(62): rmsnorm2d_fwd``. Without resolution the
-# patchability gate rejects every row as ``source not under a reusable
-# framework root``. These tests pin the three production-image
-# resolution paths (importlib spec, env override, hardcoded fallback)
-# plus the placeholder and absolute-path no-op cases.
-# ---------------------------------------------------------------------------
+# Pins the three resolution paths (importlib spec, env override, hardcoded fallback) plus no-op cases.
 
 
 def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> Path:
-    """Create ``<tmp_path>/<pkg>/<relpath>`` and return the absolute file.
-
-    ``funcs`` lets a test declare top-level ``def`` names that resolver
-    AST validation expects to find. Empty by default for non-Python
-    fixtures (``.cu`` etc.) where AST is intentionally skipped.
-    """
+    """Create ``<tmp_path>/<pkg>/<relpath>`` (with optional top-level ``def`` names) and return the absolute file."""
     target = tmp_path / pkg / relpath
     target.parent.mkdir(parents=True, exist_ok=True)
     body = ["# stub for resolver tests\n"]
@@ -2087,10 +1882,7 @@ def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> 
 
 
 def test_resolve_launcher_via_env_override(tmp_path, monkeypatch):
-    """``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` is the highest-priority
-    resolver source. Operator can pre-stage any framework root layout
-    without needing the package to be importable in the current
-    interpreter."""
+    """``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` is the highest-priority resolver source (no import needed)."""
     target = _seed_pkg(
         tmp_path, "aiter", "ops/rmsnorm.py", funcs=("rmsnorm2d_fwd",),
     )
@@ -2110,17 +1902,7 @@ def test_resolve_launcher_via_env_override(tmp_path, monkeypatch):
 
 
 def test_resolve_launcher_via_importlib_spec(monkeypatch):
-    """When no env override is set, ``importlib.util.find_spec`` walks
-    the live ``sys.path`` and returns the absolute origin. This is the
-    path that should fire on a regular production pod (aiter / sglang
-    are editable installs at /sgl-workspace, vllm sits under
-    dist-packages).
-
-    ``unittest`` is shipped with every CPython interpreter (no
-    production deps needed), and ``unittest/case.py`` always defines
-    the ``expectedFailure`` decorator — perfect for pinning the
-    find_spec branch AND the AST-symbol guard without depending on
-    aiter/sglang/vllm being installed in the test env."""
+    """With no env override, ``find_spec`` resolves the absolute origin (tested via stdlib ``unittest/case.py``)."""
     monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
     resolved = tlr._resolve_launcher_to_abs_source(
         "unittest/case.py(1): expectedFailure",
@@ -2133,16 +1915,10 @@ def test_resolve_launcher_via_importlib_spec(monkeypatch):
 
 
 def test_resolve_launcher_via_hardcoded_fallback(tmp_path, monkeypatch):
-    """When the package isn't importable but a hardcoded fallback root
-    holds the file on disk, the resolver still succeeds. This is the
-    safety net for static-analysis paths that parse CSVs without
-    actually importing ``aiter`` / ``sglang`` / ``vllm``."""
+    """When the package isn't importable but a hardcoded fallback root holds the file, the resolver still succeeds."""
     monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
 
-    # Seed a fake aiter checkout under tmp_path and force the fallback
-    # table to point at it. The package is NOT made importable, so the
-    # ``find_spec`` branch must miss and the resolver must fall through
-    # to the hardcoded table.
+    # Seed a fake aiter checkout and point the fallback table at it (package not importable).
     _seed_pkg(
         tmp_path,
         "aiter_pinned_xfx",
@@ -2154,9 +1930,7 @@ def test_resolve_launcher_via_hardcoded_fallback(tmp_path, monkeypatch):
         "_FRAMEWORK_PKG_FALLBACK_ROOTS",
         {"aiter_pinned_xfx": (str(tmp_path),)},
     )
-    # Force find_spec to return None so the test exercises the
-    # fallback table even if some operator pre-installed a real
-    # ``aiter_pinned_xfx`` package.
+    # Force find_spec to miss so the fallback table is exercised.
     monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
 
     resolved = tlr._resolve_launcher_to_abs_source(
@@ -2170,10 +1944,7 @@ def test_resolve_launcher_via_hardcoded_fallback(tmp_path, monkeypatch):
 
 
 def test_resolve_launcher_returns_none_for_absolute_path():
-    """Already-absolute launcher paths are returned as None so the
-    caller preserves the original string verbatim — there's nothing
-    to rewrite, and pretending we resolved would silently swallow
-    paths the operator deliberately set to a non-package location."""
+    """Already-absolute launcher paths return None so the caller preserves the original string."""
     assert (
         tlr._resolve_launcher_to_abs_source(
             "/sgl-workspace/aiter/aiter/ops/rmsnorm.py(62): fn",
@@ -2183,14 +1954,10 @@ def test_resolve_launcher_returns_none_for_absolute_path():
 
 
 def test_resolve_launcher_returns_none_for_placeholders_and_misses():
-    """Placeholders, empty strings, and unresolvable packages must
-    collapse to None so the patchability gate emits its normal
-    ``source file not resolved`` / ``source not under a reusable
-    framework root`` rejection (vs. a fabricated path)."""
+    """Placeholders, empty strings, and unresolvable packages collapse to None (no fabricated path)."""
     assert tlr._resolve_launcher_to_abs_source("") is None
     assert tlr._resolve_launcher_to_abs_source("—") is None
-    # Package doesn't exist anywhere → resolver gives up; caller falls
-    # back to the verbatim launcher string.
+    # Unresolvable package → None; caller falls back to the verbatim string.
     assert (
         tlr._resolve_launcher_to_abs_source(
             "definitely_not_a_real_pkg_8x9z/foo.py(1): fn",
@@ -2200,15 +1967,8 @@ def test_resolve_launcher_returns_none_for_placeholders_and_misses():
 
 
 def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatch):
-    """AST validation guard: when the resolved ``.py`` exists but does
-    NOT define the launcher's function, the resolver MUST refuse the
-    path. This catches two real failure modes — ``sys.path`` shadowing
-    (find_spec returns the wrong same-named package) and operator
-    misconfiguration of ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` pointing
-    at a stub/snapshot tree. Without this check GEAK would receive a
-    real-on-disk source path that doesn't host the kernel."""
-    # Seed a real .py file under tmp_path but DO NOT define
-    # rmsnorm2d_fwd in it.
+    """AST guard: when the resolved ``.py`` exists but lacks the launcher's function, the resolver refuses it."""
+    # Seed a .py file that does NOT define rmsnorm2d_fwd.
     target = tmp_path / "aiter_shadowed_xyz" / "ops" / "rmsnorm.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
@@ -2218,8 +1978,7 @@ def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatc
         tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
         f"aiter_shadowed_xyz={tmp_path}",
     )
-    # No fallback paths should rescue this — we want to assert the
-    # bad-symbol path is rejected outright.
+    # No fallback paths so the bad-symbol path is rejected outright.
     monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
     monkeypatch.setattr(tlr, "_FRAMEWORK_PKG_FALLBACK_ROOTS", {})
 
@@ -2267,11 +2026,7 @@ def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeyp
 
 
 def test_resolve_launcher_skips_ast_check_for_non_py_sources(tmp_path, monkeypatch):
-    """AST validation only applies to Python sources. HIP/CUDA refs
-    (``<path>#L<line>`` shape) and bare ``.cu`` paths must pass
-    existence-only validation since ``ast.parse`` cannot walk them.
-    Pin this so we don't accidentally regress HIP kernel resolution
-    when the gate hardens."""
+    """AST validation only applies to Python sources; HIP/CUDA refs pass existence-only validation."""
     target = tmp_path / "aiter_hipxyz" / "csrc" / "rms_hip.cu"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("// device code\n", encoding="utf-8")
@@ -2291,9 +2046,7 @@ def test_resolve_launcher_skips_ast_check_for_non_py_sources(tmp_path, monkeypat
 
 
 def test_resolve_launcher_skips_unparseable_env_entries(tmp_path, monkeypatch):
-    """Malformed ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` entries are
-    silently skipped — a single bad export must not poison the whole
-    resolver."""
+    """Malformed env entries are silently skipped; the one valid entry still wins."""
     target = _seed_pkg(
         tmp_path,
         "vllm",
@@ -2302,8 +2055,7 @@ def test_resolve_launcher_skips_unparseable_env_entries(tmp_path, monkeypatch):
     )
     monkeypatch.setenv(
         tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        # First entry has no '=' (skipped); second is malformed (no key);
-        # third is the only valid one and must win.
+        # First two entries are malformed (skipped); the third is the valid one.
         f"junk_without_equals,=/just/value,vllm={tmp_path}",
     )
 
@@ -2335,16 +2087,7 @@ def test_function_line_from_ast_returns_none_on_invalid_source(tmp_path):
     assert tlr._function_line_from_ast(tmp_path / "does_not_exist.py", "x") is None
 
 def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
-    """Two candidates that share the same Operation name AND resolve to
-    the same source function become one group; a third candidate at a
-    different function stays separate.
-
-    Uses the SAME ``name`` for the two grouped candidates because that
-    matches TraceLens's real-world contract: rows in a Detailed Analysis
-    Data table that share a Kernel Path also share the Operation name
-    by construction (see standalone_analysis.md examples). The
-    grouping key is ``(operation, source_path, line, function)`` —
-    different operations sharing a Python wrapper would NOT merge."""
+    """Candidates sharing Operation name + source function group together; a different function stays separate."""
     src = tmp_path / "rmsnorm.py"
     src.write_text(
         "def rms_norm(x):\n    return x\n\n\ndef other_fn(x):\n    return x\n",
@@ -2398,16 +2141,7 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
 
 
 def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
-    """Q1 invariant: two semantically-distinct kernel operations that
-    happen to share the same Python wrapper (same Kernel Path) MUST
-    stay in separate task_groups. This is the real-world hazard the
-    user surfaced — P1 ``vllm::rocm_unquantized_gemm`` and P2
-    ``vllm::rocm_aiter_triton_add_rmsnorm_pad`` both have Kernel Path
-    ``vllm/model_executor/models/gpt_oss.py(283): forward`` because
-    that's the calling Python frame, not the kernel implementation.
-    Keying on source function alone would merge them into one
-    meaningless ``rewrite forward`` task; including operation_name
-    keeps each kernel identity intact."""
+    """Q1 invariant: distinct operations sharing one Python wrapper stay in separate task_groups (operation is part of the key)."""
     src = tmp_path / "gpt_oss.py"
     src.write_text(
         "def x():\n    pass\n\n\ndef forward(x):\n    return x\n",
@@ -2455,13 +2189,7 @@ def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path)
 
 
 def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_path):
-    """Q2 invariant: when the same operation+source-function legitimately
-    appears in MULTIPLE TraceLens P-items (e.g. the same kernel
-    classified once at decode shapes and again at prefill shapes,
-    yielding two distinct prose tuples), every P-item's prose is
-    collected on the task_group's ``all_pitem_prose`` list, deduped
-    by ``(rank, title)`` and sorted by rank ascending so P1 reads
-    first."""
+    """Q2 invariant: a function spanning multiple P-items collects every P-item's prose on ``all_pitem_prose`` (deduped by (rank,title), sorted by rank)."""
     src = tmp_path / "rmsnorm.py"
     src.write_text("def rms_norm(x):\n    return x\n", encoding="utf-8")
     launcher = f"{src}(1): rms_norm"
@@ -2524,31 +2252,14 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
     assert prose[1]["rank"] == 5
     assert "prefill" in prose[1]["title"].lower()
     assert prose[1]["resolution"] == "Prefill-shape Resolution."
-    # Set-typed bookkeeping must not leak into the returned dict
-    # (would break JSON serialization in summary.json / kernel_candidates.json).
+    # Set-typed bookkeeping must not leak into the returned dict (breaks JSON).
     assert "_pitem_prose_seen" not in g
 
 
 def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     tmp_path,
 ):
-    """End-to-end pin for the most common P-item shape: same Operation
-    name + same source function + DIFFERENT Args (shapes) per row.
-
-    This is exactly the P1 ``vllm::rocm_unquantized_gemm`` pattern from
-    the user screenshot — 4 rows of one kernel at 4 distinct shape
-    tuples. The contract end-to-end:
-
-    1. ``aggregate_by_source_function`` collapses all rows into ONE
-       ``task_group`` (Q1 invariant: same operation+source key).
-    2. The group's ``rows[]`` preserves each candidate's own ``shapes``
-       list verbatim — no shape de-duplication, no cross-row mixing.
-    3. ``primary_kernel_id`` is the heaviest (max ``duration_us``).
-    4. ``_build_benchmark_cases_block`` renders one ``Case N:`` line
-       per row, each with that row's own Args / time / count / bound /
-       efficiency. GEAK sees every shape variant as its own benchmark
-       case it can target individually.
-    """
+    """End-to-end: same op + same source function + different shapes per row collapse to ONE task_group; each row's shapes are preserved verbatim and rendered as a distinct ``Case N:``."""
     src = tmp_path / "model_executor.py"
     src.write_text(
         "def x(): pass\n\n\ndef forward(x):\n    return x\n",
@@ -2647,11 +2358,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
 
 
 def test_aggregate_drops_empty_prose_entries(tmp_path):
-    """Candidates from non-Detailed-Analysis paths (raw-trace fallback)
-    have rank=0 and no prose. They contribute exactly one bookkeeping
-    entry to ``all_pitem_prose`` during aggregation, but the
-    post-process step drops it so JSON consumers see an empty list,
-    not a noise entry."""
+    """rank=0 / no-prose candidates contribute no entry to ``all_pitem_prose`` (dropped post-process)."""
     src = tmp_path / "rmsnorm.py"
     src.write_text("def rms_norm(x):\n    return x\n", encoding="utf-8")
     cands = [
@@ -2911,9 +2618,7 @@ def test_build_task_groups_filters_non_reusable():
     assert "k002" not in groups[0]["kernel_ids"]
 
 
-# ===========================================================================
 # PR-B §1: summary.json carries task_groups[] view
-# ===========================================================================
 def test_build_audit_summary_includes_task_groups():
     summary = tla.build_audit_summary(
         candidates=[],
@@ -2936,14 +2641,7 @@ def test_build_audit_summary_includes_task_groups():
     assert summary["task_group_count"] == 1
 
 
-# ===========================================================================
-# _default_workspace_path — USER_DATA_PATH rollout for TraceLens (#203)
-#
-# Locks the fallback chain so a regression that flips precedence (e.g.
-# putting WORKSPACE_PATH first) would fail loudly. GEAK / OOB / install.sh
-# intentionally still default to $WORKSPACE_PATH; only TraceLens migrated
-# in this PR.
-# ===========================================================================
+# _default_workspace_path — USER_DATA_PATH rollout for TraceLens (#203); locks the fallback precedence.
 def test_default_workspace_path_prefers_user_data_path(monkeypatch):
     """USER_DATA_PATH wins over both WORKSPACE_PATH and the hard-coded default."""
     monkeypatch.setenv("USER_DATA_PATH", "/some/user/data")
@@ -2972,19 +2670,8 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
     assert tla._default_workspace_path() == "/legacy/workspace"
 
 
-# ===========================================================================
-# T3 — Idle-% sanity gate on the Executive Summary
-# ===========================================================================
-# Per Report_Interfacing.docx §1 (Executive Summary schema) and §2
-# (idle-gate sanity check), the Executive Summary table reports
-# ``Idle %`` (e.g. ``| Idle % | 0.25% |``). When idle time dominates wall
-# clock, kernel-level rewriting cannot improve end-to-end latency — the
-# operator should pivot to parameter optimization (batch size, KV cache
-# shape, prefill/decode split). The default threshold is 80% (raised
-# from the docx-suggested 20% after observing every production
-# Qwen3-32B trace land in the 48–60% band; see
-# ``HIGH_IDLE_PCT_THRESHOLD_DEFAULT`` docstring), overridable via
-# ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
+# T3 — Idle-% sanity gate on the Executive Summary (§1/§2). High idle => pivot to params;
+# default threshold 80% (overridable via HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD).
 
 _EXEC_SUMMARY_LOW_IDLE = """\
 # Workload Analysis
@@ -3041,8 +2728,7 @@ def test_extract_idle_pct_parses_high_idle_row(tmp_path):
 
 
 def test_extract_idle_pct_returns_none_when_no_idle_row(tmp_path):
-    """Older / partial reports without an Idle % row degrade gracefully
-    to ``None`` so the runtime gate skips rather than failing the run."""
+    """Reports without an Idle % row degrade to ``None`` so the gate skips rather than fails."""
     md = tmp_path / "analysis.md"
     md.write_text(_EXEC_SUMMARY_NO_IDLE_ROW, encoding="utf-8")
     assert tlr.extract_idle_pct_from_analysis_md(md) is None
@@ -3053,8 +2739,7 @@ def test_extract_idle_pct_returns_none_when_file_missing(tmp_path):
 
 
 def test_extract_idle_pct_against_llama70b_fixture():
-    """Real TraceLens fixture: Llama 3 70B has Idle % = 0.25% in
-    its Executive Summary — pin this against drift in the regex."""
+    """Llama 3 70B fixture has Idle % = 0.25%; pins the regex against drift."""
     fixture = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
     assert fixture.exists(), f"fixture must be present: {fixture}"
     assert tlr.extract_idle_pct_from_analysis_md(fixture) == pytest.approx(0.25)
@@ -3071,9 +2756,7 @@ def test_resolve_idle_pct_threshold_honours_env_override(monkeypatch):
 
 
 def test_resolve_idle_pct_threshold_rejects_nonsense_env_value(monkeypatch):
-    """Operators who paste garbage into the env var should get the default,
-    not a crash. The shape of this code defends against silent failure
-    by validating ``float()`` and the non-negative guard."""
+    """Garbage / negative / empty env values fall back to the default, not a crash."""
     monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "not-a-float")
     assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
     monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "-5")
@@ -3083,14 +2766,9 @@ def test_resolve_idle_pct_threshold_rejects_nonsense_env_value(monkeypatch):
 
 
 def test_build_high_idle_warning_shape(tmp_path):
-    """The structured warning is the contract between
-    ``tracelens_analysis`` and ``trace_analyze_handler`` (T4). Pin the
-    shape: code, severity, idle_pct (rounded), threshold_pct (rounded),
-    source path, and a human-readable message that names both numbers."""
+    """Pin the high-idle warning shape: code/severity/idle_pct/threshold_pct (rounded)/source/message."""
     report = tmp_path / "analysis.md"
     report.write_text("# noop\n", encoding="utf-8")
-    # 42.567 → round-to-2 = 42.57 (unambiguous, avoids banker's-rounding
-    # ties that bite e.g. 42.345 → 42.34 on Python's round()).
     w = tla._build_high_idle_warning(
         idle_pct=42.567, threshold_pct=20.0, report_path=report,
     )
@@ -3099,18 +2777,14 @@ def test_build_high_idle_warning_shape(tmp_path):
     assert w["idle_pct"] == pytest.approx(42.57)
     assert w["threshold_pct"] == pytest.approx(20.0)
     assert w["source"] == str(report)
-    # The pre-rounded value (3 d.p.) shows up in the message via :.2f
-    # formatting → "42.57%", and the threshold uses the same formatter.
+    # Message formats both numbers via :.2f.
     assert "42.57%" in w["message"]
     assert "20.00%" in w["message"]
     assert "parameter optimization" in w["message"]
 
 
 def test_build_audit_summary_propagates_trace_health_warnings():
-    """``summary.json`` (the audit sidecar) must surface the same
-    structured warnings as the JSON-RPC ``result`` so an operator
-    inspecting the on-disk artefact and the live response see the same
-    findings."""
+    """``summary.json`` surfaces the same trace_health_warnings as the live result."""
     warnings = [
         {
             "code": "high_gpu_idle_pct",
@@ -3135,9 +2809,7 @@ def test_build_audit_summary_propagates_trace_health_warnings():
 
 
 def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
-    """Steady-state (no findings) is the empty list — never ``None`` —
-    so downstream consumers can ``for w in summary[...]`` without a
-    ``None`` guard."""
+    """No findings is the empty list, never ``None`` (consumers iterate without a guard)."""
     summary = tla.build_audit_summary(
         [],
         trace_input="/tmp/trace.json.gz",
@@ -3148,69 +2820,49 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
     assert summary["trace_health_warnings"] == []
 
 
-# ---------------------------------------------------------------------------
 # atom maps to ``inference`` analysis mode
-# ---------------------------------------------------------------------------
 def test_infer_analysis_mode_atom_returns_inference():
-    """atom traces share the inference-mode kernel grouping with
-    sglang/vllm; without this they would fall through to ``default``
-    and get generic torch grouping.
-    """
+    """atom shares inference-mode kernel grouping with sglang/vllm (else falls to ``default``)."""
     assert tlr.infer_analysis_mode("atom", "") == "inference"
     assert tlr.infer_analysis_mode("ATOM", "default") == "inference"
     assert tlr.infer_analysis_mode("  atom  ", "default") == "inference"
 
 
 def test_infer_analysis_mode_sglang_vllm_unchanged():
-    """Regression guard: sglang / vllm remain ``inference``.
-    """
+    """Regression guard: sglang / vllm remain ``inference``."""
     assert tlr.infer_analysis_mode("sglang", "") == "inference"
     assert tlr.infer_analysis_mode("vllm", "default") == "inference"
 
 
 def test_infer_analysis_mode_explicit_request_wins():
-    """Caller-supplied non-default mode bypasses the framework default
-    for every framework (atom included)."""
+    """Caller-supplied non-default mode bypasses the framework default for every framework."""
     assert tlr.infer_analysis_mode("atom", "training") == "training"
     assert tlr.infer_analysis_mode("sglang", "training") == "training"
     assert tlr.infer_analysis_mode("unknown", "training") == "training"
 
 
 def test_infer_analysis_mode_unknown_framework_stays_default():
-    """Frameworks outside the canonical set fall back to ``default``;
-    they don't get the inference-mode upgrade automatically.
-    """
+    """Frameworks outside the canonical set fall back to ``default``."""
     assert tlr.infer_analysis_mode("trtllm", "") == "default"
     assert tlr.infer_analysis_mode("", "") == "default"
 
 
-# ---------------------------------------------------------------------------
 # atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS
-# ---------------------------------------------------------------------------
 def test_framework_pkg_fallback_roots_has_atom_entry():
-    """The offline source resolver must accept atom kernel sources; the
-    atom entry must include at least the editable-install parent
-    ``/app/ATOM`` so a relative ``atom/model_engine/...`` path in a
-    TraceLens CSV can be joined against it.
-    """
+    """The atom fallback roots must include ``/app/ATOM`` plus a site-packages variant."""
     table = tlr._FRAMEWORK_PKG_FALLBACK_ROOTS
     assert "atom" in table, (
         "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS"
     )
     roots = table["atom"]
     assert "/app/ATOM" in roots
-    # Site-packages variants for production wheels.
     assert any("site-packages" in r or "dist-packages" in r for r in roots), (
         f"atom fallback roots lack a site-packages entry: {roots!r}"
     )
 
 
 def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
-    """End-to-end: when ``import atom`` doesn't fire (CSV-only
-    static-analysis path), the resolver still resolves a relative
-    ``atom/model_engine/model_runner.py`` against the synthetic atom
-    fallback root and returns the absolute path.
-    """
+    """End-to-end: a relative atom path resolves against the atom fallback root when import atom doesn't fire."""
     monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
     _seed_pkg(
         tmp_path,

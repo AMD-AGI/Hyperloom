@@ -1,34 +1,10 @@
 """sglang ``--context-length`` cap injection tests.
 
-sglang's ``launch_server`` defaults ``context_length`` to None, which makes it
-size ``max_total_tokens`` from the model's ``max_position_embeddings``. For a
-model that advertises a huge native window (e.g. Mistral-Nemo-12B =
-``max_position_embeddings=1024000``) the aiter attention backend then allocates
-a ``workspace_buffer`` of >100 GiB and the server dies with
-``torch.OutOfMemoryError: HIP out of memory`` -> the benchmark reports
-``baseline_failed`` with throughput 0.
-
-The vllm benchmark scripts already cap their window via
-``--max-model-len $MAX_MODEL_LEN`` (default 4096), but the sglang scripts pass
-no ``--context-length`` and never consume the YAML's ``MAX_MODEL_LEN``, so the
-asymmetry only hurts sglang. Hyperloom injects a workload-sized
-``--context-length`` (ISL+OSL+headroom, floored to a sane minimum, never above
-the model's native window) into ``EXTRA_SGLANG_ARGS`` -- which InferenceX's
-``sglang_mi300x.sh`` appends verbatim after its DEFAULT_ARGS to
-``python -m sglang.launch_server`` -- unless the operator already pinned one.
-
-These tests pin the contract:
-
-* a huge native window is capped to the workload (value <= cap, never OOM);
-* a small native window is respected (never advertised above it);
-* an operator-supplied ``--context-length`` is honored and never overridden;
-* vllm / atom runs get no ``--context-length`` at all;
-* an unreadable ``max_position_embeddings`` injects nothing (fail-safe).
-
-Both layers are exercised: the pure helpers
-(``resolve_sglang_context_cap`` / ``inject_sglang_context_length``) and the
-materialization choke point (``materialize_config_with_envs``) that every
-benchmark path funnels through.
+sglang sizes its context window from the model's ``max_position_embeddings``,
+so a huge native window OOMs the aiter backend. Hyperloom injects a
+workload-sized ``--context-length`` (capped to the native window) into
+``EXTRA_SGLANG_ARGS`` unless the operator already pinned one. Exercised at both
+the pure-helper and the ``materialize_config_with_envs`` layers.
 """
 
 from __future__ import annotations
@@ -50,21 +26,13 @@ from inference_optimizer.orchestrator.action_executors._workload_envs import (
     materialize_config_with_envs,
 )
 
-# Mistral-Nemo-12B's advertised native window -- the value that triggered the
-# 126.95 GiB aiter workspace_buffer OOM in production.
+# Mistral-Nemo-12B's native window — the value that triggered the production aiter OOM.
 _HUGE_MAX_POS = 1_024_000
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch):
-    """Isolate the context-cap env knobs and skip the GPU TP-clamp probe.
-
-    The materializer reads several workload knobs from the process env; clear
-    them so the host shell can't leak values into the rendered YAML, and
-    disable the TP clamp so the test never shells out to ``rocm-smi`` / probes
-    ``torch.cuda`` on a CPU-only CI box. The watchdog default still fires, so
-    every sglang assertion below tolerates it being present.
-    """
+    """Clear the workload env knobs and disable the TP clamp so the rendered YAML is hermetic."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     for key in (
         "SGLANG_CONTEXT_HEADROOM_TOKENS", "SGLANG_CONTEXT_FLOOR_TOKENS",
@@ -76,12 +44,7 @@ def _hermetic_env(monkeypatch):
 
 
 def _write_model(tmp_path: Path, max_pos: int | None, *, nested: bool = False) -> str:
-    """Create a model dir with a config.json and return its path.
-
-    ``max_pos=None`` writes a config.json with no max-length key (so the loader
-    returns None); ``nested=True`` hides ``max_position_embeddings`` under a
-    ``text_config`` block (the multimodal layout the loader must still read).
-    """
+    """Create a model dir with a config.json (``max_pos=None`` omits the key; ``nested=True`` uses a ``text_config`` block)."""
     model_dir = tmp_path / "model"
     model_dir.mkdir(parents=True, exist_ok=True)
     cfg: dict = {"model_type": "mistral"}
@@ -94,7 +57,9 @@ def _write_model(tmp_path: Path, max_pos: int | None, *, nested: bool = False) -
     return str(model_dir)
 
 
-def _write_yaml(path: Path, *, framework: str, model: str) -> None:
+def _write_yaml(
+    path: Path, *, framework: str, model: str, runner_type: str | None = None,
+) -> None:
     cfg: dict = {
         "benchmark": {
             "framework": framework,
@@ -111,6 +76,8 @@ def _write_yaml(path: Path, *, framework: str, model: str) -> None:
             "gpu_selection": {"auto": False},
         }
     }
+    if runner_type:
+        cfg["benchmark"]["runner_type"] = runner_type
     with path.open("w") as f:
         yaml.safe_dump(cfg, f)
 
@@ -122,10 +89,11 @@ def _materialize_envs(
     model: str,
     extra_server_args: str = "",
     extra_envs: dict | None = None,
+    runner_type: str | None = None,
 ) -> dict:
     """Render a YAML via the production choke point and return its envs map."""
     base = tmp_path / "base.yaml"
-    _write_yaml(base, framework=framework, model=model)
+    _write_yaml(base, framework=framework, model=model, runner_type=runner_type)
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
@@ -144,9 +112,7 @@ def _context_length_value(server_args: str) -> int:
     return int(tokens[idx + 1])
 
 
-# ---------------------------------------------------------------------------
 # resolve_sglang_context_cap (pure helper)
-# ---------------------------------------------------------------------------
 def test_cap_defaults():
     assert DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS == 2048
     assert DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS == 8192
@@ -176,12 +142,9 @@ def test_cap_bad_env_falls_back_to_default(monkeypatch, bad):
     assert resolve_sglang_context_cap(256, 256) == 8192
 
 
-# ---------------------------------------------------------------------------
 # inject_sglang_context_length (pure helper)
-# ---------------------------------------------------------------------------
 def test_inject_caps_huge_window_for_sglang(tmp_path):
-    """Required case 1: max_position_embeddings=1024000 -> the injected
-    ``--context-length`` is present and never exceeds the workload cap."""
+    """Case 1: a huge max_position_embeddings → the injected ``--context-length`` never exceeds the workload cap."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     out = inject_sglang_context_length("--foo bar", "sglang", model, 256, 256)
     assert "--context-length" in out
@@ -194,8 +157,7 @@ def test_inject_caps_huge_window_for_sglang(tmp_path):
 
 
 def test_inject_caps_huge_window_via_nested_text_config(tmp_path):
-    """Multimodal configs hide the window under ``text_config``; the loader
-    handles the nesting, so the cap must still apply."""
+    """Multimodal configs hide the window under ``text_config``; the cap must still apply."""
     model = _write_model(tmp_path, _HUGE_MAX_POS, nested=True)
     out = inject_sglang_context_length("", "sglang", model, 256, 256)
     assert _context_length_value(out) == 8192
@@ -256,8 +218,7 @@ def test_inject_noop_when_maxpos_unreadable(tmp_path):
 
 
 def test_inject_empty_or_unknown_framework_treated_as_sglang(tmp_path):
-    """An empty/unknown framework routes to EXTRA_SGLANG_ARGS (the default
-    backend) everywhere else in the codebase, so the cap applies there too."""
+    """An empty/unknown framework routes to EXTRA_SGLANG_ARGS, so the cap applies there too."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     assert _context_length_value(
         inject_sglang_context_length("", "", model, 256, 256)
@@ -267,9 +228,7 @@ def test_inject_empty_or_unknown_framework_treated_as_sglang(tmp_path):
     ) == 8192
 
 
-# ---------------------------------------------------------------------------
 # materialize_config_with_envs (the production choke point)
-# ---------------------------------------------------------------------------
 def test_materialize_sglang_injects_context_length_cap(tmp_path):
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     envs = _materialize_envs(tmp_path, framework="sglang", model=model)
@@ -312,6 +271,18 @@ def test_materialize_vllm_no_context_length(tmp_path):
 # ---------------------------------------------------------------------------
 # inject_sglang_attention_backend (dual chunk attention)
 # ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _default_non_amd_gpu(monkeypatch: pytest.MonkeyPatch):
+    """Default the dual-chunk backend resolver to the non-AMD path so the
+    upstream ``dual_chunk_flash_attn`` assertions hold without real GPU
+    hardware. MI30x-path tests override this with their own monkeypatch."""
+    monkeypatch.setattr(
+        "inference_optimizer.cli._autodetect_gpu_type", lambda: None,
+    )
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_DUAL_CHUNK_BACKEND", raising=False)
+
+
 def _write_dual_chunk_model(
     tmp_path: Path, *, dual_chunk: bool, nested: bool = False
 ) -> str:
@@ -340,6 +311,40 @@ def test_dual_chunk_injects_via_nested_text_config(tmp_path):
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True, nested=True)
     out = inject_sglang_attention_backend("", "sglang", model)
     assert "--attention-backend dual_chunk_flash_attn" in out
+
+
+def test_dual_chunk_falls_back_to_triton_on_amd(tmp_path, monkeypatch):
+    """On AMD/ROCm dual_chunk_flash_attn is unsupported (sm90+), so the
+    injected backend must fall back to triton."""
+    monkeypatch.setattr(
+        "inference_optimizer.cli._autodetect_gpu_type", lambda: "mi300x",
+    )
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    out = inject_sglang_attention_backend("--foo bar", "sglang", model)
+    assert "--attention-backend triton" in out
+    assert "dual_chunk_flash_attn" not in out
+    assert "--foo bar" in out
+
+
+def test_dual_chunk_uses_explicit_gpu_type_before_autodetect(tmp_path):
+    """The caller's runner gpu_type must win when runtime probing is unavailable."""
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    out = inject_sglang_attention_backend(
+        "--foo bar", "sglang", model, gpu_type="mi300x",
+    )
+    assert "--attention-backend triton" in out
+    assert "dual_chunk_flash_attn" not in out
+
+
+def test_dual_chunk_backend_env_override(tmp_path, monkeypatch):
+    """HYPERLOOM_DUAL_CHUNK_BACKEND wins over hardware detection."""
+    monkeypatch.setattr(
+        "inference_optimizer.cli._autodetect_gpu_type", lambda: "mi300x",
+    )
+    monkeypatch.setenv("HYPERLOOM_DUAL_CHUNK_BACKEND", "flashinfer")
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    out = inject_sglang_attention_backend("", "sglang", model)
+    assert "--attention-backend flashinfer" in out
 
 
 def test_dual_chunk_noop_without_config(tmp_path):
@@ -374,3 +379,13 @@ def test_materialize_sglang_injects_dual_chunk_backend(tmp_path):
     envs = _materialize_envs(tmp_path, framework="sglang", model=model)
     sglang_args = envs["EXTRA_SGLANG_ARGS"]
     assert "--attention-backend dual_chunk_flash_attn" in sglang_args
+
+
+def test_materialize_sglang_uses_runner_type_for_dual_chunk_backend(tmp_path):
+    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
+    envs = _materialize_envs(
+        tmp_path, framework="sglang", model=model, runner_type="mi300x",
+    )
+    sglang_args = envs["EXTRA_SGLANG_ARGS"]
+    assert "--attention-backend triton" in sglang_args
+    assert "dual_chunk_flash_attn" not in sglang_args

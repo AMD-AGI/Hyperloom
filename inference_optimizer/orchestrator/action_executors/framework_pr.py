@@ -2,36 +2,24 @@
 
 """FrameworkPrExecutor — FRAMEWORK_PR phase per-candidate executor.
 
-Counterpart to :class:`IntegratePatchExecutor` for the FRAMEWORK_PR
-phase. The Coordinator-side pump enumerates PR candidates via
-``fa phase-discover``, gates each one through the Critic
-(:meth:`Coordinator._critic_review_framework_pr_candidate` —
-``approve`` proceeds, ``reject`` short-circuits with a
-``critic_denied`` progress row), and dispatches **this** executor per
-approved candidate to:
+Counterpart to :class:`IntegratePatchExecutor`. The Coordinator pump
+enumerates PR candidates via ``fa phase-discover``, gates each through
+the Critic, and dispatches this executor per approved candidate to::
 
-  1. Fetch the unified diff: when ``params.patches`` is provided, use
-     those paths directly; otherwise ``curl candidate.diff_url`` into
-     the per-task workspace. (We do NOT shell out to ``fa phase-fetch``
-     — apply happens in the live framework_source_roots, not in an
-     fa-managed worktree.)
-  2. Snapshot the live tree's pre-apply HEAD SHA via ``git rev-parse``
-     so the per-candidate REVERT path can ``git reset --hard`` back to
-     it without disturbing prior KEEP commits (PR-327 P1.c fix).
-  3. Apply the diff via ``git apply`` (single integration channel,
-     mirrors ``integrate_patch``).
-  4. Bench the patched server with ``run_grid([GridVariant])`` (size=1,
-     same throughput + accuracy gate plumbing as ``integrate_patch``).
-  5. KEEP / REVERT decision: KEEP commits the change to the live tree
-     so the next candidate stacks on top; REVERT runs
-     ``git reset --hard <pre_apply_sha>`` followed by ``git clean -fd``
-     to restore exactly the pre-apply state.
+  1. Fetch the unified diff (explicit ``params.patches`` or
+     ``curl candidate.diff_url``; apply happens in the live source root).
+  2. Snapshot pre-apply HEAD SHA so REVERT can ``git reset --hard`` back
+     without disturbing prior KEEP commits (PR-327 P1.c).
+  3. Apply via ``git apply`` (single integration channel).
+  4. Bench the patched server (``run_grid([GridVariant])``, size=1).
+  5. KEEP commits to the live tree (next candidate stacks); REVERT runs
+     ``git reset --hard <pre_apply_sha>`` + ``git clean -fd``.
 
-This is a Coordinator-internal action (``framework_pr_action_not_llm_proposable``
-denies any LLM-side delegate / propose_action / request). It is
-registered for the FRAMEWORK_PR phase only.
+Coordinator-internal: ``framework_pr`` is absent from
+``PHASE_LLM_PROPOSABLE_ACTIONS`` so PolicyGate R1 denies LLM proposals.
 
-Inputs (``ctx.task.params``):
+Inputs (``ctx.task.params``)::
+
     candidate (dict, required) — PR metadata row:
         ``{repo, pr_number, ref, title, diff_url, pr_url?, framework?}``
     framework (str, optional) — ``"sglang"`` / ``"vllm"``. Falls back to
@@ -52,7 +40,8 @@ Inputs (``ctx.task.params``):
         defaults to first existing entry of ``resolve_source_file_allowlist()``.
     apply_only (bool, optional) — skip the bench step (test / smoke).
 
-Outputs (dict returned to the bus as ``delegated_result.result``):
+Outputs (dict returned to the bus as ``delegated_result.result``)::
+
     status: "kept" | "reverted" | "apply_failed" | "no_patch" |
             "fetch_failed" | "applied_no_bench" | "failed"
     output_throughput: float | None
@@ -105,16 +94,12 @@ log = logging.getLogger(__name__)
 DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
 
 
-# ---------------------------------------------------------------------------
-# Git checkpoint helpers — FRAMEWORK_PR phase processes candidates serially
-# in the same framework_root. To prevent a failed REJECT from clobbering
-# previously KEPT patches that share the worktree, every KEEP is committed
-# (so it becomes the new HEAD) and every REJECT/failure resets HEAD to the
-# sha captured immediately before apply.
-# ---------------------------------------------------------------------------
+# Git checkpoint helpers — candidates are processed serially in the same
+# framework_root; every KEEP is committed (new HEAD) and every REJECT/failure
+# resets HEAD to the pre-apply sha so a failed REJECT can't clobber prior KEEPs.
 def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
-    """``git rev-parse HEAD`` in ``framework_root``. Returns
-    ``(sha, stderr)``; sha is None when the call fails."""
+    """``git rev-parse HEAD`` in ``framework_root``; ``(sha, stderr)``,
+    sha None on failure."""
     cmd = ["git", "-C", str(framework_root), "rev-parse", "HEAD"]
     try:
         cp = subprocess.run(
@@ -128,11 +113,9 @@ def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
 
 
 def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
-    """Revert ``framework_root`` to ``sha``: ``git reset --hard <sha>``
-    followed by ``git clean -fd`` to also discard untracked files added
-    by the candidate (e.g. patches that create new files). Used as the
-    REVERT path so a failed candidate cannot leak partial state into
-    the next candidate's baseline."""
+    """Revert ``framework_root`` to ``sha``: ``git reset --hard`` +
+    ``git clean -fd`` (discards untracked files the candidate added) so a
+    failed candidate can't leak state into the next candidate's baseline."""
     cmd = ["git", "-C", str(framework_root), "reset", "--hard", sha]
     try:
         cp = subprocess.run(
@@ -157,15 +140,10 @@ def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
 def _git_commit_keep(
     framework_root: Path, message: str,
 ) -> tuple[str | None, str]:
-    """``git add -A && git commit -m <message>`` with hyperloom identity,
-    then return the new HEAD sha. ``add -A`` (not ``commit -am``) is used
-    so a PR that adds *new* files is captured in the KEEP commit — ``-am``
-    only stages already-tracked modifications, which would either leave a
-    new file untracked in the worktree (polluting the next candidate's
-    baseline) or fail outright for an add-only PR. Identity is forced via
-    ``-c`` so callers don't need to depend on whatever user.email is
-    configured in the framework_root git repo (Magpie clones may not have
-    one)."""
+    """``git add -A && git commit`` with a forced hyperloom identity (``-c``,
+    Magpie clones may lack user.email), returning the new HEAD sha. ``add -A``
+    (not ``commit -am``) so add-only PRs' new files land in the KEEP commit
+    instead of polluting the next candidate's baseline."""
     add = ["git", "-C", str(framework_root), "add", "-A"]
     try:
         cp_add = subprocess.run(
@@ -197,8 +175,8 @@ def _git_commit_keep(
 
 
 def _candidate_slug(candidate: dict[str, Any]) -> str:
-    """Short, filesystem-safe identifier for the candidate (for variant
-    names + workspace paths). Prefer ``repo/pr_number`` when present."""
+    """Filesystem-safe candidate id (variant names + paths). Prefer
+    ``repo/pr_number``."""
     repo = str(candidate.get("repo") or "").replace("/", "-")
     pr = candidate.get("pr_number")
     if repo and pr not in (None, "", 0):
@@ -212,11 +190,9 @@ def _candidate_slug(candidate: dict[str, Any]) -> str:
 def _fetch_diff_to_path(
     diff_url: str, dest: Path, *, timeout_sec: float,
 ) -> tuple[bool, str]:
-    """Curl ``diff_url`` into ``dest`` (a .patch file path). Returns
-    ``(ok, stderr)``. Uses curl rather than aiohttp because the
-    integrate_patch path is also subprocess-based and we want consistent
-    behaviour for restricted-network sessions (curl honours the same
-    HTTPS_PROXY plumbing as the rest of the runtime)."""
+    """Curl ``diff_url`` into ``dest`` (.patch path); returns ``(ok, stderr)``.
+    Uses curl (not aiohttp) for consistent HTTPS_PROXY behaviour in
+    restricted-network sessions."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "curl", "-fsSL", "--retry", "2", "--max-time",
@@ -240,7 +216,16 @@ def _run_git(
     args: list[str], *, timeout: float = 120.0,
 ) -> tuple[bool, str, str]:
     """Run ``git <args>`` capturing output. Returns ``(ok, stdout, stderr)``.
-    Never raises (spawn / timeout failures map to ``(False, "", reason)``)."""
+    Never raises (spawn / timeout failures map to ``(False, "", reason)``).
+
+    Args:
+        args (list[str]): The git arguments (without the leading ``git``).
+        timeout (float): The subprocess timeout in seconds.
+
+    Returns:
+        tuple[bool, str, str]: ``(ok, stdout, stderr)`` where ``ok`` reflects a
+            zero return code.
+    """
     try:
         cp = subprocess.run(
             ["git", *args],
@@ -254,17 +239,15 @@ def _run_git(
 
 
 def _normalize_repo_id(url_or_slug: str) -> str:
-    """Reduce a repo URL or ``owner/name`` slug to a canonical
-    ``owner/name`` lowercase token for same-repo comparison. Tolerates
-    ``https://github.com/Owner/Name.git``, ``git@github.com:Owner/Name``,
-    and a bare ``Owner/Name``."""
+    """Reduce a repo URL / slug to a canonical lowercase ``owner/name`` token.
+    Tolerates https, ssh, and bare ``Owner/Name`` forms."""
     s = (url_or_slug or "").strip().lower()
     if not s:
         return ""
     s = s.rstrip("/")
     if s.endswith(".git"):
         s = s[:-4]
-    # Strip scheme / host so only the trailing owner/name remains.
+    # Strip scheme/host so only the trailing owner/name remains.
     for sep in ("github.com/", "github.com:"):
         if sep in s:
             s = s.split(sep, 1)[1]
@@ -278,19 +261,15 @@ def _normalize_repo_id(url_or_slug: str) -> str:
 def _candidate_is_same_repo(
     candidate: dict[str, Any], framework_root: Path,
 ) -> bool:
-    """True unless we can POSITIVELY prove the candidate lives in a
-    different repo than the live framework_root's origin (in which case
-    checkout-head's ``git fetch origin`` would resolve the wrong ref).
+    """True unless we can positively prove the candidate lives in a different
+    repo than the framework_root's origin (where checkout-head's fetch would
+    resolve the wrong ref).
 
-    Fails OPEN (returns True) whenever the comparison is inconclusive:
-    no candidate repo, unreadable origin, or an origin that is not a
-    GitHub-style ``owner/name`` URL (e.g. a local-path clone). The guard
-    only fires when BOTH sides yield an ``owner/name`` token and they
-    differ — so a normal single-repo session is never downgraded."""
+    Fails OPEN when inconclusive (no candidate repo, unreadable / non-GitHub
+    origin); only fires when both sides yield differing ``owner/name`` tokens."""
     cand_repo = _normalize_repo_id(
         str(candidate.get("repo") or candidate.get("discovered_repo_url") or "")
     )
-    # A candidate repo token without an owner/name shape can't be compared.
     if not cand_repo or "/" not in cand_repo:
         return True
     ok, out, _err = _run_git(
@@ -300,10 +279,8 @@ def _candidate_is_same_repo(
     if not ok or not out.strip():
         return True
     origin_raw = out.strip()
-    # Only a GitHub-style origin gives an owner/name token directly
-    # comparable to the candidate's ``repo`` slug. A local-path / mirror
-    # / non-GitHub origin is inconclusive → fail open (don't downgrade a
-    # legitimate same-repo session whose clone uses a local path).
+    # Only a GitHub origin yields a comparable owner/name token; a
+    # local-path / non-GitHub origin is inconclusive → fail open.
     if "github.com" not in origin_raw.lower():
         return True
     return _normalize_repo_id(origin_raw) == cand_repo
@@ -318,21 +295,14 @@ def _materialize_pr_diff_via_worktree(
 ) -> tuple[bool, str]:
     """checkout-head (diff source) mode.
 
-    Fetches the candidate PR's head into ``framework_root`` (which must be
-    a git repo with a fetchable origin), checks it out into an isolated
-    ``git worktree`` so the live tree's already-KEPT stack is never
-    disturbed, computes the PR's *net* diff against its merge-base, and
-    writes that unified diff to ``dest``. The caller then ``git apply``s
-    ``dest`` onto the live tree and benches it exactly like the
-    ``diff_url`` path — so this mode only changes *where the patch text
-    comes from*, not how it is applied or measured.
+    Fetches the PR head into ``framework_root``, checks it out into an
+    isolated worktree (the live KEPT stack is undisturbed), computes the
+    PR's net diff against its merge-base, and writes it to ``dest``. Only
+    changes where the patch text comes from, not how it's applied/measured.
+    Worktree always removed in ``finally``. Returns ``(ok, err)``.
 
-    The worktree is always removed in ``finally``. Returns ``(ok, err)``.
-
-    Resolution of the head ref, in order:
-      1. ``candidate.head_sha`` (explicit sha from discovery).
-      2. ``candidate.ref`` (e.g. a branch / tag the origin already has).
-      3. ``refs/pull/<pr_number>/head`` (GitHub PR head ref).
+    Head ref order: ``candidate.head_sha`` → ``candidate.ref`` →
+    ``refs/pull/<pr_number>/head``.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     root = str(framework_root)
@@ -348,8 +318,7 @@ def _materialize_pr_diff_via_worktree(
     elif pr_number not in (None, "", 0):
         fetch_ref = f"refs/pull/{int(pr_number)}/head"
 
-    # Fetch the head (skip when we already have an explicit sha that the
-    # local repo can resolve, but try a fetch anyway for completeness).
+    # Fetch the head ref.
     if fetch_ref:
         ok, _out, err = _run_git(
             ["-C", root, "fetch", "--no-tags", "origin", fetch_ref],
@@ -371,9 +340,8 @@ def _materialize_pr_diff_via_worktree(
             "cannot resolve PR head"
         )
 
-    # Isolated worktree at the fetched head.
+    # Isolated worktree at the fetched head (clean any stale prior-run dir).
     wt_dir = dest.parent / f"wt-{_candidate_slug(candidate)}"
-    # Clean any stale worktree dir from a prior crashed run.
     _run_git(["-C", root, "worktree", "remove", "--force", str(wt_dir)],
              timeout=60.0)
     ok, _out, err = _run_git(
@@ -383,10 +351,8 @@ def _materialize_pr_diff_via_worktree(
     if not ok:
         return False, f"git worktree add failed: {err}"
     try:
-        # Merge-base against the live tree's current HEAD gives the PR's
-        # net change relative to the branch point, so applying it onto the
-        # live tree introduces only the PR's own commits (not the entire
-        # divergence between head and the live HEAD).
+        # Diff against the merge-base so applying introduces only the PR's
+        # own commits, not the full divergence from the live HEAD.
         ok_hb, base_out, _e = _run_git(
             ["-C", root, "rev-parse", "HEAD"], timeout=30.0,
         )
@@ -434,6 +400,20 @@ class FrameworkPrExecutor:
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
         diff_fetch_timeout_sec: float = DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     ):
+        """Initialize the executor with session + bench defaults.
+
+        Args:
+            session_dir (Path | str | None): The session directory used to
+                root per-task workspaces; resolved from the environment when
+                ``None``.
+            default_config_path (Path | str | None): Default baseline config
+                path used when ``params.config_path`` is absent.
+            variant_timeout_sec (int): Default per-variant bench timeout.
+            keep_threshold_pct (float): Default throughput delta (percent)
+                required to KEEP a candidate.
+            diff_fetch_timeout_sec (float): Default timeout for fetching /
+                materializing the candidate diff.
+        """
         self.session_dir = (
             Path(session_dir) if session_dir else _resolve_session_dir()
         )
@@ -445,6 +425,24 @@ class FrameworkPrExecutor:
         self.diff_fetch_timeout_sec = float(diff_fetch_timeout_sec)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Fetch, apply, bench and KEEP/REVERT one approved PR candidate.
+
+        Resolves the patch source (explicit paths, checkout-head worktree
+        diff, or curled ``diff_url``), snapshots the live tree HEAD, applies
+        the diff, optionally benches it via :meth:`_bench_candidate`, and
+        commits (KEEP) or ``git reset --hard`` reverts based on the throughput
+        delta and accuracy gate.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` (the ``candidate``
+                row and bench knobs) and ``extra`` (workspace / shared_state).
+
+        Returns:
+            dict[str, Any]: A result dict whose ``status`` is one of ``kept``,
+                ``reverted``, ``apply_failed``, ``no_patch``, ``fetch_failed``,
+                ``applied_no_bench`` or ``failed``, plus throughput / accuracy
+                / patch bookkeeping fields.
+        """
         params = dict(ctx.task.params or {})
         extra = getattr(ctx, "extra", None) or {}
         candidate = params.get("candidate") or {}
@@ -487,15 +485,10 @@ class FrameworkPrExecutor:
                 "workspace": str(output_root),
             }
 
-        # Resolve patch sources. Three modes, in priority order:
-        #   1. Explicit ``params.patches`` paths (test / smoke).
-        #   2. checkout-head (diff source): extract the PR's net diff from
-        #      an isolated worktree at the PR head. Selected when the
-        #      candidate / params request it, or as a fallback when no
-        #      diff_url is present.
-        #   3. diff_url (default): curl the unified diff GitHub serves.
-        # Modes 2 & 3 both produce a .patch that is applied + benched on
-        # the live tree identically — see Stage 1 below.
+        # Patch source modes, in priority order: explicit ``params.patches``
+        # → checkout-head (net diff from an isolated worktree at the PR head)
+        # → diff_url (curl GitHub's served diff). All produce a .patch
+        # applied + benched identically (Stage 1 below).
         explicit_patches = params.get("patches") or None
         patch_paths: list[Path] = []
         patch_source_mode = ""
@@ -509,9 +502,8 @@ class FrameworkPrExecutor:
                     log.warning(
                         "framework_pr: explicit patch %r not found", p,
                     )
-            # Refuse to run the benchmark on an unpatched tree: if every
-            # explicit patch path was missing, downstream measurements
-            # would silently reflect the un-modified framework_root.
+            # Refuse to bench an unpatched tree when every explicit patch
+            # was missing (else measurements reflect the unmodified root).
             if not patch_paths:
                 return {
                     "status": "no_patch",
@@ -538,9 +530,8 @@ class FrameworkPrExecutor:
                 params.get("prefer_checkout")
                 or candidate.get("prefer_checkout")
             )
-            # A candidate is checkout-headable only if it carries a head
-            # ref the worktree helper can resolve (head_sha / ref /
-            # pr_number).
+            # Checkout-headable only with a resolvable head ref
+            # (head_sha / ref / pr_number).
             has_checkout_ref = bool(
                 str(candidate.get("head_sha") or "").strip()
                 or str(candidate.get("ref") or "").strip()
@@ -553,11 +544,8 @@ class FrameworkPrExecutor:
             use_checkout_head = explicit_checkout or (
                 not diff_url and has_checkout_ref
             )
-            # Same-repo guard: checkout-head fetches the candidate's ref
-            # from the LIVE framework_root's origin, so it only works when
-            # the PR lives in that same repo. A cross-repo candidate (e.g.
-            # a ROCm/vllm PR while the live tree is sglang) would fetch the
-            # wrong ref, so disable checkout-head and rely on diff_url.
+            # Same-repo guard: checkout-head fetches from the live origin, so
+            # a cross-repo candidate would fetch the wrong ref → use diff_url.
             if use_checkout_head and not _candidate_is_same_repo(
                 candidate, framework_root,
             ):
@@ -569,8 +557,7 @@ class FrameworkPrExecutor:
                 )
                 use_checkout_head = False
             if not diff_url and not use_checkout_head:
-                # No served diff and nothing to check out → genuine
-                # no-patch (preserves the pre-checkout-head contract).
+                # No served diff and nothing to check out → genuine no-patch.
                 return {
                     "status": "no_patch",
                     "candidate": candidate,
@@ -591,9 +578,8 @@ class FrameworkPrExecutor:
                     timeout_sec=self.diff_fetch_timeout_sec * 4.0,
                 )
                 if not ok and diff_url:
-                    # Fall back to the served diff_url so a worktree /
-                    # fetch hiccup does not strand an otherwise-applyable
-                    # candidate.
+                    # Fall back to diff_url so a worktree/fetch hiccup doesn't
+                    # strand an otherwise-applyable candidate.
                     log.warning(
                         "framework_pr: checkout-head failed (%s); "
                         "falling back to diff_url", err,
@@ -637,10 +623,8 @@ class FrameworkPrExecutor:
                     }
                 patch_paths.append(dest.resolve())
 
-        # Capture HEAD before any apply so REVERT/REJECT can reset back
-        # cleanly. Previously-KEPT candidates in this phase are committed
-        # (see below), so they live in history past this sha and survive
-        # a reset.
+        # Capture HEAD before apply so REVERT/REJECT can reset cleanly;
+        # prior KEEPs are committed past this sha and survive a reset.
         pre_apply_sha, sha_err = _git_head_sha(framework_root)
         if pre_apply_sha is None:
             return {
@@ -785,15 +769,13 @@ class FrameworkPrExecutor:
                 "workspace": str(output_root),
             }
 
-        # KEEP: commit the applied patches in framework_root so they
-        # survive a subsequent candidate's REJECT (which resets to its
-        # own pre_apply_sha — that sha already includes this commit).
+        # KEEP: commit the patches so they survive the next candidate's
+        # REJECT (whose pre_apply_sha already includes this commit).
         keep_message = f"framework_pr KEEP {slug}"
         keep_sha, commit_err = _git_commit_keep(framework_root, keep_message)
         if keep_sha is None:
-            # Commit failed — surface as an apply_failed result and reset
-            # to pre_apply_sha so we don't leave uncommitted changes that
-            # the next candidate would see as "dirty baseline".
+            # Commit failed — reset to pre_apply_sha so the next candidate
+            # doesn't see a dirty baseline.
             reverted = self._revert_patches(
                 framework_root, applied, pre_apply_sha=pre_apply_sha,
             )
@@ -843,9 +825,7 @@ class FrameworkPrExecutor:
             "workspace": str(output_root),
         }
 
-    # ------------------------------------------------------------------
     # KB writeback (D2, Arbor-into-Hyperloom)
-    # ------------------------------------------------------------------
     async def _write_kb_record(
         self, *,
         candidate: dict[str, Any],
@@ -854,13 +834,11 @@ class FrameworkPrExecutor:
         patch_path: str,
         extra: dict[str, Any],
     ) -> None:
-        """Append a FRAMEWORK_PR outcome to
-        ``framework-agent/kb/framework_optimization/lessons.jsonl`` so the
-        next ``fa phase-discover`` can dedup already-integrated PRs.
+        """Append a FRAMEWORK_PR outcome to ``lessons.jsonl`` so the next
+        ``fa phase-discover`` can dedup integrated PRs.
 
-        Best-effort: a candidate lacking both ``pr_url`` and ``head_sha``
-        is skipped (no dedup key), and any write error is logged + swallowed
-        so a flaky KB filesystem never fails an otherwise-good KEEP/REVERT.
+        Best-effort: candidates lacking both ``pr_url`` and ``head_sha``
+        (no dedup key) are skipped; write errors are logged + swallowed.
         """
         pr_url = str(candidate.get("pr_url") or "").strip()
         pr_sha = str(candidate.get("head_sha") or "").strip()
@@ -891,9 +869,7 @@ class FrameworkPrExecutor:
         except Exception as exc:  # noqa: BLE001 — KB write is best-effort
             log.warning("framework_pr: KB writeback failed: %r", exc)
 
-    # ------------------------------------------------------------------
     # Helpers
-    # ------------------------------------------------------------------
     def _revert_patches(
         self,
         framework_root: Path | None,
@@ -901,21 +877,10 @@ class FrameworkPrExecutor:
         *,
         pre_apply_sha: str,
     ) -> list[Path]:
-        """Roll back the current candidate's changes.
-
-        FRAMEWORK_PR processes candidates serially in the same
-        framework_root, and previously-KEPT candidates have been
-        committed (see ``_git_commit_keep``). So REVERT only needs to
-        discard what *this* candidate added on top of ``pre_apply_sha``
-        — ``git reset --hard <pre_apply_sha>`` does exactly that without
-        touching the kept history. This replaces the older reverse-apply
-        + ``git checkout -- .`` fallback, which could clobber uncommitted
-        changes from prior candidates if a future caller ever omitted
-        the per-KEEP commit.
-
-        Returns the list of patches reverted (currently the full
-        ``applied`` list when the reset succeeds, empty otherwise) for
-        downstream telemetry / result schema compat.
+        """Roll back this candidate's changes via ``git reset --hard
+        <pre_apply_sha>`` (prior KEEPs are committed past that sha, so they
+        survive). Returns the patches reverted (full ``applied`` on success,
+        empty on failure) for telemetry / schema compat.
         """
         if framework_root is None or not applied:
             return []
@@ -934,10 +899,8 @@ class FrameworkPrExecutor:
         output_root: Path,
         slug: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run a 1-variant Magpie bench under the patched server +
-        evaluate the accuracy gate. Mirrors
-        :meth:`IntegratePatchExecutor._bench_patch` so the gain
-        bookkeeping is identical across the two integration channels."""
+        """Run a 1-variant Magpie bench under the patched server + accuracy
+        gate. Mirrors :meth:`IntegratePatchExecutor._bench_patch`."""
         config_path = Path(
             params.get("config_path")
             or self.default_config_path

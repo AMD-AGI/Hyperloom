@@ -26,6 +26,12 @@ def _unmangle_msys_path(v: str) -> str:
     Git Bash auto-converts POSIX paths starting with / into Windows-style paths
     when passing them as env vars or CLI args. This function detects the
     mangled form and reverses it. Safe no-op on Linux/macOS or unmangled paths.
+
+    Args:
+        v (str): A path or arbitrary string that may have been MSYS-mangled.
+
+    Returns:
+        str: The de-mangled POSIX path, or ``v`` unchanged if not mangled.
     """
     if isinstance(v, str) and re.search(r"[A-Za-z]:[/\\].*[/\\]wekafs", v):
         v = re.sub(r"[A-Za-z]:[/\\].*[/\\](wekafs.*)", r"/\1", v).replace("\\", "/")
@@ -38,17 +44,42 @@ def get_nfs_root(default: str = "/wekafs") -> str:
     All ci/* code MUST use this helper instead of os.environ.get("NFS_ROOT")
     directly, otherwise local dry-run on Windows produces malformed paths like
     `C:/Program Files/Git/wekafs/...` that don't match anything on the runner.
+
+    Args:
+        default (str): Fallback root used when ``NFS_ROOT`` is unset.
+
+    Returns:
+        str: The NFS root with Windows path-mangling reversed.
     """
     return _unmangle_msys_path(os.environ.get("NFS_ROOT", default))
 
 
 def resolve_var(value: Any, env: dict | None = None) -> Any:
-    """Resolve ${VAR} placeholders from environment."""
+    """Resolve ``${VAR}`` placeholders in a string from an environment mapping.
+
+    Args:
+        value (Any): String possibly containing ``${VAR}`` placeholders;
+            non-strings are returned unchanged.
+        env (dict | None): Mapping to resolve from; defaults to ``os.environ``.
+
+    Returns:
+        Any: The string with placeholders substituted (and MSYS paths
+            de-mangled), or the original value if it was not a string.
+    """
     if not isinstance(value, str):
         return value
     env = env or os.environ
 
     def _replace(m: re.Match) -> str:
+        """Resolve one ``${VAR}`` regex match against ``env``.
+
+        Args:
+            m (re.Match): Match whose group 1 is the variable name.
+
+        Returns:
+            str: The resolved (and de-mangled) value, or the original
+                ``${VAR}`` text when the variable is unset.
+        """
         v = env.get(m.group(1), m.group(0))
         return _unmangle_msys_path(v) if isinstance(v, str) else v
 
@@ -62,7 +93,19 @@ def fetch_amd_master_yaml(
     config_path: str = ".github/configs/amd-master.yaml",
     ref: str = "main",
 ) -> dict:
-    """Clone InferenceX repo (shallow) and parse amd-master.yaml."""
+    """Clone the InferenceX repo (shallow) and parse ``amd-master.yaml``.
+
+    Args:
+        repo_url (str): Git URL of the InferenceX repository.
+        config_path (str): Path to the config within the repo.
+        ref (str): Branch or ref to clone.
+
+    Returns:
+        dict: The parsed YAML config.
+
+    Raises:
+        subprocess.CalledProcessError: If the git clone fails.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         subprocess.run(
             ["git", "clone", "--depth=1", f"--branch={ref}", repo_url, tmpdir],
@@ -74,7 +117,18 @@ def fetch_amd_master_yaml(
 
 
 def get_latest_commit(repo_url: str, ref: str = "main") -> str:
-    """Get latest commit SHA from remote without cloning."""
+    """Get the latest commit SHA from a remote ref without cloning.
+
+    Args:
+        repo_url (str): Git URL of the repository.
+        ref (str): Branch name to query (resolved as ``refs/heads/<ref>``).
+
+    Returns:
+        str: The commit SHA, or an empty string if the ref was not found.
+
+    Raises:
+        subprocess.CalledProcessError: If the git ls-remote call fails.
+    """
     result = subprocess.run(
         ["git", "ls-remote", repo_url, f"refs/heads/{ref}"],
         check=True, capture_output=True, text=True,
@@ -104,6 +158,14 @@ def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
 
     Caller is responsible for setting ``key`` on the ci-config entry so the
     matrix filter and per-task identifier are unique.
+
+    Args:
+        model_cfg (dict): Self-contained ci-config entry (see the field list
+            above for required and optional keys).
+
+    Returns:
+        dict: An ``amd-master.yaml``-style entry consumable by
+            ``parse_model_entry()``.
     """
     isl_osl = model_cfg.get("isl_osl_configs") or [[1024, 1024]]
     return {
@@ -137,7 +199,7 @@ def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
 
 def parse_model_entry(entry: dict) -> dict:
     """Extract structured config from an amd-master.yaml model entry."""
-    # Support both old format (seq-len-configs) and new format (scenarios.fixed-seq-len)
+    # Support both seq-len-configs (old) and scenarios.fixed-seq-len (new).
     seq_configs = (
         entry.get("seq-len-configs")
         or (entry.get("scenarios") or {}).get("fixed-seq-len")
@@ -169,7 +231,19 @@ def parse_model_entry(entry: dict) -> dict:
 # ── InferenceX Benchmark API ──
 
 def fetch_benchmarks(model_api_name: str, api_url: str | None = None) -> list[dict]:
-    """Fetch benchmark data from InferenceX API."""
+    """Fetch benchmark data for a model from the InferenceX API.
+
+    Args:
+        model_api_name (str): InferenceX model identifier to query.
+        api_url (str | None): Base benchmarks URL; defaults to
+            ``INFERENCEX_API``.
+
+    Returns:
+        list[dict]: Benchmark records, or an empty list on an API error.
+
+    Raises:
+        requests.HTTPError: If the HTTP request fails.
+    """
     url = api_url or INFERENCEX_API
     resp = requests.get(f"{url}?model={model_api_name}", timeout=30)
     resp.raise_for_status()
@@ -200,6 +274,20 @@ def find_benchmark(
 
     Among remaining candidates, returns the one with the highest
     ``output_tput_per_gpu`` (or ``tput_per_gpu`` as fallback).
+
+    Args:
+        benchmarks (list[dict]): Candidate benchmark records.
+        hardware (str): Required hardware id to match.
+        isl (int): Required input sequence length.
+        osl (int): Required output sequence length.
+        precision (str | None): Optional precision filter.
+        image (str | None): Optional preferred container image substring.
+        tp (int | None): Optional preferred tensor-parallel size.
+        conc (int | None): Optional preferred concurrency.
+
+    Returns:
+        dict | None: The best matching benchmark, or ``None`` if none match
+            the required hardware/ISL/OSL/precision constraints.
     """
     candidates = []
     for b in benchmarks:
@@ -228,6 +316,15 @@ def find_benchmark(
             candidates = same_conc
 
     def _sort_key(x):
+        """Per-GPU output throughput used to rank benchmark candidates.
+
+        Args:
+            x (dict): A benchmark record.
+
+        Returns:
+            float | int: ``output_tput_per_gpu``, falling back to
+                ``tput_per_gpu`` or ``0``.
+        """
         m = x.get("metrics") or {}
         return m.get("output_tput_per_gpu") or m.get("tput_per_gpu") or 0
 
@@ -243,6 +340,15 @@ def find_benchmark_script(
 
     Tries exact match first (e.g. minimaxm2.5_fp8_mi355x.sh),
     then falls back to prefix-based glob.
+
+    Args:
+        repo_path (Path | str): Local path to the InferenceX checkout.
+        ifx_key (str): InferenceX model key to match against script stems.
+        scripts_path (str): Repo-relative directory holding the scripts.
+
+    Returns:
+        str | None: Repo-relative script path, or ``None`` if no script
+            matches.
     """
     scripts_dir = Path(repo_path) / scripts_path
     if not scripts_dir.is_dir():
@@ -269,7 +375,21 @@ def find_benchmark_script_from_clone(
     scripts_path: str = "benchmarks/single_node",
     ref: str = "main",
 ) -> str | None:
-    """Clone InferenceX (shallow) and find the benchmark script path."""
+    """Clone InferenceX (shallow) and find the benchmark script path.
+
+    Args:
+        repo_url (str): Git URL of the InferenceX repository.
+        ifx_key (str): InferenceX model key to match against script stems.
+        scripts_path (str): Repo-relative directory holding the scripts.
+        ref (str): Branch or ref to clone.
+
+    Returns:
+        str | None: Repo-relative script path, or ``None`` if no script
+            matches.
+
+    Raises:
+        subprocess.CalledProcessError: If the git clone fails.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         subprocess.run(
             ["git", "clone", "--depth=1", f"--branch={ref}", repo_url, tmpdir],
@@ -288,9 +408,23 @@ def format_benchmark_for_prompt(
     tp: int | None = None,
     conc: int | None = None,
 ) -> str:
-    """Format InferenceX benchmark data as text for the Claw prompt.
+    """Format the best-matching InferenceX benchmark as text for the Claw prompt.
 
     API response nests performance data under a 'metrics' sub-object.
+
+    Args:
+        benchmarks (list[dict]): Candidate benchmark records.
+        target_gpu (str): Hardware id to match.
+        isl (int): Input sequence length to match.
+        osl (int): Output sequence length to match.
+        precision (str): Precision to match.
+        image (str | None): Optional preferred container image substring.
+        tp (int | None): Optional preferred tensor-parallel size.
+        conc (int | None): Optional preferred concurrency.
+
+    Returns:
+        str: A multi-line summary of the selected benchmark, or a single
+            "no data" line when nothing matches.
     """
     target = find_benchmark(benchmarks, target_gpu, isl, osl, precision, image,
                             tp=tp, conc=conc)
@@ -326,7 +460,19 @@ def merge_model_config(
     harbor_prefix: str,
     ifx_benchmarks: list[dict],
 ) -> dict:
-    """Merge InferenceX yaml entry + user ci-config into a single execution config."""
+    """Merge an InferenceX yaml entry and user ci-config into one exec config.
+
+    Args:
+        model_cfg (dict): User ci-config entry with per-model overrides.
+        ifx_entry (dict): The ``amd-master.yaml`` entry for the model.
+        defaults (dict): Global ci-config defaults used as fallbacks.
+        harbor_prefix (str): Registry prefix prepended to image names; empty
+            to leave images unprefixed.
+        ifx_benchmarks (list[dict]): InferenceX benchmark records to embed.
+
+    Returns:
+        dict: The fully-resolved execution config for one model.
+    """
     parsed = parse_model_entry(ifx_entry)
     model_hf = parsed["model_hf"]
 
@@ -368,31 +514,18 @@ def merge_model_config(
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
         "inferenceX_key": model_cfg.get("inferenceX_key", ""),
         "rayjob_image": resolve_var(model_cfg.get("rayjob_image", "")),
-        # ── Per-entry Claw pluginId override ──
-        # Default behaviour (key absent in ci-config) → plugin_id=4 (legacy
-        # Hyperloom plugin, used by all existing entries). To opt a specific
-        # entry OUT of the plugin and have the agent talk to the Claw API
-        # without a pluginId in the body, set:
-        #     claw_plugin_id: null
-        # in the ci-config entry. (claw_client.send_message already omits the
-        # "pluginId" field from the JSON body when plugin_id is None.)
-        # Other integer values (e.g. claw_plugin_id: 5) switch to a different
-        # plugin — same hook used by the Inference A/B Test workflow via
-        # --plugin-id CLI override.
+        # Per-entry Claw pluginId override; default 4 (legacy Hyperloom plugin).
+        # claw_plugin_id: null omits pluginId from the body; other ints switch
+        # plugin (same hook as the A/B Test --plugin-id override).
         "claw_plugin_id": (
             model_cfg["claw_plugin_id"]
             if "claw_plugin_id" in model_cfg
             else 4
         ),
-        # ── Hyperloom-skill knobs surfaced to prompt_template.md ──
-        # `nodes` triggers the multinode Task-submission block when > 1.
-        # `target_gain` / `max_hours` are forwarded as CLI flags to
-        # `inference_optimizer optimize`. `random_range_ratio` controls
-        # benchmark prompt length jitter (matches InferenceX default 0.8).
-        # `kernel_agent_build_geak_rag_index` defaults off to skip the slow
-        # GEAK RAG index rebuild on each cold-start. All five fall back to
-        # legacy single-node defaults when absent in ci-config, so the 5
-        # existing entries are unchanged.
+        # Hyperloom-skill knobs for prompt_template.md: nodes>1 triggers the
+        # multinode block; target_gain/max_hours become optimize CLI flags;
+        # random_range_ratio is benchmark prompt jitter (InferenceX default 0.8);
+        # kernel_agent_build_geak_rag_index defaults off to skip the slow rebuild.
         "nodes": model_cfg.get("nodes", 1),
         "target_gain": model_cfg.get("target_gain", defaults.get("target_gain", 10)),
         "max_hours": model_cfg.get("max_hours", defaults.get("max_hours", 2)),

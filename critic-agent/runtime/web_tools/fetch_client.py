@@ -3,17 +3,11 @@
 """WebFetchClient — single-URL fetcher with SSRF guard, HTML→Markdown
 conversion, redirect handling and a TTL+LRU cache.
 
-Mirrors the safety posture documented in Primus-Claw's
-``Claw/docs/builtin-tools-design.md`` §5.2 — in particular the DNS-based
-SSRF rejection (stronger than claude-code) and the same-host-only
-redirect policy. Summarization (Haiku) is **not** ported because critic-
-agent is already inside a reasoning loop; double-summarization wastes
-tokens and obscures attribution.
-
-Synchronous on purpose: the CriticAgentBackend wraps ``execute`` in
-``asyncio.to_thread``. Keeping the client sync avoids leaking the asyncio
-loop into provider mocks and matches how Primus-Claw's TS version is
-structured per-request.
+Mirrors Primus-Claw ``builtin-tools-design.md`` §5.2: DNS-based SSRF
+rejection and same-host-only redirects. Summarization is not ported
+(critic-agent is already in a reasoning loop). Synchronous on purpose —
+the backend wraps ``execute`` in ``asyncio.to_thread``, keeping the loop
+out of provider mocks.
 """
 
 from __future__ import annotations
@@ -47,6 +41,18 @@ _JS_SHELL_MARKERS = (
 # ── SSRF guard ──────────────────────────────────────────────────────────
 
 def _ipv4_blocked(addr: str) -> bool:
+    """Return whether an IPv4 address falls in a blocked SSRF range.
+
+    Blocks malformed addresses plus loopback, private (RFC 1918),
+    link-local, carrier-grade NAT, benchmarking and multicast/reserved
+    ranges.
+
+    Args:
+        addr (str): The dotted-quad IPv4 address to classify.
+
+    Returns:
+        bool: ``True`` if the address must be refused, else ``False``.
+    """
     parts = addr.split(".")
     if len(parts) != 4:
         return True
@@ -76,6 +82,17 @@ def _ipv4_blocked(addr: str) -> bool:
 
 
 def _ipv6_blocked(addr: str) -> bool:
+    """Return whether an IPv6 address falls in a blocked SSRF range.
+
+    Blocks loopback (``::1``), unique-local (``fc``/``fd``), link-local
+    (``fe80::/10``) and IPv4-mapped addresses whose embedded IPv4 is blocked.
+
+    Args:
+        addr (str): The IPv6 address to classify.
+
+    Returns:
+        bool: ``True`` if the address must be refused, else ``False``.
+    """
     a = addr.lower()
     if a == "::1":
         return True
@@ -91,7 +108,18 @@ def _ipv6_blocked(addr: str) -> bool:
 
 
 def _resolve_or_raise(hostname: str) -> None:
-    """Resolve ``hostname`` and raise :class:`FetchError` for blocked IPs."""
+    """Resolve ``hostname`` and raise :class:`FetchError` for blocked IPs.
+
+    Every resolved address is checked against the IPv4/IPv6 SSRF blocklists;
+    the first blocked address aborts the fetch.
+
+    Args:
+        hostname (str): The hostname to resolve and validate.
+
+    Raises:
+        FetchError: If DNS resolution fails or any resolved address is in a
+            blocked range.
+    """
     try:
         results = socket.getaddrinfo(hostname, None)
     except OSError as exc:
@@ -116,6 +144,22 @@ class FetchError(RuntimeError):
 
 
 def _validate_url(raw: str) -> str:
+    """Normalise and validate a user-supplied URL.
+
+    Upgrades ``http://`` to ``https://``, defaults bare hosts to ``https://``,
+    and rejects unsupported protocols, embedded credentials and hostnames
+    without a dot.
+
+    Args:
+        raw (str): The raw URL or host string.
+
+    Returns:
+        str: The normalised ``https`` (or ``http``) URL.
+
+    Raises:
+        FetchError: If the URL is empty, uses an unsupported protocol, carries
+            credentials, or has an invalid hostname.
+    """
     if not isinstance(raw, str) or not raw.strip():
         raise FetchError("url is required")
     candidate = raw.strip()
@@ -139,6 +183,18 @@ def _validate_url(raw: str) -> str:
 
 
 def _domain_blocked(hostname: str, denylist: tuple[str, ...]) -> bool:
+    """Return whether a hostname matches any entry in a domain denylist.
+
+    Matches exact hosts and subdomains (``foo.example.com`` matches
+    ``example.com``).
+
+    Args:
+        hostname (str): The hostname to test.
+        denylist (tuple[str, ...]): Blocked apex domains.
+
+    Returns:
+        bool: ``True`` if the hostname is blocked, else ``False``.
+    """
     if not denylist:
         return False
     h = hostname.lower()
@@ -146,9 +202,26 @@ def _domain_blocked(hostname: str, denylist: tuple[str, ...]) -> bool:
 
 
 def _same_host(a: str, b: str) -> bool:
+    """Return whether two URLs share scheme, host (sans ``www.``) and port.
+
+    Args:
+        a (str): The first URL.
+        b (str): The second URL.
+
+    Returns:
+        bool: ``True`` if scheme, normalised host and port all match.
+    """
     pa, pb = urlparse(a), urlparse(b)
 
     def _norm(host: str | None) -> str:
+        """Lower-case a host and strip a leading ``www.``.
+
+        Args:
+            host (str | None): The hostname, possibly ``None``.
+
+        Returns:
+            str: The normalised host (``""`` when ``host`` is ``None``).
+        """
         return (host or "").lower().removeprefix("www.")
 
     return (
@@ -162,6 +235,15 @@ def _same_host(a: str, b: str) -> bool:
 
 @dataclass(frozen=True)
 class _FetchResult:
+    """Raw outcome of a single HTTP fetch after redirects.
+
+    Attributes:
+        body (bytes): The (size-limited) response body bytes.
+        content_type (str): The lower-cased content type (no parameters).
+        status_code (int): The final HTTP status code.
+        final_url (str): The URL the body was ultimately read from.
+    """
+
     body: bytes
     content_type: str
     status_code: int
@@ -169,6 +251,15 @@ class _FetchResult:
 
 
 def _looks_like_js_shell(text: str) -> bool:
+    """Heuristically detect a JS-rendered page shell with little real content.
+
+    Args:
+        text (str): The decoded HTML body.
+
+    Returns:
+        bool: ``True`` if the body is short on non-markup text yet contains a
+        known SPA/JS-shell marker.
+    """
     stripped_len = len(text) - text.count("<")
     if stripped_len > 4000:
         return False
@@ -179,6 +270,16 @@ def _looks_like_js_shell(text: str) -> bool:
 
 @dataclass(frozen=True)
 class _CacheEntry:
+    """A processed, cacheable fetch result.
+
+    Attributes:
+        body (str): The processed text body (markdown or raw).
+        content_type (str): The response content type.
+        status_code (int): The final HTTP status code.
+        final_url (str): The URL the body was read from.
+        byte_len (int): The raw body length in bytes before processing.
+    """
+
     body: str
     content_type: str
     status_code: int
@@ -187,7 +288,15 @@ class _CacheEntry:
 
 
 def _read_response_body_limited(resp: httpx.Response, max_bytes: int) -> bytes:
-    """Read at most ``max_bytes`` from a streaming response body."""
+    """Read at most ``max_bytes`` from a streaming response body.
+
+    Args:
+        resp (httpx.Response): The open streaming response.
+        max_bytes (int): The maximum number of bytes to read.
+
+    Returns:
+        bytes: The collected body, truncated to ``max_bytes``.
+    """
     parts: list[bytes] = []
     nbytes = 0
     for chunk in resp.iter_bytes():
@@ -220,13 +329,27 @@ class WebFetchClient:
     call_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
+        """Initialise the per-instance TTL+LRU cache from the config."""
         self._cache = TTLCache(
             maxsize=self.config.fetch_cache_max_entries,
             ttl=max(1, self.config.fetch_cache_ttl_s),
         )
 
     def execute(self, payload: dict) -> str:
-        """Run a single ``web_fetch`` call. Always returns a string."""
+        """Run a single ``web_fetch`` call. Always returns a string.
+
+        Validates the URL, applies the SSRF/domain guards, serves from cache
+        when possible, fetches with redirect handling, converts HTML to
+        markdown (unless ``raw``), caches the result and formats output. All
+        failures are returned as ``Error: ...`` strings rather than raised.
+
+        Args:
+            payload (dict): Tool payload with ``url`` and optional ``raw``
+                (bool) and ``max_bytes`` (int) keys.
+
+        Returns:
+            str: The formatted fetch output, or an ``Error: ...`` message.
+        """
         self.call_count += 1
         url_raw = payload.get("url")
         raw_param = bool(payload.get("raw"))
@@ -307,6 +430,25 @@ class WebFetchClient:
 
     # ──────────────────────────────────────────────────────────────────
     def _fetch_with_redirects(self, start_url: str, max_bytes: int) -> _FetchResult:
+        """Fetch a URL, manually following same-host redirects.
+
+        Each hop re-runs the SSRF DNS guard before connecting. Redirects are
+        followed only when the target shares scheme/host/port and carries no
+        credentials; cross-host or unsupported-protocol redirects are refused.
+
+        Args:
+            start_url (str): The validated URL to begin fetching from.
+            max_bytes (int): The maximum number of body bytes to read.
+
+        Returns:
+            _FetchResult: The body and metadata of the final (non-redirect)
+                response.
+
+        Raises:
+            FetchError: On a missing Location header, an unsupported-protocol
+                or credentialed redirect, a cross-host redirect, or exceeding
+                the redirect limit.
+        """
         current = start_url
         for _hop in range(_MAX_REDIRECTS + 1):
             parsed = urlparse(current)
@@ -356,6 +498,19 @@ class WebFetchClient:
 
 
 def _format_output(entry: _CacheEntry, *, truncate_at: int) -> str:
+    """Render a cache entry into the LLM-facing fetch output string.
+
+    Prepends a metadata header (URL / status / content-type / length) to the
+    body and truncates the body when it exceeds ``truncate_at``.
+
+    Args:
+        entry (_CacheEntry): The processed fetch result to render.
+        truncate_at (int): The maximum number of body characters to include
+            before appending a truncation notice.
+
+    Returns:
+        str: The formatted header-plus-body output.
+    """
     header = (
         f"URL: {entry.final_url}\n"
         f"Status: {entry.status_code}\n"
@@ -370,7 +525,13 @@ def _format_output(entry: _CacheEntry, *, truncate_at: int) -> str:
 
 
 def _new_default_http_client() -> httpx.Client:
-    """Helper used by the public factory; tests usually supply their own."""
+    """Build a default httpx client for the fetcher.
+
+    Helper used by the public factory; tests usually supply their own client.
+
+    Returns:
+        httpx.Client: A new client with HTTP/2 disabled and ``trust_env`` on.
+    """
     return httpx.Client(http2=False, trust_env=True)
 
 

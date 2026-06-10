@@ -1,16 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Research scout: tag/domain wiring, hint artifacts, and state bookkeeping.
-
-Covers the read-only PRELUDE research collector:
-
-1. The ``research_scout`` knowledge-domain tag + ``research_scout_specialist``
-   domain are registered (so PolicyGate accepts internal dispatch).
-2. ``research_hints`` artifacts enforce the source-required contract,
-   append-only merge, and the always-present PRELUDE skeleton.
-3. ``competitor_target`` drops per-concurrency rows missing a source.
-4. SharedState scout counters / seen-PR dedup round-trip through JSON.
-"""
+"""Research scout: tag/domain wiring, hint artifacts, and state bookkeeping for the read-only PRELUDE collector."""
 
 from __future__ import annotations
 
@@ -28,9 +18,7 @@ from inference_optimizer.orchestrator.system_prompts import (
 )
 
 
-# ---------------------------------------------------------------------------
 # 1. tag + domain wiring
-# ---------------------------------------------------------------------------
 def test_research_scout_tag_and_domain_registered():
     assert "research_scout" in sd.KNOWLEDGE_DOMAIN_TAGS
     assert "research_scout_specialist" in sd.SPECIALIST_DOMAIN_KEYS
@@ -40,9 +28,7 @@ def test_research_scout_has_focus_template():
     assert "research_scout_specialist" in spb._DOMAIN_FOCUS_TEMPLATES
 
 
-# ---------------------------------------------------------------------------
 # 2. research_hints artifacts
-# ---------------------------------------------------------------------------
 def test_skeleton_always_present(tmp_path: Path):
     research_hints.write_hints_skeleton(tmp_path)
     assert session_paths.research_hints_md(tmp_path).exists()
@@ -79,9 +65,7 @@ def test_skeleton_does_not_clobber_existing(tmp_path: Path):
     assert len(research_hints.load_hints(tmp_path)) == 1
 
 
-# ---------------------------------------------------------------------------
 # 3. competitor_target source contract
-# ---------------------------------------------------------------------------
 def test_competitor_target_requires_per_conc_source(tmp_path: Path):
     ok = research_hints.write_competitor_target(tmp_path, {
         "gpu": "MI300X",
@@ -106,9 +90,7 @@ def test_competitor_target_all_sourceless_writes_nothing(tmp_path: Path):
     assert not session_paths.competitor_target_json(tmp_path).exists()
 
 
-# ---------------------------------------------------------------------------
 # 4. SharedState bookkeeping
-# ---------------------------------------------------------------------------
 def test_scout_counters_and_seen_pr_roundtrip():
     s = SharedState()
     assert s.research_scout_enabled is True
