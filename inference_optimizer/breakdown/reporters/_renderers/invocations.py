@@ -91,6 +91,14 @@ def _render_pair(
 
 @register_renderer("geak_invocations")
 def render_geak(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the GEAK invocations section.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered GEAK invocations section.
+    """
     return _render_pair(
         breakdown,
         section_id="geak_invocations",
@@ -102,6 +110,14 @@ def render_geak(breakdown: dict[str, Any]) -> RenderedSection:
 
 @register_renderer("oob_invocations")
 def render_oob(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the OOB (out-of-box) invocations section.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered OOB invocations section.
+    """
     return _render_pair(
         breakdown,
         section_id="oob_invocations",

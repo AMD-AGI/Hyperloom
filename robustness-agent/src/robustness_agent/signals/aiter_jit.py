@@ -41,6 +41,15 @@ class AiterJitDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
+        """Initialise the detector and restore cross-tick JIT counters.
+
+        Args:
+            config (AiterJitConfig | None): Tunables; defaults to
+                :class:`AiterJitConfig` when ``None``.
+            state_view (DetectorStateView | None): Disk-backed state view used to
+                load/persist ``last_so_count``, ``last_build_count`` and the
+                stale-build streak.
+        """
         self._config = config or AiterJitConfig()
         self._state_view = state_view
         # Disk-backed cross-tick state; required for the regression check under subprocess-per-tick transport.
@@ -63,6 +72,7 @@ class AiterJitDetector:
             self._stale_build_streak = 0
 
     def _persist(self) -> None:
+        """Write the cross-tick JIT counters to the state view, if any."""
         if self._state_view is None:
             return
         self._state_view.save({
@@ -74,6 +84,20 @@ class AiterJitDetector:
     def evaluate(
         self, ctx: ReactorContext, data: SourceData,
     ) -> list[Symptom]:
+        """Evaluate the JIT-cache regression and stuck-build rules for this tick.
+
+        Updates the cross-tick counters and emits symptoms when the cache
+        regresses below the cold threshold or the build dir stays stuck.
+
+        Args:
+            ctx (ReactorContext): Reactor context for the current tick.
+            data (SourceData): Collected source data including
+                ``local_aiter_jit``.
+
+        Returns:
+            list[Symptom]: Any ``aiter_jit_regressed`` / ``aiter_jit_build_stuck``
+                symptoms for this tick, possibly empty.
+        """
         info = data.local_aiter_jit
         if not isinstance(info, dict) or not info:
             # No JIT data this tick — keep counters; don't accuse on missing telemetry.
@@ -114,6 +138,15 @@ class AiterJitDetector:
     def _regression_symptom(
         self, info: dict[str, Any], *, prev: int,
     ) -> Symptom:
+        """Build the ``aiter_jit_regressed`` symptom for a cache that went cold.
+
+        Args:
+            info (dict[str, Any]): Current aiter JIT probe sample.
+            prev (int): The previous tick's ``so_count`` used as the baseline.
+
+        Returns:
+            Symptom: A HIGH-severity symptom warning of an impending cold-start.
+        """
         cfg = self._config
         return Symptom(
             name="aiter_jit_regressed",
@@ -140,6 +173,15 @@ class AiterJitDetector:
         )
 
     def _build_stuck_symptom(self, info: dict[str, Any]) -> Symptom:
+        """Build the ``aiter_jit_build_stuck`` symptom for a stalled build dir.
+
+        Args:
+            info (dict[str, Any]): Current aiter JIT probe sample.
+
+        Returns:
+            Symptom: A MEDIUM-severity symptom indicating a likely crashed
+                mid-build ``hipcc`` invocation.
+        """
         cfg = self._config
         return Symptom(
             name="aiter_jit_build_stuck",
@@ -169,7 +211,16 @@ def evaluate_aiter_jit_signals(
     ctx: ReactorContext,
     data: SourceData,
 ) -> list[Symptom]:
-    """Module-level helper mirroring the other signal rule entry points."""
+    """Module-level helper mirroring the other signal rule entry points.
+
+    Args:
+        detector (AiterJitDetector): The stateful detector owned by the caller.
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected source data.
+
+    Returns:
+        list[Symptom]: The detector's symptoms for this tick, possibly empty.
+    """
     return detector.evaluate(ctx, data)
 
 

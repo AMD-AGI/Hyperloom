@@ -39,7 +39,15 @@ log = get_logger(__name__)
 
 
 def _coalesce_str(*values: Any) -> str:
-    """Return the first non-empty stripped string in ``values``; else ''."""
+    """Return the first non-empty stripped string in ``values``; else ''.
+
+    Args:
+        *values (Any): Candidate values; non-strings and blank strings are
+            skipped.
+
+    Returns:
+        str: The first stripped non-empty string, or ``""`` if none qualify.
+    """
     for value in values:
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -47,13 +55,30 @@ def _coalesce_str(*values: Any) -> str:
 
 
 def _summary_of(detail: dict[str, Any]) -> dict[str, Any]:
-    """primus-cortex wraps PR metadata under 'summary'; default to {} otherwise."""
+    """Return the nested ``summary`` mapping from a PR detail payload.
+
+    primus-cortex wraps PR metadata under a ``summary`` key; this defaults
+    to ``{}`` when it is absent or not a dict.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        dict[str, Any]: The nested summary dict, or ``{}`` when missing.
+    """
     summary = detail.get("summary")
     return summary if isinstance(summary, dict) else {}
 
 
 def _extract_head_sha(detail: dict[str, Any]) -> str:
-    """Pull head SHA out of any of the known keys in a PR detail payload."""
+    """Pull head SHA out of any of the known keys in a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The head commit SHA, or ``""`` when none of the keys carry it.
+    """
     summary = _summary_of(detail)
     sha = _coalesce_str(
         summary.get("head_sha"),
@@ -74,7 +99,14 @@ def _extract_head_sha(detail: dict[str, Any]) -> str:
 
 
 def _extract_labels(detail: dict[str, Any]) -> tuple[str, ...]:
-    """Pull labels out of a PR detail payload (handles dict and string items)."""
+    """Pull labels out of a PR detail payload (handles dict and string items).
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        tuple[str, ...]: The label names, or an empty tuple when absent.
+    """
     summary = _summary_of(detail)
     raw = summary.get("labels") if "labels" in summary else detail.get("labels")
     if raw is None:
@@ -92,7 +124,14 @@ def _extract_labels(detail: dict[str, Any]) -> tuple[str, ...]:
 
 
 def _extract_author(detail: dict[str, Any]) -> str:
-    """Pull author login from any known key in a PR detail payload."""
+    """Pull author login from any known key in a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The author login/name, or ``""`` when none can be found.
+    """
     summary = _summary_of(detail)
     summary_login = _coalesce_str(summary.get("author_login"), summary.get("author"))
     if summary_login:
@@ -109,13 +148,27 @@ def _extract_author(detail: dict[str, Any]) -> str:
 
 
 def _extract_title(detail: dict[str, Any]) -> str:
-    """Pull title from a PR detail payload."""
+    """Pull title from a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The PR title, or ``""`` when absent.
+    """
     summary = _summary_of(detail)
     return _coalesce_str(summary.get("title"), detail.get("title"))
 
 
 def _extract_updated_at(detail: dict[str, Any]) -> str:
-    """Pull updated_at timestamp string."""
+    """Pull the ``updated_at`` timestamp string from a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The update timestamp string, or ``""`` when absent.
+    """
     summary = _summary_of(detail)
     return _coalesce_str(
         summary.get("pr_updated_at"),
@@ -127,7 +180,14 @@ def _extract_updated_at(detail: dict[str, Any]) -> str:
 
 
 def _extract_html_url(detail: dict[str, Any]) -> str:
-    """Pull html_url from a PR detail payload."""
+    """Pull html_url from a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The PR HTML URL, or ``""`` when absent.
+    """
     summary = _summary_of(detail)
     return _coalesce_str(summary.get("html_url"), detail.get("html_url"), detail.get("url"))
 
@@ -135,7 +195,17 @@ def _extract_html_url(detail: dict[str, Any]) -> str:
 def _extract_changed_files(
     detail: dict[str, Any], files_payload: list[dict[str, Any]]
 ) -> tuple[str, ...]:
-    """Pull changed-files list, preferring the dedicated files endpoint payload."""
+    """Pull changed-files list, preferring the dedicated files endpoint payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload (may embed a file list).
+        files_payload (list[dict[str, Any]]): The dedicated files-endpoint
+            payload, used in preference to the embedded list.
+
+    Returns:
+        tuple[str, ...]: The changed file paths, or an empty tuple when none
+            are present.
+    """
     out: list[str] = []
     for item in files_payload:
         path = _coalesce_str(item.get("path"), item.get("filename"), item.get("file_path"))
@@ -271,7 +341,15 @@ def _enumerate_with_skipped(
 
 
 def _load_json(path: Path) -> dict[str, Any]:
-    """Best-effort JSON loader; returns {} when missing or invalid."""
+    """Best-effort JSON loader; returns {} when missing or invalid.
+
+    Args:
+        path (Path): The JSON file to load.
+
+    Returns:
+        dict[str, Any]: The parsed object, or ``{}`` when the file is missing,
+            unreadable, malformed, or not a JSON object.
+    """
     if not path.is_file():
         return {}
     try:
@@ -282,7 +360,16 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _metric_float(data: dict[str, Any], *keys: str) -> float | None:
-    """Return the first int/float value among ``keys`` in ``data``."""
+    """Return the first int/float value among ``keys`` in ``data``.
+
+    Args:
+        data (dict[str, Any]): The metric mapping to read.
+        *keys (str): Candidate keys, probed in order.
+
+    Returns:
+        float | None: The first numeric value found as a float, or ``None``
+            when no key holds an int/float.
+    """
     for key in keys:
         value = data.get(key)
         if isinstance(value, (int, float)):
@@ -291,7 +378,16 @@ def _metric_float(data: dict[str, Any], *keys: str) -> float | None:
 
 
 def _resolve_output_path(template: str, variables: dict[str, str]) -> Path:
-    """Render a path template using the candidate's variable bag."""
+    """Render a path template using the candidate's variable bag.
+
+    Args:
+        template (str): The path template with ``{var}`` placeholders.
+        variables (dict[str, str]): The variable bag substituted into the
+            template.
+
+    Returns:
+        Path: The rendered, user-expanded filesystem path.
+    """
     return Path(render_template(template, variables)).expanduser()
 
 
@@ -374,7 +470,18 @@ def _variables(
     worktree_dir: Path,
     venv_dir: Path,
 ) -> dict[str, str]:
-    """Build the variable bag passed to render_template for command specs."""
+    """Build the variable bag passed to render_template for command specs.
+
+    Args:
+        req (ExploreRequest): The explore request (framework / repo / work dir).
+        candidate (Candidate): The candidate (ref / repo).
+        candidate_dir (Path): The candidate's working directory.
+        worktree_dir (Path): The candidate's git worktree directory.
+        venv_dir (Path): The candidate's virtualenv directory.
+
+    Returns:
+        dict[str, str]: The string-valued variable bag for template rendering.
+    """
     return {
         "candidate_ref": candidate.ref,
         "candidate_repo": candidate.repo,
@@ -391,7 +498,17 @@ def _variables(
 def _evaluate_candidate(
     req: ExploreRequest, variables: dict[str, str]
 ) -> tuple[float | None, float | None, str]:
-    """Load post-run benchmark.json + accuracy.json and pull the metrics."""
+    """Load post-run benchmark.json + accuracy.json and pull the metrics.
+
+    Args:
+        req (ExploreRequest): The explore request supplying output templates.
+        variables (dict[str, str]): The candidate variable bag used to resolve
+            the output paths.
+
+    Returns:
+        tuple[float | None, float | None, str]: ``(throughput, accuracy,
+            completed)`` with ``None`` for any metric that is absent.
+    """
     benchmark_template = req.outputs.get("benchmark_json", "{candidate_dir}/benchmark.json")
     accuracy_template = req.outputs.get("accuracy_json", "{candidate_dir}/accuracy.json")
     benchmark = _load_json(_resolve_output_path(benchmark_template, variables))
@@ -501,6 +618,15 @@ async def _run_candidates_concurrent(
     semaphore = asyncio.Semaphore(max(1, req.build_concurrency))
 
     async def _bounded(idx: int, cand: Candidate) -> CandidateResult:
+        """Run one candidate under the concurrency semaphore.
+
+        Args:
+            idx (int): The unique 1-based candidate index.
+            cand (Candidate): The candidate to run.
+
+        Returns:
+            CandidateResult: The result of running the candidate in a thread.
+        """
         async with semaphore:
             return await asyncio.to_thread(
                 _run_single_candidate, req, cand, index=idx, execute=execute,
@@ -511,7 +637,14 @@ async def _run_candidates_concurrent(
 
 
 def _maybe_disk_preflight(req: ExploreRequest, n_candidates: int, *, execute: bool) -> None:
-    """Run disk_preflight when execute mode is on and threshold is not 0."""
+    """Run disk_preflight when execute mode is on and threshold is not 0.
+
+    Args:
+        req (ExploreRequest): The explore request (work dir + threshold).
+        n_candidates (int): The number of candidates to size the check by.
+        execute (bool): Whether the run is in execute mode; preflight is
+            skipped entirely in plan mode.
+    """
     if not execute or n_candidates <= 0:
         return
     if req.disk_min_free_gb == 0:
@@ -530,7 +663,14 @@ def _cleanup_losers(
     *,
     execute: bool,
 ) -> None:
-    """Apply keep_winner_only cleanup over all non-winner results."""
+    """Apply keep_winner_only cleanup over all non-winner results.
+
+    Args:
+        req (ExploreRequest): The explore request (supplies keep_winner_only).
+        results (list[CandidateResult]): The per-candidate results to clean up.
+        execute (bool): Whether the run is in execute mode; cleanup is skipped
+            in plan mode.
+    """
     if not execute or not req.keep_winner_only:
         return
     repo_dir: Path | None = None

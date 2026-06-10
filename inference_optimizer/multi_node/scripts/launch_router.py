@@ -138,6 +138,15 @@ def _detach_router(
 
 
 def main() -> int:
+    """Parse CLI arguments and detach the PD router on the head pod.
+
+    Builds the framework-specific router command, detaches it, prints a JSON
+    summary (framework, PID, URLs, file paths) to stdout, and returns.
+
+    Returns:
+        int: Process exit code; ``0`` on success, ``1`` if the router failed
+        to stay alive after launch.
+    """
     p = argparse.ArgumentParser(
         prog="launch_router.py",
         description="Detach the PD-disaggregation router on the head pod.",
