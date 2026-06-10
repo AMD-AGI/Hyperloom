@@ -40,6 +40,22 @@ def evaluate_stall_signals(
     *,
     config: StallConfig | None = None,
 ) -> list[Symptom]:
+    """Emit ``agent_stall`` symptoms for tracked agents that have gone silent.
+
+    Computes per-agent idle time from the most recent activity timestamp and
+    fires MEDIUM (or HIGH past ``severity_high_after_s``) once idle time exceeds
+    the stall timeout.
+
+    Args:
+        ctx (ReactorContext): Reactor context (provides inbox and current time).
+        data (SourceData): Collected source data including coordinator events.
+        config (StallConfig | None): Tunables; defaults to :class:`StallConfig`
+            when ``None``.
+
+    Returns:
+        list[Symptom]: One ``agent_stall`` symptom per stalled agent, possibly
+            empty.
+    """
     cfg = config or StallConfig()
     last_seen = _collect_last_seen(ctx.inbox, data.coordinator_events)
     out: list[Symptom] = []
@@ -85,6 +101,19 @@ def _collect_last_seen(
     inbox: list[InboxItem],
     coordinator_events: list[dict[str, Any]],
 ) -> dict[str, float]:
+    """Compute the latest activity timestamp per tracked agent.
+
+    Folds together inbox items and coordinator events, keeping the most recent
+    timestamp seen for each tracked agent.
+
+    Args:
+        inbox (list[InboxItem]): Inbox items from the reactor context.
+        coordinator_events (list[dict[str, Any]]): Raw coordinator events.
+
+    Returns:
+        dict[str, float]: Mapping of agent name to its latest activity unix
+            timestamp.
+    """
     last: dict[str, float] = {}
 
     for item in inbox:
@@ -112,6 +141,18 @@ def _collect_last_seen(
 
 
 def _coerce_unix(value: Any) -> float | None:
+    """Coerce a timestamp value to unix seconds.
+
+    Accepts numeric epoch seconds or an ISO-8601 string (``Z`` suffix
+    tolerated), falling back to parsing the string as a float.
+
+    Args:
+        value (Any): The raw timestamp value.
+
+    Returns:
+        float | None: Unix seconds, or ``None`` when the value cannot be
+            interpreted as a timestamp.
+    """
     if value is None:
         return None
     if isinstance(value, (int, float)):

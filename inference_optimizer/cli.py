@@ -85,6 +85,17 @@ class _RetiredFlag(argparse.Action):
         hint: str,
         **kwargs: Any,
     ) -> None:
+        """Register the retired flag as a zero-argument, hidden action.
+
+        Args:
+            option_strings (list[str]): The flag spellings this action handles.
+            dest (str): The argparse destination name (unused; suppressed).
+            hint (str): One-line migration hint shown in the error message when
+                the retired flag is used.
+            **kwargs (Any): Passed through to :class:`argparse.Action`; ``nargs``,
+                ``default``, and ``help`` are defaulted so the flag takes no
+                value and stays out of ``--help``.
+        """
         kwargs.setdefault("nargs", 0)
         kwargs.setdefault("default", argparse.SUPPRESS)
         kwargs.setdefault("help", argparse.SUPPRESS)
@@ -98,6 +109,17 @@ class _RetiredFlag(argparse.Action):
         values: Any,
         option_string: str | None = None,
     ) -> None:
+        """Abort parsing with a migration hint when the retired flag is seen.
+
+        Args:
+            parser (argparse.ArgumentParser): The parser invoking this action.
+            namespace (argparse.Namespace): The in-progress parse namespace.
+            values (Any): Parsed values for the flag (always empty; ``nargs=0``).
+            option_string (str | None): The exact flag spelling that triggered this.
+
+        Raises:
+            SystemExit: Always — ``parser.error`` prints the message and exits 2.
+        """
         parser.error(f"{option_string} was removed. {self._hint}")
 
 
@@ -107,7 +129,19 @@ def _orchestration_rules_fragment_path() -> Path:
 
 
 def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
-    """Return ``(kind, value)`` strings consumed by the prompt builder."""
+    """Summarise an objective into the ``(kind, value)`` pair the prompt expects.
+
+    Inspects the objective for the first recognised target attribute
+    (``target_gain_pct`` → float, ``target_tput_per_gpu`` → float,
+    ``baseline_dir`` → str) and pairs it with the objective's ``kind()``.
+
+    Args:
+        objective (Objective): The run objective to summarise.
+
+    Returns:
+        tuple[str, float | str | None]: ``(kind, value)`` where ``value`` is the
+        objective's numeric / string target, or ``None`` when none is present.
+    """
     kind = objective.kind()
     value: float | str | None = None
     if hasattr(objective, "target_gain_pct"):
@@ -145,7 +179,11 @@ def _build_orchestration_prompt(
 
 
 def _load_critic_prompt() -> str:
-    """Return the Critic system prompt sourced from ``system_prompts/critic.md``."""
+    """Return the Critic system prompt sourced from ``system_prompts/critic.md``.
+
+    Returns:
+        str: The contents of ``critic.md``.
+    """
     return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
 
 
@@ -273,7 +311,19 @@ def _resolve_robustness_agent_root() -> Path | None:
 
 
 def _validate_robustness_agent_runtime(root: Path) -> None:
-    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work."""
+    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work.
+
+    Runs the runtime's ``--help`` with ``cwd=root`` and ``PYTHONPATH`` extended
+    by ``<root>/src`` so the subprocess resolves the module the same way the
+    real backend will. Any launch failure or non-zero exit prints an
+    operator-facing message and aborts.
+
+    Args:
+        root (Path): The robustness-agent skill root to validate.
+
+    Raises:
+        SystemExit: With code 2 when the runtime cannot start or exits non-zero.
+    """
     src = str(root / "src")
     env = dict(os.environ)
     env["PYTHONPATH"] = src + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src
@@ -1258,6 +1308,15 @@ def _seed_shared_state(
         )
     # Resolve workload metadata from CLI flags then env; parse duplicated here to avoid re-reading manifest.json.
     def _int_env_or_arg(arg_name: str, env_name: str) -> int:
+        """Resolve an int workload knob from a CLI arg, falling back to env.
+
+        Args:
+            arg_name (str): Attribute name to read off ``args``.
+            env_name (str): Environment variable consulted when the arg is unset/0.
+
+        Returns:
+            int: The resolved value, or 0 when neither source yields a valid int.
+        """
         val = getattr(args, arg_name, None)
         if val is None or val == 0:
             raw = (os.environ.get(env_name, "") or "").strip()
@@ -1422,12 +1481,17 @@ def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
-    """Echo the freshly-created skeleton so launchers see the exact layout."""
+    """Echo the freshly-created skeleton so launchers see the exact layout.
+
+    Args:
+        session_dir (Path): The session root directory whose skeleton
+            subdirectories are listed.
+    """
     print(f"Session layout under {session_dir}:")
     for sub in _SESSION_SKELETON:
         marker = "ok" if (session_dir / sub).is_dir() else "MISSING"
         print(f"  [{marker}] {sub}/")
-    print(f"  [ok] manifest.json (written first)")
+    print("  [ok] manifest.json (written first)")
 
 
 def _snapshot_system_prompts(
@@ -1443,6 +1507,20 @@ def _snapshot_system_prompts(
 
 
 def _default_target_summary(args: argparse.Namespace) -> str:
+    """Compose a human-readable objective summary from the CLI target flags.
+
+    Used as the fallback ``target_summary`` when the operator did not pass an
+    explicit ``--target-summary``. The phrasing depends on which target flag is
+    set: ``--target-gain`` (percentage), ``--target-tput`` (tok/s/GPU), or
+    neither (open-ended optimization within the time budget).
+
+    Args:
+        args (argparse.Namespace): Parsed ``optimize`` arguments (reads ``model``,
+            ``target_gain``, ``target_tput``, ``max_hours``).
+
+    Returns:
+        str: A one-sentence description of the run's objective.
+    """
     if args.target_gain:
         return (
             f"Establish baseline on {Path(args.model).name} then drive "
@@ -1458,6 +1536,20 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
+    """Print the end-of-run summary block to stdout.
+
+    Reports the stop reason, session id, model, baseline throughput, the
+    per-round (informational) cumulative gain, the validated cumulative gain
+    (with a staleness warning when the optimization stack grew after the last
+    validation), the current best config, pruned families, and crash count.
+
+    Args:
+        state (SharedState): The final shared state after the run completes.
+        stop_reason (str): Why the run stopped (e.g. ``"target_reached"``).
+
+    Returns:
+        None
+    """
     print()
     print("================ Final summary ================")
     print(f"  stop_reason          : {stop_reason}")
@@ -1481,8 +1573,8 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
         )
     else:
         print(
-            f"  cumulative_gain_val  : 0.00% "
-            f"⚠ never validated — no `explore` stack-rebench has succeeded yet"
+            "  cumulative_gain_val  : 0.00% "
+            "⚠ never validated — no `explore` stack-rebench has succeeded yet"
         )
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
@@ -2025,6 +2117,15 @@ def _print_cortex_kb_queue_status() -> None:
     flushed = cortex_flushed_ndjson(sd)
 
     def _count(p: Path) -> int:
+        """Count non-blank lines (NDJSON rows) in a queue file.
+
+        Args:
+            p (Path): Path to the NDJSON file to count.
+
+        Returns:
+            int: The number of non-empty lines, or 0 when the file is missing
+            or unreadable.
+        """
         if not p.exists():
             return 0
         try:
@@ -2744,7 +2845,25 @@ def _gc_old_profile_traces(
 
 
 def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
-    """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS."""
+    """Create/reuse the SaFE RayJob stack for a multi-node run.
+
+    No-op when ``--nodes < 2``. Otherwise resolves the RayJob container image
+    (CLI flag → env → prior state file), creates or reuses the RayJob, runs the
+    one-time bootstrap if it hasn't run yet, exports ``RAY_ADDRESS`` for
+    kernel-agent Ray tasks, sets ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` to a
+    cluster-shared trace directory namespaced by ``rayjob_id`` (GC'ing older
+    sibling dirs), and replays previously-applied kernel patches onto the
+    (possibly fresh) pods.
+
+    Args:
+        args (argparse.Namespace): Parsed ``optimize`` arguments (reads
+            ``nodes``, ``rayjob_image``, ``rayjob_gpus_per_node``,
+            ``rayjob_extra_env``).
+
+    Raises:
+        SystemExit: With code 2 when ``--nodes >= 2`` but no RayJob image is
+            configured, or with the create/bootstrap return code on failure.
+    """
     nodes = max(1, int(args.nodes))
     if nodes < 2:
         return
@@ -3026,7 +3145,18 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
 
 
 def _argv_has_option(argv: list[str], option: str) -> bool:
-    """Return True when argv explicitly carries ``option``."""
+    """Report whether ``argv`` explicitly carries a given option.
+
+    Matches both the bare flag (``--tp``) and the ``=``-joined form
+    (``--tp=8``).
+
+    Args:
+        argv (list[str]): The argument vector to scan.
+        option (str): The long-option flag to look for (e.g. ``"--tp"``).
+
+    Returns:
+        bool: ``True`` when the option appears in ``argv``, else ``False``.
+    """
     prefix = f"{option}="
     return any(arg == option or arg.startswith(prefix) for arg in argv)
 
@@ -3188,7 +3318,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             picked = find_latest_per_session_dir()
             if picked is not None:
                 session_dir = picked
-                print(f"  --resume: auto-picked latest per-session subdir")
+                print("  --resume: auto-picked latest per-session subdir")
             else:
                 # Legacy flat layout — workspace_root itself is the session_dir.
                 session_dir = ws
@@ -4616,6 +4746,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # Integration toggles. Roofline refresh is unconditional now (fires at PRELUDE and every 10%
     # cumulative_gain_validated crossing); the legacy composite/deny profile toggles are gone.
     def _env_default_on(env_var: str) -> bool:
+        """Resolve a default-on boolean toggle from an environment variable.
+
+        Args:
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            bool: ``False`` only when the variable is explicitly set to ``"0"``;
+            ``True`` otherwise (including when unset).
+        """
         return os.environ.get(env_var, "1").strip() != "0"
 
     opt.add_argument(
@@ -4773,6 +4912,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # Default 1.10: kill a single-variant run once wall-clock exceeds baseline by +10% (outcome=KILLED_OVERTIME).
     # 0 disables (legacy variant_timeout_sec hard cap still applies); gate skips the inlined stack rebench (Q4).
     def _env_float_or(default: float, env_var: str) -> float:
+        """Resolve a float CLI default from an environment variable.
+
+        Args:
+            default (float): Value to use when the variable is unset or invalid.
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            float: The parsed env value, or ``default`` on absence / parse error.
+        """
         raw = os.environ.get(env_var, "").strip()
         if not raw:
             return float(default)
@@ -4782,6 +4930,15 @@ def _build_parser() -> argparse.ArgumentParser:
             return float(default)
 
     def _env_int_or(default: int, env_var: str) -> int:
+        """Resolve an int CLI default from an environment variable.
+
+        Args:
+            default (int): Value to use when the variable is unset or invalid.
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            int: The parsed env value, or ``default`` on absence / parse error.
+        """
         raw = os.environ.get(env_var, "").strip()
         if not raw:
             return int(default)
@@ -5028,6 +5185,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: parse arguments and dispatch the requested subcommand.
+
+    Configures logging from the ``-v`` count, resolves any ``--*-prompt`` flag
+    that points at a file (reading its contents in place), and runs the
+    ``optimize`` subcommand via :func:`asyncio.run`. Prints help and returns a
+    non-zero code for unknown commands.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv[1:]`` when ``None``.
+
+    Returns:
+        int: The process exit code (``optimize`` result, or ``2`` for no/unknown
+        command).
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)

@@ -33,10 +33,26 @@ class GlobalFacts:
     attribution_method: str             # "validated" | "best-effort reconstructed" | "missing"
 
     def as_prompt_dict(self) -> dict[str, Any]:
+        """Serialize the fact pack to a plain dict for the LLM prompt.
+
+        Returns:
+            dict[str, Any]: All fields of this dataclass as a JSON-friendly
+                mapping (via ``dataclasses.asdict``).
+        """
         return asdict(self)
 
 
 def _safe_pct(num: Any, denom: Any) -> float | None:
+    """Compute a signed percentage change, tolerating bad inputs.
+
+    Args:
+        num (Any): The new value (numerator); coerced to float.
+        denom (Any): The baseline value (denominator); coerced to float.
+
+    Returns:
+        float | None: ``(num - denom) / denom * 100`` as a percent, or
+            ``None`` if either value is non-numeric or the denominator is 0.
+    """
     try:
         n, d = float(num), float(denom)
     except (TypeError, ValueError):
@@ -47,6 +63,15 @@ def _safe_pct(num: Any, denom: Any) -> float | None:
 
 
 def _to_float(v: Any) -> float | None:
+    """Coerce a value to float, returning ``None`` instead of raising.
+
+    Args:
+        v (Any): The value to coerce.
+
+    Returns:
+        float | None: The float value, or ``None`` if ``v`` is ``None`` or
+            cannot be converted.
+    """
     try:
         return float(v) if v is not None else None
     except (TypeError, ValueError):
@@ -54,6 +79,17 @@ def _to_float(v: Any) -> float | None:
 
 
 def _workload_summary(workload: dict[str, Any]) -> str:
+    """Build a compact one-line description of the workload.
+
+    Args:
+        workload (dict[str, Any]): The ``workload`` section of the breakdown,
+            with keys such as ``model_name``, ``framework``, ``precision``,
+            ``tp``, ``conc``, ``isl`` and ``osl``.
+
+    Returns:
+        str: A single line like ``"DeepSeek-R1 vllm fp8 tp=8 conc=64 ..."``,
+            using placeholders for any missing fields.
+    """
     model = workload.get("model_name") or "(unknown-model)"
     fw = workload.get("framework") or "?"
     prec = workload.get("precision") or "?"
@@ -118,6 +154,16 @@ def _gain_attribution_lines(
 
 
 def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
+    """Count kernels at each stage of the optimization lifecycle.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        dict[str, int]: Counts keyed by lifecycle stage (``detected``,
+            ``recommended``, ``optimized``, ``adopted``, ``partial``,
+            ``reverted`` and ``rejected``).
+    """
     kl = breakdown.get("kernel_lifecycle") or {}
     return {
         "detected":    len(kl.get("detected") or []),
@@ -139,6 +185,11 @@ def _data_quality_flags(
     seen: set[str] = set()
 
     def _push(line: str) -> None:
+        """Append ``line`` to ``flags`` once, de-duplicating via ``seen``.
+
+        Args:
+            line (str): The flag text to record.
+        """
         if line in seen:
             return
         seen.add(line)
@@ -168,6 +219,15 @@ def _data_quality_flags(
 def _capabilities_split(
     breakdown: dict[str, Any],
 ) -> tuple[list[str], list[str]]:
+    """Split capabilities into those kept vs. never attempted.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        tuple[list[str], list[str]]: A sorted list of capability names with
+            status ``"kept"`` and a sorted list with status ``"not_attempted"``.
+    """
     cap = breakdown.get("capability_summary") or {}
     kept = []
     not_attempted = []
@@ -181,6 +241,15 @@ def _capabilities_split(
 
 
 def _headline(breakdown: dict[str, Any]) -> str:
+    """Build the one-line baseline→final throughput headline.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        str: A line such as ``"baseline X → final Y tok/s/gpu = +Z% validated
+            gain"``, or a fallback message when validated throughput is missing.
+    """
     b = (breakdown.get("baseline") or {}).get("throughput_tok_s_per_gpu")
     f = (breakdown.get("final") or {}).get("throughput_tok_s_per_gpu")
     g = (breakdown.get("final") or {}).get("cumulative_gain_pct_validated")
@@ -196,6 +265,20 @@ def build_global_facts(
     breakdown: dict[str, Any],
     rendered: list[RenderedSection],
 ) -> GlobalFacts:
+    """Assemble the deterministic :class:`GlobalFacts` pack for the LLM.
+
+    This is the single entry point that combines the workload summary,
+    headline, gain attribution, capability split, kernel funnel and
+    data-quality flags into one fact pack.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+        rendered (list[RenderedSection]): The already-rendered sections, used
+            to gather per-section data-quality warnings.
+
+    Returns:
+        GlobalFacts: The populated, frozen fact pack.
+    """
     workload = breakdown.get("workload") or {}
     session = breakdown.get("session") or {}
     attribution_lines, attribution_method = _gain_attribution_lines(breakdown)
