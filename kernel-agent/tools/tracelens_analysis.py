@@ -44,6 +44,8 @@ except Exception:
 
 from tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
 from tracelens_skill_runner import (
+    _parse_launcher_path,
+    _resolve_launcher_to_abs_source,
     aggregate_by_source_function,
     discover_capture_folder,
     extract_idle_pct_from_analysis_md,
@@ -1537,6 +1539,33 @@ def upgrade_aiter_compile_ops_launcher(
     return source_file
 
 
+_SGL_KERNEL_DEVICE_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "silu_and_mul",
+        (
+            "/sgl-workspace/sglang/sgl-kernel/include/hip/hip_act_and_mul.cuh",
+        ),
+    ),
+)
+
+
+def upgrade_sgl_kernel_launcher(source_file: str, kernel_name: str) -> str:
+    """Promote known sgl-kernel Python launchers to reusable HIP source."""
+    if not source_file or not kernel_name:
+        return source_file
+    source_posix = source_file.replace(os.sep, "/")
+    if "sgl-kernel/python/sgl_kernel/" not in source_posix:
+        return source_file
+    name_lower = kernel_name.lower()
+    for marker, candidates in _SGL_KERNEL_DEVICE_PROMOTIONS:
+        if marker not in name_lower:
+            continue
+        for candidate in candidates:
+            if Path(candidate).is_file():
+                return candidate
+    return source_file
+
+
 def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
                                kernel_repo: str) -> str:
     """If `source_file` is a tiny pybind11 shim, find the real device .cu/.cuh implementing `kernel_name`.
@@ -1829,6 +1858,13 @@ def _finalize_candidates(
         if item["source_file"] != wrapper_before_promotion:
             item["launcher_source_file"] = wrapper_before_promotion
             item["source_promoted_from_launcher"] = True
+        wrapper_before_sgl_promotion = item.get("source_file", "")
+        item["source_file"] = upgrade_sgl_kernel_launcher(
+            wrapper_before_sgl_promotion, item["name"],
+        )
+        if item["source_file"] != wrapper_before_sgl_promotion:
+            item["launcher_source_file"] = wrapper_before_sgl_promotion
+            item["source_promoted_from_launcher"] = True
         # Re-resolve repo in case the upgraded path lives in a different repo.
         item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
         item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
@@ -2063,6 +2099,21 @@ def _match_op_by_time(
     return best
 
 
+def _resolve_source_file_from_kernel_path(kernel_path: str) -> str:
+    """Resolve a TraceLens launcher path to an existing absolute source file."""
+    raw_path, _, _ = _parse_launcher_path(kernel_path)
+    if raw_path and os.path.isabs(raw_path) and os.path.isfile(raw_path):
+        return raw_path
+    if raw_path.startswith("sgl_kernel/"):
+        sgl_kernel_source = Path("/sgl-workspace/sglang/sgl-kernel/python") / raw_path
+        if sgl_kernel_source.is_file():
+            return str(sgl_kernel_source)
+    resolved = _resolve_launcher_to_abs_source(kernel_path)
+    if resolved is not None:
+        return resolved[0]
+    return ""
+
+
 def deterministic_extract_hot_kernels(
     output_dir: Path,
     top_k: int = 10,
@@ -2126,6 +2177,7 @@ def deterministic_extract_hot_kernels(
             launcher_path = full_op.get("launcher_path", "")
             if launcher_path in ("\u2014", "-", ""):
                 launcher_path = ""
+            source_file = _resolve_source_file_from_kernel_path(launcher_path)
 
             shapes_raw = full_op.get("args", "")
             shapes = [shapes_raw] if shapes_raw else []
@@ -2140,6 +2192,8 @@ def deterministic_extract_hot_kernels(
                 "tracelens_category": category,
                 "tracelens_pitem_rank": global_rank,
                 "kernel_path": launcher_path,
+                "tracelens_launcher_path": launcher_path,
+                "source_file": source_file,
                 "shapes": shapes,
                 "library": member.get("library", full_op.get("library", "")),
             }
