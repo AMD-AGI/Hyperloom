@@ -21,6 +21,19 @@ _CAPABILITY_ORDER = (
 
 @register_renderer("capability_summary")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the capability-summary section.
+
+    Produces a status/attempts/keeps table for each capability in a
+    stable order, one structured :class:`Decision` per non-``not_attempted``
+    capability, and a one-line fact per row. Skipped when no capabilities
+    were recorded.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered capability-summary section.
+    """
     cap = breakdown.get("capability_summary") or {}
     rows: list[list[Any]] = []
     facts: list[str] = []

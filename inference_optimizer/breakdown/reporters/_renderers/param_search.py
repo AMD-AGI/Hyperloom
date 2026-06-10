@@ -11,6 +11,18 @@ from ..base import RenderedSection, md_table, register_renderer
 
 @register_renderer("param_search")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the parameter / backend DFS-search section.
+
+    Summarizes the backends and params depth-first search (tested vs.
+    accepted counts), discovered framework flags, backend-winner history
+    and attempted synergy combos. Skipped when no search data exists.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered parameter/backend search section.
+    """
     ps = breakdown.get("param_search") or {}
     explore = ps.get("explore") or {}
     backends = ps.get("backends") or {}

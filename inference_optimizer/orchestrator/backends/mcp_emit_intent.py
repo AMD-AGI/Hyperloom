@@ -68,7 +68,21 @@ EMIT_INTENT_TOOL_DESCRIPTION = (
 
 
 def validate_emit_intent_input(payload: dict[str, Any]) -> None:
-    """Eager single-intent validation (mirrors :func:`validate_envelope`)."""
+    """Eager single-intent validation (mirrors :func:`validate_envelope`).
+
+    Checks the tool-input shape (only ``intent_type`` and ``payload`` keys,
+    both present), that ``intent_type`` is a known :class:`IntentType`, and
+    that the inner payload carries every required field for that type.
+
+    Args:
+        payload (dict[str, Any]): The raw ``emit_intent`` tool input to
+            validate.
+
+    Raises:
+        IntentValidationError: If the input is not a dict, has unexpected or
+            missing top-level keys, names an unknown intent type, or omits a
+            required payload field.
+    """
     if not isinstance(payload, dict):
         raise IntentValidationError(
             f"emit_intent input must be an object, got {type(payload).__name__}"
@@ -116,6 +130,16 @@ async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_sdk(sdk_module: Any | None) -> Any | None:
+    """Return the provided SDK module or import ``claude_agent_sdk``.
+
+    Args:
+        sdk_module (Any | None): An explicit SDK module override (used by
+            tests); when ``None`` the real ``claude_agent_sdk`` is imported.
+
+    Returns:
+        Any | None: The resolved SDK module, or ``None`` if the override is
+        absent and the SDK cannot be imported.
+    """
     if sdk_module is not None:
         return sdk_module
     try:

@@ -32,6 +32,14 @@ _TRUNC_LEN = 72
 
 
 def _ascii_only(text: str) -> bool:
+    """Report whether a string contains only ASCII characters.
+
+    Args:
+        text (str): The string to test.
+
+    Returns:
+        bool: True when every character is in the ASCII range.
+    """
     return bool(_ASCII_RE.match(text))
 
 
@@ -39,6 +47,17 @@ def slugify(topic: str) -> str:
     """ASCII-only deterministic slug.
 
     See contract Appendix D.2 for the step-by-step spec.
+
+    Args:
+        topic (str): The topic string to slugify.
+
+    Returns:
+        str: The deterministic slug (hash-suffixed when over the max length).
+
+    Raises:
+        SlugifyError: If ``topic`` is not a string, is empty/whitespace,
+            contains non-ASCII characters, collapses to empty, or is shorter
+            than the minimum length.
     """
     if not isinstance(topic, str):
         raise SlugifyError(f"topic must be str, got {type(topic).__name__}")
@@ -82,6 +101,19 @@ def slugify_safe(
     * Non-ASCII + ``translate_fn`` provided → ``slugify(translate_fn(topic))``.
     * Non-ASCII without translate_fn (or translate_fn raises) → the
       deterministic fallback ``<prefix>-<sha8>`` so writes remain idempotent.
+
+    Args:
+        topic (str): The topic string to slugify.
+        translate_fn (Callable[[str], str] | None): Optional translator used
+            to romanise non-ASCII input before slugifying.
+        fallback_prefix (str): Prefix for the deterministic hash fallback.
+
+    Returns:
+        str: A slug — from :func:`slugify`, from the translated text, or the
+        ``<prefix>-<sha8>`` fallback.
+
+    Raises:
+        SlugifyError: If ``topic`` is not a non-empty string.
     """
     if not isinstance(topic, str) or not topic.strip():
         raise SlugifyError("empty: topic is empty or whitespace-only")

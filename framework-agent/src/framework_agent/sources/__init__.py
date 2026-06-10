@@ -36,7 +36,15 @@ class SourceConfigError(RuntimeError):
 
 
 def _dedupe(items: Iterable[Candidate]) -> list[Candidate]:
-    """Stable-deduplicate candidates by ref, preserving first-seen order."""
+    """Stable-deduplicate candidates by ref, preserving first-seen order.
+
+    Args:
+        items (Iterable[Candidate]): Candidates to deduplicate.
+
+    Returns:
+        list[Candidate]: Candidates with duplicate refs removed, first-seen
+            order preserved.
+    """
     seen: set[str] = set()
     out: list[Candidate] = []
     for item in items:
@@ -83,6 +91,19 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
 
     Hard-fails when ``primus_cortex`` is requested without configuration,
     or when the primus-cortex transport fails.
+
+    Args:
+        request (ExploreRequest): Request carrying explicit refs, search modes,
+            repo URL, and search configuration.
+
+    Returns:
+        list[Candidate]: Deduplicated candidates unioned across explicit refs
+            and every enabled search mode.
+
+    Raises:
+        SourceConfigError: If an unknown search mode is requested, or
+            ``primus_cortex`` is requested without configuration.
+        PrimusCortexError: If a primus_cortex query fails.
     """
     out: list[Candidate] = []
 
@@ -123,7 +144,16 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
 
 
 def _run_github(request: ExploreRequest) -> list[Candidate]:
-    """Query anonymous GitHub Search; best-effort - empty list on failure."""
+    """Query anonymous GitHub Search; best-effort - empty list on failure.
+
+    Args:
+        request (ExploreRequest): Request supplying repo URL, gap description,
+            and candidate cap.
+
+    Returns:
+        list[Candidate]: Candidates from GitHub Search, or an empty list on any
+            failure.
+    """
     prs = github_backend.search_perf_prs(
         request.repo_url,
         gap_description=request.gap_description,

@@ -60,7 +60,19 @@ def _log(msg: str) -> None:
 
 
 def _wait_for_nodes(target_n: int, timeout_s: int) -> list[dict]:
-    """Poll ray.nodes() until ``target_n`` alive GPU nodes are visible."""
+    """Poll ray.nodes() until ``target_n`` alive GPU nodes are visible.
+
+    Args:
+        target_n (int): Number of alive GPU nodes required.
+        timeout_s (int): Maximum seconds to wait before giving up.
+
+    Returns:
+        list[dict]: The alive GPU node rows from ``ray.nodes()``.
+
+    Raises:
+        RuntimeError: If fewer than ``target_n`` nodes are visible before
+            the timeout elapses.
+    """
     started = time.monotonic()
     while True:
         nodes = [
@@ -402,7 +414,16 @@ def _spawn_remote(
 
 
 def _rank0_pid_from_log(log_dir: str) -> int | None:
-    """Read rank 0 PID from /tmp/multi_node_pids/rank_0.pid (best-effort)."""
+    """Read rank 0 PID from /tmp/multi_node_pids/rank_0.pid (best-effort).
+
+    Args:
+        log_dir (str): The log directory; its parent is probed for the
+            ``multi_node_pids/rank_0.pid`` file before falling back to the
+            default ``/tmp`` location.
+
+    Returns:
+        int | None: The rank-0 PID, or ``None`` if it cannot be read.
+    """
     try:
         pid_path = pathlib.Path(log_dir).parent / "multi_node_pids" / "rank_0.pid"
         if not pid_path.is_file():
@@ -506,7 +527,11 @@ def _wait_health(
 
 
 def _emit_rank0_log_tail(log_dir: Path) -> None:
-    """Append the tail of ``rank_0.log`` to stderr if the file exists."""
+    """Append the tail of ``rank_0.log`` to stderr if the file exists.
+
+    Args:
+        log_dir (Path): Directory containing ``rank_0.log``.
+    """
     lf = log_dir / "rank_0.log"
     try:
         sz = lf.stat().st_size if lf.is_file() else 0
@@ -534,6 +559,18 @@ def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
 
 
 def main() -> int:
+    """Parse CLI arguments and launch the multi-node server group(s).
+
+    Connects to the in-pod Ray cluster, discovers and rank-orders nodes,
+    spawns one launcher actor per rank (colocated or PD-disaggregated),
+    emits a JSON summary to stdout, and optionally waits for rank-0
+    ``/health``.
+
+    Returns:
+        int: Process exit code; ``0`` on success (or slow-but-alive boot),
+        ``1`` on a spawn failure, ``2`` on invalid args or a confirmed
+        framework early-exit / fatal log error.
+    """
     p = argparse.ArgumentParser(
         prog="launch_multinode.py",
         description="Spawn one sglang/vllm rank per RayJob node via ray actors.",

@@ -5,7 +5,8 @@
 Routes calls between the local store and the central kb-service
 according to the design fixed in 2026-05-28:
 
-Writes — local-only:
+Writes — local-only::
+
     :meth:`put_recipe`, :meth:`append_attempt`,
     :meth:`delete_recipe` are forwarded verbatim to
     :class:`LocalRecipeStore`. The remote client never sees a
@@ -14,7 +15,8 @@ Writes — local-only:
     new rows land.
 
 Reads — remote-first via the SINGLE ``/recipes/search`` route, fall
-through to local on absence / failure:
+through to local on absence / failure::
+
     The remote half is reached ONLY through ``/recipes/search``.
     ``get_recipe`` decodes the 5-tuple from the canonical_id into
     ``label_match`` and issues ONE search — the server decides
@@ -43,7 +45,8 @@ through to local on absence / failure:
        local store. Callers therefore never have to unwrap remote
        errors.
 
-Reads — local-only mode:
+Reads — local-only mode::
+
     A dispatcher constructed with ``remote=None`` (e.g.
     ``--degraded-kb`` or no ``--cortex-kb-url``) skips step 1
     entirely; reads go directly to the local store. A
@@ -81,8 +84,19 @@ def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
 
     The five cid segments are already slug-clean (produced by
     ``recipe_canonical_id``), so they map 1:1 to the label values the
-    server matches on. Raises :class:`InvalidCanonicalIdError` for a
-    malformed id — the caller falls back to a local read.
+    server matches on.
+
+    Args:
+        canonical_id (str): Canonical recipe identity to decode.
+
+    Returns:
+        dict[str, str]: The 5-key ``label_match`` dict (``model`` /
+            ``hardware`` / ``framework`` / ``framework_version`` /
+            ``precision``).
+
+    Raises:
+        InvalidCanonicalIdError: If ``canonical_id`` is malformed; the
+            caller falls back to a local read.
     """
     model, hardware, framework, framework_version, precision = (
         cid_to_path_components(canonical_id)
@@ -132,6 +146,14 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
     Tolerant of missing keys — the central server always returns the
     full v2 envelope, but a partially-populated row (e.g. an old
     archive that pre-dates the field) shouldn't crash the read.
+
+    Args:
+        v2_payload (dict[str, Any]): A v2-spec recipe dict from the
+            central kb-service.
+
+    Returns:
+        dict[str, Any]: The same row in arbor on-disk shape; an empty
+            dict if ``v2_payload`` is not a dict.
     """
     if not isinstance(v2_payload, dict):
         return {}
@@ -314,6 +336,9 @@ class RecipeKB:
         v1 ``CortexKBClient`` keep working against the v2 dispatcher
         (e.g. ``coordinator._ensure_cortex_t0_anchored``); a missing
         attribute there would silently skip the SDK-fallback T0 anchor.
+
+        Returns:
+            bool: Always ``True``.
         """
         return True
 
@@ -328,6 +353,9 @@ class RecipeKB:
         retries background) to detect "service unhealthy" within an
         SLO that matches what callers already expect from the prior
         client. Adding a separate ping doubles RTT for every read.
+
+        Returns:
+            bool: ``True`` iff a remote client exists and is enabled.
         """
         return self.remote is not None and bool(self.remote.enabled)
 
@@ -349,6 +377,17 @@ class RecipeKB:
         return _v2_to_arbor(row)
 
     def _note_failure(self, method: str, exc: Exception) -> None:
+        """Report a remote read failure before local fall-through.
+
+        Invokes the ``on_remote_failure`` callback when one is
+        configured (logging if the callback itself raises); otherwise
+        logs a warning. Never raises.
+
+        Args:
+            method (str): Name of the dispatcher method that failed
+                against the remote.
+            exc (Exception): The remote failure being reported.
+        """
         if callable(self.on_remote_failure):
             try:
                 self.on_remote_failure(method, exc)
@@ -395,9 +434,39 @@ class RecipeKB:
     ) -> dict[str, Any]:
         """Write a recipe row LOCALLY ONLY in the arbor schema.
 
-        Returns ``{"canonical_id", "version", "created"}``. Never
-        touches the central kb-service. Field shape mirrors arbor's
-        ``Recipe`` (see :mod:`recipe_kb.schema`).
+        Never touches the central kb-service. Field shape mirrors
+        arbor's ``Recipe`` (see :mod:`recipe_kb.schema`); all
+        arguments are forwarded verbatim to
+        :meth:`LocalRecipeStore.put_recipe`.
+
+        Args:
+            canonical_id (str): Canonical recipe identity; must be
+                non-empty.
+            model (str): Model identity slot.
+            hardware (str): Hardware identity slot.
+            framework (str): Framework identity slot.
+            framework_version (str): Framework version identity slot.
+            precision (str): Precision identity slot.
+            best_config (dict[str, str] | None): Best-known config.
+            best_throughput (float): Best measured throughput.
+            what_worked (list[Any] | None): Findings that helped.
+            what_failed (list[Any] | None): Findings that failed.
+            remaining_gaps (list[Any] | None): Known remaining gaps.
+            prs_tested (list[Any] | None): PRs tested.
+            pitfalls (list[Any] | None): Known pitfalls.
+            lessons (list[Any] | None): Lessons learned.
+            last_profiled (str): Timestamp of last profiling run.
+            stack_fingerprint (dict[str, str] | None): Stack
+                fingerprint mapping.
+            sessions (list[Any] | None): Per-session records.
+            authority (str): Authority tier.
+            confidence (float): Confidence score in ``[0, 1]``.
+            evidence_refs (list[Any] | None): Supporting evidence refs.
+            provenance (dict[str, Any] | None): Audit provenance.
+            extras (dict[str, Any] | None): Free-form arbor keys.
+
+        Returns:
+            dict[str, Any]: ``{"canonical_id", "version", "created"}``.
         """
         return self.local.put_recipe(
             canonical_id=canonical_id,
@@ -437,7 +506,28 @@ class RecipeKB:
         rationale: str = "",
         attempt_at: str | None = None,
     ) -> dict[str, Any]:
-        """Append one attempt row LOCALLY ONLY."""
+        """Append one attempt row LOCALLY ONLY.
+
+        Forwards verbatim to :meth:`LocalRecipeStore.append_attempt`.
+
+        Args:
+            canonical_id (str): Parent recipe identity; must be
+                non-empty.
+            session_id (str): Owning session; must be non-empty.
+            diff (dict[str, Any] | None): Config diff applied.
+            predicted_delta (dict[str, Any] | None): Predicted metric
+                deltas.
+            measured_metrics (dict[str, Any] | None): Measured metrics.
+            fitness (float | None): Scalar fitness score, or ``None``.
+            outcome (str): Outcome label.
+            rationale (str): Free-form rationale.
+            attempt_at (str | None): Explicit ISO-8601 timestamp; auto
+                stamped when ``None``.
+
+        Returns:
+            dict[str, Any]: A dict with keys ``id``,
+                ``recipe_canonical_id`` and ``attempt_at``.
+        """
         return self.local.append_attempt(
             canonical_id=canonical_id,
             session_id=session_id,
@@ -451,7 +541,15 @@ class RecipeKB:
         )
 
     def delete_recipe(self, *, canonical_id: str) -> bool:
-        """Delete the live recipe row LOCALLY ONLY (history preserved)."""
+        """Delete the live recipe row LOCALLY ONLY (history preserved).
+
+        Args:
+            canonical_id (str): Canonical recipe identity; must be
+                non-empty.
+
+        Returns:
+            bool: ``True`` iff a live row was removed.
+        """
         return self.local.delete_recipe(canonical_id=canonical_id)
 
     # ==================================================================
@@ -488,7 +586,14 @@ class RecipeKB:
           returns live rows), and
         * the fall-through when remote is absent / empty / errors.
 
-        Returns ``None`` only when neither store has the row.
+        Args:
+            canonical_id (str): Canonical recipe identity.
+            version (int | None): Specific archived version (served
+                locally), or ``None`` for the live row.
+
+        Returns:
+            dict[str, Any] | None: The recipe row in arbor shape, or
+                ``None`` when neither store has the row.
         """
         if version is None and self._remote_active():
             try:
@@ -528,6 +633,14 @@ class RecipeKB:
         ``/history`` is not used. The local archive is authoritative
         for writes anyway, so the on-disk ``history/v{N}.json`` files
         are the source of truth here.
+
+        Args:
+            canonical_id (str): Canonical recipe identity.
+            limit (int): Maximum number of archived rows to return.
+
+        Returns:
+            list[dict[str, Any]]: Archived prior versions ascending by
+                version.
         """
         return self.local.get_history(
             canonical_id=canonical_id, limit=limit,
@@ -535,7 +648,15 @@ class RecipeKB:
 
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Recent recipes — LOCAL only (remote = ``/recipes/search``
-        route only; bare ``GET /recipes`` is not used)."""
+        route only; bare ``GET /recipes`` is not used).
+
+        Args:
+            limit (int): Maximum number of recipes to return.
+
+        Returns:
+            list[dict[str, Any]]: Recent live recipes, ordered
+                ``updated_at DESC``.
+        """
         return self.local.list_recent(limit=limit)
 
     def search(
@@ -603,7 +724,15 @@ class RecipeKB:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Attempts for one recipe — LOCAL only (remote =
-        ``/recipes/search`` route only)."""
+        ``/recipes/search`` route only).
+
+        Args:
+            canonical_id (str): Parent recipe identity.
+            limit (int): Maximum number of attempts to return.
+
+        Returns:
+            list[dict[str, Any]]: Attempt rows newest-first.
+        """
         return self.local.list_attempts(
             canonical_id=canonical_id, limit=limit,
         )
@@ -615,7 +744,15 @@ class RecipeKB:
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         """Session attempts — LOCAL only (remote = ``/recipes/search``
-        route only)."""
+        route only).
+
+        Args:
+            session_id (str): Session whose attempts to collect.
+            limit (int): Maximum number of attempts to return.
+
+        Returns:
+            list[dict[str, Any]]: Attempts for the session oldest-first.
+        """
         return self.local.list_session_attempts(
             session_id=session_id, limit=limit,
         )

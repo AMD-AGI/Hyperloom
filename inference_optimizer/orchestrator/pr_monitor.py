@@ -60,6 +60,12 @@ class PRSummary:
     body_snippet: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the PR summary to a JSON-friendly dict.
+
+        Returns:
+            dict[str, Any]: All fields, with ``labels`` rendered as a
+            list.
+        """
         return {
             "repo":         self.repo,
             "number":       self.number,
@@ -104,6 +110,20 @@ class PRMonitorClient:
         enabled: bool = True,
         timeout_sec: float | None = None,
     ) -> "PRMonitorClient":
+        """Build a client, resolving config from args then env vars.
+
+        Args:
+            url (str | None): Explicit base URL; falls back to
+                ``PR_MONITOR_URL`` / ``PRIMUS_CORTEX_PR_URL`` env vars
+                then :data:`DEFAULT_PR_MONITOR_URL`.
+            enabled (bool): Whether the client issues real requests.
+            timeout_sec (float | None): Per-request timeout; falls back
+                to the ``PR_MONITOR_TIMEOUT_SEC`` env var then the
+                default.
+
+        Returns:
+            PRMonitorClient: The configured client instance.
+        """
         resolved_url = (
             url
             or os.environ.get("PR_MONITOR_URL", "").strip()
@@ -176,7 +196,12 @@ class PRMonitorClient:
 
     # REST endpoint wrappers
     def healthz(self) -> bool:
-        """Return True if the PR Monitor health endpoint responds 2xx."""
+        """Probe the PR Monitor health endpoint.
+
+        Returns:
+            bool: ``True`` when ``/healthz`` responds successfully;
+            ``False`` on any :class:`PRMonitorError`.
+        """
         try:
             self._get_json("/healthz")
             return True
@@ -294,7 +319,16 @@ class PRMonitorClient:
         return prs
 
     def get_pr(self, repo: str, number: int) -> dict[str, Any] | None:
-        """Return the full PR detail dict, or None on failure."""
+        """Fetch the full detail payload for one PR.
+
+        Args:
+            repo (str): Canonical ``owner/name`` repo identifier.
+            number (int): PR number.
+
+        Returns:
+            dict[str, Any] | None: The PR detail dict, or ``None`` on
+            failure.
+        """
         try:
             return self._get_json(f"/repos/{repo}/prs/{int(number)}")
         except PRMonitorError as exc:

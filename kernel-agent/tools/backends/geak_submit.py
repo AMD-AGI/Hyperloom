@@ -26,6 +26,13 @@ from ray_runtime import (
 
 
 def _find_geak_bin() -> str:
+    """Locate the GEAK CLI executable on ``PATH``.
+
+    Returns:
+        str: The absolute path to the first of ``geak`` / ``mini`` /
+            ``geak-gaagent`` found on ``PATH``, falling back to the bare
+            name ``"geak"`` when none resolve.
+    """
     for name in ("geak", "mini", "geak-gaagent"):
         path = shutil.which(name)
         if path:
@@ -34,6 +41,15 @@ def _find_geak_bin() -> str:
 
 
 def _resolve_geak_config() -> Path:
+    """Resolve and validate the GEAK config path from ``$GEAK_CONFIG``.
+
+    Returns:
+        Path: The validated config file path.
+
+    Raises:
+        ValueError: If ``$GEAK_CONFIG`` is unset, points at a missing
+            file, or does not set ``model.model_class: litellm``.
+    """
     geak_config = os.environ.get("GEAK_CONFIG", "").strip()
     if not geak_config:
         raise ValueError(
@@ -53,6 +69,25 @@ def _resolve_geak_config() -> Path:
 def _build_cmd(prompt_file: Path, output_dir: Path, kernel_path: str, gpu_ids: str,
                cost_limit: float | None, kernel_repo: str = "",
                test_command: str = "") -> list[str]:
+    """Assemble the GEAK CLI argument vector.
+
+    Args:
+        prompt_file (Path): Path to the task prompt file (``-t``).
+        output_dir (Path): Directory for GEAK output (``--output``).
+        kernel_path (str): Optional kernel file path (``--kernel-path``);
+            omitted when empty.
+        gpu_ids (str): Comma-separated logical GPU ids (``--gpu-ids``).
+        cost_limit (float | None): Per-attempt USD budget. ``None`` omits
+            the flag (GEAK uses its config value); ``0.0`` disables the
+            cap; ``> 0.0`` sets a finite cap.
+        kernel_repo (str): Optional repo path (``--repo``); omitted when
+            empty.
+        test_command (str): Optional test command (``--test-command``);
+            omitted when empty.
+
+    Returns:
+        list[str]: The full command vector ready for ``subprocess.run``.
+    """
     cmd = [_find_geak_bin(), "-t", str(prompt_file), "--yolo",
            "--output", str(output_dir), "--gpu-ids", gpu_ids]
     cmd.extend(["--config", str(_resolve_geak_config())])
@@ -71,6 +106,29 @@ def _build_cmd(prompt_file: Path, output_dir: Path, kernel_path: str, gpu_ids: s
 def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
                 cost_limit: float | None, num_gpus: int, timeout_s: int,
                 kernel_repo: str = "", test_command: str = "") -> dict:
+    """Run a GEAK submission inside a Ray GPU task.
+
+    Initializes Ray (quietly), then dispatches a ``num_gpus``-pinned
+    remote task that maps ROCR-visible physical GPUs to logical ids and
+    invokes the GEAK CLI.
+
+    Args:
+        prompt_file (Path): Task prompt file passed to GEAK.
+        output_dir (Path): Directory for GEAK output.
+        kernel_path (str): Optional kernel file path.
+        cost_limit (float | None): Per-attempt USD budget; see
+            :func:`_build_cmd` for the ``None`` / ``0.0`` / ``> 0.0``
+            semantics.
+        num_gpus (int): GPUs to reserve for the remote task.
+        timeout_s (int): Subprocess timeout in seconds.
+        kernel_repo (str): Optional repo path.
+        test_command (str): Optional test command.
+
+    Returns:
+        dict: The result mapping from the remote task with keys such as
+            ``returncode``, ``stdout_tail``, ``stderr_tail``,
+            ``gpu_ids``, ``elapsed_s``, and ``cmd``.
+    """
     import ray
     runtime_env = quiet_ray_init(
         num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
@@ -165,7 +223,7 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
                 "elapsed_s": round(_t.time() - started, 2),
                 "cmd": cmd,
             }
-        except _sp.TimeoutExpired as exc:
+        except _sp.TimeoutExpired:
             return {
                 "returncode": 124,
                 "stdout_tail": "",
@@ -241,6 +299,30 @@ def submit(prompt_file: Path, output_dir: Path, kernel_path: str = "",
            cost_limit: float | None = None, timeout_s: int = 1800,
            num_gpus: int = 1, prefer_ray: bool = True,
            kernel_repo: str = "", test_command: str = "") -> dict:
+    """Submit a GEAK run, preferring Ray with a CLI fallback.
+
+    Ensures the output directory exists, then (when ``prefer_ray``)
+    starts/attaches to a Ray cluster and runs via :func:`run_via_ray`,
+    falling back to a structured error dict on any Ray failure. When Ray
+    is not preferred, runs via :func:`run_via_cli`.
+
+    Args:
+        prompt_file (Path): Task prompt file passed to GEAK.
+        output_dir (Path): Directory for GEAK output; created if absent.
+        kernel_path (str): Optional kernel file path.
+        cost_limit (float | None): Per-attempt USD budget; see
+            :func:`_build_cmd`.
+        timeout_s (int): Subprocess timeout in seconds.
+        num_gpus (int): GPUs to reserve for the Ray task.
+        prefer_ray (bool): When True, try Ray first; otherwise use the
+            CLI path.
+        kernel_repo (str): Optional repo path.
+        test_command (str): Optional test command.
+
+    Returns:
+        dict: The result mapping from the chosen submission path (see
+            :func:`run_via_ray` / :func:`run_via_cli`).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     if prefer_ray:
         try:
@@ -269,6 +351,11 @@ def submit(prompt_file: Path, output_dir: Path, kernel_path: str = "",
 
 
 def main() -> int:
+    """CLI entry point: parse args, submit, and print the JSON result.
+
+    Returns:
+        int: 0 when the submission's ``returncode`` is 0, otherwise 1.
+    """
     parser = argparse.ArgumentParser(description="kernel-agent self-contained GEAK submitter")
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)

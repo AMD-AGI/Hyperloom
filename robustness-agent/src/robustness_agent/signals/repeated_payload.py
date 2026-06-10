@@ -114,6 +114,22 @@ def evaluate_repeated_payload_signals(
     *,
     config: RepeatedPayloadConfig | None = None,
 ) -> list[Symptom]:
+    """Fire ``same_payload_loop`` for action families stuck retrying one payload.
+
+    Walks the combined inbox + coordinator event stream, groups consecutive
+    same-fingerprint failures per family, and emits a symptom once a streak
+    reaches the configured threshold.
+
+    Args:
+        ctx (ReactorContext): Reactor context providing the inbox.
+        data (SourceData): Collected source data including coordinator events.
+        config (RepeatedPayloadConfig | None): Tunables; defaults to
+            :class:`RepeatedPayloadConfig` when ``None``.
+
+    Returns:
+        list[Symptom]: One ``same_payload_loop`` symptom per offending family,
+            possibly empty.
+    """
     cfg = config or RepeatedPayloadConfig()
     events = _gather_events(ctx.inbox, data.coordinator_events, cfg)
     if not events:
@@ -211,6 +227,15 @@ def _gather_events(
 
 
 def _family_of(event: dict[str, Any]) -> str:
+    """Resolve the action family for an event, falling back to ``kind``.
+
+    Args:
+        event (dict[str, Any]): A normalised event row.
+
+    Returns:
+        str: The action family, or an empty string when neither ``family`` nor
+            ``kind`` is set.
+    """
     family = str(event.get("family") or "").strip()
     if family:
         return family
@@ -223,6 +248,19 @@ def _family_of(event: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _hash_for(family: str, event: dict[str, Any]) -> str | None:
+    """Compute the action-defining fingerprint for an event payload.
+
+    Projects the family-specific (or generic) subset of the payload, strips
+    blacklisted churn keys, and hashes the canonical JSON.
+
+    Args:
+        family (str): The action family used to pick the projection.
+        event (dict[str, Any]): A normalised event row carrying the payload.
+
+    Returns:
+        str | None: A hex SHA-1 fingerprint, or ``None`` when the payload is not
+            a usable dict.
+    """
     payload = event.get("payload") or {}
     if not isinstance(payload, dict):
         return None
@@ -268,7 +306,14 @@ def _walk_path(payload: dict[str, Any], path: str) -> Any:
 
 
 def _strip_blacklisted(value: Any) -> Any:
-    """Recursively drop ``_HASH_BLACKLIST`` keys from dicts."""
+    """Recursively drop ``_HASH_BLACKLIST`` keys from dicts.
+
+    Args:
+        value (Any): A value that may be a dict, list, or scalar.
+
+    Returns:
+        Any: The value with all blacklisted keys removed from nested dicts.
+    """
     if isinstance(value, dict):
         return {
             k: _strip_blacklisted(v)
@@ -289,6 +334,17 @@ def _build_symptom(
     streak_events: list[dict[str, Any]],
     cfg: RepeatedPayloadConfig,
 ) -> Symptom | None:
+    """Build the ``same_payload_loop`` symptom for a detected streak.
+
+    Args:
+        family (str): The looping action family.
+        streak_events (list[dict[str, Any]]): Consecutive same-hash failures.
+        cfg (RepeatedPayloadConfig): Tunables (provides the streak threshold).
+
+    Returns:
+        Symptom | None: A HIGH-severity ``same_payload_loop`` symptom, or
+            ``None`` when ``streak_events`` is empty.
+    """
     if not streak_events:
         return None
     count = len(streak_events)

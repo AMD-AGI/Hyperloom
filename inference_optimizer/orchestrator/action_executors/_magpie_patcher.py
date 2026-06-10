@@ -144,6 +144,15 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 
 
 def _is_patched(src: Path) -> bool:
+    """Return whether ``src`` already contains the patch sentinel.
+
+    Args:
+        src (Path): The ``benchmarker.py`` file to inspect.
+
+    Returns:
+        bool: True iff the Hyperloom patch sentinel is present (and False on
+            any read error).
+    """
     try:
         return _PATCH_SENTINEL in src.read_text(encoding="utf-8")
     except OSError as e:
@@ -192,6 +201,13 @@ def _upstream_is_already_atomic(text: str) -> bool:
 def _apply_patch_atomic(src: Path) -> bool:
     """Rewrite ``src`` via temp-file + atomic rename so a crash
     mid-write cannot leave a corrupt ``benchmarker.py``.
+
+    Args:
+        src (Path): The ``benchmarker.py`` file to patch in place.
+
+    Returns:
+        bool: True when the patch was written; False when the legacy block was
+            missing or any read/write step failed.
     """
     try:
         original = src.read_text(encoding="utf-8")

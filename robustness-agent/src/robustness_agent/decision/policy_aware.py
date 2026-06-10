@@ -39,6 +39,14 @@ class PolicyViolation(ValueError):
     """
 
     def __init__(self, reason: str, *, rule: str, hint: str | None = None):
+        """Initialise the violation with a reason, rule id, and optional hint.
+
+        Args:
+            reason (str): Human-readable description of the violation.
+            rule (str): Short rule identifier mirroring upstream
+                ``PolicyDenied.rule``.
+            hint (str | None): Optional one-line corrective suggestion.
+        """
         super().__init__(reason)
         self.rule = rule
         self.hint = hint
@@ -57,6 +65,12 @@ class PolicyAware:
 
         Order of checks matches upstream ``PolicyGate.validate_intent``:
         role allowlist -> required fields -> per-intent extra rules.
+
+        Args:
+            intent (Intent): The intent about to be emitted.
+
+        Raises:
+            PolicyViolation: If the intent fails any local PolicyGate check.
         """
         self._check_role(intent)
         self._check_required_fields(intent)
@@ -67,6 +81,13 @@ class PolicyAware:
 
         Used in unit tests to assert exhaustive coverage of a malformed
         intent. The reactor calls :meth:`assert_payload_complete` only.
+
+        Args:
+            intent (Intent): The intent to validate.
+
+        Returns:
+            list[PolicyViolation]: Every violation found; empty when the intent
+            is emit-safe.
         """
         violations: list[PolicyViolation] = []
         for check in (self._check_role, self._check_required_fields, self._check_per_intent):
@@ -79,6 +100,14 @@ class PolicyAware:
     # -- internal checks -------------------------------------------------
 
     def _check_role(self, intent: Intent) -> None:
+        """Verify the intent type is in the robustness role allowlist.
+
+        Args:
+            intent (Intent): The intent to check.
+
+        Raises:
+            PolicyViolation: If the role may not emit this intent type.
+        """
         if intent.type not in ROBUSTNESS_ALLOWED_INTENTS:
             raise PolicyViolation(
                 f"role=robustness cannot emit intent_type={intent.type.value!r}",
@@ -87,6 +116,14 @@ class PolicyAware:
             )
 
     def _check_required_fields(self, intent: Intent) -> None:
+        """Ensure all payload fields required for the intent type are present.
+
+        Args:
+            intent (Intent): The intent to check.
+
+        Raises:
+            PolicyViolation: If a required payload field is missing.
+        """
         required = PAYLOAD_REQUIRED.get(intent.type, ())
         payload = intent.payload or {}
         for field_name in required:
@@ -99,6 +136,14 @@ class PolicyAware:
                 )
 
     def _check_per_intent(self, intent: Intent) -> None:
+        """Run the extra, type-specific payload checks for an intent.
+
+        Args:
+            intent (Intent): The intent to check.
+
+        Raises:
+            PolicyViolation: If the intent-type-specific check fails.
+        """
         payload = intent.payload or {}
         if intent.type == IntentType.ALERT:
             self._check_alert(payload)
@@ -123,6 +168,14 @@ class PolicyAware:
             pass
 
     def _check_alert(self, payload: dict[str, Any]) -> None:
+        """Validate an ``alert`` payload's severity and summary.
+
+        Args:
+            payload (dict[str, Any]): The alert intent payload.
+
+        Raises:
+            PolicyViolation: If the severity is unknown or the summary empty.
+        """
         severity = str(payload.get("severity", "")).strip()
         if severity not in ALERT_SEVERITIES:
             raise PolicyViolation(
@@ -138,6 +191,15 @@ class PolicyAware:
             )
 
     def _check_escalate(self, payload: dict[str, Any]) -> None:
+        """Validate an ``escalate_strategy_change`` payload.
+
+        Args:
+            payload (dict[str, Any]): The escalate intent payload.
+
+        Raises:
+            PolicyViolation: If reason or next_action_hint is empty, or the
+                optional severity is invalid.
+        """
         reason = str(payload.get("reason", "")).strip()
         if not reason:
             raise PolicyViolation(
@@ -159,6 +221,15 @@ class PolicyAware:
             )
 
     def _check_kill_task(self, payload: dict[str, Any]) -> None:
+        """Validate a ``kill_task`` payload, including its scope.
+
+        Args:
+            payload (dict[str, Any]): The kill_task intent payload.
+
+        Raises:
+            PolicyViolation: If task_id/reason is empty or the scope is not in
+                the robustness-allowed scope set.
+        """
         task_id = str(payload.get("task_id", "")).strip()
         if not task_id:
             raise PolicyViolation("kill_task.task_id must be non-empty", rule="payload")
@@ -175,6 +246,14 @@ class PolicyAware:
             )
 
     def _check_force_dispatch(self, payload: dict[str, Any]) -> None:
+        """Validate a ``force_dispatch`` payload.
+
+        Args:
+            payload (dict[str, Any]): The force_dispatch intent payload.
+
+        Raises:
+            PolicyViolation: If task_id or reason is empty.
+        """
         task_id = str(payload.get("task_id", "")).strip()
         if not task_id:
             raise PolicyViolation(
@@ -187,6 +266,14 @@ class PolicyAware:
             )
 
     def _check_prune_branch(self, payload: dict[str, Any]) -> None:
+        """Validate a ``prune_branch`` payload.
+
+        Args:
+            payload (dict[str, Any]): The prune_branch intent payload.
+
+        Raises:
+            PolicyViolation: If family or reason is empty.
+        """
         family = str(payload.get("family", "")).strip()
         if not family:
             raise PolicyViolation(
@@ -199,6 +286,15 @@ class PolicyAware:
             )
 
     def _check_delegate(self, payload: dict[str, Any]) -> None:
+        """Validate a ``delegate`` payload's action name against the allowlist.
+
+        Args:
+            payload (dict[str, Any]): The delegate intent payload.
+
+        Raises:
+            PolicyViolation: If action_name is empty or not allowed for the
+                robustness role.
+        """
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyViolation(
@@ -214,6 +310,16 @@ class PolicyAware:
             )
 
     def _check_update_state(self, payload: dict[str, Any]) -> None:
+        """Validate an ``update_state`` payload's field allowlist.
+
+        Args:
+            payload (dict[str, Any]): The update_state intent payload.
+
+        Raises:
+            PolicyViolation: If changes is not a non-empty dict, touches core
+                state fields, or includes fields outside the robustness
+                allowlist.
+        """
         changes = payload.get("changes")
         if not isinstance(changes, dict) or not changes:
             raise PolicyViolation(
@@ -237,6 +343,17 @@ class PolicyAware:
             )
 
     def _check_send_message(self, payload: dict[str, Any]) -> None:
+        """Validate a ``send_message`` payload's topic.
+
+        Unknown topics are not rejected (upstream soft-degrades them to
+        ``observation``), only an empty topic is a violation.
+
+        Args:
+            payload (dict[str, Any]): The send_message intent payload.
+
+        Raises:
+            PolicyViolation: If the topic is empty.
+        """
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyViolation(

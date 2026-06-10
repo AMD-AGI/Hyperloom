@@ -24,6 +24,11 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 def _log(msg: str) -> None:
+    """Write a timestamped progress line to stderr and flush it.
+
+    Args:
+        msg (str): The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kill_multinode {ts}] {msg}\n")
     sys.stderr.flush()
@@ -131,6 +136,16 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
 
 
 def main() -> int:
+    """Parse CLI arguments and fan out kill actors across all alive nodes.
+
+    Connects to the in-pod Ray cluster, schedules one pinned kill actor per
+    alive node, collects each node's kill summary, and prints the aggregate
+    as JSON to stdout.
+
+    Returns:
+        int: Process exit code; ``0`` on success even when some nodes had
+        nothing to kill.
+    """
     p = argparse.ArgumentParser(
         prog="kill_multinode.py",
         description="Kill every multi-node server process spawned by launch_multinode.py.",

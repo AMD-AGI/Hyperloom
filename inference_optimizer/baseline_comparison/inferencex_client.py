@@ -60,10 +60,22 @@ class InferenceXFetchError(Exception):
 
 
 def _base_url() -> str:
+    """Resolve the API base URL from the environment.
+
+    Returns:
+        str: ``INFERENCEX_BASE_URL`` when set and non-empty, otherwise
+            :data:`DEFAULT_BASE_URL`.
+    """
     return os.environ.get("INFERENCEX_BASE_URL", "").strip() or DEFAULT_BASE_URL
 
 
 def _timeout_sec() -> float:
+    """Resolve the per-request timeout from the environment.
+
+    Returns:
+        float: ``INFERENCEX_TIMEOUT_SEC`` clamped to a 0.5s floor, or
+            :data:`DEFAULT_TIMEOUT_SEC` when unset or unparseable.
+    """
     raw = os.environ.get("INFERENCEX_TIMEOUT_SEC", "").strip()
     if not raw:
         return DEFAULT_TIMEOUT_SEC
@@ -74,6 +86,12 @@ def _timeout_sec() -> float:
 
 
 def _max_attempts() -> int:
+    """Resolve the retry attempt budget from the environment.
+
+    Returns:
+        int: ``INFERENCEX_MAX_ATTEMPTS`` clamped to a minimum of 1, or
+            :data:`DEFAULT_MAX_ATTEMPTS` when unset or unparseable.
+    """
     raw = os.environ.get("INFERENCEX_MAX_ATTEMPTS", "").strip()
     if not raw:
         return DEFAULT_MAX_ATTEMPTS
@@ -84,11 +102,24 @@ def _max_attempts() -> int:
 
 
 def _insecure() -> bool:
+    """Report whether TLS verification should be skipped.
+
+    Returns:
+        bool: ``True`` when ``INFERENCEX_INSECURE`` is one of
+            ``"1"``/``"true"``/``"yes"``, otherwise ``False``.
+    """
     raw = os.environ.get("INFERENCEX_INSECURE", "").strip().lower()
     return raw in ("1", "true", "yes")
 
 
 def _build_ssl_context() -> ssl.SSLContext | None:
+    """Build an SSL context honouring the insecure override.
+
+    Returns:
+        ssl.SSLContext | None: ``None`` for normal (verified) TLS, or a
+            context with hostname checking and certificate verification
+            disabled when :func:`_insecure` is set.
+    """
     if not _insecure():
         return None
     ctx = ssl.create_default_context()
@@ -98,8 +129,18 @@ def _build_ssl_context() -> ssl.SSLContext | None:
 
 
 def _fetch_raw(url: str) -> bytes:
-    """Single HTTP GET with gzip support. Raises :class:`InferenceXFetchError`
-    on any non-200 / network / decode failure."""
+    """Single HTTP GET with gzip support.
+
+    Args:
+        url (str): The fully-formed request URL to fetch.
+
+    Returns:
+        bytes: The (gzip-decoded if needed) response body.
+
+    Raises:
+        InferenceXFetchError: On any non-200 status, network failure, or
+            transport-level decode error.
+    """
     req = urllib.request.Request(url, headers={
         "Accept-Encoding": "gzip",
         "User-Agent":      "inference_optimizer/baseline_comparison",
@@ -138,6 +179,14 @@ def fetch_rows(model: str) -> tuple[list[dict[str, Any]] | None, str]:
 
     Never raises. Retries up to ``INFERENCEX_MAX_ATTEMPTS`` times
     with linear back-off between attempts (0.5s, 1.0s, …).
+
+    Args:
+        model (str): The InferenceX display name to query benchmarks for.
+
+    Returns:
+        tuple[list[dict[str, Any]] | None, str]: ``(rows, warning)`` where
+            ``rows`` is the raw upstream list on success (else ``None``) and
+            ``warning`` is empty on success or a short failure note.
     """
     if not model:
         return None, "model is empty"

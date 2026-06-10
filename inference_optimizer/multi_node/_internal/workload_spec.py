@@ -43,18 +43,44 @@ _RESERVED_LABEL_PREFIXES = (
 
 
 def _b64(s: str) -> str:
+    """Base64-encode a string as ASCII.
+
+    Args:
+        s (str): The text to encode (UTF-8).
+
+    Returns:
+        str: The base64-encoded value as an ASCII string.
+    """
     return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
 
 def _sanitize_extra_env(extra_env: dict[str, str] | None) -> dict[str, str]:
-    """Drop reserved and legacy keys from user-supplied env."""
+    """Drop reserved and legacy keys from user-supplied env.
+
+    Args:
+        extra_env (dict[str, str] | None): User-supplied environment
+            variables, or ``None``.
+
+    Returns:
+        dict[str, str]: A copy of ``extra_env`` with reserved keys removed,
+        or an empty dict when input is falsy.
+    """
     if not extra_env:
         return {}
     return {k: v for k, v in extra_env.items() if k not in _STRIP_FROM_USER_ENV}
 
 
 def _sanitize_extra_labels(extra_labels: dict[str, str] | None) -> dict[str, str]:
-    """Drop labels whose key starts with any reserved prefix."""
+    """Drop labels whose key starts with any reserved prefix.
+
+    Args:
+        extra_labels (dict[str, str] | None): User-supplied labels, or
+            ``None``.
+
+    Returns:
+        dict[str, str]: A copy of ``extra_labels`` excluding keys that start
+        with any Brain-managed reserved prefix; empty when input is falsy.
+    """
     if not extra_labels:
         return {}
     out: dict[str, str] = {}

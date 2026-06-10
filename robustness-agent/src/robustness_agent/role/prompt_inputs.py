@@ -14,10 +14,10 @@ deterministic two-section text:
     current_action=...
     ...
     === Inbox for <agent> [(newest last)] ===
-      seq=<int> msg_id=<hex> from=<agent> topic=<topic> payload={'k': 'v', ...}
-      ...
+    seq=<int> msg_id=<hex> from=<agent> topic=<topic> payload={'k': 'v', ...}
+    ...
 
-Or, when no new messages exist:
+Or, when no new messages exist::
 
     === Inbox for <agent> ===
     (no new messages)
@@ -89,6 +89,18 @@ _TIME_BUDGET_LINE_RE = re.compile(
 
 @dataclass
 class InboxItem:
+    """One parsed inbox row from the Coordinator's rendered prompt.
+
+    Attributes:
+        seq (int): Monotonic per-agent sequence number of the message.
+        msg_id (str): Hex message id assigned by the Coordinator.
+        from_agent (str): Name of the agent that sent the message.
+        topic (str): Message topic string.
+        payload (dict[str, Any]): Decoded payload dict; empty when the
+            payload was absent or could not be decoded.
+        raw_payload (str): The raw, undecoded payload text as rendered.
+    """
+
     seq: int
     msg_id: str
     from_agent: str
@@ -99,6 +111,43 @@ class InboxItem:
 
 @dataclass
 class SharedStateSnapshot:
+    """Subset of the Coordinator SharedState the robustness reactor reads.
+
+    Only the fields the M1 reactor consumes are parsed; every other
+    rendered line is ignored. All fields default to a neutral value so a
+    parse miss degrades to "no signal" rather than raising.
+
+    Attributes:
+        session_id (str): Current session id, or ``""`` when unset.
+        model_name (str): Target model name, or ``""`` when unset.
+        model_class (str): Target model class, or ``""`` when unset.
+        baseline_tput (float): Baseline throughput reported by the
+            Coordinator.
+        cumulative_gain (float): Cumulative (unvalidated) gain percentage.
+        cumulative_gain_validated (float): Cumulative validated gain
+            percentage.
+        crash_count (int): Number of crashes recorded this session.
+        current_action (str): Currently dispatched action name, or ``""``
+            when idle.
+        tick (int): Coordinator's session-wide monotonic tick counter.
+        stop_reason (str): Stop reason, or ``""`` on a live run.
+        optimization_stack_size (int): Number of validated entries on the
+            optimization stack.
+        explore_started (bool): True once any explore family has produced
+            at least one record.
+        elapsed_minutes (float): Minutes elapsed against the wall-clock
+            budget.
+        remaining_minutes (float): Minutes remaining against the budget.
+        budget_minutes (float): Total wall-clock budget in minutes; ``0.0``
+            means no budget configured.
+        closing_phase (bool): True when the Coordinator signals the
+            closing phase.
+        kernel_opt_attempts_count (int): Count of unique kernel ids with at
+            least one recorded kernel_opt attempt.
+        has_keep_pending_integrate (bool): True when a multi-KEEP integrate
+            queue still has work pending.
+    """
+
     session_id: str = ""
     model_name: str = ""
     model_class: str = ""
@@ -151,6 +200,17 @@ def from_coordinator_prompt(
     Returns an empty / partially populated context on parse drift; the
     reactor's heartbeat fallback ensures liveness, and a single WARN is
     logged so deployments notice schema drift.
+
+    Args:
+        prompt (str): The rendered Coordinator prompt text. An empty
+            string yields an empty context with a parse warning.
+        tick_index (int): In-process tick index to stamp on the context.
+        now_unix (float | None): Override for the context's wall-clock
+            timestamp; ``None`` uses the current time.
+
+    Returns:
+        ReactorContext: The parsed context, possibly partial when the
+        prompt drifts from the expected schema.
     """
     if now_unix is None:
         now_unix = time.time()
@@ -186,6 +246,13 @@ def _split_sections(prompt: str) -> dict[str, str]:
     Returns a dict with keys ``shared_state`` / ``inbox``; KB hints and
     other sections are dropped because the robustness reactor does not
     consume them.
+
+    Args:
+        prompt (str): The full rendered Coordinator prompt text.
+
+    Returns:
+        dict[str, str]: Mapping of recognised section name to the joined
+        body lines for that section.
     """
     sections: dict[str, list[str]] = {}
     current: str | None = None
@@ -218,6 +285,20 @@ def _split_sections(prompt: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def _parse_shared_state(body: str) -> SharedStateSnapshot:
+    """Decode the ``=== Shared session state ===`` body into a snapshot.
+
+    Only keys in :data:`_SCALAR_KEYS` (plus the ``model=`` line) are
+    consumed; unknown or unparsable lines are skipped. Parsing stays
+    idempotent so repeated explore-family lines never clear the
+    ``explore_started`` flag once set.
+
+    Args:
+        body (str): The joined body lines of the shared-state section.
+
+    Returns:
+        SharedStateSnapshot: Populated snapshot with defaults for any
+        field whose line was absent.
+    """
     snapshot = SharedStateSnapshot()
     for raw in body.splitlines():
         line = raw.strip()
@@ -307,7 +388,15 @@ def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
 
 
 def _parse_model_line(line: str) -> tuple[str, str]:
-    """Decode ``model=<name>  class=<klass>`` (double-space separator)."""
+    """Decode ``model=<name>  class=<klass>`` (double-space separator).
+
+    Args:
+        line (str): The rendered ``model=`` line.
+
+    Returns:
+        tuple[str, str]: The ``(model_name, model_class)`` pair, with the
+        ``(unset)`` sentinel mapped to ``""``.
+    """
     body = line[len("model="):]
     name, _, rest = body.partition("  class=")
     name = name.strip()
@@ -329,6 +418,14 @@ def _split_double_space(value: str) -> str:
 
 
 def _coerce_float(value: str) -> float:
+    """Parse a string into a float, defaulting to ``0.0`` on failure.
+
+    Args:
+        value (str): The string to parse.
+
+    Returns:
+        float: The parsed float, or ``0.0`` when ``value`` is not numeric.
+    """
     try:
         return float(value)
     except ValueError:
@@ -336,6 +433,14 @@ def _coerce_float(value: str) -> float:
 
 
 def _coerce_int(value: str) -> int:
+    """Parse a string into an int, defaulting to ``0`` on failure.
+
+    Args:
+        value (str): The string to parse.
+
+    Returns:
+        int: The parsed integer, or ``0`` when ``value`` is not an int.
+    """
     try:
         return int(value)
     except ValueError:
@@ -347,6 +452,19 @@ def _coerce_int(value: str) -> int:
 # ---------------------------------------------------------------------------
 
 def _parse_inbox(body: str) -> tuple[list[InboxItem], list[str]]:
+    """Parse the inbox section body into items plus parse warnings.
+
+    Lines that do not match :data:`_INBOX_LINE_RE` are skipped with a
+    warning rather than raising. The ``(no new messages)`` sentinel
+    short-circuits to an empty item list.
+
+    Args:
+        body (str): The joined body lines of the inbox section.
+
+    Returns:
+        tuple[list[InboxItem], list[str]]: The parsed inbox items and a
+        list of human-readable parse warnings.
+    """
     items: list[InboxItem] = []
     warnings: list[str] = []
     for raw in body.splitlines():
@@ -382,6 +500,19 @@ def _parse_inbox(body: str) -> tuple[list[InboxItem], list[str]]:
 
 
 def _decode_payload(text: str) -> tuple[dict[str, Any], str | None]:
+    """Decode a rendered payload literal into a dict.
+
+    The payload is expected to be a Python literal dict. Non-dict literals
+    and unparsable text are wrapped so the caller never loses the raw
+    value.
+
+    Args:
+        text (str): The raw payload text from an inbox line.
+
+    Returns:
+        tuple[dict[str, Any], str | None]: The decoded payload dict and an
+        optional warning string when decoding fell back to a raw wrapper.
+    """
     text = text.rstrip()
     if not text:
         return {}, None

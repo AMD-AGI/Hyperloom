@@ -34,7 +34,11 @@ class T0Result:
 
 
 def _default_status_emitter(line: str) -> None:
-    """Default ``on_status`` — log at INFO."""
+    """Default ``on_status`` callback — log the banner line at INFO.
+
+    Args:
+        line (str): The status banner line to emit.
+    """
     log.info("%s", line)
 
 

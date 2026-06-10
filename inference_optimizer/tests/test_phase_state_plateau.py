@@ -17,7 +17,6 @@ from inference_optimizer.orchestrator.phase_state import (
     ESCALATE_HINT_SKIP_TO_SWEEP,
     ESCALATE_HINT_VOCAB,
     PHASE_CLOSE,
-    PHASE_KERNEL,
     PHASE_SWEEP,
     STOP_REASON_VOCAB,
     apply_escalate_budget_bump,

@@ -74,6 +74,14 @@ def _discover_inferencex_roots(
     seen: set[Path] = set()
 
     def _add(candidate: Path | str | None) -> None:
+        """Resolve and append a candidate root if it is a new directory.
+
+        Args:
+            candidate (Path | str | None): A candidate InferenceX root.
+
+        Returns:
+            None: Mutates the enclosing ``roots``/``seen`` collections.
+        """
         if not candidate:
             return
         try:
@@ -114,8 +122,16 @@ def _resolve_benchmark_lib_paths(
 def _resolve_benchmark_lib_path(
     inferencex_path: Path | str | None,
 ) -> Path | None:
-    """Single-path back-compat shim — returns first
-    :func:`_resolve_benchmark_lib_paths` result."""
+    """Single-path back-compat shim for :func:`_resolve_benchmark_lib_paths`.
+
+    Args:
+        inferencex_path (Path | str | None): Caller-provided override
+            root.
+
+    Returns:
+        Path | None: The first resolved ``benchmark_lib.sh`` path, or
+        ``None`` when none exist.
+    """
     paths = _resolve_benchmark_lib_paths(inferencex_path)
     return paths[0] if paths else None
 
@@ -148,6 +164,15 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 
 
 def _is_patched(src: Path) -> bool:
+    """Return whether ``benchmark_lib.sh`` already carries the patch.
+
+    Args:
+        src (Path): The ``benchmark_lib.sh`` file to inspect.
+
+    Returns:
+        bool: ``True`` if the patch sentinel is present; ``False`` on a
+        miss or read error.
+    """
     try:
         return _PATCH_SENTINEL in src.read_text(encoding="utf-8")
     except OSError as e:
@@ -158,6 +183,13 @@ def _is_patched(src: Path) -> bool:
 def _apply_patch_atomic(src: Path) -> bool:
     """Rewrite ``src`` via temp-file + atomic rename so a crash
     mid-write cannot leave a corrupt ``benchmark_lib.sh``.
+
+    Args:
+        src (Path): The ``benchmark_lib.sh`` file to patch in place.
+
+    Returns:
+        bool: ``True`` when the patched bytes were written; ``False``
+        when the legacy line is missing or any IO step fails.
     """
     try:
         original = src.read_text(encoding="utf-8")
@@ -281,13 +313,30 @@ def _resolve_benchmark_serving_paths(
 def _resolve_benchmark_serving_path(
     inferencex_path: Path | str | None,
 ) -> Path | None:
-    """Single-path back-compat shim — returns first
-    :func:`_resolve_benchmark_serving_paths` result."""
+    """Single-path back-compat shim for :func:`_resolve_benchmark_serving_paths`.
+
+    Args:
+        inferencex_path (Path | str | None): Caller-provided override
+            root.
+
+    Returns:
+        Path | None: The first resolved ``benchmark_serving.py`` path,
+        or ``None`` when none exist.
+    """
     paths = _resolve_benchmark_serving_paths(inferencex_path)
     return paths[0] if paths else None
 
 
 def _is_benchmark_serving_patched(src: Path) -> bool:
+    """Return whether ``benchmark_serving.py`` already carries the patch.
+
+    Args:
+        src (Path): The ``benchmark_serving.py`` file to inspect.
+
+    Returns:
+        bool: ``True`` if the ``PROFILE_EXTRA_BODY`` sentinel is present;
+        ``False`` on a miss or read error.
+    """
     try:
         return _BENCH_SERVING_SENTINEL in src.read_text(encoding="utf-8")
     except OSError as e:

@@ -69,7 +69,11 @@ class ServerRestartFailed(RuntimeError):
 
 
 def last_round_trace_dir() -> str:
-    """Return the trace dir the most recent restart was wired with (or '')."""
+    """Return the trace dir the most recent restart was wired with (or '').
+
+    Returns:
+        str: The most recent round's profiler trace dir, or ``""`` if none.
+    """
     return _LAST_ROUND_TRACE_DIR
 
 
@@ -118,6 +122,16 @@ def _resolve_pd_args(
         )
 
     def _intf(kw, sk, ek):
+        """Resolve an int field from kwarg > state key > env var.
+
+        Args:
+            kw: The explicit kwarg value (wins when not ``None``).
+            sk (str): The ``state.json`` key to read next.
+            ek (str): The environment variable name to read last.
+
+        Returns:
+            int: The first parseable integer found, or ``0`` when none.
+        """
         if kw is not None:
             return int(kw)
         v = state.get(sk)

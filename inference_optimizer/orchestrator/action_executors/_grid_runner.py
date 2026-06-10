@@ -145,7 +145,16 @@ def resolve_skip_spec(params: dict | None) -> str:
     """Resolve the active skip spec from task params + process env.
 
     ``params["skip_variants"]`` may be a list[str] or a single str; both are
-    flattened to comma-joined form before pattern parsing.
+    flattened to comma-joined form before pattern parsing. Resolution order
+    is ``params["skip_variants"]`` > ``$SKIP_VARIANTS`` > ``""``.
+
+    Args:
+        params (dict | None): Task params; ``skip_variants`` (list/tuple/str)
+            takes precedence over the environment when present and non-empty.
+
+    Returns:
+        str: The stripped skip spec string, or ``""`` when neither source
+        supplies a value.
     """
     val = ""
     if params and "skip_variants" in params:
@@ -160,7 +169,18 @@ def resolve_skip_spec(params: dict | None) -> str:
 
 
 def _parse_skip_spec(spec: str) -> list[str]:
-    """Split ``spec`` on commas and whitespace; drop empties."""
+    """Split ``spec`` on commas and whitespace; drop empties.
+
+    Newlines are treated as commas, then each comma-separated token is
+    further split on whitespace so mixed separators all flatten into one
+    list of patterns.
+
+    Args:
+        spec (str): Raw skip spec (e.g. ``"attn_*, sched_dfs\nvllm_aiter"``).
+
+    Returns:
+        list[str]: Non-empty, stripped pattern tokens in source order.
+    """
     if not spec:
         return []
     out: list[str] = []
@@ -405,7 +425,20 @@ def apply_user_skip_list(
 
 @dataclass(init=False)
 class GridVariant:
-    """One row of the grid we're going to test."""
+    """One row of the grid we're going to test.
+
+    Describes a single server-config candidate: the flags/env overrides to
+    apply on top of the base Magpie config for one benchmark run.
+
+    Attributes:
+        name (str): Human-readable label for the variant.
+        extra_server_args (str): Backend server args appended via
+            ``EXTRA_{SGLANG,VLLM,ATOM}_ARGS``. Defaults to ``""``.
+        extra_envs (dict[str, str]): Per-variant environment overrides.
+            Defaults to an empty dict.
+        note (str): Optional reason/category tag (e.g. ``multi_node_only_*``).
+            Defaults to ``""``.
+    """
 
     name: str                                    # human-readable label
     extra_server_args: str = ""                  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
@@ -441,7 +474,12 @@ class GridVariant:
 
     @property
     def fingerprint(self) -> str:
-        """Content fingerprint used as dedup-ledger key. See module doc."""
+        """Content fingerprint used as dedup-ledger key. See module doc.
+
+        Returns:
+            str: :func:`variant_fingerprint` of this variant's
+            ``extra_server_args`` and ``extra_envs``.
+        """
         return variant_fingerprint(self.extra_server_args, self.extra_envs)
 
 
@@ -494,7 +532,38 @@ def coerce_extra_envs(value: Any) -> dict[str, str]:
 
 @dataclass
 class VariantResult:
-    """One bench run's parsed result."""
+    """One bench run's parsed result.
+
+    Captures the parsed outcome of a single variant's Magpie run: identity,
+    status, the headline throughput/latency metrics, artifact paths, and
+    failure-classification metadata.
+
+    Attributes:
+        name (str): Variant label (mirrors :attr:`GridVariant.name`).
+        extra_server_args (str): Server args used for this run.
+        extra_envs (dict[str, str]): Env overrides used for this run.
+        status (str): ``"succeeded"`` or ``"failed"``.
+        output_throughput (float | None): Output tokens/sec, if measured.
+        request_throughput (float | None): Requests/sec, if measured.
+        total_token_throughput (float | None): Total tokens/sec, if measured.
+        completed_requests (int | None): Number of completed requests.
+        duration_seconds (float | None): Benchmark duration in seconds.
+        ttft_mean_ms (float | None): Mean time-to-first-token (ms).
+        e2el_mean_ms (float | None): Mean end-to-end latency (ms).
+        workspace (str | None): Path to the located ``benchmark_*`` workspace.
+        report_path (str | None): Path to ``benchmark_report.json`` if present.
+        raw_result_path (str | None): Path to the raw result JSON, if salvaged.
+        reported_success (bool | None): Magpie's own success flag, if known.
+        returncode (int | None): Magpie subprocess return code.
+        nonfatal_warnings (list[str]): Non-fatal warning tags (e.g. harvested
+            leaked artifacts).
+        error (str | None): Error summary for failed/nonzero runs.
+        error_class (str): Short failure-classification tag (empty on success).
+        note (str): Optional reason/category tag carried from the variant.
+        runtime_sec (float | None): Wall-clock seconds the subprocess consumed.
+        killed_overtime (bool): ``True`` iff reaped by the soft overtime
+            deadline rather than crashing/timing-out/succeeding.
+    """
 
     name: str
     extra_server_args: str
@@ -529,10 +598,21 @@ class VariantResult:
 
     @property
     def fingerprint(self) -> str:
-        """Same fingerprint scheme as :class:`GridVariant`."""
+        """Same fingerprint scheme as :class:`GridVariant`.
+
+        Returns:
+            str: :func:`variant_fingerprint` of this result's
+            ``extra_server_args`` and ``extra_envs``.
+        """
         return variant_fingerprint(self.extra_server_args, self.extra_envs)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize this result to a plain JSON-friendly dict.
+
+        Returns:
+            dict[str, Any]: All result fields plus the computed
+            ``fingerprint``, keyed by attribute name.
+        """
         return {
             "name":               self.name,
             "extra_server_args":  self.extra_server_args,
@@ -609,7 +689,15 @@ def sanitize_result_dir(value: Any) -> str | None:
 
 
 def server_args_env_name(framework: str | None) -> str:
-    """Return the Magpie env var used to append backend server args."""
+    """Return the Magpie env var used to append backend server args.
+
+    Args:
+        framework (str | None): Framework name; matched case-insensitively.
+
+    Returns:
+        str: ``"EXTRA_ATOM_ARGS"`` for atom, ``"EXTRA_VLLM_ARGS"`` for vLLM,
+        otherwise ``"EXTRA_SGLANG_ARGS"`` (the sglang default).
+    """
     name = str(framework or "").strip().lower()
     # atom checked first so a future overlapping-substring framework name
     # cannot match the wrong branch.
@@ -956,6 +1044,16 @@ def _build_variant_yaml(
 
 
 def _parse_report(workspace: Path) -> dict[str, Any] | None:
+    """Load ``benchmark_report.json`` from a benchmark workspace.
+
+    Args:
+        workspace (Path): Directory expected to contain
+            ``benchmark_report.json``.
+
+    Returns:
+        dict[str, Any] | None: The parsed report dict, or ``None`` if the
+        file is missing, unreadable, invalid JSON, or not a JSON object.
+    """
     report = workspace / "benchmark_report.json"
     if not report.exists():
         return None
@@ -1003,6 +1101,22 @@ def _kill_stale_servers() -> None:
         my_pgid = -1
 
     def _is_orphaned_atom_worker(pid: int, cmdline: bytes) -> bool:
+        """Detect an orphaned atom ModelRunner worker by its memory maps.
+
+        A spawned atom worker has a generic ``--multiprocessing-fork`` cmdline,
+        so it is identified instead by atom/aiter signatures mmap'd into its
+        address space. Workers belonging to this process group are excluded.
+
+        Args:
+            pid (int): Candidate process id.
+            cmdline (bytes): The process's raw ``/proc/<pid>/cmdline``.
+
+        Returns:
+            bool: ``True`` iff ``cmdline`` carries a fork marker, the process
+            is outside our process group, and its ``/proc/<pid>/maps`` shows
+            an atom/aiter signature; ``False`` otherwise (including on any
+            read/permission error).
+        """
         if not any(m in cmdline for m in _FORK_MARKERS):
             return False
         # Never touch a worker that belongs to *our* process group.
@@ -1041,10 +1155,12 @@ def _kill_stale_servers() -> None:
                 if pgid not in (my_pgid, 0):
                     os.killpg(pgid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
+                # Group already gone or not ours to signal; fall through to per-pid kill.
                 pass
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
+                # Process already exited or owned by another user; nothing to kill.
                 pass
 
     # Clear /dev/shm segments that prevent re-binding.
@@ -1054,6 +1170,7 @@ def _kill_stale_servers() -> None:
             try:
                 os.remove(f)
             except OSError:
+                # Segment already removed or held by another process; safe to skip.
                 pass
 
     # Pause for KFD async VRAM release; atom workers' teardown lags past 2s.
@@ -1161,6 +1278,15 @@ async def run_grid(
     # every variant so a mid-grid leak/crash surfaces between variants instead
     # of after the whole grid. Best-effort; see ``_robustness_pulse.py``.
     async def _pulse_after_variant(idx: int) -> None:
+        """Run a best-effort robustness pulse after a variant completes.
+
+        Exceptions from the pulse are swallowed (logged at debug) so a pulse
+        failure never aborts the grid.
+
+        Args:
+            idx (int): Zero-based index of the just-finished variant, passed
+                through as the pulse ``tick_index``.
+        """
         try:
             await _robustness_pulse(tick_index=idx)
         except Exception as exc:  # noqa: BLE001
@@ -1566,7 +1692,15 @@ def pick_winners(
 
 
 def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
+    """Filesystem-safe slug for variant directory names.
+
+    Args:
+        name (str): The variant name to slugify.
+
+    Returns:
+        str: ``name`` with every character that is not alphanumeric or in
+        ``-_.`` replaced by ``_``, truncated to 60 characters.
+    """
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 

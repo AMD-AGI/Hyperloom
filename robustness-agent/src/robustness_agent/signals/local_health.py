@@ -20,6 +20,29 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class LocalHealthConfig:
+    """Thresholds for the LocalProbe-derived health rules.
+
+    Attributes:
+        gpu_temp_warn_c (float): GPU temperature (Celsius) at/above which a
+            MEDIUM thermal symptom fires.
+        gpu_temp_crit_c (float): GPU temperature (Celsius) at/above which a HIGH
+            thermal symptom fires.
+        disk_used_warn_pct (float): Non-SHM mountpoint used-percent for a MEDIUM
+            disk-pressure symptom.
+        disk_used_crit_pct (float): Non-SHM mountpoint used-percent for a HIGH
+            disk-pressure symptom.
+        shm_mountpoints (tuple[str, ...]): Mountpoints treated as shared memory
+            (stricter thresholds, handled separately from disk).
+        shm_used_warn_pct (float): SHM used-percent for a MEDIUM symptom.
+        shm_used_crit_pct (float): SHM used-percent for a HIGH symptom.
+        ray_head_unreachable_severity (str): Severity label used when the Ray
+            head is unreachable.
+        fd_warn_used_pct (float): File-descriptor used-percent for a MEDIUM
+            symptom.
+        fd_crit_used_pct (float): File-descriptor used-percent for a HIGH
+            symptom.
+    """
+
     gpu_temp_warn_c: float = 90.0
     gpu_temp_crit_c: float = 100.0
     # disk_pressure thresholds (% used); crit also emits a prune_branch(profile) hint.
@@ -75,6 +98,18 @@ def evaluate_local_health_signals(
     *,
     config: LocalHealthConfig | None = None,
 ) -> list[Symptom]:
+    """Run all LocalProbe-only health rules and aggregate their symptoms.
+
+    Args:
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected LocalProbe source data.
+        config (LocalHealthConfig | None): Thresholds; defaults to
+            :class:`LocalHealthConfig` when ``None``.
+
+    Returns:
+        list[Symptom]: All local-health symptoms found this tick, possibly
+            empty.
+    """
     cfg = config or LocalHealthConfig()
     out: list[Symptom] = []
     out.extend(_server_unreachable(data))
@@ -88,6 +123,17 @@ def evaluate_local_health_signals(
 
 
 def _server_unreachable(data: SourceData) -> list[Symptom]:
+    """Emit ``local_server_unreachable`` for each failed local HTTP probe.
+
+    Severity is HIGH when every probed target is unreachable, otherwise MEDIUM.
+
+    Args:
+        data (SourceData): Collected source data including
+            ``local_server_health``.
+
+    Returns:
+        list[Symptom]: One symptom per unreachable probe target, possibly empty.
+    """
     if not data.local_server_health:
         return []
     bad = [entry for entry in data.local_server_health if not entry.get("reachable")]
@@ -124,6 +170,17 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
 
 
 def _log_error_symptoms(data: SourceData) -> list[Symptom]:
+    """Emit ``log_error_pattern`` symptoms grouped by matched log pattern.
+
+    Patterns in :data:`_HIGH_SEVERITY_PATTERNS` fire HIGH; all others MEDIUM.
+
+    Args:
+        data (SourceData): Collected source data including
+            ``local_log_errors``.
+
+    Returns:
+        list[Symptom]: One symptom per matched pattern, possibly empty.
+    """
     if not data.local_log_errors:
         return []
     by_pattern: dict[str, list[dict[str, Any]]] = {}
@@ -164,6 +221,15 @@ def _gpu_thermal_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
+    """Emit ``gpu_thermal_high`` for GPUs over the warn/crit temperature.
+
+    Args:
+        data (SourceData): Collected source data including ``local_gpu``.
+        cfg (LocalHealthConfig): Thresholds (provides warn/crit temperatures).
+
+    Returns:
+        list[Symptom]: One symptom per over-temperature GPU, possibly empty.
+    """
     gpus = data.local_gpu.get("gpus") if isinstance(data.local_gpu, dict) else None
     if not isinstance(gpus, list):
         return []

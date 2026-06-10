@@ -26,6 +26,19 @@ def _sources_summary(sources: list[dict[str, Any]]) -> str:
 
 @register_renderer("data_provenance")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the data-provenance section as a per-section probe table.
+
+    Shows, for each tracked section, whether it was populated and which
+    required source artifacts were missing, so empty/partial sections are
+    explainable. Skipped on breakdowns built before provenance shipped.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, or a skipped placeholder when
+            no provenance entries exist.
+    """
     entries_raw = breakdown.get("data_provenance")
     entries: list[dict[str, Any]] = (
         entries_raw if isinstance(entries_raw, list) else []

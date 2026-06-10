@@ -40,6 +40,15 @@ class NullClient:
     """No-op client; compose treats this exactly like ``llm_client=None``."""
 
     def complete(self, *, system: str, user: str) -> str:  # noqa: D401
+        """Return an empty string, disabling the narrative pass.
+
+        Args:
+            system (str): The system prompt (ignored).
+            user (str): The user message (ignored).
+
+        Returns:
+            str: Always an empty string.
+        """
         return ""
 
 
@@ -97,6 +106,20 @@ class AnthropicHttpClient:
     timeout_sec: float = 60.0
 
     def complete(self, *, system: str, user: str) -> str:
+        """POST one Messages-API request and return the concatenated text.
+
+        Args:
+            system (str): The system prompt.
+            user (str): The user message.
+
+        Returns:
+            str: The joined text of all ``text`` content blocks in the
+                response.
+
+        Raises:
+            LLMClientError: If the HTTP request fails or the response shape is
+                unexpected.
+        """
         import httpx
 
         url = self.base_url.rstrip("/") + "/v1/messages"

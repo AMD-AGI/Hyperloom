@@ -1005,7 +1005,7 @@ async def test_cooldown_suppresses_duplicate_within_window():
     assert any(i.type is IntentType.ALERT for i in first.intents)
     # Suppressed tick: no symptom-derived intent emitted, only heartbeat.
     assert all(
-        not (i.type is IntentType.ALERT) for i in suppressed.intents
+        i.type is not IntentType.ALERT for i in suppressed.intents
     )
     assert any(i.payload.get("topic") == "heartbeat" for i in suppressed.intents)
     assert suppressed.findings == []

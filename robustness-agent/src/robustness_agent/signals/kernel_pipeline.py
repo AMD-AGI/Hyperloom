@@ -71,6 +71,14 @@ class RayPendingDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
+        """Initialise the detector and restore persisted pending counters.
+
+        Args:
+            config (KernelPipelineConfig | None): Tunables; defaults to
+                :class:`KernelPipelineConfig` when ``None``.
+            state_view (DetectorStateView | None): Disk-backed state view used
+                to load/persist ``consecutive_hits`` and ``last_pending``.
+        """
         self._config = config or KernelPipelineConfig()
         self._state_view = state_view
         # Disk-backed counter — see GpuLeakDetector for the same
@@ -91,6 +99,7 @@ class RayPendingDetector:
             self._last_pending = 0
 
     def _persist(self) -> None:
+        """Write the pending counters to the state view, if any."""
         if self._state_view is None:
             return
         self._state_view.save({
@@ -101,6 +110,19 @@ class RayPendingDetector:
     def evaluate(
         self, ctx: ReactorContext, data: SourceData,
     ) -> list[Symptom]:
+        """Advance the pending streak and fire F1 once it crosses threshold.
+
+        Resets the streak when Ray data is missing, the head is unhealthy, or
+        the pending count is at/below the configured threshold.
+
+        Args:
+            ctx (ReactorContext): Reactor context for the current tick.
+            data (SourceData): Collected source data including ``local_ray``.
+
+        Returns:
+            list[Symptom]: A single ``ray_pending_starvation`` symptom once the
+                consecutive-tick threshold is crossed, otherwise an empty list.
+        """
         ray_info = data.local_ray
         if not isinstance(ray_info, dict) or not ray_info:
             # No Ray data this tick → don't accumulate.
@@ -156,6 +178,18 @@ class RayPendingDetector:
 def _geak_budget_symptoms(
     data: SourceData, cfg: KernelPipelineConfig,
 ) -> list[Symptom]:
+    """F2: fire ``geak_budget_starvation`` for kernels whose GEAK runs SIGTERM.
+
+    Args:
+        data (SourceData): Collected source data including the decision-audit
+            ``oob_attempts``.
+        cfg (KernelPipelineConfig): Tunables (provides the SIGTERM-attempt
+            threshold).
+
+    Returns:
+        list[Symptom]: One ``geak_budget_starvation`` symptom per offending
+            kernel, possibly empty.
+    """
     audit = data.local_decision_audit
     if not isinstance(audit, dict):
         return []
@@ -215,6 +249,17 @@ def _geak_budget_symptoms(
 def _cursor_auth_storm_symptoms(
     data: SourceData, cfg: KernelPipelineConfig,
 ) -> list[Symptom]:
+    """F4: fire ``cursor_auth_storm`` when the cursor backend hits repeated 401s.
+
+    Args:
+        data (SourceData): Collected source data including the decision-audit
+            ``oob_attempts``.
+        cfg (KernelPipelineConfig): Tunables (provides the 401-hit threshold).
+
+    Returns:
+        list[Symptom]: A one-element list with the ``cursor_auth_storm`` symptom
+            once the threshold is reached, otherwise an empty list.
+    """
     audit = data.local_decision_audit
     if not isinstance(audit, dict):
         return []
@@ -270,6 +315,20 @@ def _kernel_opt_no_progress_symptoms(
 ) -> list[Symptom]:
     """Identify kernels where every backend attempt landed at
     PARTIAL/REVERT (no KEEP) across the recent attempt window.
+
+    Only kernels with at least two distinct backends attempted count, so
+    one-shot kernels that haven't had time to fail are not flagged.
+
+    Args:
+        data (SourceData): Collected source data including the decision-audit
+            ``oob_attempts`` and ``recent_integrate``.
+        cfg (KernelPipelineConfig): Tunables (provides the no-progress kernel
+            count threshold).
+
+    Returns:
+        list[Symptom]: A one-element list with the ``kernel_opt_no_progress``
+            symptom when enough kernels show no progress, otherwise an empty
+            list.
     """
     audit = data.local_decision_audit
     if not isinstance(audit, dict):

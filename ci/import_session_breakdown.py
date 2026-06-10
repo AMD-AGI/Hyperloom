@@ -106,7 +106,20 @@ DEFAULT_K8S_NAMESPACE = os.environ.get("PERF_RUNS_K8S_NS", "primus-safe")
 
 
 def _import_psycopg2():
-    """Lazy import so the script still runs in ssh-kubectl mode without the driver."""
+    """Lazily import psycopg2 so ssh-kubectl mode works without the driver.
+
+    Deferring the import keeps the script usable in the default ssh-kubectl
+    mode (which shells out to ``psql``) on machines that have no local
+    PostgreSQL driver installed.
+
+    Returns:
+        tuple: ``(psycopg2_module, psycopg2.extras.Json)`` when the driver is
+            importable.
+
+    Raises:
+        SystemExit: If psycopg2 is not installed; an install hint is written
+            to stderr and the process exits with status 1.
+    """
     try:
         import psycopg2 as _pg
         from psycopg2.extras import Json as _Json
@@ -125,7 +138,17 @@ def _import_psycopg2():
 # ---------------------------------------------------------------------------
 
 def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
-    """Nested dict get with None-safety."""
+    """Walk a chain of nested dict keys, tolerating missing/None levels.
+
+    Args:
+        d (Any): The starting object, typically a dict.
+        *keys (str): Successive keys to descend through.
+        default (Any): Value returned when any level is missing, is not a
+            dict, or resolves to None.
+
+    Returns:
+        Any: The value found at the nested key path, otherwise ``default``.
+    """
     cur = d
     for k in keys:
         if isinstance(cur, dict):
@@ -136,13 +159,33 @@ def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 
 
 def truncate(s: Optional[str], n: int) -> Optional[str]:
+    """Truncate a string to at most ``n`` characters.
+
+    Args:
+        s (Optional[str]): The string to truncate, or None.
+        n (int): Maximum allowed length.
+
+    Returns:
+        Optional[str]: None when ``s`` is None, otherwise ``s`` clipped to the
+            first ``n`` characters.
+    """
     if s is None:
         return None
     return s if len(s) <= n else s[:n]
 
 
 def derive_image(framework_name: str, session_image: Optional[str]) -> str:
-    """Use session.image if present, else fall back by framework name."""
+    """Resolve the container image for a run, preferring the session value.
+
+    Args:
+        framework_name (str): Framework name (e.g. ``"sglang"`` / ``"vllm"``)
+            used to pick a default when no session image is present.
+        session_image (Optional[str]): Image recorded on the session, if any.
+
+    Returns:
+        str: ``session_image`` when set, else the framework's default image, or
+            ``"unknown"`` if the framework has no default.
+    """
     if session_image:
         return session_image
     fw = (framework_name or "").lower()
@@ -203,6 +246,16 @@ def detect_category(data: Dict) -> str:
 
 
 def reshape_snapshot(snap: Optional[Dict]) -> Optional[Dict]:
+    """Flatten a roofline snapshot into a compact display-friendly dict.
+
+    Args:
+        snap (Optional[Dict]): A raw roofline snapshot, or None.
+
+    Returns:
+        Optional[Dict]: A flattened dict with compute/idle/comm percentages,
+            top-kernel name/efficiency, and snapshot id/timestamp; None when
+            ``snap`` is not a dict.
+    """
     if not isinstance(snap, dict):
         return None
     return {
@@ -228,6 +281,17 @@ def extract_roofline(data: Dict) -> Optional[Dict]:
 
 
 def compute_gain_pct(baseline_tput: Optional[float], opt_tput: Optional[float]) -> Optional[float]:
+    """Compute percentage throughput improvement from baseline to optimized.
+
+    Args:
+        baseline_tput (Optional[float]): Baseline throughput (tok/s/GPU).
+        opt_tput (Optional[float]): Optimized throughput (tok/s/GPU).
+
+    Returns:
+        Optional[float]: ``(opt - baseline) / baseline * 100`` rounded to two
+            decimals, or None when either input is missing or the baseline is
+            non-positive.
+    """
     if baseline_tput is None or opt_tput is None:
         return None
     try:
@@ -239,7 +303,15 @@ def compute_gain_pct(baseline_tput: Optional[float], opt_tput: Optional[float]) 
 
 
 def compute_kernel_gain(attribution_src: Dict) -> Optional[float]:
-    """Kernel-attribution gain = GEAK + OOB contributions to total cumulative gain."""
+    """Sum the GEAK + OOB contributions to total cumulative gain.
+
+    Args:
+        attribution_src (Dict): The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        Optional[float]: Combined ``geak_pct_of_total + oob_pct_of_total``
+            rounded to two decimals, or None when neither value is present.
+    """
     geak = attribution_src.get("geak_pct_of_total")
     oob = attribution_src.get("oob_pct_of_total")
     if geak is None and oob is None:
@@ -260,7 +332,15 @@ def compute_param_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_backend_gain(attribution_src: Dict) -> Optional[float]:
-    """Backend-attribution gain = backend variant choice (e.g. attention=aiter)."""
+    """Return the backend variant-choice contribution (e.g. attention=aiter).
+
+    Args:
+        attribution_src (Dict): The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        Optional[float]: ``backends_pct_of_total`` rounded to two decimals, or
+            None when the value is absent.
+    """
     backends = attribution_src.get("backends_pct_of_total")
     if backends is None:
         return None
@@ -268,7 +348,15 @@ def compute_backend_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_geak_gain(attribution_src: Dict) -> Optional[float]:
-    """GEAK-source gain = attribution.source_breakdown.geak_pct_of_total."""
+    """Return the GEAK-source gain percentage.
+
+    Args:
+        attribution_src (Dict): The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        Optional[float]: ``geak_pct_of_total`` rounded to two decimals, or None
+            when the value is missing or non-numeric.
+    """
     v = attribution_src.get("geak_pct_of_total")
     if not isinstance(v, (int, float)):
         return None
@@ -276,7 +364,15 @@ def compute_geak_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_oob_gain(attribution_src: Dict) -> Optional[float]:
-    """OOB-source gain = attribution.source_breakdown.oob_pct_of_total."""
+    """Return the OOB-source gain percentage.
+
+    Args:
+        attribution_src (Dict): The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        Optional[float]: ``oob_pct_of_total`` rounded to two decimals, or None
+            when the value is missing or non-numeric.
+    """
     v = attribution_src.get("oob_pct_of_total")
     if not isinstance(v, (int, float)):
         return None
@@ -335,7 +431,15 @@ _RE_MODEL_SIZE_TOKEN = re.compile(r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)[Bb](?![A-Za
 
 
 def _collect_args_text(data: Dict) -> str:
-    """Concatenate every place where launcher args might live."""
+    """Concatenate every place where launcher args might live.
+
+    Args:
+        data (Dict): Full session breakdown JSON.
+
+    Returns:
+        str: A ``" | "``-joined string of all ``framework_args`` values found
+            under baseline/final/workload invocation blocks.
+    """
     parts: list[str] = []
     for path in (
         ("baseline", "invocation", "framework_args"),
@@ -349,6 +453,16 @@ def _collect_args_text(data: Dict) -> str:
 
 
 def _parse_int_from_args(rx: re.Pattern, text: str) -> Optional[int]:
+    """Search ``text`` with a regex and return its first group as an int.
+
+    Args:
+        rx (re.Pattern): Compiled regex whose first capture group is numeric.
+        text (str): Text to search (typically the joined launcher args).
+
+    Returns:
+        Optional[int]: The parsed integer, or None when there is no match or
+            the captured group is not an integer.
+    """
     m = rx.search(text)
     if not m:
         return None
@@ -359,6 +473,15 @@ def _parse_int_from_args(rx: re.Pattern, text: str) -> Optional[int]:
 
 
 def _infer_prec_from_name(name: str) -> str:
+    """Infer precision from quantization hints in a model name.
+
+    Args:
+        name (str): Model name to inspect.
+
+    Returns:
+        str: ``"int4"``, ``"fp4"``, or ``"bf16"`` when the name carries a
+            matching marker, otherwise the platform default precision.
+    """
     n = (name or "").lower()
     if any(t in n for t in ("awq", "gptq", "int4", "i4")):
         return "int4"
@@ -370,10 +493,18 @@ def _infer_prec_from_name(name: str) -> str:
 
 
 def _infer_tp_from_name(name: str) -> int:
-    """
-    Size-tier fallback: <=70B -> 1, 70-180B -> 4, >180B -> 8.
-    Recognises spelled-out 'kimi-k2' / 'deepseek-r1' / 'deepseek-v3' / '1T' as
-    very large.
+    """Infer a tensor-parallel size from the parameter size in a model name.
+
+    Size-tier fallback: ``<=70B -> 1``, ``70-180B -> 4``, ``>180B -> 8``. Also
+    recognises spelled-out very-large families (``kimi-k2`` / ``deepseek-r1`` /
+    ``deepseek-v3`` / ``1T``) and maps them to 8.
+
+    Args:
+        name (str): Model name to inspect for a ``<N>B`` size token.
+
+    Returns:
+        int: The inferred tensor-parallel size, or the platform default when no
+            size signal is found.
     """
     if not name:
         return DEFAULT_TP
@@ -397,14 +528,22 @@ def _infer_tp_from_name(name: str) -> int:
 
 
 def resolve_workload_dims(data: Dict) -> Dict[str, Any]:
-    """
-    Return finalised values for prec/tp/isl/osl/conc/duration_seconds.
+    """Resolve finalised workload dimensions for a session.
 
-    Order of precedence per field:
-      1. workload.<field> if set
-      2. parsed from framework_args (TP=, CONC=, ISL=, OSL=, precision=)
+    Determines values for ``prec``/``tp``/``isl``/``osl``/``conc``/
+    ``duration_seconds`` using this precedence per field:
+
+      1. ``workload.<field>`` if set
+      2. parsed from ``framework_args`` (TP=, CONC=, ISL=, OSL=, precision=)
       3. model-name inference (prec/tp only)
       4. platform default
+
+    Args:
+        data (Dict): Full session breakdown JSON.
+
+    Returns:
+        Dict[str, Any]: Mapping with keys ``prec``, ``tp``, ``isl``, ``osl``,
+            ``conc``, and ``duration_seconds``.
     """
     workload = data.get("workload") or {}
     session = data.get("session") or {}
@@ -432,6 +571,16 @@ def resolve_workload_dims(data: Dict) -> Dict[str, Any]:
 
     # isl / osl / conc
     def _pick(field_name: str, rx: re.Pattern, default: int) -> int:
+        """Pick an int workload dim from workload field, args, or default.
+
+        Args:
+            field_name (str): Key to read from the ``workload`` dict.
+            rx (re.Pattern): Regex used to parse the value from launcher args.
+            default (int): Platform default used as the final fallback.
+
+        Returns:
+            int: The resolved integer value.
+        """
         raw = workload.get(field_name)
         if isinstance(raw, (int, float)) and raw:
             return int(raw)
@@ -460,6 +609,20 @@ def resolve_workload_dims(data: Dict) -> Dict[str, Any]:
 
 
 def extract_row(data: Dict) -> Dict[str, Any]:
+    """Convert a session breakdown JSON into a perf_runs DB row dict.
+
+    Cleans the model name, derives image/category/precision/dims, computes the
+    gain (preferring ``final.cumulative_gain_pct_validated`` then a raw
+    throughput delta), normalises missing attribution gains to 0.00, clips
+    negative gains to 0, and attaches the enriched ``raw_data`` payload.
+
+    Args:
+        data (Dict): Full (V2-shaped) session breakdown JSON.
+
+    Returns:
+        Dict[str, Any]: A row dict whose keys map to the perf_runs table
+            columns, including the nested ``raw_data`` JSON.
+    """
     workload = data.get("workload") or {}
     baseline = data.get("baseline") or {}
     final = data.get("final") or {}
@@ -563,6 +726,15 @@ def extract_row(data: Dict) -> Dict[str, Any]:
 
 
 def format_duration_pretty(seconds: Optional[int]) -> str:
+    """Format a duration in seconds as a compact ``<h>h<mm>m<ss>s`` string.
+
+    Args:
+        seconds (Optional[int]): Duration in seconds, or None.
+
+    Returns:
+        str: ``"n/a"`` when ``seconds`` is None, otherwise the formatted
+            duration (e.g. ``"3h00m00s"``).
+    """
     if seconds is None:
         return "n/a"
     s = int(seconds)
@@ -611,6 +783,14 @@ def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = 
     raw_clip_applied: Dict[str, Any] = {}
 
     def _clip_neg(container: Dict, key: str, full_path: str) -> None:
+        """Clip a negative numeric field to 0 in-place and record the change.
+
+        Args:
+            container (Dict): Dict holding the value to clip.
+            key (str): Key whose numeric value should be clipped.
+            full_path (str): Dotted path used as the key in the
+                ``raw_clip_applied`` provenance map.
+        """
         v = container.get(key)
         if isinstance(v, (int, float)) and v < 0:
             container[key] = 0
@@ -672,7 +852,18 @@ _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def safe_table(name: str) -> str:
-    """Reject anything that isn't a plain identifier (defence in depth)."""
+    """Validate that a table name is a plain SQL identifier.
+
+    Args:
+        name (str): Proposed table name.
+
+    Returns:
+        str: The same ``name`` when it is a valid identifier.
+
+    Raises:
+        ValueError: If ``name`` is not a plain ``[A-Za-z_][A-Za-z0-9_]*``
+            identifier (defence in depth against SQL injection).
+    """
     if not _SAFE_IDENT.match(name):
         raise ValueError(f"Refusing unsafe table name: {name!r}")
     return name
@@ -683,6 +874,16 @@ def safe_table(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def build_upsert_sql(table: str) -> str:
+    """Build the parameterised INSERT ... ON CONFLICT upsert for local mode.
+
+    Args:
+        table (str): Destination table name (validated via :func:`safe_table`).
+
+    Returns:
+        str: A psycopg2-style SQL statement using ``%(name)s`` placeholders that
+            upserts on ``unique_key`` and returns the row id plus an inserted
+            flag.
+    """
     table = safe_table(table)
     return f"""
 INSERT INTO {table} (
@@ -731,6 +932,15 @@ RETURNING id, (xmax = 0) AS inserted;
 
 
 def build_create_unique_index_sql(table: str) -> str:
+    """Build the ``CREATE UNIQUE INDEX IF NOT EXISTS`` SQL for ``unique_key``.
+
+    Args:
+        table (str): Destination table name (validated via :func:`safe_table`).
+
+    Returns:
+        str: SQL that ensures a unique index on ``<table>(unique_key)`` so the
+            upsert's ``ON CONFLICT (unique_key)`` clause works.
+    """
     table = safe_table(table)
     return (
         f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_unique_key_idx "
@@ -743,6 +953,19 @@ def build_create_unique_index_sql(table: str) -> str:
 # ---------------------------------------------------------------------------
 
 def connect_local(args: argparse.Namespace):
+    """Open a psycopg2 connection for local mode.
+
+    Prefers ``$PERF_RUNS_DB_URL`` / ``--db-url`` when set; otherwise builds the
+    connection from the individual host/port/user/dbname (and optional
+    password) flags.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args carrying the DB connection
+            settings.
+
+    Returns:
+        psycopg2.extensions.connection: An open database connection.
+    """
     pg, _ = _import_psycopg2()
     url = os.environ.get("PERF_RUNS_DB_URL") or args.db_url
     if url:
@@ -755,7 +978,20 @@ def connect_local(args: argparse.Namespace):
 
 
 def upsert_row_local(conn, row: Dict[str, Any], sql: str) -> Tuple[int, bool]:
-    """Returns (id, inserted_bool)."""
+    """Execute the upsert for a single row over a local psycopg2 connection.
+
+    Wraps JSON columns (``roofline``/``raw_data``) in ``psycopg2.extras.Json``
+    and commits the transaction.
+
+    Args:
+        conn: An open psycopg2 connection.
+        row (Dict[str, Any]): The row dict produced by :func:`extract_row`.
+        sql (str): The upsert SQL from :func:`build_upsert_sql`.
+
+    Returns:
+        Tuple[int, bool]: The row id and a flag that is True when the row was
+            inserted (False when it updated an existing row).
+    """
     _, Json = _import_psycopg2()
     payload = dict(row)
     if payload.get("roofline") is not None:
@@ -774,7 +1010,16 @@ def upsert_row_local(conn, row: Dict[str, Any], sql: str) -> Tuple[int, bool]:
 # ---------------------------------------------------------------------------
 
 def _dollar_tag(content: str, base: str = "perf") -> str:
-    """Find a $tag$ that does not appear inside `content`."""
+    """Find a PostgreSQL dollar-quote tag that does not appear in ``content``.
+
+    Args:
+        content (str): The string the tag will wrap; the chosen tag is
+            guaranteed not to occur within it.
+        base (str): Base label embedded in the tag for readability.
+
+    Returns:
+        str: A ``$<base>_<nonce>$`` tag safe to use as a dollar-quote delimiter.
+    """
     for _ in range(8):
         tag = f"${base}_{secrets.token_hex(4)}$"
         if tag not in content:
@@ -784,6 +1029,15 @@ def _dollar_tag(content: str, base: str = "perf") -> str:
 
 
 def _sql_str_literal(s: Optional[str]) -> str:
+    """Render a value as a safe dollar-quoted SQL string literal.
+
+    Args:
+        s (Optional[str]): The value to render, or None.
+
+    Returns:
+        str: ``"NULL"`` when ``s`` is None, otherwise the value wrapped in a
+            unique dollar-quote tag (no escaping required).
+    """
     if s is None:
         return "NULL"
     s = str(s)
@@ -792,6 +1046,15 @@ def _sql_str_literal(s: Optional[str]) -> str:
 
 
 def _sql_number_literal(v: Any) -> str:
+    """Render a numeric/bool value as a SQL literal.
+
+    Args:
+        v (Any): A number, bool, or None.
+
+    Returns:
+        str: ``"NULL"`` for None, ``"TRUE"``/``"FALSE"`` for booleans, or the
+            numeric value rendered as a float/int literal.
+    """
     if v is None:
         return "NULL"
     if isinstance(v, bool):
@@ -800,6 +1063,15 @@ def _sql_number_literal(v: Any) -> str:
 
 
 def _sql_jsonb_literal(obj: Any) -> str:
+    """Render a Python object as a dollar-quoted ``::jsonb`` SQL literal.
+
+    Args:
+        obj (Any): Any JSON-serialisable object, or None.
+
+    Returns:
+        str: ``"NULL"`` when ``obj`` is None, otherwise the JSON-encoded value
+            wrapped in a unique dollar-quote tag and cast to ``jsonb``.
+    """
     if obj is None:
         return "NULL"
     js = json.dumps(obj, ensure_ascii=False)
@@ -893,7 +1165,21 @@ def build_ssh_kubectl_psql(hop1: str, namespace: str, user: str, dbname: str) ->
 
 
 def execute_remote_sql(sql: str, *, hop1: str, namespace: str, user: str, dbname: str) -> Tuple[str, str]:
-    """Pipe `sql` through SSH+kubectl psql. Raises on non-zero exit."""
+    """Pipe SQL through SSH+kubectl ``psql`` and capture its output.
+
+    Args:
+        sql (str): SQL text to send on stdin.
+        hop1 (str): SSH jump host.
+        namespace (str): Kubernetes namespace of the postgres pod.
+        user (str): PostgreSQL role to connect as.
+        dbname (str): Database name to connect to.
+
+    Returns:
+        Tuple[str, str]: The captured ``(stdout, stderr)`` decoded as UTF-8.
+
+    Raises:
+        RuntimeError: If the remote ``psql`` process exits non-zero.
+    """
     argv = build_ssh_kubectl_psql(hop1, namespace, user, dbname)
     proc = subprocess.run(argv, input=sql.encode("utf-8"), capture_output=True)
     out = proc.stdout.decode("utf-8", errors="replace")
@@ -911,6 +1197,19 @@ def execute_remote_sql(sql: str, *, hop1: str, namespace: str, user: str, dbname
 # ---------------------------------------------------------------------------
 
 def iter_json_files(paths: Iterable[str], scan_dir: Optional[str]) -> List[Path]:
+    """Expand input paths and an optional scan dir into a unique file list.
+
+    Directories are searched recursively for ``*.json``; missing paths emit a
+    warning. The result is de-duplicated while preserving order.
+
+    Args:
+        paths (Iterable[str]): Files and/or directories passed on the CLI.
+        scan_dir (Optional[str]): Extra directory to scan recursively for
+            ``*.json``, or None.
+
+    Returns:
+        List[Path]: Ordered, de-duplicated list of JSON file paths.
+    """
     files: List[Path] = []
     for p in paths or []:
         pp = Path(p)
@@ -934,6 +1233,15 @@ def iter_json_files(paths: Iterable[str], scan_dir: Optional[str]) -> List[Path]
 
 
 def looks_like_session_breakdown(data: Any) -> bool:
+    """Heuristically test whether ``data`` is a canonical V2 session breakdown.
+
+    Args:
+        data (Any): Parsed JSON object.
+
+    Returns:
+        bool: True when ``data`` is a dict carrying workload/baseline/session
+            keys (or a ``session_breakdown`` schema_version marker).
+    """
     if not isinstance(data, dict):
         return False
     return ("workload" in data and "baseline" in data and "session" in data) or \
@@ -960,6 +1268,16 @@ def looks_like_v1_flat_schema(data: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 def _deep_get(d: Any, *path, default=None):
+    """Descend nested dicts by a sequence of keys, tolerating gaps.
+
+    Args:
+        d (Any): Starting object, typically a dict.
+        *path: Successive keys to descend through.
+        default: Value returned when any level is missing/not a dict/None.
+
+    Returns:
+        Any: The value at the nested path, otherwise ``default``.
+    """
     cur = d
     for k in path:
         if not isinstance(cur, dict):
@@ -969,6 +1287,14 @@ def _deep_get(d: Any, *path, default=None):
 
 
 def _first_truthy(*vals):
+    """Return the first value that is neither None nor an empty string.
+
+    Args:
+        *vals: Candidate values in priority order.
+
+    Returns:
+        Any: The first non-None, non-empty value, or None if none qualify.
+    """
     for v in vals:
         if v is not None and v != "":
             return v
@@ -976,12 +1302,30 @@ def _first_truthy(*vals):
 
 
 def _is_pos_number(v: Any) -> bool:
+    """Test whether a value is a strictly positive (non-bool) number.
+
+    Args:
+        v (Any): Value to test.
+
+    Returns:
+        bool: True when ``v`` is an int/float (not a bool) greater than 0.
+    """
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
 
 
 def _clean_model_name(raw: Any) -> Optional[str]:
-    """V1.5 sometimes stores '/wekafs/models/<org-repo>' as 'model'. Strip the
-    storage prefix so we get a clean HuggingFace-style name."""
+    """Strip storage path prefixes to recover a HuggingFace-style model name.
+
+    V1.5 sometimes stores ``/wekafs/models/<org-repo>`` as ``model``; this
+    removes known storage prefixes and surrounding slashes.
+
+    Args:
+        raw (Any): Candidate model name (possibly a storage path).
+
+    Returns:
+        Optional[str]: The cleaned model name, or None when ``raw`` is not a
+            usable non-empty string.
+    """
     if not isinstance(raw, str) or not raw:
         return None
     s = raw.strip()
@@ -993,10 +1337,17 @@ def _clean_model_name(raw: Any) -> Optional[str]:
 
 
 def looks_like_universal_schema(data: Any) -> bool:
-    """
-    Accept any dict that has *both* an identifiable model name and an
-    identifiable framework, even if workload/baseline/session are missing
-    or under non-standard keys. The real test is migrate_universal_to_v2().
+    """Loosely test whether ``data`` carries a model name and framework.
+
+    Accepts any dict that has *both* an identifiable model name and framework,
+    even if workload/baseline/session are missing or under non-standard keys.
+    The authoritative test remains :func:`migrate_universal_to_v2`.
+
+    Args:
+        data (Any): Parsed JSON object.
+
+    Returns:
+        bool: True when both a model name and framework can be located.
     """
     if not isinstance(data, dict):
         return False
@@ -1044,6 +1395,14 @@ def migrate_universal_to_v2(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         cumulative_gain_*_validated, cumulative_gain_pct, gain_pct,
         winner_gain_pct, best.gain_pct
         (else recompute (opt-base)/base*100)
+
+    Args:
+        raw (Dict[str, Any]): A session breakdown dict in any known layout.
+
+    Returns:
+        Optional[Dict[str, Any]]: A V2-shaped dict (workload/baseline/final/
+            session, plus ``_universal_source`` provenance), or None when the
+            essential model name or baseline throughput cannot be recovered.
     """
     if not isinstance(raw, dict):
         return None
@@ -1238,6 +1597,13 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
         derive_image() fall back to DEFAULT_IMAGES[framework].
       * gain_pct goes into final.cumulative_gain_pct_validated since V1 agents
         only ever reported the post-validate cumulative gain.
+
+    Args:
+        v1 (Dict[str, Any]): A V1 flat session breakdown dict.
+
+    Returns:
+        Dict[str, Any]: The equivalent V2 nested dict, with the original V1
+            payload preserved under ``_v1_source``.
     """
     tp_raw = v1.get("tp")
     try:
@@ -1248,6 +1614,15 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
         tp = 1
 
     def to_per_gpu(total: Any) -> Optional[float]:
+        """Convert a cluster-total throughput to a per-GPU value.
+
+        Args:
+            total (Any): Total throughput across all GPUs.
+
+        Returns:
+            Optional[float]: ``total / tp`` when ``total`` is a positive
+                number, otherwise None.
+        """
         if isinstance(total, (int, float)) and total > 0:
             return float(total) / tp
         return None
@@ -1306,7 +1681,19 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def parse_file(path: Path) -> Optional[Dict[str, Any]]:
-    """Read + validate a JSON file. Returns the row dict or None if not a session breakdown."""
+    """Read and validate a JSON file, returning its extracted row.
+
+    Accepts both bare session breakdowns and the ``{"source": ..., "data":
+    <breakdown>}`` wrapper. Files that fail to parse or don't look like a
+    session breakdown are skipped (with a printed notice).
+
+    Args:
+        path (Path): Path to the JSON file.
+
+    Returns:
+        Optional[Dict[str, Any]]: The extracted row dict, or None when the file
+            is unparseable or not a session breakdown.
+    """
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
@@ -1326,6 +1713,14 @@ def parse_file(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def format_row_summary(row: Dict[str, Any]) -> str:
+    """Render a human-readable multi-line summary of a parsed row.
+
+    Args:
+        row (Dict[str, Any]): The row dict produced by :func:`extract_row`.
+
+    Returns:
+        str: A formatted summary used in dry-run and import logging.
+    """
     return (
         f"  model={row['model_name']!r} framework={row['framework']!r} "
         f"prec={row['prec']!r} category={row['category']!r}\n"
@@ -1343,6 +1738,11 @@ def format_row_summary(row: Dict[str, Any]) -> str:
 
 
 def main():
+    """CLI entry point: parse args and import the requested JSON files.
+
+    Builds the argument parser, validates the destination table, collects the
+    input files, and dispatches to dry-run, local, or ssh-kubectl mode.
+    """
     parser = argparse.ArgumentParser(
         description="Import session breakdown JSON files into perf_runs_dev.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1412,6 +1812,15 @@ def main():
 
 
 def _run_local_mode(args: argparse.Namespace, files: List[Path]) -> None:
+    """Import files using a direct psycopg2 connection (local mode).
+
+    Connects, optionally ensures the unique index, then parses and upserts each
+    file, printing per-file status and a final tally.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args.
+        files (List[Path]): JSON files to import.
+    """
     print(f"== local mode: connecting to {args.host}:{args.port}/{args.dbname} ==")
     try:
         conn = connect_local(args)
@@ -1464,6 +1873,16 @@ def _run_local_mode(args: argparse.Namespace, files: List[Path]) -> None:
 
 
 def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
+    """Import files by piping SQL through SSH+kubectl ``psql``.
+
+    Optionally ensures the unique index, parses all files, then upserts them in
+    batches (falling back to one-by-one retries on a failed batch) to amortise
+    SSH/kubectl startup cost.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args.
+        files (List[Path]): JSON files to import.
+    """
     print(
         f"== ssh-kubectl mode: hop1={args.hop1} ns={args.namespace} "
         f"db={args.dbname} table={args.table} ==")

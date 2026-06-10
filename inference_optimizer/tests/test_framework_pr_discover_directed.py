@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 from inference_optimizer.orchestrator import framework_agent_client as _fa_client
-from inference_optimizer.orchestrator import coordinator as _coord_mod
 from inference_optimizer.orchestrator.coordinator import (
     DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES,
     Coordinator,

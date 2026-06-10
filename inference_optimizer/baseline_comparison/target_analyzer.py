@@ -44,6 +44,11 @@ LLM_AUTHORED_SOURCE = "llm_authored"
 
 
 def _iso_utc_now() -> str:
+    """Return the current UTC time as a second-precision ISO string.
+
+    Returns:
+        str: Timestamp formatted as ``YYYY-MM-DDTHH:MM:SSZ``.
+    """
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -53,6 +58,14 @@ def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
     Upstream sometimes contains multiple rows for the same (conc, tp)
     (different dates or sweep methods). The report only needs the best
     one per slot — keeping all of them just clutters the markdown.
+
+    Args:
+        points (list[BaselinePoint]): Candidate points, possibly with
+            duplicate ``(conc, decode_tp)`` combos.
+
+    Returns:
+        list[BaselinePoint]: Best point per ``(conc, decode_tp)``,
+            sorted by those two keys.
     """
     best: dict[tuple[int, int], BaselinePoint] = {}
     for p in points:
@@ -70,6 +83,12 @@ def _format_report_md(summary: BaselineSummary) -> str:
     contract is "facts only, no derived KPI" so this section never
     accidentally becomes an optimisation target (see S2 in the design
     chat).
+
+    Args:
+        summary (BaselineSummary): The summary to render.
+
+    Returns:
+        str: The markdown report text (newline-terminated).
     """
     q = summary.query
     lines: list[str] = []
@@ -144,6 +163,15 @@ def _persist(
     Uses :mod:`session_paths` for path computation. Returns the
     ``(json_path, md_path)`` tuple so the executor can surface them
     on the bus event.
+
+    Args:
+        summary (BaselineSummary): The analysis artefact to serialise.
+        session_dir (Path): Session root under which the
+            ``target_analysis/`` output directory is created.
+
+    Returns:
+        tuple[Path, Path]: The ``(json_path, md_path)`` of the written
+            JSON and Markdown report files.
     """
     from ..session_paths import (
         target_analysis_dir,

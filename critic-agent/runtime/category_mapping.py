@@ -44,8 +44,15 @@ CATEGORY_TO_KIND: dict[str, str] = {
 def map_category_to_kind(category: str) -> str:
     """Return the KB ``kind`` for a Critic ``category``.
 
+    Args:
+        category (str): The Critic category to translate.
+
+    Returns:
+        str: The mapped KB ``kind``.
+
     Raises:
-        RuntimeAdapterError: If ``category`` is not in the catalogue.
+        RuntimeAdapterError: If ``category`` is not a string or is not in the
+            catalogue.
     """
     if not isinstance(category, str):
         raise RuntimeAdapterError(
@@ -63,7 +70,15 @@ def map_category_to_kind(category: str) -> str:
 def filter_supported_categories(
     categories: Iterable[str],
 ) -> tuple[list[str], list[str]]:
-    """Split an iterable into ``(supported, rejected)`` category lists."""
+    """Split an iterable into ``(supported, rejected)`` category lists.
+
+    Args:
+        categories (Iterable[str]): Critic categories to partition.
+
+    Returns:
+        tuple[list[str], list[str]]: ``(supported, rejected)`` where supported
+        categories appear in the mapping table and rejected ones do not.
+    """
     supported: list[str] = []
     rejected: list[str] = []
     for c in categories:

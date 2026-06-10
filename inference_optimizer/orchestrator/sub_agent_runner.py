@@ -27,6 +27,16 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class RunnerContext:
+    """Per-task context handed to an :data:`ExecutorFn`.
+
+    Attributes:
+        task (Task): The task being executed.
+        lease (Lease | None): The resource lease held for this task, or
+            None when the task requires no lanes.
+        extra (dict): Optional extras (e.g. ``workspace`` / ``session_dir``
+            paths) the runner stashes for the executor.
+    """
+
     task: Task
     lease: Lease | None
     extra: dict = field(default_factory=dict)
@@ -38,6 +48,16 @@ ExecutorFn = Callable[[RunnerContext], Awaitable[dict]]
 
 @dataclass
 class SubAgentResult:
+    """Outcome of a single :meth:`SubAgentRunner.run_task` call.
+
+    Attributes:
+        task_id (str): Id of the task that ran.
+        state (str): Terminal state — ``"succeeded"`` / ``"failed"`` /
+            ``"needs_manual_review"``.
+        result (dict): Executor result payload (empty on failure).
+        error (str | None): Error string when the task failed, else None.
+    """
+
     task_id: str
     state: str   # "succeeded" / "failed" / "needs_manual_review"
     result: dict
@@ -60,6 +80,18 @@ class SubAgentRunner:
         session_dir: Path | None = None,
         shared_state: object | None = None,
     ):
+        """Initialise the runner with its lock manager + task registry.
+
+        Args:
+            locks (ResourceLockManager): Lane lease manager used to gate
+                task execution.
+            tasks (TaskRegistry): Registry the runner transitions task
+                state through.
+            executor_registry (dict[str, ExecutorFn] | None): Optional
+                initial map of ``task.kind`` to executor function (copied).
+            session_dir (Path | None): Session root used to pre-create
+                per-action workspaces; None disables workspace pre-mkdir.
+        """
         self.locks = locks
         self.tasks = tasks
         self.executor_registry: dict[str, ExecutorFn] = dict(executor_registry or {})
@@ -70,6 +102,13 @@ class SubAgentRunner:
         self.shared_state = shared_state
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
+        """Register (or replace) the executor for a task kind.
+
+        Args:
+            kind (str): The ``task.kind`` this executor handles.
+            fn (ExecutorFn): Async callable invoked with a
+                :class:`RunnerContext`.
+        """
         self.executor_registry[kind] = fn
 
     def _pre_mkdir_workspace(self, task: Task) -> Path | None:

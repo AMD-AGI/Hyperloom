@@ -36,6 +36,17 @@ class SessionBreakdownExecutor:
     """
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Write ``session_breakdown.json`` and return its path + metadata.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` (optional
+                ``session_dir`` / ``output_path`` overrides) and ``extra``.
+
+        Returns:
+            dict[str, Any]: On success, ``status="succeeded"`` with
+                ``breakdown_path``, ``warnings`` and ``size_bytes``; on failure,
+                ``status="failed"`` with an ``error`` message.
+        """
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             return {
@@ -76,7 +87,16 @@ class SessionBreakdownExecutor:
 
     @staticmethod
     def _resolve_session_dir(ctx) -> Path | None:
-        """Same resolution order as :class:`ReportExecutor`."""
+        """Same resolution order as :class:`ReportExecutor`.
+
+        Args:
+            ctx: The runner context whose ``extra`` / ``task.params`` may carry
+                a ``session_dir``.
+
+        Returns:
+            Path | None: The resolved session directory, or ``None`` when none
+                resolves to an existing session with a manifest.
+        """
         extra = getattr(ctx, "extra", None) or {}
         if extra.get("session_dir"):
             return Path(extra["session_dir"])

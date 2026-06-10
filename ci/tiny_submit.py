@@ -71,6 +71,12 @@ def load_candidates(path: Path) -> list[dict]:
 
     Returns the candidate dicts in pool order, dropping any without a repo_id.
     Each dict keeps pool_id / pool_index so the manifest can carry provenance.
+
+    Args:
+        path (Path): Path to the candidates JSON file.
+
+    Returns:
+        list[dict]: De-duplicated candidate dicts in pool order.
     """
     data = json.loads(path.read_text(encoding="utf-8"))
     raw = data.get("candidates") or data.get("models") or []
@@ -93,6 +99,13 @@ def load_done_records(progress_path: Path) -> dict[str, SubmissionRecord]:
     The progress file is append-only NDJSON, one ``asdict(record)`` per line.
     On resume we skip any repo that already reached a terminal state so the
     controller can pick up a multi-day run after an interruption.
+
+    Args:
+        progress_path (Path): Path to the append-only NDJSON progress log.
+
+    Returns:
+        dict[str, SubmissionRecord]: Map of model -> reconstructed record for
+            every valid line; empty if the file is absent.
     """
     done: dict[str, SubmissionRecord] = {}
     if not progress_path.is_file():
@@ -120,7 +133,33 @@ def load_done_records(progress_path: Path) -> dict[str, SubmissionRecord]:
 # ── The controller ──────────────────────────────────────────────────────────────
 
 class TinyController:
+    """Long-running scheduler that keeps many SaFE optimization tasks in flight.
+
+    Drives two independent submit-workspace worker pools off a shared work
+    queue, throttles the register/download burst with a semaphore, checkpoints
+    progress for crash-safe resume, and emits incremental per-batch CI
+    summaries plus webhooks while building a full ranked summary at the end.
+
+    Attributes:
+        args (argparse.Namespace): Parsed CLI arguments controlling the run.
+        artifacts_dir (Path): Where downloaded task artifacts are stored.
+        manifests_dir (Path): Where manifests + progress NDJSON are written.
+        summary_out (Path): Where the full ranked summary is written.
+        records (list[SubmissionRecord]): All completed submission records.
+        register_sem (threading.Semaphore): Bounds the register/download burst.
+        stop (threading.Event): Set to ask workers to stop after the current
+            model.
+        completed (int): Count of completed models.
+        total_planned (int): Total models planned (done + pending).
+    """
+
     def __init__(self, args: argparse.Namespace):
+        """Initialize controller state, output dirs, and SaFE clients.
+
+        Args:
+            args (argparse.Namespace): Parsed CLI arguments; also consulted
+                with env-var fallbacks for SaFE connection and cluster fields.
+        """
         self.args = args
         self.artifacts_dir = Path(args.artifacts_dir)
         self.manifests_dir = Path(args.output_dir)
@@ -189,6 +228,12 @@ class TinyController:
         self.safe_hyperloom = self._make_client(self.hyperloom_workspace, args.hyperloom_cap)
 
     def _resolve_prompt_prefix(self) -> str:
+        """Resolve the prompt prefix from file, inline arg, or the default.
+
+        Returns:
+            str: The prompt prefix text (the packaged default if neither a
+                file nor an inline value is provided).
+        """
         a = self.args
         if a.prompt_prefix_file:
             p = Path(a.prompt_prefix_file)
@@ -200,6 +245,16 @@ class TinyController:
         return _load_default_prompt_prefix()
 
     def _make_client(self, submit_workspace: str, cap: int) -> SafeOptimizeClient:
+        """Create a SaFE client sized for one submit workspace's worker pool.
+
+        Args:
+            submit_workspace (str): Workspace to submit tasks into.
+            cap (int): Worker count for this pool; used to size the HTTP
+                connection pool.
+
+        Returns:
+            SafeOptimizeClient: A configured client with a per-workspace cap.
+        """
         client = SafeOptimizeClient(
             self.base_url, self.api_key or "dry-run",
             register_workspace=self.register_workspace,
@@ -222,12 +277,25 @@ class TinyController:
     # ── progress / reporting ────────────────────────────────────────────────
 
     def _append_progress(self, rec: SubmissionRecord) -> None:
+        """Append one record to the crash-safe NDJSON progress log.
+
+        Args:
+            rec (SubmissionRecord): The completed record to checkpoint.
+
+        Returns:
+            None
+        """
         line = json.dumps(asdict(rec), separators=(",", ":"))
         with self.progress_lock:
             with self.progress_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
     def _write_manifest_snapshot(self) -> None:
+        """Write a submission manifest from a snapshot of all current records.
+
+        Returns:
+            None
+        """
         with self.records_lock:
             snapshot = list(self.records)
         with self.manifest_lock:
@@ -247,6 +315,14 @@ class TinyController:
         yields just these rows -> a single 10-row Teams card. The full ranked
         table is produced separately by _write_full_summary() as the run
         artifact; it is never pushed to the webhook.
+
+        Args:
+            seq (int): Monotonic batch sequence number (used for the dir name).
+            batch (list[SubmissionRecord]): Records completed since the last
+                report.
+
+        Returns:
+            None
         """
         if not batch:
             return
@@ -319,6 +395,19 @@ class TinyController:
             log.warning("[summary] full build_summary failed: %s", e)
 
     def _on_complete(self, rec: SubmissionRecord, pool_label: str) -> None:
+        """Record a finished model, update counters, and maybe emit a batch.
+
+        Thread-safe: appends to the progress log and records list, bumps the
+        submitted/succeeded tallies, logs progress, and triggers a webhook
+        batch report once ``report_every`` new completions accumulate.
+
+        Args:
+            rec (SubmissionRecord): The completed record.
+            pool_label (str): Label of the pool that handled it (for logging).
+
+        Returns:
+            None
+        """
         self._append_progress(rec)
         batch: list[SubmissionRecord] | None = None
         seq = 0
@@ -349,6 +438,17 @@ class TinyController:
     # ── per-model work ────────────────────────────────────────────────────────
 
     def _try_prewarm(self, repo: str) -> None:
+        """Best-effort pre-pull of a model into ``/wekafs`` before register.
+
+        No-op when prewarm is disabled or the NFS models root is not writable;
+        timeouts/errors are logged and SaFE downloads the model instead.
+
+        Args:
+            repo (str): HuggingFace repo id to prewarm.
+
+        Returns:
+            None
+        """
         if not self.args.prewarm:
             return
         nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
@@ -371,6 +471,19 @@ class TinyController:
             log.warning("[%s] prewarm error %s — SaFE will download", repo, e)
 
     def _handle_one(self, safe: SafeOptimizeClient, cand: dict) -> SubmissionRecord:
+        """Process one candidate: prewarm, register/submit, then wait+collect.
+
+        Register/download/submit run under the concurrency gate; the long
+        per-task wait runs outside it so full concurrency is reached.
+
+        Args:
+            safe (SafeOptimizeClient): Client for this candidate's pool.
+            cand (dict): Candidate dict (requires ``repo_id``).
+
+        Returns:
+            SubmissionRecord: The resulting record (possibly ``skipped`` when
+                the controller is stopping, or unwaited in dry-run mode).
+        """
         repo = cand["repo_id"]
         pool_metadata = {
             "pool_id": cand.get("pool_id") or self.args.pool_id,
@@ -413,6 +526,19 @@ class TinyController:
 
     def _worker(self, safe: SafeOptimizeClient, work_q: "queue.Queue[dict]",
                 pool_label: str) -> None:
+        """Worker loop: pull candidates off the queue and process each one.
+
+        Exceptions from a single model are caught so one failure never kills
+        the worker; each result is forwarded to ``_on_complete``.
+
+        Args:
+            safe (SafeOptimizeClient): Client for this worker's pool.
+            work_q (queue.Queue[dict]): Shared queue of candidate dicts.
+            pool_label (str): Label of this worker's pool (for logging).
+
+        Returns:
+            None
+        """
         while not self.stop.is_set():
             try:
                 cand = work_q.get_nowait()
@@ -448,6 +574,20 @@ class TinyController:
     # ── run ─────────────────────────────────────────────────────────────────
 
     def run(self, candidates: list[dict]) -> int:
+        """Run the full controller over a candidate list until drained.
+
+        Optionally resumes from the progress log, starts the heartbeat and
+        both worker pools, joins them, flushes the final partial batch to the
+        webhook, and writes the full ranked summary.
+
+        Args:
+            candidates (list[dict]): Candidate dicts to process (pool order).
+
+        Returns:
+            int: Exit code — ``0`` if at least one task submitted (or there is
+                nothing to do), ``2`` on missing API key / empty prompt
+                prefix, else ``1``.
+        """
         if not self.api_key and not self.args.dry_run:
             log.error("no API key (CLAW_API_KEY / SAFE_API_KEY / --api-key)")
             return 2
@@ -560,6 +700,12 @@ class TinyController:
 # ── CLI ──────────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the Tiny CI command-line argument parser.
+
+    Returns:
+        argparse.ArgumentParser: Parser with all controller, pool, SaFE,
+            prewarm, and reporting options.
+    """
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
@@ -649,6 +795,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """CLI entrypoint: load candidates, build the controller, and run it.
+
+    Returns:
+        int: Process exit code — ``2`` if the candidates file is missing or no
+            candidates are selected, otherwise the controller's exit code.
+    """
     args = _build_parser().parse_args()
     logging.basicConfig(
         level=args.log_level,

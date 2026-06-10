@@ -22,6 +22,15 @@ _PCT_NUM_RE = re.compile(r"([-+]?\d+(?:\.\d+)?)")
 
 
 def _parse_pct(raw: str | None) -> float | None:
+    """Extract a leading percentage number from a raw table cell.
+
+    Args:
+        raw (str | None): The raw cell text (e.g. ``"28.78%"``), or ``None``.
+
+    Returns:
+        float | None: The parsed number rounded to two decimals, or ``None``
+            when the input is missing or unparseable.
+    """
     if raw is None:
         return None
     m = _PCT_NUM_RE.search(str(raw).replace(",", ""))
@@ -34,6 +43,16 @@ def _parse_pct(raw: str | None) -> float | None:
 
 
 def _parse_executive_table(text: str) -> dict[str, str]:
+    """Parse a markdown Executive Summary table into a label→value map.
+
+    Skips header and separator rows.
+
+    Args:
+        text (str): The markdown text containing the two-column table.
+
+    Returns:
+        dict[str, str]: Mapping of row label to its raw value cell.
+    """
     rows: dict[str, str] = {}
     for m in _TABLE_ROW_RE.finditer(text):
         label = m.group("label").strip()
@@ -45,6 +64,14 @@ def _parse_executive_table(text: str) -> dict[str, str]:
 
 
 def _parse_top_bottleneck(raw: str | None) -> str | None:
+    """Strip the trailing ``(pct%)`` annotation from a bottleneck label.
+
+    Args:
+        raw (str | None): Raw cell such as ``"MoE_fused (28.78%)"``.
+
+    Returns:
+        str | None: The bare category name, or ``None`` when empty.
+    """
     if not raw:
         return None
     # ``MoE_fused (28.78%)`` -> ``MoE_fused``
@@ -53,7 +80,16 @@ def _parse_top_bottleneck(raw: str | None) -> str | None:
 
 
 def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
-    """Best-effort workload-level metrics from Executive Summary table."""
+    """Best-effort workload-level metrics from Executive Summary table.
+
+    Args:
+        analysis_md_path (str | Path): Path to a TraceLens ``analysis.md``.
+
+    Returns:
+        dict[str, Any]: Mapping with ``compute_pct`` / ``idle_pct`` /
+            ``comm_pct`` / ``top_bottleneck`` keys; values are ``None`` when
+            the file is missing or a metric cannot be parsed.
+    """
     path = Path(analysis_md_path)
     out: dict[str, Any] = {
         "compute_pct": None,
@@ -109,6 +145,14 @@ def derive_saturation_per_direction(analysis_md_text: str) -> dict[str, float]:
 
 
 def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
+    """Return the TraceLens output directory containing an ``analysis.md``.
+
+    Args:
+        analysis_md_path (Path): Path to an ``analysis.md`` file.
+
+    Returns:
+        Path: The parent directory holding the TraceLens artifacts.
+    """
     # ``.../tracelens/analysis.md`` -> ``.../tracelens/``
     if analysis_md_path.name == "analysis.md" and analysis_md_path.parent.name:
         return analysis_md_path.parent
@@ -116,7 +160,19 @@ def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
 
 
 def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
-    """Return the highest ``percent_of_total`` operation across category metrics."""
+    """Return the highest ``percent_of_total`` operation across category metrics.
+
+    Scans the sibling ``category_data/*_metrics.json`` files for the operation
+    with the largest share of total GPU time.
+
+    Args:
+        analysis_md_path (str | Path): Path to a TraceLens ``analysis.md``.
+
+    Returns:
+        dict[str, Any] | None: The top kernel descriptor (``name`` / ``gpu_pct``
+            / ``efficiency_pct`` / ``bound_type`` / ``category``), or ``None``
+            when no category data is available or no named op was found.
+    """
     md_path = Path(analysis_md_path)
     cat_dir = _tracelens_dir_for_analysis_md(md_path) / "category_data"
     if not cat_dir.is_dir():
@@ -244,6 +300,14 @@ def build_roofline_snapshot(
 
 
 def _snapshot_id_from_meta(meta: dict[str, Any]) -> int | None:
+    """Extract an integer snapshot id from a metadata dict.
+
+    Args:
+        meta (dict[str, Any]): Snapshot metadata.
+
+    Returns:
+        int | None: The first integer-valued id found, or ``None``.
+    """
     for key in ("snapshot_id", "roofline_snapshot_id"):
         raw = meta.get(key)
         if isinstance(raw, int):
@@ -252,6 +316,16 @@ def _snapshot_id_from_meta(meta: dict[str, Any]) -> int | None:
 
 
 def _num_delta(latest: float | None, baseline: float | None) -> float | None:
+    """Return ``latest - baseline`` rounded to two decimals.
+
+    Args:
+        latest (float | None): The latest value.
+        baseline (float | None): The baseline value.
+
+    Returns:
+        float | None: The rounded delta, or ``None`` if either input is
+            ``None``.
+    """
     if latest is None or baseline is None:
         return None
     return round(latest - baseline, 2)
@@ -314,7 +388,17 @@ def build_roofline_comparison(
     baseline_meta: dict[str, Any],
     latest_meta: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Build ``roofline_comparison`` block for ``final.json``."""
+    """Build ``roofline_comparison`` block for ``final.json``.
+
+    Args:
+        baseline_meta (dict[str, Any]): Baseline snapshot metadata (must carry
+            ``analysis_md_path`` / ``ts`` / ``snapshot_id``).
+        latest_meta (dict[str, Any]): Latest snapshot metadata.
+
+    Returns:
+        dict[str, Any] | None: The comparison block, or ``None`` when neither
+            side has an ``analysis_md_path``.
+    """
     base_path = str(baseline_meta.get("analysis_md_path") or "")
     latest_path = str(latest_meta.get("analysis_md_path") or "")
     if not base_path and not latest_path:
@@ -369,6 +453,14 @@ def build_roofline_comparison(
 
 
 def _fmt_delta(val: float | None) -> str:
+    """Format a signed delta cell with one decimal place.
+
+    Args:
+        val (float | None): The delta value, or ``None``.
+
+    Returns:
+        str: A signed string (e.g. ``"+1.2"``), or ``"—"`` when ``None``.
+    """
     if val is None:
         return "—"
     sign = "+" if val > 0 else ""
@@ -376,14 +468,28 @@ def _fmt_delta(val: float | None) -> str:
 
 
 def _fmt_tput(v: float | None) -> str:
-    """Format ``output_throughput`` cell; one decimal place + tok/s unit."""
+    """Format ``output_throughput`` cell; one decimal place + tok/s unit.
+
+    Args:
+        v (float | None): The throughput value (tok/s).
+
+    Returns:
+        str: The formatted cell, or ``"—"`` when missing/non-positive.
+    """
     if not isinstance(v, (int, float)) or v <= 0:
         return "—"
     return f"{float(v):.1f} tok/s"
 
 
 def _fmt_pct_cell(v: float | None) -> str:
-    """Format a percentage cell; ``—`` when missing."""
+    """Format a percentage cell; ``—`` when missing.
+
+    Args:
+        v (float | None): The percentage value.
+
+    Returns:
+        str: The formatted cell, or ``"—"`` when not numeric.
+    """
     if not isinstance(v, (int, float)):
         return "—"
     return f"{float(v):.1f}%"
@@ -393,6 +499,14 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns)."""
 
     def cell(v: float | None) -> str:
+        """Format a percentage value for a table cell.
+
+        Args:
+            v (float | None): The percentage value.
+
+        Returns:
+            str: The formatted cell, or ``"—"`` when not a float.
+        """
         return f"{v:.1f}%" if isinstance(v, float) else "—"
 
     baseline = cmp.get("baseline") or {}

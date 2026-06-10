@@ -20,12 +20,31 @@ _ENVS_MAX_DISPLAY = 12
 
 
 def _truncate(text: str, limit: int) -> str:
+    """Truncate ``text`` to ``limit`` characters with an ellipsis.
+
+    Args:
+        text (str): The text to truncate.
+        limit (int): The maximum length of the returned string.
+
+    Returns:
+        str: ``text`` unchanged when within ``limit``, otherwise a prefix
+            ending in ``...``.
+    """
     if len(text) <= limit:
         return text
     return text[: max(limit - 3, 0)] + "..."
 
 
 def _format_envs(envs: dict[str, Any] | None) -> str:
+    """Format environment variables as a compact, capped string.
+
+    Args:
+        envs (dict[str, Any] | None): Environment variable name/value pairs.
+
+    Returns:
+        str: A comma-joined ``k=v`` listing (capped at ``_ENVS_MAX_DISPLAY``
+            entries with a ``+N more`` suffix), or an empty string when empty.
+    """
     if not isinstance(envs, dict) or not envs:
         return ""
     items = sorted(envs.items())

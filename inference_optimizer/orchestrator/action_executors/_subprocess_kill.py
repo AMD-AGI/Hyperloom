@@ -55,7 +55,12 @@ def _process_group_alive(pgid: int) -> bool:
 
 
 def _signal_group(pgid: int, sig: int) -> None:
-    """Send ``sig`` to every member of ``pgid``; swallow ``ESRCH``."""
+    """Send ``sig`` to every member of ``pgid``; swallow ``ESRCH``.
+
+    Args:
+        pgid (int): The POSIX process-group id to signal.
+        sig (int): The signal number to send.
+    """
     if os.name != "posix":
         return
     try:
@@ -277,7 +282,7 @@ def run_with_session_kill(
                 # Drain the pipes so the exception carries partial output.
                 stdout, stderr = proc.communicate(timeout=2.0)
             except subprocess.TimeoutExpired:
-                stdout, stderr = "", ""
+                pass
             raise
         except _ServerDeadDetected as exc:
             kill_my_spawned_server(proc)
@@ -331,6 +336,12 @@ class _SoftDeadlineExceeded(Exception):
     """
 
     def __init__(self, *, deadline_sec: float, elapsed_sec: float) -> None:
+        """Record the deadline and actual elapsed time on the sentinel.
+
+        Args:
+            deadline_sec (float): The soft deadline that was exceeded.
+            elapsed_sec (float): The actual wall-clock elapsed at trip time.
+        """
         super().__init__(
             f"soft deadline {deadline_sec:.1f}s elapsed "
             f"(actual={elapsed_sec:.1f}s)"

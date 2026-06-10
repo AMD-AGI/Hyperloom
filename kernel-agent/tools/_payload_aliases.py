@@ -23,6 +23,15 @@ _DEPRECATION_MESSAGE: str = (
 
 
 def _coerce_str(value: Any) -> str:
+    """Coerce an arbitrary payload value to a string.
+
+    Args:
+        value (Any): The value pulled from the payload dict.
+
+    Returns:
+        str: ``value`` unchanged when it is already a string, an empty
+            string when it is None, otherwise ``str(value)``.
+    """
     if value is None:
         return ""
     if isinstance(value, str):

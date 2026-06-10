@@ -1,4 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
+"""Stateful monitors that sample runtime signals into alerts.
+
+Exposes the process, GPU, server-health, and log-tailing monitors used
+by the robustness agent.
+"""
 
 from .process_monitor import ProcessMonitor
 from .gpu_monitor import GpuMonitor

@@ -69,6 +69,15 @@ _STATIC_PATCH_FALLBACK_ROOTS: tuple[str, ...] = (
 
 
 def _normalize_root(path: str) -> str:
+    """Normalise a root path to a trailing-slash form.
+
+    Args:
+        path (str): Raw path string (may be empty / whitespace).
+
+    Returns:
+        str: The stripped path with a guaranteed trailing ``/``, or an
+            empty string when the input was blank.
+    """
     p = str(path or "").strip()
     if not p:
         return ""
@@ -76,6 +85,16 @@ def _normalize_root(path: str) -> str:
 
 
 def _merge_roots(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    """Concatenate root groups, dropping blanks and duplicates.
+
+    Args:
+        *groups (tuple[str, ...]): One or more ordered groups of root
+            strings to merge.
+
+    Returns:
+        tuple[str, ...]: The merged roots in first-seen order with
+            duplicates and empty strings removed.
+    """
     seen: set[str] = set()
     out: list[str] = []
     for group in groups:
@@ -87,6 +106,16 @@ def _merge_roots(*groups: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _find_spec_origin(module_name: str) -> Path | None:
+    """Return the package directory for an importable module.
+
+    Args:
+        module_name (str): Importable module / package name to locate.
+
+    Returns:
+        Path | None: The directory containing the module's origin (its
+            parent dir, whether or not it's a package ``__init__.py``), or
+            None when the module cannot be found / has no origin.
+    """
     try:
         spec = importlib.util.find_spec(module_name)
     except (ImportError, ModuleNotFoundError, ValueError):
@@ -100,7 +129,14 @@ def _find_spec_origin(module_name: str) -> Path | None:
 
 
 def _glob_install_package_roots() -> tuple[str, ...]:
-    """Discover framework package dirs under common lib layouts."""
+    """Discover framework package dirs under common lib layouts.
+
+    Globs ``python*/{site,dist}-packages/<pkg>`` under the known install
+    parents plus ``sys.prefix/lib``.
+
+    Returns:
+        tuple[str, ...]: Normalised, de-duplicated package root paths.
+    """
     patterns = (
         "python*/dist-packages/aiter",
         "python*/dist-packages/sglang",
@@ -132,11 +168,24 @@ def _glob_install_package_roots() -> tuple[str, ...]:
 
 
 def _discover_installed_framework_roots() -> tuple[str, ...]:
-    """Runtime discovery via importlib and filesystem globs."""
+    """Runtime discovery via importlib and filesystem globs.
+
+    Combines ``importlib`` spec origins for each framework package, a
+    ``$VIRTUAL_ENV`` site-packages glob, and the common install-parent
+    globs.
+
+    Returns:
+        tuple[str, ...]: Normalised, de-duplicated discovered root paths.
+    """
     found: list[str] = []
     seen: set[str] = set()
 
     def add(path: str | Path) -> None:
+        """Append a normalised root to ``found`` if new and non-empty.
+
+        Args:
+            path (str | Path): Candidate root path to record.
+        """
         root = _normalize_root(str(path))
         if root and root not in seen:
             seen.add(root)
@@ -168,7 +217,15 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
 
 
 def resolve_source_file_allowlist() -> tuple[str, ...]:
-    """Return PolicyGate ``source_file`` allowlist roots (default ∪ discovered ∪ env)."""
+    """Return PolicyGate ``source_file`` allowlist roots.
+
+    Merges the static defaults, runtime-discovered roots, and any roots
+    from ``$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`` (default ∪
+    discovered ∪ env).
+
+    Returns:
+        tuple[str, ...]: The merged, de-duplicated allowlist roots.
+    """
     env = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").strip()
     env_roots = tuple(
         _normalize_root(p) for p in env.split(":") if p.strip()
@@ -185,6 +242,10 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
 
     Same as :func:`resolve_source_file_allowlist` plus static fallbacks for
     layouts that are not importable until first use (e.g. ``aiter_meta/csrc``).
+
+    Returns:
+        tuple[str, ...]: The allowlist roots merged with the static patch
+            fallback roots.
     """
     return _merge_roots(
         resolve_source_file_allowlist(),
@@ -193,7 +254,15 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
 
 
 def resolve_sglang_server_args_path() -> tuple[Path, str]:
-    """Resolve SGLang server_args.py for AST discovery."""
+    """Resolve SGLang server_args.py for AST discovery.
+
+    Honours ``$INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS``, then the default
+    container path, then ``importlib`` discovery.
+
+    Returns:
+        tuple[Path, str]: ``(path, message)`` where ``message`` is the
+            path string on success or a diagnostic on failure.
+    """
     override = os.environ.get("INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS", "").strip()
     if override:
         p = Path(override)
@@ -219,7 +288,15 @@ def resolve_sglang_server_args_path() -> tuple[Path, str]:
 
 
 def resolve_vllm_arg_utils_path() -> tuple[Path, str]:
-    """Resolve vLLM arg_utils.py for AST discovery."""
+    """Resolve vLLM arg_utils.py for AST discovery.
+
+    Honours ``$INFERENCE_OPTIMIZER_VLLM_ARG_UTILS``, then the default
+    container path, then ``importlib`` discovery.
+
+    Returns:
+        tuple[Path, str]: ``(path, message)`` where ``message`` is the
+            path string on success or a diagnostic on failure.
+    """
     override = os.environ.get("INFERENCE_OPTIMIZER_VLLM_ARG_UTILS", "").strip()
     if override:
         p = Path(override)
@@ -273,7 +350,13 @@ def resolve_atom_arg_utils_path() -> tuple[Path, str]:
 
 
 def probe_framework_source_roots_for_env() -> str:
-    """Colon-separated roots for ``INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS``."""
+    """Colon-separated roots for ``INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS``.
+
+    Filters the resolved allowlist down to roots that exist on disk.
+
+    Returns:
+        str: Existing roots joined by ``:`` (empty string when none exist).
+    """
     found: list[str] = []
     for root in resolve_source_file_allowlist():
         p = Path(root.rstrip("/"))

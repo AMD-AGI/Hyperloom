@@ -107,6 +107,9 @@ def default_baseline_config() -> Path:
 
     Returns the sglang YAML when ``$FRAMEWORK`` is unset/unknown so existing
     sglang-default tests keep passing.
+
+    Returns:
+        Path: The shipped Magpie YAML config path for the resolved framework.
     """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
     if fw == "atom":

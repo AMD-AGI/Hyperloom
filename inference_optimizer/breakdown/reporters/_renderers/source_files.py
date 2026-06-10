@@ -13,6 +13,18 @@ from ..base import RenderedSection, md_table, register_renderer
 
 @register_renderer("source_files")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the source-files manifest section.
+
+    Lists, per file kind, how many artifacts the breakdown was built from
+    plus a short preview, so a session can be replayed or audited. Skipped
+    when no source-files manifest is present.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered source-files section.
+    """
     sf = breakdown.get("source_files") or {}
     if not sf:
         return RenderedSection(

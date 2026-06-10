@@ -92,6 +92,16 @@ _ANALYSIS_MD_KEYWORDS = (
 
 
 def _safe_load_state(session_dir: Path) -> dict[str, Any] | None:
+    """Load ``state.json`` from a session directory if present and valid.
+
+    Args:
+        session_dir (Path): Hyperloom session directory expected to contain
+            a ``state.json`` file.
+
+    Returns:
+        dict[str, Any] | None: Parsed JSON state mapping, or ``None`` when the
+        file is missing or cannot be read/parsed as JSON.
+    """
     p = session_dir / "state.json"
     if not p.is_file():
         return None
@@ -102,6 +112,17 @@ def _safe_load_state(session_dir: Path) -> dict[str, Any] | None:
 
 
 def _parse_iso(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp string into a datetime.
+
+    Accepts a trailing ``Z`` UTC designator by normalizing it to ``+00:00``.
+
+    Args:
+        value (Any): Candidate timestamp; only non-empty strings are parsed.
+
+    Returns:
+        datetime | None: Parsed datetime, or ``None`` when the value is not a
+        valid ISO-8601 string.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -111,8 +132,18 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 def _wall_clock_min(state: dict[str, Any]) -> float:
-    """Approximate session duration from baseline ts → last validated
-    gain ts (or fallback to latest attempt ts)."""
+    """Approximate session duration from baseline ts → last validated gain ts.
+
+    The end time prefers ``cumulative_gain_validated_ts`` and otherwise falls
+    back to the latest timestamp across known action-attempt lists.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        float: Elapsed wall-clock minutes (>= 0.0), or ``0.0`` when start/end
+        timestamps cannot be determined.
+    """
     starts: list[datetime] = []
     baseline_attempts = state.get("baseline_attempts") or []
     for entry in baseline_attempts:
@@ -139,13 +170,31 @@ def _wall_clock_min(state: dict[str, Any]) -> float:
 
 
 def _count_action_attempts(state: dict[str, Any], action: str) -> int:
-    """Length of `<action>_attempts` list; 0 when missing / non-list."""
+    """Count entries in the ``<action>_attempts`` list within state.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+        action (str): Action name whose ``<action>_attempts`` key is counted.
+
+    Returns:
+        int: Length of the attempts list, or ``0`` when missing or not a list.
+    """
     attempts = state.get(f"{action}_attempts") or []
     return len(attempts) if isinstance(attempts, list) else 0
 
 
 def _flatten_discovered_flag_names(state: dict[str, Any]) -> set[str]:
-    """Union of every `--flag-name` in `discovered_flags[fw].{backend,param}_flags`."""
+    """Collect every discovered flag name across all frameworks.
+
+    Walks ``discovered_flags[framework].{backend_flags,param_flags}`` and
+    unions the flag names into a single set.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        set[str]: Set of discovered flag names; empty when none are present.
+    """
     discovered = state.get("discovered_flags") or {}
     names: set[str] = set()
     if not isinstance(discovered, dict):
@@ -164,8 +213,17 @@ _FLAG_PATTERN = re.compile(r"--[a-z][a-z0-9_-]+")
 
 
 def _extract_proposed_flags(state: dict[str, Any]) -> list[str]:
-    """Pull every `--flag-name` mentioned in any explore variant the
-    LLM proposed (across attempts_history)."""
+    """Pull every ``--flag-name`` proposed across explore variants.
+
+    Scans ``explore_attempts`` and ``explore_search.tested`` entries for
+    ``extra_server_args`` strings and extracts flag tokens from each.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        list[str]: Flag names proposed by the LLM; may contain duplicates.
+    """
     found: list[str] = []
     attempts = state.get("explore_attempts") or []
     if isinstance(attempts, list):
@@ -195,6 +253,13 @@ def _count_orchestration_prune_branch(state: dict[str, Any]) -> int:
     source, ts}`) or a list of strings (legacy / Robustness inserts).
     Strings are NOT counted as orchestration-emitted because the
     source provenance is unknown.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        int: Number of ``pruned_families`` dict entries whose ``source`` is
+        ``"orchestration"``.
     """
     pruned = state.get("pruned_families") or []
     if not isinstance(pruned, list):
@@ -214,6 +279,13 @@ def _count_analysis_md_references(state: dict[str, Any]) -> int:
     Sources:
     * `pruned_families[*].reason` (orchestration-sourced)
     * `attempts_history` entries' `notes` field (when present)
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        int: Count of reason/notes strings that contain at least one
+        analysis.md grounding keyword.
     """
     count = 0
     pruned = state.get("pruned_families") or []
@@ -240,6 +312,19 @@ def _count_analysis_md_references(state: dict[str, Any]) -> int:
 
 
 def extract(session_dir: Path) -> SessionMetrics:
+    """Read a session directory and derive its comparison metrics.
+
+    Loads ``state.json`` and populates a :class:`SessionMetrics` with gain,
+    timing, action counts, snapshot signal, and decision-quality fields. A
+    missing/unreadable state is reported via the result's ``error`` field
+    rather than raising.
+
+    Args:
+        session_dir (Path): Hyperloom session directory to inspect.
+
+    Returns:
+        SessionMetrics: Populated metrics for the session.
+    """
     m = SessionMetrics(session_dir=session_dir)
     state = _safe_load_state(session_dir)
     if state is None:
@@ -304,6 +389,15 @@ def extract(session_dir: Path) -> SessionMetrics:
 # Rendering
 # ---------------------------------------------------------------------------
 def _cache_hit_rate(m: SessionMetrics) -> float:
+    """Compute the prompt-cache read hit rate for a session.
+
+    Args:
+        m (SessionMetrics): Session metrics carrying cache token counters.
+
+    Returns:
+        float: ``cache_read / (cache_creation + cache_read)`` in [0, 1], or
+        ``0.0`` when no cache tokens were recorded.
+    """
     total = m.cache_creation_input_tokens + m.cache_read_input_tokens
     if total <= 0:
         return 0.0
@@ -311,6 +405,17 @@ def _cache_hit_rate(m: SessionMetrics) -> float:
 
 
 def _format_action_seq(stack: list[dict[str, Any]]) -> str:
+    """Render an optimization stack as a compact ``kind:variant`` sequence.
+
+    Truncates to the first 12 entries and appends a ``...(+N more)`` suffix
+    when longer.
+
+    Args:
+        stack (list[dict[str, Any]]): Optimization stack entries.
+
+    Returns:
+        str: Comma-separated action sequence, or ``"(empty)"`` when empty.
+    """
     parts: list[str] = []
     for entry in stack[:12]:
         kind = str(entry.get("kind") or entry.get("action") or "?")
@@ -321,6 +426,19 @@ def _format_action_seq(stack: list[dict[str, Any]]) -> str:
 
 
 def render(baseline: SessionMetrics, exp: SessionMetrics) -> str:
+    """Build the human-readable baseline-vs-experiment comparison report.
+
+    Produces the side-by-side metrics table, action sequences, a §10.2
+    pass/partial/fail verdict on delta gain, and the informational §10.3 v2
+    quality criteria.
+
+    Args:
+        baseline (SessionMetrics): Metrics for the baseline session.
+        exp (SessionMetrics): Metrics for the experiment session.
+
+    Returns:
+        str: Multi-line report text suitable for printing to stdout.
+    """
     delta_gain = (
         exp.cumulative_gain_validated_pct - baseline.cumulative_gain_validated_pct
     )
@@ -467,6 +585,15 @@ def render(baseline: SessionMetrics, exp: SessionMetrics) -> str:
 
 
 def _exit_code_for_delta(delta_gain: float) -> int:
+    """Map a delta-gain percentage to the CI exit code.
+
+    Args:
+        delta_gain (float): Experiment-minus-baseline cumulative gain percent.
+
+    Returns:
+        int: ``0`` (PASS, >= +5.0%), ``2`` (PARTIAL, in (0%, +5.0%)), or ``1``
+        (FAIL, <= 0%).
+    """
     if delta_gain >= 5.0:
         return 0
     if delta_gain > 0:
@@ -478,6 +605,16 @@ def _exit_code_for_delta(delta_gain: float) -> int:
 # CLI
 # ---------------------------------------------------------------------------
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the verification CLI.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv`` when ``None``.
+
+    Returns:
+        argparse.Namespace: Parsed arguments with ``baseline``, ``exp``, and
+        ``json`` attributes.
+    """
     p = argparse.ArgumentParser(
         description="Compare a baseline vs experiment Hyperloom session "
                     "for Roofline-v2 verification (design §10.5).",
@@ -492,6 +629,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the baseline-vs-experiment verification and return an exit code.
+
+    Extracts metrics for both sessions, prints the comparison report, and
+    optionally writes a JSON summary to stderr when ``--json`` is given.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv`` when ``None``.
+
+    Returns:
+        int: CI exit code derived from the delta gain (see
+        :func:`_exit_code_for_delta`).
+    """
     args = _parse_args(argv)
     baseline = extract(args.baseline)
     exp = extract(args.exp)
