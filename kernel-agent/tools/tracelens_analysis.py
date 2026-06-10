@@ -1974,6 +1974,17 @@ def _run_deterministic_tracelens_steps(
         return rc
 
     # Step 7: category analysis scripts
+    # Map manifest category names to actual script module names where they
+    # differ. Categories not in this map use f"{cat_name}_analysis".
+    _CATEGORY_SCRIPT_MAP: dict[str, str] = {
+        "rmsnorm": "norm",
+        "sdpa": "sdpa",
+    }
+    # Categories that have no standalone analysis script (system-tier or
+    # handled by the orchestrator's own subagents).
+    _SKIP_CATEGORIES: set[str] = {
+        "cpu_idle", "multi_kernel", "kernel_fusion", "customcollective",
+    }
     manifest_path = output_dir / "category_data" / "category_manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1982,7 +1993,10 @@ def _run_deterministic_tracelens_steps(
             tier = cat_entry.get("tier", "")
             if tier != "compute_kernel":
                 continue
-            script_name = f"{cat_name}_analysis"
+            if cat_name in _SKIP_CATEGORIES:
+                continue
+            base = _CATEGORY_SCRIPT_MAP.get(cat_name, cat_name)
+            script_name = f"{base}_analysis"
             analysis_cmd = [
                 sys.executable, "-m",
                 f"TraceLens.Agent.Analysis.category_analyses.{script_name}",
@@ -2023,6 +2037,30 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
     except (OSError, csv.Error, ValueError):
         pass
     return None
+
+
+def _match_op_by_time(
+    ops: list[dict[str, Any]], name: str, time_ms: float,
+) -> dict[str, Any]:
+    """Find the operation in *_metrics.json matching by name and time_ms.
+
+    Multiple operations can share the same name (e.g. ``aten::mm`` with
+    different shapes). We match by ``time_ms`` with a small tolerance to
+    account for floating-point rounding in JSON serialization.
+    """
+    best: dict[str, Any] = {}
+    best_delta = float("inf")
+    for op in ops:
+        if op.get("name") != name:
+            continue
+        op_time = op.get("time_ms", 0)
+        delta = abs(op_time - time_ms)
+        if delta < best_delta:
+            best_delta = delta
+            best = op
+            if delta < 0.01:
+                break
+    return best
 
 
 def deterministic_extract_hot_kernels(
@@ -2069,7 +2107,6 @@ def deterministic_extract_hot_kernels(
         members = finding.get("members", [])
 
         cat_ops = ops_by_category.get(category, [])
-        ops_lookup = {op.get("name", ""): op for op in cat_ops}
 
         sorted_members = sorted(
             members, key=lambda m: m.get("efficiency_pct", 100),
@@ -2077,13 +2114,17 @@ def deterministic_extract_hot_kernels(
 
         for member in sorted_members:
             op_name = member.get("operation", "")
-            full_op = ops_lookup.get(op_name, {})
+            member_time_ms = member.get("time_ms", 0)
 
-            duration_us = member.get("time_ms", 0) * 1000
+            # Match by (name, time_ms) to avoid collisions when multiple
+            # ops share the same name (e.g. many aten::mm instances).
+            full_op = _match_op_by_time(cat_ops, op_name, member_time_ms)
+
+            duration_us = member_time_ms * 1000
             eff_pct = member.get("efficiency_pct", 0)
 
             launcher_path = full_op.get("launcher_path", "")
-            if launcher_path == "\u2014":
+            if launcher_path in ("\u2014", "-", ""):
                 launcher_path = ""
 
             shapes_raw = full_op.get("args", "")
