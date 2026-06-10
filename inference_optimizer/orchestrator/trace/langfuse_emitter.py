@@ -49,6 +49,10 @@ from .trace_env import (
 log = logging.getLogger(__name__)
 
 
+def _manifest_path(session_dir: Path) -> Path:
+    return session_dir / "manifest.json"
+
+
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     import json
 
@@ -100,6 +104,14 @@ class LangfuseEmitter:
         self._pending: dict[tuple, dict[str, dict[str, Any]]] = {}
         self._client: Any = None
         self._trace_id: str | None = None
+        self._session_label: str | None = None
+        self._manifest: dict[str, Any] = {}
+        # Span hierarchy caches (lazy): root trace span; one span per phase;
+        # one span per (phase, agent). Each Generation nests in its agent span.
+        self._root_span: Any = None
+        self._phase_spans: dict[str, Any] = {}
+        self._agent_spans: dict[tuple[str, str], Any] = {}
+        self._trace_attrs_set = False
         self._enabled = self._init_client()
 
     # -- gating / client setup ------------------------------------------
@@ -126,10 +138,19 @@ class LangfuseEmitter:
         try:
             creds = langfuse_credentials()
             self._client = get_client()
-            self._trace_id = lfmap.derive_trace_id(self.session_dir.name)
+            self._manifest = _load_json(_manifest_path(self.session_dir))
+            # Correlate on the PrimusClaw session id (claw_session_id) so live
+            # push, offline backfill, and any claw-side upload all land on one
+            # Langfuse trace; fall back to the internal session id locally.
+            self._session_label = lfmap.langfuse_session_id(
+                self._manifest, self.session_dir.name,
+            )
+            self._trace_id = lfmap.derive_trace_id(
+                lfmap.correlation_seed(self._manifest, self.session_dir.name),
+            )
             log.info(
-                "langfuse: live push enabled (host=%s, trace_id=%s)",
-                creds.get("LANGFUSE_HOST"), self._trace_id,
+                "langfuse: live push enabled (host=%s, session=%s, trace_id=%s)",
+                creds.get("LANGFUSE_HOST"), self._session_label, self._trace_id,
             )
             return True
         except Exception:  # noqa: BLE001
@@ -139,6 +160,57 @@ class LangfuseEmitter:
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    # -- span hierarchy (trace -> phase -> agent -> generation) ---------
+    def _trace_name(self) -> str:
+        return str(self._manifest.get("model_name") or self._session_label or "hyperloom")
+
+    def _ensure_root(self, start: Any) -> Any:
+        """Lazily open the root span and stamp trace-level attrs once."""
+        if self._root_span is None:
+            self._root_span = self._client.start_observation(
+                name=self._trace_name(),
+                as_type="span",
+                start_time=start,
+                trace_context={"trace_id": self._trace_id},
+                metadata=lfmap.trace_metadata(self._manifest),
+            )
+            if not self._trace_attrs_set:
+                try:
+                    self._root_span.update_trace(
+                        name=self._trace_name(),
+                        session_id=self._session_label,
+                        metadata=lfmap.trace_metadata(self._manifest),
+                    )
+                except Exception:  # noqa: BLE001 — older SDKs may lack it
+                    log.debug("langfuse: update_trace unavailable", exc_info=True)
+                self._trace_attrs_set = True
+        return self._root_span
+
+    def _ensure_phase_span(self, phase: str, start: Any) -> Any:
+        span = self._phase_spans.get(phase)
+        if span is None:
+            root = self._ensure_root(start)
+            span = root.start_observation(
+                name=f"phase:{phase}", as_type="span", start_time=start,
+                metadata={"phase": phase},
+            )
+            self._phase_spans[phase] = span
+        return span
+
+    def _ensure_agent_span(self, phase: str, agent: str, start: Any) -> Any:
+        """Get-or-create the per-(phase, agent) span. This is the 'which agent
+        did what' layer; Generations and decision Scores attach here."""
+        key = (phase, agent)
+        span = self._agent_spans.get(key)
+        if span is None:
+            phase_span = self._ensure_phase_span(phase, start)
+            span = phase_span.start_observation(
+                name=f"agent:{agent}", as_type="span", start_time=start,
+                metadata={"phase": phase, "agent": agent},
+            )
+            self._agent_spans[key] = span
+        return span
 
     # -- live ingest ----------------------------------------------------
     def record_llm_call(self, row: dict[str, Any]) -> None:
@@ -179,17 +251,18 @@ class LangfuseEmitter:
         token_row: dict[str, Any] | None,
         conv_row: dict[str, Any] | None,
     ) -> None:
-        """Send one Generation built from a token row and/or conversation row."""
+        """Emit one Generation, nested under its phase -> agent span."""
         base = token_row or conv_row or {}
-        phase = str(base.get("phase") or lfmap.UNPHASED)
+        phase = lfmap.phase_of(base)
+        agent = lfmap.agent_of(base)
         start = lfmap.parse_ts(base.get("ts"))
         has_text = conv_row is not None
         try:
-            gen = self._client.start_observation(
+            parent = self._ensure_agent_span(phase, agent, start)
+            gen = parent.start_observation(
                 name=lfmap.generation_name(base),
                 as_type="generation",
                 start_time=start,
-                trace_context={"trace_id": self._trace_id},
                 model=base.get("model"),
                 input=(conv_row or {}).get("prompt"),
                 output=(conv_row or {}).get("response"),
@@ -214,6 +287,7 @@ class LangfuseEmitter:
             self._flush_pending_halves()
             self._flush_ext_shards()
             self._flush_decision_scores()
+            self._close_spans()
         except Exception:  # noqa: BLE001
             log.debug("langfuse: flush_session reconcile failed", exc_info=True)
         finally:
@@ -221,6 +295,22 @@ class LangfuseEmitter:
                 self._client.flush()
             except Exception:  # noqa: BLE001
                 log.debug("langfuse: client.flush failed", exc_info=True)
+
+    def _close_spans(self) -> None:
+        """End every open span, innermost first (agent -> phase -> root)."""
+        for span in list(self._agent_spans.values()):
+            self._safe_end(span)
+        for span in list(self._phase_spans.values()):
+            self._safe_end(span)
+        if self._root_span is not None:
+            self._safe_end(self._root_span)
+
+    @staticmethod
+    def _safe_end(span: Any) -> None:
+        try:
+            span.end()
+        except Exception:  # noqa: BLE001
+            log.debug("langfuse: span end failed", exc_info=True)
 
     def _flush_pending_halves(self) -> None:
         """Emit any buffered call that only ever got one half (token XOR text)."""
@@ -249,23 +339,48 @@ class LangfuseEmitter:
                 self._emit_generation(token_row=row, conv_row=None)
 
     def _flush_decision_scores(self) -> None:
-        """Convert each decision_trace row into Langfuse Score(s) on the trace."""
+        """Convert each decision_trace row into Langfuse Score(s).
+
+        Each score targets the agent span that owns the decision -- (phase,
+        component) from the decision metadata -- so the KEEP/REVERT/gain_pct
+        attaches to "which agent did this". When no matching span exists (the
+        agent produced a decision but no LLM call, or phase/component is
+        missing), it falls back to a trace-level score.
+        """
         for drow in _load_jsonl(decision_trace_path(self.session_dir)):
             for score in lfmap.decision_to_scores(drow):
-                try:
-                    self._client.create_score(
-                        name=score["name"],
-                        value=score["value"],
-                        trace_id=self._trace_id,
-                        data_type=score["data_type"],
-                        comment=score.get("comment") or "",
-                        metadata=score.get("metadata") or {},
-                    )
-                except Exception:  # noqa: BLE001
-                    log.debug(
-                        "langfuse: create_score failed for %s", score.get("name"),
-                        exc_info=True,
-                    )
+                meta = score.get("metadata") or {}
+                phase = str(meta.get("phase") or lfmap.UNPHASED)
+                agent = str(meta.get("component") or lfmap.UNKNOWN_AGENT)
+                self._create_score(score, phase=phase, agent=agent)
+
+    def _create_score(
+        self, score: dict[str, Any], *, phase: str, agent: str,
+    ) -> None:
+        span = self._agent_spans.get((phase, agent))
+        try:
+            if span is not None and hasattr(span, "score"):
+                span.score(
+                    name=score["name"],
+                    value=score["value"],
+                    data_type=score["data_type"],
+                    comment=score.get("comment") or "",
+                    metadata=score.get("metadata") or {},
+                )
+            else:
+                self._client.create_score(
+                    name=score["name"],
+                    value=score["value"],
+                    trace_id=self._trace_id,
+                    data_type=score["data_type"],
+                    comment=score.get("comment") or "",
+                    metadata=score.get("metadata") or {},
+                )
+        except Exception:  # noqa: BLE001
+            log.debug(
+                "langfuse: create_score failed for %s", score.get("name"),
+                exc_info=True,
+            )
 
 
 # ---------------------------------------------------------------------------

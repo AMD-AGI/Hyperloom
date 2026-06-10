@@ -27,6 +27,54 @@ from datetime import datetime, timezone
 from typing import Any
 
 UNPHASED = "(unphased)"
+UNKNOWN_AGENT = "(unknown)"
+
+
+def correlation_seed(manifest: dict[str, Any], fallback: str) -> str:
+    """Pick the Langfuse correlation seed for a session.
+
+    Prefers the PrimusClaw session id (``claw_session_id``) so every trace
+    produced for one hosted sandbox session -- live push, offline backfill,
+    and any future claw-side upload -- collapses onto the same Langfuse trace
+    / session view. Falls back to the internal session id (e.g. the session
+    dir name) for standalone/local runs where no claw id exists.
+    """
+    claw = str(manifest.get("claw_session_id") or "").strip()
+    if claw:
+        return claw
+    sid = str(manifest.get("session_id") or "").strip()
+    return sid or str(fallback)
+
+
+def langfuse_session_id(manifest: dict[str, Any], fallback: str) -> str:
+    """The value for Langfuse's ``session_id`` grouping dimension.
+
+    Same precedence as :func:`correlation_seed` (claw id wins) -- this is the
+    human-facing session grouping in the Langfuse UI, whereas the trace_id is
+    its hashed form.
+    """
+    return correlation_seed(manifest, fallback)
+
+
+def agent_of(row: dict[str, Any]) -> str:
+    """The agent that produced a row: its ``component`` (role fallback).
+
+    ``component`` is the closed producer vocabulary (orchestration / kernel /
+    specialist / critic / geak / oob / robustness / proposal_scorer /
+    tracelens / breakdown); it is the "which agent did this" axis used for the
+    per-agent span layer.
+    """
+    return str(row.get("component") or row.get("role") or UNKNOWN_AGENT)
+
+
+def phase_of(row: dict[str, Any]) -> str:
+    """The phase a row belongs to (``(unphased)`` when absent)."""
+    return str(row.get("phase") or UNPHASED)
+
+
+def span_key(row: dict[str, Any]) -> tuple[str, str]:
+    """(phase, agent) key identifying which agent-span a Generation nests in."""
+    return (phase_of(row), agent_of(row))
 
 
 def derive_trace_id(seed: str) -> str:
@@ -176,13 +224,19 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "UNKNOWN_AGENT",
     "UNPHASED",
+    "agent_of",
+    "correlation_seed",
     "decision_to_scores",
     "derive_trace_id",
     "generation_metadata",
     "generation_name",
+    "langfuse_session_id",
     "pair_key",
     "parse_ts",
+    "phase_of",
+    "span_key",
     "trace_metadata",
     "usage_details",
     "utc_second_key",

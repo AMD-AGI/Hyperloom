@@ -119,17 +119,25 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
     for c in conv:
         conv_by_key[lfmap.pair_key(c)] = c
 
-    session_id = str(
+    internal_id = str(
         manifest.get("session_id")
         or (llm[0].get("session_id") if llm else "")
         or session_dir.name
     )
+    # Correlate on claw_session_id (fallback internal id) so backfill and the
+    # live emitter land on one Langfuse trace.
+    seed = lfmap.correlation_seed(manifest, internal_id)
+    session_label = lfmap.langfuse_session_id(manifest, internal_id)
 
-    phases: "OrderedDict[str, list[dict]]" = OrderedDict()
+    # phase -> agent -> [generation parts]; the span hierarchy mirrors the
+    # live emitter (trace -> phase span -> agent span -> generation).
+    phases: "OrderedDict[str, OrderedDict[str, list[dict]]]" = OrderedDict()
     paired = 0
     for row in llm:
-        phase = str(row.get("phase") or UNPHASED)
-        gens = phases.setdefault(phase, [])
+        phase = lfmap.phase_of(row)
+        agent = lfmap.agent_of(row)
+        agents = phases.setdefault(phase, OrderedDict())
+        gens = agents.setdefault(agent, [])
         conv_row = conv_by_key.get(lfmap.pair_key(row))
         if conv_row is not None:
             paired += 1
@@ -142,9 +150,11 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
         })
 
     return {
-        "trace_id_seed": session_id,
-        "session_id": session_id,
-        "name": manifest.get("model_name") or session_id,
+        "trace_id_seed": seed,
+        "session_id": session_label,
+        "internal_session_id": internal_id,
+        "claw_session_id": manifest.get("claw_session_id"),
+        "name": manifest.get("model_name") or session_label,
         "metadata": lfmap.trace_metadata(manifest),
         "created_at": manifest.get("created_at_utc"),
         "phases": phases,
@@ -159,12 +169,19 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
     }
 
 
-def _phase_time_bounds(gens: list[dict]) -> tuple[datetime | None, datetime | None]:
+def _time_bounds(gens: list[dict]) -> tuple[datetime | None, datetime | None]:
     times = [lfmap.parse_ts(g["ts"]) for g in gens]
     times = [t for t in times if t is not None]
     if not times:
         return (None, None)
     return (min(times), max(times))
+
+
+def _phase_time_bounds(
+    agents: "OrderedDict[str, list[dict]]",
+) -> tuple[datetime | None, datetime | None]:
+    flat = [g for gens in agents.values() for g in gens]
+    return _time_bounds(flat)
 
 
 # ---------------------------------------------------------------------------
@@ -173,19 +190,25 @@ def _phase_time_bounds(gens: list[dict]) -> tuple[datetime | None, datetime | No
 def print_plan(plan: dict[str, Any]) -> None:
     s = plan["stats"]
     print(f"Trace: {plan['name']}  (session_id={plan['session_id']})")
+    print(f"  claw_session_id = {plan.get('claw_session_id') or '(none)'}  "
+          f"internal_session_id = {plan.get('internal_session_id')}")
     print(f"  trace_id = {lfmap.derive_trace_id(plan['trace_id_seed'])}")
     print(f"  llm_calls={s['llm_calls']} conversations={s['conversations']} "
           f"decisions={s['decisions']} "
           f"generations_with_text={s['generations_with_text']} "
           f"phases={s['phase_count']}")
     print("  metadata:", json.dumps(plan["metadata"], ensure_ascii=False))
-    print("  Phases / generations:")
-    for phase, gens in plan["phases"].items():
-        lo, hi = _phase_time_bounds(gens)
-        models = sorted({str(g["row"].get("model")) for g in gens})
-        with_text = sum(1 for g in gens if g["has_text"])
-        print(f"    [{phase}] {len(gens)} gen(s), {with_text} with text, "
-              f"models={models}, {lo} .. {hi}")
+    print("  Phases / agents / generations:")
+    for phase, agents in plan["phases"].items():
+        lo, hi = _phase_time_bounds(agents)
+        total = sum(len(g) for g in agents.values())
+        print(f"    [{phase}] {total} gen(s) across {len(agents)} agent(s), "
+              f"{lo} .. {hi}")
+        for agent, gens in agents.items():
+            models = sorted({str(g["row"].get("model")) for g in gens})
+            with_text = sum(1 for g in gens if g["has_text"])
+            print(f"        - {agent}: {len(gens)} gen(s), {with_text} with text, "
+                  f"models={models}")
     outcomes = [
         (d.get("decision") or {}).get("outcome") for d in plan["decisions"]
     ]
@@ -235,49 +258,69 @@ def ingest(plan: dict[str, Any]) -> int:
     except Exception:  # noqa: BLE001 — older SDKs may differ
         log.warning("update_trace not available; trace attrs partially set")
 
+    # trace -> phase span -> agent span -> generation. Keep the agent spans so
+    # decision scores can attach to the agent that produced them.
+    agent_spans: dict[tuple[str, str], Any] = {}
     last_end = trace_start
-    for phase, gens in plan["phases"].items():
-        lo, hi = _phase_time_bounds(gens)
-        span = root.start_observation(
-            name=f"phase:{phase}", as_type="span", start_time=lo or trace_start,
-            metadata={"phase": phase, "generation_count": len(gens)},
+    for phase, agents in plan["phases"].items():
+        p_lo, p_hi = _phase_time_bounds(agents)
+        phase_span = root.start_observation(
+            name=f"phase:{phase}", as_type="span", start_time=p_lo or trace_start,
+            metadata={"phase": phase, "agent_count": len(agents)},
         )
-        for g in gens:
-            g_start = lfmap.parse_ts(g["ts"])
-            row = g["row"]
-            gen = span.start_observation(
-                name=lfmap.generation_name(row),
-                as_type="generation",
-                start_time=g_start,
-                model=row.get("model"),
-                input=g.get("input"),
-                output=g.get("output"),
-                metadata=lfmap.generation_metadata(
-                    row, phase=phase, has_text=g["has_text"],
-                ),
-                usage_details=lfmap.usage_details(row),
+        for agent, gens in agents.items():
+            a_lo, a_hi = _time_bounds(gens)
+            agent_span = phase_span.start_observation(
+                name=f"agent:{agent}", as_type="span", start_time=a_lo or p_lo or trace_start,
+                metadata={"phase": phase, "agent": agent, "generation_count": len(gens)},
             )
-            gen.end(end_time=g_start)
-        span.end(end_time=hi or lo or trace_start)
-        if hi is not None:
-            last_end = hi
+            agent_spans[(phase, agent)] = agent_span
+            for g in gens:
+                g_start = lfmap.parse_ts(g["ts"])
+                row = g["row"]
+                gen = agent_span.start_observation(
+                    name=lfmap.generation_name(row),
+                    as_type="generation",
+                    start_time=g_start,
+                    model=row.get("model"),
+                    input=g.get("input"),
+                    output=g.get("output"),
+                    metadata=lfmap.generation_metadata(
+                        row, phase=phase, has_text=g["has_text"],
+                    ),
+                    usage_details=lfmap.usage_details(row),
+                )
+                gen.end(end_time=g_start)
+            agent_span.end(end_time=a_hi or a_lo or p_lo or trace_start)
+        phase_span.end(end_time=p_hi or p_lo or trace_start)
+        if p_hi is not None:
+            last_end = p_hi
 
-    root.end(end_time=last_end)
-
+    # Decision scores -> the owning agent span (trace-level fallback).
     for i, drow in enumerate(plan["decisions"]):
         for score in lfmap.decision_to_scores(drow):
+            meta = score.get("metadata") or {}
+            phase = str(meta.get("phase") or lfmap.UNPHASED)
+            agent = str(meta.get("component") or lfmap.UNKNOWN_AGENT)
+            span = agent_spans.get((phase, agent))
             try:
-                client.create_score(
-                    name=score["name"],
-                    value=score["value"],
-                    trace_id=trace_id,
-                    data_type=score["data_type"],
-                    comment=score.get("comment") or "",
-                    metadata=score.get("metadata") or {},
-                )
+                if span is not None and hasattr(span, "score"):
+                    span.score(
+                        name=score["name"], value=score["value"],
+                        data_type=score["data_type"],
+                        comment=score.get("comment") or "",
+                        metadata=meta,
+                    )
+                else:
+                    client.create_score(
+                        name=score["name"], value=score["value"],
+                        trace_id=trace_id, data_type=score["data_type"],
+                        comment=score.get("comment") or "", metadata=meta,
+                    )
             except Exception:  # noqa: BLE001
                 log.exception("create_score failed for decision %d", i)
 
+    root.end(end_time=last_end)
     client.flush()
     print(f"Backfilled trace_id={trace_id} session_id={plan['session_id']}")
     return 0

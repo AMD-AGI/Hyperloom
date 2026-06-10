@@ -32,11 +32,26 @@ from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
 # Fake langfuse SDK
 # ---------------------------------------------------------------------------
 class _FakeObservation:
+    """A span or generation; can spawn children (nested spans/generations)."""
+
     def __init__(self, sink: "_FakeClient", kind: str, kwargs: dict):
         self._sink = sink
         self.kind = kind
         self.kwargs = kwargs
         self.ended = False
+        self.trace_update: dict | None = None
+        self.observation_scores: list[dict] = []
+
+    def start_observation(self, *, as_type: str, **kwargs):
+        return self._sink._spawn(as_type, kwargs)
+
+    def update_trace(self, **kwargs):
+        self.trace_update = kwargs
+        self._sink.trace_updates.append(kwargs)
+
+    def score(self, **kwargs):
+        self.observation_scores.append(kwargs)
+        self._sink.observation_scores.append(kwargs)
 
     def end(self, **kwargs):
         self.ended = True
@@ -46,24 +61,40 @@ class _FakeClient:
     """Records every observation / score so tests can assert on them."""
 
     def __init__(self, *, raise_on_generation: bool = False):
+        self.observations: list[_FakeObservation] = []
         self.generations: list[_FakeObservation] = []
-        self.scores: list[dict] = []
+        self.spans: list[_FakeObservation] = []
+        self.scores: list[dict] = []  # trace-level
+        self.observation_scores: list[dict] = []  # span-level
+        self.trace_updates: list[dict] = []
         self.flushed = 0
         self._raise_on_generation = raise_on_generation
 
-    def start_observation(self, *, as_type: str, **kwargs):
+    def _spawn(self, as_type: str, kwargs: dict) -> _FakeObservation:
         if as_type == "generation" and self._raise_on_generation:
             raise RuntimeError("boom: langfuse network down")
         obs = _FakeObservation(self, as_type, kwargs)
+        self.observations.append(obs)
         if as_type == "generation":
             self.generations.append(obs)
+        else:
+            self.spans.append(obs)
         return obs
+
+    def start_observation(self, *, as_type: str, **kwargs):
+        return self._spawn(as_type, kwargs)
 
     def create_score(self, **kwargs):
         self.scores.append(kwargs)
 
     def flush(self):
         self.flushed += 1
+
+    def span_named(self, name: str) -> _FakeObservation | None:
+        for s in self.spans:
+            if s.kwargs.get("name") == name:
+                return s
+        return None
 
 
 def _install_fake_sdk(monkeypatch, client: _FakeClient) -> None:
@@ -78,6 +109,19 @@ def _enable_env(monkeypatch) -> None:
     monkeypatch.setenv("LANGFUSE_HOST", "https://lf.test")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+
+def _write_manifest(session_dir: Path, **fields) -> None:
+    base = {
+        "session_id": session_dir.name,
+        "model_name": "TestModel",
+        "claw_session_id": "claw-abc-123",
+    }
+    base.update(fields)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "manifest.json").write_text(
+        json.dumps(base), encoding="utf-8",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -146,9 +190,39 @@ def test_all_gates_pass_enables(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
-    em = lfe.LangfuseEmitter(tmp_path)
+    sd = tmp_path / "SID"
+    _write_manifest(sd, claw_session_id="claw-XYZ")
+    em = lfe.LangfuseEmitter(sd)
     assert em.enabled is True
-    assert em._trace_id == lfmap.derive_trace_id(tmp_path.name)
+    # trace_id derives from claw_session_id (not the dir name) so live + backfill
+    # of one claw session collapse onto one trace.
+    assert em._trace_id == lfmap.derive_trace_id("claw-XYZ")
+    assert em._session_label == "claw-XYZ"
+
+
+def test_trace_id_falls_back_to_internal_id_without_claw(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd, claw_session_id="", session_id="internal-99")
+    em = lfe.LangfuseEmitter(sd)
+    assert em._trace_id == lfmap.derive_trace_id("internal-99")
+    assert em._session_label == "internal-99"
+
+
+def test_trace_session_id_set_from_claw_on_first_generation(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd, claw_session_id="claw-XYZ")
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())
+    em.record_conversation(_conv_row())
+    # update_trace stamped the Langfuse session_id grouping with the claw id.
+    assert client.trace_updates, "expected update_trace to be called once"
+    assert client.trace_updates[0]["session_id"] == "claw-XYZ"
 
 
 # ---------------------------------------------------------------------------
@@ -182,11 +256,69 @@ def test_conversation_first_then_token_also_pairs(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
-    em = lfe.LangfuseEmitter(tmp_path)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
     em.record_conversation(_conv_row())
     assert client.generations == []
     em.record_llm_call(_llm_row())
     assert len(client.generations) == 1
+
+
+# ---------------------------------------------------------------------------
+# Span hierarchy: trace -> phase span -> agent span -> generation
+# ---------------------------------------------------------------------------
+def test_generation_nests_under_phase_and_agent_spans(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row(phase="EXPLORE", component="kernel", role="kernel"))
+    em.record_conversation(_conv_row(phase="EXPLORE", component="kernel", role="kernel"))
+
+    # Root + phase:EXPLORE + agent:kernel spans exist; the generation is a child.
+    assert client.span_named("phase:EXPLORE") is not None
+    assert client.span_named("agent:kernel") is not None
+    assert len(client.generations) == 1
+    assert client.generations[0].kwargs["metadata"]["component"] == "kernel"
+
+
+def test_distinct_agents_get_distinct_spans(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row(phase="EXPLORE", component="orchestration",
+                                role="orchestration", tick=1))
+    em.record_conversation(_conv_row(phase="EXPLORE", component="orchestration",
+                                     role="orchestration", tick=1))
+    em.record_llm_call(_llm_row(phase="EXPLORE", component="kernel",
+                                role="kernel", tick=2))
+    em.record_conversation(_conv_row(phase="EXPLORE", component="kernel",
+                                     role="kernel", tick=2))
+    agent_spans = [s for s in client.spans if s.kwargs.get("name", "").startswith("agent:")]
+    names = sorted(s.kwargs["name"] for s in agent_spans)
+    assert names == ["agent:kernel", "agent:orchestration"]
+    # One shared phase span reused across both agents.
+    phase_spans = [s for s in client.spans if s.kwargs.get("name") == "phase:EXPLORE"]
+    assert len(phase_spans) == 1
+
+
+def test_flush_closes_all_spans(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())
+    em.record_conversation(_conv_row())
+    em.flush_session()
+    for s in client.spans:
+        assert s.ended is True, f"span {s.kwargs.get('name')} not ended"
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +327,7 @@ def test_conversation_first_then_token_also_pairs(tmp_path, monkeypatch):
 def _seed_trace_dir(tmp_path: Path) -> Path:
     sd = tmp_path / "SID"
     (sd / "reports" / "trace" / "ext").mkdir(parents=True)
+    _write_manifest(sd)
     return sd
 
 
@@ -254,14 +387,21 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
+    # Create an agent span for (KERNEL, kernel) so its decision attaches there;
+    # the (EXPLORE, orchestration) decision has no span -> trace-level fallback.
+    em.record_llm_call(_llm_row(phase="KERNEL", component="kernel", role="kernel"))
+    em.record_conversation(_conv_row(phase="KERNEL", component="kernel", role="kernel"))
     em.flush_session()
-    names = sorted(s["name"] for s in client.scores)
-    # KEEP w/ gain -> 2 scores; REVERT w/o gain -> 1 score.
-    assert names == ["decision_outcome", "decision_outcome", "gain_pct"]
-    gain = [s for s in client.scores if s["name"] == "gain_pct"][0]
+
+    span_score_names = sorted(s["name"] for s in client.observation_scores)
+    trace_score_names = sorted(s["name"] for s in client.scores)
+    # KERNEL/kernel KEEP w/ gain -> 2 span-level scores.
+    assert span_score_names == ["decision_outcome", "gain_pct"]
+    # EXPLORE/orchestration REVERT w/o gain -> 1 trace-level fallback score.
+    assert trace_score_names == ["decision_outcome"]
+    gain = [s for s in client.observation_scores if s["name"] == "gain_pct"][0]
     assert gain["value"] == 12.5
     assert gain["data_type"] == "NUMERIC"
-    assert gain["trace_id"] == em._trace_id
 
 
 # ---------------------------------------------------------------------------
