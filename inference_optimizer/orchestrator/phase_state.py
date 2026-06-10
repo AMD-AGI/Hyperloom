@@ -1272,10 +1272,16 @@ def make_history_row(
 LIFECYCLE_STATUS_START = "START"
 LIFECYCLE_STATUS_END = "END"
 LIFECYCLE_STATUS_ERROR = "ERROR"
+# Phase-boundary marker. Unlike START (which pairs with a later END for the
+# same step), ENTER is a point-in-time "entered <phase>" mark: the next
+# phase's ENTER implies the previous one finished, so phase rows are never
+# expected to have a matching END (see SKILL.md reading tip).
+LIFECYCLE_STATUS_ENTER = "ENTER"
 LIFECYCLE_STATUSES: frozenset[str] = frozenset({
     LIFECYCLE_STATUS_START,
     LIFECYCLE_STATUS_END,
     LIFECYCLE_STATUS_ERROR,
+    LIFECYCLE_STATUS_ENTER,
 })
 
 # Human-friendly labels for the six coordinator phases.
@@ -1391,6 +1397,7 @@ __all__ = [
     "ESCALATE_HINT_VOCAB",
     "LIFECYCLE_STATUSES",
     "LIFECYCLE_STATUS_END",
+    "LIFECYCLE_STATUS_ENTER",
     "LIFECYCLE_STATUS_ERROR",
     "LIFECYCLE_STATUS_START",
     "LIFECYCLE_STEP_LABELS",

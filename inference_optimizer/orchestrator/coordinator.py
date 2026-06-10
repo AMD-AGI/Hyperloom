@@ -1117,11 +1117,14 @@ class Coordinator:
         # #266: mirror the phase boundary into the operator-facing
         # lifecycle log so a launcher poll surfaces "entered <phase>" in
         # chat (with the human-friendly label) alongside the step-level
-        # events. Best-effort; must never roll back the transition.
+        # events. Uses the ENTER status (not START): a phase boundary is a
+        # point-in-time marker, not a paired START/END interval, so it must
+        # not read as "still running" forever. Best-effort; must never roll
+        # back the transition.
         try:
             state.record_lifecycle_event(
                 step=target,
-                status="START",
+                status=_phase_state.LIFECYCLE_STATUS_ENTER,
                 phase=target,
                 detail=f"reason={reason}" if reason else "",
             )
@@ -6265,6 +6268,17 @@ class Coordinator:
                 if cached_result is not None:
                     result = cached_result
                     cache_hit_source = "shared_state_cache"
+                    # #266: a cache hit produces a response but never runs the
+                    # handler, so emit a single END (no paired START). Without
+                    # this the lifecycle log would show no record at all for a
+                    # cache-served step, leaving an operator unsure whether it
+                    # ran. detail=cache_hit marks it as served-from-cache.
+                    self._emit_lifecycle(
+                        step=kind,
+                        status="END",
+                        artifacts=_lifecycle_paths(result),
+                        detail="cache_hit",
+                    )
                 else:
                     rejected = (
                         self.shared_state.find_rejected_kernel_patch(merged_payload)
@@ -6286,6 +6300,16 @@ class Coordinator:
                             "reason": rejected.get("reason"),
                         }
                         cache_hit_source = "shared_state_kernel_rejection"
+                        # #266: a short-circuited integrate (patch already
+                        # exhausted) also never runs the handler; emit a lone
+                        # END so the log records the step was resolved as a
+                        # rejection rather than silently missing.
+                        self._emit_lifecycle(
+                            step=kind,
+                            status="END",
+                            artifacts=_lifecycle_paths(result),
+                            detail="rejected",
+                        )
                     else:
                         # Inject base_tput from current_best.tput when an integrate request omits it (else 2nd/3rd multi-KEEP integrate fails base_tput > 0); operator value wins.
                         if (

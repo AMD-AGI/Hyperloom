@@ -1027,7 +1027,9 @@ class SharedState:
         # package (phase_state imports nothing from SharedState).
         from .phase_state import make_lifecycle_event
 
-        events = list(self.lifecycle or [])
+        events = self.lifecycle
+        if events is None:
+            events = self.lifecycle = []
         next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
         event = make_lifecycle_event(
             step=step,
@@ -1040,10 +1042,12 @@ class SharedState:
             seq=next_seq,
             ts=ts or _now_iso(),
         )
+        # Append in place and trim only when over the cap, so the common
+        # per-step-boundary path is an O(1) append rather than copying the
+        # whole list on every call.
         events.append(event)
         if len(events) > _LIFECYCLE_CAP:
-            events = events[-_LIFECYCLE_CAP:]
-        self.lifecycle = events
+            del events[: -_LIFECYCLE_CAP]
         return event
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:

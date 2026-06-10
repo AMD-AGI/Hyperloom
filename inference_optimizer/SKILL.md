@@ -963,11 +963,18 @@ print("phase:", s.get("phase"))
 # operator can tell — without reading the run log — that a phase ran, where
 # its outputs went, and which artifact feeds the next phase.
 #
-# Reading tip: a START with no matching END for the same step means that
-# step is still running (or died without finishing). An ERROR means the
-# handler raised. Follow the printed artifact paths to inspect intermediates
-# during execution (e.g. the TraceLens run dir that contains
-# analysis.md / kernel_candidates.json / agent_transcript.jsonl).
+# Reading tip: step-level events pair up. A START with no matching END for
+# the same step means that step is still running (or died without
+# finishing); an ERROR means the handler raised. Two rows intentionally do
+# NOT pair: (a) phase-boundary rows use status ENTER (step == the phase
+# name) and are point-in-time "entered <phase>" markers — the next phase's
+# ENTER implies the previous one finished, so they never get an END; and
+# (b) a lone END with no START is a step that produced a response without
+# running its handler (detail=cache_hit when served from the trace_analyze
+# cache, detail=rejected when an integrate hit an already-exhausted patch).
+# Follow the printed artifact paths to inspect intermediates during
+# execution (e.g. the TraceLens run dir that contains analysis.md /
+# kernel_candidates.json / agent_transcript.jsonl).
 events = s.get("lifecycle") or []
 print(f"\n--- lifecycle (last 12 of {len(events)}) ---")
 for e in events[-12:]:

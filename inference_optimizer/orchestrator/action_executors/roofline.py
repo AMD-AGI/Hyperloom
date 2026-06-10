@@ -381,8 +381,13 @@ class RooflineExecutor:
         # #266: the auto-roofline TraceLens run does NOT pass through
         # Coordinator._handle_request, so emit its lifecycle event here so
         # operators still see "TraceLens finished -> analysis at <path>".
-        # Best-effort; persisted only when running against a real session
-        # dir (tests may resolve session_dir to ".").
+        # Best-effort. The event is recorded into the coordinator's shared
+        # SharedState object, so it is durable as soon as ANY later
+        # coordinator save runs; the explicit save below is only a fast-path
+        # to flush it immediately when a real session dir already exists
+        # (tests may resolve session_dir to "."). Note: if auto-roofline ever
+        # became the very first writer of state.json, this in-memory event
+        # would rely on that later coordinator save to reach disk.
         try:
             self.shared_state.record_lifecycle_event(
                 step="roofline",

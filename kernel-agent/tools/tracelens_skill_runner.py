@@ -570,6 +570,16 @@ async def run_tracelens_skill(
     # turn was actually recorded.
     if transcript_written:
         artifact_paths["tracelens_agent_transcript"] = str(transcript_path)
+    else:
+        # No turn was recorded (empty stream, or every serialization failed):
+        # remove the zero-byte file we truncated open at start so we don't
+        # leave a misleading empty agent_transcript.jsonl on disk.
+        try:
+            transcript_path.unlink(missing_ok=True)
+        except OSError as exc:
+            if log:
+                log(f"[claude-sdk] WARNING: cannot remove empty transcript "
+                    f"{transcript_path}: {exc}")
     if sdk_error:
         artifact_paths["tracelens_agent_sdk_error"] = sdk_error
 

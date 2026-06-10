@@ -91,7 +91,9 @@ def test_make_lifecycle_event_omits_duration_when_none():
 
 
 def test_lifecycle_statuses_enum():
-    assert LIFECYCLE_STATUSES == frozenset({"START", "END", "ERROR"})
+    # ENTER is the phase-boundary marker (point-in-time, never paired with
+    # an END); START / END / ERROR are the step-level statuses.
+    assert LIFECYCLE_STATUSES == frozenset({"START", "END", "ERROR", "ENTER"})
 
 
 # ===========================================================================
