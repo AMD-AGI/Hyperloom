@@ -33,6 +33,18 @@ _SEVERITY_REGRESS: str = "regress"
 # semantic empties are left for the orchestrator. Env override / disable via
 # INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY (set "0" to disable).
 SPECIALIST_AUTO_RETRY_MAX: int = 2
+
+# Periodic in-process maintenance/reaper cadence (R5 + R4 DB retention). Runs
+# every N coordinator ticks: actively reaps expired serving + GPU leases and
+# prunes the events/tasks DB so a multi-day single-session run never leaks
+# capacity or grows the DB unbounded (no process restart clears them). Env
+# override via INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS ("0" disables).
+MAINTENANCE_EVERY_TICKS: int = 50
+
+# R2: default per-macro-cycle wall-clock window (hours) in cyclic mode. Each
+# phase's budget fraction (DEFAULT_PHASE_BUDGET_PCT) applies to this window
+# rather than the whole run. Env override: INFERENCE_OPTIMIZER_CYCLE_HOURS.
+DEFAULT_CYCLE_HOURS: float = 6.0
 from . import phase_state as _phase_state
 from .optimization_journal import (
     Journal,
@@ -354,6 +366,50 @@ class Coordinator:
         except ValueError:
             self._no_progress_threshold = 15
 
+        # Periodic maintenance/reaper cadence (R5 + R4 DB retention). 0 disables.
+        try:
+            self._maintenance_every_ticks: int = max(
+                0,
+                int(os.environ.get(
+                    "INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS",
+                    str(MAINTENANCE_EVERY_TICKS),
+                )),
+            )
+        except ValueError:
+            self._maintenance_every_ticks = MAINTENANCE_EVERY_TICKS
+
+        # R2: when cyclic mode is on, pin a per-macro-cycle budget window so the
+        # per-phase budget fractions apply per cycle, not per whole run.
+        if _phase_state.is_cyclic_phases_enabled() and float(
+            getattr(self.shared_state, "cycle_minutes", 0) or 0
+        ) <= 0:
+            try:
+                _cycle_hours = float(os.environ.get(
+                    "INFERENCE_OPTIMIZER_CYCLE_HOURS", str(DEFAULT_CYCLE_HOURS),
+                ))
+            except ValueError:
+                _cycle_hours = DEFAULT_CYCLE_HOURS
+            self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
+
+        # R6: medium-intensity soft restart at each macro-cycle boundary
+        # (reap/prune/clear-caches + compacted-memory conversation reset). On by
+        # default in cyclic mode; opt out via the env flag.
+        self._cycle_soft_restart: bool = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART", "",
+            ).strip().lower() not in {"1", "true", "yes", "on"}
+        )
+        # The soft restart's inference-server deep-clean kills lingering server
+        # processes (vLLM/SGLang/atom workers). It is safe at a cycle boundary
+        # (no benchmark in flight) but is the highest-blast-radius step, so it is
+        # separately gated and defaults ON within the soft restart; opt out via
+        # the env flag (tests set it to avoid touching real /proc).
+        self._cycle_restart_servers: bool = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART", "",
+            ).strip().lower() not in {"1", "true", "yes", "on"}
+        )
+
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {
             name: 0 for name in self.role_registry
@@ -476,12 +532,60 @@ class Coordinator:
             "last_progress_tick": int(marker.get("last_progress_tick", cur_tick)),
         }
 
+    async def _maybe_run_maintenance_tick(
+        self, *, tick: int,
+    ) -> dict[str, Any] | None:
+        """Periodic in-process maintenance (R5 reaper + R4 DB retention).
+
+        On a fixed tick cadence: actively reap TTL-expired serving + GPU leases
+        and prune the events/tasks DB (strictly below the resume anchor) so a
+        multi-day single-session run never leaks capacity or grows the DB
+        unbounded. Best-effort — every step is independently guarded so one
+        failure never aborts the run loop. Returns a summary dict when it ran,
+        else ``None``.
+        """
+        every = int(getattr(self, "_maintenance_every_ticks", 0) or 0)
+        if every <= 0 or tick <= 0 or (tick % every) != 0:
+            return None
+        summary: dict[str, Any] = {"tick": tick}
+        try:
+            reaped = await self.locks.reap_expired()
+            summary["leases_reaped"] = len(reaped or [])
+        except Exception:  # noqa: BLE001 — maintenance never aborts the run loop
+            log.exception("maintenance: serving-lease reap failed")
+        try:
+            summary["gpu_leases_reaped"] = (
+                await self.gpu_specialist_pool.reap_expired()
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("maintenance: gpu-lease reap failed")
+        # R6 watchdog/self-heal: reclaim orphaned running tasks whose execution
+        # lease has expired so a dead worker never wedges a lane indefinitely.
+        try:
+            reclaimed = await self.tasks.reclaim_expired_running(
+                reason="maintenance_watchdog",
+            )
+            summary["running_tasks_reclaimed"] = len(reclaimed)
+        except Exception:  # noqa: BLE001
+            log.exception("maintenance: running-task reclaim failed")
+        try:
+            from . import db_maintenance as _db_maint
+            res = await _db_maint.run_db_retention(self.db, self.cursors)
+            summary["events_pruned"] = res.events_deleted
+            summary["tasks_pruned"] = res.tasks_deleted
+        except Exception:  # noqa: BLE001
+            log.exception("maintenance: DB retention failed")
+        log.info("maintenance tick %d: %s", tick, summary)
+        return summary
+
     async def _maybe_checkpoint_orchestration(
-        self, *, tick: int, phase_changed: bool = False,
+        self, *, tick: int, phase_changed: bool = False, force: bool = False,
     ) -> bool:
         """Compact the orchestration conversation into durable memory (plan Step 4).
 
-        Returns True when a checkpoint was taken. Best-effort.
+        Returns True when a checkpoint was taken. Best-effort. ``force`` bypasses
+        the throttle policy (used by the R6 cycle-boundary soft restart) but
+        still requires a seeded conversational backend.
         """
         if not self._checkpoint_enabled:
             return False
@@ -503,7 +607,7 @@ class Coordinator:
         ticks_since = max(0, tick - tracker.last_tick)
         minutes_since = max(0.0, now_min - tracker.last_minute_mark)
         # Approximate conversation growth from recorded prompt char counts since last reset.
-        if not self._checkpoint_policy.should_checkpoint(
+        if not force and not self._checkpoint_policy.should_checkpoint(
             ticks_since_last=ticks_since,
             minutes_since_last=minutes_since,
             chars_since_last=tracker.chars_since_last,
@@ -1024,6 +1128,41 @@ class Coordinator:
             and not state.stop_reason
         ):
             state.set_stop_reason(reason)
+        # R1: a SWEEP→EXPLORE loopback opens a new macro-cycle. Bump the cycle
+        # counter + persist the R7 no-gain streak BEFORE recording the
+        # transition so the new EXPLORE phase rows carry the new cycle number.
+        # R3: a cyclic EXPLORE plateau winds the cycle down with
+        # ``switch_bottleneck`` — record the bottleneck we plateaued on so the
+        # next macro-cycle's orchestration prompt redirects specialists off it.
+        if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
+            try:
+                state.mark_bottleneck_switch(
+                    prev_bottleneck=state.current_top_bottleneck(),
+                )
+                log.info(
+                    "R3: plateau → bottleneck switch flagged (off %r)",
+                    state.last_cycle_bottleneck,
+                )
+            except Exception:  # noqa: BLE001 — advisory bookkeeping is best-effort
+                log.exception("R3: mark_bottleneck_switch failed")
+        is_loopback = bool(isinstance(evidence, dict) and evidence.get("loopback"))
+        if is_loopback:
+            prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+            self._apply_macro_cycle_reloop(evidence)
+            await self._run_cycle_soft_restart(
+                prior_cycle=prior_cycle,
+                new_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            )
+        # R7: also persist the no-gain streak on a cyclic-mode terminal close so
+        # a subsequent resume sees the convergence state.
+        elif (
+            target == _phase_state.PHASE_CLOSE
+            and isinstance(evidence, dict)
+            and "no_gain_cycle_streak_effective" in evidence
+        ):
+            state.no_gain_cycle_streak = int(
+                evidence.get("no_gain_cycle_streak_effective", 0) or 0
+            )
         state.record_phase_transition(
             to_phase=target,
             reason=reason,
@@ -1056,6 +1195,159 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: _on_phase_entered hook failed")
 
+    def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
+        """Open a new macro-cycle on a SWEEP→EXPLORE loopback (R1/R2/R7).
+
+        Increments ``macro_cycle``, persists the R7 no-gain streak + the
+        per-cycle gain anchor, and resets per-cycle counters so the new cycle
+        gets a fresh budget / plateau evaluation. The negative ledger
+        (``explore_search.tested``) is deliberately PRESERVED across cycles so a
+        later cycle never re-explores an already-rejected variant.
+        """
+        state = self.shared_state
+        prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        state.macro_cycle = prior_cycle + 1
+        # R7: carry the effective no-gain streak computed by should_reloop.
+        if isinstance(evidence, dict) and "no_gain_cycle_streak_effective" in evidence:
+            state.no_gain_cycle_streak = int(
+                evidence.get("no_gain_cycle_streak_effective", 0) or 0
+            )
+        # Anchor gain for the cycle we are about to start.
+        try:
+            state.gain_at_cycle_start = float(
+                getattr(state, "cumulative_gain_validated", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            state.gain_at_cycle_start = 0.0
+        # Reset per-cycle counters (fresh plateau/dispatch budget for the cycle).
+        try:
+            state.reset_specialist_dispatched()
+            state.reset_explore_plateau_proxy()
+        except Exception:  # noqa: BLE001 — resets are best-effort
+            log.exception("Coordinator: per-cycle reset failed on reloop")
+        # Clear the per-cycle SWEEP completion markers: exit_normal_sweep keys off
+        # last_sweep / last_conc_sweep status, so a stale "succeeded" from the
+        # prior cycle would make the next cycle's SWEEP exit instantly without
+        # running a fresh sweep. (current_best / optimization_stack are global
+        # and intentionally preserved.)
+        state.last_sweep = {}
+        state.last_conc_sweep = {}
+        log.info(
+            "Coordinator: macro-cycle reloop %d → %d (no_gain_streak=%d, "
+            "gain_anchor=%.4f)",
+            prior_cycle, state.macro_cycle, state.no_gain_cycle_streak,
+            state.gain_at_cycle_start,
+        )
+
+    async def _run_cycle_soft_restart(
+        self, *, prior_cycle: int, new_cycle: int,
+    ) -> dict[str, Any] | None:
+        """R6: medium-intensity soft restart at a macro-cycle boundary.
+
+        Brings the single-session run the per-session restart benefits (fresh
+        leases, pruned DB, cleared transient caches, compacted-memory
+        conversation reset) without losing accumulated optimization state.
+        ``current_best`` / ``optimization_stack`` / ``explore_search`` (the
+        negative ledger) are GLOBAL and deliberately preserved here — only
+        transient / per-cycle resources recycle, and the routine is idempotent
+        so a resume mid-restart never double-cleans or replays tasks.
+
+        Best-effort: every step is independently guarded so one failure never
+        aborts the run loop. Returns a summary dict when it ran, else ``None``.
+        """
+        if not getattr(self, "_cycle_soft_restart", False):
+            return None
+        summary: dict[str, Any] = {
+            "prior_cycle": int(prior_cycle),
+            "new_cycle": int(new_cycle),
+        }
+        # 1) Compact the just-finished cycle's conversation into durable memory
+        #    and reset so the new cycle reseeds from the compressed seed instead
+        #    of dragging the full transcript across the boundary.
+        try:
+            compacted = await self._maybe_checkpoint_orchestration(
+                tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                phase_changed=True,
+                force=True,
+            )
+            summary["memory_compacted"] = bool(compacted)
+            # Reset unconditionally so even a no-op checkpoint (e.g. mock backend)
+            # still reseeds from the latest compacted memory next turn.
+            self._reset_orchestration_conversation()
+            summary["conversation_reset"] = True
+        except Exception:  # noqa: BLE001 — soft restart never aborts the run loop
+            log.exception("cycle soft-restart: conversation reset failed")
+        # 2) Reap TTL-expired serving + GPU leases immediately (don't wait for
+        #    the maintenance cadence) so the new cycle starts on fresh capacity.
+        try:
+            reaped = await self.locks.reap_expired()
+            summary["leases_reaped"] = len(reaped or [])
+        except Exception:  # noqa: BLE001
+            log.exception("cycle soft-restart: serving-lease reap failed")
+        try:
+            summary["gpu_leases_reaped"] = (
+                await self.gpu_specialist_pool.reap_expired()
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("cycle soft-restart: gpu-lease reap failed")
+        # 2b) Reclaim orphaned running tasks (lease expired) → failed so they
+        #     free their lanes and stay retry-eligible. Idempotent.
+        try:
+            reclaimed = await self.tasks.reclaim_expired_running(
+                reason="cycle_soft_restart",
+            )
+            summary["running_tasks_reclaimed"] = len(reclaimed)
+        except Exception:  # noqa: BLE001
+            log.exception("cycle soft-restart: running-task reclaim failed")
+        # 3) Prune the events/tasks DB (strictly below the resume anchor).
+        try:
+            from . import db_maintenance as _db_maint
+            res = await _db_maint.run_db_retention(self.db, self.cursors)
+            summary["events_pruned"] = res.events_deleted
+            summary["tasks_pruned"] = res.tasks_deleted
+        except Exception:  # noqa: BLE001
+            log.exception("cycle soft-restart: DB retention failed")
+        # 4) Clear transient knowledge-plane caches so the new cycle pulls a
+        #    fresh PR feed instead of reusing the prior cycle's window.
+        try:
+            if self.knowledge_plane is not None:
+                self.knowledge_plane.reset_round_caches()
+                summary["caches_cleared"] = True
+        except Exception:  # noqa: BLE001
+            log.exception("cycle soft-restart: cache clear failed")
+        # 5) Deep-clean any lingering inference-server processes so the next
+        #    cycle's first benchmark starts a fresh server (no stale zmq /
+        #    shared-mem / VRAM held by escaped workers).
+        if getattr(self, "_cycle_restart_servers", False):
+            try:
+                self._restart_inference_servers()
+                summary["servers_restarted"] = True
+            except Exception:  # noqa: BLE001
+                log.exception("cycle soft-restart: server restart failed")
+        log.info(
+            "cycle soft-restart %d → %d: %s",
+            int(prior_cycle), int(new_cycle), summary,
+        )
+        try:
+            await self._record_observation(
+                "coordinator", "observation",
+                {"kind": "cycle_soft_restart", **summary},
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("cycle soft-restart: observation write failed")
+        return summary
+
+    def _restart_inference_servers(self) -> None:
+        """Deep-clean lingering inference-server processes (R6 soft restart).
+
+        Reuses the grid runner's ``_kill_stale_servers`` /proc sweep, which only
+        targets vLLM/SGLang/atom server processes outside our own process group
+        (never our live children) and is a no-op in multi-node mode. Safe at a
+        cycle boundary where no benchmark is in flight.
+        """
+        from .action_executors._grid_runner import _kill_stale_servers
+        _kill_stale_servers()
+
     async def _on_phase_entered(self, *, from_phase: str, to_phase: str) -> None:
         """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 5-step sequencer (KB_design §3.2 §5.5 + KB_gaps/Gap-06; sets close_sequence_done)."""
         # Orchestration checkpoint at the phase seam (plan Step 4); runs before per-phase side effects.
@@ -1080,7 +1372,30 @@ class Coordinator:
             await self._on_enter_close(from_phase=from_phase)
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
-        """Warm ``KnowledgePlane.pr_feed`` across specialist domains (best-effort) on EXPLORE entry. Roofline lives in PRELUDE, not here."""
+        """Warm ``KnowledgePlane.pr_feed`` across specialist domains (best-effort) on EXPLORE entry. Roofline lives in PRELUDE, not here (except the R3 per-cycle reprofile below)."""
+        # R3: at the start of each macro-cycle (cyclic loopback SWEEP→EXPLORE),
+        # force a fresh roofline/profile so the new cycle re-targets the current
+        # bottleneck instead of reusing the prior cycle's stale picture. The
+        # cycle-scoped idempotency key guarantees a new task each cycle.
+        if (
+            _phase_state.is_cyclic_phases_enabled()
+            and (from_phase or "").upper() == _phase_state.PHASE_SWEEP
+            and int(getattr(self.shared_state, "macro_cycle", 0) or 0) > 0
+        ):
+            try:
+                task = await self._enqueue_internal_analysis_task(
+                    reason="cycle_start",
+                )
+                self.shared_state.auto_roofline_pending_task_id = task.task_id
+                log.info(
+                    "cycle %d EXPLORE entry: forced reprofile task=%s",
+                    int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    task.task_id,
+                )
+            except Exception:  # noqa: BLE001 — reprofile is best-effort
+                log.exception(
+                    "cycle EXPLORE entry: forced reprofile enqueue failed",
+                )
         plane = self.knowledge_plane
         if plane is None:
             return
@@ -2351,6 +2666,20 @@ class Coordinator:
             tput = float(tput_raw) if tput_raw is not None else 0.0
         except (TypeError, ValueError):
             tput = 0.0
+        # ``tput`` (output_throughput) is the HOT measure round; kept only for
+        # reporting (``hot_tput``). The fair comparison value — used for gain,
+        # the stack entry, and current_best.tput (the explore/sweep anchor) —
+        # MUST be the single-fresh-server (warmup) round so it matches the
+        # measurement basis of explore/sweep variants. Fall back to ``tput``
+        # for a single-run replay that has no separate warmup round.
+        single_raw = result.get("warmup_round_tput")
+        try:
+            single_round_tput = float(single_raw) if single_raw is not None else 0.0
+        except (TypeError, ValueError):
+            single_round_tput = 0.0
+        if single_round_tput <= 0:
+            single_round_tput = tput
+        hot_tput = tput
         # Use the baseline_tput captured at enqueue time so a mid-replay baseline rerun can't shift the anchor; fall back to live state.baseline_tput.
         anchor_raw = None
         if task is not None and isinstance(getattr(task, "params", None), dict):
@@ -2361,13 +2690,15 @@ class Coordinator:
             baseline_tput = 0.0
         if baseline_tput <= 0:
             baseline_tput = float(state.baseline_tput or 0.0)
-        if tput <= 0 or baseline_tput <= 0:
+        if single_round_tput <= 0 or baseline_tput <= 0:
             outcome["status"] = "failed"
-            outcome["reason"] = f"invalid_tput tput={tput} baseline={baseline_tput}"
+            outcome["reason"] = (
+                f"invalid_tput tput={single_round_tput} baseline={baseline_tput}"
+            )
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
             return
-        measured_gain = (tput / baseline_tput - 1.0) * 100.0
+        measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
         )
@@ -2407,7 +2738,8 @@ class Coordinator:
                 # Canonical key matching EXPLORE-KEEP stack entries so downstream readers key on the same name.
                 "extra_server_args": warm_args,
                 "extra_envs":        warm_envs,
-                "tput":              float(tput),
+                "tput":              float(single_round_tput),
+                "hot_tput":          float(hot_tput),
                 "gain_pct":          round(measured_gain, 3),
                 "workspace":         str(result.get("workspace") or ""),
                 "ts":                datetime.now(timezone.utc).isoformat(),
@@ -2435,8 +2767,8 @@ class Coordinator:
             gp = list(getattr(state, "gain_per_stack_entry", []) or [])
             gp.append(round(measured_gain, 3))
             state.gain_per_stack_entry = gp
-            # Cumulative gain from absolute tput/baseline (stack is superposition, not additive deltas).
-            total_gain = (tput / baseline_tput - 1.0) * 100.0
+            # Cumulative gain from absolute tput/baseline (stack is superposition, not additive deltas). Single-round basis (matches explore/sweep + baseline anchor).
+            total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
             state.cumulative_gain = round(total_gain, 3)
             state.cumulative_gain_validated = round(total_gain, 3)
             state.cumulative_gain_validated_stack_len = len(
@@ -2445,7 +2777,10 @@ class Coordinator:
             state.current_best = {
                 "action": "warm_replay",
                 "name": "warm_replay",
-                "tput": tput,
+                # Single-round anchor (NOT hot) so explore/sweep variants are
+                # judged on a comparable basis; hot kept under hot_tput.
+                "tput": single_round_tput,
+                "hot_tput": hot_tput,
                 # Canonical key — matches the current_best shape _lift_to_current_best writes for KEEPs.
                 "extra_server_args": warm_args,
                 "extra_envs": warm_envs,
@@ -2524,6 +2859,17 @@ class Coordinator:
                 "after baseline: %r", exc,
             )
 
+    def _cycle_idem_suffix(self) -> str:
+        """Idempotency-key suffix that scopes a per-cycle internal singleton to
+        the current macro-cycle (R1). Empty for cycle 0 / non-cyclic runs so the
+        monotonic-chain keys (and their tests) are byte-for-byte unchanged.
+
+        Without this, a later macro-cycle's sweep/roofline/profile would dedupe
+        to the first cycle's already-succeeded task and never re-run.
+        """
+        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        return f"-c{cycle}" if cycle > 0 else ""
+
     async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Kind-agnostic idempotency key internal-analysis-<reason>; omits baseline_config_path so ProfileExecutor enables torch_profiler."""
         state = self.shared_state
@@ -2546,7 +2892,7 @@ class Coordinator:
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=kind,
             params=params,
-            idempotency_key=f"internal-analysis-{reason}",
+            idempotency_key=f"internal-analysis-{reason}{self._cycle_idem_suffix()}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
         )
@@ -2671,7 +3017,7 @@ class Coordinator:
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind="conc_sweep",
                 params=params,
-                idempotency_key=f"internal-conc_sweep-{reason}",
+                idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
                 # lease_ttl matches total_budget_sec so a multi-hour conc_sweep doesn't expire mid-flight.
                 lease_ttl_sec=int(state.conc_sweep_total_budget_sec or 9000),
             )
@@ -2725,7 +3071,7 @@ class Coordinator:
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="sweep",
             params=params,
-            idempotency_key=f"internal-sweep-{reason}",
+            idempotency_key=f"internal-sweep-{reason}{self._cycle_idem_suffix()}",
         )
         if was_existing:
             log.info(
@@ -3391,6 +3737,11 @@ class Coordinator:
                             exc=exc,
                             tick=tick_n,
                         )
+                    # Periodic reaper + DB retention (R5 + R4); cadence-gated, best-effort.
+                    try:
+                        await self._maybe_run_maintenance_tick(tick=tick_n)
+                    except Exception:  # noqa: BLE001
+                        log.exception("maintenance tick raised")
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -3861,6 +4212,16 @@ class Coordinator:
             if plateau_block:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
+
+            # R3: cyclic bottleneck-redirect advisory (next-cycle re-targeting).
+            try:
+                redirect_block = self._bottleneck_redirect_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: bottleneck redirect advisory failed")
+                redirect_block = ""
+            if redirect_block:
+                sections.append("=== Bottleneck redirect (advisory) ===")
+                sections.append(redirect_block)
 
         # Conversational DELTA turn: tell the agent verbose state was not re-pushed + how to pull it.
         if agent_name == "orchestration" and not push_full:
@@ -5547,6 +5908,91 @@ class Coordinator:
             "Phase advance is driven only by hard limits (IR-6 force-exit, "
             "phase budget, terminal stop_reason) or explicit "
             "escalate_strategy_change hints; this block is informational."
+        )
+        return "\n".join(lines)
+
+    #: Map a dominant roofline direction → (specialist domain key, kb tag) so
+    #: the R3 redirect advisory can name a concrete dispatch target. Advisory
+    #: only — Orchestration still chooses the actual domain.
+    _BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
+        "comm": ("comm_specialist", "communication"),
+        "host_overhead": ("system_specialist", "systems"),
+        "idle": ("system_specialist", "systems"),
+        "compute": ("kernel_switch_specialist", "kernel"),
+        "memory": ("serving_specialist", "framework"),
+    }
+
+    def _dominant_roofline_direction(self) -> tuple[str, float]:
+        """Return ``(direction, pct)`` for the most-saturated roofline direction.
+
+        Reads the latest roofline snapshot's compute/idle/comm percentages plus
+        the bound kind; returns ``("", 0.0)`` when no snapshot is available.
+        """
+        snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
+        if not snaps or not isinstance(snaps[-1], dict):
+            return "", 0.0
+        latest = snaps[-1]
+        candidates: dict[str, float] = {}
+        for direction, key in (
+            ("compute", "compute_pct"),
+            ("idle", "idle_pct"),
+            ("comm", "comm_pct"),
+        ):
+            val = latest.get(key)
+            if isinstance(val, (int, float)):
+                candidates[direction] = float(val)
+        # Fold the memory/compute bound kind in as a tie-breaker signal.
+        bound_kind = str(latest.get("roofline_bound_kind") or "").strip().lower()
+        if bound_kind == "memory":
+            candidates["memory"] = max(candidates.get("compute", 0.0), 0.0) + 0.01
+        if not candidates:
+            return "", 0.0
+        best = max(candidates.items(), key=lambda kv: kv[1])
+        return best[0], best[1]
+
+    def _bottleneck_redirect_advisory_block(self) -> str:
+        """Render the R3 cyclic bottleneck-redirect advisory (EXPLORE only).
+
+        Active only in cyclic mode when a prior cycle's plateau flagged
+        ``pending_bottleneck_switch``. Names the bottleneck we plateaued on, the
+        current dominant roofline direction, and a suggested specialist domain so
+        Orchestration redirects the new cycle's dispatch. Advisory, never gates.
+        """
+        state = self.shared_state
+        if not _phase_state.is_cyclic_phases_enabled():
+            return ""
+        if not bool(getattr(state, "pending_bottleneck_switch", False)):
+            return ""
+        if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_EXPLORE:
+            return ""
+        prev = str(getattr(state, "last_cycle_bottleneck", "") or "")
+        cur_top = state.current_top_bottleneck()
+        direction, pct = self._dominant_roofline_direction()
+        lines: list[str] = [
+            "The previous macro-cycle plateaued; redirect this cycle to a "
+            "different bottleneck instead of re-mining the exhausted one.",
+        ]
+        if prev:
+            lines.append(f"  plateaued_bottleneck={prev} (avoid re-targeting)")
+        if cur_top:
+            lines.append(f"  current_top_bottleneck={cur_top}")
+        if direction:
+            hint = self._BOTTLENECK_DOMAIN_HINTS.get(direction)
+            if hint:
+                lines.append(
+                    f"  dominant_direction={direction} ({pct:.1f}%) → "
+                    f"suggested specialist domain={hint[0]} tag={hint[1]}"
+                )
+            else:
+                lines.append(f"  dominant_direction={direction} ({pct:.1f}%)")
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        lines.append(
+            f"  macro_cycle={cycle}; prior-cycle rejected fingerprints are "
+            "bucketed per cycle and remain de-duped (never re-explored)."
+        )
+        lines.append(
+            "Advisory only: pick the domain/tag yourself; this nudges focus, "
+            "it does not gate dispatch."
         )
         return "\n".join(lines)
 
@@ -7712,10 +8158,18 @@ class Coordinator:
                         "PRELUDE: warm-recipe history injection failed: %r",
                         exc,
                     )
-                # Step 2 — warm-recipe replay.
+                # Step 2 — warm-recipe replay. Anchor the replay gain on the
+                # SINGLE-fresh-server-round baseline (``state.baseline_tput``,
+                # the same anchor explore/sweep variants are judged against),
+                # NOT the hot measure ``tput`` — otherwise warm-replay's gain
+                # and current_best land on the hot basis and every
+                # single-round explore variant is judged against an unbeatable
+                # hot bar (mirrors the baseline-promote invariant).
                 try:
                     await self._maybe_enqueue_warm_replay(
-                        baseline_tput=float(tput),
+                        baseline_tput=float(
+                            self.shared_state.baseline_tput or tput
+                        ),
                     )
                 except Exception as exc:  # noqa: BLE001 — defensive
                     log.exception(

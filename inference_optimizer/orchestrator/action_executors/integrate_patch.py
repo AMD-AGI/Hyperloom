@@ -255,6 +255,44 @@ def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     return cp.returncode == 0, cp.stderr.strip()
 
 
+def _git_commit_kept(framework_root: Path, message: str) -> tuple[bool, str]:
+    """Commit the current working tree to git (R1 cross-cycle durability).
+
+    In the cyclic phase machine, KEEP patches accumulate across macro-cycles as
+    *uncommitted* working-tree edits. A later cycle's REVERT may fall back to
+    ``git checkout -- .`` (discards ALL uncommitted changes), which would wipe
+    every prior cycle's win. Committing each KEEP makes those wins survive the
+    checkout fallback (it only clears uncommitted state). Best-effort: a commit
+    failure (e.g. nothing staged) is non-fatal — the KEEP still stands in the
+    working tree exactly as before.
+    """
+    add = ["git", "-C", str(framework_root), "add", "-A"]
+    commit = [
+        "git", "-C", str(framework_root),
+        "-c", "user.email=hyperloom@local",
+        "-c", "user.name=Hyperloom",
+        "commit", "-q", "-m", message,
+    ]
+    try:
+        cp_add = subprocess.run(
+            add, capture_output=True, text=True, timeout=60.0, check=False,
+        )
+        if cp_add.returncode != 0:
+            return False, f"git add failed: {cp_add.stderr.strip()}"
+        cp = subprocess.run(
+            commit, capture_output=True, text=True, timeout=60.0, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return False, f"git commit spawn failed: {exc!r}"
+    if cp.returncode == 0:
+        return True, ""
+    # "nothing to commit" is a benign no-op, not an error.
+    out = (cp.stdout + cp.stderr).lower()
+    if "nothing to commit" in out:
+        return True, "nothing to commit"
+    return False, cp.stderr.strip()
+
+
 def _resolve_patch_paths(
     *,
     specialist_workspace: Path,
@@ -623,6 +661,22 @@ class IntegratePatchExecutor:
             tps_delta_pct=float(delta_pct or 0.0),
             extra=extra,
         )
+        # R1: in cyclic mode, commit the KEEP so a later macro-cycle's REVERT
+        # checkout fallback can't wipe this win (best-effort, non-fatal).
+        try:
+            from ..phase_state import is_cyclic_phases_enabled
+            if is_cyclic_phases_enabled():
+                ok, note = _git_commit_kept(
+                    framework_root,
+                    f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
+                )
+                if not ok:
+                    log.warning(
+                        "integrate_patch: commit-on-KEEP failed (%s); win "
+                        "remains uncommitted in the working tree", note,
+                    )
+        except Exception:  # noqa: BLE001 — commit durability is best-effort
+            log.exception("integrate_patch: commit-on-KEEP raised")
         return {
             "status": "kept",
             "specialist_task_id": specialist_task_id,

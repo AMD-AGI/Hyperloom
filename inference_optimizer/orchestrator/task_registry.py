@@ -249,6 +249,72 @@ class TaskRegistry:
         )
         return [Task.from_row(r) for r in rows]
 
+    async def reclaim_expired_running(
+        self,
+        *,
+        now_unix: float | None = None,
+        reason: str = "lease_expired",
+    ) -> list[str]:
+        """Fail running tasks whose execution lease (``lease_ttl_sec`` since
+        ``updated_at``) has expired (R6 watchdog / cycle soft-restart cleanup).
+
+        A ``running`` row that has not advanced for longer than its own
+        ``lease_ttl_sec`` is orphaned — the worker died or was reaped — so we
+        transition it ``running -> failed`` (retry-eligible, lanes freed). Tasks
+        with ``lease_ttl_sec <= 0`` are left untouched (no lease to expire).
+
+        Idempotent: a second call finds the rows already ``failed`` and is a
+        no-op. Returns the reclaimed task_ids.
+        """
+        import time as _time
+
+        now = float(now_unix if now_unix is not None else _time.time())
+        reclaimed: list[str] = []
+        async with self.db.transaction() as cur:
+            cur.execute(
+                "SELECT task_id, lease_ttl_sec, updated_at, history "
+                "FROM tasks WHERE state='running'"
+            )
+            rows = [
+                (r["task_id"], r["lease_ttl_sec"], r["updated_at"], r["history"])
+                for r in cur.fetchall()
+            ]
+            now_iso = _now_iso()
+            for task_id, ttl, updated_at, history_json in rows:
+                try:
+                    ttl_sec = float(ttl or 0)
+                except (TypeError, ValueError):
+                    ttl_sec = 0.0
+                if ttl_sec <= 0:
+                    continue
+                try:
+                    updated = datetime.fromisoformat(str(updated_at))
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    age = now - updated.timestamp()
+                except (TypeError, ValueError):
+                    continue
+                if age < ttl_sec:
+                    continue
+                history = json.loads(history_json)
+                history.append({
+                    "from": "running",
+                    "to": "failed",
+                    "ts": now_iso,
+                    "evidence": {
+                        "reason": reason,
+                        "age_sec": round(age, 1),
+                        "lease_ttl_sec": ttl_sec,
+                    },
+                })
+                cur.execute(
+                    "UPDATE tasks SET state='failed', history=?, updated_at=? "
+                    "WHERE task_id=?",
+                    (json.dumps(history), now_iso, task_id),
+                )
+                reclaimed.append(task_id)
+        return reclaimed
+
     async def cancel_family(self, family_kinds: list[str]) -> list[str]:
         """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch); returns cancelled task_ids."""
         if not family_kinds:

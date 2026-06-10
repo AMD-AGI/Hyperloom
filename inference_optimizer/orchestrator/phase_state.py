@@ -239,6 +239,8 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "framework_pr_phase_done",
     "framework_pr_plateau",
     "framework_pr_force_exit_low_budget",
+    # R7: cyclic phase machine exhausted leverage across macro-cycles.
+    "global_converged",
 
     # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
     "model_context_window_too_small",
@@ -293,6 +295,101 @@ DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE:      float = 0.0
 DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK:                 int   = 3
 DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT:            float = 1.0
 DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
+
+
+# ---------------------------------------------------------------------------
+# R1 cyclic phase machine (env-gated)
+# ---------------------------------------------------------------------------
+# When enabled, SWEEP loops back to EXPLORE (a new macro-cycle) while budget
+# remains and the run hasn't globally converged, instead of always terminating
+# at CLOSE. Off by default => behaviour identical to the monotonic chain.
+PHASE_CYCLIC_ENV: str = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"
+
+# Safety ceiling on macro-cycles (defense against a pathological tight loop).
+DEFAULT_MAX_MACRO_CYCLES: int = 1000
+
+# Minimum session wall-clock (seconds) that must remain to justify opening a new
+# macro-cycle; below this we wind down to CLOSE instead of starting a cycle we
+# cannot meaningfully use.
+DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 1800.0  # 30 min
+
+# R7 global convergence: number of consecutive no-gain macro-cycles after which
+# the run is considered converged (stop looping → CLOSE).
+DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
+
+# A macro-cycle "gained" when validated cumulative gain rose by more than this
+# (percentage points); guards against float noise being read as progress.
+DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
+
+
+def is_cyclic_phases_enabled() -> bool:
+    """True iff the R1 cyclic phase machine is enabled via env."""
+    return os.environ.get(PHASE_CYCLIC_ENV, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _cumulative_gain_validated(state: Any) -> float:
+    try:
+        return float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def should_reloop_to_explore(
+    state: Any,
+    *,
+    now_unix: float | None = None,
+    max_cycles: int = DEFAULT_MAX_MACRO_CYCLES,
+    min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
+    no_gain_cycles: int = DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
+    min_gain_pct: float = DEFAULT_CYCLE_MIN_GAIN_PCT,
+) -> tuple[bool, dict[str, Any]]:
+    """Decide whether SWEEP should open a new macro-cycle (R1) or wind to CLOSE.
+
+    Pure: never mutates state. Returns ``(reloop, evidence)``. The evidence
+    carries the *effective* no-gain streak for the cycle that just completed so
+    the Coordinator can persist it on the loopback/close transition.
+
+    Loops back iff cyclic mode is on AND below the macro-cycle safety cap AND
+    the run has not globally converged (R7: ``no_gain_cycles`` consecutive
+    no-gain cycles) AND enough session budget remains to use a fresh cycle.
+    """
+    cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    evidence: dict[str, Any] = {"cyclic": is_cyclic_phases_enabled(), "macro_cycle": cycle}
+    if not is_cyclic_phases_enabled():
+        return False, evidence
+
+    # Per-cycle gain since this cycle started → effective no-gain streak.
+    cur_gain = _cumulative_gain_validated(state)
+    start_gain = float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0)
+    cycle_gained = (cur_gain - start_gain) > float(min_gain_pct)
+    prior_streak = int(getattr(state, "no_gain_cycle_streak", 0) or 0)
+    effective_streak = 0 if cycle_gained else prior_streak + 1
+    evidence["cycle_gain_delta"] = round(cur_gain - start_gain, 6)
+    evidence["cycle_gained"] = cycle_gained
+    evidence["no_gain_cycle_streak_effective"] = effective_streak
+
+    # Safety cap on macro-cycles.
+    if (cycle + 1) >= int(max_cycles):
+        evidence["reloop_blocked"] = "max_cycles"
+        return False, evidence
+
+    # R7 global convergence.
+    if effective_streak >= int(no_gain_cycles):
+        evidence["reloop_blocked"] = "global_converged"
+        return False, evidence
+
+    # Budget remaining must justify a fresh cycle.
+    remaining = session_remaining_seconds(state, now_unix=now_unix)
+    if remaining is not None and remaining < float(min_remaining_sec):
+        evidence["reloop_blocked"] = "insufficient_remaining"
+        evidence["session_remaining_seconds"] = round(remaining, 2)
+        return False, evidence
+
+    evidence["reloop"] = True
+    evidence["next_cycle"] = cycle + 1
+    return True, evidence
 
 
 # escalate_strategy_change hint vocabulary. Closed enum; unknown hints logged, never change phase.
@@ -403,6 +500,25 @@ def _max_minutes(state: Any) -> float:
         return 0.0
 
 
+def _budget_minutes(state: Any) -> float:
+    """Wall-clock minutes the PER-PHASE budget fractions apply to (R2).
+
+    In cyclic mode the Coordinator sets ``cycle_minutes`` > 0 so each phase's
+    budget (``DEFAULT_PHASE_BUDGET_PCT``) is a fraction of ONE macro-cycle's
+    window rather than the whole run. 0 (legacy/non-cyclic) falls back to the
+    total ``max_minutes`` so behaviour is identical to the monotonic chain.
+    Note: ``session_remaining_seconds`` deliberately keeps using ``max_minutes``
+    — the global deadline is per-run, not per-cycle.
+    """
+    try:
+        cm = float(getattr(state, "cycle_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        cm = 0.0
+    if cm > 0:
+        return cm
+    return _max_minutes(state)
+
+
 def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float:
     """Return wall-clock seconds spent in current phase. 0 if not started."""
     started = _phase_started_unix(state)
@@ -418,8 +534,8 @@ def phase_budget_remaining_seconds(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> float | None:
-    """Return seconds remaining in the current phase's budget (``None`` when ``max_minutes`` 0 = unlimited)."""
-    mm = _max_minutes(state)
+    """Return seconds remaining in the current phase's budget (``None`` when budget window 0 = unlimited)."""
+    mm = _budget_minutes(state)
     if mm <= 0:
         return None
     budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
@@ -501,8 +617,9 @@ def should_force_exit_explore(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )
     if phase_remaining is not None:
-        # Express remaining as a fraction of the phase's total budget.
-        mm = _max_minutes(state)
+        # Express remaining as a fraction of the phase's total budget (per-cycle
+        # window in cyclic mode, else the whole run).
+        mm = _budget_minutes(state)
         budget = normalize_budget_pct(
             budget_pct or getattr(state, "phase_budget_pct", None)
         )
@@ -786,6 +903,18 @@ def exit_normal_explore(
             "evidence": "no_more_leverage",
             "hint": hint,
         }
+    # R3: in cyclic mode a detected EXPLORE plateau is *actionable* — wind the
+    # cycle down (→ SWEEP → reloop) and flag that the next cycle should switch
+    # bottleneck. Advisory-only off cyclic mode (legacy behaviour preserved).
+    if is_cyclic_phases_enabled():
+        plateaued, plateau_ev = compute_plateau_explore(state)
+        if plateaued:
+            return "no_more_leverage", {
+                "evidence": "plateau_explore",
+                "plateau": True,
+                "switch_bottleneck": True,
+                **plateau_ev,
+            }
     remaining = phase_budget_remaining_seconds(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )
@@ -1123,7 +1252,25 @@ def compute_next_phase(
     if current == PHASE_SWEEP:
         norm = exit_normal_sweep(state, budget_pct=budget_pct, now_unix=now_unix)
         if norm is not None:
-            return PHASE_CLOSE, norm[0], norm[1]
+            # R1: in cyclic mode, loop back to EXPLORE (a new macro-cycle)
+            # while budget remains and the run hasn't globally converged (R7);
+            # otherwise wind down to CLOSE (the monotonic-chain behaviour).
+            reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
+            if reloop and explore_enabled:
+                return PHASE_EXPLORE, "cycle_reloop", {
+                    **norm[1], **reloop_ev, "loopback": True,
+                }
+            # R7: if cyclic looping was blocked because leverage is exhausted
+            # (global convergence) or the safety cap is hit, terminate the run
+            # with a terminal stop_reason instead of idling in CLOSE until the
+            # deadline. ``insufficient_remaining`` defers to the run-loop
+            # deadline (non-terminal CLOSE), matching the monotonic chain.
+            blocked = str(reloop_ev.get("reloop_blocked") or "")
+            if blocked in ("global_converged", "max_cycles"):
+                return PHASE_CLOSE, "global_converged", {
+                    **norm[1], **reloop_ev, "terminal": True,
+                }
+            return PHASE_CLOSE, norm[0], {**norm[1], **reloop_ev}
         return None
 
     # PHASE_CLOSE — terminal, no further transitions.
@@ -1139,8 +1286,13 @@ def make_history_row(
     evidence: dict[str, Any] | None,
     ts: str,
     ts_unix: float,
+    cycle: int = 0,
 ) -> dict[str, Any]:
-    """Construct a canonical phase_history row (Inv-2.2 + KB_design §3.2 §6); ``reason`` unvalidated for resume tools."""
+    """Construct a canonical phase_history row (Inv-2.2 + KB_design §3.2 §6); ``reason`` unvalidated for resume tools.
+
+    ``cycle`` stamps the R1 macro-cycle this transition belongs to (0 for the
+    first pass / legacy non-cyclic runs).
+    """
     return {
         "from_phase": (from_phase or "").strip().upper(),
         "to_phase":   (to_phase or "").strip().upper(),
@@ -1148,6 +1300,7 @@ def make_history_row(
         "evidence":   dict(evidence or {}),
         "ts":         ts,
         "ts_unix":    float(ts_unix or 0.0),
+        "cycle":      int(cycle or 0),
     }
 
 
@@ -1188,6 +1341,13 @@ __all__ = [
     "DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK",
     "DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT",
     "DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO",
+    "DEFAULT_MAX_MACRO_CYCLES",
+    "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
+    "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
+    "DEFAULT_CYCLE_MIN_GAIN_PCT",
+    "PHASE_CYCLIC_ENV",
+    "is_cyclic_phases_enabled",
+    "should_reloop_to_explore",
     "abort_prelude",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
