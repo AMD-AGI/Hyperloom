@@ -23,6 +23,15 @@ SCHEMA_VERSION = "hyperloom.ci.normalized.v1"
 
 
 def _read_json(path: Path | None, warnings: list[str]) -> Any | None:
+    """Read and parse a JSON file, recording failures as warnings.
+
+    Args:
+        path (Path | None): File to read; ``None`` yields ``None``.
+        warnings (list[str]): List appended to with a message on parse failure.
+
+    Returns:
+        Any | None: The parsed JSON value, or ``None`` if missing/unparsable.
+    """
     if not path:
         return None
     try:
@@ -33,6 +42,14 @@ def _read_json(path: Path | None, warnings: list[str]) -> Any | None:
 
 
 def _to_float(value: Any) -> float | None:
+    """Coerce a value to ``float``, tolerating commas and ``SKIPPED``.
+
+    Args:
+        value (Any): Number or string to convert.
+
+    Returns:
+        float | None: The float value, or ``None`` if it cannot be parsed.
+    """
     if value is None:
         return None
     if isinstance(value, (int, float)):
@@ -47,11 +64,28 @@ def _to_float(value: Any) -> float | None:
 
 
 def _to_int(value: Any) -> int | None:
+    """Coerce a value to ``int`` via :func:`_to_float`.
+
+    Args:
+        value (Any): Number or string to convert.
+
+    Returns:
+        int | None: The integer value, or ``None`` if it cannot be parsed.
+    """
     number = _to_float(value)
     return int(number) if number is not None else None
 
 
 def _first_of(data: dict[str, Any], *keys: str) -> Any | None:
+    """Return the first non-None value among the given top-level keys.
+
+    Args:
+        data (dict[str, Any]): Source mapping.
+        *keys (str): Keys to try in order.
+
+    Returns:
+        Any | None: The first present non-None value, or ``None``.
+    """
     for key in keys:
         if data.get(key) is not None:
             return data[key]
@@ -75,6 +109,16 @@ def _first_nested(data: dict[str, Any], *paths: str) -> Any | None:
 
 
 def _relative(path: Path | None, root: Path) -> str | None:
+    """Express ``path`` relative to ``root`` as a POSIX string.
+
+    Args:
+        path (Path | None): Path to relativize; ``None`` yields ``None``.
+        root (Path): Base directory.
+
+    Returns:
+        str | None: The relative POSIX path, or the absolute POSIX path if it
+            is not under ``root``; ``None`` when ``path`` is ``None``.
+    """
     if path is None:
         return None
     try:
@@ -84,7 +128,16 @@ def _relative(path: Path | None, root: Path) -> str | None:
 
 
 def find_artifact(root: Path, *tails: str) -> Path | None:
-    """Find the first file whose relative path ends with one of ``tails``."""
+    """Find the first file whose relative path ends with one of ``tails``.
+
+    Args:
+        root (Path): Directory to search recursively.
+        *tails (str): Path suffixes or bare file names to match (case- and
+            separator-insensitive).
+
+    Returns:
+        Path | None: The first matching file, or ``None`` if none found.
+    """
     if not root.exists():
         return None
     normalized = tuple(t.replace("\\", "/").lower().lstrip("/") for t in tails)
@@ -99,6 +152,15 @@ def find_artifact(root: Path, *tails: str) -> Path | None:
 
 
 def parse_env_file(path: Path | None) -> dict[str, str]:
+    """Parse a ``KEY=value`` env file, ignoring blanks and comments.
+
+    Args:
+        path (Path | None): Env file to read; missing/None yields ``{}``.
+
+    Returns:
+        dict[str, str]: Parsed key/value pairs with surrounding quotes
+            stripped from values.
+    """
     if not path or not path.exists():
         return {}
     values: dict[str, str] = {}
@@ -112,6 +174,20 @@ def parse_env_file(path: Path | None) -> dict[str, str]:
 
 
 def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize a heterogeneous ci_metrics payload into a stable shape.
+
+    Resolves baseline/optimized throughput, gain percentage (including
+    multiplier-style ratios), TPOT/TTFT latencies, and run metadata across the
+    several historical schemas via :func:`_first_nested`/:func:`_first_of`.
+    Computes ``gain_pct`` from throughput when it is not reported directly.
+
+    Args:
+        data (dict[str, Any] | None): Raw ci_metrics or session-breakdown
+            dict; ``None`` is treated as empty.
+
+    Returns:
+        dict[str, Any]: Canonical metrics dict with float/int-coerced fields.
+    """
     data = data or {}
     baseline = _first_nested(
         data,
@@ -272,6 +348,16 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def parse_baseline_summary(data: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize a ``baseline_summary.json`` payload into a stable shape.
+
+    Args:
+        data (dict[str, Any] | None): Raw baseline summary; ``None`` is
+            treated as empty.
+
+    Returns:
+        dict[str, Any]: Baseline throughput, config, torch-compile/aiter
+            variants, and run metadata with numeric fields coerced.
+    """
     data = data or {}
     return {
         "baseline_tput_per_gpu": _to_float(data.get("baseline_tput_per_gpu")),
@@ -289,6 +375,16 @@ def parse_baseline_summary(data: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def parse_sweep_results(path: Path | None, warnings: list[str]) -> list[dict[str, Any]]:
+    """Parse a ``sweep_results.csv`` into a list of per-point dicts.
+
+    Args:
+        path (Path | None): CSV file to read; missing/None yields ``[]``.
+        warnings (list[str]): List appended to with a message on failure.
+
+    Returns:
+        list[dict[str, Any]]: One dict per sweep point with coerced numeric
+            fields and an ``"ok"``/``"skipped"`` status.
+    """
     if not path or not path.exists():
         return []
     points: list[dict[str, Any]] = []
@@ -312,6 +408,16 @@ def parse_sweep_results(path: Path | None, warnings: list[str]) -> list[dict[str
 
 
 def parse_kernel_candidates(data: Any) -> list[dict[str, Any]]:
+    """Normalize a ``kernel_candidates.json`` list into stable dicts.
+
+    Args:
+        data (Any): Expected to be a list of candidate dicts; other types
+            yield ``[]``.
+
+    Returns:
+        list[dict[str, Any]]: One dict per candidate with coerced numeric
+            fields.
+    """
     if not isinstance(data, list):
         return []
     candidates: list[dict[str, Any]] = []
@@ -330,6 +436,17 @@ def parse_kernel_candidates(data: Any) -> list[dict[str, Any]]:
 
 
 def parse_kernel_results(data: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Normalize a ``kernel_results.json`` payload.
+
+    Args:
+        data (dict[str, Any] | None): Raw kernel results; ``None`` is treated
+            as empty.
+
+    Returns:
+        tuple[list[dict[str, Any]], dict[str, Any]]: ``(kernels, summary)``
+            where ``kernels`` is the per-kernel list and ``summary`` is the
+            summary dict (empty when absent).
+    """
     data = data or {}
     kernels: list[dict[str, Any]] = []
     for item in data.get("kernels") or []:
@@ -348,6 +465,15 @@ def parse_kernel_results(data: dict[str, Any] | None) -> tuple[list[dict[str, An
 
 
 def build_artifact_index(task_dir: Path) -> list[dict[str, Any]]:
+    """Index every file under a task directory with size and kind.
+
+    Args:
+        task_dir (Path): Task artifact directory to scan recursively.
+
+    Returns:
+        list[dict[str, Any]]: One entry per file with ``path``,
+            ``size_bytes``, and classified ``kind``.
+    """
     artifacts: list[dict[str, Any]] = []
     if not task_dir.exists():
         return artifacts
@@ -364,6 +490,15 @@ def build_artifact_index(task_dir: Path) -> list[dict[str, Any]]:
 
 
 def classify_artifact(path: str) -> str:
+    """Classify an artifact file by its name/suffix.
+
+    Args:
+        path (str): Relative artifact path.
+
+    Returns:
+        str: A kind label such as ``"ci_metrics"``, ``"sweep_results"``,
+            ``"log"``, or ``"artifact"`` for anything unrecognized.
+    """
     lower = path.lower()
     if lower.endswith("ci_metrics.json"):
         return "ci_metrics"
@@ -500,6 +635,19 @@ def collect_normalized_results(
 
 
 def write_single_result(result: dict[str, Any], out_dir: Path) -> None:
+    """Write one normalized result in three on-disk formats.
+
+    Emits ``normalized_result.json`` (the bare object),
+    ``normalized_results.json`` (wrapped in a ``results`` list), and
+    ``normalized_results.ndjson`` (single NDJSON line).
+
+    Args:
+        result (dict[str, Any]): The normalized result to persist.
+        out_dir (Path): Output directory; created if it does not exist.
+
+    Returns:
+        None
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "normalized_result.json").write_text(
         json.dumps(result, indent=2),
@@ -516,6 +664,12 @@ def write_single_result(result: dict[str, Any], out_dir: Path) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the manual single-directory entrypoint.
+
+    Returns:
+        argparse.ArgumentParser: Parser accepting ``--task-dir`` plus optional
+            output/metadata flags.
+    """
     parser = argparse.ArgumentParser(
         description="Normalize one downloaded Hyperloom artifact directory.",
     )
@@ -534,6 +688,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Normalize a single artifact directory from CLI args and write outputs.
+
+    Returns:
+        int: Process exit code — ``0`` on success, ``2`` if the task
+            directory does not exist.
+    """
     args = _build_parser().parse_args()
     task_dir = Path(args.task_dir)
     if not task_dir.exists():

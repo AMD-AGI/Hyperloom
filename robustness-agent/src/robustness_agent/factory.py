@@ -78,6 +78,11 @@ class ReactorBundle:
     sink: FindingSink
 
     async def aclose(self) -> None:
+        """Release lifecycle resources held by the bundle.
+
+        Closes the underlying robustness-server HTTP client when one was
+        created; a no-op in local-only mode.
+        """
         if self.server_client is not None:
             await self.server_client.aclose()
 
@@ -90,18 +95,21 @@ def build_reactor_components(
 ) -> ReactorBundle:
     """Construct everything the reactor needs.
 
-    Parameters
-    ----------
-    config:
-        Discovered :class:`Config` — typically the result of
-        ``await Config.discover()``.
-    rca:
-        Optional RCA engine override. Defaults to :class:`NoopRcaEngine`
-        because M1 ships RCA disabled.
-    session_id:
-        Override for the FindingSink filename.  Defaults to
-        ``config.session_dir.name`` so each per-session sandbox writes
-        to a stable file.
+    Wires the primary/fallback sources, degrade router, detectors,
+    state store, finding sink, and RCA engine into a single bundle.
+
+    Args:
+        config (Config): Discovered configuration — typically the result
+            of ``await Config.discover()``.
+        rca (RcaEngine | None): Optional RCA engine override. Defaults to
+            an auto-selected engine (Noop unless LLM RCA is enabled).
+        session_id (str | None): Override for the FindingSink filename.
+            Defaults to ``config.session_dir.name`` so each per-session
+            sandbox writes to a stable file.
+
+    Returns:
+        ReactorBundle: The assembled reactor plus the lifecycle handles
+        (components, server client, and sink) the caller must manage.
     """
     # Primary source: robustness-server (omitted in local-only mode).
     server_client: RobustnessServerClient | None = None
@@ -373,7 +381,18 @@ def _build_rca_engine(
     *,
     state_store: DetectorStateStore | None = None,
 ) -> RcaEngine:
-    """Choose between Noop and Llm based on config + env override."""
+    """Choose between Noop and Llm based on config + env override.
+
+    Args:
+        config (Config): Configuration carrying LLM RCA enablement,
+            credentials, and throttle settings.
+        state_store (DetectorStateStore | None): Optional store backing
+            the RCA throttle's cross-tick cooldown state.
+
+    Returns:
+        RcaEngine: A :class:`LlmRcaEngine` when LLM RCA is enabled and
+        credentials are present, otherwise a :class:`NoopRcaEngine`.
+    """
     if os.environ.get("ROBUSTNESS_LLM_RCA_DISABLED", "").lower() in {"1", "true", "yes"}:
         log.info("LLM RCA disabled via ROBUSTNESS_LLM_RCA_DISABLED env override")
         return NoopRcaEngine()
@@ -413,6 +432,16 @@ def _build_rca_engine(
 
 
 def _parse_severity(value: str) -> SymptomSeverity:
+    """Map a severity string to a :class:`SymptomSeverity`.
+
+    Args:
+        value (str): A severity label such as ``"low"``, ``"medium"``,
+            or ``"high"`` (case-insensitive; synonyms accepted).
+
+    Returns:
+        SymptomSeverity: The matching severity, defaulting to ``HIGH``
+        for unrecognised values.
+    """
     normalized = (value or "").strip().lower()
     if normalized in {"low", "info", "observe"}:
         return SymptomSeverity.LOW
@@ -433,6 +462,17 @@ class _NoServerSource:
     reason: str
 
     async def fetch(self, ctx: Any) -> SourceData:
+        """Always fail, signalling the source is unavailable.
+
+        Args:
+            ctx (Any): The fetch context (ignored).
+
+        Returns:
+            SourceData: Never returns normally.
+
+        Raises:
+            SourceUnavailable: Always, with the configured reason.
+        """
         raise SourceUnavailable(self.reason)
 
 

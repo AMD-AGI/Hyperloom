@@ -26,6 +26,18 @@ DEFAULT_SERVICE_URL = "http://hyperloom-results-service.primus-claw-dev.svc.clus
 
 
 def _default_model(task_dir: Path) -> str:
+    """Determine the model name for a result directory.
+
+    Prefers the ``MODEL_NAME``/``MODEL`` environment variables, then falls back
+    to the ``MODEL=`` line in ``results/run_context.env``. The returned value is
+    reduced to the final path segment.
+
+    Args:
+        task_dir (Path): Root directory of the task result.
+
+    Returns:
+        str: The resolved model name, or ``"unknown"`` if none can be found.
+    """
     env_model = os.environ.get("MODEL_NAME") or os.environ.get("MODEL")
     if env_model:
         return env_model.rstrip("/").split("/")[-1]
@@ -38,6 +50,18 @@ def _default_model(task_dir: Path) -> str:
 
 
 def _task_id(model: str) -> str:
+    """Resolve the task identifier for the publish payload.
+
+    Uses the first set of ``HYPERLOOM_TASK_ID``, ``SAFE_TASK_ID``, or
+    ``CLAW_SESSION_ID``; otherwise synthesizes a slug from the model name and
+    the current timestamp.
+
+    Args:
+        model (str): Model name used to build a fallback identifier.
+
+    Returns:
+        str: The resolved or generated task identifier.
+    """
     explicit = (
         os.environ.get("HYPERLOOM_TASK_ID")
         or os.environ.get("SAFE_TASK_ID")
@@ -50,6 +74,15 @@ def _task_id(model: str) -> str:
 
 
 def _host_reachable(url: str) -> tuple[bool, str]:
+    """Check whether the host in a URL resolves via DNS.
+
+    Args:
+        url (str): URL whose host component is extracted and resolved.
+
+    Returns:
+        tuple[bool, str]: ``(True, "")`` when the host resolves, otherwise
+        ``(False, reason)`` with the resolution error message.
+    """
     host = url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
     try:
         socket.gethostbyname(host)
@@ -59,6 +92,12 @@ def _host_reachable(url: str) -> tuple[bool, str]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser for the publish helper.
+
+    Returns:
+        argparse.ArgumentParser: Parser configured with the task directory,
+        output, model, service URL, token, timeout, and ``--strict`` options.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-dir", default=os.environ.get("HYPERLOOM_RESULT_DIR") or os.environ.get("USER_DATA_PATH") or "/workspace/hyperloom")
     parser.add_argument("--out-dir", default="")
@@ -77,6 +116,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Normalize a result directory and publish it to the results service.
+
+    Resolves the model, task id, and output directory, normalizes the task
+    artifacts, and POSTs the result. Failures are swallowed (exit ``0``) unless
+    ``--strict`` is set, so publishing never invalidates an optimization run.
+
+    Returns:
+        int: Process exit code. ``0`` on success or non-strict failure/skip,
+        ``1`` on a strict error, ``2`` on a strict unreachable-host skip.
+    """
     args = _build_parser().parse_args()
     task_dir = Path(args.task_dir)
     out_dir = Path(args.out_dir) if args.out_dir else task_dir / "normalized"

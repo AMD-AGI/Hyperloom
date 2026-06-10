@@ -42,7 +42,15 @@ log = logging.getLogger("build-summary")
 # ── InferenceX reference lookup ─────────────────────────────────────────────────
 
 def load_hf_to_ifx_map(yaml_path: Path) -> dict[str, str]:
-    """Read inferenceX_models.yaml → {hf_model: api_name}."""
+    """Read inferenceX_models.yaml → {hf_model: api_name}.
+
+    Args:
+        yaml_path (Path): Path to ``inferenceX_models.yaml``.
+
+    Returns:
+        dict[str, str]: Mapping of HF model id to InferenceX api_name; empty
+            if the file is missing.
+    """
     if not yaml_path.exists():
         return {}
     cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
@@ -94,6 +102,24 @@ def collect_rows(
     isl: int,
     osl: int,
 ) -> tuple[list[dict], list[dict]]:
+    """Build one summary row per normalized task result.
+
+    Normalizes per-task artifacts, derives success/status fields, and attaches
+    the InferenceX reference throughput and vs-InferenceX delta when available.
+
+    Args:
+        artifacts_dir (Path): Root dir of per-task artifacts.
+        manifests_dir (Path): Root dir of submission_manifest.json file(s).
+        hf_to_ifx (dict[str, str]): HF model id → InferenceX api_name map.
+        target_gpu (str): Reference GPU for InferenceX comparison.
+        isl (int): Input sequence length.
+        osl (int): Output sequence length.
+
+    Returns:
+        tuple[list[dict], list[dict]]: ``(rows, normalized_results)`` where
+            ``rows`` are the rendered summary rows and ``normalized_results``
+            are the underlying normalized records.
+    """
     rows: list[dict] = []
     normalized_results = collect_normalized_results(
         artifacts_dir, manifests_dir, build_run_metadata())
@@ -164,7 +190,12 @@ def collect_rows(
 
 
 def build_run_metadata() -> dict:
-    """Capture GitHub Actions context when present; harmless for local runs."""
+    """Capture GitHub Actions context when present; harmless for local runs.
+
+    Returns:
+        dict: Run metadata with the ``source`` tag and ``GITHUB_*`` env values
+            (``None`` for any that are unset).
+    """
     return {
         "source": "hyperloom-ci",
         "github_run_id": os.environ.get("GITHUB_RUN_ID"),
@@ -179,6 +210,16 @@ def build_run_metadata() -> dict:
 # ── Markdown rendering ──────────────────────────────────────────────────────────
 
 def fmt_num(v, fmt: str = ".1f") -> str:
+    """Format a numeric value for the table, with a dash placeholder.
+
+    Args:
+        v: The value to format, or ``None``.
+        fmt (str): A format spec applied to ``v`` (default ``".1f"``).
+
+    Returns:
+        str: The formatted number, ``"—"`` if ``v`` is ``None``, or
+            ``str(v)`` if formatting fails.
+    """
     if v is None:
         return "—"
     try:
@@ -188,6 +229,15 @@ def fmt_num(v, fmt: str = ".1f") -> str:
 
 
 def fmt_pct(v) -> str:
+    """Format a percentage value with a sign, with a dash placeholder.
+
+    Args:
+        v: The percentage value to format, or ``None``.
+
+    Returns:
+        str: ``"+x.xx%"``-style text, ``"—"`` if ``v`` is ``None``, or
+            ``str(v)`` if formatting fails.
+    """
     if v is None:
         return "—"
     try:
@@ -197,7 +247,15 @@ def fmt_pct(v) -> str:
 
 
 def gain_medal(pct: float | None) -> str:
-    """Award medals based on gain percentage (sample-table convention)."""
+    """Award medals based on gain percentage (sample-table convention).
+
+    Args:
+        pct (float | None): The gain percentage.
+
+    Returns:
+        str: A medal/emoji string keyed to the gain band, or ``""`` when
+            ``pct`` is ``None`` or negative.
+    """
     if pct is None:
         return ""
     if pct >= 50:
@@ -216,6 +274,14 @@ def gain_medal(pct: float | None) -> str:
 
 
 def vs_infx_decoration(pct: float | None) -> str:
+    """Pick a check-mark decoration for the vs-InferenceX delta.
+
+    Args:
+        pct (float | None): The vs-InferenceX percentage delta.
+
+    Returns:
+        str: ``"✅✅"`` for >= 50%, ``"✅"`` for any positive value, else ``""``.
+    """
     if pct is None:
         return ""
     if pct >= 50:
@@ -226,6 +292,15 @@ def vs_infx_decoration(pct: float | None) -> str:
 
 
 def status_icon(row: dict) -> str:
+    """Choose a status icon for a summary row.
+
+    Args:
+        row (dict): A summary row with ``ci_success``, ``final_status``, and
+            baseline/optimized throughput fields.
+
+    Returns:
+        str: ``"✅"`` (success), ``"🟡"`` (partial metrics), or ``"❌"``.
+    """
     final = row.get("final_status")
     baseline = row.get("baseline_tok_per_gpu")
     optimized = row.get("optimized_tok_per_gpu")
@@ -244,7 +319,15 @@ _PARAMS_RX = re.compile(r"(\d+(?:\.\d+)?)\s*[Bb](?:\b|[-_])")
 
 
 def derive_params(repo_id: str | None) -> str | None:
-    """Best-effort: pull '14B', '70B', '1.5B' out of an HF repo_id."""
+    """Best-effort: pull '14B', '70B', '1.5B' out of an HF repo_id.
+
+    Args:
+        repo_id (str | None): The HF model id to parse.
+
+    Returns:
+        str | None: A normalized parameter label (e.g. ``"14B"``, ``"1.5B"``),
+            or ``None`` if no count is found.
+    """
     if not repo_id:
         return None
     m = _PARAMS_RX.search(repo_id)
@@ -259,14 +342,30 @@ def derive_params(repo_id: str | None) -> str | None:
 
 
 def short_model_name(repo_id: str | None) -> str:
-    """Strip 'owner/' prefix for compact display."""
+    """Strip 'owner/' prefix for compact display.
+
+    Args:
+        repo_id (str | None): The HF model id.
+
+    Returns:
+        str: The portion after the first ``/``, or ``"—"`` if ``repo_id`` is
+            falsy.
+    """
     if not repo_id:
         return "—"
     return repo_id.split("/", 1)[-1]
 
 
 def gain_sort_key(row: dict) -> tuple[int, float]:
-    """Sort key: rows with a numeric gain first (desc), failures last."""
+    """Sort key: rows with a numeric gain first (desc), failures last.
+
+    Args:
+        row (dict): A summary row with ``ci_success`` and ``gain_pct``.
+
+    Returns:
+        tuple[int, float]: ``(delivered_rank, -gain)`` so delivered rows sort
+            before failures and higher gains sort first.
+    """
     delivered_rank = 0 if row.get("ci_success") else 1
     pct = row.get("gain_pct")
     if pct is None:
@@ -278,7 +377,17 @@ def gain_sort_key(row: dict) -> tuple[int, float]:
 
 
 def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> str:
-    """Render the ranked summary in the format used for executive reporting."""
+    """Render the ranked summary in the format used for executive reporting.
+
+    Args:
+        rows (list[dict]): Summary rows produced by :func:`collect_rows`.
+        target_gpu (str): Reference GPU shown in the header.
+        isl (int): Input sequence length shown in the header.
+        osl (int): Output sequence length shown in the header.
+
+    Returns:
+        str: The rendered markdown table (trailing newline included).
+    """
     sorted_rows = sorted(rows, key=gain_sort_key)
     n = len(rows)
     delivered = sum(1 for r in rows if r.get("ci_success"))
@@ -294,7 +403,7 @@ def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> st
         f"- Models: {n} (Delivered: {delivered}, SaFE Succeeded: {safe_succeeded}, with gain: {with_gain}, compare against the baseline: {beat_infx})",
         f"- ISL/OSL: {isl} / {osl}",
         f"- InferenceX reference GPU: `{target_gpu}`",
-        f"- Sort: by Gain% (desc); failures last",
+        "- Sort: by Gain% (desc); failures last",
         "",
         "| # | Model | Frm | Prec | TP | Params | Baseline tok/s/GPU | "
         + "Optimized tok/s/GPU | Gain | InfX | vs InfX |",
@@ -337,6 +446,14 @@ def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> st
 # ── Main ────────────────────────────────────────────────────────────────────────
 
 def main() -> int:
+    """CLI entry point: build the summary table and write output artifacts.
+
+    Parses arguments, collects rows, and writes ``ci_summary.{md,json}`` plus
+    ``normalized_results.{json,ndjson}`` into the output directory.
+
+    Returns:
+        int: Process exit code (0 on success).
+    """
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--artifacts-dir", required=True,

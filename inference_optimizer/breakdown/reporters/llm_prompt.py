@@ -63,6 +63,16 @@ You MUST:
 
 
 def _section_input(rendered: RenderedSection) -> dict[str, Any]:
+    """Project a rendered section into the JSON shape the LLM receives.
+
+    Args:
+        rendered (RenderedSection): The section to project.
+
+    Returns:
+        dict[str, Any]: A JSON-friendly dict with the section id, title,
+            skipped flag, key facts, decisions and warnings (the markdown
+            block is deliberately excluded so the LLM cannot rewrite it).
+    """
     return {
         "section_id":  rendered.section_id,
         "title":       rendered.title,
