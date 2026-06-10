@@ -30,6 +30,11 @@ from ..sub_agent_runner import RunnerContext
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a second-precision ISO-8601 string.
+
+    Returns:
+        str: The current UTC timestamp formatted with ``timespec="seconds"``.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -137,6 +142,15 @@ class RooflineExecutor:
     """
 
     def __init__(self, *, shared_state: Any):
+        """Initialize the executor with a required SharedState reference.
+
+        Args:
+            shared_state (Any): The SharedState instance the executor mutates
+                (profile fields, trace_analyze cache). Must not be ``None``.
+
+        Raises:
+            ValueError: If ``shared_state`` is ``None``.
+        """
         if shared_state is None:
             raise ValueError(
                 "RooflineExecutor requires a SharedState reference; "
@@ -327,6 +341,16 @@ class RooflineExecutor:
     # Helpers (instance methods so tests can subclass / monkeypatch)
     @staticmethod
     def _resolve_session_dir(ctx: RunnerContext) -> Path:
+        """Resolve the session directory from the runner context.
+
+        Args:
+            ctx (RunnerContext): The runner context whose ``extra`` may carry a
+                ``session_dir`` entry.
+
+        Returns:
+            Path: The configured session directory, or ``Path(".")`` when none
+                is present.
+        """
         sd = ctx.extra.get("session_dir") if ctx.extra else None
         return Path(sd) if sd else Path(".")
 

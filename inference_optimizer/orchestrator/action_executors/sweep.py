@@ -127,6 +127,15 @@ def _build_grid(
 
 
 def _result_dict(v: VariantResult) -> dict[str, Any]:
+    """Convert a VariantResult to a dict with conc/isl/osl pulled out.
+
+    Args:
+        v (VariantResult): The variant result to serialize.
+
+    Returns:
+        dict[str, Any]: ``v.to_dict()`` augmented with int ``conc`` / ``isl``
+            / ``osl`` keys extracted from the variant's ``extra_envs``.
+    """
     d = v.to_dict()
     # Surface conc/isl/osl from extra_envs so consumers needn't parse them.
     envs = v.extra_envs or {}
@@ -137,7 +146,14 @@ def _result_dict(v: VariantResult) -> dict[str, Any]:
 
 
 def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Naive O(N²) Pareto for (max output_throughput, min e2el_mean_ms)."""
+    """Naive O(N²) Pareto for (max output_throughput, min e2el_mean_ms).
+
+    Args:
+        entries (list[dict[str, Any]]): Sweep result entries to filter.
+
+    Returns:
+        list[dict[str, Any]]: The non-dominated subset of succeeded entries.
+    """
     succ = [e for e in entries if e["status"] == "succeeded"
             and isinstance(e.get("output_throughput"), (int, float))
             and isinstance(e.get("e2el_mean_ms"), (int, float))]
@@ -185,6 +201,21 @@ class SweepExecutor:
         self.variant_timeout_sec = variant_timeout_sec
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the full CONC × (ISL, OSL) sweep and map the Pareto frontier.
+
+        Materializes the workload config, builds the variant grid, runs it via
+        ``run_grid``, and computes the Pareto front plus the best variant per
+        concurrency level.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` (sweep knobs /
+                config) and ``extra`` (workspace).
+
+        Returns:
+            dict[str, Any]: A result dict with ``status``, ``grid_size``,
+                ``sweep_grid``, ``pareto_front``, ``best_for_each_conc`` and
+                ``workspace``.
+        """
         params = ctx.task.params or {}
         config_path = Path(
             params.get("config_path")

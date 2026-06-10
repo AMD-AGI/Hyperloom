@@ -21,6 +21,29 @@ SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 
 # §1 Session metadata
 class SessionMeta(TypedDict, total=False):
+    """Identity, timing, and host context for one optimization session.
+
+    Captures the metadata describing the run that produced the breakdown: its
+    identifiers, lifecycle timestamps, stop reason, and runtime environment.
+
+    Attributes:
+        session_id (str): Hyperloom internal id (``manifest.session_id``).
+        claw_session_id (str | None): SaFE / Claw session id (env ``CLAW_SESSION_ID``).
+        sandbox_user_id (str | None): Sandbox user identifier, if any.
+        created_at_utc (str): ISO UTC timestamp when the session started.
+        ended_at_utc (str): ISO UTC timestamp when the session ended.
+        stop_reason (str): Why the run stopped (``target_reached`` /
+            ``time_exhausted`` / ``no_more_leverage`` / ``max_ticks`` /
+            ``baseline_failed`` / ...).
+        max_minutes (int): Configured time budget in minutes.
+        elapsed_minutes (float): Wall-clock minutes the session ran.
+        host (str): Hostname the session executed on.
+        code_revision (str): Source revision of the optimizer.
+        pid (int): Process id of the optimizer.
+        session_dir (str): Absolute path to the session working directory.
+        tick_count (int): Number of orchestration ticks executed.
+        image (str | None): Fully-qualified container image, or None if unset.
+    """
     session_id: str               # hyperloom internal id (manifest.session_id)
     claw_session_id: str | None   # SaFE / Claw session id (env CLAW_SESSION_ID)
     sandbox_user_id: str | None
@@ -39,11 +62,39 @@ class SessionMeta(TypedDict, total=False):
 
 # §2 Workload configuration
 class WorkloadObjective(TypedDict, total=False):
+    """Optimization goal the session was asked to pursue.
+
+    Attributes:
+        kind (str): Objective type (``gain_pct`` / ``tput`` / ``baseline`` /
+            ``time_only``).
+        value (Any): Goal value — a float target, a string (e.g.
+            ``target_baseline_dir``), or None when not applicable.
+    """
     kind: str                     # gain_pct / tput / baseline / time_only
     value: Any                    # float or str (target_baseline_dir) or None
 
 
 class Workload(TypedDict, total=False):
+    """Model, framework, and serving configuration under optimization.
+
+    Describes the inference workload (model + framework + parallelism + shape)
+    plus the objective that defines success for the run.
+
+    Attributes:
+        framework (str): Serving framework (``sglang`` / ``vllm`` / ``atom``).
+        framework_version (str): Version string of the framework.
+        model_name (str): Human-readable model name.
+        model_path (str): Filesystem or registry path to the model weights.
+        model_class (str): Model architecture class.
+        gpu_type (str): GPU SKU (``mi300x`` / ``mi325x`` / ``mi355x``).
+        tp (int | None): Tensor-parallel degree, or None if unset.
+        conc (int | None): Request concurrency, or None if unset.
+        isl (int | None): Input sequence length, or None if unset.
+        osl (int | None): Output sequence length, or None if unset.
+        max_model_len (int | None): Max context length, or None if unset.
+        precision (str): Numeric precision of the served model.
+        objective (WorkloadObjective): The optimization goal for the run.
+    """
     framework: str                # sglang / vllm / atom
     framework_version: str
     model_name: str
@@ -61,6 +112,17 @@ class Workload(TypedDict, total=False):
 
 # §3 Baseline
 class BaselineAttemptSummary(TypedDict, total=False):
+    """One recorded attempt to establish the baseline measurement.
+
+    Attributes:
+        ts (str): ISO UTC timestamp of the attempt.
+        task_id (str): Orchestrator task id for the attempt.
+        status (str): Outcome status of the attempt.
+        decision (str): Decision taken (e.g. promoted / discarded).
+        key_metric (float | None): Headline metric value, or None if absent.
+        workspace (str | None): Benchmark workspace path, or None.
+        error_class (str | None): Error classification on failure, or None.
+    """
     ts: str
     task_id: str
     status: str
@@ -90,6 +152,24 @@ class BenchmarkInvocation(TypedDict, total=False):
 
 
 class Baseline(TypedDict, total=False):
+    """Pre-optimization reference performance for the workload.
+
+    The baseline against which all gains are computed, including latency
+    sub-metrics, attempt history, and the replayable launch invocation.
+
+    Attributes:
+        throughput_tok_s_per_gpu (float): Baseline throughput (tok/s per GPU).
+        accuracy (float): Baseline accuracy score.
+        ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
+        e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
+        ttft_e2el_source (str): Provenance of the latency metrics
+            (``state_workspace`` / ``runs_baseline_disk`` / ``unavailable``).
+        config_path (str | None): Path to the baseline config, or None.
+        benchmark_report_path (str | None): Path to the benchmark report, or None.
+        attempts_history (list[BaselineAttemptSummary]): Recorded baseline attempts.
+        failure_streak (int): Consecutive baseline failures.
+        invocation (BenchmarkInvocation): Replayable launch record.
+    """
     throughput_tok_s_per_gpu: float
     accuracy: float
     ttft_mean_ms: float | None
@@ -104,6 +184,30 @@ class Baseline(TypedDict, total=False):
 
 # §4 Final state — SaFE contract core
 class Final(TypedDict, total=False):
+    """Final validated optimization state — the SaFE contract core.
+
+    Records the best validated result of the session: throughput, cumulative
+    gain, the applied server-arg/env stack, and closing-phase bookkeeping.
+
+    Attributes:
+        throughput_tok_s_per_gpu (float | None): Final throughput (tok/s/GPU), or None.
+        cumulative_gain_pct_validated (float): Validated cumulative gain percent.
+        cumulative_gain_pct_per_round_sum (float): Sum of per-round gain percents.
+        validated_at_stack_len (int): Stack depth at which validation occurred.
+        validated_ts (str): ISO UTC timestamp of the validation.
+        stack_changed_after_validation (bool): Whether the stack changed post-validation.
+        extra_server_args (str): Final extra server-arg CLI fragment.
+        extra_envs (dict[str, Any]): Final extra env vars applied.
+        action_path (list[str]): Ordered ``action:variant`` labels from the stack.
+        ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
+        e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
+        ttft_e2el_source (str): Provenance of the latency metrics (``current_best`` /
+            ``validate_stack_disk`` / ``stack_top_disk`` / ``unavailable``).
+        invocation (BenchmarkInvocation): Replayable launch record for the final state.
+        closing_phase_entered (bool): Whether the closing phase was entered.
+        closing_started_unix (float): Unix time the closing phase started.
+        closing_report_task_id (str): Task id of the closing report.
+    """
     throughput_tok_s_per_gpu: float | None
     cumulative_gain_pct_validated: float
     cumulative_gain_pct_per_round_sum: float
@@ -124,6 +228,28 @@ class Final(TypedDict, total=False):
 
 # §5 Phase timeline — chronological events
 class PhaseEvent(TypedDict, total=False):
+    """One chronological event in the optimization timeline.
+
+    A single action attempt (profile, backend trial, kernel opt, validation,
+    etc.) with its outcome and optional contextual extras.
+
+    Attributes:
+        ts (str): ISO UTC timestamp of the event.
+        action (str): Action kind (``baseline`` / ``profile`` / ``backends`` /
+            ``params`` / ``sweep`` / ``validate_stack`` / ``kernel_opt`` /
+            ``trace_analyze`` / ``integrate``).
+        task_id (str): Orchestrator task id.
+        kernel_id (str | None): Kernel id for kernel-owned actions, else None.
+        status (str): Outcome (``succeeded`` / ``failed``).
+        decision (str): Decision label (``promoted`` / ``discarded`` /
+            ``salvaged`` / ``no_promote`` / ``error`` / ``KEEP`` / ``PARTIAL`` /
+            ``REVERT``).
+        key_metric (float | None): Headline metric value, or None.
+        key_metric_kind (str | None): Type/label of the key metric, or None.
+        workspace (str | None): Benchmark workspace path, or None.
+        error_class (str | None): Error classification on failure, or None.
+        extras (dict[str, Any]): Action-specific extra fields.
+    """
     ts: str
     action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
     task_id: str
@@ -158,6 +284,24 @@ class CapabilityEntry(TypedDict, total=False):
 
 
 class CapabilitySummary(TypedDict, total=False):
+    """Per-capability roll-up powering the dashboard capability cards.
+
+    Holds one :class:`CapabilityEntry` per capability family. ``backends`` /
+    ``params`` / ``validate_stack`` are retained as compatibility aliases of
+    the primary ``explore`` row.
+
+    Attributes:
+        geak (CapabilityEntry): GEAK kernel-generation capability.
+        oob (CapabilityEntry): Out-of-box kernel backend capability.
+        explore (CapabilityEntry): Primary explore (param/backend search) row.
+        backends (CapabilityEntry): Compatibility alias for backend exploration.
+        params (CapabilityEntry): Compatibility alias for param exploration.
+        sweep (CapabilityEntry): Concurrency/shape sweep capability.
+        validate_stack (CapabilityEntry): Compatibility alias for stack validation.
+        specialist (CapabilityEntry): Specialist sub-agent capability; ``tested`` =
+            total proposals across rounds, ``keeps`` = proposals kept,
+            ``attempts`` = number of dispatch rounds.
+    """
     geak: CapabilityEntry
     oob: CapabilityEntry
     # primary explore row; backends/params/validate_stack are compat aliases.
@@ -172,6 +316,15 @@ class CapabilitySummary(TypedDict, total=False):
 
 # §7 / §8 GEAK / OOB invocations
 class KernelMetadata(TypedDict, total=False):
+    """Descriptive metadata for a kernel targeted by a backend invocation.
+
+    Attributes:
+        name (str): Kernel name.
+        source_file (str): Source file the kernel lives in.
+        shapes (list[dict[str, Any]]): Input/output shape descriptors.
+        gpu_pct (float | None): Share of total GPU time (0..100), or None.
+        arithmetic_intensity (float | None): FLOPs per byte, or None.
+    """
     name: str
     source_file: str
     shapes: list[dict[str, Any]]
@@ -203,6 +356,20 @@ class Invocation(TypedDict, total=False):
 
 # §9 Kernel lifecycle (4+1 stages)
 class DetectedKernel(TypedDict, total=False):
+    """A hot kernel surfaced by profiling (stage 1 of the kernel lifecycle).
+
+    Attributes:
+        kernel_id (str): Kernel identifier.
+        name (str): Kernel name.
+        gpu_pct (float | None): Share of total GPU time (0..100), or None.
+        time_ms (float | None): Kernel duration in milliseconds, or None.
+        bottleneck (str): Bottleneck class (``compute`` / ``memory`` / ``comm``).
+        arithmetic_intensity (float | None): FLOPs per byte, or None.
+        reusable_native_kernel (bool): Whether a native kernel can be swapped in.
+        source_file (str | None): Source file of the kernel, or None.
+        detected_from_task (str): Profile task id that surfaced the kernel.
+        benchmark_report_path (str): Path to the benchmark report.
+    """
     kernel_id: str
     name: str
     gpu_pct: float | None
@@ -223,6 +390,17 @@ class DetectedKernel(TypedDict, total=False):
 
 
 class RecommendedKernel(TypedDict, total=False):
+    """A kernel recommended for optimization (stage 2 of the lifecycle).
+
+    Attributes:
+        kernel_id (str): Kernel identifier.
+        name (str): Kernel name.
+        gpu_pct (float | None): Share of total GPU time (0..100), or None.
+        recommended_backends (list[str]): Suggested optimization backends.
+        recommended_actions (list[str]): Suggested optimization actions.
+        bottleneck (str): Bottleneck class (compute / memory / comm).
+        reusable_native_kernel (bool): Whether a native kernel can be swapped in.
+    """
     kernel_id: str
     name: str
     gpu_pct: float | None
@@ -233,6 +411,18 @@ class RecommendedKernel(TypedDict, total=False):
 
 
 class OptimizedKernel(TypedDict, total=False):
+    """A kernel that went through optimization (stage 3 of the lifecycle).
+
+    Attributes:
+        kernel_id (str): Kernel identifier.
+        backend (str): Winning backend (``geak`` / ``claude`` / ``codex``, best-of).
+        total_attempts (int): Total optimization attempts.
+        successful_attempts (int): Attempts that succeeded.
+        best_micro_speedup (float | None): Best micro-benchmark speedup, or None.
+        last_decision (str): Decision of the last attempt.
+        best_artifact_path (str | None): Path to the best artifact, or None.
+        attempts_summary (list[dict[str, Any]]): Per-attempt summary rows.
+    """
     kernel_id: str
     backend: str                  # geak / claude / codex (best-of)
     total_attempts: int
@@ -244,6 +434,19 @@ class OptimizedKernel(TypedDict, total=False):
 
 
 class AdoptedKernel(TypedDict, total=False):
+    """A kernel optimization adopted into the stack (stage 4 of the lifecycle).
+
+    Attributes:
+        kernel_id (str): Kernel identifier.
+        patch_path (str): Path to the adopted patch.
+        target_file (str): File the patch applies to.
+        extra_server_args (str): Server-arg fragment introduced by the adoption.
+        e2e_gain_pct (float | None): End-to-end gain percent, or None.
+        validated (bool): Whether the adoption was validated.
+        last_status (str): Last recorded status.
+        adopted_at (str): ISO UTC timestamp of adoption.
+        attempt_count (int): Number of attempts before adoption.
+    """
     kernel_id: str
     patch_path: str
     target_file: str
@@ -256,6 +459,17 @@ class AdoptedKernel(TypedDict, total=False):
 
 
 class RejectedKernel(TypedDict, total=False):
+    """A kernel optimization that was tried but not adopted (the +1 stage).
+
+    Attributes:
+        kernel_id (str): Kernel identifier.
+        reason (str): Why the kernel optimization was rejected.
+        patch_path (str | None): Path to the rejected patch, or None.
+        target_file (str | None): File the patch targeted, or None.
+        attempt_count (int): Number of attempts made.
+        best_gain_pct (float | None): Best gain percent observed, or None.
+        ts (str): ISO UTC timestamp of rejection.
+    """
     kernel_id: str
     reason: str
     patch_path: str | None
@@ -266,6 +480,18 @@ class RejectedKernel(TypedDict, total=False):
 
 
 class KernelLifecycle(TypedDict, total=False):
+    """Kernels grouped by lifecycle stage (4+1 stages).
+
+    Tracks kernels as they move from detection through recommendation,
+    optimization, and finally adoption or rejection.
+
+    Attributes:
+        detected (list[DetectedKernel]): Hot kernels surfaced by profiling.
+        recommended (list[RecommendedKernel]): Kernels recommended for optimization.
+        optimized (list[OptimizedKernel]): Kernels that were optimized.
+        adopted (list[AdoptedKernel]): Optimizations adopted into the stack.
+        rejected (list[RejectedKernel]): Optimizations tried but not adopted.
+    """
     detected: list[DetectedKernel]
     recommended: list[RecommendedKernel]
     optimized: list[OptimizedKernel]
@@ -275,7 +501,21 @@ class KernelLifecycle(TypedDict, total=False):
 
 # §10 Param search
 class ParamSearchEntry(TypedDict, total=False):
-    """One row from explore_search.{tested,accepted,rejected}."""
+    """One candidate variant from ``explore_search.{tested,accepted,rejected}``.
+
+    Records a single param/backend variant that was evaluated, its launch
+    fingerprint, the measured throughput, and the resulting gain.
+
+    Attributes:
+        name (str): Variant name.
+        fingerprint (str): Content-hash deduplication key.
+        extra_server_args (str): Server-arg CLI fragment for the variant.
+        extra_envs (dict[str, Any]): Env vars set by the variant.
+        output_throughput (float | None): Measured throughput, or None.
+        gain_pct (float | None): Gain percent vs current best, or None.
+        ts (str): ISO UTC timestamp of evaluation.
+        status (str): Outcome (``accepted`` / ``rejected`` / ``tested``).
+    """
     name: str
     fingerprint: str
     extra_server_args: str
@@ -287,6 +527,17 @@ class ParamSearchEntry(TypedDict, total=False):
 
 
 class ParamSearchLedger(TypedDict, total=False):
+    """Ledger of one explore family's tested/accepted/rejected variants.
+
+    Attributes:
+        schema_version (int): Ledger schema version.
+        tested_count (int): Total number of variants tested.
+        accepted (list[ParamSearchEntry]): Variants that were accepted.
+        rejected (list[ParamSearchEntry]): Variants that were rejected.
+        top_by_gain (list[ParamSearchEntry]): Best variants ordered by gain.
+        winner_history (list[dict[str, Any]]): History of winning variants.
+        no_promote_streak (int): Consecutive evaluations without a promotion.
+    """
     schema_version: int
     tested_count: int
     accepted: list[ParamSearchEntry]
@@ -297,6 +548,15 @@ class ParamSearchLedger(TypedDict, total=False):
 
 
 class ParamSearch(TypedDict, total=False):
+    """Merged explore-search results across the param and backend families.
+
+    Attributes:
+        params (ParamSearchLedger): Ledger for the param-tuning family.
+        backends (ParamSearchLedger): Ledger for the backend-tuning family.
+        synergy_attempted (list[str]): Synergy combinations that were attempted.
+        discovered_flags (dict[str, Any]): Flags discovered during search.
+        backend_winners_history (list[dict[str, Any]]): History of backend winners.
+    """
     params: ParamSearchLedger
     backends: ParamSearchLedger
     synergy_attempted: list[str]
@@ -306,6 +566,20 @@ class ParamSearch(TypedDict, total=False):
 
 # §11 Sweep
 class SweepPoint(TypedDict, total=False):
+    """One measured point in a concurrency/shape sweep grid.
+
+    Attributes:
+        variant_name (str): Name of the swept variant.
+        conc (int | None): Concurrency at this point, or None.
+        isl (int | None): Input sequence length, or None.
+        osl (int | None): Output sequence length, or None.
+        output_throughput_tok_s (float | None): Throughput (tok/s), or None.
+        ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
+        tpot_mean_ms (float | None): Mean time-per-output-token (ms), or None.
+        e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
+        status (str): Point status (``ok`` / ``skipped`` / ``failed``).
+        benchmark_report_path (str | None): Path to the benchmark report, or None.
+    """
     variant_name: str
     conc: int | None
     isl: int | None
@@ -319,6 +593,16 @@ class SweepPoint(TypedDict, total=False):
 
 
 class Sweep(TypedDict, total=False):
+    """Results of the concurrency/shape sweep across the variant grid.
+
+    Attributes:
+        grid_size (int): Number of points in the sweep grid.
+        best_overall (dict[str, Any]): Best-performing point overall.
+        best_for_each_conc (list[dict[str, Any]]): Best point per concurrency level.
+        pareto_front (list[dict[str, Any]]): Pareto-optimal sweep points.
+        all_variants (list[SweepPoint]): All measured sweep points.
+        config_path (str | None): Path to the sweep config, or None.
+    """
     grid_size: int
     best_overall: dict[str, Any]
     best_for_each_conc: list[dict[str, Any]]
@@ -329,6 +613,20 @@ class Sweep(TypedDict, total=False):
 
 # §12 Critic / Robustness
 class CriticIteration(TypedDict, total=False):
+    """One critic-agent review pass over a proposed change.
+
+    Attributes:
+        iter (int): Iteration index.
+        ts (str): ISO UTC timestamp of the review.
+        topic (str): What was reviewed (e.g. ``kernel_opt:k001`` / ``backends:flag_X``).
+        verdict (str): Review verdict (``approve`` / ``reject`` / ``redirect`` /
+            ``advise`` / ``needs_review``).
+        summary (str): Human-readable review summary.
+        request_path (str): Path to the review request artifact.
+        judge_bundle_path (str): Path to the judge bundle.
+        emit_path (str): Path to the emitted review output.
+        review_path (str): Path to the review record.
+    """
     iter: int
     ts: str
     topic: str                    # what was reviewed (kernel_opt:k001, backends:flag_X, ...)
@@ -341,6 +639,15 @@ class CriticIteration(TypedDict, total=False):
 
 
 class RobustnessSignal(TypedDict, total=False):
+    """A fault/recovery event handled during the session.
+
+    Attributes:
+        ts (str): ISO UTC timestamp of the signal.
+        signal (str): Signal type (``crash`` / ``stall`` / ``disk_full`` /
+            ``cluster_fault`` / ...).
+        action (str): Recovery action taken in response.
+        workdir (str): Working directory associated with the signal.
+    """
     ts: str
     signal: str                   # crash / stall / disk_full / cluster_fault / ...
     action: str                   # what was done
@@ -348,6 +655,15 @@ class RobustnessSignal(TypedDict, total=False):
 
 
 class CriticRobustness(TypedDict, total=False):
+    """Critic-review iterations and robustness signals for the session.
+
+    Attributes:
+        critic_iterations (list[CriticIteration]): Critic-agent review passes.
+        robustness_signals (list[RobustnessSignal]): Fault/recovery events handled.
+        kb_writes_summary (CriticKBWritesSummary): Counts of KB writes proxied
+            through the critic's ``commit-review`` protocol (the Coordinator
+            performs the writes; the critic only authors them).
+    """
     critic_iterations: list[CriticIteration]
     robustness_signals: list[RobustnessSignal]
     # KB writes proxied through the critic's ``commit-review`` protocol.
@@ -356,6 +672,16 @@ class CriticRobustness(TypedDict, total=False):
 
 # §13 Telemetry
 class GpuMonitorAggregate(TypedDict, total=False):
+    """Aggregated GPU power/thermal/clock telemetry over the session.
+
+    Attributes:
+        samples (int): Number of telemetry samples aggregated.
+        avg_power_w (float): Average power draw (watts).
+        max_power_w (float): Peak power draw (watts).
+        avg_temp_c (float): Average temperature (Celsius).
+        max_temp_c (float): Peak temperature (Celsius).
+        avg_clock_mhz (float): Average clock frequency (MHz).
+    """
     samples: int
     avg_power_w: float
     max_power_w: float
@@ -373,6 +699,17 @@ class LaneTimelineEntry(TypedDict, total=False):
 
 
 class Telemetry(TypedDict, total=False):
+    """Pointers to telemetry artifacts and aggregated hardware metrics.
+
+    Attributes:
+        baseline_report_path (str | None): Path to the baseline report, or None.
+        profile_report_paths (list[str]): Paths to profile reports.
+        torch_trace_paths (list[str]): Paths to torch traces.
+        system_profile_paths (list[str]): Paths to system profiles.
+        server_log_paths (list[str]): Paths to server logs.
+        gpu_monitor_aggregate (GpuMonitorAggregate): Aggregated GPU telemetry.
+        lane_timeline (list[LaneTimelineEntry]): Per-lane capacity/occupancy summary.
+    """
     baseline_report_path: str | None
     profile_report_paths: list[str]
     torch_trace_paths: list[str]
@@ -385,7 +722,24 @@ class Telemetry(TypedDict, total=False):
 
 # §14 Attribution
 class StackGainEntry(TypedDict, total=False):
-    """One KEEP/validation event with its incremental contribution."""
+    """One KEEP/validation event with its incremental gain contribution.
+
+    Records how a single stack change moved the cumulative gain, used to
+    attribute total gain across the optimization stack.
+
+    Attributes:
+        ts (str): ISO UTC timestamp of the event.
+        stack_len_before (int): Stack depth before the change.
+        stack_len_after (int): Stack depth after the change.
+        action (str): Action kind (``backends`` / ``params`` /
+            ``kernel_opt:<kid>`` / ``validate_stack``).
+        variant_name (str | None): Variant label, or None.
+        cum_gain_before (float): Cumulative gain percent before the change.
+        cum_gain_after (float): Cumulative gain percent after the change.
+        delta_pct (float | None): Incremental gain percent; None when
+            ``validate_stack`` re-baselined.
+        extra_server_args (str): Server-arg fragment associated with the change.
+    """
     ts: str
     stack_len_before: int
     stack_len_after: int
@@ -398,6 +752,24 @@ class StackGainEntry(TypedDict, total=False):
 
 
 class SourceBreakdown(TypedDict, total=False):
+    """Validated total gain split by contributing source/family.
+
+    Each ``*_pct_of_total`` field is the share of the validated total gain
+    attributed to that source. The per-source values reconcile against
+    ``validated_total_pct``.
+
+    Attributes:
+        geak_pct_of_total (float): Gain share from GEAK kernel rewrites.
+        oob_pct_of_total (float): Gain share from out-of-box backends.
+        explore_pct_of_total (float): Gain share from the primary explore family.
+        framework_pr_pct_of_total (float): Gain share from FRAMEWORK_PR bake-ins.
+        gemm_tuning_pct_of_total (float): Gain share from the FP8 GEMM tuner
+            (0.0 on non-FP8 workloads or when the tuner produced no KEEP).
+        backends_pct_of_total (float): Gain share from backend exploration.
+        params_pct_of_total (float): Gain share from param exploration.
+        sweep_pct_of_total (float): Gain share attributed to the sweep.
+        validated_total_pct (float): Total validated gain percent.
+    """
     geak_pct_of_total: float
     oob_pct_of_total: float
     # primary explore family bucket.
@@ -449,7 +821,22 @@ class PhaseBreakdownGemmTuning(TypedDict, total=False):
 
 
 class PhaseBreakdown(TypedDict, total=False):
-    """v0.8 M7 per-phase gain attribution (KB_design §3.13 M7 §6)."""
+    """v0.8 M7 per-phase gain attribution (KB_design §3.13 M7 §6).
+
+    Splits the validated total gain across the phase state machine, with each
+    phase carrying its own per-sub-bucket breakdown.
+
+    Attributes:
+        prelude (PhaseBreakdownExplore): PRELUDE phase gain (always 0 by definition).
+        framework_pr (PhaseBreakdownFrameworkPr): FRAMEWORK_PR phase gain.
+        explore (PhaseBreakdownExplore): EXPLORE phase gain by domain.
+        kernel (PhaseBreakdownKernel): KERNEL phase gain by ``kernel_id``.
+        gemm_tuning (PhaseBreakdownGemmTuning): KERNEL-entry GEMM-tuning gain,
+            bucketed separately from source-level kernel rewrites.
+        sweep (PhaseBreakdownExplore): SWEEP phase gain (usually 0; measurement).
+        close (PhaseBreakdownExplore): CLOSE phase gain (usually 0).
+        unattributed (PhaseBreakdownExplore): Gain whose phase could not be inferred.
+    """
     prelude: PhaseBreakdownExplore         # always 0 by definition
     framework_pr: PhaseBreakdownFrameworkPr  # PRELUDE → FRAMEWORK_PR → EXPLORE
     explore: PhaseBreakdownExplore
@@ -462,6 +849,16 @@ class PhaseBreakdown(TypedDict, total=False):
 
 
 class Attribution(TypedDict, total=False):
+    """Gain attribution across stack entries, sources, and phases.
+
+    Attributes:
+        gain_per_stack_entry (list[StackGainEntry]): Per-KEEP incremental gains.
+        method (str): How attribution was computed (``validated`` /
+            ``single_source`` / ``reconstructed`` / ``missing``).
+        source_breakdown (SourceBreakdown): Gain split by contributing source.
+        phase_breakdown (PhaseBreakdown): Gain split per optimization phase.
+        notes (list[str]): Human-readable caveats about the attribution.
+    """
     gain_per_stack_entry: list[StackGainEntry]
     # validated / single_source / reconstructed / missing
     method: str
@@ -472,6 +869,23 @@ class Attribution(TypedDict, total=False):
 
 # §16 Phase segments — phase state machine
 class PhaseSegment(TypedDict, total=False):
+    """One contiguous segment of the v0.8 M2 phase state machine.
+
+    Captures a phase the session occupied between two transitions, including
+    the entry evidence and the events that fell within the segment window.
+
+    Attributes:
+        phase (str): Phase name (``PRELUDE`` / ``FRAMEWORK_PR`` / ``EXPLORE`` /
+            ``KERNEL`` / ``SWEEP`` / ``CLOSE``).
+        from_phase (str): Previous phase (empty for the first segment).
+        entered_ts (str): ISO UTC timestamp of entry.
+        entered_unix (float | None): Unix time of entry, or None.
+        exit_ts (str): ISO UTC timestamp of the next transition; "" if current.
+        exit_reason (str): Transition reason; "" for the current segment.
+        evidence (dict[str, Any]): Entry evidence snapshot at transition time.
+        actions (list[PhaseEvent]): Timeline events with ts in [entered, exit).
+        elapsed_seconds (float | None): Segment duration in seconds, or None.
+    """
     phase: str                 # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
     from_phase: str            # previous phase (empty for first segment)
     entered_ts: str            # iso UTC of entry
@@ -487,6 +901,13 @@ class PhaseSegment(TypedDict, total=False):
 
 # §15 KB Provenance — RecipeKB / PR Monitor integration
 class KBQueueStats(TypedDict, total=False):
+    """Depth statistics for the on-disk KB write queues.
+
+    Attributes:
+        pending_lines (int): Current depth of ``.kb_pending.ndjson``.
+        flushed_bookmarks (int): Drain-bookmark rows in ``.kb_flushed.ndjson``.
+        dead_letter_lines (int): Rows in ``.kb_dead_letter.ndjson``.
+    """
     pending_lines: int             # current depth of .kb_pending.ndjson
     flushed_bookmarks: int         # rows in .kb_flushed.ndjson (drain bookmarks)
     dead_letter_lines: int         # rows in .kb_dead_letter.ndjson
@@ -520,6 +941,35 @@ class WarmReplayOutcome(TypedDict, total=False):
 
 
 class KBProvenance(TypedDict, total=False):
+    """Cortex KB integration audit for the session.
+
+    Covers warm-start context seeded from the KB, the warm-replay outcome,
+    pending/created KB points, queue depth, and the flusher daemon status.
+
+    Attributes:
+        cortex_session_id (str): Cortex KB session id.
+        warm_start_ts (str): ISO UTC timestamp of warm start.
+        warm_start_recipe_seen (bool): Whether a warm recipe was seen.
+        warm_start_recipe_tier (str): Tier of the seen warm recipe.
+        warm_start_pitfall_count (int): Number of pitfalls injected at warm start.
+        warm_start_lesson_count (int): Number of lessons injected at warm start.
+        warm_replay (WarmReplayOutcome): Operator-visible warm-replay summary.
+        warm_replay_attempted (bool): Whether a warm replay was attempted.
+        warm_history_injected (bool): Whether warm history was injected.
+        stack_fingerprint (dict[str, str]): Fingerprint of the optimization stack.
+        pending_edges (list[KBPendingEdge]): Edges queued but not committed.
+        queue (KBQueueStats): Depth stats for the KB write queues.
+        audit_tail_count (int): Number of audit-tail entries.
+        audit_status_counts (dict[str, int]): Audit entries counted by status.
+        points_created (list[KBPointCreated]): KB points created this session.
+        points_by_kind (dict[str, int]): Created-point counts by kind.
+        commit_summary (KBCommitSummary): Outcome of committing the edges.
+        flusher_status (KBFlusherStatus): KB flusher daemon lifecycle marker.
+        kb_degraded_reason (str): KB soft-degrade reason (None / ``explicit_flag`` /
+            ``ir3_auto``).
+        pr_degraded_reason (str): PR Monitor soft-degrade reason (None /
+            ``explicit_flag`` / ``ir3_auto``).
+    """
     cortex_session_id: str
     warm_start_ts: str
     warm_start_recipe_seen: bool
@@ -585,6 +1035,18 @@ class CriticKBWritesSummary(TypedDict, total=False):
 
 # Top-level shape
 class SourceFiles(TypedDict, total=False):
+    """Paths to the on-disk artifacts the breakdown was assembled from.
+
+    Attributes:
+        manifest (str): Path to the session manifest.
+        state (str): Path to the session state file.
+        baseline_report (str | None): Path to the baseline report, or None.
+        profile_reports (list[str]): Paths to profile reports.
+        sweep_reports (list[str]): Paths to sweep reports.
+        kernel_attempts (list[str]): Paths to kernel attempt artifacts.
+        critic_workdir (str | None): Critic working directory, or None.
+        robustness_workdir (str | None): Robustness working directory, or None.
+    """
     manifest: str
     state: str
     baseline_report: str | None
@@ -819,6 +1281,45 @@ class DecisionTrace(TypedDict, total=False):
 
 
 class SessionBreakdown(TypedDict, total=False):
+    """Top-level wire shape of ``session_breakdown.json``.
+
+    The complete contract between the producer (``inference_optimizer``) and
+    downstream consumers, aggregating every section of the breakdown. Several
+    keys are intentional v1-reader compatibility aliases (``phase_timeline`` /
+    ``action_timeline``, ``param_search`` / ``explore_search``) that carry the
+    same data under both names.
+
+    Attributes:
+        schema_version (str): Schema version string (see ``SCHEMA_VERSION``).
+        exported_at_utc (str): ISO UTC timestamp the file was exported.
+        exporter_version (str): Version of the exporter that produced the file.
+        session (SessionMeta): Session identity, timing, and host context.
+        workload (Workload): Model/framework/serving configuration.
+        baseline (Baseline): Pre-optimization reference performance.
+        final (Final): Final validated optimization state.
+        phase_timeline (list[PhaseEvent]): Flat per-action timeline (v1-reader compat).
+        phase_segments (list[PhaseSegment]): Phase-boundary view (M2).
+        action_timeline (list[PhaseEvent]): v2 canonical flat per-action timeline.
+        capability_summary (CapabilitySummary): Per-capability roll-up.
+        geak_invocations (list[Invocation]): GEAK backend invocations.
+        oob_invocations (list[Invocation]): Out-of-box backend invocations.
+        kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
+        param_search (ParamSearch): v1-reader compat alias for ``explore_search``.
+        explore_search (ParamSearch): Merged explore-search ledger.
+        sweep (Sweep): Concurrency/shape sweep results.
+        critic_robustness (CriticRobustness): Critic reviews and robustness signals.
+        telemetry (Telemetry): Telemetry artifacts and aggregated metrics.
+        attribution (Attribution): Gain attribution across stack/source/phase.
+        kb_provenance (KBProvenance): Cortex KB integration audit.
+        specialist_runs (list[SpecialistRound]): Specialist sub-agent dispatch records.
+        optimization_stack (list[OptimizationStackEntry]): Raw KEEP ledger passthrough.
+        kernel_roofline (KernelRoofline): Hot-kernel table for the dashboard.
+        roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
+            the markdown report's ``## Roofline`` section.
+        roofline_progress (RooflineProgress): Optimization-progress curve for the dashboard.
+        warnings (list[str]): Collector warnings emitted while assembling the file.
+        source_files (SourceFiles): Paths to the source artifacts used.
+    """
     schema_version: str
     exported_at_utc: str
     exporter_version: str

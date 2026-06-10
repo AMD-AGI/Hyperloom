@@ -20,7 +20,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,6 +127,23 @@ def _build_trace_split_warning(
     *, trace_input: Path, split_dir: Path, split_rc: int,
     mixed_count: int, decode_count: int, prefilldecode_count: int,
 ) -> dict[str, Any]:
+    """Build the ``trace_split_no_steady_state`` trace-health warning.
+
+    Emitted when the TraceLens splitter produces no steady-state chunks,
+    so analyzing the raw trace would risk misleading high-idle results.
+
+    Args:
+        trace_input (Path): The raw trace that was handed to the splitter.
+        split_dir (Path): Directory the splitter wrote its outputs into.
+        split_rc (int): Return code from the splitter subprocess.
+        mixed_count (int): Number of ``mixed`` steady-state chunks produced.
+        decode_count (int): Number of ``decode_only`` chunks produced.
+        prefilldecode_count (int): Number of ``prefilldecode`` chunks produced.
+
+    Returns:
+        dict[str, Any]: A structured warning entry with code
+            ``trace_split_no_steady_state`` and the supporting counts/message.
+    """
     return {
         "code": "trace_split_no_steady_state",
         "severity": "warning",
@@ -187,6 +203,14 @@ def _check_selected_chunk_has_gpu_events(
         return None
 
     def _f(name: str) -> float:
+        """Read a numeric field from the selected splitter CSV row.
+
+        Args:
+            name (str): Column name to read from ``selected_row``.
+
+        Returns:
+            float: The parsed value, or ``0.0`` when missing/unparseable.
+        """
         try:
             return float(selected_row.get(name) or "0") or 0.0
         except (TypeError, ValueError):
@@ -257,6 +281,15 @@ _CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
 
 
 def _resolve_min_busy_ratio() -> float:
+    """Return the minimum chunk busy-ratio threshold for the N36 quality gate.
+
+    Reads ``INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO`` and falls back
+    to :data:`_DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO` when unset, out of the
+    ``[0.0, 1.0]`` range, or unparseable.
+
+    Returns:
+        float: The busy-ratio threshold in the inclusive range ``[0.0, 1.0]``.
+    """
     raw = os.environ.get(
         "INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO", "",
     ).strip()
@@ -299,6 +332,15 @@ def _check_selected_chunk_has_gpu_events_quality(
         return None
 
     def _row_for(chunk_path: "Path") -> "dict[str, str] | None":
+        """Find the splitter CSV row whose ``output_path`` is the chunk.
+
+        Args:
+            chunk_path (Path): Chunk file to match against ``output_path``.
+
+        Returns:
+            dict[str, str] | None: The matching CSV row, or ``None`` when no
+                row resolves to the same path.
+        """
         resolved = str(chunk_path.resolve())
         for row in rows:
             out_path = row.get("output_path", "")
@@ -312,9 +354,26 @@ def _check_selected_chunk_has_gpu_events_quality(
         return None
 
     def _stats(row: "dict[str, str] | None") -> "tuple[int, float, float]":
+        """Extract ``(num_gpu_events, gpu_busy_duration, gpu_duration)``.
+
+        Args:
+            row (dict[str, str] | None): A splitter CSV row, or ``None``.
+
+        Returns:
+            tuple[int, float, float]: The event count, busy duration (us),
+                and total duration (us); all zero when ``row`` is ``None``.
+        """
         if row is None:
             return 0, 0.0, 0.0
         def _f(k: str) -> float:
+            """Read a numeric field from the CSV row.
+
+            Args:
+                k (str): Column name to read.
+
+            Returns:
+                float: The parsed value, or ``0.0`` when missing/unparseable.
+            """
             try:
                 return float(row.get(k) or "0") or 0.0
             except (TypeError, ValueError):
@@ -412,10 +471,24 @@ DEFAULT_TRACELENS_INTERNAL_ROOT = ""
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO-8601 string.
+
+    Returns:
+        str: The current UTC timestamp in ISO-8601 format.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write ``data`` as pretty-printed JSON to ``path``.
+
+    Writes to a temporary file in the same directory then replaces the
+    target so readers never observe a partially-written file.
+
+    Args:
+        path (Path): Destination JSON file; parent dirs are created.
+        data (dict[str, Any]): JSON-serializable payload to write.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
         json.dump(data, tmp, indent=2, sort_keys=True)
@@ -425,12 +498,29 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def append_log(log_path: Path, message: str) -> None:
+    """Append a single line to a log file, creating parent dirs as needed.
+
+    Args:
+        log_path (Path): Log file to append to.
+        message (str): Text to append; trailing whitespace is stripped and a
+            newline is added.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(message.rstrip() + "\n")
 
 
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
+    """Return the last ``limit`` lines of a log file.
+
+    Args:
+        log_path (Path): Log file to read.
+        limit (int): Maximum number of trailing lines to return.
+
+    Returns:
+        list[str]: The trailing lines, or an empty list when the file does
+            not exist.
+    """
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -448,6 +538,22 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
+    """Atomically write a tracelens_analysis run-status JSON file.
+
+    Captures the current run state, recent log tail, and (on terminal
+    states) the wall-clock duration so downstream collectors can build a
+    timeline event.
+
+    Args:
+        status_path (Path): Destination status JSON file.
+        state (str): Current run state (e.g. ``running``, ``succeeded``).
+        current_step (str): Human-readable label of the active step.
+        log_path (Path): Log file whose size/tail are recorded.
+        artifact_paths (dict[str, str]): Map of artifact names to paths.
+        run_id (str): Unique identifier for this run.
+        started_at (str): ISO-8601 start time used to compute duration.
+        error (str | None): Error message recorded when the run failed.
+    """
     updated_at = utc_now()
     payload: dict[str, Any] = {
         "tool": "tracelens_analysis",
@@ -483,6 +589,14 @@ def update_status(
 
 
 def open_json(path: Path) -> dict[str, Any]:
+    """Load a JSON file, transparently handling ``.gz`` compression.
+
+    Args:
+        path (Path): JSON or gzipped-JSON file to read.
+
+    Returns:
+        dict[str, Any]: The parsed JSON payload.
+    """
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt", encoding="utf-8", errors="replace") as fh:
         return json.load(fh)
@@ -522,6 +636,23 @@ def _trace_input_sort_key(path: Path) -> tuple[int, str]:
 
 
 def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
+    """Resolve a trace input path into a list of trace files.
+
+    Accepts either a single trace file or a capture directory; directories
+    are searched recursively for known trace extensions, deduplicated, and
+    ordered via :func:`_trace_input_sort_key`.
+
+    Args:
+        trace_input (Path): A trace file or a capture directory.
+
+    Returns:
+        tuple[str, list[Path]]: ``("file", [path])`` for a single file or
+            ``("capture_dir", paths)`` for a directory.
+
+    Raises:
+        FileNotFoundError: When the path does not exist or no trace files are
+            found under a supplied directory.
+    """
     if trace_input.is_file():
         return "file", [trace_input]
     if not trace_input.is_dir():
@@ -555,6 +686,18 @@ def is_kernel_event(event: dict[str, Any]) -> bool:
 
 
 def extract_shape(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract a shape annotation from a trace event when present.
+
+    Checks both ``event['args']`` and the event top level for the first of
+    several known shape keys.
+
+    Args:
+        event (dict[str, Any]): A single trace event.
+
+    Returns:
+        dict[str, Any] | None: A single-key dict ``{shape_key: value}`` for
+            the first shape field found, or ``None`` when none is present.
+    """
     args = event.get("args") if isinstance(event.get("args"), dict) else {}
     for key in ("shape", "shapes", "input_shape", "trace_shapes"):
         if key in args:
@@ -565,6 +708,17 @@ def extract_shape(event: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def extract_source_file(event: dict[str, Any]) -> str:
+    """Extract a source-file path from a trace event when present.
+
+    Checks both ``event['args']`` and the event top level for the first of
+    several known path keys.
+
+    Args:
+        event (dict[str, Any]): A single trace event.
+
+    Returns:
+        str: The first non-empty source path found, or ``""`` when none.
+    """
     args = event.get("args") if isinstance(event.get("args"), dict) else {}
     for key in ("source_file", "file", "filename", "path"):
         value = args.get(key) or event.get(key)
@@ -603,6 +757,19 @@ _FLYDSL_PSEUDO_OP_NAME_MARKERS = (
 
 
 def source_type_for(name: str, source_file: str) -> str:
+    """Classify a kernel's source type from its name and source path.
+
+    Recognizes FlyDSL pseudo-ops, runtime-generated kernels, HIP/C++,
+    Triton, FlyDSL, plain Python, and vendor-binary backends.
+
+    Args:
+        name (str): Kernel symbol/name.
+        source_file (str): Resolved source-file path (may be empty).
+
+    Returns:
+        str: One of ``flydsl``, ``runtime_generated``, ``hip_cpp``,
+            ``triton``, ``python``, ``vendor_binary``, or ``unknown``.
+    """
     lower_name = name.lower()
     lower_file = source_file.lower()
     # PR #668: synthetic ``pseudo_op::*flydsl_*`` carry no source_file; match the name prefix directly.
@@ -684,7 +851,12 @@ def _flydsl_reusable_roots() -> tuple[str, ...]:
 
 
 def _reusable_roots() -> tuple[str, ...]:
-    """Discovered framework roots + aiter csrc + FlyDSL checkout (dynamic)."""
+    """Combine all reusable-source roots used by the patchability gate.
+
+    Returns:
+        tuple[str, ...]: Discovered framework roots plus the aiter csrc root
+            and FlyDSL checkout roots, deduplicated.
+    """
     roots = _framework_patch_roots()
     csrc = _aiter_csrc_root()
     if csrc and csrc not in roots:
@@ -824,6 +996,12 @@ def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
 
     Thin wrapper over :func:`classify_patchability` kept for backward
     compatibility with downstream consumers that only need the bool.
+
+    Args:
+        candidate (dict[str, Any]): A hot-kernel candidate row.
+
+    Returns:
+        bool: ``True`` when the candidate is routable to a kernel-opt backend.
     """
     return classify_patchability(candidate)[0]
 
@@ -877,6 +1055,14 @@ SOURCE_EXTENSIONS = (".cuh", ".cu", ".hip", ".cpp", ".h", ".hpp", ".py")
 
 
 def _strip_template_args(symbol: str) -> str:
+    """Remove C++ template argument blocks (``<...>``) from a symbol.
+
+    Args:
+        symbol (str): A possibly templated C++ symbol name.
+
+    Returns:
+        str: The symbol with all balanced ``<...>`` sections removed.
+    """
     out: list[str] = []
     depth = 0
     for ch in symbol:
@@ -905,6 +1091,13 @@ def _candidate_keywords(name: str) -> list[str]:
 
     Prefers descriptive identifiers (e.g. cross_device_reduce_2stage, gemm_a16w16)
     over namespace/type tokens (aiter, vllm, RankData) that match too widely.
+
+    Args:
+        name (str): Kernel symbol/name (possibly Itanium-mangled).
+
+    Returns:
+        list[str]: Up to three descriptive search keywords, most-specific
+            first; empty when nothing usable can be extracted.
     """
     cleaned = name.strip()
     if cleaned.startswith("_Z"):
@@ -961,6 +1154,18 @@ _GREP_CACHE: dict[tuple[str, str], list[Path]] = {}
 
 
 def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
+    """Recursively grep ``root`` for source files containing ``keyword``.
+
+    Results are cached per ``(keyword, root)`` and restricted to known
+    source extensions. Failures (missing grep, timeout) yield ``[]``.
+
+    Args:
+        keyword (str): Literal string to search for.
+        root (Path): Directory to search recursively.
+
+    Returns:
+        list[Path]: Existing source files that match, possibly empty.
+    """
     if not root.exists():
         return []
     cache_key = (keyword, str(root))
@@ -994,7 +1199,27 @@ def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
 
 
 def _rank_paths(paths: list[Path]) -> list[Path]:
+    """Sort candidate source paths by likely relevance.
+
+    Prefers real source repos over installed wheels and over optimized /
+    build variants, then by file extension and path depth.
+
+    Args:
+        paths (list[Path]): Candidate source paths to rank.
+
+    Returns:
+        list[Path]: ``paths`` sorted best-first.
+    """
     def score(path: Path) -> tuple[int, int, int]:
+        """Compute the sort score for a single candidate path.
+
+        Args:
+            path (Path): Candidate source path.
+
+        Returns:
+            tuple[int, int, int]: ``(kind_score, ext_score, depth_penalty)``;
+                lower tuples sort earlier (more relevant).
+        """
         s = str(path)
         # Prefer real source repos over installed wheels and over optimized variants.
         depth_penalty = s.count("/")
@@ -1015,6 +1240,12 @@ def locate_source_via_grep(name: str) -> str:
     """Locate a kernel source file by grepping known repos.
 
     Returns "" when no confident match exists. Never fabricates a path.
+
+    Args:
+        name (str): Kernel symbol/name to locate.
+
+    Returns:
+        str: The best-ranked matching source path, or ``""`` when none.
     """
     keywords = _candidate_keywords(name)
     if not keywords:
@@ -1033,6 +1264,13 @@ def find_repo_root(source_file: str) -> str:
     """Walk upward from source_file until we find a .git/ dir; return the dir.
 
     Returns "" when no git repo root is found.
+
+    Args:
+        source_file (str): Path to a file inside a (possibly) git repo.
+
+    Returns:
+        str: The directory containing the nearest ``.git`` ancestor, or
+            ``""`` when none is found.
     """
     if not source_file:
         return ""
@@ -1075,6 +1313,18 @@ _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 
 
 def _known_harness_files(name: str, source_file: str) -> list[Path]:
+    """Return curated benchmark/test harnesses matching a kernel.
+
+    Looks up :data:`_KNOWN_HARNESS_HINTS` by marker substrings found in the
+    kernel name / source path and returns the hinted harnesses that exist.
+
+    Args:
+        name (str): Kernel symbol/name.
+        source_file (str): Resolved source-file path (may be empty).
+
+    Returns:
+        list[Path]: Existing curated harness files, possibly empty.
+    """
     blob = f"{name} {source_file}".lower()
     out: list[Path] = []
     for markers, paths in _KNOWN_HARNESS_HINTS:
@@ -1143,6 +1393,14 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
     # Demote multi-GPU / distributed tests to the end: backends running on a
     # single Ray worker can't satisfy them, and they tend to make agents bail.
     def _is_multigpu(path_str: str) -> bool:
+        """Return whether a harness path looks multi-GPU / distributed.
+
+        Args:
+            path_str (str): Candidate harness file path.
+
+        Returns:
+            bool: ``True`` when the path contains a multi-GPU/distributed tag.
+        """
         low = path_str.lower()
         return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
     unique.sort(key=_is_multigpu)
@@ -1152,6 +1410,17 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
 _PYBIND_PARENT_DIRS = ("csrc/pybind", "csrc/python", "python_bindings")
 # A pybind11 registration shim (<2KB, just PYBIND11_MODULE) has no device code; detect so callers promote it to the real .cu/.cuh.
 def _is_pybind_shim(source_file: str) -> bool:
+    """Detect a tiny pybind11 registration TU (no rewritable device code).
+
+    A shim is a small (<2 KB) ``.cu``/``.cpp``/``.cc`` file under a pybind
+    directory that only contains ``PYBIND11_MODULE`` glue.
+
+    Args:
+        source_file (str): Candidate source-file path.
+
+    Returns:
+        bool: ``True`` when the file is a pybind11 registration shim.
+    """
     if not source_file:
         return False
     p = Path(source_file)
@@ -1302,6 +1571,18 @@ def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
 
 
 def _coerce_count(value: Any) -> int | None:
+    """Coerce a loosely-typed call-count value into a positive int.
+
+    Handles ``None``/empty, numpy-repr strings (``np.float64(...)``), and
+    float-like strings.
+
+    Args:
+        value (Any): The raw count value to coerce.
+
+    Returns:
+        int | None: A positive integer, or ``None`` when absent, unparseable,
+            or non-positive.
+    """
     if value in (None, ""):
         return None
     text = str(value).strip()
@@ -1315,6 +1596,16 @@ def _coerce_count(value: Any) -> int | None:
 
 
 def _merge_shape_call(target: list[Any], shape: Any, call_num: int) -> None:
+    """Merge a shape/call-count pair into an accumulator list in place.
+
+    If an entry with the same shape already exists, its ``call_num`` is
+    incremented; otherwise a new entry is appended.
+
+    Args:
+        target (list[Any]): Accumulator list of ``{"shape", "call_num"}`` dicts.
+        shape (Any): The shape value to merge.
+        call_num (int): Call count to add for this shape.
+    """
     for entry in target:
         if isinstance(entry, dict) and entry.get("shape") == shape:
             entry["call_num"] = int(entry.get("call_num") or 0) + call_num
@@ -1323,6 +1614,16 @@ def _merge_shape_call(target: list[Any], shape: Any, call_num: int) -> None:
 
 
 def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any]]:
+    """Normalize a shapes payload into merged ``{shape, call_num}`` entries.
+
+    Args:
+        shapes (Any): A list of shape values or ``{"shape", "call_num"}`` dicts.
+        call_num (Any): Default call count applied when an entry lacks one.
+
+    Returns:
+        list[dict[str, Any]]: Deduplicated shape entries with summed call
+            counts; empty when ``shapes`` is not a list.
+    """
     if not isinstance(shapes, list):
         return []
     count = _coerce_count(call_num) or 1
@@ -1379,7 +1680,16 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
 
 
 def is_multigpu_kernel(name: str, source_file: str) -> bool:
-    """Heuristic: kernel is a multi-GPU collective if name/source hints it."""
+    """Heuristic: kernel is a multi-GPU collective if name/source hints it.
+
+    Args:
+        name (str): Kernel symbol/name.
+        source_file (str): Resolved source-file path (may be empty).
+
+    Returns:
+        bool: ``True`` when the name/source contains a collective /
+            distributed marker.
+    """
     blob = f"{name} {source_file}".lower()
     return any(tag in blob for tag in (
         "all_reduce", "allreduce", "all_gather", "allgather",
@@ -1390,6 +1700,19 @@ def is_multigpu_kernel(name: str, source_file: str) -> bool:
 
 
 def analyze_trace_files(trace_files: list[Path], top_k: int) -> list[dict[str, Any]]:
+    """Aggregate GPU kernels across raw trace files into top-K candidates.
+
+    Sums per-kernel duration and call counts across all events, takes the
+    top ``top_k`` by duration, then runs :func:`_finalize_candidates`. This
+    is the dry-run / test-only raw-trace path (production uses analysis.md).
+
+    Args:
+        trace_files (list[Path]): Trace files (optionally gzipped) to scan.
+        top_k (int): Number of hottest kernels to keep.
+
+    Returns:
+        list[dict[str, Any]]: Finalized hot-kernel candidate dicts.
+    """
     aggregates: dict[str, dict[str, Any]] = {}
     total_dur = 0.0
 
@@ -1567,6 +1890,15 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
+    """Build a short human-readable optimization note for a candidate.
+
+    Args:
+        candidate (dict[str, Any]): A finalized hot-kernel candidate row.
+
+    Returns:
+        str: A note describing whether/why the candidate is routable
+            (resolved source vs. an explanation of why it was skipped).
+    """
     if not candidate.get("source_file"):
         return "source file not resolved; backend dispatch will be skipped"
     if candidate.get("runtime_generated_kernel", is_runtime_generated_kernel(
@@ -1605,7 +1937,15 @@ def run_command(
 
 
 def roofline_match_key(name: str) -> str:
-    """Normalize trace and rocprof names enough to join roofline data."""
+    """Normalize trace and rocprof names enough to join roofline data.
+
+    Args:
+        name (str): A kernel name from a trace or rocprof report.
+
+    Returns:
+        str: A canonical match key (e.g. ``hipblaslt_gemm``, ``attention``),
+            falling back to the first 80 lower-cased chars.
+    """
     lower = (name or "").lower()
     if "cijk_" in lower:
         return "hipblaslt_gemm"
@@ -1633,6 +1973,16 @@ def roofline_match_key(name: str) -> str:
 
 
 def load_roofline_results(path: str | None) -> dict[str, dict[str, Any]]:
+    """Load roofline results JSON keyed by normalized kernel match key.
+
+    Args:
+        path (str | None): Path to a roofline results JSON file (a list of
+            rows or a dict with a ``results`` list); may be empty/``None``.
+
+    Returns:
+        dict[str, dict[str, Any]]: Map of :func:`roofline_match_key` to row;
+            empty when the path is missing or unparseable.
+    """
     if not path:
         return {}
     p = Path(path).expanduser()
@@ -1656,6 +2006,17 @@ def merge_roofline_into_candidates(
     candidates: list[dict[str, Any]],
     roofline_by_name: dict[str, dict[str, Any]],
 ) -> None:
+    """Merge roofline metrics into candidate rows in place.
+
+    For each candidate, looks up roofline data by normalized name and copies
+    bottleneck / utilization / suggestion fields; candidates without a match
+    get conservative ``None``/default placeholders.
+
+    Args:
+        candidates (list[dict[str, Any]]): Hot-kernel candidate rows to enrich.
+        roofline_by_name (dict[str, dict[str, Any]]): Roofline rows keyed by
+            :func:`roofline_match_key`.
+    """
     for item in candidates:
         if not isinstance(item, dict):
             continue
@@ -1677,6 +2038,14 @@ def merge_roofline_into_candidates(
 
 
 def _first_non_empty(*values: Any) -> Any:
+    """Return the first argument that is neither ``None`` nor empty string.
+
+    Args:
+        *values (Any): Candidate values in priority order.
+
+    Returns:
+        Any: The first value that is not ``None`` or ``""``, else ``None``.
+    """
     for value in values:
         if value is not None and value != "":
             return value
@@ -1684,7 +2053,15 @@ def _first_non_empty(*values: Any) -> Any:
 
 
 def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
-    """Project one hot-kernel candidate into the kernel-roofline view."""
+    """Project one hot-kernel candidate into the kernel-roofline view.
+
+    Args:
+        candidate (dict[str, Any]): A finalized hot-kernel candidate row.
+
+    Returns:
+        dict[str, Any]: A flattened roofline row with identity, cost, and
+            (possibly ``None``) utilization/bottleneck fields.
+    """
     arithmetic_intensity = _first_non_empty(
         candidate.get("arithmetic_intensity"),
         candidate.get("flops_per_byte"),
@@ -1773,6 +2150,18 @@ def kernel_roofline_path_for_run(run_dir: Path) -> Path:
 
 
 def _candidate_model_config_paths(model_name: str) -> list[Path]:
+    """Enumerate candidate ``config.json`` paths for a model name/path.
+
+    Considers the value as a direct JSON path, a directory containing
+    ``config.json``, and locations under ``$HYPERLOOM_MODELS_ROOT``.
+
+    Args:
+        model_name (str): A model name or filesystem path.
+
+    Returns:
+        list[Path]: Deduplicated candidate config paths in priority order;
+            empty when ``model_name`` is blank.
+    """
     text = str(model_name or "").strip()
     if not text:
         return []
@@ -1795,7 +2184,16 @@ def _candidate_model_config_paths(model_name: str) -> list[Path]:
 
 
 def load_model_kernel_params(model_name: str) -> dict[str, Any]:
-    """Read HF config.json and return attention parameters relevant to GEAK."""
+    """Read HF config.json and return attention parameters relevant to GEAK.
+
+    Args:
+        model_name (str): A model name or path used to locate ``config.json``.
+
+    Returns:
+        dict[str, Any]: Attention/MLA params (e.g. ``HEAD_SIZE``,
+            ``NUM_ATTENTION_HEADS``) plus ``MODEL_CONFIG_PATH``; empty when no
+            readable config is found.
+    """
     for config_path in _candidate_model_config_paths(model_name):
         if not config_path.is_file():
             continue
@@ -1894,7 +2292,17 @@ def _flydsl_kernel_params(
 def enrich_candidates_with_runtime_metadata(
     candidates: list[dict[str, Any]], args: argparse.Namespace,
 ) -> None:
-    """Attach stable runtime metadata fields before GEAK prompt generation."""
+    """Attach stable runtime metadata fields before GEAK prompt generation.
+
+    Mutates each candidate in place, filling framework, shapes/dtypes,
+    model and FlyDSL kernel params, and runtime flags so the downstream
+    prompt builder sees a consistent schema.
+
+    Args:
+        candidates (list[dict[str, Any]]): Hot-kernel candidate rows to enrich.
+        args (argparse.Namespace): Parsed CLI args carrying framework, model
+            name, target platform, and runtime flags.
+    """
     framework = str(getattr(args, "framework", "") or "").strip()
     model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
     target_platform = str(getattr(args, "target_platform", "") or "")
@@ -2215,6 +2623,16 @@ def _default_workspace_path() -> str:
 
 
 def main() -> int:
+    """CLI entry point for the TraceLens analysis tool.
+
+    Parses arguments, optionally splits the trace into a steady-state chunk,
+    runs the TraceLens SDK orchestrator, extracts hot-kernel candidates,
+    merges roofline data, and writes the run's report sidecars and status.
+
+    Returns:
+        int: ``0`` on success, ``1`` when the run failed (the error is also
+            written to status and printed as JSON).
+    """
     parser = argparse.ArgumentParser(description="Kernel Agent TraceLens analysis tool")
     parser.add_argument("--trace-input", required=True)
     parser.add_argument("--session-id", default="")
@@ -2564,6 +2982,16 @@ def main() -> int:
                 # The three chunks are parallel views, not a fallback ladder; the consumer picks ONE
                 # via --steady-state-mode (default 'mixed') and we hard-fail when the selected chunk is missing/empty.
                 def _collect(prefix: str) -> list[Path]:
+                    """Collect splitter chunk files for a steady-state prefix.
+
+                    Args:
+                        prefix (str): Chunk prefix (``mixed``, ``decode_only``,
+                            or ``prefilldecode``).
+
+                    Returns:
+                        list[Path]: Sorted chunk files matching the prefix
+                            across known trace extensions.
+                    """
                     out: list[Path] = []
                     for ext in ("trace.json.gz", "json.gz", "trace.json", "json"):
                         out.extend(sorted(split_dir.rglob(f"{prefix}_steady_state_*.{ext}")))

@@ -15,12 +15,26 @@ from pathlib import Path
 
 # Top-level files
 def manifest_path(session_dir: Path) -> Path:
-    """Absolute path to ``manifest.json`` (Python-written session resume tag)."""
+    """Compute the path to ``manifest.json`` (the Python-written resume tag).
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/manifest.json``.
+    """
     return Path(session_dir) / "manifest.json"
 
 
 def state_path(session_dir: Path) -> Path:
-    """Absolute path to ``state.json`` (SharedState — Coordinator-written)."""
+    """Compute the path to ``state.json`` (the Coordinator-written SharedState).
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/state.json``.
+    """
     return Path(session_dir) / "state.json"
 
 
@@ -68,6 +82,19 @@ def _runs_actions() -> frozenset[str]:
 
 
 def _validate_action(action: str) -> str:
+    """Normalise and validate an action name against the runs-workspace set.
+
+    Args:
+        action (str): The candidate action name (whitespace-stripped before
+            comparison).
+
+    Returns:
+        str: The stripped action name when it is recognised.
+
+    Raises:
+        ValueError: If the action is not one of the names returned by
+            :func:`_runs_actions`.
+    """
     a = str(action or "").strip()
     valid = _runs_actions()
     if a not in valid:
@@ -79,17 +106,37 @@ def _validate_action(action: str) -> str:
 
 
 def runs_root(session_dir: Path) -> Path:
-    """``<sd>/runs/`` — parent of all per-action subtrees."""
+    """Compute ``<sd>/runs/``, the parent of all per-action subtrees.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/runs``.
+    """
     return Path(session_dir) / "runs"
 
 
 def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
-    """``<sd>/runs/<action>/<task_id>/`` — per-task data-plane workspace.
+    """Compute ``<sd>/runs/<action>/<task_id>/``, a per-task data-plane workspace.
 
     Caller is expected to ``mkdir(parents=True, exist_ok=True)`` before
     writing files into the returned path; SubAgentRunner pre-creates this
     in normal coordinator-managed runs, so executors typically just read
     ``ctx.extra["workspace"]``.
+
+    Args:
+        session_dir (Path): The session root directory.
+        action (str): The owning action name; validated against the
+            runs-workspace action set.
+        task_id (str): The task identifier; blank/empty falls back to
+            ``"unknown"``.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/runs/<action>/<task_id>``.
+
+    Raises:
+        ValueError: If ``action`` is not a recognised runs-workspace action.
     """
     a = _validate_action(action)
     tid = str(task_id or "").strip() or "unknown"
@@ -127,11 +174,29 @@ def patches_dir(session_dir: Path, kernel_id: str) -> Path:
 
 # Reports / logs
 def reports_dir(session_dir: Path) -> Path:
+    """Compute ``<sd>/reports/``, the host dir for generated report files.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/reports``.
+    """
     return Path(session_dir) / "reports"
 
 
 def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
-    """``<sd>/reports/<ts>_final.{md,json}``."""
+    """Compute the path to a final report file ``<sd>/reports/<ts>_final.<suffix>``.
+
+    Args:
+        session_dir (Path): The session root directory.
+        ts (str): The timestamp tag used as the filename prefix.
+        suffix (str): The file extension without the dot (e.g. ``"md"`` or
+            ``"json"``). Defaults to ``"md"``.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/reports/<ts>_final.<suffix>``.
+    """
     return reports_dir(session_dir) / f"{ts}_final.{suffix}"
 
 
@@ -220,11 +285,27 @@ def competitor_target_json(session_dir: Path) -> Path:
 
 
 def logs_dir(session_dir: Path) -> Path:
+    """Compute ``<sd>/logs/``, the host dir for per-agent log files.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/logs``.
+    """
     return Path(session_dir) / "logs"
 
 
 def agent_log(session_dir: Path, role: str) -> Path:
-    """``<sd>/logs/<role>.log`` — one append-only log per persistent agent."""
+    """Compute ``<sd>/logs/<role>.log``, one append-only log per persistent agent.
+
+    Args:
+        session_dir (Path): The session root directory.
+        role (str): The persistent agent role name.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/logs/<role>.log``.
+    """
     return logs_dir(session_dir) / f"{role}.log"
 
 
@@ -238,37 +319,104 @@ def optimizer_runs_dir(session_dir: Path) -> Path:
 
 
 def optimizer_run_log(session_dir: Path, run_tag: str) -> Path:
-    """``<sd>/optimizer_runs/run_<tag>.log``."""
+    """Compute the launcher stdout log path ``<sd>/optimizer_runs/run_<tag>.log``.
+
+    Args:
+        session_dir (Path): The session root directory.
+        run_tag (str): The launcher run tag; blank/empty falls back to
+            ``"unknown"``.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/optimizer_runs/run_<tag>.log``.
+    """
     tag = str(run_tag or "").strip() or "unknown"
     return optimizer_runs_dir(session_dir) / f"run_{tag}.log"
 
 
 def optimizer_run_pidfile(session_dir: Path, run_tag: str) -> Path:
-    """``<sd>/optimizer_runs/run_<tag>.pid``."""
+    """Compute the launcher pid-file path ``<sd>/optimizer_runs/run_<tag>.pid``.
+
+    Args:
+        session_dir (Path): The session root directory.
+        run_tag (str): The launcher run tag; blank/empty falls back to
+            ``"unknown"``.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/optimizer_runs/run_<tag>.pid``.
+    """
     tag = str(run_tag or "").strip() or "unknown"
     return optimizer_runs_dir(session_dir) / f"run_{tag}.pid"
 
 
 # Per-agent inbox/outbox + system prompt snapshot
 def agent_dir(session_dir: Path, role: str) -> Path:
+    """Compute ``<sd>/agents/<role>/``, the per-agent artefact root.
+
+    Args:
+        session_dir (Path): The session root directory.
+        role (str): The agent role name.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/agents/<role>``.
+    """
     return Path(session_dir) / "agents" / role
 
 
 def agent_inbox(session_dir: Path, role: str) -> Path:
+    """Compute ``<sd>/agents/<role>/inbox.jsonl``, the agent's inbound message log.
+
+    Args:
+        session_dir (Path): The session root directory.
+        role (str): The agent role name.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/agents/<role>/inbox.jsonl``.
+    """
     return agent_dir(session_dir, role) / "inbox.jsonl"
 
 
 def agent_outbox(session_dir: Path, role: str) -> Path:
+    """Compute ``<sd>/agents/<role>/outbox.jsonl``, the agent's outbound message log.
+
+    Args:
+        session_dir (Path): The session root directory.
+        role (str): The agent role name.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/agents/<role>/outbox.jsonl``.
+    """
     return agent_dir(session_dir, role) / "outbox.jsonl"
 
 
 def agent_persona(session_dir: Path, role: str) -> Path:
+    """Compute ``<sd>/agents/<role>/persona.md``, the agent's persona document.
+
+    Args:
+        session_dir (Path): The session root directory.
+        role (str): The agent role name.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/agents/<role>/persona.md``.
+    """
     return agent_dir(session_dir, role) / "persona.md"
 
 
 def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
-    """``<sd>/agents/<role>/system_prompt.snapshot.md`` — written once at
-    Coordinator start, then read for resume / drift inspection."""
+    """Compute the path to the per-agent system-prompt snapshot.
+
+    Written once at Coordinator start, then read for resume / drift
+    inspection.
+
+    Args:
+        session_dir (Path): The session root directory.
+        role (str): The agent role name.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/agents/<role>/system_prompt.snapshot.md``.
+    """
     return agent_dir(session_dir, role) / "system_prompt.snapshot.md"
 
 
@@ -283,15 +431,33 @@ def target_analysis_dir(session_dir: Path) -> Path:
 
 
 def target_baseline_json(session_dir: Path) -> Path:
-    """``<sd>/target_analysis/target_baseline.json`` — machine-readable
-    ``BaselineSummary`` written by ``target_analysis`` and read by
-    ``report`` to render an advisory section in ``final.md``."""
+    """Compute the path to the machine-readable target ``BaselineSummary``.
+
+    Written by ``target_analysis`` and read by ``report`` to render an
+    advisory section in ``final.md``.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/target_analysis/target_baseline.json``.
+    """
     return target_analysis_dir(session_dir) / "target_baseline.json"
 
 
 def target_analysis_report_md(session_dir: Path) -> Path:
-    """``<sd>/target_analysis/target_analysis_report.md`` — short human
-    note suitable for inclusion / linking from the final report."""
+    """Compute the path to the short human-readable target-analysis note.
+
+    The note is suitable for inclusion / linking from the final report.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/target_analysis/target_analysis_report.md``.
+    """
     return target_analysis_dir(session_dir) / "target_analysis_report.md"
 
 
@@ -299,7 +465,14 @@ def target_analysis_report_md(session_dir: Path) -> Path:
 # ``<sd>/runtime/cortex/``. Callers MUST go through these helpers so the NDJSON
 # protocol stays homogeneous across producers/consumers.
 def cortex_dir(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/`` — Cortex KB per-session bookkeeping root."""
+    """Compute ``<sd>/runtime/cortex/``, the Cortex KB per-session bookkeeping root.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/runtime/cortex``.
+    """
     return Path(session_dir) / "runtime" / "cortex"
 
 
@@ -311,15 +484,31 @@ def cortex_sid_file(session_dir: Path) -> Path:
 
 
 def cortex_warm_json(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.kb_warm.json`` — T0 snapshot of
-    ``find-recipe`` output. Read by §3.5 specialist assembly (M5).
+    """Compute the path to ``.kb_warm.json``, the T0 ``find-recipe`` snapshot.
+
+    Read by §3.5 specialist assembly (M5).
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/runtime/cortex/.kb_warm.json``.
     """
     return cortex_dir(session_dir) / ".kb_warm.json"
 
 
 def cortex_pitfalls_json(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.kb_pitfalls.json`` — T0 snapshot of
-    ``traps`` output. Read by §3.5 specialist assembly (M5).
+    """Compute the path to ``.kb_pitfalls.json``, the T0 ``traps`` snapshot.
+
+    Read by §3.5 specialist assembly (M5).
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/runtime/cortex/.kb_pitfalls.json``.
     """
     return cortex_dir(session_dir) / ".kb_pitfalls.json"
 
@@ -333,15 +522,32 @@ def cortex_pending_ndjson(session_dir: Path) -> Path:
 
 
 def cortex_flushed_ndjson(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.kb_flushed.ndjson`` — successfully-POSTed
-    rows, kept around for offline audit / breakdown collection.
+    """Compute the path to ``.kb_flushed.ndjson``, the successfully-POSTed rows.
+
+    Kept around for offline audit / breakdown collection.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/runtime/cortex/.kb_flushed.ndjson``.
     """
     return cortex_dir(session_dir) / ".kb_flushed.ndjson"
 
 
 def cortex_dead_letter_ndjson(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.kb_dead_letter.ndjson`` — rows that failed
-    permanently (HTTP 4xx business-logic rejects); robustness HIGH alert.
+    """Compute the path to ``.kb_dead_letter.ndjson``, the permanent-failure rows.
+
+    Holds rows that failed permanently (HTTP 4xx business-logic rejects);
+    raises a robustness HIGH alert.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/runtime/cortex/.kb_dead_letter.ndjson``.
     """
     return cortex_dir(session_dir) / ".kb_dead_letter.ndjson"
 
@@ -358,8 +564,14 @@ def cortex_audit_jsonl(session_dir: Path) -> Path:
 # from the legacy /v1/points client. Writes are local-only, so only the
 # read-side audit log survives here.
 def recipe_snapshot_dir(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_snapshot/`` — dispatcher / remote-client
-    per-session bookkeeping root.
+    """Compute ``<sd>/runtime/recipe_snapshot/``, the dispatcher bookkeeping root.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/runtime/recipe_snapshot``.
     """
     return Path(session_dir) / "runtime" / "recipe_snapshot"
 
@@ -381,8 +593,16 @@ def pr_monitor_status_json(session_dir: Path) -> Path:
 
 
 def cortex_flusher_pid(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.kb_flusher.pid`` — flusher daemon pid file
-    (one line). Robustness reads this to detect a dead flusher.
+    """Compute the path to ``.kb_flusher.pid``, the flusher daemon pid file.
+
+    The one-line file is read by robustness checks to detect a dead flusher.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/runtime/cortex/.kb_flusher.pid``.
     """
     return cortex_dir(session_dir) / ".kb_flusher.pid"
 

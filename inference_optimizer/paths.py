@@ -210,12 +210,30 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
 
 
 def db_path_for(session_dir: Path) -> Path:
-    """Canonical SQLite location for a session: ``<sd>/storage/coordinator.db``."""
+    """Return the canonical SQLite database path for a session.
+
+    Args:
+        session_dir (Path): The session directory root.
+
+    Returns:
+        Path: ``<session_dir>/storage/coordinator.db``.
+    """
     return Path(session_dir) / "storage" / "coordinator.db"
 
 
 def asset_root() -> Path:
-    """Return the package runtime-asset root (shipped read-only files)."""
+    """Return the package runtime-asset root (shipped read-only files).
+
+    Honours the ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` override (with ``~``
+    expansion) when set; otherwise returns the installed package root.
+
+    Returns:
+        Path: The asset root directory.
+
+    Raises:
+        AssetRootNotFound: If the override env var is set but points at a
+            path that does not exist.
+    """
     override = os.environ.get(ENV_OVERRIDE_ASSET_ROOT)
     if override:
         root = Path(override).expanduser()
@@ -228,18 +246,38 @@ def asset_root() -> Path:
 
 
 def asset_scripts_dir() -> Path:
+    """Return the directory of shipped shell scripts.
+
+    Returns:
+        Path: ``<asset_root>/scripts``.
+    """
     return asset_root() / "scripts"
 
 
 def asset_actions_dir() -> Path:
+    """Return the directory of shipped action-metadata files.
+
+    Returns:
+        Path: ``<asset_root>/actions``.
+    """
     return asset_root() / "actions"
 
 
 def asset_system_prompts_dir() -> Path:
+    """Return the directory of shipped agent system prompts.
+
+    Returns:
+        Path: ``<asset_root>/orchestrator/system_prompts``.
+    """
     return asset_root() / "orchestrator" / "system_prompts"
 
 
 def asset_kernel_opt_dir() -> Path:
+    """Return the directory of shipped kernel-optimization prompt templates.
+
+    Returns:
+        Path: ``<asset_root>/kernel_opt``.
+    """
     return asset_root() / "kernel_opt"
 
 
