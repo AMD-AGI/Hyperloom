@@ -579,16 +579,44 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             )
             apply_modes[p] = "patch"
             continue
+        # Forward apply fails. Before fail-softing the *whole* atomic set,
+        # check whether this individual patch is in fact ALREADY APPLIED: a
+        # clean reverse apply (``git apply -R --check``) succeeds iff the
+        # working tree already contains exactly this patch's post-image. The
+        # common trigger is a "new file" patch (e.g. kernel_shape_profiler.py)
+        # whose target file is pre-baked into the image — ``git apply --check``
+        # refuses with "already exists in working directory" and the fuzzy
+        # fallback fails the same way, even though the file content is
+        # byte-identical. Skipping the already-applied member lets the
+        # remaining annotation patches still apply atomically instead of the
+        # entire set fail-softing (which silently disabled per-step kernel-shape
+        # annotations -> empty kernel shape -> kernel-opt/GEAK never dispatched).
+        if _git(git, ("apply", "-R", "--check", strip_arg, str(p)), plan.apply_root):
+            log.info(
+                "_server_patcher: %s patch %s already applied (reverse "
+                "`git apply -R --check %s` is clean); skipping it from the "
+                "transaction so the remaining patches still apply",
+                plan.framework, p.name, strip_arg,
+            )
+            apply_modes[p] = "skip"
+            continue
         log.warning(
             "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
-            "--dry-run` both failed for %s (version %s, patch %s); fail-soft "
-            "skip", strip_arg, strip_arg, plan.framework, plan.version, p.name,
+            "--dry-run` both failed for %s (version %s, patch %s), and it is "
+            "not already applied (reverse check failed); fail-soft skip",
+            strip_arg, strip_arg, plan.framework, plan.version, p.name,
         )
         return False
 
     applied: list[tuple[Path, str]] = []
+    skipped = 0
     for p in plan.patches:
         mode = apply_modes[p]
+        if mode == "skip":
+            # Already applied (verified by the reverse-check above); nothing
+            # to do and nothing to roll back.
+            skipped += 1
+            continue
         if mode == "git":
             ok = _git(git, ("apply", strip_arg, str(p)), plan.apply_root)
         else:
@@ -628,9 +656,9 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
     log.info(
         "_server_patcher: applied %d TraceLens patch(es) for %s %s "
-        "(strict=%d, fuzzy=%d) (issue #194 §4/§5)",
+        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
         len(applied), plan.framework, plan.version,
-        len(applied) - fuzzy_count, fuzzy_count,
+        len(applied) - fuzzy_count, fuzzy_count, skipped,
     )
     return True
 
