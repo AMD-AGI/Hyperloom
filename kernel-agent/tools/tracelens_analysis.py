@@ -62,6 +62,11 @@ HIGH_IDLE_PCT_THRESHOLD_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
 ARCH_BENCHMARK_TIMEOUT_ENV = "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC"
 ARCH_BENCHMARK_TIMEOUT_FLOOR_S = 600
 
+ANALYSIS_ROUTE_ENV = "HYPERLOOM_TRACE_ANALYSIS_ROUTE"
+ANALYSIS_ROUTE_DETERMINISTIC = "deterministic"
+ANALYSIS_ROUTE_AGENT = "agent"
+_VALID_ANALYSIS_ROUTES = {ANALYSIS_ROUTE_DETERMINISTIC, ANALYSIS_ROUTE_AGENT}
+
 
 def _resolve_idle_pct_threshold() -> float:
     """Return the idle-percent gate threshold (default 80.0%).
@@ -1913,6 +1918,313 @@ def build_notes(candidate: dict[str, Any]) -> str:
     return f"resolved source: {candidate['source_file']}"
 
 
+# ---------------------------------------------------------------------------
+# Deterministic analysis route — runs TraceLens Python toolchain without LLM
+# ---------------------------------------------------------------------------
+
+
+def _run_deterministic_tracelens_steps(
+    trace_path: Path,
+    output_dir: Path,
+    tl_root: Path,
+    *,
+    platform: str,
+    analysis_mode: str,
+    framework: str,
+    capture_folder: Path | None,
+    log_path: Path,
+    budget_minutes: float,
+) -> int:
+    """Run the TraceLens deterministic pipeline (Steps 1 + 2-5 + 7 scripts + 7.5).
+
+    Invokes the CLI tools as subprocesses so they run in the TraceLens
+    package environment. Returns 0 on success.
+    """
+    timeout_s = max(120, int(budget_minutes * 60))
+
+    # Step 1: perf report
+    report_cmd = [
+        sys.executable, "-m",
+        "TraceLens.Reporting.generate_perf_report_pytorch_inference",
+        str(trace_path),
+        "-o", str(output_dir),
+        "--platform", platform,
+    ]
+    if analysis_mode:
+        report_cmd += ["--analysis-mode", analysis_mode]
+    if capture_folder and capture_folder.exists():
+        report_cmd += ["--capture-folder", str(capture_folder)]
+    rc = run_command(report_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
+    if rc != 0:
+        return rc
+
+    # Steps 2-5: orchestrator_prepare
+    prepare_cmd = [
+        sys.executable, "-m",
+        "TraceLens.Agent.Analysis.utils.orchestrator_prepare",
+        "--trace-path", str(trace_path),
+        "--output-dir", str(output_dir),
+        "--platform", platform,
+    ]
+    if analysis_mode:
+        prepare_cmd += ["--analysis-mode", analysis_mode]
+    if capture_folder and capture_folder.exists():
+        prepare_cmd += ["--capture-folder", str(capture_folder)]
+    rc = run_command(prepare_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
+    if rc != 0:
+        return rc
+
+    # Step 7: category analysis scripts
+    manifest_path = output_dir / "category_data" / "category_manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for cat_entry in manifest.get("categories", []):
+            cat_name = cat_entry.get("name", "")
+            tier = cat_entry.get("tier", "")
+            if tier != "compute_kernel":
+                continue
+            script_name = f"{cat_name}_analysis"
+            analysis_cmd = [
+                sys.executable, "-m",
+                f"TraceLens.Agent.Analysis.category_analyses.{script_name}",
+                "--output-dir", str(output_dir),
+            ]
+            rc_cat = run_command(
+                analysis_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s,
+            )
+            if rc_cat != 0:
+                append_log(
+                    log_path,
+                    f"deterministic: category script {script_name} exited "
+                    f"with rc={rc_cat}; continuing with remaining categories",
+                )
+
+    # Step 7.5: generate_priority_data
+    priority_cmd = [
+        sys.executable, "-c",
+        f"from TraceLens.Agent.Analysis.utils.report_utils import "
+        f"generate_priority_data; generate_priority_data('{output_dir}')",
+    ]
+    rc = run_command(priority_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
+    return rc
+
+
+def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
+    """Read GPU idle percentage directly from gpu_timeline.csv."""
+    csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
+    if not csv_path.exists():
+        return None
+    try:
+        with open(csv_path, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                row_type = (row.get("type") or "").strip().lower()
+                if row_type == "idle":
+                    return float(row.get("percent", 0))
+    except (OSError, csv.Error, ValueError):
+        pass
+    return None
+
+
+def deterministic_extract_hot_kernels(
+    output_dir: Path,
+    top_k: int = 10,
+) -> list[dict[str, Any]]:
+    """Extract hot kernels directly from TraceLens deterministic outputs.
+
+    Reads ``*_metrics.json`` and ``priority_data.json`` to produce the same
+    candidate list that ``parse_analysis_md()`` would extract from
+    ``analysis.md``, without any LLM involvement.
+
+    Each candidate maps to the same schema that ``_finalize_candidates``
+    expects downstream (name, duration_us, efficiency_percent, etc.).
+    """
+    priority_path = output_dir / "priority_data.json"
+    if not priority_path.exists():
+        return []
+
+    priority_data = json.loads(priority_path.read_text(encoding="utf-8"))
+    findings = priority_data.get("findings", [])
+
+    cat_data_dir = output_dir / "category_data"
+    ops_by_category: dict[str, list[dict[str, Any]]] = {}
+    if cat_data_dir.is_dir():
+        for fname in sorted(cat_data_dir.iterdir()):
+            if not fname.name.endswith("_metrics.json"):
+                continue
+            try:
+                metrics = json.loads(fname.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if metrics.get("status") in ("ERROR", "NO_DATA"):
+                continue
+            cat = metrics.get("category", fname.stem.replace("_metrics", ""))
+            ops_by_category[cat] = metrics.get("operations", [])
+
+    candidates: list[dict[str, Any]] = []
+
+    for finding in findings:
+        global_rank = finding.get("global_rank", 0)
+        category = finding.get("category", "")
+        impact_score = finding.get("impact_score", 0.0)
+        members = finding.get("members", [])
+
+        cat_ops = ops_by_category.get(category, [])
+        ops_lookup = {op.get("name", ""): op for op in cat_ops}
+
+        sorted_members = sorted(
+            members, key=lambda m: m.get("efficiency_pct", 100),
+        )
+
+        for member in sorted_members:
+            op_name = member.get("operation", "")
+            full_op = ops_lookup.get(op_name, {})
+
+            duration_us = member.get("time_ms", 0) * 1000
+            eff_pct = member.get("efficiency_pct", 0)
+
+            launcher_path = full_op.get("launcher_path", "")
+            if launcher_path == "\u2014":
+                launcher_path = ""
+
+            shapes_raw = full_op.get("args", "")
+            shapes = [shapes_raw] if shapes_raw else []
+
+            candidate = {
+                "name": op_name,
+                "duration_us": round(duration_us, 3),
+                "call_count": full_op.get("count", 1),
+                "efficiency_percent": round(eff_pct, 2),
+                "impact_score": member.get("impact_score", impact_score),
+                "bound_type": member.get("bound_type", ""),
+                "tracelens_category": category,
+                "tracelens_pitem_rank": global_rank,
+                "kernel_path": launcher_path,
+                "shapes": shapes,
+                "library": member.get("library", full_op.get("library", "")),
+            }
+            candidates.append(candidate)
+            if len(candidates) >= top_k:
+                return candidates
+
+    return candidates
+
+
+def generate_minimal_analysis_md(
+    output_dir: Path,
+    candidates: list[dict[str, Any]],
+    idle_pct: float | None = None,
+) -> Path:
+    """Generate a minimal deterministic analysis.md for downstream consumption.
+
+    The report is a structured template (no LLM) containing the Executive
+    Summary, Top Ops table, and per-P-item Data tables that
+    ``shared_state.analysis_md_text`` can inject into orchestrator prompts.
+    """
+    report_path = output_dir / "analysis.md"
+    lines: list[str] = []
+
+    gpu_timeline_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
+    gpu_rows: list[dict[str, str]] = []
+    if gpu_timeline_path.exists():
+        try:
+            with open(gpu_timeline_path, encoding="utf-8") as fh:
+                gpu_rows = list(csv.DictReader(fh))
+        except (OSError, csv.Error):
+            pass
+
+    lines.append("# TraceLens Performance Analysis Report")
+    lines.append("")
+    lines.append("> Generated via deterministic analysis route "
+                 "(HYPERLOOM_TRACE_ANALYSIS_ROUTE=deterministic)")
+    lines.append("")
+
+    # Executive Summary
+    lines.append("## Executive Summary")
+    lines.append("")
+    if gpu_rows:
+        lines.append("| Metric | Time (ms) | % |")
+        lines.append("|--------|-----------|---|")
+        for row in gpu_rows:
+            rtype = row.get("type", "")
+            time_ms = row.get("time ms", "0")
+            pct = row.get("percent", "0")
+            lines.append(f"| {rtype} | {time_ms} | {pct}% |")
+        lines.append("")
+
+    if idle_pct is not None:
+        lines.append(f"**Idle %**: {idle_pct:.2f}%")
+        lines.append("")
+
+    # Top Hot Kernels table
+    lines.append("## Top Hot Kernels")
+    lines.append("")
+    if candidates:
+        lines.append(
+            "| Rank | Operation | Time (us) | Efficiency | Impact | "
+            "Category | Bound |"
+        )
+        lines.append(
+            "|------|-----------|-----------|------------|--------|"
+            "----------|-------|"
+        )
+        for i, c in enumerate(candidates, 1):
+            lines.append(
+                f"| {i} | {c.get('name', '')} "
+                f"| {c.get('duration_us', 0):.1f} "
+                f"| {c.get('efficiency_percent', 0):.1f}% "
+                f"| {c.get('impact_score', 0):.2f} "
+                f"| {c.get('tracelens_category', '')} "
+                f"| {c.get('bound_type', '')} |"
+            )
+        lines.append("")
+
+    # Per-P-item Detailed Analysis (mirrors the format parse_analysis_md expects)
+    seen_ranks: set[int] = set()
+    for c in candidates:
+        rank = c.get("tracelens_pitem_rank", 0)
+        if rank in seen_ranks:
+            continue
+        seen_ranks.add(rank)
+        rank_cands = [
+            x for x in candidates
+            if x.get("tracelens_pitem_rank") == rank
+        ]
+        cat = rank_cands[0].get("tracelens_category", "") if rank_cands else ""
+
+        lines.append(f"### P{rank}: {cat} kernels")
+        lines.append("")
+        lines.append(
+            f"<!-- reasoning-candidate tier=compute rank={rank} -->"
+        )
+        lines.append("")
+        lines.append(
+            "**Data:**\n\n"
+            "| Operation | Time (us) | %E2E | Count | FLOPS/Byte | "
+            "Efficiency | Bound | Args | Kernel Path |"
+        )
+        lines.append(
+            "|-----------|-----------|------|-------|------------|"
+            "------------|-------|------|-------------|"
+        )
+        for rc in rank_cands:
+            lines.append(
+                f"| {rc.get('name', '')} "
+                f"| {rc.get('duration_us', 0):.1f} "
+                f"| {rc.get('impact_score', 0):.2f} "
+                f"| {rc.get('call_count', 1)} "
+                f"| - "
+                f"| {rc.get('efficiency_percent', 0):.1f}% "
+                f"| {rc.get('bound_type', '')} "
+                f"| {' '.join(rc.get('shapes', []))} "
+                f"| {rc.get('kernel_path', '')} |"
+            )
+        lines.append("")
+
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
+
+
 def run_command(
     cmd: list[str],
     *,
@@ -2686,6 +2998,29 @@ def main() -> int:
     )
     parser.add_argument("--budget-minutes", type=float, default=60.0)
     parser.add_argument("--dry-run", action="store_true")
+    default_analysis_route = (
+        os.environ.get(ANALYSIS_ROUTE_ENV, "").strip().lower()
+        or ANALYSIS_ROUTE_AGENT
+    )
+    if default_analysis_route not in _VALID_ANALYSIS_ROUTES:
+        default_analysis_route = ANALYSIS_ROUTE_AGENT
+    parser.add_argument(
+        "--analysis-route",
+        choices=sorted(_VALID_ANALYSIS_ROUTES),
+        default=default_analysis_route,
+        help=(
+            "Trace analysis pipeline route. 'agent' (default) runs the "
+            "TraceLens analysis-orchestrator LLM skill via Claude SDK to "
+            "produce analysis.md, then parses hot kernels from it. "
+            "'deterministic' bypasses all LLM calls and instead runs the "
+            "TraceLens deterministic Python toolchain (perf report, "
+            "orchestrator_prepare, category analysis scripts, "
+            "generate_priority_data) to extract hot kernels directly from "
+            "*_metrics.json. A minimal analysis.md is generated from "
+            "templates for downstream prompt injection. "
+            "Env: HYPERLOOM_TRACE_ANALYSIS_ROUTE."
+        ),
+    )
     default_llm_orchestrator = os.environ.get(
         "KERNEL_AGENT_USE_LLM_ORCHESTRATOR", "1",
     ).strip().lower() not in {"0", "false", "no", "off"}
@@ -3140,7 +3475,123 @@ def main() -> int:
                     f"using {cli_trace_path.name} for perf report",
                 )
 
-            if args.use_llm_orchestrator and not trace_split_blocked:
+            # ------ Route: deterministic vs agent ------
+            use_deterministic = (
+                args.analysis_route == ANALYSIS_ROUTE_DETERMINISTIC
+            )
+
+            if use_deterministic and not trace_split_blocked:
+                update_status(
+                    status_path, state="running",
+                    current_step="deterministic_pipeline",
+                    log_path=log_path, artifact_paths=artifacts,
+                    run_id=run_id, started_at=started_at,
+                )
+                append_log(
+                    log_path,
+                    "analysis-route=deterministic: running TraceLens "
+                    "deterministic Python toolchain (no LLM calls)",
+                )
+                trace_input_path = Path(args.trace_input).expanduser().resolve()
+                capture_folder = (
+                    Path(args.capture_folder).expanduser().resolve()
+                    if args.capture_folder else
+                    discover_capture_folder(trace_input_path, trace_files)
+                )
+
+                det_rc = _run_deterministic_tracelens_steps(
+                    trace_path=cli_trace_path,
+                    output_dir=tracelens_dir,
+                    tl_root=tl_root,
+                    platform=args.target_platform,
+                    analysis_mode=args.analysis_mode,
+                    framework=args.framework,
+                    capture_folder=capture_folder,
+                    log_path=log_path,
+                    budget_minutes=args.budget_minutes,
+                )
+                if det_rc != 0:
+                    append_log(
+                        log_path,
+                        f"deterministic pipeline returned rc={det_rc}; "
+                        "attempting partial extraction from available outputs",
+                    )
+
+                orchestrator_mode = "deterministic"
+
+                idle_pct_value = _extract_idle_pct_from_gpu_timeline(
+                    tracelens_dir,
+                )
+                idle_pct_threshold = _resolve_idle_pct_threshold()
+                high_idle_detected = (
+                    idle_pct_value is not None
+                    and idle_pct_value > idle_pct_threshold
+                )
+                if high_idle_detected:
+                    assert idle_pct_value is not None
+                    agent_candidates = []
+                    allow_empty_candidates = True
+                    trace_health_warnings.append(
+                        _build_high_idle_warning(
+                            idle_pct=idle_pct_value,
+                            threshold_pct=idle_pct_threshold,
+                            report_path=tracelens_dir / "analysis.md",
+                        )
+                    )
+                    append_log(
+                        log_path,
+                        f"deterministic: GPU Idle % = {idle_pct_value:.2f}% "
+                        f"(threshold {idle_pct_threshold:.2f}%); "
+                        "suppressing hot_kernels[]",
+                    )
+                else:
+                    if idle_pct_value is not None:
+                        append_log(
+                            log_path,
+                            f"deterministic: GPU Idle % = "
+                            f"{idle_pct_value:.2f}% "
+                            f"(threshold {idle_pct_threshold:.2f}%) "
+                            "-- below gate, extracting candidates",
+                        )
+                    raw_det_candidates = deterministic_extract_hot_kernels(
+                        tracelens_dir, args.top_k,
+                    )
+                    if raw_det_candidates:
+                        total_dur = sum(
+                            float(c.get("duration_us") or 0)
+                            for c in raw_det_candidates
+                        )
+                        agent_candidates = _finalize_candidates(
+                            raw_det_candidates,
+                            total_dur=total_dur or None,
+                            perf_report_csv_dir=(
+                                tracelens_dir / "perf_report_csvs"
+                            ),
+                        )
+                        append_log(
+                            log_path,
+                            f"deterministic pipeline produced "
+                            f"{len(agent_candidates)} hot kernels",
+                        )
+                    else:
+                        agent_candidates = []
+                        allow_empty_candidates = True
+                        append_log(
+                            log_path,
+                            "deterministic pipeline: no candidates "
+                            "extracted from *_metrics.json / "
+                            "priority_data.json; returning empty "
+                            "hot_kernels[]",
+                        )
+
+                agent_report_path = generate_minimal_analysis_md(
+                    tracelens_dir,
+                    agent_candidates or [],
+                    idle_pct=idle_pct_value,
+                )
+                artifacts["tracelens_agent_report"] = str(agent_report_path)
+
+            elif args.use_llm_orchestrator and not trace_split_blocked:
                 update_status(status_path, state="running",
                               current_step="run_tracelens_sdk_orchestrator",
                               log_path=log_path, artifact_paths=artifacts,
@@ -3170,8 +3621,6 @@ def main() -> int:
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = "claude_agent_sdk"
 
-                    # T3: gate on the Executive Summary's Idle % before consuming candidates.
-                    # High idle => empty hot_kernels[] + a trace_health_warnings entry (T4 routes to params).
                     raw_agent_candidates = []
                     report_source = ""
                     idle_pct_value = extract_idle_pct_from_analysis_md(
@@ -3263,6 +3712,12 @@ def main() -> int:
                     )
 
             if agent_candidates is None:
+                if use_deterministic:
+                    raise RuntimeError(
+                        "Deterministic analysis route failed to produce "
+                        "any candidates; check the TraceLens toolchain "
+                        "outputs under the tracelens/ directory."
+                    )
                 raise RuntimeError(
                     "TraceLens analysis.md was not produced; refusing to "
                     "fall back to priority_data/category_data/CSV candidate "

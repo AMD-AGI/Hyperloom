@@ -1311,6 +1311,13 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
+    # Forward the analysis route switch (deterministic vs agent).
+    analysis_route = (
+        payload.get("analysis_route")
+        or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")
+    ).strip().lower()
+    if analysis_route in ("deterministic", "agent"):
+        cmd += ["--analysis-route", analysis_route]
     # ``--roofline-json`` CLI param retired with the ``pmc_roofline`` action; a stale payload key is silently ignored.
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
