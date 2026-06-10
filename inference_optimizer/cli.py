@@ -4013,9 +4013,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Live Langfuse push (opt-in, default off): reconcile + flush after the
         # breakdown wrote decision_trace.jsonl / ext shards. No-op unless
         # HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* are configured. Best-effort.
+        # Then splice the post-flush receipt (final counts) back into the
+        # session_breakdown.json langfuse section, which was written above with
+        # only the pre-flush in-process counts.
         try:
             from .orchestrator.trace.langfuse_emitter import flush_session
             flush_session(session_dir)
+            from .breakdown import patch_breakdown_langfuse
+            patch_breakdown_langfuse(session_dir)
         except Exception:  # noqa: BLE001
             log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 

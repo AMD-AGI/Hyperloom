@@ -216,6 +216,16 @@ def build(
                                         ),
                                         warnings,
                                         default={})
+    # Live-Langfuse push receipt (opt-in second sink): enabled? / redacted
+    # config / counts. Prefers the post-flush ``langfuse_receipt.json``;
+    # falls back to a live emitter read. The local trace jsonl is always
+    # written regardless of this section.
+    langfuse           = _safe_collect("langfuse",
+                                        lambda: collectors.collect_langfuse(
+                                            sd, manifest, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
 
     source_files = collectors.collect_source_files(
         sd,
@@ -272,6 +282,10 @@ def build(
         # / session_total summary. New optional section — v1 readers ignore
         # it. Empty on pre-trace sessions.
         "decision_trace":      decision_trace,
+        # Live-Langfuse push receipt; ``enabled`` False (with a
+        # ``disabled_reason``) on the default path. Local jsonl ledger is
+        # always written regardless.
+        "langfuse":            langfuse,
 
         "warnings":            warnings,
         "source_files":        source_files,
@@ -332,6 +346,57 @@ def write_breakdown_json(
         raise
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
     return target
+
+
+def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
+    """Refresh only the ``langfuse`` section of an already-written breakdown.
+
+    ``session_breakdown.json`` is written *before* the session-end
+    ``flush_session`` (the flush depends on ``decision_trace.jsonl``, which the
+    breakdown produces). So the breakdown's first ``langfuse`` section carries
+    the pre-flush, in-process counts (``counts_final=False``). Call this right
+    after ``flush_session`` to splice in the post-flush
+    ``langfuse_receipt.json`` (final counts) without rebuilding the whole file.
+
+    Best-effort and self-skipping: returns False (no-op) when no breakdown or
+    no receipt exists yet, when live push was disabled, or on any error. Never
+    raises -- it must not mask the session's stop_reason at shutdown.
+    """
+    from ..orchestrator.trace.langfuse_emitter import read_receipt
+
+    sd = Path(session_dir).resolve()
+    target = sd / BREAKDOWN_FILENAME
+    try:
+        receipt = read_receipt(sd)
+        if receipt is None or not target.exists():
+            return False
+        receipt["receipt_source"] = "receipt_file"
+        breakdown = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(breakdown, dict):
+            return False
+        if breakdown.get("langfuse") == receipt:
+            return False  # already current
+        breakdown["langfuse"] = receipt
+        payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{BREAKDOWN_FILENAME}.", suffix=".tmp", dir=str(target.parent),
+        )
+        os.close(fd)
+        tmp_path = Path(tmp)
+        try:
+            tmp_path.write_text(payload, encoding="utf-8")
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        log.info("session_breakdown: refreshed langfuse section in %s", target)
+        return True
+    except Exception:  # noqa: BLE001
+        log.debug("session_breakdown: langfuse patch failed (non-fatal)", exc_info=True)
+        return False
 
 
 def _json_default(obj: Any) -> Any:

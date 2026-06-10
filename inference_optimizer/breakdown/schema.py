@@ -1280,6 +1280,92 @@ class DecisionTrace(TypedDict, total=False):
     unattributed_tokens: TokenBucket
 
 
+# ---------------------------------------------------------------------------
+# Langfuse push receipt — was the trace mirrored live to Langfuse?
+# ---------------------------------------------------------------------------
+class LangfuseConfig(TypedDict, total=False):
+    """Redacted Langfuse connection config that was in effect this session.
+
+    Credentials are never recorded verbatim: only the host URL (not a secret)
+    and presence booleans for the public/secret keys.
+
+    Attributes:
+        enable_flag (bool): Whether ``HYPERLOOM_LANGFUSE_ENABLE`` was on.
+        host (str | None): ``LANGFUSE_HOST`` URL, or None if unset.
+        public_key_set (bool): Whether ``LANGFUSE_PUBLIC_KEY`` was present.
+        secret_key_set (bool): Whether ``LANGFUSE_SECRET_KEY`` was present.
+        sdk_available (bool): Whether the optional ``langfuse`` SDK importable.
+    """
+    enable_flag: bool
+    host: str | None
+    public_key_set: bool
+    secret_key_set: bool
+    sdk_available: bool
+
+
+class LangfusePushCounts(TypedDict, total=False):
+    """How many observations the live push actually emitted this session.
+
+    Attributes:
+        generations_sent (int): Generations successfully started.
+        generations_paired (int): Of those, ones that had both a token row and
+            conversation text (vs token-only / text-only).
+        generations_text_only (int): Generations from a conversation row only.
+        generations_token_only (int): Generations from a token row only
+            (the typical out-of-process child case).
+        scores_sent (int): Decision Scores created (span- + trace-level).
+        spans_opened (int): Phase + agent spans created.
+        ext_shards_read (int): Out-of-process ``ext/*.jsonl`` shards swept at flush.
+        errors (int): Swallowed send failures (a Langfuse outage never breaks
+            the optimization loop).
+    """
+    generations_sent: int
+    generations_paired: int
+    generations_text_only: int
+    generations_token_only: int
+    scores_sent: int
+    spans_opened: int
+    ext_shards_read: int
+    errors: int
+
+
+class LangfusePush(TypedDict, total=False):
+    """Receipt of whether/where/how much the session was pushed to Langfuse.
+
+    The local ``reports/trace/*.jsonl`` ledger is always written; this section
+    records the *optional* second sink (live Langfuse push, default off). When
+    disabled it still reports the config + ``disabled_reason`` so an operator
+    can see why nothing was sent.
+
+    Attributes:
+        enabled (bool): Whether the live push was active (all gates passed).
+        disabled_reason (str | None): Which gate tripped when not enabled
+            (``disabled`` / ``no_credentials`` / ``sdk_missing`` /
+            ``init_failed``); None when enabled.
+        config (LangfuseConfig): Redacted connection config in effect.
+        trace_id (str | None): Langfuse trace id (derived from the correlation
+            id), or None when disabled.
+        session_id (str | None): Langfuse ``session_id`` grouping value.
+        correlated_on (str): Which id seeded the trace
+            (``claw_session_id`` / ``internal_session_id``).
+        counts (LangfusePushCounts): What was actually emitted.
+        counts_final (bool): True once the session-end flush ran (counts then
+            include out-of-process ext shards + decision scores); False when
+            the breakdown was assembled before flush (in-process counts only).
+        receipt_source (str): Where the collector read this from
+            (``receipt_file`` / ``live_emitter`` / ``config_only``).
+    """
+    enabled: bool
+    disabled_reason: str | None
+    config: LangfuseConfig
+    trace_id: str | None
+    session_id: str | None
+    correlated_on: str
+    counts: LangfusePushCounts
+    counts_final: bool
+    receipt_source: str
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -1317,6 +1403,8 @@ class SessionBreakdown(TypedDict, total=False):
         roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
             the markdown report's ``## Roofline`` section.
         roofline_progress (RooflineProgress): Optimization-progress curve for the dashboard.
+        langfuse (LangfusePush): Live-Langfuse push receipt (enabled? / redacted
+            config / counts); the local trace jsonl is always written regardless.
         warnings (list[str]): Collector warnings emitted while assembling the file.
         source_files (SourceFiles): Paths to the source artifacts used.
     """
@@ -1365,6 +1453,11 @@ class SessionBreakdown(TypedDict, total=False):
     # ignores it. Empty dict on sessions that ran before the trace
     # subsystem landed (no reports/trace/ files).
     decision_trace: DecisionTrace
+    # Live-Langfuse push receipt: enabled?/redacted config/how much was sent.
+    # Additive optional section; the local trace jsonl is always written
+    # regardless. ``enabled`` is False (with a ``disabled_reason``) on the
+    # default path where HYPERLOOM_LANGFUSE_ENABLE is off.
+    langfuse: LangfusePush
 
     warnings: list[str]
     source_files: SourceFiles
@@ -1387,6 +1480,9 @@ __all__ = [
     "DecisionTrace",
     "DecisionTraceEntry",
     "DetectedKernel",
+    "LangfuseConfig",
+    "LangfusePush",
+    "LangfusePushCounts",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",

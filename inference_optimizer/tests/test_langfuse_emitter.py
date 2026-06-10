@@ -423,3 +423,100 @@ def test_get_emitter_is_cached_per_session(tmp_path, monkeypatch):
     a = lfe.get_emitter(tmp_path)
     b = lfe.get_emitter(tmp_path)
     assert a is b
+
+
+# ---------------------------------------------------------------------------
+# Receipt (session_breakdown ``langfuse`` section)
+# ---------------------------------------------------------------------------
+def test_receipt_disabled_records_reason_and_redacts(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
+    em = lfe.LangfuseEmitter(tmp_path)
+    r = em.receipt()
+    assert r["enabled"] is False
+    assert r["disabled_reason"] == "disabled"
+    assert r["config"]["enable_flag"] is False
+    # No secret material ever appears in the receipt.
+    blob = json.dumps(r)
+    assert "sk-" not in blob and "pk-" not in blob
+
+
+def test_receipt_no_credentials_reason(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "1")
+    monkeypatch.delenv("LANGFUSE_HOST", raising=False)
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    em = lfe.LangfuseEmitter(tmp_path)
+    r = em.receipt()
+    assert r["enabled"] is False
+    assert r["disabled_reason"] == "no_credentials"
+    assert r["config"]["enable_flag"] is True
+    assert r["config"]["public_key_set"] is False
+
+
+def test_receipt_counts_and_redaction_when_enabled(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd, claw_session_id="claw-XYZ")
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())
+    em.record_conversation(_conv_row())
+
+    r = em.receipt()
+    assert r["enabled"] is True
+    assert r["disabled_reason"] is None
+    assert r["config"]["host"] == "https://lf.test"
+    assert r["config"]["public_key_set"] is True
+    assert r["config"]["secret_key_set"] is True
+    assert r["correlated_on"] == "claw_session_id"
+    assert r["counts"]["generations_sent"] == 1
+    assert r["counts"]["generations_paired"] == 1
+    # Pre-flush: not final yet.
+    assert r["counts_final"] is False
+    # host is a URL (not secret); raw keys never present.
+    blob = json.dumps(r)
+    assert "pk-test" not in blob and "sk-test" not in blob
+
+
+def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    # one ext shard (out-of-process) + one decision so flush counts move.
+    (sd / "reports" / "trace" / "ext" / "geak-1.jsonl").write_text(
+        json.dumps(_llm_row(component="geak", role=None)) + "\n", encoding="utf-8",
+    )
+    (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(
+        json.dumps({
+            "decision": {"change": "x", "component": "kernel", "outcome": "KEEP",
+                         "gain_pct": 5.0, "task_id": "k1"},
+            "phase": "KERNEL", "tick": 1, "ts": "2026-06-09T16:00:00Z",
+        }) + "\n", encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+
+    persisted = lfe.read_receipt(sd)
+    assert persisted is not None
+    assert persisted["counts_final"] is True
+    assert persisted["counts"]["ext_shards_read"] == 1
+    assert persisted["counts"]["generations_sent"] >= 1
+    assert persisted["counts"]["scores_sent"] >= 1
+
+
+def test_read_receipt_absent_returns_none(tmp_path):
+    assert lfe.read_receipt(tmp_path / "nope") is None
+
+
+def test_disabled_flush_still_writes_receipt(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    persisted = lfe.read_receipt(sd)
+    assert persisted is not None
+    assert persisted["enabled"] is False
+    assert persisted["disabled_reason"] == "disabled"

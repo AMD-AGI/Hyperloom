@@ -37,10 +37,14 @@ from typing import Any
 
 from ...session_paths import (
     decision_trace_path,
+    trace_dir,
     trace_ext_dir,
 )
 from . import langfuse_mapping as lfmap
 from .trace_env import (
+    ENV_LANGFUSE_HOST,
+    ENV_LANGFUSE_PUBLIC_KEY,
+    ENV_LANGFUSE_SECRET_KEY,
     langfuse_credentials,
     langfuse_credentials_complete,
     langfuse_live_enabled,
@@ -51,6 +55,20 @@ log = logging.getLogger(__name__)
 
 def _manifest_path(session_dir: Path) -> Path:
     return session_dir / "manifest.json"
+
+
+def _receipt_path(session_dir: Path) -> Path:
+    return trace_dir(session_dir) / "langfuse_receipt.json"
+
+
+def _sdk_available() -> bool:
+    """Whether the optional ``langfuse`` SDK can be imported (no side effects)."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("langfuse") is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -103,23 +121,52 @@ class LangfuseEmitter:
         # pair_key -> partial generation parts ({"llm": row} / {"conv": row}).
         self._pending: dict[tuple, dict[str, dict[str, Any]]] = {}
         self._client: Any = None
-        self._trace_id: str | None = None
-        self._session_label: str | None = None
-        self._manifest: dict[str, Any] = {}
+        # Manifest + correlation are resolved unconditionally (even when the
+        # push is disabled) so the receipt always reports the right trace id /
+        # correlation key. Live push, offline backfill, and any claw-side
+        # upload correlate on claw_session_id (fallback internal session id).
+        self._manifest: dict[str, Any] = _load_json(_manifest_path(self.session_dir))
+        self._session_label: str | None = lfmap.langfuse_session_id(
+            self._manifest, self.session_dir.name,
+        )
+        self._trace_id: str | None = lfmap.derive_trace_id(
+            lfmap.correlation_seed(self._manifest, self.session_dir.name),
+        )
         # Span hierarchy caches (lazy): root trace span; one span per phase;
         # one span per (phase, agent). Each Generation nests in its agent span.
         self._root_span: Any = None
         self._phase_spans: dict[str, Any] = {}
         self._agent_spans: dict[tuple[str, str], Any] = {}
         self._trace_attrs_set = False
+        # Receipt counters (for the session_breakdown ``langfuse`` section).
+        # ``disabled_reason`` is the gate that tripped when not enabled.
+        self._disabled_reason: str | None = None
+        self._counts: dict[str, int] = {
+            "generations_sent": 0,      # Generations successfully started
+            "generations_paired": 0,    # of which had both token + text halves
+            "generations_text_only": 0,
+            "generations_token_only": 0,
+            "scores_sent": 0,           # decision Scores created (span + trace)
+            "spans_opened": 0,          # phase + agent spans created
+            "ext_shards_read": 0,       # out-of-process ext/*.jsonl files swept
+            "errors": 0,                # swallowed send failures
+        }
+        self._flushed = False
         self._enabled = self._init_client()
 
     # -- gating / client setup ------------------------------------------
     def _init_client(self) -> bool:
-        """Resolve the three gates and build the SDK client; False -> no-op."""
+        """Resolve the three gates and build the SDK client; False -> no-op.
+
+        Records ``_disabled_reason`` (``disabled`` / ``no_credentials`` /
+        ``sdk_missing`` / ``init_failed``) so the receipt can explain *why*
+        nothing was pushed. Correlation is already resolved in ``__init__``.
+        """
         if not langfuse_live_enabled():
+            self._disabled_reason = "disabled"
             return False
         if not langfuse_credentials_complete():
+            self._disabled_reason = "no_credentials"
             log.warning(
                 "langfuse: HYPERLOOM_LANGFUSE_ENABLE is on but LANGFUSE_HOST/"
                 "PUBLIC_KEY/SECRET_KEY are not all set; live push disabled.",
@@ -128,6 +175,7 @@ class LangfuseEmitter:
         try:
             from langfuse import get_client  # type: ignore
         except Exception as exc:  # noqa: BLE001
+            self._disabled_reason = "sdk_missing"
             log.warning(
                 "langfuse: SDK not importable (%s: %s); live push disabled. "
                 "Install the optional dependency: pip install 'hyperloom-"
@@ -138,22 +186,13 @@ class LangfuseEmitter:
         try:
             creds = langfuse_credentials()
             self._client = get_client()
-            self._manifest = _load_json(_manifest_path(self.session_dir))
-            # Correlate on the PrimusClaw session id (claw_session_id) so live
-            # push, offline backfill, and any claw-side upload all land on one
-            # Langfuse trace; fall back to the internal session id locally.
-            self._session_label = lfmap.langfuse_session_id(
-                self._manifest, self.session_dir.name,
-            )
-            self._trace_id = lfmap.derive_trace_id(
-                lfmap.correlation_seed(self._manifest, self.session_dir.name),
-            )
             log.info(
                 "langfuse: live push enabled (host=%s, session=%s, trace_id=%s)",
                 creds.get("LANGFUSE_HOST"), self._session_label, self._trace_id,
             )
             return True
         except Exception:  # noqa: BLE001
+            self._disabled_reason = "init_failed"
             log.warning("langfuse: client init failed; live push disabled.", exc_info=True)
             return False
 
@@ -196,6 +235,7 @@ class LangfuseEmitter:
                 metadata={"phase": phase},
             )
             self._phase_spans[phase] = span
+            self._counts["spans_opened"] += 1
         return span
 
     def _ensure_agent_span(self, phase: str, agent: str, start: Any) -> Any:
@@ -210,6 +250,7 @@ class LangfuseEmitter:
                 metadata={"phase": phase, "agent": agent},
             )
             self._agent_spans[key] = span
+            self._counts["spans_opened"] += 1
         return span
 
     # -- live ingest ----------------------------------------------------
@@ -270,7 +311,15 @@ class LangfuseEmitter:
                 usage_details=lfmap.usage_details(token_row or {}),
             )
             gen.end(end_time=start)
+            self._counts["generations_sent"] += 1
+            if token_row is not None and conv_row is not None:
+                self._counts["generations_paired"] += 1
+            elif conv_row is not None:
+                self._counts["generations_text_only"] += 1
+            else:
+                self._counts["generations_token_only"] += 1
         except Exception:  # noqa: BLE001
+            self._counts["errors"] += 1
             log.debug("langfuse: emit generation failed", exc_info=True)
 
     # -- session-end reconcile ------------------------------------------
@@ -282,6 +331,9 @@ class LangfuseEmitter:
         derived trace_id keeps re-runs on one trace).
         """
         if not self._enabled:
+            # Still drop a receipt so the breakdown can report *why* nothing
+            # was pushed (disabled / no_credentials / sdk_missing).
+            self._write_receipt()
             return
         try:
             self._flush_pending_halves()
@@ -289,12 +341,16 @@ class LangfuseEmitter:
             self._flush_decision_scores()
             self._close_spans()
         except Exception:  # noqa: BLE001
+            self._counts["errors"] += 1
             log.debug("langfuse: flush_session reconcile failed", exc_info=True)
         finally:
             try:
                 self._client.flush()
             except Exception:  # noqa: BLE001
+                self._counts["errors"] += 1
                 log.debug("langfuse: client.flush failed", exc_info=True)
+            self._flushed = True
+            self._write_receipt()
 
     def _close_spans(self) -> None:
         """End every open span, innermost first (agent -> phase -> root)."""
@@ -335,6 +391,7 @@ class LangfuseEmitter:
         if not ext_dir.is_dir():
             return
         for shard in sorted(ext_dir.glob("*.jsonl")):
+            self._counts["ext_shards_read"] += 1
             for row in _load_jsonl(shard):
                 self._emit_generation(token_row=row, conv_row=None)
 
@@ -376,11 +433,66 @@ class LangfuseEmitter:
                     comment=score.get("comment") or "",
                     metadata=score.get("metadata") or {},
                 )
+            self._counts["scores_sent"] += 1
         except Exception:  # noqa: BLE001
+            self._counts["errors"] += 1
             log.debug(
                 "langfuse: create_score failed for %s", score.get("name"),
                 exc_info=True,
             )
+
+    # -- receipt (session_breakdown ``langfuse`` section) ---------------
+    def receipt(self) -> dict[str, Any]:
+        """A redacted record of whether/where/how much was pushed.
+
+        Shape mirrors the ``langfuse`` section of ``session_breakdown.json``.
+        Credentials are never included verbatim -- only the host URL (not a
+        secret) and booleans noting that the keys were present. ``counts_final``
+        is True once :meth:`flush_session` has run (so the out-of-process ext
+        shards and decision scores are reflected); before that it reports the
+        in-process running totals.
+        """
+        creds = langfuse_credentials()
+        config = {
+            "enable_flag": langfuse_live_enabled(),
+            "host": creds.get(ENV_LANGFUSE_HOST),
+            "public_key_set": ENV_LANGFUSE_PUBLIC_KEY in creds,
+            "secret_key_set": ENV_LANGFUSE_SECRET_KEY in creds,
+            "sdk_available": _sdk_available(),
+        }
+        return {
+            "enabled": self._enabled,
+            "disabled_reason": self._disabled_reason,
+            "config": config,
+            "trace_id": self._trace_id,
+            "session_id": self._session_label,
+            "correlated_on": (
+                "claw_session_id"
+                if str(self._manifest.get("claw_session_id") or "").strip()
+                else "internal_session_id"
+            ),
+            "counts": dict(self._counts),
+            "counts_final": self._flushed,
+        }
+
+    def _write_receipt(self) -> None:
+        """Persist :meth:`receipt` to ``reports/trace/langfuse_receipt.json``.
+
+        Best-effort: a failed receipt write must never break shutdown. The
+        breakdown collector prefers this file (it reflects the post-flush
+        final counts) over a live read of the emitter singleton.
+        """
+        import json
+
+        try:
+            path = _receipt_path(self.session_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(self.receipt(), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("langfuse: receipt write failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -406,4 +518,29 @@ def flush_session(session_dir: Path) -> None:
     get_emitter(session_dir).flush_session()
 
 
-__all__ = ["LangfuseEmitter", "flush_session", "get_emitter"]
+def read_receipt(session_dir: Path) -> dict[str, Any] | None:
+    """Read the persisted ``langfuse_receipt.json`` for ``session_dir``.
+
+    Returns the post-flush receipt dict (preferred by the breakdown
+    collector, since its counts are final) or ``None`` if no receipt was
+    written -- e.g. the breakdown is being assembled before ``flush_session``
+    ran, or live push never happened.
+    """
+    import json
+
+    path = _receipt_path(session_dir)
+    if not path.exists():
+        return None
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        return obj if isinstance(obj, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+__all__ = [
+    "LangfuseEmitter",
+    "flush_session",
+    "get_emitter",
+    "read_receipt",
+]
