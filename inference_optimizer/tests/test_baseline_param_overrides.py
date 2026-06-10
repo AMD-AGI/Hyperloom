@@ -91,11 +91,17 @@ def test_sanitize_result_dir_rejects_unsafe(bad):
 
 
 # materialize_config_with_envs honors benchmark_script after gpu_type pop
-def _write_yaml(path: Path, *, benchmark_script: str | None = None) -> None:
+def _write_yaml(
+    path: Path,
+    *,
+    benchmark_script: str | None = None,
+    framework: str = "sglang",
+    model: str = "/wekafs/models/Qwen-Qwen3-8B",
+) -> None:
     cfg: dict = {
         "benchmark": {
-            "framework": "sglang",
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "framework": framework,
+            "model": model,
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
@@ -148,6 +154,46 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
     cfg = yaml.safe_load(materialized.read_text())
     # framework in _write_yaml fixture is "sglang".
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
+
+
+def test_kimi_materialize_enables_remote_client_trust(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, model="/wekafs/models/moonshotai-Kimi-K2.6")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = materialize_config_with_envs(
+        base,
+        out,
+        model_path="/wekafs/models/moonshotai-Kimi-K2.6",
+        gpu_type="mi300x",
+    )
+    envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+
+    assert envs["SGLANG_ROCM_FUSED_DECODE_MLA"] == "0"
+    assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+
+
+def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_yaml(
+        base,
+        framework="vllm",
+        model="/wekafs/models/Qwen-Qwen3.6-35B-A3B",
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = materialize_config_with_envs(
+        base,
+        out,
+        model_path="/wekafs/models/Qwen-Qwen3.6-35B-A3B",
+        gpu_type="mi300x",
+    )
+    envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+
+    assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+    assert "--trust-remote-code" in envs["EXTRA_VLLM_ARGS"]
 
 
 # TP auto-clamp against visible GPU count (real Qwen3-8B failure regression)

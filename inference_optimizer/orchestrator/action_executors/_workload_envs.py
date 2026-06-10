@@ -400,6 +400,26 @@ def materialize_config_with_envs(
         # pipeline keeps the configured tp8 + the clean aiter MLA path.
         # Verified on MI300X: capture passes, decode correct.
         envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
+        # Kimi's client-side tokenizer lives behind custom model code. The
+        # server path already passes --trust-remote-code; mirror that on
+        # Magpie's remote benchmark client without changing other models.
+        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
+    if "qwen3.6-35b-a3b" in _model_basename or (
+        "qwen3-6-35b-a3b" in _model_basename
+    ):
+        # Qwen3.6 MoE also uses a custom text-generation implementation behind
+        # a config that advertises vision_config. Keep trust scoped to this
+        # exact daily candidate family instead of enabling it globally.
+        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
+        _qwen_fw_env = server_args_env_name(bench.get("framework"))
+        _qwen_existing = str(envs.get(_qwen_fw_env, "")).strip()
+        if "trust-remote-code" not in _qwen_existing:
+            from ._grid_runner import merge_server_args
+            envs[_qwen_fw_env] = (
+                merge_server_args(_qwen_existing, "--trust-remote-code")
+                if _qwen_existing
+                else "--trust-remote-code"
+            )
     if "mimo-v2" in _model_basename:
         # MiMo-V2.x (moe_swa) loads MiMoV2ForCausalLM fine but its DEFAULT
         # aiter attention backend SIGABRTs during CUDA-graph capture on

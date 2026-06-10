@@ -792,6 +792,7 @@ _UNSUPPORTED_CONFIG_KEYS = (
 
 _TEXT_COMPAT_MULTIMODAL_EXCEPTIONS = frozenset({
     ("kimi_k25", "KimiK25ForConditionalGeneration"),
+    ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
 })
 
 
@@ -810,11 +811,11 @@ def _is_text_compatible_multimodal_exception(
 ) -> bool:
     """Allow known multimodal configs whose text path is benchmark-compatible.
 
-    Kimi-K2.6 ships as ``KimiK25ForConditionalGeneration`` with
-    ``vision_config`` even when used as a text-only checkpoint. SGLang can serve
-    its text-generation path for our benchmark; the generic multimodal gate was
-    too broad and rejected it before baseline could start. Keep this list exact
-    so ordinary VLMs remain fail-fast.
+    Kimi-K2.6 and Qwen3.6 MoE ship with ``vision_config`` even when used as
+    text-only checkpoints. Their serving stacks can exercise the text-generation
+    path for our benchmark; the generic multimodal gate was too broad and
+    rejected them before baseline could start. Keep this list exact so ordinary
+    VLMs remain fail-fast.
     """
     return any(
         (model_type_l, arch) in _TEXT_COMPAT_MULTIMODAL_EXCEPTIONS
