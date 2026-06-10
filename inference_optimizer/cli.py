@@ -4010,6 +4010,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     "session artifact package failed (non-fatal)"
                 )
 
+        # Live Langfuse push (opt-in, default off): reconcile + flush after the
+        # breakdown wrote decision_trace.jsonl / ext shards. No-op unless
+        # HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* are configured. Best-effort.
+        try:
+            from .orchestrator.trace.langfuse_emitter import flush_session
+            flush_session(session_dir)
+        except Exception:  # noqa: BLE001
+            log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
+
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 

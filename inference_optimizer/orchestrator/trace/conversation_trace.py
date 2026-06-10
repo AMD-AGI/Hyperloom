@@ -222,6 +222,16 @@ def append_conversation(
             record.component, record.session_id, exc,
         )
 
+    # Second sink (opt-in): mirror in-process conversation text to Langfuse
+    # live. Skipped for ext/ shards (target set). Best-effort; never raises.
+    if target is None:
+        try:
+            from .langfuse_emitter import get_emitter
+
+            get_emitter(session_dir).record_conversation(row)
+        except Exception:  # noqa: BLE001 — Langfuse must never break the ledger
+            log.debug("conversation_trace: langfuse mirror failed", exc_info=True)
+
 
 # Sanity guard: dataclass fields (minus the write-time ``ts``) must stay
 # in lockstep with the on-disk row schema.

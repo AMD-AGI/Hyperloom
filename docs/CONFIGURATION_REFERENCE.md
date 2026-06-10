@@ -28,6 +28,9 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 | `GEAK_MODEL_NAME`      | no       | `claude-opus-4-7` | GEAK preprocessor / solver model id.                                                                                                                                                           |
 | `ANTHROPIC_API_KEY`    | no       | inherits `SAFE_API_KEY` (via auth-proxy) | Only set explicitly to override.                                                                                                                                |
 | `OPENAI_API_KEY`       | no       | inherits `SAFE_API_KEY` (via auth-proxy) | Only set explicitly to override.                                                                                                                                |
+| `LANGFUSE_HOST`        | no (required only when `HYPERLOOM_LANGFUSE_ENABLE=1`) | unset | Base URL of your Langfuse deployment (e.g. `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
+| `LANGFUSE_PUBLIC_KEY`  | no (required only when `HYPERLOOM_LANGFUSE_ENABLE=1`) | unset | Langfuse project public key (`pk-...`).                                                                                                                  |
+| `LANGFUSE_SECRET_KEY`  | no (required only when `HYPERLOOM_LANGFUSE_ENABLE=1`) | unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
 
 ---
 
@@ -135,6 +138,7 @@ populate `session_breakdown.json` for downstream consumers
 |-------------------|--------------------------------------------------------------------------------------------|
 | `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the PrimusClaw sandbox; unset for local runs. |
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by PrimusClaw; unset for local runs.                                            |
+| `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. When `1/true/yes/on` *and* the three `LANGFUSE_*` credentials are set, every in-process LLM call is mirrored into Langfuse as a Generation while the run is live, and a session-end flush backfills the out-of-process children (geak / oob / robustness / specialist) and KEEP/REVERT decision Scores. The local `reports/trace/*.jsonl` ledger is always written regardless. Requires the optional `langfuse` dependency (`pip install 'hyperloom-inference_optimizer[trace]'`); a missing SDK degrades to a no-op. |
 
 ---
 
