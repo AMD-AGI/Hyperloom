@@ -34,12 +34,27 @@ _STREAM_TAIL_BYTES = 32 * 1024
 
 
 def _log(msg: str) -> None:
+    """Write a timestamped progress line to stderr and flush it.
+
+    Args:
+        msg (str): The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kernel_bench_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _tail_bytes(s: str | None, limit: int) -> str:
+    """Return the trailing portion of a string up to a byte limit.
+
+    Args:
+        s (str | None): The source text, or ``None``.
+        limit (int): Maximum number of trailing characters to keep.
+
+    Returns:
+        str: The last ``limit`` characters of ``s`` (or all of it if
+        shorter); an empty string when ``s`` is falsy.
+    """
     if not s:
         return ""
     if len(s) <= limit:
@@ -160,6 +175,16 @@ def _pick_gpu_node() -> str:
 
 
 def _do_bench(args: argparse.Namespace) -> int:
+    """Schedule the bench actor on a GPU node and emit its JSON result.
+
+    Args:
+        args (argparse.Namespace): Parsed ``bench`` subcommand arguments
+            (``workspace``, ``bench_command``, ``files_b64_json``,
+            ``result_glob``, ``timeout_sec``).
+
+    Returns:
+        int: ``0`` if the bench command exited 0, otherwise ``1``.
+    """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     node_id = _pick_gpu_node()
     _log(f"bench: node_id={node_id[:16]} workspace={args.workspace}")
@@ -196,6 +221,12 @@ def _do_bench(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """Parse CLI arguments and dispatch the ``bench`` subcommand.
+
+    Returns:
+        int: Process exit code; the bench result code, or ``2`` if no
+        recognized subcommand was given.
+    """
     p = argparse.ArgumentParser(
         prog="kernel_bench_multinode.py",
         description=(

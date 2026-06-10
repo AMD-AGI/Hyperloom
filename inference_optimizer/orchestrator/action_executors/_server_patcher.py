@@ -199,7 +199,15 @@ def ensure_sglang_patched_for_tracelens(
     """SGLang counterpart of :func:`ensure_vllm_patched_for_tracelens`.
     Applies the 10-patch roofline / shape-discovery set as a single
     atomic transaction (``--check`` all first, rollback on mid-apply
-    failure)."""
+    failure).
+
+    Args:
+        tracelens_root (Path | str | None): TraceLens checkout root;
+            falls back to ``$TRACELENS_ROOT`` when ``None``.
+
+    Returns:
+        bool: ``True`` if the SGLang install is in patched state at exit.
+    """
     plan = _discover_sglang_plan(tracelens_root)
     if plan is None:
         return False
@@ -244,11 +252,34 @@ def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
 
 
 def _patch_tree(tracelens_root: Path, leaf: str) -> Path:
-    """``<tracelens>/examples/custom_workflows/inference_analysis/<leaf>``."""
+    """Build a path under the TraceLens inference-analysis patch tree.
+
+    Args:
+        tracelens_root (Path): The resolved TraceLens checkout root.
+        leaf (str): The trailing path component (e.g. a patch subdir).
+
+    Returns:
+        Path: ``<tracelens>/examples/custom_workflows/inference_analysis/<leaf>``.
+    """
     return tracelens_root.joinpath(*_PATCH_TREE_REL, leaf)
 
 
 def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
+    """Build the vLLM patch plan for the installed vLLM version.
+
+    Probes the importable ``vllm`` module, locates the matching
+    TraceLens patch file and install layout, and assembles the
+    sentinel markers used to detect an already-patched install.
+
+    Args:
+        arg (Path | str | None): TraceLens checkout root, or ``None``
+            to read ``$TRACELENS_ROOT``.
+
+    Returns:
+        _PatchPlan | None: A fully-resolved plan, or ``None`` on any
+        fail-soft condition (TraceLens missing, vLLM not importable,
+        no matching patch, unexpected install layout).
+    """
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
         log.info(
@@ -301,6 +332,21 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
 
 
 def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
+    """Build the SGLang patch plan for the installed SGLang version.
+
+    Resolves the per-version patch directory, enforces the version
+    allowlist, picks the right apply root / strip count for editable
+    vs wheel layouts, and assembles the multi-file sentinel markers.
+
+    Args:
+        arg (Path | str | None): TraceLens checkout root, or ``None``
+            to read ``$TRACELENS_ROOT``.
+
+    Returns:
+        _PatchPlan | None: A fully-resolved plan, or ``None`` on any
+        fail-soft condition (TraceLens missing, sglang not importable,
+        unsupported version, no patches, unexpected install layout).
+    """
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
         log.info(
@@ -436,7 +482,14 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
 
 
 def _ensure_patched(plan: _PatchPlan) -> bool:
-    """Fast no-lock path → lock → re-check → atomic apply."""
+    """Drive a plan to patched state: fast check, lock, re-check, apply.
+
+    Args:
+        plan (_PatchPlan): The resolved patch plan to enforce.
+
+    Returns:
+        bool: ``True`` if the install is patched at exit, else ``False``.
+    """
     if _is_patched(plan):
         return True
     with _file_lock(_LOCK_PATH):
@@ -622,7 +675,17 @@ def _patch_apply(
 ) -> bool:
     """Real ``patch -p<strip> --fuzz=2`` apply (or reverse). Mirrors
     :func:`_patch_dry_run` but actually mutates the working tree.
-    Returns True iff rc == 0."""
+
+    Args:
+        patch_bin (str): Path to the ``patch`` executable.
+        patch_file (Path): The patch file to apply.
+        cwd (Path): Working directory the patch is applied relative to.
+        strip (int): The ``-p<N>`` strip count. Defaults to ``1``.
+        reverse (bool): Apply the patch in reverse when ``True``.
+
+    Returns:
+        bool: ``True`` iff the apply exits with return code 0.
+    """
     args = [patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", "--silent"]
     if reverse:
         args.append("--reverse")
@@ -653,7 +716,16 @@ def _patch_apply(
 
 
 def _git(git: str, args: Sequence[str], cwd: Path) -> bool:
-    """Run ``git <args>`` in ``cwd``. Returns True iff rc == 0."""
+    """Run ``git <args>`` in ``cwd``.
+
+    Args:
+        git (str): Path to the ``git`` executable.
+        args (Sequence[str]): Arguments passed after ``git``.
+        cwd (Path): Working directory for the invocation.
+
+    Returns:
+        bool: ``True`` iff the command exits with return code 0.
+    """
     try:
         result = subprocess.run(
             (git, *args),

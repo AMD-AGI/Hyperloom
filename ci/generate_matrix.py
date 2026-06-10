@@ -32,6 +32,12 @@ def generate_matrix(config_path: str = "ci-config.yaml", selected_models: str = 
 
 
 def main():
+    """Generate the matrix and write it to the GitHub Actions output.
+
+    Reads the model selection from the ``INPUT_MODELS`` environment variable,
+    builds the matrix, and appends it to the file named by ``GITHUB_OUTPUT``.
+    When that variable is unset, the matrix is pretty-printed to stdout instead.
+    """
     selected = os.environ.get("INPUT_MODELS", "")
     matrix = generate_matrix(selected_models=selected)
 

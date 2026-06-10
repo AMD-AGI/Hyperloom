@@ -18,6 +18,22 @@ DEFAULT_SERVICE_URL = "http://core42.example-internal-host.invalid/hyperloom-res
 
 
 def load_results(path: Path) -> list[dict[str, Any]]:
+    """Load result records from a JSON or NDJSON file.
+
+    Handles three on-disk shapes: a ``.ndjson`` file with one JSON object per
+    line, a JSON object wrapping a ``results`` list (or a single schema-versioned
+    result), and a top-level JSON list of result objects.
+
+    Args:
+        path (Path): Path to the results file to read.
+
+    Returns:
+        list[dict[str, Any]]: The parsed result records, or an empty list if
+        the payload does not match any recognized shape.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+    """
     if not path.exists():
         raise FileNotFoundError(f"input file not found: {path}")
 
@@ -125,6 +141,14 @@ def publish(
 
 
 def main() -> int:
+    """Parse CLI arguments, load results, and publish them.
+
+    Skips publishing (returning success) when no service URL is configured or
+    when the input file contains no results.
+
+    Returns:
+        int: Process exit code (``0`` on success or skip).
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, help="normalized_results.json or .ndjson")
     parser.add_argument(

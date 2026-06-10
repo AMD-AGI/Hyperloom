@@ -52,7 +52,18 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
 
 
 def normalize_upstream_category(raw: str) -> str:
-    """Normalize a TraceLens category string to a GEAK-facing label."""
+    """Normalize a TraceLens category string to a GEAK-facing label.
+
+    The raw value is lower-cased and its separators collapsed to underscores
+    before lookup in :data:`UPSTREAM_CATEGORY_TO_GEAK`.
+
+    Args:
+        raw (str): The upstream TraceLens category string.
+
+    Returns:
+        str: The mapped GEAK-facing label, ``"unknown"`` when ``raw`` is empty,
+            or the original ``raw`` value when no mapping exists.
+    """
 
     if not raw:
         return "unknown"
@@ -71,11 +82,31 @@ class TraceLensSkillRunResult:
 
 
 def shell_quote(path: Path | str) -> str:
+    """Shell-quote a path for safe inclusion in a command string.
+
+    Args:
+        path (Path | str): The path to quote.
+
+    Returns:
+        str: The string form of ``path`` quoted for POSIX shells.
+    """
     return shlex.quote(str(path))
 
 
 def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
-    """Create the command-prefix cache expected by the TraceLens skill."""
+    """Create the command-prefix cache expected by the TraceLens skill.
+
+    Writes a ``cache/cmd_prefix.txt`` file under ``output_dir`` whose contents
+    ``cd <tracelens_root> && {CMD}`` let the skill root every shell command at
+    the TraceLens project directory.
+
+    Args:
+        output_dir (Path): Directory under which the ``cache`` folder is created.
+        tracelens_root (Path): The TraceLens project root the prefix cd's into.
+
+    Returns:
+        Path: The path to the written ``cmd_prefix.txt`` file.
+    """
 
     cache_dir = output_dir / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -88,6 +119,21 @@ def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
 
 
 def infer_analysis_mode(framework: str, requested: str) -> str:
+    """Resolve the effective TraceLens analysis mode for a framework.
+
+    An explicit non-default ``requested`` mode always wins. Otherwise inference
+    frameworks (vllm/sglang/atom) default to ``"inference"`` grouping because
+    their traces share the chrome-trace shape produced by the torch profiler;
+    everything else falls back to the requested value or ``"default"``.
+
+    Args:
+        framework (str): The framework that produced the trace (e.g. ``vllm``).
+        requested (str): The caller-requested analysis mode, possibly empty or
+            ``"default"``.
+
+    Returns:
+        str: The resolved analysis mode string.
+    """
     requested = (requested or "").strip().lower()
     if requested and requested != "default":
         return requested
@@ -98,7 +144,19 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
 
 
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
-    """Find a graph-capture folder near a Magpie torch_trace input."""
+    """Find a graph-capture folder near a Magpie torch_trace input.
+
+    Checks the conventional ``capture_traces`` / ``graph_capture`` siblings of
+    the trace input directory and of the first trace file, returning the first
+    one that exists.
+
+    Args:
+        trace_input (Path): The trace input path (file or directory).
+        trace_files (list[Path]): Discovered trace files; only the first is used.
+
+    Returns:
+        Path | None: The capture folder if one exists nearby, else ``None``.
+    """
 
     candidates: list[Path] = []
     if trace_input.is_dir():
@@ -129,7 +187,25 @@ def build_orchestrator_prompt(
     analysis_mode: str,
     capture_folder: Path | None,
 ) -> str:
-    """Prompt a Claude SDK agent to execute the TraceLens standalone skill."""
+    """Prompt a Claude SDK agent to execute the TraceLens standalone skill.
+
+    Assembles the full natural-language instruction that pins every Step 0
+    input (paths, platform, framework, analysis/execution mode, capture folder)
+    so the agent can run the analysis-orchestrator workflow without prompting.
+
+    Args:
+        skill_path (Path): Path to the TraceLens skill file to follow.
+        trace_path (Path): Path to the trace file to analyze.
+        output_dir (Path): Directory where TraceLens outputs must be written.
+        tracelens_root (Path): The TraceLens project root.
+        platform (str): The target platform string.
+        framework (str): The framework that produced the trace.
+        analysis_mode (str): The requested analysis mode (resolved internally).
+        capture_folder (Path | None): Graph-capture folder for inference runs.
+
+    Returns:
+        str: The fully assembled orchestrator prompt text.
+    """
 
     analysis_mode = infer_analysis_mode(framework, analysis_mode)
     if analysis_mode == "inference" and capture_folder is not None:
@@ -189,6 +265,16 @@ When complete, respond with a short summary of the artifacts you wrote.
 
 
 def _import_sdk() -> tuple[Any, Any]:
+    """Import the Claude Agent SDK and return its query primitives.
+
+    Returns:
+        tuple[Any, Any]: The ``(query, ClaudeAgentOptions)`` callables from
+            ``claude_agent_sdk``.
+
+    Raises:
+        RuntimeError: If the SDK is not installed or lacks the expected
+            ``query`` / ``ClaudeAgentOptions`` attributes.
+    """
     try:
         import claude_agent_sdk as sdk  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised via caller fallback
@@ -201,6 +287,17 @@ def _import_sdk() -> tuple[Any, Any]:
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
+    """Yield text fragments from an SDK message.
+
+    Handles both content blocks exposing a ``.text`` attribute or ``"text"``
+    dict key, plus a top-level ``.result`` string.
+
+    Args:
+        message (Any): An SDK message object.
+
+    Yields:
+        str: Each non-empty text fragment found on the message.
+    """
     for block in list(getattr(message, "content", None) or []):
         text = getattr(block, "text", None)
         if isinstance(text, str) and text:
@@ -229,7 +326,36 @@ async def run_tracelens_skill(
     sdk_options_cls: Any | None = None,
     log: Callable[[str], None] | None = None,
 ) -> TraceLensSkillRunResult:
-    """Execute the standalone TraceLens skill with Claude SDK."""
+    """Execute the standalone TraceLens skill with Claude SDK.
+
+    Prepares the command-prefix cache and orchestrator prompt, drives the SDK
+    query loop, and treats the presence of ``analysis.md`` as the source of
+    truth: an SDK error after the report was written is recorded as metadata
+    rather than raised.
+
+    Args:
+        skill_path (Path): Path to the TraceLens skill file to follow.
+        trace_path (Path): Path to the trace file to analyze.
+        output_dir (Path): Directory where TraceLens outputs are written.
+        tracelens_root (Path): The TraceLens project root.
+        platform (str): The target platform string.
+        framework (str): The framework that produced the trace.
+        analysis_mode (str): The requested analysis mode.
+        capture_folder (Path | None): Graph-capture folder for inference runs.
+        budget_minutes (float): Soft time budget for the run (informational).
+        model (str | None): Optional model override; defaults to the SDK default.
+        sdk_query_factory (Callable[..., Any] | None): Optional injected query
+            factory (used by tests); imported from the SDK when ``None``.
+        sdk_options_cls (Any | None): Optional injected options class (used by
+            tests); imported from the SDK when ``None``.
+        log (Callable[[str], None] | None): Optional logging callback.
+
+    Returns:
+        TraceLensSkillRunResult: The artifacts produced by the run.
+
+    Raises:
+        RuntimeError: If ``analysis.md`` is not written by the run.
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix_path = write_local_cmd_prefix(output_dir, tracelens_root)
@@ -317,6 +443,16 @@ async def run_tracelens_skill(
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce a value to float, falling back to a default on failure.
+
+    Args:
+        value (Any): The value to coerce.
+        default (float): The value returned when ``value`` is ``None`` or not
+            convertible.
+
+    Returns:
+        float: The parsed float, or ``default`` on ``None`` / parse failure.
+    """
     try:
         if value is None:
             return default
@@ -376,6 +512,14 @@ _IMPACT_HIGH_RE = re.compile(
 
 
 def _parse_marker_attrs(blob: str) -> dict[str, str]:
+    """Parse ``key=value`` attributes from an HTML-comment marker blob.
+
+    Args:
+        blob (str): The inner text of a TraceLens marker comment.
+
+    Returns:
+        dict[str, str]: A mapping of attribute names to their string values.
+    """
     return dict(re.findall(r"(\w+)=([^\s>]+)", blob))
 
 
@@ -434,7 +578,15 @@ def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
 
 
 def _split_data_blocks(text: str) -> list[tuple[int, str, str]]:
-    """Yield ``(rank, title, body)`` for each compute-tier reasoning block."""
+    """Split the report into compute-tier reasoning blocks.
+
+    Args:
+        text (str): The full ``analysis.md`` report text.
+
+    Returns:
+        list[tuple[int, str, str]]: One ``(rank, title, body)`` triple per
+            compute-tier reasoning-candidate block found.
+    """
 
     blocks: list[tuple[int, str, str]] = []
     matches = list(_REASONING_MARKER_RE.finditer(text))
@@ -492,6 +644,27 @@ def _row_to_candidate(
     impact: dict[str, float],
     prose: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    """Convert one parsed data-table row into a hot-kernel candidate dict.
+
+    Maps the 9 canonical columns into typed candidate fields, preserves any
+    trailing extra columns under ``tracelens_extra_columns``, resolves the
+    launcher path to an absolute source file where possible, and attaches the
+    shared P-item prose.
+
+    Args:
+        headers (list[str]): Lower-cased column header names for ``cells``.
+        cells (list[str]): The row's cell strings, aligned with ``headers``.
+        category (str): The TraceLens category for the owning P-item.
+        rank (int): The P-item rank (1-based).
+        title (str): The P-item title.
+        library (str): The library name parsed from the P-item title.
+        impact (dict[str, float]): Impact scores for the owning P-item.
+        prose (dict[str, Any] | None): Shared P-item prose to attach, if any.
+
+    Returns:
+        dict[str, Any] | None: The candidate dict, or ``None`` when the row is
+            malformed (cell count mismatch) or names a placeholder operation.
+    """
     if len(cells) != len(headers):
         return None
     record = dict(zip(headers, cells))

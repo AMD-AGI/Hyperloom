@@ -19,6 +19,16 @@ from pathlib import Path
 #: Default KB root for framework-PR lessons; override via
 #: ``INFERENCE_OPTIMIZER_FA_KB_PATH``.
 def _default_kb_root() -> Path:
+    """Resolve the default KB root for framework-PR lessons.
+
+    Honours the ``INFERENCE_OPTIMIZER_FA_KB_PATH`` override when set;
+    otherwise derives a repo-relative path so ``framework-agent`` sits
+    next to ``inference_optimizer/``.
+
+    Returns:
+        Path: The ``framework_optimization`` directory under the resolved
+            KB root.
+    """
     override = os.environ.get("INFERENCE_OPTIMIZER_FA_KB_PATH", "").strip()
     if override:
         return Path(override) / "framework_optimization"
@@ -51,7 +61,23 @@ def _record(
     tps_delta_pct: float,
     session_id: str,
 ) -> dict:
-    """Build the canonical record dict (sync helper for testability)."""
+    """Build the canonical framework-PR outcome record dict.
+
+    Sync helper kept separate from the async writer for testability.
+
+    Args:
+        pr_url (str): URL of the upstream PR the patch came from.
+        pr_sha (str): Commit SHA of the PR head (cross-session dedup key).
+        patch_path (str): Local snapshot path of the applied patch.
+        outcome (str): One of :data:`ALLOWED_OUTCOMES`.
+        tps_delta_pct (float): %-throughput delta vs. the pre-integrate
+            baseline.
+        session_id (str): Orchestrator session id (audit hook).
+
+    Returns:
+        dict: The record with a ``ts`` timestamp plus the stringified /
+            coerced input fields.
+    """
     return {
         "ts": time.time(),
         "session_id": str(session_id or ""),
@@ -66,7 +92,14 @@ def _record(
 def _append_record_sync(record: dict) -> Path:
     """Append a single JSONL record under :data:`KB_ROOT`.
 
-    Returns the on-disk path so callers can log / surface it.
+    Creates the KB root directory if needed, then appends one JSON line.
+
+    Args:
+        record (dict): The record dict to serialise (see :func:`_record`).
+
+    Returns:
+        Path: The on-disk path of the ``lessons.jsonl`` file so callers
+            can log / surface it.
     """
     KB_ROOT.mkdir(parents=True, exist_ok=True)
     path = KB_ROOT / LESSONS_FILE
