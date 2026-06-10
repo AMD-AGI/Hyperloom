@@ -542,8 +542,12 @@ async def run_tracelens_skill(
         if transcript_fh is not None:
             try:
                 transcript_fh.close()
-            except OSError:
-                pass
+            except OSError as exc:
+                # Closing the diagnostic transcript must never abort an
+                # otherwise-successful run; surface it as a warning instead.
+                if log:
+                    log(f"[claude-sdk] WARNING: cannot close transcript "
+                        f"{transcript_path}: {exc}")
 
     # Final report is ``analysis.md`` (contract since #148; the v0.2 standalone_analysis.md
     # fallback was dropped in #203 for masking orchestrator failures with stale data).

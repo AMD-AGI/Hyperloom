@@ -1361,6 +1361,9 @@ def make_lifecycle_event(
         try:
             event["duration_s"] = round(float(duration_s), 3)
         except (TypeError, ValueError):
+            # A malformed duration_s is intentionally omitted rather than
+            # failing event creation: lifecycle logging is operator-facing
+            # diagnostics and must never break the orchestration loop.
             pass
     return event
 
