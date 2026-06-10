@@ -17,6 +17,7 @@ from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
     _LEGACY_BLOCK,
     _PATCH_SENTINEL,
     _PATCHED_BLOCK,
+    _REMOTE_TRUST_SENTINEL,
     _UPSTREAM_ATOMIC_HELPER,
     _extract_prepare_region,
     _upstream_is_already_atomic,
@@ -119,6 +120,20 @@ class _FakeBenchmarker:
 """
 
 
+_UPSTREAM_SGLANG_MI300X_SH = """\
+#!/usr/bin/env bash
+if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
+  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+    # Remote server: call Python benchmark_serving.py directly.
+    SERVER_MONITOR_ARGS=()
+    magpie_run_benchmark_serving_remote_direct || exit $?
+  else
+    run_benchmark_serving --model "$MODEL" || exit $?
+  fi
+fi
+"""
+
+
 # Genuine layout drift: unrecognisable prepare body + atomic ops only in an
 # unrelated method. Region scoping must keep this out of "already atomic".
 _GARBAGE_WITH_UNRELATED_ATOMIC_PY = """\
@@ -160,6 +175,15 @@ def _write_magpie_tree(root: Path, benchmarker_src: str) -> Path:
     bench_py = bench_dir / "benchmarker.py"
     bench_py.write_text(benchmarker_src, encoding="utf-8")
     return bench_py
+
+
+def _write_sglang_script(root: Path, src: str = _UPSTREAM_SGLANG_MI300X_SH) -> Path:
+    script_dir = root / "Magpie" / "scripts" / "benchmark"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script = script_dir / "sglang_mi300x.sh"
+    script.write_text(src, encoding="utf-8")
+    script.chmod(0o755)
+    return script
 
 
 # Basic shape / sanity
@@ -204,6 +228,21 @@ def test_patch_is_idempotent(fake_magpie: Path):
     after_second = bench_py.read_text(encoding="utf-8")
     assert after_first == after_second
     assert after_second.count(_PATCH_SENTINEL) == 1
+
+
+def test_sglang_remote_client_trust_patch_is_env_gated(fake_magpie: Path):
+    script = _write_sglang_script(fake_magpie)
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    text = script.read_text(encoding="utf-8")
+
+    assert _REMOTE_TRUST_SENTINEL in text
+    assert '[[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]' in text
+    assert "magpie_run_benchmark_serving_remote_direct trust" in text
+    assert "magpie_run_benchmark_serving_remote_direct || exit $?" in text
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    assert script.read_text(encoding="utf-8") == text
 
 
 def test_patch_preserves_file_mode(fake_magpie: Path):
