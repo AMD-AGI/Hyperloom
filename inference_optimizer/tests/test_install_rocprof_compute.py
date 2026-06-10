@@ -87,6 +87,7 @@ export PATH="{fake_bin}:/usr/bin:/bin"
 export ROCPROF_COMPUTE_BIN="{rocprof_bin}"
 export HYPERLOOM_ROCPROF_COMPUTE_PATH="{rocprof_path}"
 export ROCPROF_APT_BIN="{apt_bin}"
+export PYTHON="$(command -v python3 || echo /usr/bin/python3)"
 log() {{ echo "[log] $*"; }}
 warn() {{ echo "[warn] $*"; }}
 CHECK_ONLY={check_only}
@@ -147,3 +148,45 @@ def test_dry_run_does_not_install(tmp_path: Path) -> None:
     )
     assert not apt_called, f"--dry-run must not install:\n{out}"
     assert "would install" in out
+
+
+def test_present_path_persisted_for_ray_workers(tmp_path: Path) -> None:
+    """ensure_rocprof_compute must export the resolved absolute path so
+    Ray workers with a trimmed PATH can locate the binary (root cause of
+    the 2026-06-09 rocprof failures)."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    rocprof_stub = tmp_path / "rocprof-compute-stub"
+    _make_exec(rocprof_stub, "#!/bin/sh\nexit 0\n")
+    # Feed the path via the legacy ROCPROF_COMPUTE_PATH input (not the
+    # HYPERLOOM_ output var) so the assertion truly observes the export,
+    # not a leaked input.
+    harness = f"""#!/usr/bin/env bash
+set -euo pipefail
+export PATH="{fake_bin}:/usr/bin:/bin"
+export ROCPROF_COMPUTE_BIN="definitely-not-a-real-cmd"
+unset HYPERLOOM_ROCPROF_COMPUTE_PATH
+export ROCPROF_COMPUTE_PATH="{rocprof_stub}"
+export ROCPROF_APT_BIN="definitely-not-a-real-apt"
+export PYTHON="$(command -v python3 || echo /usr/bin/python3)"
+log() {{ echo "[log] $*"; }}
+warn() {{ echo "[warn] $*"; }}
+CHECK_ONLY=0
+DRY_RUN=0
+
+{_extract_ensure_rocprof_compute()}
+
+ensure_rocprof_compute
+echo "RESOLVED=${{HYPERLOOM_ROCPROF_COMPUTE_PATH:-<unset>}}"
+"""
+    script = tmp_path / "harness.sh"
+    script.write_text(harness, encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=REPO_ROOT, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    assert proc.returncode == 0, f"harness failed:\n{proc.stdout}"
+    assert f"RESOLVED={rocprof_stub}" in proc.stdout, (
+        f"resolved path must be persisted for Ray workers:\n{proc.stdout}"
+    )
+    assert "rocprof-compute present at" in proc.stdout
