@@ -79,37 +79,56 @@ def build(
     state = _load_state(sd, warnings)
     manifest = _load_manifest(sd, warnings)
 
+    # Author-time recorder fragments (write-side spool). When present they are
+    # the source of truth for their section (they capture facts the collectors
+    # can miss: pre-dispatch/infra failures, pruned robustness signals, ...);
+    # when absent the legacy collectors are used as fallback, so historical
+    # sessions and recorder-disabled runs behave exactly as before.
+    assembled = _load_assembled(sd, warnings)
+
+    def _pick(section: str, collector_value: Any) -> Any:
+        """Fragment value if recorded and non-empty, else the collector value."""
+        frag = assembled.get(section)
+        if isinstance(frag, list) and frag:
+            return frag
+        if isinstance(frag, dict) and frag:
+            return frag
+        return collector_value
+
     from datetime import datetime, timezone
     exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # Section collectors (each catches its own errors via warnings).
-    session_meta      = _safe_collect("session",
+    session_meta      = _pick("session", _safe_collect("session",
                                        lambda: collectors.collect_session(sd, state, manifest, warnings),
-                                       warnings)
-    workload          = _safe_collect("workload",
+                                       warnings))
+    workload          = _pick("workload", _safe_collect("workload",
                                        lambda: collectors.collect_workload(state, manifest, warnings),
-                                       warnings)
-    baseline          = _safe_collect("baseline",
+                                       warnings))
+    baseline          = _pick("baseline", _safe_collect("baseline",
                                        lambda: collectors.collect_baseline(sd, state, warnings),
-                                       warnings)
-    final             = _safe_collect("final",
+                                       warnings))
+    final             = _pick("final", _safe_collect("final",
                                        lambda: collectors.collect_final(sd, state, warnings),
-                                       warnings)
-    phase_timeline    = _safe_collect("phase_timeline",
+                                       warnings))
+    phase_timeline    = _pick("phase_timeline", _safe_collect("phase_timeline",
                                        lambda: collectors.collect_phase_timeline(sd, state, warnings),
-                                       warnings)
+                                       warnings))
+    # Derived from the resolved (fragment-or-collector) phase_timeline.
     phase_segments    = _safe_collect("phase_segments",
                                        lambda: collectors.collect_phase_segments(
                                            state, phase_timeline, warnings,
                                        ),
                                        warnings,
                                        default=[])
-    geak_invocations, oob_invocations = _safe_collect(
+    geak_c, oob_c = _safe_collect(
         "invocations",
         lambda: collectors.collect_kernel_invocations(sd, warnings),
         warnings,
         default=([], []),
     )
+    geak_invocations = _pick("geak_invocations", geak_c)
+    oob_invocations = _pick("oob_invocations", oob_c)
     capability_summary = _safe_collect("capability_summary",
                                         lambda: collectors.collect_capability_summary(
                                             state, geak_invocations, oob_invocations, warnings,
@@ -120,18 +139,18 @@ def build(
                                             sd, state, geak_invocations, oob_invocations, warnings,
                                         ),
                                         warnings)
-    explore_search     = _safe_collect("explore_search",
+    explore_search     = _pick("explore_search", _safe_collect("explore_search",
                                         lambda: collectors.collect_explore_search(state, warnings),
-                                        warnings)
-    sweep              = _safe_collect("sweep",
+                                        warnings))
+    sweep              = _pick("sweep", _safe_collect("sweep",
                                         lambda: collectors.collect_sweep(sd, state, warnings),
-                                        warnings)
-    critic_robustness  = _safe_collect("critic_robustness",
+                                        warnings))
+    critic_robustness  = _pick("critic_robustness", _safe_collect("critic_robustness",
                                         lambda: collectors.collect_critic_robustness(sd, warnings),
-                                        warnings)
-    telemetry          = _safe_collect("telemetry",
+                                        warnings))
+    telemetry          = _pick("telemetry", _safe_collect("telemetry",
                                         lambda: collectors.collect_telemetry(sd, state, warnings),
-                                        warnings)
+                                        warnings))
     attribution        = _safe_collect("attribution",
                                         lambda: collectors.collect_attribution(
                                             state, geak_invocations, oob_invocations,
@@ -139,61 +158,61 @@ def build(
                                             warnings,
                                         ),
                                         warnings)
-    kb_provenance      = _safe_collect("kb_provenance",
+    kb_provenance      = _pick("kb_provenance", _safe_collect("kb_provenance",
                                         lambda: collectors.collect_kb_provenance(
                                             session_dir, state, manifest, warnings,
                                         ),
-                                        warnings)
+                                        warnings))
     # specialist sub-agent dispatch records (single source: state + on-disk transcripts).
-    specialist_runs    = _safe_collect("specialist_runs",
+    specialist_runs    = _pick("specialist_runs", _safe_collect("specialist_runs",
                                         lambda: collectors.collect_specialist_runs(
                                             sd, state, warnings,
                                             include_transcripts=include_transcripts,
                                         ),
                                         warnings,
-                                        default=[])
+                                        default=[]))
     # Raw ``state.optimization_stack[]`` passthrough (full per-entry evidence; never raises).
-    optimization_stack = _safe_collect("optimization_stack",
+    optimization_stack = _pick("optimization_stack", _safe_collect("optimization_stack",
                                         lambda: collectors.collect_optimization_stack(state),
                                         warnings,
-                                        default=[])
+                                        default=[]))
     # Hot-kernel roofline table (Dashboard §1) from ``<sd>/reports/kernel_roofline.json``.
-    kernel_roofline    = _safe_collect("kernel_roofline",
+    kernel_roofline    = _pick("kernel_roofline", _safe_collect("kernel_roofline",
                                         lambda: collectors.collect_kernel_roofline(
                                             sd, warnings,
                                         ),
                                         warnings,
-                                        default={})
+                                        default={}))
     # Kernel-agent attempt outcome summary (Breakdown panel integration spec §A1);
     # mirrors ``reports/kernel_optimization_summary.json``, empty → dashboard hides Block 1.
-    kernel_optimization_summary = _safe_collect(
+    kernel_optimization_summary = _pick("kernel_optimization_summary", _safe_collect(
         "kernel_optimization_summary",
         lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
         warnings,
-        default={})
+        default={}))
     # Post-optimization concurrency sweep (Breakdown panel integration spec §A2);
     # mirrors ``reports/conc_sweep_summary.json``, empty → dashboard hides Block 2.
-    conc_sweep_summary = _safe_collect(
+    conc_sweep_summary = _pick("conc_sweep_summary", _safe_collect(
         "conc_sweep_summary",
         lambda: collectors.collect_conc_sweep_summary(sd, warnings),
         warnings,
-        default={})
+        default={}))
     # Per-snapshot roofline comparison list (markdown ``## Roofline`` source) from ``state.roofline_snapshots``.
-    roofline           = _safe_collect("roofline",
+    roofline           = _pick("roofline", _safe_collect("roofline",
                                         lambda: collectors.collect_roofline(
                                             state, warnings,
                                         ),
                                         warnings,
-                                        default=[])
+                                        default=[]))
     # Optimization-progress curve (Dashboard §2): stack ledger + ceiling/target
     # lines from state.json. Renamed from ``roofline`` to avoid clashing with the
     # list-shaped section above.
-    roofline_progress  = _safe_collect("roofline_progress",
+    roofline_progress  = _pick("roofline_progress", _safe_collect("roofline_progress",
                                         lambda: collectors.collect_roofline_progress(
                                             sd, state, manifest, warnings,
                                         ),
                                         warnings,
-                                        default={})
+                                        default={}))
 
     source_files = collectors.collect_source_files(
         sd,
@@ -248,6 +267,31 @@ def build(
         "warnings":            warnings,
         "source_files":        source_files,
     }
+
+
+def _load_assembled(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Assemble recorder fragments into ``{section: value}`` (empty on opt-out
+    or when no fragments exist). Never raises — a recorder bug must not poison
+    the export; it just falls back to collectors."""
+    disabled = os.environ.get(
+        "INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER", "",
+    ).strip().lower() in ("1", "true", "yes")
+    if disabled:
+        return {}
+    try:
+        from .recorder import assemble_parts, has_parts
+
+        if not has_parts(session_dir):
+            return {}
+        out = assemble_parts(session_dir, warnings=warnings)
+        return out if isinstance(out, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("recorder: assemble_parts failed")
+        warnings.append(f"recorder: assemble_parts failed: {type(exc).__name__}: {exc}")
+        return {}
 
 
 def _safe_collect(

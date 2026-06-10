@@ -526,6 +526,15 @@ def _write_kernel_opt_summary(
         out_path = output_dir / "kernel_optimization_summary.json"
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
+        # Author-time breakdown capture: mirror the summary into the recorder.
+        try:
+            from ...breakdown.recorder import instrument
+            instrument.record_singleton_section(
+                session_dir, "kernel_optimization_summary", summary,
+                producer="coordinator",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return out_path
     except Exception as exc:  # noqa: BLE001
         log.warning(

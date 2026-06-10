@@ -477,6 +477,11 @@ class SharedState:
     # Orchestration working memory — durable compacted reasoning snapshot for compaction + crash-recovery rebuild; Coordinator-only writer, not in session_breakdown.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
 
+    # Non-field instance attr (set in load_or_init / save): session dir used by
+    # breakdown instrumentation. Plain class attr => not a dataclass field, so
+    # asdict()/state.json never serialize it.
+    _session_dir = None
+
     # Persistence
     @classmethod
     def state_path(cls, session_dir: Path) -> Path:
@@ -487,10 +492,15 @@ class SharedState:
         """Load existing ``state.json`` or return a fresh blank instance."""
         path = cls.state_path(session_dir)
         if not path.exists():
-            return cls()
-        with path.open(encoding="utf-8") as f:
-            raw = json.load(f)
-        return cls.from_dict(raw)
+            inst = cls()
+        else:
+            with path.open(encoding="utf-8") as f:
+                raw = json.load(f)
+            inst = cls.from_dict(raw)
+        # Remember the session dir so breakdown instrumentation can record
+        # fragments at author time (non-field attr; not serialized by asdict).
+        inst._session_dir = Path(session_dir)
+        return inst
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
@@ -710,6 +720,14 @@ class SharedState:
             except OSError:
                 pass
             raise
+        # Author-time breakdown capture: snapshot state-owned sections into the
+        # recorder spool right after persisting. Best-effort; never blocks save.
+        self._session_dir = Path(session_dir)
+        try:
+            from ..breakdown.recorder import instrument
+            instrument.snapshot_state_sections(session_dir, self)
+        except Exception:  # noqa: BLE001
+            pass
 
     # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
@@ -1085,6 +1103,16 @@ class SharedState:
         """Capture kernel_optimization_handler result for the next Orch turn; empty kernel_id no-op, non-KEEP can't overwrite a pending KEEP, retires kernel_id (r24 guard) after >= max_partial PARTIALs (INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL)."""
         if not isinstance(result, dict):
             return
+        # Author-time breakdown capture: record geak/oob invocations (incl.
+        # backend + pre-dispatch failures) before the metadata-less early
+        # return so no failed attempt becomes invisible in the geak/oob view.
+        try:
+            from ..breakdown.recorder import instrument
+            instrument.record_kernel_invocations(
+                getattr(self, "_session_dir", None), result,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         kernel_id = str(result.get("kernel_id") or "")
         if not kernel_id:
             # Metadata-less failure: preserve prior streaming-record KEEP.
@@ -1509,6 +1537,14 @@ class SharedState:
             history = history[-max_history:]
         setattr(self, attempts_attr, history)
         setattr(self, last_attr, dict(entry))
+        # Author-time breakdown capture: one phase_timeline event per attempt.
+        try:
+            from ..breakdown.recorder import instrument
+            instrument.record_phase_event(
+                getattr(self, "_session_dir", None), action=action, entry=entry,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return entry
 
     def record_action_failure(
@@ -1881,13 +1917,24 @@ class SharedState:
         round_id = str(entry.get("round_id") or "").strip()
         if not round_id:
             self.specialist_rounds.append(dict(entry))
-            return
-        existing = self.specialist_rounds
-        for i, prev in enumerate(existing):
-            if isinstance(prev, dict) and str(prev.get("round_id") or "") == round_id:
-                existing[i] = dict(entry)
-                return
-        existing.append(dict(entry))
+        else:
+            existing = self.specialist_rounds
+            matched = False
+            for i, prev in enumerate(existing):
+                if isinstance(prev, dict) and str(prev.get("round_id") or "") == round_id:
+                    existing[i] = dict(entry)
+                    matched = True
+                    break
+            if not matched:
+                existing.append(dict(entry))
+        # Author-time breakdown capture: one specialist_runs item per round.
+        try:
+            from ..breakdown.recorder import instrument
+            instrument.record_specialist_round(
+                getattr(self, "_session_dir", None), entry,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def bump_specialist_domain_empty_streak(
         self, domain: str, *, empty: bool,

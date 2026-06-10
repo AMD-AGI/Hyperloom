@@ -523,6 +523,14 @@ async def run_conc_sweep(
             encoding="utf-8",
         )
         _write_csv(csv_path, baseline_points + optimized_points)
+        # Author-time breakdown capture: mirror the summary into the recorder.
+        try:
+            from ..breakdown.recorder import instrument
+            instrument.record_singleton_section(
+                session_dir, "conc_sweep_summary", payload, producer="conc_sweep",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         # final.json pointer is added by report.py at CLOSE (this action runs before CLOSE).
 
     log.info(

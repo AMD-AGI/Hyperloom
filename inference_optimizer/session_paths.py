@@ -125,6 +125,16 @@ def patches_dir(session_dir: Path, kernel_id: str) -> Path:
     return Path(session_dir) / "patches" / kid
 
 
+# Session-breakdown record fragments (recorder write-side spool).
+def breakdown_parts_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/breakdown/parts/`` — per-producer breakdown record
+    fragments. Each owner writes its own files here (atomic + uniquely named);
+    the exporter assembles them into ``session_breakdown.json``. Single-owner
+    per section, so there is no cross-producer write contention.
+    """
+    return Path(session_dir) / "runtime" / "breakdown" / "parts"
+
+
 # Reports / logs
 def reports_dir(session_dir: Path) -> Path:
     return Path(session_dir) / "reports"
@@ -339,6 +349,7 @@ __all__ = [
     "agent_outbox",
     "agent_persona",
     "agent_prompt_snapshot",
+    "breakdown_parts_dir",
     "competitor_target_json",
     "cortex_audit_jsonl",
     "cortex_dead_letter_ndjson",

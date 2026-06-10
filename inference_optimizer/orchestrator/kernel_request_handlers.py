@@ -1717,6 +1717,25 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+def _record_kernel_roofline_sidecar(session_dir: Path) -> None:
+    """Transcribe ``reports/kernel_roofline.json`` (written by the external
+    kernel-agent tool) into the breakdown recorder as a ``kernel_roofline``
+    singleton. Best-effort; never raises."""
+    try:
+        sidecar_path = Path(session_dir) / "reports" / "kernel_roofline.json"
+        if not sidecar_path.is_file():
+            return
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or not payload:
+            return
+        from ..breakdown.recorder import instrument
+        instrument.record_singleton_section(
+            session_dir, "kernel_roofline", payload, producer="kernel-agent",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
     """Resolve the TraceLens/device kernel name for a roofline sidecar row."""
     sidecar_path = session_dir / "reports" / "kernel_roofline.json"
@@ -1918,6 +1937,9 @@ async def _run_after_kernel_opt_rocprof(
             rocprof_status=status,
             phase="after_kernel_opt",
         )
+        # Author-time breakdown capture: transcribe the external tool's sidecar
+        # (reports/kernel_roofline.json) into the recorder right after it lands.
+        _record_kernel_roofline_sidecar(session_dir)
     except Exception as exc:
         log.warning("integrate: after_kernel_opt sidecar update failed: %s", exc)
 
