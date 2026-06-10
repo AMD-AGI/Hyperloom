@@ -141,6 +141,11 @@ GEAK and OOB submit Ray tasks with `num_gpus>=1`. If Ray is started with
 ```bash
 RAY_NUM_GPUS="${RAY_NUM_GPUS:-$(python3 -c 'import torch; print(torch.cuda.device_count() or 1)')}"
 ray stop --force || true
+# issue #433: raise the soft open-files limit before `ray start` so the
+# raylet does not abort / zombie at the container default (1024). Needs a
+# container launched with `--ulimit nofile=1048576` (>= 65536) for the hard
+# cap; `install.sh` and the Python backends apply the same preflight.
+ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true
 ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 ray status
 ```

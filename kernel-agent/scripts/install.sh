@@ -613,6 +613,51 @@ PY
   fi
 }
 
+# Minimum soft `ulimit -n` the Ray raylet needs to stay up (issue #433).
+# The raylet opens a large number of fds (sockets, plasma store, per-worker
+# pipes); at the container default soft limit (1024) it aborts on startup /
+# lingers as a zombie that only `ray stop --force` clears. Operators can
+# override via RAY_MIN_NOFILE.
+RAY_MIN_NOFILE="${RAY_MIN_NOFILE:-65536}"
+
+# Raise this shell's soft open-files limit before `ray start` so the raylet
+# child inherits a high enough ceiling (issue #433). Raising the soft limit
+# up to the hard cap needs no privileges; only `docker run --ulimit
+# nofile=...` at container launch can lift the hard cap, so when the hard cap
+# is itself below the target we raise soft as high as allowed and warn.
+ensure_fd_limit_for_ray() {
+  local soft hard target
+  soft="$(ulimit -Sn 2>/dev/null || echo unknown)"
+  hard="$(ulimit -Hn 2>/dev/null || echo unknown)"
+  case "$soft" in
+    ''|*[!0-9]*)
+      log "fd-limit: soft nofile unknown ('$soft'); skipping raylet fd preflight (issue #433)"
+      return 0
+      ;;
+  esac
+  if [ "$soft" -ge "$RAY_MIN_NOFILE" ]; then
+    log "fd-limit: soft nofile=$soft already >= $RAY_MIN_NOFILE"
+    return 0
+  fi
+  target="$RAY_MIN_NOFILE"
+  case "$hard" in
+    unlimited|''|*[!0-9]*) : ;;
+    *) [ "$hard" -lt "$RAY_MIN_NOFILE" ] && target="$hard" ;;
+  esac
+  if ulimit -Sn "$target" 2>/dev/null; then
+    log "fd-limit: raised soft nofile $soft -> $(ulimit -Sn) before 'ray start' (issue #433)"
+  else
+    warn "fd-limit: could not raise soft nofile to $target (soft=$soft hard=$hard); Ray raylet may be unstable. Launch container with --ulimit nofile=1048576 (issue #433)."
+  fi
+  case "$hard" in
+    unlimited|''|*[!0-9]*) : ;;
+    *)
+      [ "$hard" -lt "$RAY_MIN_NOFILE" ] && \
+        warn "fd-limit: hard nofile cap=$hard < $RAY_MIN_NOFILE; only 'docker run --ulimit nofile=1048576' lifts the hard cap (issue #433)."
+      ;;
+  esac
+}
+
 # Idempotently bring up a Ray head node. Kernel backends submit Ray tasks with
 # `num_gpus>=1`; if no head is running (or one is running with --num-gpus=0)
 # kernel optimization will hang forever even when GPUs are idle. We:
@@ -634,6 +679,9 @@ ensure_ray_started() {
     return 0
   fi
   log "no live ray head detected; starting one"
+  # issue #433: raise fd limit BEFORE starting the head so the raylet inherits
+  # a ceiling high enough to stay up (container default 1024 makes it abort).
+  ensure_fd_limit_for_ray
   ray stop --force >/dev/null 2>&1 || true
   local num_gpus
   num_gpus="$(python3 - <<'PY' 2>/dev/null || echo 0
