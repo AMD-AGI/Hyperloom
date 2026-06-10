@@ -129,6 +129,54 @@ def test_detect_rope_in_nested_text_config(tmp_path):
     assert reason is not None
 
 
+def test_detect_dual_chunk_blocks_on_amd(tmp_path):
+    m = tmp_path / "dual_chunk_amd"
+    _write_config(
+        m,
+        model_type="qwen2",
+        max_position_embeddings=1010000,
+        dual_chunk_attention_config={"chunk_size": 262144},
+    )
+    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    assert reason is not None
+    assert "dual_chunk" in reason
+
+
+def test_detect_dual_chunk_not_blocked_off_amd(tmp_path):
+    m = tmp_path / "dual_chunk_non_amd"
+    _write_config(
+        m,
+        model_type="qwen2",
+        max_position_embeddings=1010000,
+        dual_chunk_attention_config={"chunk_size": 262144},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_unregistered_custom_config_blocks(tmp_path):
+    m = tmp_path / "kimi_k2"
+    _write_config(
+        m,
+        model_type="kimi_k2",
+        max_position_embeddings=131072,
+        auto_map={"AutoConfig": "configuration_deepseek.DeepseekV3Config"},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "kimi_k2" in reason
+
+
+def test_detect_custom_automap_known_type_not_blocked(tmp_path):
+    m = tmp_path / "known_automap"
+    _write_config(
+        m,
+        model_type="llama",
+        max_position_embeddings=8192,
+        auto_map={"AutoConfig": "configuration_custom.CustomConfig"},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
 # ---------------------------------------------------------------------------
 # _preflight_model_config_compat — persistence + return contract
 # ---------------------------------------------------------------------------

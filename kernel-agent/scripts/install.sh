@@ -1280,6 +1280,7 @@ write_env_file() {
     [ -n "${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}" ] && echo "export GEAK_SAVE_TO_KNOWLEDGE_BASE='${GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL}'"
     [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
     [ -n "${CODEX_MODEL_VAL}" ] && echo "export CODEX_MODEL='${CODEX_MODEL_VAL}'"
+    [ -n "${HYPERLOOM_ROCPROF_COMPUTE_PATH:-}" ] && echo "export HYPERLOOM_ROCPROF_COMPUTE_PATH='${HYPERLOOM_ROCPROF_COMPUTE_PATH}'"
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"

@@ -741,14 +741,102 @@ ensure_bench_serving_deps() {
 ROCPROF_COMPUTE_BIN="${ROCPROF_COMPUTE_BIN:-rocprof-compute}"
 ROCPROF_COMPUTE_PATH="${HYPERLOOM_ROCPROF_COMPUTE_PATH:-${ROCPROF_COMPUTE_PATH:-/opt/rocm/bin/rocprof-compute}}"
 ROCPROF_APT_BIN="${ROCPROF_APT_BIN:-apt-get}"
+ROCPROF_REQUIREMENTS="${ROCPROF_REQUIREMENTS:-}"
 
 _rocprof_compute_present() {
   command -v "$ROCPROF_COMPUTE_BIN" >/dev/null 2>&1 || [ -x "$ROCPROF_COMPUTE_PATH" ]
 }
 
+_rocprof_compute_runnable() {
+  local bin="$1"
+  "$bin" --version >/dev/null 2>&1
+}
+
+_rocprof_find_requirements() {
+  local bin="$1"
+  if [ -n "$ROCPROF_REQUIREMENTS" ] && [ -f "$ROCPROF_REQUIREMENTS" ]; then
+    echo "$ROCPROF_REQUIREMENTS"; return 0
+  fi
+  local hint
+  hint="$("$bin" --version 2>&1 | grep -oP '(?<=See: )\S+requirements\.txt' | head -1)" || true
+  if [ -n "$hint" ] && [ -f "$hint" ]; then
+    echo "$hint"; return 0
+  fi
+  local d
+  for d in /opt/rocm/libexec/rocprofiler-compute /opt/rocm-*/libexec/rocprofiler-compute; do
+    if [ -f "$d/requirements.txt" ]; then
+      echo "$d/requirements.txt"; return 0
+    fi
+  done
+  return 1
+}
+
+_rocprof_fix_python_deps() {
+  local bin="$1"
+  if _rocprof_compute_runnable "$bin"; then return 0; fi
+  log "rocprof-compute binary present but --version failed; checking Python deps"
+  local req
+  if ! req="$(_rocprof_find_requirements "$bin")"; then
+    warn "rocprof-compute --version failed and requirements.txt not found; roofline may be degraded"
+    return 1
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute deps missing (check-only; would pip install -r $req)"
+    return 1
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would pip install rocprof-compute Python deps from $req"
+    return 1
+  fi
+  # vllm images ship apt-installed python3-blinker 1.4 (distutils
+  # egg-info, no RECORD) which pip cannot uninstall.
+  if "$PYTHON" -c "import vllm" >/dev/null 2>&1; then
+    log "vllm detected; pre-installing blinker to work around distutils conflict"
+    "$PYTHON" -m pip install --quiet --no-cache-dir --break-system-packages \
+      --ignore-installed "blinker>=1.9" >/dev/null 2>&1 || true
+  fi
+  log "installing rocprof-compute Python deps from $req"
+  if "$PYTHON" -m pip install --quiet --no-cache-dir --break-system-packages \
+       -r "$req" >/dev/null 2>&1 \
+     && _rocprof_compute_runnable "$bin"; then
+    log "rocprof-compute Python deps installed OK"
+    return 0
+  fi
+  warn "rocprof-compute Python dep install failed; roofline may be degraded"
+  return 1
+}
+
+_rocprof_fix_pandas3() {
+  # rocprof-compute 3.4.0 is incompatible with pandas 3.0+ (Arrow
+  # string backend changes dtype, breaking Agent_Id conversion).
+  if "$PYTHON" -c "import pandas; v=tuple(int(x) for x in pandas.__version__.split('.')[:2]); exit(0 if v>=(3,0) else 1)" 2>/dev/null; then
+    log "pandas 3.x detected; downgrading to 2.x for rocprof-compute compat"
+    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      log "would pip install 'pandas>=2.1,<3'"
+      return 0
+    fi
+    "$PYTHON" -m pip install --quiet --no-cache-dir --break-system-packages \
+      "pandas>=2.1,<3" >/dev/null 2>&1 \
+      && log "pandas downgraded to $("$PYTHON" -c 'import pandas; print(pandas.__version__)')" \
+      || warn "pandas downgrade failed; rocprof-compute roofline may produce empty results"
+  fi
+}
+
 ensure_rocprof_compute() {
   if _rocprof_compute_present; then
-    log "rocprof-compute present"
+    # Persist the resolved absolute path so Ray workers (trimmed PATH) can find it.
+    local resolved
+    resolved="$(command -v "$ROCPROF_COMPUTE_BIN" 2>/dev/null)" || resolved=""
+    [ -z "$resolved" ] && [ -x "$ROCPROF_COMPUTE_PATH" ] && resolved="$ROCPROF_COMPUTE_PATH"
+    if [ -n "$resolved" ]; then
+      export HYPERLOOM_ROCPROF_COMPUTE_PATH="$resolved"
+      _rocprof_fix_python_deps "$resolved" || true
+      _rocprof_fix_pandas3
+      log "rocprof-compute present at ${resolved}"
+    else
+      _rocprof_fix_pandas3
+      log "rocprof-compute present"
+    fi
     return 0
   fi
   if ! command -v "$ROCPROF_APT_BIN" >/dev/null 2>&1; then
@@ -768,7 +856,13 @@ ensure_rocprof_compute() {
   if "$ROCPROF_APT_BIN" update -qq >/dev/null 2>&1 \
       && "$ROCPROF_APT_BIN" install -y --no-install-recommends rocprofiler-compute >/dev/null 2>&1 \
       && _rocprof_compute_present; then
-    log "rocprofiler-compute installed OK"
+    local resolved
+    resolved="$(command -v "$ROCPROF_COMPUTE_BIN" 2>/dev/null)" || resolved=""
+    [ -z "$resolved" ] && [ -x "$ROCPROF_COMPUTE_PATH" ] && resolved="$ROCPROF_COMPUTE_PATH"
+    [ -n "$resolved" ] && export HYPERLOOM_ROCPROF_COMPUTE_PATH="$resolved"
+    [ -n "$resolved" ] && _rocprof_fix_python_deps "$resolved" || true
+    _rocprof_fix_pandas3
+    log "rocprofiler-compute installed OK${resolved:+ at ${resolved}}"
   else
     warn "rocprofiler-compute install failed; kernel roofline data will be skipped (preinstall it in the image to fix)"
   fi

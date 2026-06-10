@@ -313,16 +313,15 @@ def test_dual_chunk_injects_via_nested_text_config(tmp_path):
     assert "--attention-backend dual_chunk_flash_attn" in out
 
 
-def test_dual_chunk_falls_back_to_triton_on_amd(tmp_path, monkeypatch):
-    """On AMD/ROCm dual_chunk_flash_attn is unsupported (sm90+), so the
-    injected backend must fall back to triton."""
+def test_dual_chunk_on_amd_returns_canonical_backend(tmp_path, monkeypatch):
+    """AMD dual-chunk models are blocked by preflight; if inject still runs
+    it should return the canonical backend (not triton which sglang rejects)."""
     monkeypatch.setattr(
         "inference_optimizer.cli._autodetect_gpu_type", lambda: "mi300x",
     )
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
     out = inject_sglang_attention_backend("--foo bar", "sglang", model)
-    assert "--attention-backend triton" in out
-    assert "dual_chunk_flash_attn" not in out
+    assert "--attention-backend dual_chunk_flash_attn" in out
     assert "--foo bar" in out
 
 
@@ -332,8 +331,7 @@ def test_dual_chunk_uses_explicit_gpu_type_before_autodetect(tmp_path):
     out = inject_sglang_attention_backend(
         "--foo bar", "sglang", model, gpu_type="mi300x",
     )
-    assert "--attention-backend triton" in out
-    assert "dual_chunk_flash_attn" not in out
+    assert "--attention-backend dual_chunk_flash_attn" in out
 
 
 def test_dual_chunk_backend_env_override(tmp_path, monkeypatch):
@@ -387,5 +385,4 @@ def test_materialize_sglang_uses_runner_type_for_dual_chunk_backend(tmp_path):
         tmp_path, framework="sglang", model=model, runner_type="mi300x",
     )
     sglang_args = envs["EXTRA_SGLANG_ARGS"]
-    assert "--attention-backend triton" in sglang_args
-    assert "dual_chunk_flash_attn" not in sglang_args
+    assert "--attention-backend dual_chunk_flash_attn" in sglang_args

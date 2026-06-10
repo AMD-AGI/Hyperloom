@@ -874,23 +874,18 @@ def inject_sglang_context_length(
 def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
     """Pick the dual-chunk attention backend for the current hardware.
 
-    ``dual_chunk_flash_attn`` is an sgl-kernel flash-attn path that only
-    builds for sm90+ (NVIDIA Hopper); on AMD/ROCm (MI300X/MI325X/MI355X,
-    gfx9) sglang raises ``flash_attn at sgl-kernel is only supported on
-    sm90 and above`` and the server is killed before baseline. ``triton``
-    is the ROCm-capable backend that still honours dual-chunk attention,
-    so we fall back to it on any AMD GPU. The hardware is resolved from the
-    explicit ``gpu_type`` first (the caller already knows it and writes it
-    into the runner), then ``GPU_TYPE``, then a runtime autodetect, so a
-    missing ``rocm-smi``/torch probe at this call site cannot silently fall
-    back to the sm90-only kernel. Override via ``$HYPERLOOM_DUAL_CHUNK_BACKEND``.
+    ``dual_chunk_flash_attn`` is the only backend sglang accepts when the
+    model declares ``dual_chunk_attention_config``. It requires sm90+
+    (NVIDIA Hopper); on AMD/ROCm the preflight gate
+    (``_detect_incompatible_model_config``) blocks these models before
+    they reach this point. If a session somehow arrives here on AMD
+    (e.g. operator override), return the canonical backend and let sglang
+    raise the clear error rather than silently injecting triton which
+    sglang also rejects.  Override via ``$HYPERLOOM_DUAL_CHUNK_BACKEND``.
     """
     override = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip()
     if override:
         return override
-    from ...cli import _resolve_amd_gpu_type
-    if _resolve_amd_gpu_type(gpu_type):
-        return "triton"
     return _SGLANG_DUAL_CHUNK_BACKEND
 
 

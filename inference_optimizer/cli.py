@@ -1057,6 +1057,12 @@ _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 _AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32"})
 _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 
+# model_type values that ship a custom AutoConfig (auto_map) but aren't
+# registered in sglang/vLLM's config mapping. sglang falls back to
+# PreTrainedConfig (base class), which lacks max_position_embeddings etc.,
+# causing AttributeError deep in engine init.
+_UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
+
 
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
@@ -1125,6 +1131,32 @@ def _detect_incompatible_model_config(
             f"({', '.join(_MAXPOS_CONFIG_KEYS)}); transformers/vLLM rope "
             "init dereferences a missing max_position_embeddings and crashes "
             "in engine init (DeepSeek-V3.2-Exp class)."
+        )
+    # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
+    # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
+    auto_map = data.get("auto_map")
+    model_type = str(data.get("model_type") or "").strip().lower()
+    if (
+        isinstance(auto_map, dict)
+        and auto_map.get("AutoConfig")
+        and model_type in _UNREGISTERED_CUSTOM_CONFIG_TYPES
+    ):
+        return (
+            f"model_type '{model_type}' ships a custom AutoConfig "
+            f"({auto_map['AutoConfig']}) but is not registered in sglang/"
+            f"vLLM's config mapping; the engine falls back to "
+            f"PreTrainedConfig which lacks key attributes "
+            f"(max_position_embeddings) and crashes in init."
+        )
+    # Dual-chunk attention on AMD/ROCm: sglang hard-requires
+    # dual_chunk_flash_attn (sm90+ only) and rejects all other backends.
+    if _resolve_amd_gpu_type(gpu_type) and _model_has_dual_chunk_attention(
+        model_path
+    ):
+        return (
+            "model declares dual_chunk_attention_config but sglang requires "
+            "the dual_chunk_flash_attn backend which only builds on sm90+ "
+            "(NVIDIA Hopper); no compatible backend exists for AMD/ROCm."
         )
     return None
 
