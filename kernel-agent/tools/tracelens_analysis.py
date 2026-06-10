@@ -1942,18 +1942,21 @@ def _run_deterministic_tracelens_steps(
     """
     timeout_s = max(120, int(budget_minutes * 60))
 
+    csv_dir = output_dir / "perf_report_csvs"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
     # Step 1: perf report
     report_cmd = [
         sys.executable, "-m",
         "TraceLens.Reporting.generate_perf_report_pytorch_inference",
-        str(trace_path),
-        "-o", str(output_dir),
-        "--platform", platform,
+        "--profile_json_path", str(trace_path),
+        "--output_csvs_dir", str(csv_dir),
+        "--gpu_arch_platform", platform,
+        "--include_call_stack",
+        "--enable_pseudo_ops",
     ]
-    if analysis_mode:
-        report_cmd += ["--analysis-mode", analysis_mode]
     if capture_folder and capture_folder.exists():
-        report_cmd += ["--capture-folder", str(capture_folder)]
+        report_cmd += ["--capture_folder", str(capture_folder)]
     rc = run_command(report_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
     if rc != 0:
         return rc
@@ -1966,10 +1969,6 @@ def _run_deterministic_tracelens_steps(
         "--output-dir", str(output_dir),
         "--platform", platform,
     ]
-    if analysis_mode:
-        prepare_cmd += ["--analysis-mode", analysis_mode]
-    if capture_folder and capture_folder.exists():
-        prepare_cmd += ["--capture-folder", str(capture_folder)]
     rc = run_command(prepare_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
     if rc != 0:
         return rc
