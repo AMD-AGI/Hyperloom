@@ -3569,6 +3569,20 @@ def main() -> int:
                     f"using {cli_trace_path.name} for perf report",
                 )
 
+            # ------ Discover capture_folder (shared by both routes) ------
+            trace_input_path = Path(args.trace_input).expanduser().resolve()
+            capture_folder: Path | None = (
+                Path(args.capture_folder).expanduser().resolve()
+                if args.capture_folder else
+                discover_capture_folder(trace_input_path, trace_files)
+            )
+            if capture_folder:
+                append_log(
+                    log_path,
+                    f"capture_folder resolved: {capture_folder} "
+                    f"(exists={capture_folder.is_dir()})",
+                )
+
             # ------ Route: deterministic vs agent ------
             use_deterministic = (
                 args.analysis_route == ANALYSIS_ROUTE_DETERMINISTIC
@@ -3585,12 +3599,6 @@ def main() -> int:
                     log_path,
                     "analysis-route=deterministic: running TraceLens "
                     "deterministic Python toolchain (no LLM calls)",
-                )
-                trace_input_path = Path(args.trace_input).expanduser().resolve()
-                capture_folder = (
-                    Path(args.capture_folder).expanduser().resolve()
-                    if args.capture_folder else
-                    discover_capture_folder(trace_input_path, trace_files)
                 )
 
                 det_rc = _run_deterministic_tracelens_steps(
@@ -3691,12 +3699,6 @@ def main() -> int:
                               log_path=log_path, artifact_paths=artifacts,
                               run_id=run_id, started_at=started_at)
                 try:
-                    trace_input_path = Path(args.trace_input).expanduser().resolve()
-                    capture_folder = (
-                        Path(args.capture_folder).expanduser().resolve()
-                        if args.capture_folder else
-                        discover_capture_folder(trace_input_path, trace_files)
-                    )
                     skill_result = asyncio.run(run_tracelens_skill(
                         skill_path=skill,
                         trace_path=cli_trace_path,
