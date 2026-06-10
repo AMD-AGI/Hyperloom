@@ -12,9 +12,87 @@ Conventions:
 from __future__ import annotations
 
 import os
+import resource
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
+
+# Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up (issue #433).
+# The raylet opens a large number of fds (sockets, plasma store, per-worker
+# pipes); at the container default soft limit (1024) it aborts on startup /
+# is left as a zombie that only `ray stop --force` can clear. Operators can
+# override via RAY_MIN_NOFILE.
+DEFAULT_MIN_NOFILE = 65536
+
+
+def _fd_limit_warn(msg: str) -> None:
+    """Single indirection for fd-limit warnings.
+
+    Kept as a module function so tests can capture it and so every warning
+    carries the same prefix. Goes to stderr; callers that own a log_path
+    also get a line in the Ray lifecycle log.
+    """
+    print(f"[kernel-agent WARN] {msg}", file=sys.stderr)
+
+
+def _min_nofile_target() -> int:
+    raw = os.environ.get("RAY_MIN_NOFILE", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return DEFAULT_MIN_NOFILE
+
+
+def ensure_fd_limit(
+    min_soft: Optional[int] = None, log_path: Optional[Path] = None,
+) -> Tuple[int, int]:
+    """Raise this process's RLIMIT_NOFILE soft limit before Ray spawns the
+    raylet (issue #433).
+
+    The child ``ray start`` process inherits this process's limits, so the
+    raylet's open-files ceiling is whatever we set here. We raise the soft
+    limit to ``min(min_soft, hard)``. Raising the soft limit up to the hard
+    cap needs no privileges; lifting the hard cap does (CAP_SYS_RESOURCE),
+    so when the hard cap is itself below ``min_soft`` we raise soft as high
+    as allowed and warn — only ``docker run --ulimit nofile=...`` at
+    container launch can lift the hard cap in an unprivileged container.
+
+    Returns the ``(soft, hard)`` limit in effect after the call.
+    """
+    if min_soft is None:
+        min_soft = _min_nofile_target()
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft >= min_soft:
+        return soft, hard
+    target = min(min_soft, hard)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        soft = target
+    except (ValueError, OSError) as exc:  # pragma: no cover - defensive
+        _fd_limit_warn(
+            f"could not raise RLIMIT_NOFILE soft limit to {target} "
+            f"(soft={soft}, hard={hard}): {exc}; Ray raylet may be unstable "
+            f"(issue #433). Launch the container with --ulimit nofile=1048576."
+        )
+        return soft, hard
+    if hard < min_soft:
+        _fd_limit_warn(
+            f"RLIMIT_NOFILE hard cap {hard} is below the raylet target "
+            f"{min_soft}; raised soft to {soft} but this may still be too low "
+            f"(issue #433). Launch the container with --ulimit nofile=1048576 "
+            f"(>= {min_soft})."
+        )
+    if log_path is not None:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(
+                    f"[fd_limit] RLIMIT_NOFILE soft raised to {soft} "
+                    f"(hard={hard}) for raylet stability (issue #433)\n"
+                )
+        except OSError:  # pragma: no cover - logging must never break startup
+            pass
+    return soft, hard
 
 
 def ray_status_ok() -> bool:
@@ -36,6 +114,10 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     """
     if ray_status_ok():
         return False
+    # issue #433: raise the open-files limit before the raylet starts so it
+    # inherits a high enough ceiling and does not abort / zombie at the
+    # container default (1024).
+    ensure_fd_limit(log_path=log_path)
     cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=0.0.0.0"]
     if num_gpus is not None:
         cmd.append(f"--num-gpus={num_gpus}")
@@ -96,6 +178,10 @@ def force_restart_local_cluster(
 
     Raises RuntimeError if the fresh head fails to start.
     """
+    # issue #433: raise the open-files limit before the fresh raylet starts
+    # so it inherits a high enough ceiling (the container default 1024 makes
+    # the raylet abort on startup / linger as a zombie).
+    ensure_fd_limit(log_path=log_path)
     stop_cmd = ["ray", "stop", "--force"]
     start_cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=0.0.0.0"]
     if num_gpus is not None:

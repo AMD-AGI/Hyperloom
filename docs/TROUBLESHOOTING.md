@@ -89,6 +89,42 @@ ray status
 
 ---
 
+## Ray raylet unstable / zombie (fd-limit too low)
+
+**Symptom.** During GEAK dispatch the raylet aborts on startup
+(`SIGABRT`), or `ray stop` reports it could not be stopped and leaves
+it behind, e.g.:
+
+```
+WARN scripts.py:1287 -- Stopped only 0 out of 391 Ray processes within
+the grace period 16 seconds. Remaining processes [... name='raylet',
+status='zombie' ...]
+```
+
+**Cause.** At the container default `ulimit -n` (1024) the open-files
+limit is far too low for the raylet, which opens many fds (sockets,
+plasma store, per-worker pipes) — on a 384-CPU node with hundreds of
+workers it needs `nofile >= 65536` (issue #433).
+
+**Fix.** Launch the kernel-agent container with a high open-files limit
+(this is a **hard requirement** — only the container launch can lift the
+*hard* cap):
+
+```bash
+docker run --ulimit nofile=1048576 ...   # minimum: --ulimit nofile=65536
+```
+
+The runtime also runs an fd-limit preflight that raises this process's
+*soft* limit (up to the hard cap) before every `ray start`
+(`kernel-agent/scripts/install.sh` `ensure_fd_limit_for_ray` and
+`kernel-agent/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
+high hard cap is enough; you do not need to set the soft limit yourself.
+Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
+warns that the **hard** cap is below the target, the container was not
+launched with `--ulimit nofile=...` — fix the launch command.
+
+---
+
 ## VRAM exhaustion / IR-1 error
 
 **Symptom.** Inference server exits with `HSA: out of memory`,
