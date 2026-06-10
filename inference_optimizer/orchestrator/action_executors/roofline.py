@@ -22,11 +22,16 @@ Design constraints (§4/§6):
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..sub_agent_runner import RunnerContext
+
+log = logging.getLogger(__name__)
+
+_PROFILE_MAX_ATTEMPTS = 3
 
 
 def _now_iso() -> str:
@@ -168,29 +173,68 @@ class RooflineExecutor:
 
         session_dir = self._resolve_session_dir(ctx)
 
-        # ---- Step 1: profile ------------------------------------------------
-        profile_ctx = self._wrap_profile_ctx(ctx)
-        try:
-            profile_result = await profile_executor(profile_ctx)
-        except Exception as exc:  # noqa: BLE001 — surface sub-step errors
-            return _failed("profile", f"profile_executor raised: {exc!r}")
-        if not isinstance(profile_result, dict):
+        # ---- Step 1: profile (with retry) ------------------------------------
+        # sglang's torch profiler on MI300X/ROCm is unstable: ~86% per-attempt
+        # failure rate (SIGQUIT / "Profiling is not in progress" / engine init
+        # crash). Retry up to _PROFILE_MAX_ATTEMPTS times; each call to
+        # profile_executor manages its own server lifecycle, so a fresh attempt
+        # starts with a clean profiling state.
+        profile_result: dict[str, Any] | None = None
+        trace_path = ""
+        last_error = ""
+        for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
+            profile_ctx = self._wrap_profile_ctx(ctx)
+            try:
+                profile_result = await profile_executor(profile_ctx)
+            except Exception as exc:  # noqa: BLE001
+                last_error = f"profile_executor raised: {exc!r}"
+                log.warning(
+                    "roofline profile attempt %d/%d failed (exception): %s",
+                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                )
+                continue
+            if not isinstance(profile_result, dict):
+                last_error = (
+                    f"profile_executor returned non-dict: "
+                    f"{type(profile_result).__name__}"
+                )
+                log.warning(
+                    "roofline profile attempt %d/%d failed (bad return): %s",
+                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                )
+                continue
+            if profile_result.get("status") != "succeeded":
+                last_error = str(
+                    profile_result.get("error") or "profile sub-step failed"
+                )
+                log.warning(
+                    "roofline profile attempt %d/%d failed: %s",
+                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                )
+                continue
+            trace_path = _extract_trace_path(profile_result)
+            if not trace_path:
+                last_error = (
+                    "profile succeeded but no trace_path in result "
+                    "(missing both main_trace_path and trace_files[0])"
+                )
+                log.warning(
+                    "roofline profile attempt %d/%d: no trace path",
+                    attempt, _PROFILE_MAX_ATTEMPTS,
+                )
+                continue
+            # Success
+            if attempt > 1:
+                log.info(
+                    "roofline profile succeeded on attempt %d/%d",
+                    attempt, _PROFILE_MAX_ATTEMPTS,
+                )
+            break
+        else:
             return _failed(
                 "profile",
-                f"profile_executor returned non-dict: {type(profile_result).__name__}",
-            )
-        if profile_result.get("status") != "succeeded":
-            return _failed(
-                "profile",
-                str(profile_result.get("error") or "profile sub-step failed"),
-                sub_result=profile_result,
-            )
-        trace_path = _extract_trace_path(profile_result)
-        if not trace_path:
-            return _failed(
-                "profile_no_trace",
-                "profile succeeded but no trace_path in result "
-                "(missing both main_trace_path and trace_files[0])",
+                f"all {_PROFILE_MAX_ATTEMPTS} profile attempts failed; "
+                f"last: {last_error}",
                 sub_result=profile_result,
             )
 
