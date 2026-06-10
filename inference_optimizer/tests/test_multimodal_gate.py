@@ -171,6 +171,17 @@ def test_detect_kimi_k25_text_compatible_exception_allowed(tmp_path):
     assert cli._detect_unsupported_model(str(m)) is None
 
 
+def test_detect_qwen35_moe_text_compatible_exception_allowed(tmp_path):
+    """Qwen3.6 MoE carries vision_config but benchmarks as text-only."""
+    m = tmp_path / "qwen3_5_moe"
+    _write_config(m, {
+        "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+        "model_type": "qwen3_5_moe",
+        "vision_config": {"hidden_size": 1024},
+    })
+    assert cli._detect_unsupported_model(str(m)) is None
+
+
 def test_detect_missing_config_returns_none(tmp_path):
     assert cli._detect_unsupported_model(str(tmp_path / "nope")) is None
 
