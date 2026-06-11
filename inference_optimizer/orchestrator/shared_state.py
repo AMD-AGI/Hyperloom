@@ -101,6 +101,12 @@ _DEFAULT_LAST_FAILURES = 10
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
 
+# Lifecycle-event log cap (#266). Unlike phase_history (≤6 transitions),
+# lifecycle events fire at every step boundary (trace_analyze /
+# run_optimization / integrate / report, ×N kernels ×M rounds), so the cap
+# is generous but still bounds state.json growth on a long run.
+_LIFECYCLE_CAP = 500
+
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
 
@@ -227,6 +233,13 @@ class SharedState:
     model_class: str = ""
     # Advisory architecture profile; prompt-context only, no deterministic gating (those stay on ``model_class``).
     model_arch: dict = field(default_factory=dict)
+    # Degraded-mode advisory: True when the run is knowingly running a
+    # multimodal checkpoint on the text-only path (--allow-mm-text-fallback).
+    # Advisory only — never a stop_reason, never gates Objective/scoring.
+    degraded_mode: bool = False
+    # Structured degraded-mode / model-compat warnings (e.g. multimodal text
+    # fallback). Surfaced verbatim in reports/final.{json,md}.
+    model_warnings: list[dict[str, Any]] = field(default_factory=list)
     # KB tags from config.json (``architectures`` + ``model_type``); stamped into recipe-snapshot ``extras`` so fine-tuned models carry base arch identity.
     model_architectures: list[str] = field(default_factory=list)
     model_type: str = ""
@@ -466,6 +479,13 @@ class SharedState:
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from phase_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    # Append-only operator-facing lifecycle log (#266). Each row is built
+    # by :func:`phase_state.make_lifecycle_event` and records a phase/step
+    # boundary (START / END / ERROR) plus the artifact paths it produced,
+    # so a launcher can surface "phase X ran, outputs at <path>" in chat.
+    # Coordinator-only writer (PolicyGate adds it to ``CORE_STATE_FIELDS``);
+    # capped at ``_LIFECYCLE_CAP``.
+    lifecycle: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
 
@@ -980,6 +1000,62 @@ class SharedState:
         self.phase_started_ts = now_ts
         self.phase_started_unix = now_unix
         return row
+
+    def record_lifecycle_event(
+        self,
+        *,
+        step: str,
+        status: str,
+        phase: str | None = None,
+        label: str | None = None,
+        artifacts: dict[str, str] | None = None,
+        detail: str = "",
+        duration_s: float | None = None,
+        ts: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a structured lifecycle event (#266, method 1).
+
+        Each event marks a phase/step boundary so operators can see — in
+        state.json, and via the launcher in chat — that a phase ran, where
+        its outputs went, and which artifact feeds the next phase.
+
+        ``step`` is the machine step/handler name (e.g. ``trace_analyze``);
+        ``label`` defaults to the human-friendly name from
+        :data:`phase_state.LIFECYCLE_STEP_LABELS` so both naming dimensions
+        are carried. ``phase`` defaults to the current coordinator phase.
+        ``seq`` is monotonic across the cap so consumers can order events
+        even after the oldest rows are trimmed.
+
+        Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards
+        ``lifecycle`` so an LLM ``update_state`` cannot forge events).
+        Returns the inserted row.
+        """
+        # Lazy import to avoid an import-time cycle with the orchestrator
+        # package (phase_state imports nothing from SharedState).
+        from .phase_state import make_lifecycle_event
+
+        events = self.lifecycle
+        if events is None:
+            events = self.lifecycle = []
+        next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
+        event = make_lifecycle_event(
+            step=step,
+            status=status,
+            phase=(phase if phase is not None else (self.phase or "")),
+            label=label,
+            artifacts=artifacts,
+            detail=detail,
+            duration_s=duration_s,
+            seq=next_seq,
+            ts=ts or _now_iso(),
+        )
+        # Append in place and trim only when over the cap, so the common
+        # per-step-boundary path is an O(1) append rather than copying the
+        # whole list on every call.
+        events.append(event)
+        if len(events) > _LIFECYCLE_CAP:
+            del events[: -_LIFECYCLE_CAP]
+        return event
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         """Render the most recent PolicyGate denials for prompt injection.
