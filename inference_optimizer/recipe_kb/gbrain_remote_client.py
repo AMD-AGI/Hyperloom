@@ -78,6 +78,13 @@ class GbrainRemoteError(RemoteRecipeClientError):
     """
 
     def __init__(self, message: str, *, category: str = "transport", **kwargs: Any) -> None:
+        """Initialize the error.
+
+        Args:
+            message: Human-readable error message.
+            category: Error category (defaults to ``transport``).
+            **kwargs: Additional fields forwarded to the base exception.
+        """
         super().__init__(message, category=category, **kwargs)
 
 
@@ -85,11 +92,32 @@ class _GbrainMcp:
     """Minimal JSON-RPC-over-HTTP MCP client (list_pages / get_page)."""
 
     def __init__(self, base_url: str, token: str, timeout_sec: float) -> None:
+        """Initialize the MCP client.
+
+        Args:
+            base_url: Base URL of the gbrain MCP endpoint.
+            token: Bearer token for authorization.
+            timeout_sec: Per-request timeout in seconds (floored at 0.5).
+        """
         self._base = base_url.rstrip("/")
         self._token = token
         self._timeout = max(0.5, float(timeout_sec))
 
     def call(self, tool: str, arguments: dict[str, Any]) -> Any:
+        """Invoke an MCP tool over JSON-RPC and return its decoded result.
+
+        Args:
+            tool: MCP tool name to call.
+            arguments: Tool arguments.
+
+        Returns:
+            The decoded tool result: parsed JSON content when present, else the
+            raw content text, else the result object.
+
+        Raises:
+            GbrainRemoteError: On transport failures, malformed envelopes, or
+                JSON-RPC / tool-level errors.
+        """
         envelope = {
             "jsonrpc": "2.0", "id": "1", "method": "tools/call",
             "params": {"name": tool, "arguments": arguments},
@@ -140,6 +168,14 @@ class _GbrainMcp:
 
 
 def _as_float(value: Any) -> float:
+    """Coerce a value to float, defaulting to ``0.0`` on failure.
+
+    Args:
+        value: Value to convert.
+
+    Returns:
+        The parsed float, or ``0.0`` when conversion fails.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -318,6 +354,15 @@ class GbrainRemoteRecipeClient:
         enabled: bool = True,
         timeout_sec: float | None = None,
     ) -> None:
+        """Initialize the gbrain-backed recipe client.
+
+        Args:
+            base_url: Base URL of the gbrain endpoint.
+            token: Bearer token for authorization.
+            enabled: Whether the client is active (also requires a URL/token).
+            timeout_sec: Per-request timeout; defaults to the foreground HTTP
+                budget when ``None``.
+        """
         self.base_url = (base_url or "").strip()
         self.token = (token or "").strip()
         # Foreground-friendly default: gbrain is a read side-channel, so
@@ -334,9 +379,16 @@ class GbrainRemoteRecipeClient:
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:  # symmetry with RemoteRecipeClient
+        """Release the underlying MCP client."""
         self._mcp = None
 
     def health(self) -> bool:
+        """Probe gbrain reachability with a tiny ``list_pages`` call.
+
+        Returns:
+            ``True`` if the probe succeeds; ``False`` when disabled or the
+            probe errors.
+        """
         if not self.enabled or self._mcp is None:
             return False
         try:
@@ -348,6 +400,12 @@ class GbrainRemoteRecipeClient:
 
     # -- internal scan -----------------------------------------------------
     def _scan_cache_ttl(self) -> float:
+        """Return the recipe-scan cache TTL in seconds.
+
+        Returns:
+            The value from ``GBRAIN_RECIPE_SCAN_TTL_SEC`` when valid, otherwise
+            the default TTL.
+        """
         raw = os.environ.get("GBRAIN_RECIPE_SCAN_TTL_SEC", "").strip()
         if raw:
             try:
@@ -457,10 +515,28 @@ class GbrainRemoteRecipeClient:
         return rows[0] if rows else None
 
     def get_history(self, *, canonical_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Return the version history for a recipe.
+
+        Args:
+            canonical_id: Canonical recipe id.
+            limit: Maximum number of history entries.
+
+        Returns:
+            Always ``[]`` — gbrain does not retain a versioned recipe archive
+            (provided for interface parity).
+        """
         # gbrain does not retain a versioned recipe archive.
         return []
 
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return the most recently updated recipes.
+
+        Args:
+            limit: Maximum number of recipes to return.
+
+        Returns:
+            Recent recipe rows, or ``[]`` when the client is disabled.
+        """
         if not self.enabled:
             return []
         return self._scan_recipes(limit=limit)
@@ -497,14 +573,41 @@ class GbrainRemoteRecipeClient:
         return rows[: int(limit)] if limit and limit > 0 else rows
 
     def list_attempts(self, *, canonical_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Return attempt rows for a recipe.
+
+        Args:
+            canonical_id: Canonical recipe id.
+            limit: Maximum number of attempts.
+
+        Returns:
+            Always ``[]`` — attempt rows live in the local store, so the
+            dispatcher falls through to local on gbrain absence.
+        """
         # Attempt rows live on local store under this design; gbrain
         # absence falls the dispatcher through to local.
         return []
 
     def list_session_attempts(self, *, session_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """Return attempt rows for a session.
+
+        Args:
+            session_id: Session identifier.
+            limit: Maximum number of attempts.
+
+        Returns:
+            Always ``[]`` — session attempts are served from the local store.
+        """
         return []
 
     def session_summary(self, *, session_id: str) -> dict[str, Any] | None:
+        """Return a session summary.
+
+        Args:
+            session_id: Session identifier.
+
+        Returns:
+            Always ``None`` — gbrain does not serve session summaries.
+        """
         return None
 
 
