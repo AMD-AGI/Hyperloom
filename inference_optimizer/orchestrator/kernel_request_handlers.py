@@ -1548,7 +1548,7 @@ def _backend_order(payload: dict) -> list[str]:
     """
     raw = payload.get("backend_order") or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
     if raw:
-        order = [item.strip() for item in str(raw).split(",") if item.strip()]
+        order = [item.strip().lower() for item in str(raw).split(",") if item.strip()]
         explicit = True
     else:
         # Ignore legacy payload["backends"]; the default ladder (GEAK first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
