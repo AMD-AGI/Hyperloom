@@ -129,7 +129,14 @@ SATURATION_ADVISORY_THRESHOLD_PCT: float = 80.0
 
 
 def derive_saturation_per_direction(analysis_md_text: str) -> dict[str, float]:
-    """Return ``{direction: saturation_pct}`` for the four canonical directions (F3-4 Roofline-v2; missing/unparseable degrades to ``0.0``)."""
+    """Return ``{direction: saturation_pct}`` for the four canonical directions (F3-4 Roofline-v2; missing/unparseable degrades to ``0.0``).
+
+    Args:
+        analysis_md_text: The TraceLens ``analysis.md`` text to parse.
+
+    Returns:
+        A mapping of each canonical direction to its saturation percent.
+    """
     out: dict[str, float] = {k: 0.0 for k in _SATURATION_LABEL_MAP}
     if not analysis_md_text:
         return out
@@ -222,7 +229,16 @@ def _compute_within_and_gap(
     peak: float,
     achieved: float,
 ) -> tuple[float | None, float | None]:
-    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive."""
+    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive.
+
+    Args:
+        peak: The theoretical peak throughput.
+        achieved: The achieved throughput.
+
+    Returns:
+        A tuple of ``(within_roofline_pct, gap_to_roofline_pct)``, both
+        ``None`` when either input is non-positive.
+    """
     if peak <= 0 or achieved <= 0:
         return None, None
     within = round(achieved / peak * 100.0, 2)
@@ -243,6 +259,20 @@ def build_roofline_snapshot(
     """Materialise one side (baseline or latest) of the comparison.
 
     ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling (from ``roofline_ceiling.compute_roofline_breakdown_from_state``); mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
+
+    Args:
+        snapshot_id: Monotonic snapshot id, or ``None`` for offline callers.
+        ts: ISO timestamp for the snapshot.
+        analysis_md_path: Path to the TraceLens ``analysis.md`` (empty skips
+            workload/kernel enrichment).
+        theoretical_peak_tok_per_sec: Primary decode roofline ceiling.
+        achieved_tok_per_sec: Snapshot-time achieved output throughput.
+        mem_ceiling_tok_per_sec: Memory-bound ceiling side.
+        cmp_ceiling_tok_per_sec: Compute-bound ceiling side.
+        bound_kind: Which side dominated (e.g. ``memory`` / ``compute``).
+
+    Returns:
+        The snapshot dict for one side of the comparison.
     """
     within, gap = _compute_within_and_gap(
         peak=theoretical_peak_tok_per_sec,
@@ -338,6 +368,12 @@ def build_roofline_comparison_from_history(
 
     Append-only: ``snapshots[0]`` is baseline, ``snapshots[-1]`` the latest refresh.
     Same snapshot_id → single_snapshot mode; distinct ids → before_after with ``delta``. ``None`` when history empty.
+
+    Args:
+        snapshots: The append-only snapshot history, or ``None``.
+
+    Returns:
+        The ``roofline_comparison`` block, or ``None`` when history is empty.
     """
     snapshots = list(snapshots or [])
     if not snapshots:
@@ -496,7 +532,14 @@ def _fmt_pct_cell(v: float | None) -> str:
 
 
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
-    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns)."""
+    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns).
+
+    Args:
+        cmp: The ``roofline_comparison`` block to render.
+
+    Returns:
+        The markdown table as a list of lines.
+    """
 
     def cell(v: float | None) -> str:
         """Format a percentage value for a table cell.

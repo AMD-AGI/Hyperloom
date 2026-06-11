@@ -72,29 +72,53 @@ class ContextProvider:
 
     # Projections backed by SharedState.to_*_summary.
     def mission_status(self) -> str:
-        """Return the mission-status summary projection."""
+        """Return the mission-status summary projection.
+
+        Returns:
+            The mission-status summary string.
+        """
         return self._safe(self.shared_state.to_mission_summary, "mission_status")
 
     def shared_state_summary(self) -> str:
-        """Return the prompt-oriented shared-state summary projection."""
+        """Return the prompt-oriented shared-state summary projection.
+
+        Returns:
+            The shared-state summary string.
+        """
         return self._safe(self.shared_state.to_prompt_summary, "shared_state")
 
     def gaps(self) -> str:
-        """Return the open-gaps summary projection."""
+        """Return the open-gaps summary projection.
+
+        Returns:
+            The open-gaps summary string.
+        """
         return self._safe(self.shared_state.to_gaps_summary, "gaps")
 
     def warm_start(self) -> str:
-        """Return the warm-start summary projection."""
+        """Return the warm-start summary projection.
+
+        Returns:
+            The warm-start summary string.
+        """
         return self._safe(self.shared_state.to_warm_start_summary, "warm_start")
 
     def proposal_scores(self) -> str:
-        """Return the proposal-scores summary projection."""
+        """Return the proposal-scores summary projection.
+
+        Returns:
+            The proposal-scores summary string.
+        """
         return self._safe(
             self.shared_state.to_proposal_scores_summary, "proposal_scores"
         )
 
     def intervention_mix(self) -> str:
-        """Return the intervention-mix summary projection."""
+        """Return the intervention-mix summary projection.
+
+        Returns:
+            The intervention-mix summary string.
+        """
         return self._safe(
             self.shared_state.to_intervention_mix_summary, "intervention_mix"
         )
@@ -326,7 +350,16 @@ def _resolve_sdk(sdk_module: Any | None) -> Any | None:
 def _make_handler(
     provider: ContextProvider, method_name: str,
 ) -> Callable[[dict[str, Any]], Any]:
-    """Build an async MCP handler returning the provider method's string."""
+    """Build an async MCP handler returning the provider method's string.
+
+    Args:
+        provider: The context provider whose method backs the handler.
+        method_name: Name of the provider method to invoke per tool call.
+
+    Returns:
+        An async MCP handler callable that invokes the bound method and wraps
+        its result.
+    """
 
     async def _handler(args: dict[str, Any]) -> dict[str, Any]:
         """Invoke the bound provider method and wrap its string result.
@@ -381,6 +414,18 @@ def build_context_tools_server(
     Returns the SDK ``McpSdkServerConfig`` for
     :class:`ClaudeAgentOptions.mcp_servers`, or ``None`` if the SDK lacks
     in-process MCP helpers (handled gracefully by the caller).
+
+    Args:
+        provider: The context provider backing every tool handler.
+        sdk_module: Explicit SDK module to use, or ``None`` to import the real
+            one.
+        tool_factory: Override for the SDK ``tool`` decorator factory (tests).
+        server_factory: Override for the SDK ``create_sdk_mcp_server`` factory
+            (tests).
+
+    Returns:
+        The constructed in-process MCP server config, or ``None`` when the SDK
+        lacks the required in-process MCP helpers.
     """
     sdk = _resolve_sdk(sdk_module)
     if tool_factory is None:

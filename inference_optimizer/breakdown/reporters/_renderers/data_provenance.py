@@ -14,7 +14,14 @@ from ..base import RenderedSection, md_table, register_renderer
 
 
 def _sources_summary(sources: list[dict[str, Any]]) -> str:
-    """Render a ``<found>/<total> probed`` summary, distinguishing required hits from optional."""
+    """Render a ``<found>/<total> probed`` summary, distinguishing required hits from optional.
+
+    Args:
+        sources: Probe records, each with ``found`` and ``required`` flags.
+
+    Returns:
+        A summary string of found/total counts, or ``"—"`` when empty.
+    """
     if not sources:
         return "—"
     total = len(sources)

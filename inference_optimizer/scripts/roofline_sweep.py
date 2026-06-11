@@ -84,6 +84,16 @@ def extract_templates(state: dict[str, Any]) -> tuple[LaunchTemplate, LaunchTemp
     state.current_best.extra_server_args + extra_envs. The optimized
     template is the hard KPI of this sweep — when empty, the caller
     should refuse to run.
+
+    Args:
+        state: Parsed ``state.json`` contents.
+
+    Returns:
+        A ``(baseline, optimized)`` tuple of launch templates.
+
+    Raises:
+        SystemExit: If ``current_best`` has neither extra server args nor
+            extra envs.
     """
     cb = state.get("current_best") or {}
     opt_args = (cb.get("extra_server_args") or "").strip()
@@ -234,7 +244,11 @@ class SglangServer:
 
     @property
     def base_url(self) -> str:
-        """Return the server's local base URL."""
+        """Return the server's local base URL.
+
+        Returns:
+            The ``http://127.0.0.1:<port>`` base URL.
+        """
         return f"http://127.0.0.1:{self.port}"
 
 
@@ -248,6 +262,21 @@ def run_bench(
     """Invoke ``sglang.bench_serving`` once; return parsed metrics dict.
 
     Returns ``{}`` on subprocess failure (caller can mark as OOM/ERROR).
+
+    Args:
+        base_url: The server base URL to benchmark against.
+        model_path: The served model path.
+        conc: Maximum concurrency for the run.
+        isl: Random input sequence length.
+        osl: Random output sequence length.
+        num_prompts: Number of prompts to send.
+        dataset: Dataset name passed to ``bench_serving``.
+        output_dir: Directory for the bench output file.
+        port: Server port (used for logging/output naming).
+
+    Returns:
+        The parsed metrics dict, or ``{}`` on subprocess failure or missing
+        output.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     out_file = output_dir / f"bench_conc{conc}.jsonl"

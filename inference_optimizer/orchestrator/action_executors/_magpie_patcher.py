@@ -145,6 +145,14 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
 
     Returns ``None`` when unconfigured or missing on disk (callers skip
     patching).
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+            falsy.
+
+    Returns:
+        The resolved ``benchmarker.py`` path, or ``None`` when unconfigured or
+        absent on disk.
     """
     root: Path | None = None
     if magpie_dir:
@@ -162,7 +170,16 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
 def _resolve_sglang_mi300x_script_path(
     magpie_dir: Path | str | None,
 ) -> Path | None:
-    """Resolve Magpie's generic SGLang MI300X benchmark script when present."""
+    """Resolve Magpie's generic SGLang MI300X benchmark script when present.
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+            falsy.
+
+    Returns:
+        The resolved ``sglang_mi300x.sh`` path, or ``None`` when unconfigured
+        or absent on disk.
+    """
     root: Path | None = None
     if magpie_dir:
         root = Path(magpie_dir)
@@ -182,6 +199,12 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 
     Falls through without exclusion if the lock file can't be opened; the
     atomic-replace still guarantees no torn writes (idempotent).
+
+    Args:
+        lock_path: Filesystem path of the lock file to acquire exclusively.
+
+    Yields:
+        Control while the exclusive lock is held; the lock is released on exit.
     """
     try:
         fp = open(lock_path, "w")  # noqa: SIM115 — kept open across yield
@@ -227,6 +250,13 @@ def _extract_prepare_region(text: str) -> str:
     Scopes inline-atomic detection to one method body (header down to the next
     line indented at/below the header column) so an unrelated ``os.replace``
     can't masquerade as a fixed copy loop.
+
+    Args:
+        text: The full ``benchmarker.py`` source text to slice.
+
+    Returns:
+        The source slice covering the ``_prepare_benchmark_scripts`` method
+        body, or ``""`` when the header is absent.
     """
     start = text.find(_PREPARE_METHOD_MARKER)
     if start == -1:
@@ -251,6 +281,13 @@ def _upstream_is_already_atomic(text: str) -> bool:
     redundant). Either signal suffices: ``_copy_benchmark_script_atomic``
     present, or an inline ``tempfile.mkstemp(`` + ``os.replace(`` in the
     ``_prepare_benchmark_scripts`` body.
+
+    Args:
+        text: The full ``benchmarker.py`` source text to inspect.
+
+    Returns:
+        True when the cloned Magpie already copies scripts atomically (making
+        the #C1 patch redundant), False otherwise.
     """
     if _UPSTREAM_ATOMIC_HELPER in text:
         return True
@@ -344,12 +381,27 @@ def _apply_patch_atomic_reason(src: Path) -> str:
 
 def _apply_patch_atomic(src: Path) -> bool:
     """Bool wrapper over :func:`_apply_patch_atomic_reason`: True when the
-    atomic-copy race is closed (applied / already-patched / upstream-atomic)."""
+    atomic-copy race is closed (applied / already-patched / upstream-atomic).
+
+    Args:
+        src: The ``benchmarker.py`` file to patch in place.
+
+    Returns:
+        True when the atomic-copy race is closed, False on a genuine failure.
+    """
     return _apply_patch_atomic_reason(src) not in _ATOMIC_REASONS_GENUINE_FAILURE
 
 
 def _is_remote_trust_patched(src: Path) -> bool:
-    """Return whether the SGLang remote-client trust gate is already present."""
+    """Return whether the SGLang remote-client trust gate is already present.
+
+    Args:
+        src: The ``sglang_mi300x.sh`` file to inspect.
+
+    Returns:
+        True iff the remote-trust sentinel is present, False on a miss or read
+        error.
+    """
     try:
         return _REMOTE_TRUST_SENTINEL in src.read_text(encoding="utf-8")
     except OSError as e:
@@ -358,7 +410,16 @@ def _is_remote_trust_patched(src: Path) -> bool:
 
 
 def _apply_remote_trust_patch_atomic(src: Path) -> bool:
-    """Patch ``sglang_mi300x.sh`` so remote clients can pass trust mode."""
+    """Patch ``sglang_mi300x.sh`` so remote clients can pass trust mode.
+
+    Args:
+        src: The ``sglang_mi300x.sh`` file to patch in place.
+
+    Returns:
+        True when the trust gate is present after the call (already patched or
+        freshly written), False when the legacy block is missing or any IO
+        step fails.
+    """
     try:
         original = src.read_text(encoding="utf-8")
     except OSError as e:
@@ -439,7 +500,12 @@ class MagpiePatchStatus:
     def atomic_genuine_failure(self) -> bool:
         """True when ``atomic_ok`` is False for a real reason (unrecognized
         shape / I/O error) — i.e. the script-tearing race is NOT mitigated, as
-        opposed to a benign no-op. A strict install should fail-loud on this."""
+        opposed to a benign no-op. A strict install should fail-loud on this.
+
+        Returns:
+            True when the atomic-copy patch failed for a genuine reason
+            (unrecognized shape / I/O error), False for a benign no-op.
+        """
         return self.atomic_reason in _ATOMIC_REASONS_GENUINE_FAILURE
 
 
@@ -451,6 +517,14 @@ def magpie_scripts_patch_status(
     This keeps a drift in the optional SGLang remote-client trust patch from
     being reported as a generic atomic-copy failure. The bool-valued
     ``ensure_magpie_atomic_scripts_patch`` wrapper remains for compatibility.
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+            falsy.
+
+    Returns:
+        A ``MagpiePatchStatus`` carrying the atomic-copy and remote-trust
+        outcomes plus the classified ``atomic_reason``.
     """
     src = _resolve_benchmarker_path(magpie_dir)
     if src is None:
@@ -515,6 +589,14 @@ def ensure_magpie_atomic_scripts_patch(
     without the atomic race being open, so it is intentionally NOT folded in
     here; callers that need both must use :func:`magpie_scripts_patch_status`
     and check ``remote_trust_ok`` / ``ok`` (install.sh does this).
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+            falsy.
+
+    Returns:
+        True when the atomic-copy race is closed, False when the file is
+        missing or neither the legacy block nor an atomic impl is found.
     """
     return magpie_scripts_patch_status(magpie_dir).atomic_ok
 

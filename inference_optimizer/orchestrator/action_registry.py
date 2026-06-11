@@ -100,7 +100,14 @@ _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
 
 
 def default_verdict_class_for(action_name: str) -> str:
-    """Look up the default ``verdict_class``; falls back to ``"exploration"``."""
+    """Look up the default ``verdict_class``; falls back to ``"exploration"``.
+
+    Args:
+        action_name: The action name to look up.
+
+    Returns:
+        The mapped verdict class, or ``"exploration"`` when unmapped.
+    """
     return _DEFAULT_VERDICT_CLASS.get(
         action_name, _DEFAULT_VERDICT_CLASS_FALLBACK,
     )

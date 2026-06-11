@@ -62,6 +62,9 @@ def _visible_gpu_count() -> int:
     tests happy), falls back to ``rocm-smi --showid``. Returns 0 on every
     failure so callers skip the clamp. Override via
     ``$INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT``.
+
+    Returns:
+        The number of visible GPUs, or 0 when none/unknown.
     """
     override = os.environ.get("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "").strip()
     if override:
@@ -107,6 +110,9 @@ def _tracelens_patch_enabled() -> bool:
     Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of vLLM /
     SGLang (keeps today's safe behaviour, no TraceLens-only flags injected).
     Default on because the patches are backward-compatible.
+
+    Returns:
+        True when runtime patching is enabled (default), else False.
     """
     return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
 
@@ -156,7 +162,23 @@ def materialize_config_with_envs(
     ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
     into the framework env; ``extra_envs`` overrides any of the above.
 
-    Returns the materialized YAML path (stable file name across calls).
+    Args:
+        config_path: Path to the source Magpie YAML to render.
+        output_dir: Directory the materialized YAML is written into.
+        extra_server_args: Extra framework server args merged into the env.
+        extra_envs: Overrides applied last over any computed env values.
+        model_path: Model path/id; overrides ``benchmark.model`` when set.
+        gpu_type: GPU type; sets ``runner_type`` and pins the generic script.
+        inferencex_path: Explicit InferenceX checkout to pin into the YAML.
+        benchmark_script: Pre-sanitized benchmark script name to re-pin.
+        out_name: File name for the materialized YAML.
+
+    Returns:
+        The materialized YAML path (stable file name across calls).
+
+    Raises:
+        FrameworkScriptMismatchError: If ``benchmark_script`` targets a
+            different known framework than the run's framework.
     """
     server_args = (extra_server_args or "").strip()
     with config_path.open(encoding="utf-8") as f:

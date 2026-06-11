@@ -78,7 +78,11 @@ def _receipt_path(session_dir: Path) -> Path:
 
 
 def _sdk_available() -> bool:
-    """Whether the optional ``langfuse`` SDK can be imported (no side effects)."""
+    """Whether the optional ``langfuse`` SDK can be imported (no side effects).
+
+    Returns:
+        True when the ``langfuse`` SDK is importable.
+    """
     import importlib.util
 
     try:
@@ -93,6 +97,12 @@ def _to_ns(dt: Any) -> int | None:
     v4's OTEL-based SDK wants integer ns for ``end_time``; v2/v3 accepted a
     ``datetime``. Returns None for a None/zero input so callers can omit the
     kwarg entirely. Best-effort: an unparseable value yields None.
+
+    Args:
+        dt: A ``datetime`` (or other value) to convert.
+
+    Returns:
+        Integer nanoseconds since epoch, or ``None`` when not convertible.
     """
     if dt is None:
         return None
@@ -115,6 +125,13 @@ def _start_obs(parent: Any, **kwargs: Any) -> Any:
     TypeError, retry without it. This keeps backdated timestamps where the
     SDK supports them and degrades to "start = now" only on the SDKs that
     require it, instead of unconditionally dropping the timestamp.
+
+    Args:
+        parent: The client or span to create the observation under.
+        **kwargs: Observation kwargs forwarded to ``start_observation``.
+
+    Returns:
+        The created observation object.
     """
     try:
         return parent.start_observation(**kwargs)
@@ -132,6 +149,12 @@ def _end_time_wants_int(obs: Any) -> bool:
     OTEL span, so a "try datetime then retry int" pattern double-ends the
     span and emits a noisy "Calling end() on an ended span" warning.
     Falls back to datetime (False) when the annotation can't be read.
+
+    Args:
+        obs: The observation whose ``end`` signature is inspected.
+
+    Returns:
+        True when ``end(end_time=...)`` expects integer nanoseconds.
     """
     try:
         import inspect
@@ -150,6 +173,10 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
     Picks the right ``end_time`` type up front (see :func:`_end_time_wants_int`)
     so the span is never ended twice. Falls back to a bare ``end()`` if the
     typed call is rejected, so a signature change can't strand an open span.
+
+    Args:
+        obs: The observation to end (no-op when ``None``).
+        end_dt: The end ``datetime``, or ``None`` for a bare ``end()``.
     """
     if obs is None:
         return
@@ -178,6 +205,12 @@ def _otel_attr_value(v: Any) -> Any:
     the SDK log ``Invalid type ... for attribute`` and drop it. So: skip
     ``None``, pass scalars through, and JSON-stringify everything else
     (e.g. the ``workload`` dict) so it still lands on the trace as text.
+
+    Args:
+        v: The metadata value to coerce.
+
+    Returns:
+        An OTEL-acceptable scalar/string, or ``None`` to skip the attribute.
     """
     if v is None:
         return None
@@ -205,6 +238,12 @@ def _set_trace_attrs(
     attributes directly on the underlying span (``langfuse.trace.name``,
     ``session.id``, ``langfuse.trace.metadata.*``). Best-effort: a missing
     API on either side just means the trace label isn't set, never a raise.
+
+    Args:
+        span: The root span whose trace attributes are stamped.
+        name: Trace name to set, when provided.
+        session_id: Langfuse session id to set, when provided.
+        metadata: Trace-level metadata to stamp, when provided.
     """
     try:
         span.update_trace(name=name, session_id=session_id, metadata=metadata)
@@ -352,6 +391,9 @@ class LangfuseEmitter:
         Records ``_disabled_reason`` (``disabled`` / ``no_credentials`` /
         ``sdk_missing`` / ``init_failed``) so the receipt can explain *why*
         nothing was pushed. Correlation is already resolved in ``__init__``.
+
+        Returns:
+            True when all gates pass and the client was built, else False.
         """
         if not langfuse_live_enabled():
             self._disabled_reason = "disabled"
@@ -389,7 +431,11 @@ class LangfuseEmitter:
 
     @property
     def enabled(self) -> bool:
-        """Whether live push to Langfuse is enabled for this session."""
+        """Whether live push to Langfuse is enabled for this session.
+
+        Returns:
+            True when live push is enabled.
+        """
         return self._enabled
 
     # -- span hierarchy (trace -> phase -> agent -> generation) ---------
@@ -402,7 +448,14 @@ class LangfuseEmitter:
         return str(self._manifest.get("model_name") or self._session_label or "hyperloom")
 
     def _ensure_root(self, start: Any) -> Any:
-        """Lazily open the root span and stamp trace-level attrs once."""
+        """Lazily open the root span and stamp trace-level attrs once.
+
+        Args:
+            start: Span start time.
+
+        Returns:
+            The cached or newly opened root span.
+        """
         if self._root_span is None:
             self._root_span = _start_obs(
                 self._client,
@@ -446,7 +499,16 @@ class LangfuseEmitter:
 
     def _ensure_agent_span(self, phase: str, agent: str, start: Any) -> Any:
         """Get-or-create the per-(phase, agent) span. This is the 'which agent
-        did what' layer; Generations and decision Scores attach here."""
+        did what' layer; Generations and decision Scores attach here.
+
+        Args:
+            phase: Phase name.
+            agent: Agent/component name.
+            start: Span start time.
+
+        Returns:
+            The cached or newly opened agent span.
+        """
         key = (phase, agent)
         span = self._agent_spans.get(key)
         if span is None:
@@ -462,7 +524,11 @@ class LangfuseEmitter:
 
     # -- live ingest ----------------------------------------------------
     def record_llm_call(self, row: dict[str, Any]) -> None:
-        """Buffer a token row; emit the Generation if its text half is in."""
+        """Buffer a token row; emit the Generation if its text half is in.
+
+        Args:
+            row: The token (``llm_calls``) trace row.
+        """
         if not self._enabled:
             return
         try:
@@ -471,7 +537,11 @@ class LangfuseEmitter:
             log.debug("langfuse: record_llm_call failed", exc_info=True)
 
     def record_conversation(self, row: dict[str, Any]) -> None:
-        """Buffer a conversation row; emit the Generation if its tokens are in."""
+        """Buffer a conversation row; emit the Generation if its tokens are in.
+
+        Args:
+            row: The conversation trace row.
+        """
         if not self._enabled:
             return
         try:
@@ -505,7 +575,12 @@ class LangfuseEmitter:
         token_row: dict[str, Any] | None,
         conv_row: dict[str, Any] | None,
     ) -> None:
-        """Emit one Generation, nested under its phase -> agent span."""
+        """Emit one Generation, nested under its phase -> agent span.
+
+        Args:
+            token_row: The token half of the call, or ``None``.
+            conv_row: The conversation (text) half of the call, or ``None``.
+        """
         base = token_row or conv_row or {}
         phase = lfmap.phase_of(base)
         agent = lfmap.agent_of(base)
@@ -685,6 +760,9 @@ class LangfuseEmitter:
         is True once :meth:`flush_session` has run (so the out-of-process ext
         shards and decision scores are reflected); before that it reports the
         in-process running totals.
+
+        Returns:
+            A redacted receipt dict mirroring the breakdown ``langfuse`` section.
         """
         creds = langfuse_credentials()
         config = {
@@ -737,7 +815,14 @@ _REGISTRY_LOCK = threading.Lock()
 
 
 def get_emitter(session_dir: Path) -> LangfuseEmitter:
-    """Return the per-session emitter, building it once (cached by session)."""
+    """Return the per-session emitter, building it once (cached by session).
+
+    Args:
+        session_dir: Session directory keying the emitter.
+
+    Returns:
+        The cached or newly built :class:`LangfuseEmitter`.
+    """
     key = str(Path(session_dir).resolve())
     with _REGISTRY_LOCK:
         emitter = _REGISTRY.get(key)
@@ -748,7 +833,11 @@ def get_emitter(session_dir: Path) -> LangfuseEmitter:
 
 
 def flush_session(session_dir: Path) -> None:
-    """Module-level convenience: flush the emitter for ``session_dir``."""
+    """Module-level convenience: flush the emitter for ``session_dir``.
+
+    Args:
+        session_dir: Session directory whose emitter is flushed.
+    """
     get_emitter(session_dir).flush_session()
 
 
@@ -759,6 +848,12 @@ def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     collector, since its counts are final) or ``None`` if no receipt was
     written -- e.g. the breakdown is being assembled before ``flush_session``
     ran, or live push never happened.
+
+    Args:
+        session_dir: Session directory whose receipt is read.
+
+    Returns:
+        The receipt dict, or ``None`` when no receipt was written.
     """
     import json
 

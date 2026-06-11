@@ -261,7 +261,15 @@ _PREFER_STRING_KEYS: tuple[str, ...] = (
 
 
 def _prefer_score(row: dict[str, Any], prefer: dict[str, Any]) -> int:
-    """Count how many ``prefer`` fields the (flat arbor) row matches."""
+    """Count how many ``prefer`` fields the (flat arbor) row matches.
+
+    Args:
+        row: A flat arbor recipe row.
+        prefer: Workload-similarity hints to compare against the row.
+
+    Returns:
+        The count of matching numeric and string preference fields.
+    """
     if not isinstance(row, dict):
         return 0
     score = 0
@@ -294,6 +302,14 @@ def _rerank_by_prefer(
 
     No-op when ``prefer`` is empty. Never drops rows; only reorders so a
     closer-workload recipe surfaces first.
+
+    Args:
+        rows: The flat arbor rows to reorder.
+        prefer: Workload-similarity hints, or ``None`` to leave order intact.
+
+    Returns:
+        The rows reordered by descending preference score (or unchanged when
+        ``prefer`` is empty).
     """
     if not prefer:
         return rows
@@ -373,6 +389,12 @@ class RecipeKB:
         :func:`_v2_to_arbor` keeps an idempotency guard so a row that is
         already in flat arbor shape (e.g. a mis-built adapter) passes
         through untouched rather than being silently emptied.
+
+        Args:
+            row: The remote row in the unified nested KB-interface envelope.
+
+        Returns:
+            The row projected into the flat arbor shape callers expect.
         """
         return _v2_to_arbor(row)
 
@@ -687,6 +709,18 @@ class RecipeKB:
 
         ``prefer`` only reorders; the ``required`` filter
         (``label_match`` / ``metric_filters``) decides membership.
+
+        Args:
+            label_match: Identity labels deciding membership.
+            metric_filters: ``{metric: {min, max}}`` bounds deciding membership.
+            updated_since: Lower bound on ``updated_at``.
+            order_by: Ordering directive forwarded to the store.
+            limit: Maximum number of rows to return.
+            prefer: Workload-similarity hints used only to rerank results.
+
+        Returns:
+            The matching recipe rows (remote-first, local fall-through),
+            reranked by ``prefer``.
         """
         if self._remote_active():
             try:

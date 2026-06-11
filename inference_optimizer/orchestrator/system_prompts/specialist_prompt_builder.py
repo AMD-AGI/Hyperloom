@@ -39,7 +39,14 @@ from inference_optimizer.orchestrator.policy import (
 
 def _is_atom(inp: SpecialistPromptInputs) -> bool:
     """True when ``_focus_*`` blocks should use atom-flavoured hints
-    (empty framework falls back to the canonical sglang/vllm block)."""
+    (empty framework falls back to the canonical sglang/vllm block).
+
+    Args:
+        inp: The specialist prompt inputs.
+
+    Returns:
+        True when the framework is ``atom``.
+    """
     return (inp.framework or "").strip().lower() == "atom"
 
 
@@ -631,7 +638,14 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
     """Heads-up block when this dispatch is a bounded auto-retry of a prior
     transient (timeout / crash / stale-heartbeat) attempt. Advisory only —
     the mandate is unchanged; the note nudges the specialist to scope its work
-    so it finishes within budget this time."""
+    so it finishes within budget this time.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``auto_retry_reason``).
+
+    Returns:
+        The rendered auto-retry notice lines.
+    """
     reason = inp.auto_retry_reason.strip()
     return [
         "",
@@ -651,7 +665,15 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
 def _bench_block(inp: SpecialistPromptInputs) -> list[str]:
     """In-loop micro-bench mandate appended for bench-enabled specialists
     (``mode=patch`` & ``bench=true``). Lists the whitelisted ``bench_id``s and
-    the worktree-scoped contract; the ``run_bench`` tool executes them."""
+    the worktree-scoped contract; the ``run_bench`` tool executes them.
+
+    Args:
+        inp: The specialist prompt inputs.
+
+    Returns:
+        The rendered micro-bench mandate lines, or ``[]`` when no benches are
+        registered.
+    """
     from ..specialist_bench import BENCH_REGISTRY, MAX_BENCH_WALL_CLOCK_SEC
     if not BENCH_REGISTRY:
         return []
@@ -683,7 +705,14 @@ def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
     """Free-form mandate appended when ``scope == 'freeform'`` (absorbed from
     the retired dynamic_specialist wave channel). The specialist is NOT bound
     to the domain catalogue — the Orchestration ``task_description`` is the
-    whole mandate. The single deliverable is still ONE ``specialist_done``."""
+    whole mandate. The single deliverable is still ONE ``specialist_done``.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``task_description``).
+
+    Returns:
+        The rendered free-form mandate lines.
+    """
     desc = (inp.task_description or "").strip() or "(no task description provided)"
     return [
         "",
@@ -709,7 +738,15 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
     """Cross-domain mandate appended when ``scope == 'domains'`` (absorbed
     from the retired dynamic_action channel). The single deliverable is still
     ONE ``specialist_done``; the difference is the patch may span every domain
-    in scope and the Critic will hold it to the cross-domain rules."""
+    in scope and the Critic will hold it to the cross-domain rules.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``extra_focus_tags`` /
+            ``domain``).
+
+    Returns:
+        The rendered cross-domain mandate lines.
+    """
     tags = ", ".join(inp.extra_focus_tags) if inp.extra_focus_tags else inp.domain.key
     return [
         "",
@@ -829,7 +866,14 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 # Section 4 — optional KB context
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     """Issue-J: all prior sources empty, so inject a cold-start directive
-    instead of letting specialists return an empty proposal_set."""
+    instead of letting specialists return an empty proposal_set.
+
+    Args:
+        inp: The specialist prompt inputs.
+
+    Returns:
+        True when every prior KB/PR/research source is empty.
+    """
     return (
         not inp.kb_subgraph
         and not inp.warm_start_recipe
@@ -920,7 +964,14 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
 # Section 4a — Roofline / TraceLens evidence
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
-    empty evidence renders a heading + ``(none)`` placeholder."""
+    empty evidence renders a heading + ``(none)`` placeholder.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``roofline_evidence``).
+
+    Returns:
+        The rendered roofline-evidence section lines.
+    """
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
     ev = inp.roofline_evidence or {}
     if not isinstance(ev, dict) or not ev:
@@ -1074,7 +1125,14 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
 # Section 5b — Related lessons (positive priors from prior KEEPs)
 def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
     """Render KB ``kind=lesson`` points from prior KEEPs, compactly
-    (statement + measured_impact)."""
+    (statement + measured_impact).
+
+    Args:
+        inp: The specialist prompt inputs (reads ``warm_start_lessons``).
+
+    Returns:
+        The rendered related-lessons section lines.
+    """
     rows = ["## 5b. RELATED LESSONS (prior KEEPs on this model+hw)", ""]
     if not inp.warm_start_lessons:
         rows.append(_NONE_PLACEHOLDER)
@@ -1117,7 +1175,16 @@ def _format_version_note(
 ) -> str:
     """GAP 8 — render a ``[from sglang@X.Y, you're on A.B]`` annotation when
     the lesson's framework_version differs; empty when either side is
-    unknown or they match."""
+    unknown or they match.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``framework`` /
+            ``framework_version``).
+        lesson_attrs: The lesson's attrs (reads ``framework_version``).
+
+    Returns:
+        The version-mismatch annotation, or "" when unknown or matching.
+    """
     lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
     current_fv = (inp.framework_version or "").strip()
     if not lesson_fv or not current_fv:
@@ -1130,7 +1197,14 @@ def _format_version_note(
 
 def _render_measured_impact(raw: Any) -> str:
     """Back-compat renderer for ``attrs.measured_impact`` (dict, legacy
-    string, or other)."""
+    string, or other).
+
+    Args:
+        raw: The ``measured_impact`` value (dict, string, None, or other).
+
+    Returns:
+        A compact human-readable impact string ("" when ``raw`` is None).
+    """
     if isinstance(raw, dict):
         parts: list[str] = []
         gain = raw.get("gain_pct")
@@ -1156,7 +1230,14 @@ def _render_measured_impact(raw: Any) -> str:
 # Section 5c — Known pitfalls (anti-priors from prior REVERTs)
 def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
     """Render KB ``kind=pitfall`` points from prior REVERTs (description +
-    severity); framed as forbidden paths, not suggestions."""
+    severity); framed as forbidden paths, not suggestions.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``warm_start_pitfalls``).
+
+    Returns:
+        The rendered known-pitfalls section lines.
+    """
     rows = ["## 5c. KNOWN PITFALLS (do NOT repeat — prior REVERTs)", ""]
     if not inp.warm_start_pitfalls:
         rows.append(_NONE_PLACEHOLDER)

@@ -46,6 +46,26 @@ def _build_backends(
     ``critic_agent_root``). ``robustness_choice`` ∈ {``mock``, ``agent``}:
     mock is the heartbeat-only backend; ``agent`` is
     :class:`RobustnessAgentBackend` (requires ``robustness_agent_root``).
+
+    Args:
+        claude_model: Claude model id for orchestration/kernel backends.
+        codex_model: Codex model id for the kernel/critic backends.
+        kernel_codex: When True, use the Codex backend for kernel work.
+        critic_choice: ``mock`` or ``agent``.
+        session_dir: The current session directory.
+        critic_agent_root: Critic-agent runtime root (required for ``agent``).
+        critic_kb_mode: KB mode passed to the critic-agent backend.
+        robustness_choice: ``mock`` or ``agent``.
+        robustness_agent_root: Robustness-agent root (required for ``agent``).
+        robustness_options: Optional ``request.options`` overrides.
+        no_kernel: When True, omit the kernel backend.
+
+    Returns:
+        dict[str, Any]: Per-role backend instances keyed by role name.
+
+    Raises:
+        ValueError: If a choice is not in ``{'mock','agent'}`` or an ``agent``
+            choice is missing its required root.
     """
     if critic_choice not in ("mock", "agent"):
         raise ValueError(
@@ -135,6 +155,14 @@ def _build_proposal_scorer(
     ``session_dir`` is forwarded so the scorer can append its per-model
     token usage to the full-trace ledger (component=proposal_scorer); when
     omitted the scorer simply skips trace writes.
+
+    Args:
+        args: Parsed CLI arguments (scoring opt-out, model list).
+        session_dir: Optional session directory for token-usage tracing.
+
+    Returns:
+        ProposalScorer | None: The configured scorer, or ``None`` when
+        scoring is disabled or the model list resolves empty.
     """
     if getattr(args, "no_proposal_scoring", False):
         return None
@@ -158,6 +186,12 @@ def _robustness_server_configured(args: argparse.Namespace) -> bool:
     ``enable_cluster_pod_metrics`` and the sandbox-local LocalProbe false
     positives are silenced. Configured = ``--robustness-server-url`` or
     ``ROBUSTNESS_SERVER_URL`` is set.
+
+    Args:
+        args: Parsed CLI arguments (``robustness_server_url``).
+
+    Returns:
+        bool: ``True`` if a robustness-server endpoint is configured.
     """
     url = (getattr(args, "robustness_server_url", None) or "").strip()
     if url:
@@ -188,6 +222,12 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     forward a workload_uid hint, disable the 127.0.0.1:8888 auto-probe,
     and lift the ``no_levers_found`` floor to 60 min. Single-node
     semantics stay untouched.
+
+    Args:
+        args: Parsed CLI arguments (robustness flags, node count).
+
+    Returns:
+        dict[str, Any]: The non-default ``request.options`` overrides.
     """
     options: dict[str, Any] = {}
     server_url = getattr(args, "robustness_server_url", None)

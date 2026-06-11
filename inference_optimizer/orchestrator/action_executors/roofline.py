@@ -62,9 +62,13 @@ def _extract_steady_state_retry_mode(
 ) -> "tuple[str, dict[str, Any]] | None":
     """Inspect a failed trace_analyze result for a steady-state recovery hint.
 
-    Returns ``(mode, warning_dict)`` when a recovery warning carries an
-    alternate in ``non_empty_modes`` / ``available_modes`` (first one picked,
-    splitter-sorted); ``None`` otherwise (caller falls to ``_failed()``).
+    Args:
+        ta_result: The failed trace_analyze result to inspect for warnings.
+
+    Returns:
+        ``(mode, warning_dict)`` when a recovery warning carries an alternate
+        in ``non_empty_modes`` / ``available_modes`` (first one picked,
+        splitter-sorted); ``None`` otherwise (caller falls to ``_failed()``).
     """
     if not isinstance(ta_result, dict):
         return None
@@ -93,7 +97,14 @@ def _extract_steady_state_retry_mode(
 
 def _extract_trace_path(profile_result: dict[str, Any]) -> str:
     """Pick the trace path like Coordinator's ``_promote_to_shared_state``:
-    prefer ``main_trace_path`` (merged), else ``trace_files[0]``."""
+    prefer ``main_trace_path`` (merged), else ``trace_files[0]``.
+
+    Args:
+        profile_result: The profile sub-step result to read the trace from.
+
+    Returns:
+        The resolved trace path, or an empty string if none is present.
+    """
     if not isinstance(profile_result, dict):
         return ""
     direct = profile_result.get("main_trace_path")
@@ -117,6 +128,15 @@ def _failed(
 
     ``phase`` names the failed sub-step (profile / profile_no_trace /
     trace_analyze); ``sub_result`` is pruned to known keys for audit.
+
+    Args:
+        phase: Name of the failed sub-step.
+        error: Human-readable error message.
+        sub_result: The failed sub-step's result, pruned to known keys for
+            audit when provided.
+
+    Returns:
+        The canonical failure result dict.
     """
     out: dict[str, Any] = {
         "status": "failed",
@@ -492,6 +512,12 @@ class RooflineExecutor:
         Bypasses SubAgentRunner's child Task creation (avoids double task
         accounting); the child carries kind="profile" + same params and
         inherits the lease (no profile_lane re-acquire).
+
+        Args:
+            parent_ctx: The parent runner context to derive the child from.
+
+        Returns:
+            A child ``RunnerContext`` for the profile sub-step.
         """
         from ..task_registry import Task
         parent_task = parent_ctx.task
@@ -514,7 +540,14 @@ class RooflineExecutor:
 
 
 def make_roofline_executor(*, shared_state: Any) -> RooflineExecutor:
-    """Production factory used by `cli._register_executors`."""
+    """Production factory used by `cli._register_executors`.
+
+    Args:
+        shared_state: The SharedState instance the executor will mutate.
+
+    Returns:
+        A configured ``RooflineExecutor``.
+    """
     return RooflineExecutor(shared_state=shared_state)
 
 

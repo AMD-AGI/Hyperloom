@@ -194,6 +194,13 @@ def _slug(value: str, default: str) -> str:
     Slugged for lookup stability (``--model /path/Qwen3`` and ``qwen3`` must
     converge) and filesystem safety in the local KB store. ``/`` resolves to
     the basename first (HF paths collapse to the stem).
+
+    Args:
+        value: The raw value to slugify.
+        default: Fallback slug returned when ``value`` is empty.
+
+    Returns:
+        The slugified value, or ``default`` when empty.
     """
     raw = (value or "").strip()
     if not raw:
@@ -221,6 +228,16 @@ def recipe_canonical_id(
     useful before all components are known. Keyword-only to prevent
     positional re-ordering; missing components fall back to ``DEFAULT_*_SLUG``
     so the id is always well-formed (6 colon-separated segments).
+
+    Args:
+        model: The model identifier.
+        hardware: The hardware/GPU identifier.
+        framework: The serving framework name.
+        framework_version: The framework version.
+        precision: The precision/quantization scheme.
+
+    Returns:
+        The six-segment colon-separated canonical id.
     """
     return (
         f"inference:"
@@ -243,6 +260,16 @@ def canonical_labels(
     """Return the five-key ``labels`` dict mirroring the canonical id, so
     ``/recipes/search`` can ``label_match`` by individual dimension. Slug
     values match :func:`recipe_canonical_id`.
+
+    Args:
+        model: The model identifier.
+        hardware: The hardware/GPU identifier.
+        framework: The serving framework name.
+        framework_version: The framework version.
+        precision: The precision/quantization scheme.
+
+    Returns:
+        The five-key labels dict mirroring the canonical id.
     """
     return {
         F_LABEL_MODEL:             _slug(model,             DEFAULT_MODEL_SLUG),
@@ -268,6 +295,12 @@ def detect_framework_version(framework: str) -> str:
     top-level package and reading ``__version__``. Failures degrade to
     :data:`DEFAULT_FRAMEWORK_VERSION_SLUG` (the optimizer must boot without
     the framework importable).
+
+    Args:
+        framework: The serving framework name to probe.
+
+    Returns:
+        The detected version slug, or the default on any failure.
     """
     fw_slug = _slug(framework, "")
     if not fw_slug:
@@ -296,6 +329,13 @@ def format_recipe_path(template: str, canonical_id: str) -> str:
     """Substitute ``{canonical_id}`` into a path template without
     percent-encoding (server treats canonical_id as ``:path``-typed, so HF
     stems like ``Qwen/Qwen3-30B-A3B`` must reach it verbatim).
+
+    Args:
+        template: The path template containing ``{canonical_id}``.
+        canonical_id: The canonical id to substitute verbatim.
+
+    Returns:
+        The template with ``{canonical_id}`` replaced.
     """
     return template.replace("{canonical_id}", canonical_id)
 

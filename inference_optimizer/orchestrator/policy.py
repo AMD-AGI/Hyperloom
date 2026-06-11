@@ -43,7 +43,14 @@ if TYPE_CHECKING:  # pragma: no cover — type-only
 
 
 def _value_is_present(value: Any) -> bool:
-    """Present iff a non-empty string OR non-empty container; ``None`` / whitespace count as absent."""
+    """Present iff a non-empty string OR non-empty container; ``None`` / whitespace count as absent.
+
+    Args:
+        value: The value to test for presence.
+
+    Returns:
+        True when the value is considered present.
+    """
     if value is None:
         return False
     if isinstance(value, str):
@@ -54,7 +61,15 @@ def _value_is_present(value: Any) -> bool:
 
 
 def _delegate_field_present(payload: dict[str, Any], field_name: str) -> bool:
-    """True iff ``field_name`` is present at the top of ``payload`` OR nested under ``payload["params"]`` (robustness uses params)."""
+    """True iff ``field_name`` is present at the top of ``payload`` OR nested under ``payload["params"]`` (robustness uses params).
+
+    Args:
+        payload: The intent payload dict to inspect.
+        field_name: The field name to look for.
+
+    Returns:
+        True when the field is present at the top level or under ``params``.
+    """
     if _value_is_present(payload.get(field_name)):
         return True
     nested = payload.get("params")
@@ -128,7 +143,11 @@ RESEARCH_LANE_CEILING_FALLBACK: int = 2
 
 
 def detect_gpu_count() -> int:
-    """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed."""
+    """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
+
+    Returns:
+        The visible GPU count, or 0 when nothing can be probed.
+    """
     for env_name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         raw = os.environ.get(env_name)
         if raw is None:
@@ -163,7 +182,11 @@ def detect_gpu_count() -> int:
 
 
 def research_lane_ceiling() -> int:
-    """Dynamic ceiling on concurrent research-lane specialists (``2 × GPU``; falls back to :data:`RESEARCH_LANE_CEILING_FALLBACK`)."""
+    """Dynamic ceiling on concurrent research-lane specialists (``2 × GPU``; falls back to :data:`RESEARCH_LANE_CEILING_FALLBACK`).
+
+    Returns:
+        The research-lane concurrency ceiling.
+    """
     gpus = detect_gpu_count()
     if gpus > 0:
         return 2 * gpus
@@ -171,7 +194,15 @@ def research_lane_ceiling() -> int:
 
 
 def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
-    """Configured GPU specialist capacity (separate from serving lanes; 0 disables ``needs_gpu=true`` dispatch)."""
+    """Configured GPU specialist capacity (separate from serving lanes; 0 disables ``needs_gpu=true`` dispatch).
+
+    Args:
+        shared_state: Session state carrying the configured capacity, or
+            ``None`` to read from the environment.
+
+    Returns:
+        The configured GPU specialist capacity (>= 0).
+    """
     if shared_state is not None:
         try:
             return max(0, int(
@@ -360,7 +391,11 @@ SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
 def _trace_path_allowlist() -> tuple[str, ...]:
-    """Multi-node profile trace path-prefix allowlist (runtime-resolved; trailing ``/`` is load-bearing for the startswith check)."""
+    """Multi-node profile trace path-prefix allowlist (runtime-resolved; trailing ``/`` is load-bearing for the startswith check).
+
+    Returns:
+        A one-tuple of the allowed trace-root path prefix.
+    """
     from ..paths import mn_profile_trace_root
     root = str(mn_profile_trace_root()).rstrip("/") + "/"
     return (root,)
@@ -492,7 +527,15 @@ class PolicyGate:
 
     # Public API
     def validate_intent(self, from_agent: str, intent: Intent) -> None:
-        """Raise :class:`PolicyDenied` if the intent is not allowed (cheapest checks first: role → allowed_intents → structural → cross-source)."""
+        """Raise :class:`PolicyDenied` if the intent is not allowed (cheapest checks first: role → allowed_intents → structural → cross-source).
+
+        Args:
+            from_agent: Identity of the emitting agent.
+            intent: The parsed intent to validate.
+
+        Raises:
+            PolicyDenied: If the intent is not permitted for the agent.
+        """
         # specialist sub-agents emit under an ephemeral ``specialist:<task_id>`` identity routed to a synthetic role.
         if from_agent.startswith(SPECIALIST_FROM_AGENT_PREFIX):
             self._validate_specialist_intent(from_agent, intent)
@@ -544,7 +587,15 @@ class PolicyGate:
     def _closing_phase_denial(
         self, source: str, intent: Intent,
     ) -> PolicyDenied | None:
-        """During closing phase, allow only harmless intents and ``report`` proposals."""
+        """During closing phase, allow only harmless intents and ``report`` proposals.
+
+        Args:
+            source: Identity of the emitting agent.
+            intent: The parsed intent under evaluation.
+
+        Returns:
+            A :class:`PolicyDenied` to raise, or ``None`` when allowed.
+        """
         state = self.shared_state
         if state is None or not getattr(state, "closing_phase", False):
             return None
@@ -569,7 +620,14 @@ class PolicyGate:
         )
 
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
-        """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read)."""
+        """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read).
+
+        Args:
+            agent_name: Identity of the reactor agent.
+
+        Returns:
+            The list of tool names the agent may use.
+        """
         role = self.role_registry.get(agent_name)
         if role is None:
             return []
@@ -583,7 +641,14 @@ class PolicyGate:
         return tools
 
     def allowed_tools_for_action(self, action_name: str) -> list[str]:
-        """Per-action tool intersection; action's declared ``allowed_tools`` or the default ``["emit_intent"]``."""
+        """Per-action tool intersection; action's declared ``allowed_tools`` or the default ``["emit_intent"]``.
+
+        Args:
+            action_name: The action to resolve tools for.
+
+        Returns:
+            The list of allowed tool names for the action.
+        """
         if self.action_registry is None:
             return ["emit_intent"]
         meta = self.action_registry.get(action_name)
@@ -992,7 +1057,17 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject an action the LLM cannot propose in the current phase (``strict_phase`` True raises, False warns; no-op when phase missing)."""
+        """Reject an action the LLM cannot propose in the current phase (``strict_phase`` True raises, False warns; no-op when phase missing).
+
+        Args:
+            role: The resolved role of the emitting agent.
+            action_name: The action being validated.
+            intent_kind: The intent kind (e.g. ``"delegate"``).
+
+        Raises:
+            PolicyDenied: If the action is not proposable in the phase and
+                ``strict_phase`` is enabled.
+        """
         if action_name in COORDINATOR_INTERNAL_ACTIONS:
             raise PolicyDenied(
                 f"action {action_name!r} is Coordinator-managed and not "
@@ -1060,7 +1135,15 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject GEMM tuning for non-FP8 sessions (it drives FP8 block-scale GEMM dispatch; the handler repeats the check)."""
+        """Reject GEMM tuning for non-FP8 sessions (it drives FP8 block-scale GEMM dispatch; the handler repeats the check).
+
+        Args:
+            action_name: The action being validated.
+            intent_kind: The intent kind (e.g. ``"delegate"``).
+
+        Raises:
+            PolicyDenied: If the action is FP8-only but the session is not FP8.
+        """
         if not action_name or action_name not in FP8_ONLY_ACTIONS:
             return
         state = self.shared_state
@@ -1087,7 +1170,15 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject any intent whose ``action_name`` / ``request.kind`` equals a Cortex KB write tool name (defense in depth; KB_design §3.11 §4.4 / Inv-11.3)."""
+        """Reject any intent whose ``action_name`` / ``request.kind`` equals a Cortex KB write tool name (defense in depth; KB_design §3.11 §4.4 / Inv-11.3).
+
+        Args:
+            action_name: The action / request kind being validated.
+            intent_kind: The intent kind (e.g. ``"delegate"``).
+
+        Raises:
+            PolicyDenied: If the name collides with a KB write tool.
+        """
         if not action_name:
             return
         if action_name not in KB_WRITE_TOOL_NAMES:
@@ -1113,7 +1204,16 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject an external tool name not on the caller's role whitelist (KB/PR/Web tools are specialist-only; KB_design §3.11 §4.5)."""
+        """Reject an external tool name not on the caller's role whitelist (KB/PR/Web tools are specialist-only; KB_design §3.11 §4.5).
+
+        Args:
+            role_name: The emitting role name.
+            action_name: The action / tool name being validated.
+            intent_kind: The intent kind (e.g. ``"delegate"``).
+
+        Raises:
+            PolicyDenied: If the tool is not whitelisted for the role.
+        """
         if not action_name:
             return
         # Skip KB write names (R4 owns them) so a write attempt yields ``kb_write_unauthorized``, not the less-specific R5 code.
@@ -1144,7 +1244,17 @@ class PolicyGate:
         source_role: str,
         phase: str | None = None,
     ) -> None:
-        """Raise :class:`PolicyDenied` if ``tool_name`` is not allowed for ``source_role`` (pure, Inv-11.1; ``phase`` no longer gates)."""
+        """Raise :class:`PolicyDenied` if ``tool_name`` is not allowed for ``source_role`` (pure, Inv-11.1; ``phase`` no longer gates).
+
+        Args:
+            tool_name: The canonical tool name being invoked.
+            source_role: The role invoking the tool.
+            phase: Current phase; retained for compatibility (no longer gates).
+
+        Raises:
+            PolicyDenied: If the tool is empty, a KB write, or not whitelisted
+                for the role.
+        """
         tool_name = (tool_name or "").strip()
         if not tool_name:
             raise PolicyDenied(
@@ -1184,7 +1294,15 @@ class PolicyGate:
     def _validate_sweep_singleton(
         self, payload: dict[str, Any], *, intent_kind: str,
     ) -> None:
-        """Enforce one sweep per SWEEP phase (Inv-9.4): deny agent sweeps once the auto-enqueued sweep landed (concurrent sweeps crash both vllm engines). Escape: ``params.bypass_sweep_singleton=True``."""
+        """Enforce one sweep per SWEEP phase (Inv-9.4): deny agent sweeps once the auto-enqueued sweep landed (concurrent sweeps crash both vllm engines). Escape: ``params.bypass_sweep_singleton=True``.
+
+        Args:
+            payload: The delegate/propose payload (may carry the bypass flag).
+            intent_kind: The intent kind (e.g. ``"delegate"``).
+
+        Raises:
+            PolicyDenied: If an auto-enqueued sweep already exists this phase.
+        """
         params = payload.get("params") or {}
         if isinstance(params, dict) and params.get("bypass_sweep_singleton"):
             return
@@ -1228,7 +1346,15 @@ class PolicyGate:
     def _validate_conc_sweep_singleton(
         self, payload: dict[str, Any], *, intent_kind: str,
     ) -> None:
-        """Enforce one conc_sweep per SWEEP phase (Bug #11); re-proposals burn GPU for no new data. Escape: ``params.bypass_conc_sweep_singleton=True``."""
+        """Enforce one conc_sweep per SWEEP phase (Bug #11); re-proposals burn GPU for no new data. Escape: ``params.bypass_conc_sweep_singleton=True``.
+
+        Args:
+            payload: The delegate/propose payload (may carry the bypass flag).
+            intent_kind: The intent kind (e.g. ``"delegate"``).
+
+        Raises:
+            PolicyDenied: If an auto-enqueued conc_sweep already exists this phase.
+        """
         params = payload.get("params") or {}
         if isinstance(params, dict) and params.get("bypass_conc_sweep_singleton"):
             return
@@ -1268,7 +1394,14 @@ class PolicyGate:
     def _validate_integrate_patch_critic_gate(
         self, payload: dict[str, Any],
     ) -> None:
-        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict, unless ``params.bypass_critic=True``)."""
+        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict, unless ``params.bypass_critic=True``).
+
+        Args:
+            payload: The integrate_patch delegate payload.
+
+        Raises:
+            PolicyDenied: If params are malformed or the critic gate is unmet.
+        """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
             raise PolicyDenied(
@@ -1335,7 +1468,15 @@ class PolicyGate:
     def _validate_specialist_dispatch(
         self, role: "AgentRole", payload: dict[str, Any],
     ) -> None:
-        """Enforce the specialist-delegate contract (Inv-11.2): orchestration-only, tags ∈ vocab, gap_canonical_id required, max_turns ≤ cap."""
+        """Enforce the specialist-delegate contract (Inv-11.2): orchestration-only, tags ∈ vocab, gap_canonical_id required, max_turns ≤ cap.
+
+        Args:
+            role: The resolved role of the emitting agent.
+            payload: The specialist delegate payload.
+
+        Raises:
+            PolicyDenied: If any part of the specialist-dispatch contract fails.
+        """
         if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
             raise PolicyDenied(
                 f"role={role.name!r} cannot dispatch specialists "
@@ -1514,7 +1655,14 @@ class PolicyGate:
         validates only structural shape: a single ``task_description`` or a
         ``tasks=[...]`` wave (bounded by SPECIALIST_FREEFORM_WAVE_MAX), each
         with a non-empty, length-bounded description that survives the
-        red-line tripwire."""
+        red-line tripwire.
+
+        Args:
+            params: The freeform specialist delegate params.
+
+        Raises:
+            PolicyDenied: If the wave or task descriptions are malformed.
+        """
         wave = params.get("tasks")
         if wave is not None:
             if not isinstance(wave, list) or not wave:
@@ -1559,7 +1707,15 @@ class PolicyGate:
     @staticmethod
     def _check_freeform_task_description(desc: str, *, where: str) -> None:
         """Per-task structural checks for a free-form ``task_description``:
-        non-empty, length-bounded, and clear of the red-line tripwire."""
+        non-empty, length-bounded, and clear of the red-line tripwire.
+
+        Args:
+            desc: The task description to check.
+            where: Label identifying the task position, used in error messages.
+
+        Raises:
+            PolicyDenied: If the description is empty, too long, or tripwired.
+        """
         if not desc:
             raise PolicyDenied(
                 f"delegate{{action='specialist',scope='freeform'}}: "
@@ -1595,7 +1751,16 @@ class PolicyGate:
     def _validate_specialist_intent(
         self, from_agent: str, intent: Intent,
     ) -> None:
-        """Validate any intent emitted under a ``specialist:<task_id>`` identity (Inv-5.2: only SEND_MESSAGE, ALERT, and one SPECIALIST_DONE)."""
+        """Validate any intent emitted under a ``specialist:<task_id>`` identity (Inv-5.2: only SEND_MESSAGE, ALERT, and one SPECIALIST_DONE).
+
+        Args:
+            from_agent: The ``specialist:<task_id>`` emitting identity.
+            intent: The parsed intent to validate.
+
+        Raises:
+            PolicyDenied: If the task id is missing or the intent type is
+                not permitted for a specialist.
+        """
         task_id = from_agent.removeprefix(SPECIALIST_FROM_AGENT_PREFIX).strip()
         if not task_id:
             raise PolicyDenied(
@@ -1631,7 +1796,15 @@ class PolicyGate:
     def _validate_specialist_done_payload(
         self, task_id: str, payload: dict[str, Any],
     ) -> None:
-        """Per-field R3 structural checks for the ``specialist_done`` payload (gap_canonical_id, domain ∈ keys, proposal_set, empty+reason, summary ≤4096, confidence ∈ [0,1])."""
+        """Per-field R3 structural checks for the ``specialist_done`` payload (gap_canonical_id, domain ∈ keys, proposal_set, empty+reason, summary ≤4096, confidence ∈ [0,1]).
+
+        Args:
+            task_id: The specialist task id (for error context).
+            payload: The specialist_done payload to validate.
+
+        Raises:
+            PolicyDenied: If any required field is missing or malformed.
+        """
         gap = str(payload.get("gap_canonical_id") or "").strip()
         if not gap:
             raise PolicyDenied(
@@ -1806,14 +1979,31 @@ class PolicyGate:
         return any(s.startswith(p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
-        """Match a value against runtime-resolved trace path prefixes (multi-node shared profile dir outside session_dir)."""
+        """Match a value against runtime-resolved trace path prefixes (multi-node shared profile dir outside session_dir).
+
+        Args:
+            value: The path string to test.
+
+        Returns:
+            True when ``value`` starts with an allowed trace path prefix.
+        """
         s = str(value)
         return any(s.startswith(p) for p in _trace_path_allowlist())
 
     def _validate_payload_paths(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any],
     ) -> None:
-        """Walk payload (recursively); reject path-like values escaping session_dir. No-op when session_dir is None or strict_paths is False."""
+        """Walk payload (recursively); reject path-like values escaping session_dir. No-op when session_dir is None or strict_paths is False.
+
+        Args:
+            role: The resolved role of the emitting agent.
+            intent_type: The intent type being validated.
+            payload: The intent payload to walk.
+
+        Raises:
+            PolicyDenied: If a path-like value escapes session_dir and its
+                applicable allowlists.
+        """
         if self.session_dir is None or not self.strict_paths:
             return
 

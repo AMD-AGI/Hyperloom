@@ -69,6 +69,9 @@ def _runs_actions() -> frozenset[str]:
     """Action names that own a ``runs/<kind>/<task_id>/`` workspace, from
     action metadata. Lazy + cached; falls back to ``_RUNS_ACTIONS_FALLBACK``
     when the registry can't load.
+
+    Returns:
+        The set of action names that own a runs-workspace.
     """
     try:
         from .orchestrator.action_registry import ActionRegistry  # local: avoid import-time cycle
@@ -149,6 +152,14 @@ def kernel_workspace(session_dir: Path, kernel_id: str) -> Path:
     GEAK/OOB candidates, and the chosen patch for one kernel. Keyed by
     ``kernel_id`` and survives across tasks (vs the per-invocation
     :func:`kernel_agent_runs_dir`).
+
+    Args:
+        session_dir: The session root directory.
+        kernel_id: Kernel id keying the workspace; blank falls back to
+            ``"unknown"``.
+
+    Returns:
+        ``<session_dir>/kernel-agent-workspace/<kernel_id>``.
     """
     kid = str(kernel_id or "").strip() or "unknown"
     return Path(session_dir) / "kernel-agent-workspace" / kid
@@ -159,6 +170,14 @@ def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
     kernel-agent output (logs, status JSON, optimization_attempts.jsonl,
     TraceLens analysis). Keyed by tool-invocation session id (vs the
     kernel_id-keyed :func:`kernel_workspace`).
+
+    Args:
+        session_dir: The session root directory.
+        session_id: Tool-invocation session id; blank falls back to
+            ``"unknown"``.
+
+    Returns:
+        ``<session_dir>/kernel-agent/runs/<session_id>``.
     """
     sid = str(session_id or "").strip() or "unknown"
     return Path(session_dir) / "kernel-agent" / "runs" / sid
@@ -167,6 +186,14 @@ def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
 def patches_dir(session_dir: Path, kernel_id: str) -> Path:
     """``<sd>/patches/<kernel_id>/`` — KEEP-promoted on-disk changes: the
     original source backup + applied patch (REVERT restores from backup).
+
+    Args:
+        session_dir: The session root directory.
+        kernel_id: Kernel id keying the patch dir; blank falls back to
+            ``"unknown"``.
+
+    Returns:
+        ``<session_dir>/patches/<kernel_id>``.
     """
     kid = str(kernel_id or "").strip() or "unknown"
     return Path(session_dir) / "patches" / kid
@@ -213,7 +240,14 @@ def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
 # All trace writers are best-effort and swallow OSError; these helpers only
 # compute paths (callers mkdir the parent before writing).
 def trace_dir(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/`` — root of the unified token+decision trace."""
+    """``<sd>/reports/trace/`` — root of the unified token+decision trace.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/reports/trace``.
+    """
     return reports_dir(session_dir) / "trace"
 
 
@@ -224,13 +258,26 @@ def llm_calls_path(session_dir: Path) -> Path:
 
     Out-of-process children write to :func:`ext_trace_path` instead; the
     collector merges both streams.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/reports/trace/llm_calls.jsonl``.
     """
     return trace_dir(session_dir) / "llm_calls.jsonl"
 
 
 def trace_ext_dir(session_dir: Path) -> Path:
     """``<sd>/reports/trace/ext/`` — parent of every out-of-process child's
-    own ``<component>-<pid>.jsonl`` shard."""
+    own ``<component>-<pid>.jsonl`` shard.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/reports/trace/ext``.
+    """
     return trace_dir(session_dir) / "ext"
 
 
@@ -241,6 +288,14 @@ def ext_trace_path(session_dir: Path, component: str, pid: int) -> Path:
     CLI / tracelens) writes its own shard so concurrent children never
     contend on a shared file; the collector globs ``ext/*.jsonl`` and merges.
     The ``pid`` keeps shards disjoint across re-spawns of the same component.
+
+    Args:
+        session_dir: The session root directory.
+        component: Producer component name; blank falls back to ``"unknown"``.
+        pid: Process id of the producing child.
+
+    Returns:
+        ``<session_dir>/reports/trace/ext/<component>-<pid>.jsonl``.
     """
     comp = str(component or "").strip() or "unknown"
     return trace_ext_dir(session_dir) / f"{comp}-{int(pid)}.jsonl"
@@ -248,7 +303,14 @@ def ext_trace_path(session_dir: Path, component: str, pid: int) -> Path:
 
 def decision_trace_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/decision_trace.jsonl`` — collector output joining
-    every decision to its LLM token spend along the phase→tick timeline."""
+    every decision to its LLM token spend along the phase→tick timeline.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/reports/trace/decision_trace.jsonl``.
+    """
     return trace_dir(session_dir) / "decision_trace.jsonl"
 
 
@@ -262,25 +324,52 @@ def conversations_path(session_dir: Path) -> Path:
     can be replayed or exported (e.g. to Langfuse) after the fact. Both share
     the same ``session_id`` / ``component`` / ``tick`` / ``phase`` join keys
     so the two streams line up against ``decision_trace``.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/reports/trace/conversations.jsonl``.
     """
     return trace_dir(session_dir) / "conversations.jsonl"
 
 
 def research_hints_md(session_dir: Path) -> Path:
     """``<sd>/research_hints.md`` — human-readable proven-prior hints
-    collected by the research scout."""
+    collected by the research scout.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/research_hints.md``.
+    """
     return Path(session_dir) / "research_hints.md"
 
 
 def research_hints_json(session_dir: Path) -> Path:
     """``<sd>/research_hints.json`` — structured mirror of the research
-    hints (machine-readable; advisory gap-scoring reads this)."""
+    hints (machine-readable; advisory gap-scoring reads this).
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/research_hints.json``.
+    """
     return Path(session_dir) / "research_hints.json"
 
 
 def competitor_target_json(session_dir: Path) -> Path:
     """``<sd>/competitor_target.json`` — LLM-authored competitor target
-    numbers (each per-concurrency entry carries its own source)."""
+    numbers (each per-concurrency entry carries its own source).
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/competitor_target.json``.
+    """
     return Path(session_dir) / "competitor_target.json"
 
 
@@ -314,6 +403,12 @@ def optimizer_runs_dir(session_dir: Path) -> Path:
     """``<sd>/optimizer_runs/`` — launcher artefacts (run_<tag>.log / .pid /
     robustness_monitor_*.log). Under $USER_DATA_PATH so one override moves
     the whole run tail.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/optimizer_runs``.
     """
     return Path(session_dir) / "optimizer_runs"
 
@@ -426,6 +521,12 @@ def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
 def target_analysis_dir(session_dir: Path) -> Path:
     """``<sd>/target_analysis/`` — external baseline artefacts. Owner:
     TargetAnalysisExecutor; reader: ReportExecutor.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/target_analysis``.
     """
     return Path(session_dir) / "target_analysis"
 
@@ -479,6 +580,12 @@ def cortex_dir(session_dir: Path) -> Path:
 def cortex_sid_file(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.kb_sid`` — Cortex session id from T0 ``session
     begin`` (resume reuses it). Absent => --degraded-kb or T0 not yet run.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/runtime/cortex/.kb_sid``.
     """
     return cortex_dir(session_dir) / ".kb_sid"
 
@@ -517,6 +624,12 @@ def cortex_pending_ndjson(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.kb_pending.ndjson`` — append-only async write
     queue for T2/T3 ops. Consumed by the cortex_kb_flusher daemon; drained at
     T4 before ``session commit``.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/runtime/cortex/.kb_pending.ndjson``.
     """
     return cortex_dir(session_dir) / ".kb_pending.ndjson"
 
@@ -555,6 +668,12 @@ def cortex_dead_letter_ndjson(session_dir: Path) -> Path:
 def cortex_audit_jsonl(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.kb_audit.jsonl`` — append-only audit of every
     direct Cortex CLI invocation. Source of truth for breakdown.kb_provenance.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/runtime/cortex/.kb_audit.jsonl``.
     """
     return cortex_dir(session_dir) / ".kb_audit.jsonl"
 
@@ -579,6 +698,12 @@ def recipe_snapshot_dir(session_dir: Path) -> Path:
 def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only audit of
     every recipe-snapshot remote READ call (writes are local-only and skip it).
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/runtime/recipe_snapshot/.audit.jsonl``.
     """
     return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
 
@@ -588,6 +713,12 @@ def pr_monitor_status_json(session_dir: Path) -> Path:
     reachability snapshot; breakdown reads it for pr_monitor:* warnings.
 
     Schema: ``{enabled, url, reachable, mcp_url, window_days, status_text}``.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/runtime/cortex/.pr_monitor_status.json``.
     """
     return cortex_dir(session_dir) / ".pr_monitor_status.json"
 
@@ -614,6 +745,12 @@ def cortex_flusher_status_json(session_dir: Path) -> Path:
 
     Schema: ``{enabled, spawned, pid, cmd, cortex_kb_url, interval_sec,
     batch_size, reason, ts}``.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/runtime/cortex/.kb_flusher_status.json``.
     """
     return cortex_dir(session_dir) / ".kb_flusher_status.json"
 

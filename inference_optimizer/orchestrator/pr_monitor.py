@@ -155,6 +155,17 @@ class PRMonitorClient:
         """GET ``base_url + path`` with ``params``; parsed JSON or raises.
 
         Response size capped at 4 MiB as defense-in-depth.
+
+        Args:
+            path: The endpoint path appended to ``base_url``.
+            params: Optional query parameters (empty/``None`` values dropped).
+
+        Returns:
+            The parsed JSON response.
+
+        Raises:
+            PRMonitorError: If the client is disabled, the request fails, or
+                the response is not valid JSON.
         """
         if not self.enabled:
             raise PRMonitorError("PR Monitor client disabled (--degraded-pr)")
@@ -214,6 +225,9 @@ class PRMonitorClient:
 
         Accepts either the array or ``{"items": [...]}`` shape and either
         ``repo_name``/``name`` field; skips ``is_active=False`` entries.
+
+        Returns:
+            The active repo names, or ``[]`` on failure.
         """
         try:
             data = self._get_json("/repos")
@@ -249,6 +263,15 @@ class PRMonitorClient:
 
         Returns :class:`PRSummary` list (empty on failure). Cached by
         rendered URL to avoid re-hitting the network within a tick.
+
+        Args:
+            repo: Canonical ``owner/name`` repo identifier.
+            state: PR state filter (``all`` / ``open`` / ``closed``).
+            since: Optional ISO lower bound on ``updated_at``.
+            limit: Maximum number of PRs to fetch.
+
+        Returns:
+            The PR summaries, or ``[]`` on failure.
         """
         params = {
             "state": state,
@@ -346,7 +369,19 @@ class PRMonitorClient:
         total_budget_sec: float = DEFAULT_PR_FEED_TOTAL_BUDGET_SEC,
         now: datetime | None = None,
     ) -> tuple[list[PRSummary], list[str]]:
-        """Return ``(prs, warnings)`` for the union of ``repos``."""
+        """Return ``(prs, warnings)`` for the union of ``repos``.
+
+        Args:
+            repos: The repos to fetch and union.
+            keywords: Optional keyword filter applied to each PR.
+            window_days: Lookback window in days for the ``since`` bound.
+            per_repo_limit: Maximum PRs fetched per repo.
+            total_budget_sec: Total wall-clock budget across all repos.
+            now: Optional reference time (for tests); defaults to current UTC.
+
+        Returns:
+            A ``(prs, warnings)`` tuple; PRs are sorted newest-first.
+        """
         out: list[PRSummary] = []
         warns: list[str] = []
         if not self.enabled:
@@ -399,6 +434,18 @@ class PRMonitorClient:
         """Same as :meth:`list_prs` but re-raises :class:`PRMonitorError`.
 
         Lets :meth:`pr_feed_warm` distinguish empty-window from fetch-failed.
+
+        Args:
+            repo: Canonical ``owner/name`` repo identifier.
+            state: PR state filter (``all`` / ``open`` / ``closed``).
+            since: Optional ISO lower bound on ``updated_at``.
+            limit: Maximum number of PRs to fetch.
+
+        Returns:
+            The PR summaries for the repo.
+
+        Raises:
+            PRMonitorError: If the underlying HTTP fetch fails.
         """
         params: dict[str, Any] = {
             "state": state,
@@ -457,7 +504,16 @@ class PRMonitorClient:
 
 
 def _matches_keywords(pr: PRSummary, keywords_lower: list[str]) -> bool:
-    """Return True iff ``pr`` (title + labels + body snippet) mentions any keyword."""
+    """Return True iff ``pr`` (title + labels + body snippet) mentions any keyword.
+
+    Args:
+        pr: The PR summary to test.
+        keywords_lower: Lowercased keywords to match (empty matches all).
+
+    Returns:
+        ``True`` when any keyword appears in the PR's title, labels, or body
+        snippet (or when no keywords are given).
+    """
     if not keywords_lower:
         return True
     haystack = " ".join([

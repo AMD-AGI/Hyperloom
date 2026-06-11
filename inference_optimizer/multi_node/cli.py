@@ -42,7 +42,11 @@ _DEFAULT_JIT_POLL_TIMEOUT_S = 1800
 
 
 def _resolve_poll_timeout_s() -> int:
-    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env else ``_DEFAULT_POLL_TIMEOUT_S``."""
+    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env else ``_DEFAULT_POLL_TIMEOUT_S``.
+
+    Returns:
+        int: The poll budget in seconds (at least 1).
+    """
     raw = (os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S") or "").strip()
     if raw:
         try:
@@ -87,7 +91,14 @@ _TERMINAL_OK_STATUSES = {"SUCCEEDED"}
 
 
 def _normalize_extra_args(s: str | None) -> str:
-    """Normalize ``--extra-args`` whitespace for equality (order-preserving; argv order matters)."""
+    """Normalize ``--extra-args`` whitespace for equality (order-preserving; argv order matters).
+
+    Args:
+        s: The raw extra-args string, or ``None``.
+
+    Returns:
+        str: The whitespace-collapsed string.
+    """
     return " ".join((s or "").split())
 
 # Exit codes — part of the CLI's contract with the agent; keep stable.
@@ -154,7 +165,13 @@ def _checkpoint_create_rayjob_state(
     workspace: str,
     args: argparse.Namespace,
 ) -> None:
-    """Persist ``rayjob_id`` as soon as SaFE returns it, so a concurrent ``create-rayjob`` doesn't leak a second RayJob."""
+    """Persist ``rayjob_id`` as soon as SaFE returns it, so a concurrent ``create-rayjob`` doesn't leak a second RayJob.
+
+    Args:
+        wid: The workload id returned by SaFE.
+        workspace: The SaFE workspace the workload belongs to.
+        args: Parsed ``create-rayjob`` arguments (node/GPU counts, image).
+    """
     prev = _load_state()
     old = (prev.get("rayjob_id") or "").strip()
     state: dict[str, Any] = dict(prev)
@@ -196,6 +213,16 @@ def _write_rayjob_meta(
 
     Skipped when ``session_id`` is empty (it's the filename). Best-effort:
     filesystem errors are logged at WARN and swallowed.
+
+    Args:
+        wid: The RayJob workload id.
+        workspace: The SaFE workspace.
+        session_id: The sandbox session id (also the meta filename); empty
+            skips the write.
+        owner_id: Optional owner id.
+        display_name: Human-readable workload name.
+        nodes: Total node count.
+        gpus_per_node: GPUs requested per node.
     """
     if not session_id:
         return
@@ -272,7 +299,14 @@ def _b64(s: str) -> str:
 
 
 def _wrap_for_dash(body: str) -> str:
-    """Base64-wrap a bash entrypoint so it survives Ray Dashboard exec under /bin/sh (dash rejects ``set -o pipefail``)."""
+    """Base64-wrap a bash entrypoint so it survives Ray Dashboard exec under /bin/sh (dash rejects ``set -o pipefail``).
+
+    Args:
+        body: The bash entrypoint body to wrap.
+
+    Returns:
+        str: A shell command that decodes and runs ``body`` under bash.
+    """
     enc = _b64(body)
     return f"echo {enc} | base64 -d | bash"
 
@@ -303,7 +337,12 @@ def _parse_kv_list(values: list[str] | None) -> dict[str, str]:
 
 
 def _credential_fanout() -> dict[str, str]:
-    """Return the *_API_KEY / *_BASE_URL env to inject into the RayJob (keys fall back to SAFE_API_KEY per ADDENDUM-13)."""
+    """Return the *_API_KEY / *_BASE_URL env to inject into the RayJob (keys fall back to SAFE_API_KEY per ADDENDUM-13).
+
+    Returns:
+        dict[str, str]: The credential env vars present in the sandbox,
+        keyed by name.
+    """
     safe_key = os.environ.get("SAFE_API_KEY", "").strip()
     out: dict[str, str] = {}
     for name in (
@@ -362,6 +401,29 @@ def _short_poll(
     post-create 404 lag). Terminal failure raises
     :class:`WorkloadTerminalFailure` (exit 2); timeout raises
     :class:`TransientFailure` (exit 1, safe to rerun).
+
+    Args:
+        label: Human-readable label used in log lines and errors.
+        fetch: Callable returning ``(state_obj, summary_str)`` per poll.
+        is_ok: Predicate that returns True when the state is terminal-OK.
+        is_fail: Predicate that returns True when the state is terminal-fail.
+        interval_s: Seconds to sleep between polls.
+        timeout_s: Maximum seconds to poll before raising.
+        failure_diag: Optional callable mapping a failed state to a
+            ``(diag, snapshot)`` pair.
+        quiet_fetch_error_grace_s: Seconds during which a quiet fetch error
+            logs at INFO rather than WARN.
+        is_quiet_fetch_error: Optional predicate classifying an exception as
+            an expected quiet fetch error.
+
+    Returns:
+        Any: The first state object that satisfies ``is_ok``.
+
+    Raises:
+        WorkloadTerminalFailure: When ``is_fail`` matches and ``failure_diag``
+            is provided.
+        RuntimeError: When ``is_fail`` matches without a ``failure_diag``.
+        TransientFailure: When the timeout elapses before a terminal state.
     """
     started = time.monotonic()
     attempt = 0
@@ -415,7 +477,15 @@ def _short_poll(
 
 
 def _summarize_workload_failure(workload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Build a one-line diagnostic + JSON-safe snapshot (phase/message/per-pod status/dispatch) from a SaFE GetWorkloadResponse."""
+    """Build a one-line diagnostic + JSON-safe snapshot (phase/message/per-pod status/dispatch) from a SaFE GetWorkloadResponse.
+
+    Args:
+        workload: A SaFE GetWorkloadResponse dict.
+
+    Returns:
+        tuple[str, dict[str, Any]]: The one-line diagnostic and a JSON-safe
+        failure snapshot.
+    """
     phase = str(workload.get("phase") or "?")
     msg = str(workload.get("message") or "").strip()
     queue = workload.get("queuePosition")
@@ -472,6 +542,12 @@ def _find_head_pod_ip(workload: dict) -> str:
 
     Priority: a ``podId`` containing ``-head-``, then ``resourceId == 0``,
     then the first pod with a ``podIP`` (the submitter pod isn't the head).
+
+    Args:
+        workload: A SaFE GetWorkloadResponse dict.
+
+    Returns:
+        str: The head pod IP, or an empty string when none is found.
     """
     pods = workload.get("pods") or []
     if not pods:
@@ -678,6 +754,13 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
     Streams the sandbox-side ``scripts/bootstrap.sh`` into the head pod via a
     heredoc entrypoint (``--script PATH`` overrides with a pod-visible script).
+
+    Args:
+        args: Parsed ``bootstrap`` arguments (script override, force,
+            print_logs, polling).
+
+    Returns:
+        int: ``0`` on success.
     """
     state = _require_state("rayjob_id", "head_pod_ip")
     head_ip = state["head_pod_ip"]
@@ -792,7 +875,17 @@ _SCRIPTS_DIR = Path(__file__).parent / "scripts"
 
 
 def _read_pod_script(name: str) -> str:
-    """Read a pod-side script from ``multi_node/scripts/`` (embedded into the dashboard entrypoint at submit time)."""
+    """Read a pod-side script from ``multi_node/scripts/`` (embedded into the dashboard entrypoint at submit time).
+
+    Args:
+        name: The script filename under ``multi_node/scripts/``.
+
+    Returns:
+        str: The script's text contents.
+
+    Raises:
+        RuntimeError: If the script file is missing.
+    """
     p = _SCRIPTS_DIR / name
     if not p.is_file():
         raise RuntimeError(
@@ -807,7 +900,20 @@ def _build_restart_entrypoint(
     pid_file: str,
     log_file: str,
 ) -> str:
-    """Compose the single-node restart entrypoint (heredoc kill_server.sh + launch_server.sh; IR-5 PID-file kill)."""
+    """Compose the single-node restart entrypoint (heredoc kill_server.sh + launch_server.sh; IR-5 PID-file kill).
+
+    Args:
+        args: Parsed ``restart-server`` arguments (framework, model, tp,
+            extra_args, health flag).
+        pid_file: Head-pod PID file path.
+        log_file: Head-pod server log path.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+
+    Raises:
+        RuntimeError: If ``args.framework`` is not sglang or vllm.
+    """
     framework = args.framework.lower()
     if framework not in ("sglang", "vllm"):
         raise RuntimeError(f"unsupported framework: {args.framework!r} (use sglang or vllm)")
@@ -912,7 +1018,15 @@ def _exec_kill_submission(
 
 
 def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
-    """Compose the head-pod entrypoint that kills every rank's server via heredoc-embedded kill_multinode.py (fans out via ray actors)."""
+    """Compose the head-pod entrypoint that kills every rank's server via heredoc-embedded kill_multinode.py (fans out via ray actors).
+
+    Args:
+        pid_dir: Directory of per-rank PID files to sweep.
+        grace_sec: Seconds between SIGTERM and SIGKILL.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("kill_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
@@ -924,7 +1038,14 @@ def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
 
 
 def _extract_launcher_summary(launch_logs: str) -> dict:
-    """Parse the JSON summary launch_multinode.py writes to stdout (the last balanced ``{...}`` in the interleaved logs); ``{}`` on failure."""
+    """Parse the JSON summary launch_multinode.py writes to stdout (the last balanced ``{...}`` in the interleaved logs); ``{}`` on failure.
+
+    Args:
+        launch_logs: The interleaved launcher logs.
+
+    Returns:
+        dict: The parsed launcher summary, or ``{}`` if none could be found.
+    """
     if not launch_logs:
         return {}
     text = launch_logs.rstrip()
@@ -961,6 +1082,16 @@ def _build_multinode_launch_entrypoint(
 
     Killed ranks MUST be cleared before this runs (sequenced by
     cmd_restart_server) or rank 0's old process still holds :8888.
+
+    Args:
+        args: Parsed ``restart-server`` arguments (framework, model, tp, ep,
+            PD knobs, health flag, extra_args).
+        nnodes: Total node count for the launch.
+        pid_dir: Directory the per-rank PID files are written to.
+        log_dir: Directory the per-rank logs are written to.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("launch_multinode.py")
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
@@ -1036,7 +1167,18 @@ def _build_multinode_router_entrypoint(
     pid_dir: str,
     log_dir: str,
 ) -> str:
-    """Compose the head-pod entrypoint that detaches the PD router (rank 0 only, binds 8888) via heredoc-embedded launch_router.py."""
+    """Compose the head-pod entrypoint that detaches the PD router (rank 0 only, binds 8888) via heredoc-embedded launch_router.py.
+
+    Args:
+        args: Parsed ``restart-server`` arguments (framework, router override).
+        prefill_url: Internal prefill group URL.
+        decode_url: Internal decode group URL.
+        pid_dir: Directory the router PID file is written to.
+        log_dir: Directory the router log is written to.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("launch_router.py")
     public_port = 8888
     pid_file = f"{pid_dir.rstrip('/')}/router.pid"
@@ -1065,7 +1207,18 @@ def _build_multinode_apply_patch_entrypoint(
     kernel_id: str,
     timeout_sec: int,
 ) -> str:
-    """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py."""
+    """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py.
+
+    Args:
+        target_path: Absolute file path on each pod to overwrite.
+        patch_b64: Base64-encoded new file contents.
+        backup_dir: Directory on each pod where the original is saved.
+        kernel_id: Optional id used to construct the backup filename.
+        timeout_sec: Per-actor timeout in seconds.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
@@ -1086,7 +1239,16 @@ def _build_multinode_revert_patch_entrypoint(
     backup_map_json: str,
     timeout_sec: int,
 ) -> str:
-    """Compose the head-pod entrypoint that fans out a revert via heredoc-embedded kernel_patch_multinode.py (``backup_map_json`` from the matching apply)."""
+    """Compose the head-pod entrypoint that fans out a revert via heredoc-embedded kernel_patch_multinode.py (``backup_map_json`` from the matching apply).
+
+    Args:
+        target_path: Absolute file path on each pod to restore.
+        backup_map_json: JSON ``{hostname: backup_path}`` from the matching apply.
+        timeout_sec: Per-actor timeout in seconds.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
@@ -1108,6 +1270,13 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
 
     Forwards only ``$TRACELENS_ROOT`` (patches are read on the pods'
     wekafs mount); the in-pod script is idempotent.
+
+    Args:
+        tracelens_root: Path to the TraceLens checkout visible from every pod.
+        sglang_version_pin: Optional advisory version pin; omitted when empty.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("apply_tracelens_patch_multinode.py")
     pin_arg = ""
@@ -1131,7 +1300,18 @@ def _build_multinode_kernel_bench_entrypoint(
     result_glob: str,
     timeout_sec: int,
 ) -> str:
-    """Compose the head-pod entrypoint running a kernel micro-benchmark on a single GPU node via heredoc-embedded kernel_bench_multinode.py."""
+    """Compose the head-pod entrypoint running a kernel micro-benchmark on a single GPU node via heredoc-embedded kernel_bench_multinode.py.
+
+    Args:
+        workspace: Absolute dir on the pod used as CWD for the bench.
+        bench_command: Shell command run via ``bash -lc``.
+        files_b64_json: JSON ``{rel_path: base64_content}`` of files to stage.
+        result_glob: Glob (relative to workspace) of artifacts to read back.
+        timeout_sec: Hard timeout for the bench command.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("kernel_bench_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
@@ -1148,7 +1328,15 @@ def _build_multinode_kernel_bench_entrypoint(
 
 
 def _extract_pod_json(logs: str) -> dict | None:
-    """Parse the last top-level JSON document from an interleaved Ray Dashboard job_logs blob (the in-pod scripts emit one)."""
+    """Parse the last top-level JSON document from an interleaved Ray Dashboard job_logs blob (the in-pod scripts emit one).
+
+    Args:
+        logs: The interleaved dashboard job logs.
+
+    Returns:
+        dict | None: The parsed JSON document, or ``None`` if none is found
+        or it does not parse.
+    """
     if not logs:
         return None
     text = logs.rstrip()
@@ -1192,7 +1380,19 @@ def _submit_and_collect_pod_json(
     poll_interval: int,
     poll_timeout: int,
 ) -> tuple[int, dict | None, str]:
-    """Submit ``entrypoint``, poll to terminal, parse the per-pod JSON, and return ``(returncode, parsed_or_None, logs)``."""
+    """Submit ``entrypoint``, poll to terminal, parse the per-pod JSON, and return ``(returncode, parsed_or_None, logs)``.
+
+    Args:
+        head_ip: IP of the Ray head pod's dashboard.
+        entrypoint: The entrypoint shell command to submit.
+        label: Human-readable label used in log lines and polling.
+        poll_interval: Seconds between polls.
+        poll_timeout: Maximum seconds to poll.
+
+    Returns:
+        tuple[int, dict | None, str]: The exit code, parsed per-pod JSON (or
+        ``None``), and the raw dashboard logs.
+    """
     with ray_dashboard.RayDashboardClient(head_ip) as ray:
         sub_id = ray.submit_job(_wrap_for_dash(entrypoint))
         info(f"{label} submission_id={sub_id}")
@@ -1230,7 +1430,16 @@ def _submit_and_collect_pod_json(
 
 # Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only)
 def cmd_apply_patch(args: argparse.Namespace) -> int:
-    """Fan out a kernel patch to every pod via kernel_patch_multinode.py apply; multi-node only. Re-prints its JSON verbatim."""
+    """Fan out a kernel patch to every pod via kernel_patch_multinode.py apply; multi-node only. Re-prints its JSON verbatim.
+
+    Args:
+        args: Parsed ``apply-patch`` arguments (patch file, target, backup
+            dir, kernel id, polling).
+
+    Returns:
+        int: A process exit code (``EXIT_OK``/``EXIT_TRANSIENT``/
+        ``EXIT_CONFIG_ERROR``).
+    """
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
@@ -1271,7 +1480,15 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
 
 
 def cmd_revert_patch(args: argparse.Namespace) -> int:
-    """Fan out a kernel patch revert; ``--backup-map-json`` is the per-host map from the matching apply-patch (pass through unchanged)."""
+    """Fan out a kernel patch revert; ``--backup-map-json`` is the per-host map from the matching apply-patch (pass through unchanged).
+
+    Args:
+        args: Parsed ``revert-patch`` arguments (target, backup map, polling).
+
+    Returns:
+        int: A process exit code (``EXIT_OK``/``EXIT_TRANSIENT``/
+        ``EXIT_CONFIG_ERROR``).
+    """
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
@@ -1314,6 +1531,14 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     Needed because the sandbox can't ``import sglang`` to run the local
     patcher. Idempotent (already-patched pods return ``status=skipped``).
     Re-prints the script's JSON (``status`` + ``per_pod``) verbatim.
+
+    Args:
+        args: Parsed ``apply-tracelens-patch`` arguments (tracelens root,
+            version pin, polling).
+
+    Returns:
+        int: ``EXIT_OK`` when applied/skipped, otherwise ``EXIT_TRANSIENT`` /
+        ``EXIT_CONFIG_ERROR``.
     """
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
@@ -1362,7 +1587,16 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
 
 
 def cmd_kernel_bench(args: argparse.Namespace) -> int:
-    """Run a kernel micro-benchmark on a GPU-bearing pod (stages ``--workspace`` files, runs ``--bench-command``, reads back ``--result-glob``)."""
+    """Run a kernel micro-benchmark on a GPU-bearing pod (stages ``--workspace`` files, runs ``--bench-command``, reads back ``--result-glob``).
+
+    Args:
+        args: Parsed ``kernel-bench`` arguments (workspace, command, staged
+            files, result glob, polling).
+
+    Returns:
+        int: A process exit code (``EXIT_OK``/``EXIT_TRANSIENT``/
+        ``EXIT_CONFIG_ERROR``).
+    """
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
@@ -1405,6 +1639,14 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     Picks a path from state.json's ``nodes``: single-pod runs
     kill/launch_server.sh on the head pod; multi-pod fans
     kill/launch_multinode.py out across every node via ray actors.
+
+    Args:
+        args: Parsed ``restart-server`` arguments (framework, model, tp, ep,
+            PD knobs, pid/log files, polling).
+
+    Returns:
+        int: ``0`` on success; ``1`` on a terminal launch/router failure;
+        ``2`` for unsupported single-node PD.
     """
     state = _require_state("head_pod_ip")
     head_ip = state["head_pod_ip"]
@@ -2051,7 +2293,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint with stable exit codes: 0 ok, 1 transient (retryable), 2 terminal workload failure (do not retry), 3 config error, 130 SIGINT."""
+    """CLI entrypoint with stable exit codes: 0 ok, 1 transient (retryable), 2 terminal workload failure (do not retry), 3 config error, 130 SIGINT.
+
+    Args:
+        argv: Optional argument vector; defaults to ``sys.argv`` when ``None``.
+
+    Returns:
+        int: The process exit code per the codes described above.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

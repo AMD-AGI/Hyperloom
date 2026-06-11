@@ -158,7 +158,22 @@ class TaskRegistry:
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
     ) -> tuple[Task, bool]:
-        """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``."""
+        """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``.
+
+        Args:
+            kind: Task kind tag.
+            params: Task parameters serialised into the row.
+            idempotency_key: Key used to detect and return an existing task.
+            requires_lanes: Lanes the task must hold while running.
+            allowed_tools: Tools the task is permitted to use.
+            side_effects: Declared side effects of the task.
+            lease_ttl_sec: Lease time-to-live in seconds.
+            task_id: Optional explicit task id; generated when omitted.
+
+        Returns:
+            A tuple ``(task, was_existing)`` where ``was_existing`` is ``True``
+            when a task with the same idempotency key already existed.
+        """
         existing = await self.db.fetchone(
             "SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,)
         )
@@ -220,7 +235,21 @@ class TaskRegistry:
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
     ) -> Task:
-        """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``."""
+        """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``.
+
+        Args:
+            kind: Task kind tag.
+            params: Task parameters serialised into the row.
+            idempotency_key: Key used to detect and return an existing task.
+            requires_lanes: Lanes the task must hold while running.
+            allowed_tools: Tools the task is permitted to use.
+            side_effects: Declared side effects of the task.
+            lease_ttl_sec: Lease time-to-live in seconds.
+            task_id: Optional explicit task id; generated when omitted.
+
+        Returns:
+            The created or pre-existing ``Task``.
+        """
         task, _was_existing = await self.create_or_return_existing(
             kind=kind,
             params=params,
@@ -352,7 +381,14 @@ class TaskRegistry:
         return [Task.from_row(r) for r in rows]
 
     async def cancel_family(self, family_kinds: list[str]) -> list[str]:
-        """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch); returns cancelled task_ids."""
+        """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch); returns cancelled task_ids.
+
+        Args:
+            family_kinds: Task kinds whose queued tasks should be cancelled.
+
+        Returns:
+            The task ids that were cancelled (empty when none matched).
+        """
         if not family_kinds:
             return []
         cancelled: list[str] = []

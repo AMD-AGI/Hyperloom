@@ -33,6 +33,12 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     """Resolve the local recipe-snapshot KB root: ``--local-kb-root`` ->
     ``$HYPERLOOM_LOCAL_KB_ROOT`` -> ``workspace_root()/kb``. Not created here
     (LocalRecipeStore creates it lazily on first write).
+
+    Args:
+        args: Parsed CLI arguments; ``local_kb_root`` is consulted first.
+
+    Returns:
+        Path: The resolved local KB root directory.
     """
     explicit = (
         getattr(args, "local_kb_root", None)
@@ -49,6 +55,12 @@ def _build_recipe_kb_dispatcher(
     """Build the local-write / remote-read RecipeKB dispatcher. Local store
     always wired; remote half enabled only when not --degraded-kb and a URL
     resolves (foreground 2s + 1-retry; no hard-coded default endpoint).
+
+    Args:
+        args: Parsed CLI arguments (``degraded_kb``, ``cortex_kb_url``, etc.).
+
+    Returns:
+        Any: A configured ``RecipeKB`` dispatcher (optionally gbrain-mirroring).
     """
     from .recipe_kb import LocalRecipeStore, RecipeKB, RemoteRecipeClient
 
@@ -141,6 +153,15 @@ def _bootstrap_cortex_kb(
     """Boot the recipe-snapshot KB integration, run the T0 anchor, and return
     the dispatcher. KB unavailability never aborts the launch
     (fail_fast=False); a hard T0 failure warns and continues warm-start-empty.
+
+    Args:
+        args: Parsed CLI arguments.
+        session_dir: The current session directory.
+        manifest: The session manifest dict (model, framework, fingerprint).
+        resume: Whether this launch is resuming an existing session.
+
+    Returns:
+        Any: The configured ``RecipeKB`` dispatcher.
     """
     kb = _build_recipe_kb_dispatcher(args)
 
@@ -211,6 +232,15 @@ def _bootstrap_knowledge_plane(
     """Construct the :class:`KnowledgePlane` facade. Wires the optional PR
     Monitor REST client (KB reads go through RecipeKB, so cortex_kb=None here).
     Both backends fail-soft; --degraded-pr yields a disabled PRMonitorClient.
+
+    Args:
+        args: Parsed CLI arguments (PR Monitor enablement, URLs, window).
+        cortex_client: Optional cortex client; unused (KB reads go via RecipeKB).
+        session_dir: Optional session directory; when set a status marker is
+            written for breakdown warnings.
+
+    Returns:
+        KnowledgePlane: The wired KnowledgePlane facade.
     """
     from .orchestrator.knowledge_plane import (
         KnowledgePlane,

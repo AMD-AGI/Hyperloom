@@ -124,7 +124,11 @@ class _RetiredFlag(argparse.Action):
 
 
 def _orchestration_rules_fragment_path() -> Path:
-    """Path to the rules-only ``orchestration.md`` fragment consumed by ``prompt_builder``."""
+    """Path to the rules-only ``orchestration.md`` fragment consumed by ``prompt_builder``.
+
+    Returns:
+        Path: The path to the ``orchestration.md`` system-prompt fragment.
+    """
     return asset_system_prompts_dir() / "orchestration.md"
 
 
@@ -161,7 +165,18 @@ def _build_orchestration_prompt(
     max_minutes: int,
     action_registry: ActionRegistry | None = None,
 ) -> str:
-    """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
+    """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
+
+    Args:
+        no_kernel: When True, kernel actions are excluded from the prompt.
+        framework: The target framework name.
+        objective: The run objective to summarise into the prompt.
+        max_minutes: The session time budget in minutes.
+        action_registry: Optional preloaded action registry; loaded if omitted.
+
+    Returns:
+        str: The composed orchestration system prompt.
+    """
     registry = action_registry or ActionRegistry().load()
     enabled = default_enabled_actions(no_kernel=no_kernel)
     kind, value = _objective_summary_for_prompt(objective)
@@ -225,6 +240,12 @@ def _gpu_runner_type(gpu_type: str) -> str:
 
     MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
     the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
+
+    Args:
+        gpu_type: The resolved real GPU type (e.g. ``mi325x``).
+
+    Returns:
+        str: The Magpie runner label (``mi325x``/``mi308x`` map to ``mi300x``).
     """
     normalized = str(gpu_type or "").strip().lower()
     if normalized in ("mi325x", "mi308x"):
@@ -252,7 +273,12 @@ _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 
 def _resolve_critic_agent_root() -> Path | None:
-    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else sibling ``critic-agent/``), or ``None``."""
+    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else sibling ``critic-agent/``), or ``None``.
+
+    Returns:
+        Path | None: The resolved critic-agent root containing
+        ``runtime/cli.py``, or ``None`` when it cannot be located.
+    """
     override = os.environ.get(_CRITIC_AGENT_ROOT_ENV, "").strip()
     if override:
         p = Path(override).expanduser()
@@ -263,7 +289,14 @@ def _resolve_critic_agent_root() -> Path | None:
 
 
 def _validate_critic_agent_runtime(root: Path) -> None:
-    """Fail fast (SystemExit) if ``python -m runtime.cli --help`` doesn't work."""
+    """Fail fast (SystemExit) if ``python -m runtime.cli --help`` doesn't work.
+
+    Args:
+        root: The critic-agent skill root to validate.
+
+    Raises:
+        SystemExit: With code 2 when the runtime cannot start or exits non-zero.
+    """
     cmd = [sys.executable, "-m", "runtime.cli", "--help"]
     try:
         proc = subprocess.run(
@@ -299,7 +332,12 @@ _ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
 
 
 def _resolve_robustness_agent_root() -> Path | None:
-    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else sibling), or ``None``."""
+    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else sibling), or ``None``.
+
+    Returns:
+        Path | None: The resolved robustness-agent root containing the runtime
+        ``cli.py``, or ``None`` when it cannot be located.
+    """
     override = os.environ.get(_ROBUSTNESS_AGENT_ROOT_ENV, "").strip()
     if override:
         p = Path(override).expanduser()
@@ -362,6 +400,15 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
 
     No auto-tightening is applied; kernel/framework/profile all work on atom. Multi-node TP wiring
     is unimplemented so ``--nodes>=2`` exits 2. Returns the list of auto-disabled flags (always empty).
+
+    Args:
+        args: Parsed CLI arguments (``nodes`` is consulted).
+
+    Returns:
+        list[str]: The auto-disabled flags (always empty).
+
+    Raises:
+        SystemExit: With code 2 when ``--nodes >= 2`` (atom is single-node).
     """
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
@@ -393,6 +440,13 @@ def _resolve_gpu_type(
     Probe always wins on disagreement (wrong --gpu-type corrupts baseline+KB rows); user value kept
     only on probe failure. Returns ``(effective_gpu_type, warnings)``; warnings go to stderr to keep
     the ``HYPERLOOM_LAUNCH`` stdout sentinel clean.
+
+    Args:
+        user_specified: The user-provided ``--gpu-type`` hint.
+        probed: The hardware-probed GPU type.
+
+    Returns:
+        tuple[str, list[str]]: The effective GPU type and any warning strings.
     """
     warnings: list[str] = []
     if probed and user_specified and probed != user_specified:
@@ -420,6 +474,19 @@ def _emit_launch_info(
     """Print the machine-readable HYPERLOOM_LAUNCH stdout line; optionally JSON-dump to ``launch_info_file``.
 
     Returns the launch_info dict for callers/tests.
+
+    Args:
+        pid: The launched process id.
+        session_dir: The session directory.
+        session_id: The session id.
+        run_log: Path to the run log.
+        gpu_type: The resolved GPU type.
+        framework: The target framework.
+        model: The model path/id.
+        launch_info_file: Optional path to also JSON-dump the launch info to.
+
+    Returns:
+        dict[str, Any]: The launch info mapping.
     """
     launch_info: dict[str, Any] = {
         "event": "launch",
@@ -453,6 +520,15 @@ def _clean_stale_aiter_locks(
     Only deletes locks with mtime older than ``stale_minutes`` (default 5; above cold-start MoE build
     time, below the hang-suspicion cliff). Build dir resolution: caller arg → $INFERENCE_OPTIMIZER_AITER_JIT_DIR
     → dynamic <aiter>/jit/build → legacy fallbacks. Returns a stats dict; never raises (errors counted).
+
+    Args:
+        aiter_jit_dir: Optional explicit JIT build dir; resolved automatically
+            when ``None``.
+        stale_minutes: Minimum lock age (minutes) before deletion.
+
+    Returns:
+        dict[str, Any]: Stats with ``dir``, ``scanned``, ``deleted``,
+        ``skipped_fresh``, and ``errors`` counts.
     """
     stats: dict[str, Any] = {
         "dir": None,
@@ -530,7 +606,12 @@ def _clean_stale_aiter_locks(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
+    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort).
+
+    Returns:
+        str | None: The detected GPU runner label, or ``None`` when it cannot
+        be determined.
+    """
     import subprocess
     try:
         out = subprocess.run(
@@ -565,6 +646,13 @@ def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
     callers gate AMD-specific behaviour on real hardware while still honouring
     a launcher/CI-supplied ``gpu_type`` even if ``rocm-smi``/torch probing is
     unavailable at the call site.
+
+    Args:
+        explicit: An explicit GPU type hint, consulted first.
+
+    Returns:
+        str | None: The resolved AMD GPU runner label, or ``None`` when not on
+        a recognised AMD GPU.
     """
     for cand in (explicit, os.environ.get("GPU_TYPE")):
         norm = str(cand or "").strip().lower()
@@ -587,6 +675,17 @@ def _resume_safe_flag(
 
     ``invert=True`` handles the ``--no-*`` pattern (args.no_X True == disable; manifest stores positive form).
     Lets robustness_monitor.sh resume preserve original intent without re-passing the flag.
+
+    Args:
+        args: Parsed CLI arguments.
+        arg_name: The attribute name on ``args`` to read.
+        manifest: The resume manifest, or ``None``.
+        manifest_key: The manifest key to fall back to.
+        default: The default returned when neither arg nor manifest applies.
+        invert: When True, treat the arg as a ``--no-*`` (disable) flag.
+
+    Returns:
+        bool: The resolved boolean value.
     """
     raw_arg = getattr(args, arg_name, None)
     if isinstance(raw_arg, bool) and raw_arg:
@@ -606,7 +705,18 @@ def _resume_safe_numeric(
     *,
     default: float,
 ) -> float:
-    """Float-valued analog of :func:`_resume_safe_flag`: explicit non-default arg → manifest → default."""
+    """Float-valued analog of :func:`_resume_safe_flag`: explicit non-default arg → manifest → default.
+
+    Args:
+        args: Parsed CLI arguments.
+        arg_name: The attribute name on ``args`` to read.
+        manifest: The resume manifest, or ``None``.
+        manifest_key: The manifest key to fall back to.
+        default: The default returned when neither arg nor manifest applies.
+
+    Returns:
+        float: The resolved numeric value.
+    """
     raw_arg = getattr(args, arg_name, None)
     if raw_arg is not None:
         try:
@@ -628,6 +738,14 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
 
     Soft-degrades to ``{}`` (never blocks launch) on missing/unreadable/invalid file. Stale-file guard:
     require ``data["model_name"]`` basename to match launched ``--model`` basename, else WARN + ``{}``.
+
+    Args:
+        workspace_root: Directory containing ``model_arch.json``.
+        model_name: The launched model name used for the freshness check.
+
+    Returns:
+        dict: The parsed model-arch profile, or ``{}`` when absent, invalid,
+        or stale.
     """
     arch_path = workspace_root / "model_arch.json"
     try:
@@ -666,7 +784,14 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
 
 
 def _load_model_config_dict(model_path: str) -> dict | None:
-    """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure."""
+    """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure.
+
+    Args:
+        model_path: Directory containing ``config.json``.
+
+    Returns:
+        dict | None: The parsed config dict, or ``None`` on any failure.
+    """
     if not model_path:
         return None
     cfg_path = Path(model_path) / "config.json"
@@ -691,7 +816,14 @@ def _load_model_config_dict(model_path: str) -> dict | None:
 
 
 def _config_architectures(config: dict) -> list[str]:
-    """Normalise ``config["architectures"]`` to a list of non-empty strings (scalar wrapped; absent -> [])."""
+    """Normalise ``config["architectures"]`` to a list of non-empty strings (scalar wrapped; absent -> []).
+
+    Args:
+        config: A model config dict.
+
+    Returns:
+        list[str]: The non-empty architecture strings.
+    """
     arches_raw = config.get("architectures")
     if isinstance(arches_raw, list):
         return [str(a).strip() for a in arches_raw if str(a or "").strip()]
@@ -704,6 +836,13 @@ def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture-identity tags (``architectures`` + ``model_type``) from config.json.
 
     Soft-degrades to ``{}`` (never blocks launch); normalised fields are omitted when empty so callers can .get().
+
+    Args:
+        model_path: Directory containing ``config.json``.
+
+    Returns:
+        dict: KB architecture-identity tags (``architectures``, ``model_type``);
+        empty when the config is absent or has no identifiable fields.
     """
     data = _load_model_config_dict(model_path)
     if data is None:
@@ -824,7 +963,14 @@ _TEXT_COERCIBLE_MODEL_TYPES = frozenset({
 
 def _arch_is_supported_text_generation(arch: str) -> bool:
     """True when an architecture class name denotes a supported text-generation
-    (decoder-only causal LM) model."""
+    (decoder-only causal LM) model.
+
+    Args:
+        arch: An architecture class name from ``config.json``.
+
+    Returns:
+        bool: ``True`` when the name carries a supported text-generation marker.
+    """
     a = (arch or "").strip()
     if not a:
         return False
@@ -839,6 +985,14 @@ def _config_declares_text_decoder(config: dict, architectures: list[str], model_
     described under ``text_config`` / ``language_config``. Treat those nested
     text blocks as capability evidence instead of requiring a per-family
     allowlist entry.
+
+    Args:
+        config: The model config dict.
+        architectures: The normalised top-level architecture names.
+        model_type_l: The lower-cased top-level ``model_type``.
+
+    Returns:
+        bool: ``True`` when a usable text decoder is positively identified.
     """
     if model_type_l in _TEXT_COERCIBLE_MODEL_TYPES:
         return True
@@ -890,6 +1044,14 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
       (e.g. Kimi-K2.6 / Qwen3.6 MoE, or a generic ``ForCausalLM`` arch that
       merely carries a ``vision_config``). Caller proceeds on the text path with
       a degraded-mode warning unless ``--allow-mm-text-fallback`` is off.
+
+    Args:
+        model_path: Directory containing the model's ``config.json``.
+
+    Returns:
+        dict | None: ``None`` for a plain (or unreadable) text-generation
+        model; otherwise a dict with ``architecture``, ``model_type``,
+        ``signal``, and ``verdict``.
     """
     config = _load_model_config_dict(model_path)
     if config is None:
@@ -1004,7 +1166,15 @@ _MAX_MODEL_LEN_HEADROOM = 4096
 
 
 def _load_model_max_position_embeddings(model_path: str) -> int | None:
-    """Best-effort read of max sequence length from config.json (first positive among known keys, incl. nested ``text_config``), or None."""
+    """Best-effort read of max sequence length from config.json (first positive among known keys, incl. nested ``text_config``), or None.
+
+    Args:
+        model_path: Directory containing ``config.json``.
+
+    Returns:
+        int | None: The first positive max-sequence-length value found, or
+        ``None`` when unavailable.
+    """
     if not model_path:
         return None
     cfg_path = Path(model_path) / "config.json"
@@ -1035,6 +1205,12 @@ def _model_has_dual_chunk_attention(model_path: str) -> bool:
     default aiter attention backend and demands ``dual_chunk_flash_attn``.
     Checks the top level and a nested ``text_config``. Soft-degrades to
     False on any missing / unreadable / invalid config.
+
+    Args:
+        model_path: Directory containing ``config.json``.
+
+    Returns:
+        bool: ``True`` when a ``dual_chunk_attention_config`` is present.
     """
     data = _load_model_config_dict(model_path)
     if data is None:
@@ -1059,6 +1235,12 @@ def _model_is_moe(model_path: str) -> bool:
     callers use this to switch to a ROCm-capable MoE runner. Checks the top
     level and a nested ``text_config``. Soft-degrades to False on any missing
     / unreadable / invalid config.
+
+    Args:
+        model_path: Directory containing ``config.json``.
+
+    Returns:
+        bool: ``True`` when the config carries Mixture-of-Experts markers.
     """
     data = _load_model_config_dict(model_path)
     if data is None:
@@ -1085,7 +1267,11 @@ def _model_is_moe(model_path: str) -> bool:
 
 
 def _context_headroom_tokens() -> int:
-    """Resolve the context headroom (tokens); env override, else default."""
+    """Resolve the context headroom (tokens); env override, else default.
+
+    Returns:
+        int: The non-negative context headroom in tokens.
+    """
     raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
     if not raw:
         return _CONTEXT_HEADROOM_DEFAULT
@@ -1097,7 +1283,16 @@ def _context_headroom_tokens() -> int:
 
 
 def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
-    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to ``max_position_embeddings`` (never stretch context)."""
+    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to ``max_position_embeddings`` (never stretch context).
+
+    Args:
+        isl: Input sequence length.
+        osl: Output sequence length.
+        model_path: Directory containing ``config.json`` for the clamp.
+
+    Returns:
+        int: The resolved max model length, clamped to the native window.
+    """
     desired = int(isl) + int(osl) + _MAX_MODEL_LEN_HEADROOM
     maxpos = _load_model_max_position_embeddings(model_path)
     if maxpos:
@@ -1110,6 +1305,14 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
 
     Persists a stop reason and returns True (caller should exit) when the workload does NOT fit; False
     when it fits or the model's max length is unknown.
+
+    Args:
+        args: Parsed CLI arguments (``isl``, ``osl``, ``model``).
+        session_dir: The session directory for the persisted stop report.
+
+    Returns:
+        bool: ``True`` when the workload does not fit (caller should exit),
+        ``False`` otherwise.
     """
     isl = int(getattr(args, "isl", 0) or 0)
     osl = int(getattr(args, "osl", 0) or 0)
@@ -1206,6 +1409,13 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
     Reads both ``config.json:quantization_config`` (standard HF) and the
     separate ``hf_quant_config.json`` (NVIDIA ModelOpt). Returns None when the
     format is ROCm-runnable or absent.
+
+    Args:
+        model_path: Directory containing the model's config files.
+
+    Returns:
+        str | None: A human-readable reason when the quant format is
+        unsupported on ROCm, otherwise ``None``.
     """
     if not model_path:
         return None
@@ -1266,6 +1476,14 @@ def _detect_incompatible_model_config(
 
     A fully absent ``config.json`` is NOT blocked (kept soft-degrade): the
     upstream submission filter + downstream loader still apply.
+
+    Args:
+        model_path: Directory containing the model's ``config.json``.
+        gpu_type: Resolved GPU type used to gate AMD/ROCm-only checks.
+
+    Returns:
+        str | None: A human-readable incompatibility reason, or ``None`` when
+        no statically-knowable incompatibility is found.
     """
     if not model_path:
         return None
@@ -1357,7 +1575,13 @@ def _preflight_model_config_compat(
     or a RoPE block without any max-position field) so we persist a clear stop
     reason instead of booting a server that dies cryptically in engine init.
 
-    Returns True when incompatible (caller should exit); False otherwise.
+    Args:
+        args: Parsed CLI arguments (``model``, ``gpu_type``).
+        session_dir: Session directory for the persisted stop report.
+
+    Returns:
+        bool: ``True`` when incompatible (caller should exit), ``False``
+        otherwise.
     """
     model = str(getattr(args, "model", "") or "")
     detail = _detect_incompatible_model_config(
@@ -1424,6 +1648,14 @@ def _preflight_unsupported_model_arch(
       to fail-fast.
     * ``vision_only`` (true VLM / unclassifiable) → persists
       ``stop_reason=unsupported_model_arch`` and returns True (caller exits).
+
+    Args:
+        args: Parsed CLI arguments (``model``, ``allow_mm_text_fallback``).
+        session_dir: Session directory for the persisted stop report.
+
+    Returns:
+        bool: ``True`` when the model is unsupported (caller should exit),
+        ``False`` otherwise.
     """
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)
@@ -1606,6 +1838,12 @@ def _seed_shared_state(
 
         Ladder: explicit CLI/$FRAMEWORK_VERSION → auto-detect package __version__ → "" (canonical_id
         substitutes unknown_version). Auto-detect runs only when both CLI and env are empty.
+
+        Args:
+            args_in: Parsed CLI arguments (``framework_version``, ``framework``).
+
+        Returns:
+            str: The resolved framework version, or an empty string when unknown.
         """
         explicit = (
             (getattr(args_in, "framework_version", None) or "").strip()
@@ -1739,7 +1977,15 @@ def _seed_shared_state(
 
 
 def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
-    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]; non-integers warned+dropped, empty -> 1..128 ladder."""
+    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]; non-integers warned+dropped, empty -> 1..128 ladder.
+
+    Args:
+        args: Parsed CLI arguments carrying ``conc_sweep_concs``.
+
+    Returns:
+        list[int]: The parsed concurrency ladder, or the default
+        ``[1, 2, 4, 8, 16, 32, 64, 128]`` when empty.
+    """
     raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
     if not raw:
         return [1, 2, 4, 8, 16, 32, 64, 128]
@@ -1774,7 +2020,12 @@ def _snapshot_system_prompts(
     *,
     prompts: dict[str, str],
 ) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``."""
+    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``.
+
+    Args:
+        session_dir: Session root directory for the snapshots.
+        prompts: Mapping of agent role to its effective system prompt.
+    """
     for role, body in prompts.items():
         target = agent_prompt_snapshot(session_dir, role)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1862,6 +2113,10 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
     """Reconcile persisted ``crash_count`` (state.json + final.json) up to the live in-memory value.
 
     Only ever raises the persisted value (max), never lowers it; best-effort, never fatal.
+
+    Args:
+        state: The live shared state carrying the in-memory ``crash_count``.
+        session_dir: Session directory holding ``state.json`` and the report.
     """
     live = int(getattr(state, "crash_count", 0) or 0)
 
@@ -1891,7 +2146,12 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
 
 
 def _print_kernel_opt_summary_line(state: SharedState) -> None:
-    """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort)."""
+    """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort).
+
+    Args:
+        state: The shared state used to resolve the session directory and
+            build the kernel-optimization summary.
+    """
     try:
         from .orchestrator.kernel_attempt_summary import (
             build_kernel_optimization_summary,
@@ -1925,7 +2185,15 @@ def _print_kernel_opt_summary_line(state: SharedState) -> None:
 
 
 def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
-    """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved."""
+    """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved.
+
+    Args:
+        state: The shared state (reserved for future resolution heuristics).
+
+    Returns:
+        Path | None: The resolved session directory, or ``None`` when it
+        cannot be determined.
+    """
     env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
     if env_sd:
         p = Path(env_sd).expanduser()
@@ -1935,7 +2203,14 @@ def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
 
 
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
-    """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it)."""
+    """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it).
+
+    Args:
+        openai_base_url: The OpenAI-style base URL to transform.
+
+    Returns:
+        str: The derived Anthropic base URL.
+    """
     from urllib.parse import urlparse, urlunparse
 
     parsed = urlparse(openai_base_url)
@@ -1948,7 +2223,12 @@ def _derive_anthropic_base_url(openai_base_url: str) -> str:
 def _reset_claude_config_to_upstream(
     safe_key: str, anthropic_base_url: str
 ) -> None:
-    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail)."""
+    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail).
+
+    Args:
+        safe_key: SaFE API key to persist as ``primaryApiKey`` when provided.
+        anthropic_base_url: Upstream gateway URL to write as ``customApiUrl``.
+    """
     import json as _json
 
     if not anthropic_base_url:
@@ -2015,7 +2295,14 @@ def _validate_credentials() -> None:
 
 
 def _is_placeholder_tracelens_path(value: str) -> bool:
-    """Treat .env.template's bare ``\\`` and whitespace-only values as unset."""
+    """Treat .env.template's bare ``\\`` and whitespace-only values as unset.
+
+    Args:
+        value: The raw configuration value to inspect.
+
+    Returns:
+        bool: ``True`` when the value is a placeholder/unset, else ``False``.
+    """
     stripped = value.strip()
     return stripped in ("", "\\")
 
@@ -2143,6 +2430,13 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
 
     Avoids first-tick BackendError after baseline burns wall time; same-interpreter install avoids
     cross-interpreter install failures.
+
+    Args:
+        python_exe: Interpreter used to both probe and install the SDKs.
+        pip_extra: Extra arguments forwarded to ``pip install``.
+
+    Raises:
+        subprocess.CalledProcessError: If a required ``pip install`` fails.
     """
     candidates = (
         ("claude_agent_sdk", "claude-agent-sdk>=0.1.65"),
@@ -2314,7 +2608,13 @@ def _emit_preflight_diagnostics(
     anthropic_base_url: str | None,
     args: argparse.Namespace | None = None,
 ) -> None:
-    """One canonical, grep-friendly diagnostics block at the end of preflight."""
+    """One canonical, grep-friendly diagnostics block at the end of preflight.
+
+    Args:
+        magpie_python: Path to the Magpie Python interpreter.
+        anthropic_base_url: Resolved Anthropic gateway URL, or ``None``.
+        args: Parsed CLI arguments used to report KB/PR-monitor status.
+    """
     from .orchestrator.action_executors.baseline import (
         BASELINE_COLD_START_TIMEOUT_SEC,
         BASELINE_DEFAULT_TIMEOUT_SEC,
@@ -2379,7 +2679,15 @@ def _emit_preflight_diagnostics(
 
 
 def _print_cortex_kb_queue_status() -> None:
-    """Emit a one-line summary of the Cortex KB offline NDJSON queue (dead-letter = permanent-reject signal)."""
+    """Emit a one-line summary of the Cortex KB offline NDJSON queue (dead-letter = permanent-reject signal).
+
+    Reads the pending, dead-letter, and flushed NDJSON queues for the resolved
+    session and prints their row counts.
+
+    Note:
+        Side-effecting: writes a one-line status summary to stdout and returns
+        nothing.
+    """
     from .session_paths import (
         cortex_dead_letter_ndjson,
         cortex_flushed_ndjson,
@@ -2431,6 +2739,14 @@ def _probe_llm_catalog(
     """Probe ``<base_url>/models`` with retry (gateway flakes); return set of model ids or None.
 
     TLS verification is on by default; ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` skips it (warns).
+
+    Args:
+        base_url: Gateway base URL whose ``/models`` endpoint is probed.
+        api_key: Bearer token sent in the ``Authorization`` header.
+
+    Returns:
+        set[str] | None: The set of model ids on success, or ``None`` when the
+        probe is skipped or exhausts its retries.
     """
     import time
 
@@ -2530,6 +2846,18 @@ def _validate_and_resolve_claude_model(
 
     Probes the gateway catalog (retries); falls back 4-7→4-6 with a WARN, else sys.exit(2). Returns the
     catalog id set on success (reused by the codex smoke-test).
+
+    Args:
+        args: Parsed CLI arguments; ``claude_model`` may be mutated in place.
+        resolved_urls: Optional ``(anthropic_url, openai_url)`` pair used to
+            derive the catalog probe base URL.
+
+    Returns:
+        set[str] | None: The gateway catalog id set on success.
+
+    Raises:
+        SystemExit: If the chosen model is disallowed, the catalog is
+            unreachable, or no acceptable model is present.
     """
     chosen = (args.claude_model or "").strip()
     if chosen not in _CLAUDE_ALLOWED_MODELS:
@@ -2591,7 +2919,13 @@ def _smoke_test_codex_model(
     args: argparse.Namespace,
     catalog_ids: set[str] | None,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts."""
+    """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts.
+
+    Args:
+        args: Parsed CLI arguments (``codex_model``, ``critic_backend``,
+            ``kernel_codex``, ``no_kernel``).
+        catalog_ids: Gateway catalog id set, or ``None`` when unavailable.
+    """
     if catalog_ids is None:
         return
     # Codex is needed by the Kernel agent (kernel-codex on) and the critic-agent review path.
@@ -2627,6 +2961,12 @@ def _inferencex_checkout_ok(path: Path | str) -> bool:
     ``git init`` that then failed to fetch/checkout. Magpie sources
     ``benchmarks/benchmark_lib.sh`` at runtime, so require that file to
     exist — a complete checkout always has it, a stub never does.
+
+    Args:
+        path: Candidate InferenceX checkout directory.
+
+    Returns:
+        bool: ``True`` when the checkout looks complete, else ``False``.
     """
     return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
 
@@ -2642,6 +2982,12 @@ def _clone_inferencex(dest: Path) -> str | None:
     On any failure the partial ``dest`` (e.g. a bare ``git init`` with no
     fetched tree) is removed so a later preflight's detection does not
     mistake the stub for a valid checkout and skip re-cloning.
+
+    Args:
+        dest: Destination directory for the InferenceX checkout.
+
+    Returns:
+        str | None: The checkout path on success, or ``None`` on failure.
     """
     repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
     ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
@@ -2683,6 +3029,13 @@ def _preflight(
     Credentials fallback → auth aliases → SDK install → ANTHROPIC_BASE_URL resolve + ~/.claude reset →
     ROCm hygiene → ray/Magpie/InferenceX install → CLI presence checks → diagnostics. Returns
     ``(anthropic_base_url, openai_base_url)`` or ``None`` when ``OPENAI_BASE_URL`` is missing.
+
+    Args:
+        args: Parsed CLI arguments, or ``None`` when run outside a command.
+
+    Returns:
+        tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)`` on
+        success, or ``None`` when ``OPENAI_BASE_URL`` is missing.
     """
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
@@ -2897,6 +3250,9 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
 
     Mutates args: ``cortex_enabled``/``pr_monitor_enabled`` plus
     ``kb_degraded_reason``/``pr_degraded_reason`` (None|"explicit_flag"|"ir3_auto").
+
+    Args:
+        args: Parsed CLI arguments; reachability fields are mutated in place.
     """
     explicit_kb = bool(getattr(args, "degraded_kb", False))
     explicit_pr = bool(getattr(args, "degraded_pr", False))
@@ -2973,7 +3329,17 @@ _VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
 def _resolve_critic_choice(args: argparse.Namespace) -> str:
-    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid."""
+    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid.
+
+    Args:
+        args: Parsed CLI arguments carrying ``critic_backend``.
+
+    Returns:
+        str: The resolved critic backend name.
+
+    Raises:
+        SystemExit: If the resolved backend is not a valid choice.
+    """
     chosen = args.critic_backend
     if chosen is None:
         chosen = DEFAULT_CRITIC_BACKEND
@@ -3001,6 +3367,15 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Multi-node policy: on ``nodes>=2`` the agent's LocalProbe targets sandbox-local resources that live in
     separate pods (HIGH false positives). Keep ``agent`` only when a robustness-server is configured; else
     auto-downgrade to ``mock`` (explicit --robustness-agent gets a WARN).
+
+    Args:
+        args: Parsed CLI arguments (``robustness_backend``, ``nodes``).
+
+    Returns:
+        str: The resolved robustness backend name.
+
+    Raises:
+        SystemExit: If the resolved backend is not a valid choice.
     """
     chosen = getattr(args, "robustness_backend", None)
     explicit = chosen is not None
@@ -3037,7 +3412,11 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
 
 
 def _reset_state_file(session_dir: Path) -> None:
-    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Cortex KB untouched)."""
+    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Cortex KB untouched).
+
+    Args:
+        session_dir: Session directory holding the ``state.json`` to reset.
+    """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         return
@@ -3069,6 +3448,11 @@ def _gc_old_profile_traces(
 
     Never blocks startup (errors swallowed). Env knobs: HYPERLOOM_MN_TRACE_RETENTION_DAYS,
     HYPERLOOM_MN_TRACE_GC_DISABLE.
+
+    Args:
+        root: Trace-root directory to scan; defaults to the multi-node root.
+        retention_days: Age threshold in days before a trace dir is removed.
+        keep: Name of a trace dir to always preserve.
     """
     if os.environ.get("HYPERLOOM_MN_TRACE_GC_DISABLE", "").strip() in (
         "1", "true", "yes",
@@ -3251,6 +3635,10 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
     """Replay every applied kernel-agent patch (manifest status=applied + multinode block) onto RayJob pods.
 
     Idempotent ``apply-patch`` fan-out, run only when ``--nodes>=2``. Best-effort: per-patch failures warn.
+
+    Args:
+        args: Parsed CLI arguments carrying ``nodes`` (replay is a no-op for
+            single-node runs).
     """
     nodes = max(1, int(getattr(args, "nodes", 1) or 1))
     if nodes < 2:
@@ -3352,6 +3740,14 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         The skip is made **detectable** so a launcher / UI never mistakes the
         run for quantized: a ``QUANTIZATION_SKIPPED:`` marker line on stdout
         plus the ``$HYPERLOOM_QUANTIZATION_SKIPPED`` env var (set to the reason).
+
+    Args:
+        args: Parsed CLI arguments (``quantize``, ``quantize_scheme``,
+            ``model``, ``resume``); ``model`` is rewritten on success.
+
+    Raises:
+        SystemExit: With code 3 when an explicitly requested quantization
+            fails or is blocked.
     """
     # Free-text --quantize wins; otherwise resolve the structured
     # --quantize-scheme enum (the UI/backend path) to a prompt.
@@ -3444,7 +3840,16 @@ def _export_workload_envs_for_optimize(
     ep_resolved: int,
     argv: list[str] | None = None,
 ) -> None:
-    """Mirror explicit workload CLI flags (--tp/--conc/--ep) into env so executors' Magpie YAMLs honor them."""
+    """Mirror explicit workload CLI flags (--tp/--conc/--ep) into env so executors' Magpie YAMLs honor them.
+
+    Args:
+        args: Parsed CLI arguments (reads ``conc``).
+        nodes_resolved: Resolved node count (>=2 forces all exports).
+        tp_resolved: Resolved tensor-parallel size exported as ``$TP``.
+        ep_resolved: Resolved expert-parallel size exported as ``$EP``.
+        argv: Argument vector to scan for explicit flags; defaults to
+            ``sys.argv[1:]``.
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
     if nodes_resolved >= 2 or _argv_has_option(argv, "--tp"):
         os.environ["TP"] = str(tp_resolved)
@@ -4336,7 +4741,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
 
 def _default_research_lane_capacity() -> int:
-    """Default ``--research-lane-capacity``: $INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY else the GPU ceiling (2×GPU)."""
+    """Default ``--research-lane-capacity``: $INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY else the GPU ceiling (2×GPU).
+
+    Returns:
+        int: The resolved default research-lane capacity.
+    """
     env = os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY")
     if env:
         try:

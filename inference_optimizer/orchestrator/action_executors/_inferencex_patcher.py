@@ -69,6 +69,13 @@ def _discover_inferencex_roots(
     unpatched. Patches ALL discovered roots (deduped by resolved path):
     ``inferencex_path`` arg, ``$INFERENCEX_PATH``, ``$MAGPIE_DIR/InferenceX``.
     Returns ``[]`` when none resolve (callers fail-soft).
+
+    Args:
+        inferencex_path: Caller-provided override root to include in the scan.
+
+    Returns:
+        A deduped list of resolved InferenceX checkout directories, or ``[]``
+        when none resolve.
     """
     roots: list[Path] = []
     seen: set[Path] = set()
@@ -108,6 +115,13 @@ def _resolve_benchmark_lib_paths(
 ) -> list[Path]:
     """Return every existing ``<root>/benchmarks/benchmark_lib.sh`` to patch
     (one per :func:`_discover_inferencex_roots` root). ``[]`` = skip patching.
+
+    Args:
+        inferencex_path: Caller-provided override root to include in the scan.
+
+    Returns:
+        A list of existing ``benchmark_lib.sh`` paths, or ``[]`` when none
+        exist.
     """
     out: list[Path] = []
     for root in _discover_inferencex_roots(inferencex_path):
@@ -142,6 +156,12 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 
     Falls through without exclusion if the lock file can't be opened; the
     atomic-replace path still guarantees no torn writes (idempotent).
+
+    Args:
+        lock_path: Filesystem path of the lock file to acquire exclusively.
+
+    Yields:
+        Control while the exclusive lock is held; the lock is released on exit.
     """
     try:
         fp = open(lock_path, "w")
@@ -258,6 +278,14 @@ def ensure_benchmark_lib_patched(
     Returns ``True`` when patched at exit, ``False`` (non-fatal) when the file
     is missing or the legacy line is absent. Concurrency-safe (flock +
     atomic rename; already-patched fast-path skips the lock).
+
+    Args:
+        inferencex_path: Caller-provided override root; defaults to env-based
+            discovery when ``None``.
+
+    Returns:
+        True when at least one discovered ``benchmark_lib.sh`` is patched (or
+        already patched), False when none could be patched.
     """
     sources = _resolve_benchmark_lib_paths(inferencex_path)
     if not sources:
@@ -301,6 +329,13 @@ def _resolve_benchmark_serving_paths(
     ``<root>/utils/bench_serving/benchmark_serving.py`` to patch (one per
     :func:`_discover_inferencex_roots` root, including Magpie's bundled copy
     per the #210 fix). Independent of the benchmark_lib.sh resolver.
+
+    Args:
+        inferencex_path: Caller-provided override root to include in the scan.
+
+    Returns:
+        A list of existing ``benchmark_serving.py`` paths, or ``[]`` when none
+        exist.
     """
     out: list[Path] = []
     for root in _discover_inferencex_roots(inferencex_path):
@@ -347,6 +382,13 @@ def _is_benchmark_serving_patched(src: Path) -> bool:
 def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
     """Rewrite the hardcoded ``extra_body=`` line to consult
     ``PROFILE_EXTRA_BODY`` first, via temp-file + atomic rename.
+
+    Args:
+        src: The ``benchmark_serving.py`` file to patch in place.
+
+    Returns:
+        True when the patched bytes were written, False when the legacy line
+        is missing or any IO step fails.
     """
     try:
         original = src.read_text(encoding="utf-8")
@@ -418,6 +460,14 @@ def ensure_benchmark_serving_patched(
     Returns ``True`` when patched at exit, ``False`` (non-fatal) when missing.
     Concurrency-safe; independent lock file from
     :func:`ensure_benchmark_lib_patched` so the two patches don't serialize.
+
+    Args:
+        inferencex_path: Caller-provided override root; defaults to env-based
+            discovery when ``None``.
+
+    Returns:
+        True when at least one discovered ``benchmark_serving.py`` is patched
+        (or already patched), False when none could be patched.
     """
     sources = _resolve_benchmark_serving_paths(inferencex_path)
     if not sources:

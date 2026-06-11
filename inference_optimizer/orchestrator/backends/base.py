@@ -24,6 +24,15 @@ def parse_call_timeout_env(env_name: str, *, default: float) -> float:
 
     Returns ``default`` (logging a WARNING) when the env var is unset, empty,
     or not a positive finite float — a malformed knob must not be fatal.
+
+    Args:
+        env_name: Name of the environment variable holding the timeout seconds.
+        default: Fallback timeout in seconds used when the env var is missing
+            or malformed.
+
+    Returns:
+        The parsed positive finite timeout in seconds, or ``default`` on any
+        miss or parse error.
     """
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
