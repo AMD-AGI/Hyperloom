@@ -136,7 +136,17 @@ def _integrate_symptoms(
 
 
 def _g1_empty_patch_kept(entry: dict[str, Any]) -> list[Symptom]:
-    """G1: integrate KEEP/PARTIAL with patch_size_bytes == 0 — empty patch, so any gain is noise."""
+    """G1: flag a KEEP/PARTIAL integrate with an empty patch.
+
+    A ``patch_size_bytes == 0`` means no code changed, so any measured gain
+    is noise.
+
+    Args:
+        entry: A decision-audit ledger entry.
+
+    Returns:
+        A list with one :class:`Symptom` when the guard trips, else empty.
+    """
     patch_size = entry.get("patch_size_bytes")
     if not isinstance(patch_size, int) or patch_size > 0:
         return []
@@ -175,7 +185,17 @@ def _g1_empty_patch_kept(entry: dict[str, Any]) -> list[Symptom]:
 def _g2_decision_threshold_violated(
     entry: dict[str, Any], cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """G2: KEEP with gain_pct below ``min_keep_gain_pct`` (noise-floor); MEDIUM since the real fix is upstream's threshold."""
+    """G2: flag a KEEP whose gain is below the noise-floor threshold.
+
+    MEDIUM severity since the real fix is upstream's keep threshold.
+
+    Args:
+        entry: A decision-audit ledger entry.
+        cfg: Decision-audit configuration (supplies ``min_keep_gain_pct``).
+
+    Returns:
+        A list with one :class:`Symptom` when the guard trips, else empty.
+    """
     if entry.get("decision") != "KEEP":
         return []
     gain_pct = entry.get("gain_pct")
@@ -212,9 +232,19 @@ def _g2_decision_threshold_violated(
 def _g3_kernel_dispatch_bypassed(
     entry: dict[str, Any], cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """G3: KEEP'd patch likely never executed — ``dispatched_count == 0``, or absent
-    with ``|gain_pct| < dispatch_bypass_pre_post_epsilon_pct``. HIGH: a KEEP without
-    proof of execution is a false-positive in the optimization_stack.
+    """G3: flag a KEEP'd patch that likely never executed.
+
+    Trips when ``dispatched_count == 0``, or it is absent while
+    ``|gain_pct| < dispatch_bypass_pre_post_epsilon_pct``. HIGH severity: a
+    KEEP without proof of execution is a false-positive in the
+    optimization_stack.
+
+    Args:
+        entry: A decision-audit ledger entry.
+        cfg: Decision-audit configuration (dispatch-bypass epsilon).
+
+    Returns:
+        A list with one :class:`Symptom` when the guard trips, else empty.
     """
     if entry.get("decision") != "KEEP":
         return []
@@ -294,8 +324,18 @@ def _ci_metrics_symptoms(
 def _g4_negative_delta_kernel_kept(
     ci_metrics: dict[str, Any], ci_metrics_path: str,
 ) -> list[Symptom]:
-    """G4: kernels_optimized > 0 AND optimized_kernel_delta_pct <= 0 (net-negative).
-    HIGH because downstream aggregators treat kernels_optimized as a win count.
+    """G4: flag net-negative kernel changes counted as wins.
+
+    Trips when ``kernels_optimized > 0`` AND
+    ``optimized_kernel_delta_pct <= 0``. HIGH because downstream
+    aggregators treat ``kernels_optimized`` as a win count.
+
+    Args:
+        ci_metrics: Parsed ci_metrics document.
+        ci_metrics_path: Path of the ci_metrics file (recorded in evidence).
+
+    Returns:
+        A list with one :class:`Symptom` when the guard trips, else empty.
     """
     kernels_opt = ci_metrics.get("kernels_optimized")
     delta_pct = ci_metrics.get("optimized_kernel_delta_pct")
@@ -331,8 +371,18 @@ def _g4_negative_delta_kernel_kept(
 def _g5_baseline_zero_without_status(
     ci_metrics: dict[str, Any], ci_metrics_path: str,
 ) -> list[Symptom]:
-    """G5: any baseline-throughput field == 0 AND no ``status="baseline_failed"`` marker —
-    half-written ci_metrics that downstream mistakes for "no optimization space".
+    """G5: flag a zero baseline throughput lacking a failure marker.
+
+    Trips when any baseline-throughput field == 0 AND there is no
+    ``status="baseline_failed"`` marker — a half-written ci_metrics file
+    that downstream mistakes for "no optimization space".
+
+    Args:
+        ci_metrics: Parsed ci_metrics document.
+        ci_metrics_path: Path of the ci_metrics file (recorded in evidence).
+
+    Returns:
+        A list with one :class:`Symptom` when the guard trips, else empty.
     """
     if str(ci_metrics.get("status") or "") == "baseline_failed":
         return []
@@ -382,7 +432,18 @@ def _g5_baseline_zero_without_status(
 def _g6_schema_drift(
     ci_metrics: dict[str, Any], ci_metrics_path: str,
 ) -> list[Symptom]:
-    """G6: ci_metrics missing required schema fields OR using legacy names; MEDIUM (fix is in report_back)."""
+    """G6: flag ci_metrics schema drift.
+
+    Trips when required schema fields are missing OR legacy field names are
+    used. MEDIUM severity (the fix is in ``report_back``).
+
+    Args:
+        ci_metrics: Parsed ci_metrics document.
+        ci_metrics_path: Path of the ci_metrics file (recorded in evidence).
+
+    Returns:
+        A list with one :class:`Symptom` when the guard trips, else empty.
+    """
     keys = set(ci_metrics.keys())
     missing = _CI_METRICS_REQUIRED_FIELDS - keys
     legacy = keys & _CI_METRICS_LEGACY_FIELDS
@@ -421,7 +482,17 @@ def _oob_symptoms(
     entries: list[dict[str, Any]],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """G7: OOB attempt advertises "expected speedup" but never measured; HIGH so downstream won't count it as kernels_optimized."""
+    """G7: flag OOB attempts advertising unmeasured "expected speedup".
+
+    HIGH severity so downstream won't count them as ``kernels_optimized``.
+
+    Args:
+        entries: OOB ``optimization_attempts.jsonl`` entries.
+        cfg: Decision-audit configuration.
+
+    Returns:
+        Symptoms for offending entries, possibly empty.
+    """
     out: list[Symptom] = []
     by_kernel: dict[str, dict[str, Any]] = {}
     for entry in entries:
