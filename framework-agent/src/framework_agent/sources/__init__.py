@@ -64,8 +64,15 @@ def _pr_to_candidate(
 ) -> Candidate:
     """Convert a GitHubPr (any backend) into a downstream Candidate.
 
-    ``score`` is the gap-relevance value from :func:`_rank_by_keyword_overlap`;
-    0.0 for paths that skip ranking (explicit refs, label-only listing).
+    Args:
+        pr: The source PR record.
+        repo_url: Repository URL the PR belongs to.
+        source: Source label recorded on the candidate (e.g. ``"github"``).
+        score: Gap-relevance value from :func:`_rank_by_keyword_overlap`;
+            ``0.0`` for paths that skip ranking.
+
+    Returns:
+        The downstream :class:`Candidate`.
     """
     return Candidate(
         ref=pr.ref,
@@ -168,6 +175,12 @@ def _resolve_keywords(request: ExploreRequest) -> list[str]:
     Priority: (1) ``request.keywords`` non-empty -> used verbatim (lowercased,
     bypasses extract_keywords); (2) ``gap_description`` -> auto-extract via
     :func:`extract_keywords`; (3) else ``[]`` (label-only path).
+
+    Args:
+        request: The explore request carrying keywords / gap description.
+
+    Returns:
+        The resolved keyword list (possibly empty).
     """
     if request.keywords:
         return [k.lower() for k in request.keywords if k.strip()]
@@ -183,8 +196,14 @@ def _rank_by_keyword_overlap(
 
     Uses :func:`score_title_with_anti_signal` so wrong-axis PRs (e.g.
     ``MegaMoE`` when gap calls for ``dense``) are demoted below correct-axis
-    PRs. Higher score first; ties preserve upstream order. Zero-score PRs drop
-    to the tail but are not filtered out. Anti-signal is gated per-gap-keyword.
+    PRs. Zero-score PRs drop to the tail but are not filtered out.
+
+    Args:
+        prs: PRs to rerank.
+        keywords: Active keywords driving the score.
+
+    Returns:
+        PRs sorted by descending score; ties preserve upstream order.
     """
     if not keywords:
         return list(prs)
@@ -196,12 +215,22 @@ def _rank_by_keyword_overlap(
 
 
 def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
-    """Query primus-cortex with gap-aware ranking; hard-fail on transport errors.
+    """Query primus-cortex with gap-aware ranking.
 
     With non-empty keywords, prefer the free-text ``/v1/search/prs`` endpoint
     (over-fetch, then client-rerank by title overlap, trim to
     ``max_search_candidates``); fall back to ``list_perf_prs`` if search is
     unimplemented. With no keywords, use the cheap label-only path.
+
+    Args:
+        request: The explore request carrying the Primus config.
+
+    Returns:
+        Candidates from Primus Cortex, ranked when keywords are present.
+
+    Raises:
+        SourceConfigError: If ``primus_cortex`` is requested without config.
+        PrimusCortexError: On Primus transport errors.
     """
     cfg = request.primus_cortex
     if cfg is None:
