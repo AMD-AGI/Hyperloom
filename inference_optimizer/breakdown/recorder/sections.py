@@ -49,6 +49,14 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "conc_sweep_summary":          "singleton",
     "roofline":                    "item",
     "roofline_progress":           "singleton",
+    # Kernel-major lifecycle substreams. Recorded by their respective owners at
+    # author time and folded into the ``kernel_journey`` view at assembly (same
+    # compose-on-read pattern as ``critic_robustness``); none of these leak into
+    # the breakdown envelope on their own.
+    "kernel_discovery":            "item",  # one per hot-kernel discovery run (tracelens/roofline)
+    "kernel_dispatch":             "item",  # one per kernel: dispatched? which backends?
+    "kernel_backend_result":       "item",  # one per backend attempt (geak/oob)
+    "kernel_e2e":                  "item",  # one per kernel: e2e integrate gain
 }
 
 # Sections computed at finalize from in-memory state, never written as

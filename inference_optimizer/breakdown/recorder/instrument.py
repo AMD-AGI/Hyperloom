@@ -42,6 +42,15 @@ _OOB_BACKENDS = frozenset({"claude", "codex"})
 _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
 
 
+def _now_iso_safe() -> str:
+    from datetime import datetime, timezone
+
+    try:
+        return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _to_float(value: Any) -> float | None:
     try:
         if value is None or isinstance(value, bool):
@@ -382,6 +391,277 @@ def record_kernel_invocations(
         log.debug("record_kernel_invocations failed", exc_info=True)
 
 
+def _to_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in ("true", "1", "yes", "pass", "passed", "ok"):
+        return True
+    if s in ("false", "0", "no", "fail", "failed"):
+        return False
+    return None
+
+
+# Cache of resolved tool metadata, keyed by the resolved root dir. The git
+# probe is a one-shot per root: it never re-runs in the hot path.
+_TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _git_short_commit(root: Path) -> str:
+    """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises)."""
+    import subprocess  # local: keep module import cost off the common path
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _tool_metadata(
+    tool: str,
+    *,
+    root: str | None = None,
+    root_env: str | None = None,
+    version: str | None = None,
+) -> dict[str, Any]:
+    """Resolve ``{tool, root_dir, commit, version}`` for an external tool.
+
+    ``root`` (explicit) wins over ``root_env`` (an env var holding the path).
+    The commit is a cached ``git rev-parse`` of the root; ``version`` is passed
+    through verbatim when the tool already surfaced its own. All best-effort:
+    a missing root just yields empty strings.
+    """
+    import os
+
+    root_dir = str(root or (os.environ.get(root_env or "") or "")).strip()
+    cache_key = f"{tool}:{root_dir}"
+    cached = _TOOL_META_CACHE.get(cache_key)
+    if cached is None:
+        commit = ""
+        if root_dir:
+            try:
+                if Path(root_dir).is_dir():
+                    commit = _git_short_commit(Path(root_dir))
+            except Exception:  # noqa: BLE001
+                commit = ""
+        cached = {"tool": tool, "root_dir": root_dir, "commit": commit}
+        _TOOL_META_CACHE[cache_key] = cached
+    meta = dict(cached)
+    meta["version"] = str(version or "")
+    return meta
+
+
+def _normalize_hot_kernel(k: dict[str, Any]) -> dict[str, Any]:
+    """Project a raw hot-kernel candidate onto the discovery shape."""
+    return {
+        "kernel_id":               str(k.get("kernel_id") or k.get("id") or ""),
+        "name":                    str(k.get("name") or k.get("kernel_name") or ""),
+        "gpu_pct":                 _to_float(k.get("gpu_pct") or k.get("gpu_percent")),
+        "time_ms":                 _to_float(k.get("time_ms") or k.get("duration_ms")),
+        "bound_type":              str(k.get("bound_type") or k.get("bottleneck") or ""),
+        "arithmetic_intensity":    _to_float(k.get("arithmetic_intensity")),
+        "reusable_native_kernel":  bool(k.get("reusable_native_kernel") or False),
+        "source_file":             k.get("source_file"),
+        "recommended_backends":    list(k.get("recommended_backends") or []),
+        "selected_for_optimization": bool(k.get("selected_for_optimization") or False),
+    }
+
+
+def record_kernel_discovery(
+    session_dir: Path | str | None,
+    *,
+    source: str,
+    status: str,
+    hot_kernels: list[Any] | None = None,
+    scan: dict[str, Any] | None = None,
+    tool_root: str | None = None,
+    tool_root_env: str | None = None,
+    tool_version: str | None = None,
+    error: str | None = None,
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Record one hot-kernel discovery run (stage 1 of ``kernel_journey``).
+
+    One item per discovery invocation (tracelens / roofline scan), keyed by the
+    candidates/report path so a re-run with the same artifact overwrites rather
+    than duplicates. Carries the tool metadata (root + commit + version) and the
+    full hot-kernel list the run surfaced.
+    """
+    if not session_dir:
+        return
+    try:
+        kernels = [
+            _normalize_hot_kernel(k) for k in (hot_kernels or [])
+            if isinstance(k, dict)
+        ]
+        scan = dict(scan or {})
+        meta = _tool_metadata(
+            source, root=tool_root, root_env=tool_root_env, version=tool_version,
+        )
+        payload = {
+            "source":           str(source or ""),
+            "status":           str(status or ""),
+            "ts":               _now_iso_safe(),
+            "tool":             meta,
+            "scan":             scan,
+            "hot_kernel_count": len(kernels),
+            "hot_kernels":      kernels,
+            "error":            error,
+        }
+        key = (
+            str(scan.get("candidates_path") or scan.get("trace_report_path") or "")
+            or None
+        )
+        _recorder(session_dir, producer).record_item(
+            "kernel_discovery", payload, key=key,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("record_kernel_discovery failed", exc_info=True)
+
+
+def record_kernel_dispatch(
+    session_dir: Path | str | None,
+    *,
+    kernel_id: str,
+    dispatched: bool,
+    backends: list[str] | None = None,
+    skip_reason: str = "",
+    orchestration_commit: str = "",
+    task_group: str | None = None,
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Record the dispatch decision for one kernel (stage 2 of ``kernel_journey``).
+
+    Idempotent per ``kernel_id`` (last decision wins). ``dispatched`` is False
+    for kernels gated out before any backend ran, with ``skip_reason`` holding
+    the gate (non_reusable_kernel / missing_source / budget_exhausted / ...).
+    """
+    if not session_dir or not kernel_id:
+        return
+    try:
+        payload = {
+            "kernel_id":            str(kernel_id),
+            "dispatched":           bool(dispatched),
+            "backends":             [str(b) for b in (backends or [])],
+            "skip_reason":          str(skip_reason or ""),
+            "orchestration_commit": str(orchestration_commit or ""),
+            "task_group":           task_group,
+            "ts":                   _now_iso_safe(),
+        }
+        _recorder(session_dir, producer).record_item(
+            "kernel_dispatch", payload, key=str(kernel_id),
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("record_kernel_dispatch failed", exc_info=True)
+
+
+def record_kernel_backend_result(
+    session_dir: Path | str | None,
+    result: dict[str, Any],
+    *,
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Record per-backend attempts for one kernel (stage 3 of ``kernel_journey``).
+
+    One item per attempt, keyed by ``attempt_id`` (falls back to
+    ``run_id-backend``) so retries across runs are preserved rather than
+    collapsed. Mirrors the attempt ladder in ``result['attempts']`` and carries
+    the per-attempt timing + tool metadata when the kernel-agent surfaced them.
+    """
+    if not session_dir or not isinstance(result, dict):
+        return
+    try:
+        rec = _recorder(session_dir, producer)
+        kid = str(result.get("kernel_id") or "")
+        run_id = str(result.get("run_id") or result.get("session_id") or "")
+        attempts = result.get("attempts")
+        attempts = attempts if isinstance(attempts, list) else []
+        result_meta = result.get("metadata") if isinstance(
+            result.get("metadata"), dict) else {}
+        for att in attempts:
+            if not isinstance(att, dict):
+                continue
+            backend = str(att.get("backend") or "").lower()
+            attempt_id = str(att.get("attempt_id") or att.get("id") or "")
+            optimized = att.get("optimized_path") or att.get("optimized_file")
+            att_meta = att.get("metadata") if isinstance(
+                att.get("metadata"), dict) else {}
+            payload = {
+                "kernel_id":          kid,
+                "attempt_id":         attempt_id,
+                "run_id":             run_id,
+                "backend":            backend,
+                "model":              att.get("model"),
+                "ts":                 str(att.get("ts") or att.get("started_at") or ""),
+                "status":             str(att.get("status") or "").lower(),
+                "decision":           str(att.get("decision") or "").upper(),
+                "micro_speedup":      _to_float(
+                    att.get("micro_speedup") or att.get("speedup")),
+                "compile_passed":     _to_bool(att.get("compile_passed")),
+                "correctness_passed": _to_bool(att.get("correctness_passed")),
+                "optimized_files":    [str(optimized)] if optimized else [],
+                "error":              att.get("error") or att.get("error_message"),
+                "duration_sec":       _to_float(
+                    att.get("duration_sec") or att.get("elapsed_sec")),
+                "tool": _tool_metadata(
+                    backend or "kernel_agent",
+                    root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "")
+                    or None,
+                    root_env="HYPERLOOM_KERNEL_AGENT_ROOT",
+                    version=str(att_meta.get("version") or result_meta.get("version") or ""),
+                ),
+            }
+            key = attempt_id or (f"{run_id}-{backend}" if run_id else None)
+            rec.record_item("kernel_backend_result", payload, key=key)
+    except Exception:  # noqa: BLE001
+        log.debug("record_kernel_backend_result failed", exc_info=True)
+
+
+def record_kernel_e2e(
+    session_dir: Path | str | None,
+    *,
+    kernel_id: str,
+    integrated: bool,
+    e2e_gain_pct: Any = None,
+    validated: bool | None = None,
+    decision: str = "",
+    patch_path: str | None = None,
+    target_file: str | None = None,
+    extra_server_args: str = "",
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Record the end-to-end integrate outcome for one kernel (stage 4).
+
+    Idempotent per ``kernel_id``. ``e2e_gain_pct`` is the validated end-to-end
+    gain at integrate (negative => regressed and reverted).
+    """
+    if not session_dir or not kernel_id:
+        return
+    try:
+        payload = {
+            "kernel_id":         str(kernel_id),
+            "integrated":        bool(integrated),
+            "e2e_gain_pct":      _to_float(e2e_gain_pct),
+            "validated":         bool(validated) if validated is not None else None,
+            "decision":          str(decision or "").upper(),
+            "patch_path":        patch_path,
+            "target_file":       target_file,
+            "extra_server_args": str(extra_server_args or ""),
+            "ts":                _now_iso_safe(),
+        }
+        _recorder(session_dir, producer).record_item(
+            "kernel_e2e", payload, key=str(kernel_id),
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("record_kernel_e2e failed", exc_info=True)
+
+
 def record_specialist_round(
     session_dir: Path | str | None,
     entry: dict[str, Any],
@@ -490,6 +770,10 @@ __all__ = [
     "PRODUCER_COORDINATOR",
     "PRODUCER_KERNEL_AGENT",
     "record_critic_iteration",
+    "record_kernel_backend_result",
+    "record_kernel_discovery",
+    "record_kernel_dispatch",
+    "record_kernel_e2e",
     "record_kernel_invocations",
     "record_phase_event",
     "record_robustness_signal",

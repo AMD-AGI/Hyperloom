@@ -85,6 +85,7 @@ def assemble_parts(
         out[section] = rec.get("payload")
 
     _compose_critic_robustness(out)
+    _compose_kernel_journey(out)
     return out
 
 
@@ -109,6 +110,111 @@ def _compose_critic_robustness(out: dict[str, Any]) -> None:
     }
 
 
+def _compose_kernel_journey(out: dict[str, Any]) -> None:
+    """Fold the four kernel-lifecycle item substreams into a single
+    kernel-major ``kernel_journey`` view (discovery -> dispatch -> backend
+    attempts -> e2e), then pop the raw substreams so they don't leak into the
+    envelope. No-op (and ``kernel_journey`` stays absent) when no substream was
+    recorded, preserving historical breakdowns byte-for-byte.
+    """
+    discovery = out.pop("kernel_discovery", None)
+    dispatch = out.pop("kernel_dispatch", None)
+    backend = out.pop("kernel_backend_result", None)
+    e2e = out.pop("kernel_e2e", None)
+    if discovery is None and dispatch is None and backend is None and e2e is None:
+        return
+    # A directly-recorded singleton (if any) takes precedence over substreams.
+    if "kernel_journey" in out:
+        return
+
+    discovery_runs = [r for r in (discovery or []) if isinstance(r, dict)]
+    dispatch_rows = [r for r in (dispatch or []) if isinstance(r, dict)]
+    backend_rows = [r for r in (backend or []) if isinstance(r, dict)]
+    e2e_rows = [r for r in (e2e or []) if isinstance(r, dict)]
+
+    # Latest discovery snapshot per kernel_id (later runs win).
+    discovery_by_kid: dict[str, dict[str, Any]] = {}
+    for run in discovery_runs:
+        for hk in run.get("hot_kernels") or []:
+            if not isinstance(hk, dict):
+                continue
+            kid = str(hk.get("kernel_id") or "")
+            if kid:
+                discovery_by_kid[kid] = hk
+
+    dispatch_by_kid = {
+        str(r.get("kernel_id") or ""): r for r in dispatch_rows
+        if str(r.get("kernel_id") or "")
+    }
+    e2e_by_kid = {
+        str(r.get("kernel_id") or ""): r for r in e2e_rows
+        if str(r.get("kernel_id") or "")
+    }
+    attempts_by_kid: dict[str, list[dict[str, Any]]] = {}
+    for r in backend_rows:
+        kid = str(r.get("kernel_id") or "")
+        if kid:
+            attempts_by_kid.setdefault(kid, []).append(r)
+
+    kids: list[str] = []
+    for source in (discovery_by_kid, dispatch_by_kid, attempts_by_kid, e2e_by_kid):
+        for kid in source:
+            if kid and kid not in kids:
+                kids.append(kid)
+
+    kernels: list[dict[str, Any]] = []
+    for kid in kids:
+        disc = discovery_by_kid.get(kid, {})
+        disp = dispatch_by_kid.get(kid, {})
+        atts = attempts_by_kid.get(kid, [])
+        kernel_e2e = e2e_by_kid.get(kid, {})
+        kernels.append({
+            "kernel_id":        kid,
+            "name":             str(disc.get("name") or ""),
+            "gpu_pct":          disc.get("gpu_pct"),
+            "bound_type":       str(disc.get("bound_type") or ""),
+            "source_file":      disc.get("source_file"),
+            "discovery":        disc,
+            "dispatch":         disp,
+            "backend_attempts": atts,
+            "e2e":              kernel_e2e,
+            "outcome":          _kernel_outcome(disp, atts, kernel_e2e),
+        })
+
+    def _gpu(k: dict[str, Any]) -> float:
+        v = k.get("gpu_pct")
+        try:
+            return float(v) if v is not None else float("-inf")
+        except (TypeError, ValueError):
+            return float("-inf")
+
+    kernels.sort(key=_gpu, reverse=True)
+    out["kernel_journey"] = {
+        "discovery_runs": discovery_runs,
+        "kernels":        kernels,
+    }
+
+
+def _kernel_outcome(
+    dispatch: dict[str, Any],
+    attempts: list[dict[str, Any]],
+    e2e: dict[str, Any],
+) -> str:
+    """Coarse per-kernel outcome: adopted / reverted / attempted / dispatched /
+    skipped / discovered (in lifecycle-descending precedence)."""
+    if e2e:
+        decision = str(e2e.get("decision") or "").upper()
+        if e2e.get("integrated") or decision in ("KEEP", "ADOPTED"):
+            return "adopted"
+        if decision in ("REVERT", "REJECTED"):
+            return "reverted"
+    if attempts:
+        return "attempted"
+    if dispatch:
+        return "dispatched" if dispatch.get("dispatched") else "skipped"
+    return "discovered"
+
+
 def _kb_writes_summary(critic_iters: list[Any]) -> dict[str, Any]:
     """Count each critic iteration's verdict (mirrors the collector)."""
     by_verdict: dict[str, int] = {}
@@ -125,3 +231,4 @@ def _kb_writes_summary(critic_iters: list[Any]) -> dict[str, Any]:
 
 
 __all__ = ["assemble_parts", "has_parts", "parts_dir"]
+

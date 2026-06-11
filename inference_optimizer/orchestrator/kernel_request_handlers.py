@@ -1380,6 +1380,31 @@ async def trace_analyze_handler(
                 metadata,
                 trace_report_path=str(report_path or ""),
             )
+
+        # kernel_journey stage 1 (hot-kernel discovery): additive, best-effort.
+        # Records the tracelens run + its hot-kernel list + tool provenance so
+        # the journey can thread discovery -> dispatch -> backends -> e2e.
+        try:
+            from ..breakdown.recorder import instrument
+            _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
+            instrument.record_kernel_discovery(
+                session_dir,
+                source="tracelens",
+                status=str(result.get("status") or ""),
+                hot_kernels=_hot if isinstance(_hot, list) else [],
+                scan={
+                    "splitter_mode":      steady_state_mode,
+                    "trace_dir":          str(trace_input),
+                    "candidates_path":    str(result.get("candidates_path") or ""),
+                    "trace_report_path":  str(result.get("trace_report_path") or ""),
+                },
+                tool_root=str(HYPERLOOM_KERNEL_AGENT_ROOT or "") or None,
+                tool_root_env=_KERNEL_AGENT_ROOT_ENV,
+                error=(str(result.get("error") or "") or None
+                       if str(result.get("status") or "") == "failed" else None),
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return result
 
 

@@ -1336,6 +1336,27 @@ class SharedState:
         })
         self.kernel_integrate_attempts[key] = entry
 
+        # kernel_journey stage 4 (end-to-end integrate outcome): additive,
+        # idempotent per kernel_id, best-effort.
+        try:
+            from ..breakdown.recorder import instrument
+            sdir = getattr(self, "_session_dir", None)
+            if sdir and kernel_id:
+                _dec = str(result.get("decision") or "").upper()
+                instrument.record_kernel_e2e(
+                    sdir,
+                    kernel_id=kernel_id,
+                    integrated=(_dec == "KEEP"),
+                    e2e_gain_pct=result.get("gain_pct"),
+                    validated=True if _dec == "KEEP" else None,
+                    decision=_dec,
+                    patch_path=patch_path,
+                    target_file=target_file,
+                    extra_server_args=extra_args,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
         if result.get("decision") == "KEEP":
             return entry
 
@@ -1384,9 +1405,35 @@ class SharedState:
         # return so no failed attempt becomes invisible in the geak/oob view.
         try:
             from ..breakdown.recorder import instrument
-            instrument.record_kernel_invocations(
-                getattr(self, "_session_dir", None), result,
-            )
+            sdir = getattr(self, "_session_dir", None)
+            instrument.record_kernel_invocations(sdir, result)
+            # kernel_journey stage 2 (dispatch) + stage 3 (backend attempts):
+            # additive, never overlaps the legacy geak/oob view above.
+            _kid = str(result.get("kernel_id") or "")
+            if sdir and _kid:
+                _attempts = result.get("attempts")
+                _attempts = _attempts if isinstance(_attempts, list) else []
+                _backends = []
+                for _a in _attempts:
+                    if isinstance(_a, dict):
+                        _b = str(_a.get("backend") or "").lower()
+                        if _b and _b not in _backends:
+                            _backends.append(_b)
+                if not _backends:
+                    _sel = result.get("selected_backends") or result.get("backends")
+                    if isinstance(_sel, list):
+                        _backends = [str(b).lower() for b in _sel if b]
+                _dispatched = bool(_attempts)
+                instrument.record_kernel_dispatch(
+                    sdir,
+                    kernel_id=_kid,
+                    dispatched=_dispatched,
+                    backends=_backends,
+                    skip_reason="" if _dispatched else str(
+                        result.get("error_class") or result.get("status") or ""),
+                    orchestration_commit=str(getattr(self, "code_revision", "") or ""),
+                )
+                instrument.record_kernel_backend_result(sdir, result)
         except Exception:  # noqa: BLE001
             pass
         kernel_id = str(result.get("kernel_id") or "")
