@@ -118,6 +118,15 @@ def configure_logging(
 
     Idempotent: each call clears previously attached handlers so re-running
     does not stack duplicates.
+
+    Args:
+        level: Log level (name or int); resolved from env when ``None``.
+        json_output: Force JSON line output; resolved from env when ``None``.
+        log_file: Optional file path to also write logs to.
+        quiet_third_party: Raise noisy third-party loggers to WARNING.
+
+    Returns:
+        The configured root logger.
     """
     use_json = (
         json_output
@@ -199,8 +208,15 @@ def stage_log(
 ) -> Iterator[dict[str, Any]]:
     """Bracket a per-stage block with start/done/failed envelopes.
 
-    Yields a mutable dict so the caller can attach result metrics (e.g.
-    ``ctx["throughput"] = 1234.5``) before the ``done`` envelope fires.
+    Args:
+        logger: Logger to emit the stage envelopes on.
+        stage: Stage name included in each envelope.
+        candidate: Optional candidate ref for context.
+        **fields: Extra structured fields attached to the envelopes.
+
+    Yields:
+        A mutable dict so the caller can attach result metrics (e.g.
+        ``ctx["throughput"] = 1234.5``) before the ``done`` envelope fires.
     """
     started = time.monotonic()
     base: dict[str, Any] = {"stage": stage}
