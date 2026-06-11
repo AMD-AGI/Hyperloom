@@ -235,7 +235,6 @@ Optimize inference for this workload:
 - CONC: 64
 - ISL: 1024
 - OSL: 1024
-- Precision: bf16
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
 
@@ -304,7 +303,6 @@ Prompt field reference:
 | `CONC` | `CONC` | Benchmark concurrency. | YAML default, commonly `8` |
 | `ISL` | `--isl`, `ISL` | Input sequence length. | `256` |
 | `OSL` | `--osl`, `OSL` | Output sequence length. | `256` |
-| `Precision` | `--precision`, `PRECISION` | Model precision, for example `bf16`. | `bf16` |
 | `Goal` | `--target-gain`, `--target-tput`, `--target-baseline-dir` | Optional stop condition, such as target throughput gain. | unset |
 | `Budget` | `--max-hours` | Maximum optimization time. | `2.0` hours |
 | `Kernel optimization` | `--no-kernel` | Kernel optimization is enabled by default; ask to skip it if you only want parameter/backend search. | enabled |
