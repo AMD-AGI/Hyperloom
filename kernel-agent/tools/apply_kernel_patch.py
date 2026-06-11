@@ -99,7 +99,12 @@ _MN_STATE_FILE = Path(_MN_STATE_FILE_DEFAULT)
 
 
 def _is_multi_node() -> bool:
-    """True iff a multi-node RayJob is active (nodes >= 2); missing/unreadable → False."""
+    """Report whether a multi-node RayJob is active.
+
+    Returns:
+        ``True`` when the state file reports ``nodes >= 2``; ``False`` when the
+        state file is missing or unreadable.
+    """
     state_path = _mn_state_path()
     try:
         if not state_path.is_file():
@@ -118,10 +123,21 @@ def _dispatch_multinode_apply(
     backup_dir_on_pod: str,
     timeout_sec: int = 180,
 ) -> dict[str, Any]:
-    """Fan the patch out to every pod (head + workers); return parsed JSON.
+    """Fan a patch out to every pod (head + workers).
 
-    Raises RuntimeError on subprocess failure / non-JSON / pod status != ok so
-    the caller can roll back the sandbox-local copy.
+    Args:
+        target_file: The file to patch on each pod.
+        patch_path: Path to the patch file to apply.
+        kernel_id: Identifier of the kernel being patched.
+        backup_dir_on_pod: Directory on each pod to store backups.
+        timeout_sec: Subprocess timeout in seconds.
+
+    Returns:
+        The parsed JSON result from the multi-node dispatch.
+
+    Raises:
+        RuntimeError: On subprocess failure, non-JSON output, or a pod status
+            other than ``ok`` (so the caller can roll back the local copy).
     """
     cmd = [
         sys.executable, "-m", "inference_optimizer.multi_node",
@@ -162,7 +178,18 @@ def _dispatch_multinode_revert(
     backup_map: dict[str, str],
     timeout_sec: int = 120,
 ) -> dict[str, Any]:
-    """Restore the original file on every pod that received the apply (best-effort)."""
+    """Restore the original file on every pod that received the apply.
+
+    Best-effort: failures are reported in the result rather than raised.
+
+    Args:
+        target_path: The patched file path to restore on each pod.
+        backup_map: Mapping of pod identifier to its backup path.
+        timeout_sec: Subprocess timeout in seconds.
+
+    Returns:
+        The parsed JSON result, or an empty dict when output is not JSON.
+    """
     cmd = [
         sys.executable, "-m", "inference_optimizer.multi_node",
         "revert-patch",
@@ -439,12 +466,24 @@ _AITER_CSRC_MARKER = "/aiter/csrc/"
 
 
 def _target_is_in_aiter_csrc(target_file: Path) -> bool:
-    """Return True iff ``target_file`` resides under any ``aiter/csrc/`` tree."""
+    """Report whether a file resides under an ``aiter/csrc/`` tree.
+
+    Args:
+        target_file: The file path to test.
+
+    Returns:
+        ``True`` if the path is under an ``aiter/csrc/`` directory.
+    """
     return _AITER_CSRC_MARKER in str(target_file).replace(os.sep, "/")
 
 
 def _aiter_jit_build_dir() -> Path | None:
-    """Return ``<aiter>/jit/build`` for the importable aiter, or ``None`` if absent."""
+    """Locate the importable aiter package's ``jit/build`` directory.
+
+    Returns:
+        The ``<aiter>/jit/build`` path, or ``None`` when aiter is not
+        importable.
+    """
     try:
         spec = importlib.util.find_spec("aiter")
     except (ImportError, ValueError):
@@ -461,9 +500,16 @@ def _invalidate_aiter_jit_build(
     *,
     jit_build_dir_override: Path | None = None,
 ) -> dict[str, Any]:
-    """Move aiter ``jit/build/`` aside so a post-rebuild first import re-JITs.
+    """Move aiter ``jit/build/`` aside so a post-rebuild import re-JITs.
 
-    Returns status ok / skipped / failed; ``jit_build_dir_override`` is test-only.
+    Args:
+        target_file: The file being patched (gates the operation).
+        backup_dir: Directory to move the ``jit/build`` tree into.
+        jit_build_dir_override: Test-only override for the jit/build location.
+
+    Returns:
+        A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``
+        and supporting fields.
     """
     if not _target_is_in_aiter_csrc(target_file):
         return {"status": "skipped", "reason": "target not under aiter/csrc/"}
@@ -508,7 +554,17 @@ def _invalidate_aiter_jit_build(
 
 
 def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]:
-    """Reverse of :func:`_invalidate_aiter_jit_build`: restore the backup, removing any regenerated dir first."""
+    """Restore an aiter ``jit/build`` backup, reversing the invalidation.
+
+    Any regenerated ``jit/build`` directory is removed first.
+
+    Args:
+        jit_build_backup: The backup record returned by
+            :func:`_invalidate_aiter_jit_build`.
+
+    Returns:
+        A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``.
+    """
     if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
         return {"status": "skipped", "reason": "no backup recorded"}
     src = Path(jit_build_backup.get("src", ""))
@@ -578,7 +634,7 @@ _MD_NAME_RE = re.compile(r"""(?m)^\s*MD_NAME\s*=\s*["']([^"']+)["']""")
 
 
 def _target_is_in_aiter_cpp_itfs(target_file: Path) -> bool:
-    """True iff ``target_file`` lives under any ``aiter/csrc/cpp_itfs/`` tree.
+    """Report whether a file lives under an ``aiter/csrc/cpp_itfs/`` tree.
 
     Strict subset of :func:`_target_is_in_aiter_csrc`: these are the
     runtime-compiled kernels whose served ``.so`` lives in
@@ -586,6 +642,12 @@ def _target_is_in_aiter_cpp_itfs(target_file: Path) -> bool:
     statically-linked wheel. Matches both the editable checkout
     (``/sgl-workspace/aiter/csrc/cpp_itfs/...``) and the dist-packages
     layout (``.../aiter/csrc/cpp_itfs/...``).
+
+    Args:
+        target_file: The file path to test.
+
+    Returns:
+        ``True`` if the path is under an ``aiter/csrc/cpp_itfs/`` directory.
     """
     return _AITER_CPP_ITFS_MARKER in str(target_file).replace(os.sep, "/")
 
@@ -597,6 +659,9 @@ def _aiter_cpp_itfs_build_dir() -> Path:
     ``$AITER_ROOT_DIR`` defaulting to ``$HOME/.aiter``. Honouring both env
     vars keeps non-default deployments + unit tests correct without importing
     aiter into this standalone tool.
+
+    Returns:
+        The resolved cpp_itfs ``build`` directory path.
     """
     root = os.environ.get("AITER_ROOT_DIR", "").strip()
     if not root:
@@ -606,16 +671,21 @@ def _aiter_cpp_itfs_build_dir() -> Path:
 
 
 def _cpp_itfs_module_names(target_file: Path) -> list[str]:
-    """Best-effort ``MD_NAME`` prefix(es) for the cpp_itfs module(s) the
-    patched source feeds.
+    """Collect ``MD_NAME`` prefixes for the cpp_itfs module(s) a source feeds.
 
     The cpp_itfs ``.py`` driver next to the patched source declares
     ``MD_NAME = "pa_ragged"`` (etc.), which becomes the
     ``<md_name>_<hash>`` runtime-cache folder prefix. A single shared
     ``.cuh`` (e.g. ``pa_kernels.cuh``) is pulled into several drivers in the
     same directory, so we collect EVERY ``MD_NAME`` declared in the target's
-    directory. An empty result tells the caller to fall back to clearing the
-    whole cpp_itfs build root.
+    directory.
+
+    Args:
+        target_file: The patched source file whose directory is scanned.
+
+    Returns:
+        The discovered ``MD_NAME`` prefixes. An empty list tells the caller to
+        fall back to clearing the whole cpp_itfs build root.
     """
     names: set[str] = set()
     search_dir = target_file.parent
@@ -651,6 +721,14 @@ def _invalidate_aiter_cpp_itfs_cache(
     The record always carries ``is_cpp_itfs`` + ``build_dir`` +
     ``module_names`` + ``invalidated_unix`` (even when nothing was cached
     yet) so integrate can later verify a fresh rebuild actually landed.
+
+    Args:
+        target_file: The file being patched (gates the operation).
+        backup_dir: Directory to move affected cache dirs into.
+        build_dir_override: Test-only override for the cpp_itfs build root.
+
+    Returns:
+        A status dict recording what was moved and the invalidation metadata.
 
     Returns one of ``ok`` / ``skipped`` / ``failed`` mirroring
     :func:`_invalidate_aiter_jit_build`. ``build_dir_override`` is a
@@ -733,6 +811,13 @@ def _restore_aiter_cpp_itfs_cache(cache_backup: dict[str, Any]) -> dict[str, Any
     Moves each backed-up cache dir back to its original location, removing
     any dir the re-baseline server regenerated there first so the pre-patch
     runtime cache is restored bit-for-bit.
+
+    Args:
+        cache_backup: The backup record from
+            :func:`_invalidate_aiter_cpp_itfs_cache`.
+
+    Returns:
+        A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``.
     """
     if not isinstance(cache_backup, dict) or cache_backup.get("status") != "ok":
         return {"status": "skipped", "reason": "no cpp_itfs cache backup recorded"}
@@ -776,9 +861,14 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
     measured gain is meaningless -- the integrate KEEP/REVERT gate uses this
     to flag/abort instead of scoring a stale binary (GH #458 point 2).
 
-    Returns ``{"verified": bool, ...}``. ``verified`` is True for
-    non-cpp_itfs targets so the caller's gate is a strict no-op off the
-    cpp_itfs path.
+    Args:
+        cache_backup: The invalidation record from
+            :func:`_invalidate_aiter_cpp_itfs_cache`.
+
+    Returns:
+        A dict ``{"verified": bool, ...}``. ``verified`` is ``True`` for
+        non-cpp_itfs targets so the caller's gate is a strict no-op off the
+        cpp_itfs path.
     """
     if not isinstance(cache_backup, dict) or not cache_backup.get("is_cpp_itfs"):
         return {"verified": True, "status": "skipped", "reason": "non-cpp_itfs target"}
