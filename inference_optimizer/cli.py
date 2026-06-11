@@ -836,6 +836,13 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     if config is None:
         return None
     architectures = _config_architectures(config)
+    # Wrapper models may nest the real arch under text_config; merge so the
+    # unsupported-arch blocklist still matches (e.g. RWKV6Qwen2ForCausalLM).
+    nested = config.get("text_config")
+    if isinstance(nested, dict):
+        for a in _config_architectures(nested):
+            if a not in architectures:
+                architectures.append(a)
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
 

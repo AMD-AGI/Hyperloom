@@ -47,6 +47,14 @@ log = logging.getLogger(__name__)
 _RUN_EVAL_DEFAULT_WARN_EMITTED = False
 
 
+class FrameworkScriptMismatchError(ValueError):
+    """Raised when benchmark_script targets a different framework than the run.
+
+    Subclasses ValueError so callers can catch it specifically and turn it
+    into a structured action failure instead of an uncaught exception.
+    """
+
+
 def _visible_gpu_count() -> int:
     """Return how many GPUs are visible to this pod (0 = none / unknown).
 
@@ -176,7 +184,7 @@ def materialize_config_with_envs(
     if _script and _fw in _known_fw:
         _other = [k for k in _known_fw if k != _fw and _script.startswith(f"{k}_")]
         if _other:
-            raise ValueError(
+            raise FrameworkScriptMismatchError(
                 f"framework/script mismatch: framework={_fw!r} but "
                 f"benchmark_script={_script!r} targets {_other[0]!r}; refusing "
                 f"to boot server (would launch the wrong framework's entrypoint)"

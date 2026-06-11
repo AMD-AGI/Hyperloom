@@ -65,6 +65,18 @@ def test_detect_plain_rwkv_not_rejected(tmp_path):
     assert cli._detect_unsupported_model(str(m)) is None
 
 
+def test_detect_unsupported_arch_nested_in_text_config(tmp_path):
+    """Blocklisted arch nested under text_config must still be caught."""
+    m = tmp_path / "nested_rwkv6"
+    _write_config(m, {
+        "model_type": "wrapper",
+        "text_config": {"architectures": ["RWKV6Qwen2ForCausalLM"]},
+    })
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert hit["architecture"] == "RWKV6Qwen2ForCausalLM"
+
+
 # 1. classifier — whitelist-based detection
 def test_detect_gemma3_conditional_generation_rejected(tmp_path):
     """Gemma3ForConditionalGeneration is not a causal LM arch -> rejected."""
@@ -193,6 +205,19 @@ def test_detect_kimi_k25_text_compatible_exception_allowed(tmp_path):
         "architectures": ["KimiK25ForConditionalGeneration"],
         "model_type": "kimi_k25",
         "vision_config": {"hidden_size": 1024},
+    })
+    assert cli._detect_unsupported_model(str(m)) is None
+
+
+def test_detect_nested_text_compatible_exception_allowed(tmp_path):
+    """Exception arch nested under text_config must still be honored."""
+    m = tmp_path / "nested_kimi_k25"
+    _write_config(m, {
+        "model_type": "kimi_k25",
+        "vision_config": {"hidden_size": 1024},
+        "text_config": {
+            "architectures": ["KimiK25ForConditionalGeneration"],
+        },
     })
     assert cli._detect_unsupported_model(str(m)) is None
 

@@ -12,6 +12,7 @@ import yaml
 
 from inference_optimizer.cli import _export_workload_envs_for_optimize
 from inference_optimizer.orchestrator.action_executors._workload_envs import (
+    FrameworkScriptMismatchError,
     materialize_config_with_envs,
 )
 
@@ -33,7 +34,7 @@ def test_framework_script_mismatch_fails_fast(tmp_path):
     """vllm framework + sglang script must raise before server boot (QRWKV-72B bug)."""
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm", benchmark_script="sglang_mi300x.sh")
-    with pytest.raises(ValueError, match="framework/script mismatch"):
+    with pytest.raises(FrameworkScriptMismatchError, match="framework/script mismatch"):
         materialize_config_with_envs(
             src, tmp_path / "out", model_path="/m", gpu_type="mi300x",
             benchmark_script="sglang_mi300x.sh",
