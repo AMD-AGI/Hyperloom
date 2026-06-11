@@ -574,6 +574,12 @@ def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
 
     Merge (not rebase/reset) preserves the fork-only verify-pr/sync workflow
     files while keeping the base current.
+
+    Args:
+        repo_dir: Local clone directory of the fork.
+        upstream_url: Upstream repository URL to add as a remote.
+        branch: Branch to sync from upstream.
+        token: Optional auth token for the push back to the fork.
     """
     _run_git(["remote", "add", "upstream", upstream_url], repo_dir, check=False)
     _run_git(["fetch", "upstream", branch], repo_dir)
