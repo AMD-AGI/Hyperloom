@@ -49,7 +49,14 @@ _DEFAULT_PHASE = "EXPLORE"
 
 
 def is_legacy_session(state: dict[str, Any]) -> bool:
-    """A session is *legacy* when it never recorded ``phase_history``."""
+    """A session is *legacy* when it never recorded ``phase_history``.
+
+    Args:
+        state: Session state mapping to inspect.
+
+    Returns:
+        ``True`` when the session has no ``phase_history``, else ``False``.
+    """
     history = state.get("phase_history")
     return not (isinstance(history, list) and history)
 
@@ -99,6 +106,15 @@ def collect_phase_segments(
     consecutive same-phase events into segments matching the v2 collector
     wire shape; ``evidence.reconstructed_from == "legacy_audit_lists"``
     flags each as a derived view.
+
+    Args:
+        state: Session state mapping holding the optimization stack.
+        phase_timeline: Timestamped phase/action events to segment.
+        warnings: Mutable list to which any reconstruction warnings are
+            appended.
+
+    Returns:
+        The reconstructed ``phase_segments`` list in v2 collector shape.
     """
     events = [e for e in (phase_timeline or []) if isinstance(e, dict) and e.get("ts")]
     events.sort(key=lambda e: str(e.get("ts") or ""))

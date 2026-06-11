@@ -196,6 +196,13 @@ def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
     Returns ``None`` when ``tput_per_gpu`` is missing or non-positive.
     ``tpot_ms`` is the per-output-token latency; ``interactivity`` (when
     present) is informational only and not folded into the point shape.
+
+    Args:
+        row: A single ``per_conc`` mapping from the competitor target data.
+
+    Returns:
+        A ``BaselinePoint`` built from the row, or ``None`` when the row has
+        no usable positive ``tput_per_gpu``.
     """
     def _fnum(key: str) -> float:
         """Read a float field from the enclosing ``row``.
@@ -253,6 +260,20 @@ def analyze(
     ``reason`` mirrors ``status`` with finer granularity:
     ``ok`` / ``model_mapping_miss`` / ``no_target_gpu_configured`` /
     ``no_competitor_target``.
+
+    Args:
+        session_dir: Session directory used to load competitor data and
+            persist the resulting summary.
+        model_path: Model path or name to map to a canonical display name.
+        compare_against_gpu: Target GPU to compare against; when empty the
+            analysis is skipped.
+        framework: Optional framework name recorded on the query.
+        precision: Optional precision label recorded on the query.
+        isl: Optional input sequence length recorded on the query.
+        osl: Optional output sequence length recorded on the query.
+
+    Returns:
+        The persisted ``BaselineSummary`` describing the comparison outcome.
     """
     from ..orchestrator import research_hints
 

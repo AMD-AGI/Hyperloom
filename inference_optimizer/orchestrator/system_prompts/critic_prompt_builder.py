@@ -99,7 +99,11 @@ def _section_run_context(
 
 def _section_phase_review_contract() -> list[str]:
     """Static phase-aware verdict contract (v0.8 §3.3 §4.3); mirrors
-    ``phase_state.PHASE_LLM_PROPOSABLE_ACTIONS`` (PolicyGate R1)."""
+    ``phase_state.PHASE_LLM_PROPOSABLE_ACTIONS`` (PolicyGate R1).
+
+    Returns:
+        The rendered phase-review-contract lines.
+    """
     from ..phase_state import (
         PHASE_NAMES,
         is_phase_interleave_enabled,
@@ -333,20 +337,20 @@ def build_critic_prompt(
 ) -> str:
     """Compose the Critic system prompt (deterministic for given inputs).
 
-    Parameters
-    ----------
-    action_registry:
-        Pre-loaded ``ActionRegistry`` (caller calls ``.load()``).
-    enabled_actions:
-        Action names enabled for this run (same set as orchestration).
-    framework:
-        ``sglang`` / ``vllm`` / ``atom`` — printed in RUN CONTEXT verbatim.
-    kernel_enabled:
-        ``None`` derives from whether any KERNEL_OWNED action is enabled.
-    max_minutes:
-        Wall-clock budget for the run.
-    rules_fragment_path:
-        Path to ``critic.md`` rules fragment.
+    Args:
+        action_registry: Pre-loaded ``ActionRegistry`` (caller calls
+            ``.load()``).
+        enabled_actions: Action names enabled for this run (same set as
+            orchestration).
+        framework: ``sglang`` / ``vllm`` / ``atom`` — printed in RUN CONTEXT
+            verbatim.
+        kernel_enabled: ``None`` derives from whether any KERNEL_OWNED action
+            is enabled.
+        max_minutes: Wall-clock budget for the run.
+        rules_fragment_path: Path to the ``critic.md`` rules fragment.
+
+    Returns:
+        The composed Critic system prompt string.
     """
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:

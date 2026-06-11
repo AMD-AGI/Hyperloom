@@ -38,6 +38,13 @@ def canonical_fingerprint(
     inputs (lossless legacy → ledger merge); kept separate so call-sites depend
     on the legacy canonical identity. Normalization: args ``shlex.split`` →
     sorted tokens; envs ``(str(k), str(v))`` sorted by key; 16-char SHA-1.
+
+    Args:
+        extra_args: Extra server-arg string for the variant, or None.
+        extra_envs: Mapping of extra environment variables, or None.
+
+    Returns:
+        The 16-character SHA-1 fingerprint hex digest.
     """
     args_text = str(extra_args or "")
     try:
@@ -70,6 +77,16 @@ def workload_signature(
     cross-workload resume can warn when an old KEEP came from a different
     (CONC, ISL, OSL, precision, TP). Not part of the fingerprint hash today.
     Args default to the corresponding process env vars when omitted.
+
+    Args:
+        conc: Concurrency; defaults to the ``CONC`` env var.
+        isl: Input sequence length; defaults to the ``ISL`` env var.
+        osl: Output sequence length; defaults to the ``OSL`` env var.
+        precision: Workload precision; defaults to the ``PRECISION`` env var.
+        tp: Tensor-parallel size; defaults to the ``TP`` env var.
+
+    Returns:
+        The 12-character SHA-1 digest of the workload contract.
     """
     fields = {
         "conc": str(conc if conc is not None else os.environ.get("CONC", "")).strip(),
