@@ -310,7 +310,15 @@ def _parse_keywords(raw: Any) -> tuple[str, ...]:
 
     None/empty -> ``()`` (auto-extract from gap_description); string ->
     split on comma/whitespace; list/tuple -> trimmed non-empty items.
-    Anything else raises ``ValueError``.
+
+    Args:
+        raw: The raw ``keywords`` value to coerce.
+
+    Returns:
+        A tuple of trimmed keyword strings (empty when unset).
+
+    Raises:
+        ValueError: If ``raw`` is present but not a list/tuple/str.
     """
     if raw is None or raw == "":
         return ()
