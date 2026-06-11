@@ -44,6 +44,16 @@ def _infer_model_class_from_config(model_path: str) -> str:
     text = " ".join(text_parts)
 
     def _positive_int(*keys: str) -> bool:
+        """Whether any of the given payload keys holds a positive integer.
+
+        Booleans are explicitly ignored (they are not treated as ints).
+
+        Args:
+            *keys: Payload keys to check.
+
+        Returns:
+            ``True`` if at least one key parses to an integer > 0.
+        """
         for key in keys:
             val = payload.get(key)
             if isinstance(val, bool):

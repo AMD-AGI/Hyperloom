@@ -297,6 +297,15 @@ def _build_roofline_ceiling(
             t_peak = t_mem
 
         def _mbu_pct(measured: Any) -> float | None:
+            """Express a measured throughput as a percent of peak.
+
+            Args:
+                measured: Measured throughput value.
+
+            Returns:
+                The ratio to ``t_peak`` as a percentage, or ``None`` when
+                inputs are non-positive or invalid.
+            """
             if not isinstance(measured, (int, float)) or measured <= 0:
                 return None
             if t_peak <= 0:
