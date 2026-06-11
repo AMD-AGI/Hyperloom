@@ -60,10 +60,20 @@ class SpecialistProfile:
 
     @property
     def is_freeform(self) -> bool:
+        """Whether this profile uses the free-form (unscoped) scope.
+
+        Returns:
+            ``True`` if the scope is free-form.
+        """
         return self.scope == SCOPE_FREEFORM
 
     @property
     def is_cross_domain(self) -> bool:
+        """Whether this profile spans multiple knowledge domains.
+
+        Returns:
+            ``True`` if the scope is the multi-domain scope.
+        """
         return self.scope == SCOPE_DOMAINS
 
     @property
@@ -75,6 +85,18 @@ class SpecialistProfile:
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
+    """Coerce a loosely-typed value to a boolean.
+
+    Accepts native bools, numbers, and common truthy/falsey strings
+    (``"true"``/``"yes"``/``"on"`` and their negatives).
+
+    Args:
+        value: Value to interpret.
+        default: Fallback returned when ``value`` is ``None`` or unrecognized.
+
+    Returns:
+        The interpreted boolean, or ``default`` when undecidable.
+    """
     if value is None:
         return default
     if isinstance(value, bool):
