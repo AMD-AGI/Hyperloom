@@ -180,6 +180,12 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     "Engine process failed to start",
     "AsyncEngineDeadError",
     "raise EngineDeadError",
+    # vLLM v1 engine-core bootstrap failure tail (#524): the APIServer logs
+    # ``RuntimeError: Engine core initialization failed`` (already matched
+    # above) followed by ``Failed core proc(s): {...}``. Add the latter as a
+    # second, equally terminal anchor — both only appear once the engine core
+    # is unrecoverable, never on a merely slow cold start.
+    "Failed core proc(s)",
 )
 
 # Default grace after the first fatal marker before forcing a reap. Gives the
@@ -209,6 +215,38 @@ def _server_log_shows_death(path: str) -> bool:
     except (OSError, ValueError):
         return False
     return any(marker in tail for marker in _SERVER_DEAD_MARKERS)
+
+
+def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
+    """Return a short ``server.log`` excerpt around the first terminal
+    engine/worker-init marker, or ``None`` when no fatal marker is present.
+
+    Baseline / profile failure classification (#524) calls this to surface the
+    real server-side root cause — e.g. vLLM's ``RuntimeError: Engine core
+    initialization failed`` — instead of the Magpie wrapper's generic
+    stdout/stderr tail, which never carries the server.log contents. The
+    excerpt keeps a couple of lines of context around the marker so the
+    operator-facing ``error`` field is actionable. Best-effort: a missing /
+    unreadable log reads as "no marker" (returns ``None``).
+    """
+    try:
+        with open(path, "rb") as fh:
+            try:
+                fh.seek(-_SERVER_LOG_TAIL_BYTES, os.SEEK_END)
+            except OSError:
+                fh.seek(0)
+            tail = fh.read().decode("utf-8", "ignore")
+    except (OSError, ValueError):
+        return None
+    lines = tail.splitlines()
+    for idx, line in enumerate(lines):
+        if any(marker in line for marker in _SERVER_DEAD_MARKERS):
+            start = max(0, idx - 2)
+            excerpt = "\n".join(lines[start:idx + 3]).strip()
+            if not excerpt:
+                return None
+            return excerpt[-max_chars:]
+    return None
 
 
 def run_with_session_kill(

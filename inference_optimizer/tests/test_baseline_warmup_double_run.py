@@ -279,6 +279,126 @@ def test_baseline_no_workspace_persists_stderr_to_file(tmp_path):
     assert crash_text in saved.read_text(encoding="utf-8")
 
 
+def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
+    tmp_path, monkeypatch,
+):
+    """#524: a vLLM engine-core bootstrap failure — server.log carries
+    ``Engine core initialization failed`` while Magpie exits nonzero without a
+    benchmark_* workspace — is classified ``server_init_dead`` with the
+    server.log root cause surfaced in ``error`` (not a generic
+    ``subprocess_nonzero`` from Magpie's wrapper noise)."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        slot.mkdir(parents=True, exist_ok=True)
+        (slot / "server.log").write_text(
+            "(APIServer pid=16160)   File '.../vllm/v1/engine/utils.py', "
+            "line 1057, in wait_for_engine_startup\n"
+            "(APIServer pid=16160) RuntimeError: Engine core initialization "
+            "failed. See root cause above. Failed core proc(s): {}\n",
+            encoding="utf-8",
+        )
+        # Magpie exits nonzero, no benchmark_* workspace produced.
+        return subprocess.CompletedProcess(cmd, 1, "", "magpie wrapper noise")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "server_init_dead", result
+    assert "Engine core initialization failed" in result["error"]
+
+
+def test_baseline_server_dead_returncode_classifies_server_init_dead(
+    tmp_path, monkeypatch,
+):
+    """#524: when the liveness watchdog reaps a hung server
+    (``SERVER_DEAD_RETURNCODE``), baseline classifies it ``server_init_dead``
+    even when no server.log marker is independently visible."""
+    from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
+        SERVER_DEAD_RETURNCODE,
+    )
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="sglang")
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, SERVER_DEAD_RETURNCODE, "", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "server_init_dead", result
+
+
+def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
+    """#523: the Magpie/server subprocess cwd is anchored to the stable task
+    output_dir (never the default ``/tmp``), so SGLang's cuda-graph
+    relative-path memory-snapshot dump lands in a directory that still exists
+    instead of a transient one torn down mid-run."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    seen: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["cwd"] = kwargs.get("cwd")
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=_HOT_TPUT)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert seen["cwd"] is not None
+    assert seen["cwd"] != "/tmp"
+    assert str(output_dir) in seen["cwd"]
+
+
 def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
     """AMD-AGI/Magpie#34 — atom baseline engages the lifecycle double-run like vllm/sglang."""
     base = tmp_path / "base.yaml"

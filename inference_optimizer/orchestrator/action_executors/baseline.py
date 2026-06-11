@@ -33,9 +33,11 @@ from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from ._grid_runner import sanitize_result_dir, sanitize_script_name
 from ._subprocess_kill import (
+    SERVER_DEAD_RETURNCODE,
     _process_group_alive,
     _signal_group,
     run_with_session_kill,
+    server_log_death_excerpt,
 )
 from ._workload_envs import (
     default_baseline_config,
@@ -745,10 +747,20 @@ class BaselineExecutor:
         # root cause of the bash-source race in §C #1). See
         # ``_subprocess_kill.py``.
         subprocess_started_unix = time.time()
+        # #523: anchor the Magpie/server subprocess cwd to the stable per-task
+        # output_dir instead of the default ``/tmp``. SGLang's cuda-graph
+        # profiling dumps ``cuda_graph_runner_memory_usage.pickle`` to a
+        # RELATIVE path under the running process's cwd; when the server is
+        # launched from a transient working dir that the benchmark wrapper
+        # tears down mid-run, that dump hits ``FileNotFoundError`` and the
+        # scheduler dies (sigquit) before any ``.trace.json.gz`` is produced.
+        # output_dir lives for the whole task and Hyperloom never rmtrees it,
+        # so the relative dump lands in a directory that still exists.
+        output_dir.mkdir(parents=True, exist_ok=True)
         try:
             proc = await asyncio.to_thread(
                 run_with_session_kill, cmd,
-                env=env, cwd=str(self.cwd), timeout=timeout_sec,
+                env=env, cwd=str(output_dir), timeout=timeout_sec,
                 server_log_path=str(output_dir / "server.log"),
             )
             subprocess_runtime_sec = max(
@@ -777,6 +789,28 @@ class BaselineExecutor:
         proc_returncode = proc.returncode
         proc_stdout = proc.stdout
         proc_stderr = proc.stderr
+
+        # #524: when the inference server's engine/worker bootstrap dies (e.g.
+        # vLLM ``RuntimeError: Engine core initialization failed``), the real
+        # root cause is in server.log, not in Magpie's stdout/stderr tail — and
+        # the liveness watchdog may have reaped the hung parent with
+        # ``SERVER_DEAD_RETURNCODE``. Detect that once here and reuse it across
+        # the failure branches below so the failure is classified
+        # ``server_init_dead`` (parity with the explore/grid path) and the
+        # operator sees the actual server fault instead of a generic
+        # ``subprocess_nonzero``. Backend-agnostic: the markers cover both
+        # vLLM and SGLang engine/worker init failures.
+        server_death_excerpt = server_log_death_excerpt(
+            str(output_dir / "server.log")
+        )
+        server_init_dead = (
+            server_death_excerpt is not None
+            or proc_returncode == SERVER_DEAD_RETURNCODE
+        )
+        server_init_dead_error = server_death_excerpt or (
+            "server engine/worker init failed (reaped by liveness watchdog); "
+            "see server.log"
+        )
 
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
@@ -819,6 +853,14 @@ class BaselineExecutor:
                     )
             if stderr_log_path:
                 failure_extras["stderr_log_path"] = stderr_log_path
+            if server_init_dead:
+                return {
+                    "status": "failed",
+                    "error_class": "server_init_dead",
+                    "returncode": proc_returncode,
+                    "error": server_init_dead_error,
+                    **failure_extras,
+                }
             if proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
                 return {
@@ -857,7 +899,10 @@ class BaselineExecutor:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            if proc_returncode != 0:
+            if server_init_dead:
+                error_class = "server_init_dead"
+                error = server_init_dead_error
+            elif proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
                 error_class = "subprocess_nonzero"
                 error = tail
