@@ -34,6 +34,12 @@ test = [
     "pytest-asyncio>=1.0",
     "respx>=0.21",
 ]
+# Optional live-Langfuse trace push (HYPERLOOM_LANGFUSE_ENABLE=1). The local
+# reports/trace/*.jsonl ledger never needs this; only the opt-in Langfuse
+# sink imports the SDK (lazily, with a friendly no-op when absent).
+trace = [
+    "langfuse>=2.0",
+]
 
 [project.scripts]
 inference_optimizer = "inference_optimizer.cli:main"

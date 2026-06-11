@@ -20,6 +20,7 @@ from .exporter import (
     BREAKDOWN_FILENAME,
     EXPORTER_VERSION,
     build,
+    patch_breakdown_langfuse,
     write_breakdown_json,
     write_minimal_final_report,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "build",
     "package_session_artifacts",
+    "patch_breakdown_langfuse",
     "write_breakdown_json",
     "write_minimal_final_report",
 ]
