@@ -54,10 +54,26 @@ log = logging.getLogger(__name__)
 
 
 def _manifest_path(session_dir: Path) -> Path:
+    """Return the path to a session's ``manifest.json``.
+
+    Args:
+        session_dir: Session directory.
+
+    Returns:
+        The manifest file path.
+    """
     return session_dir / "manifest.json"
 
 
 def _receipt_path(session_dir: Path) -> Path:
+    """Return the path to a session's Langfuse receipt file.
+
+    Args:
+        session_dir: Session directory.
+
+    Returns:
+        The ``langfuse_receipt.json`` path under the trace directory.
+    """
     return trace_dir(session_dir) / "langfuse_receipt.json"
 
 
@@ -220,6 +236,15 @@ def _set_trace_attrs(
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Load a JSONL file into a list of dict records.
+
+    Args:
+        path: Path to the ``.jsonl`` file.
+
+    Returns:
+        The dict records; missing files, unreadable files, and malformed lines
+        yield (or are skipped to) an empty/partial list.
+    """
     import json
 
     out: list[dict[str, Any]] = []
@@ -243,6 +268,15 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_json(path: Path) -> dict[str, Any]:
+    """Load a JSON object file.
+
+    Args:
+        path: Path to the JSON file.
+
+    Returns:
+        The parsed object, or ``{}`` when the file is missing, unreadable, or
+        not a JSON object.
+    """
     import json
 
     if not path.exists():
@@ -264,6 +298,15 @@ class LangfuseEmitter:
     """
 
     def __init__(self, session_dir: Path) -> None:
+        """Initialize the per-session emitter.
+
+        Resolves the manifest and correlation labels unconditionally (even when
+        the live push is disabled) so the receipt always reports the right trace
+        and correlation ids.
+
+        Args:
+            session_dir: Session directory whose traces are emitted.
+        """
         self.session_dir = Path(session_dir)
         self._lock = threading.Lock()
         # pair_key -> partial generation parts ({"llm": row} / {"conv": row}).
@@ -346,10 +389,16 @@ class LangfuseEmitter:
 
     @property
     def enabled(self) -> bool:
+        """Whether live push to Langfuse is enabled for this session."""
         return self._enabled
 
     # -- span hierarchy (trace -> phase -> agent -> generation) ---------
     def _trace_name(self) -> str:
+        """Return the human-readable trace name.
+
+        Returns:
+            The model name, else the session label, else ``"hyperloom"``.
+        """
         return str(self._manifest.get("model_name") or self._session_label or "hyperloom")
 
     def _ensure_root(self, start: Any) -> Any:
@@ -374,6 +423,15 @@ class LangfuseEmitter:
         return self._root_span
 
     def _ensure_phase_span(self, phase: str, start: Any) -> Any:
+        """Get-or-create the span for a phase under the trace root.
+
+        Args:
+            phase: Phase name.
+            start: Span start time.
+
+        Returns:
+            The cached or newly opened phase span.
+        """
         span = self._phase_spans.get(phase)
         if span is None:
             root = self._ensure_root(start)
@@ -422,6 +480,12 @@ class LangfuseEmitter:
             log.debug("langfuse: record_conversation failed", exc_info=True)
 
     def _buffer(self, row: dict[str, Any], *, half: str) -> None:
+        """Buffer one half of a generation and emit once both halves arrive.
+
+        Args:
+            row: The token (``llm``) or conversation (``conv``) row.
+            half: Which half this row represents (``"llm"`` or ``"conv"``).
+        """
         key = lfmap.pair_key(row)
         emit_parts: dict[str, dict[str, Any]] | None = None
         with self._lock:
@@ -521,6 +585,11 @@ class LangfuseEmitter:
 
     @staticmethod
     def _safe_end(span: Any) -> None:
+        """End a span, swallowing any errors.
+
+        Args:
+            span: The span object to end.
+        """
         try:
             span.end()
         except Exception:  # noqa: BLE001
@@ -572,6 +641,13 @@ class LangfuseEmitter:
     def _create_score(
         self, score: dict[str, Any], *, phase: str, agent: str,
     ) -> None:
+        """Attach a Langfuse Score to the owning agent span or the trace.
+
+        Args:
+            score: Score payload (``name``, ``value``, ``data_type``, ...).
+            phase: Phase that owns the decision, used to locate the span.
+            agent: Agent/component that owns the decision.
+        """
         span = self._agent_spans.get((phase, agent))
         try:
             if span is not None and hasattr(span, "score"):
