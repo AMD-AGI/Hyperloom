@@ -406,8 +406,17 @@ _LADDER_KEY_SEP: str = "\x1f"  # ASCII unit separator — safe inside JSON strin
 def _encode_last_emitted(
     last_emitted: dict[tuple[str, ...], int],
 ) -> dict[str, int]:
-    """Serialise a tuple-keyed cooldown dict to a JSON-safe dict (tuple
-    components joined with ``_LADDER_KEY_SEP`` so decode recovers them)."""
+    """Serialise a tuple-keyed cooldown dict to a JSON-safe dict.
+
+    Tuple components are joined with ``_LADDER_KEY_SEP`` so the decoder can
+    recover them.
+
+    Args:
+        last_emitted: Cooldown map keyed by tuple of string components.
+
+    Returns:
+        A string-keyed dict safe for JSON serialization.
+    """
     out: dict[str, int] = {}
     for key, tick in last_emitted.items():
         try:

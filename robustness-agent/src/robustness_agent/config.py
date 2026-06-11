@@ -476,6 +476,9 @@ def _discover_workload_uid() -> str:
 
     Lets a RayJob sandbox opt into hierarchy-based pod discovery; single-node
     runs leave every key unset and fall back to ``list_session_pods``.
+
+    Returns:
+        The first non-empty workload-uid env value, or ``""`` if none set.
     """
     for key in _WORKLOAD_UID_ENV_KEYS:
         value = (os.environ.get(key) or "").strip()
