@@ -25,6 +25,7 @@ from inference_optimizer.orchestrator.action_executors.profile import (
     PROFILE_DEFAULT_CONFIG,
     ProfileExecutor,
     _default_profile_config,
+    _sanitize_profile_server_args,
 )
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
@@ -675,6 +676,20 @@ def test_profile_executor_calls_benchmark_lib_patcher():
     )
 
 
+def test_profile_server_args_sanitizer_drops_torch_compile_flags():
+    raw = (
+        "--enable-torch-compile --torch-compile-max-bs 32 "
+        "--quantization fp8 --foo=bar --torch-compile-max-bs=64"
+    )
+
+    sanitized = _sanitize_profile_server_args(raw)
+
+    assert "--enable-torch-compile" not in sanitized
+    assert "--torch-compile-max-bs" not in sanitized
+    assert "--quantization fp8" in sanitized
+    assert "--foo=bar" in sanitized
+
+
 # Regression: $FRAMEWORK env switches the default yaml between sglang/vllm without an explicit config_path (entry-layer fix for vLLM support).
 def test_default_baseline_config_resolves_sglang_by_default(monkeypatch):
     monkeypatch.delenv("FRAMEWORK", raising=False)
@@ -784,6 +799,37 @@ async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path)
 
     assert result["status"] == "succeeded"
     assert called["parent"] is True
+
+
+def test_profile_executor_sanitizes_current_best_args(monkeypatch, tmp_path):
+    """Profile must not inherit torch-compile flags that break profiler boot."""
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    captured: dict[str, str] = {}
+
+    async def _fake_parent(self, ctx):
+        captured.update(ctx.task.params)
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
+
+    task = SimpleNamespace(
+        params={
+            "base_extra_args": (
+                "--enable-torch-compile --torch-compile-max-bs 32 "
+                "--quantization fp8"
+            ),
+        },
+        task_id="t-profile-sanitize",
+    )
+    ctx = SimpleNamespace(task=task, extra={"workspace": str(tmp_path / "ws")})
+
+    result = asyncio.run(ProfileExecutor()(ctx))
+
+    assert result["status"] == "succeeded"
+    merged = captured["extra_sglang_args"]
+    assert "--enable-torch-compile" not in merged
+    assert "--torch-compile-max-bs" not in merged
+    assert "--quantization fp8" in merged
 
 
 @pytest.mark.asyncio
