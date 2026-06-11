@@ -198,6 +198,14 @@ def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
     present) is informational only and not folded into the point shape.
     """
     def _fnum(key: str) -> float:
+        """Read a float field from the enclosing ``row``.
+
+        Args:
+            key: Field name to look up.
+
+        Returns:
+            The value as a float, or ``0.0`` if missing or unparseable.
+        """
         try:
             return float(row.get(key))
         except (TypeError, ValueError):
