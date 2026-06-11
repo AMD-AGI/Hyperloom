@@ -1492,6 +1492,14 @@ _AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
 # Fallback aiter editable-checkout root when find_repo_root can't resolve from a wheel-install wrapper (no csrc/).
 _AITER_FALLBACK_REPO = "/sgl-workspace/aiter"
 
+# Framework package-inner roots for resolving relative launcher paths.
+# TraceLens emits paths like "ops/rmsnorm.py" relative to the package dir,
+# not the repo root. These are tried when _resolve_launcher_to_abs_source fails.
+_PACKAGE_INNER_ROOTS = (
+    "/sgl-workspace/aiter/aiter",
+    "/sgl-workspace/sglang/python/sglang",
+)
+
 
 def upgrade_aiter_compile_ops_launcher(
     source_file: str, kernel_name: str, kernel_repo: str,
@@ -2154,7 +2162,7 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
             reader = csv.DictReader(fh)
             for row in reader:
                 row_type = (row.get("type") or "").strip().lower()
-                if row_type == "idle":
+                if row_type == "idle_time":
                     return float(row.get("percent", 0))
     except (OSError, csv.Error, ValueError):
         pass
@@ -2188,7 +2196,9 @@ def _match_op_by_time(
 def _resolve_source_file_from_kernel_path(kernel_path: str) -> str:
     """Resolve a TraceLens launcher path to an existing absolute source file."""
     raw_path, _, _ = _parse_launcher_path(kernel_path)
-    if raw_path and os.path.isabs(raw_path) and os.path.isfile(raw_path):
+    if not raw_path:
+        return ""
+    if os.path.isabs(raw_path) and os.path.isfile(raw_path):
         return raw_path
     if raw_path.startswith("sgl_kernel/"):
         sgl_kernel_source = Path("/sgl-workspace/sglang/sgl-kernel/python") / raw_path
@@ -2200,11 +2210,7 @@ def _resolve_source_file_from_kernel_path(kernel_path: str) -> str:
     # Fallback: TraceLens launcher paths for aiter ops are relative to the
     # aiter package dir (e.g. "ops/rmsnorm.py" → /sgl-workspace/aiter/aiter/ops/rmsnorm.py).
     # Try known framework package roots when the head segment isn't a top-level package.
-    if raw_path and not os.path.isabs(raw_path):
-        _PACKAGE_INNER_ROOTS = (
-            "/sgl-workspace/aiter/aiter",
-            "/sgl-workspace/sglang/python/sglang",
-        )
+    if not os.path.isabs(raw_path):
         for pkg_root in _PACKAGE_INNER_ROOTS:
             candidate = os.path.join(pkg_root, raw_path)
             if os.path.isfile(candidate):
@@ -3717,6 +3723,7 @@ def main() -> int:
                         "Deterministic TraceLens pipeline returned "
                         f"rc={det_rc}"
                     )
+                _raise_on_failed_deterministic_pipeline(det_rc)
 
                 idle_pct_value = _extract_idle_pct_from_gpu_timeline(
                     tracelens_dir,
@@ -3755,7 +3762,6 @@ def main() -> int:
                     raw_det_candidates = deterministic_extract_hot_kernels(
                         tracelens_dir, args.top_k,
                     )
-                    _raise_on_failed_deterministic_pipeline(det_rc)
                     if raw_det_candidates:
                         total_dur = sum(
                             float(c.get("duration_us") or 0)
