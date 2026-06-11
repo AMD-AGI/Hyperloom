@@ -80,7 +80,11 @@ class SpecialistProfile:
     def grants_bench_tool(self) -> bool:
         """True iff this dispatch may use the in-loop ``run_bench`` tool. Only
         patch-authoring specialists with ``bench=True`` qualify (bench has no
-        meaning for read-only research)."""
+        meaning for read-only research).
+
+        Returns:
+            True when the dispatch is patch-authoring with bench enabled.
+        """
         return self.mode == MODE_PATCH and self.bench
 
 
@@ -117,6 +121,13 @@ def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfi
     Unknown / missing values fall back to the legacy-compatible defaults so the
     resolver never raises; PolicyGate is the place that *rejects* malformed
     dispatches, this helper only normalises for the runtime.
+
+    Args:
+        params: The dispatch params (reads ``scope`` / ``mode`` / ``bench`` /
+            ``lane``), or ``None``.
+
+    Returns:
+        The normalised :class:`SpecialistProfile`.
     """
     p = params or {}
 

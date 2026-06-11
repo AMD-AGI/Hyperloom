@@ -26,7 +26,16 @@ BREAKDOWN_FILENAME = "session_breakdown.json"
 
 
 def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``state.json`` as a plain dict; empty dict + warning when missing."""
+    """Read ``state.json`` as a plain dict; empty dict + warning when missing.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        warnings: Accumulator appended to when the file is missing or
+            unparseable.
+
+    Returns:
+        The parsed ``state.json`` contents, or an empty dict on any failure.
+    """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         warnings.append(f"state.json missing at {state_path}")
@@ -314,7 +323,17 @@ def _safe_collect(
     *,
     default: Any = None,
 ):
-    """Run a collector with broad exception catching; failure → warning + ``default`` (a bug in one collector must not poison the export)."""
+    """Run a collector with broad exception catching; failure → warning + ``default`` (a bug in one collector must not poison the export).
+
+    Args:
+        name: Collector name used in the warning message.
+        fn: Zero-argument callable that runs the collector.
+        warnings: Accumulator appended to when the collector raises.
+        default: Value returned on failure; an empty dict when ``None``.
+
+    Returns:
+        The collector result, or ``default`` (or an empty dict) on failure.
+    """
     try:
         return fn()
     except Exception as exc:  # noqa: BLE001
@@ -335,6 +354,16 @@ def write_breakdown_json(
 
     ``output_path`` defaults to ``<session_dir>/session_breakdown.json``;
     ``include_transcripts`` is as in :func:`build`.
+
+    Args:
+        session_dir: The hyperloom session directory to build from.
+        output_path: Destination file; defaults to
+            ``<session_dir>/session_breakdown.json``.
+        include_transcripts: Whether to embed transcripts, as in
+            :func:`build`.
+
+    Returns:
+        The absolute path of the written breakdown file.
     """
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else sd / BREAKDOWN_FILENAME
@@ -376,6 +405,12 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     Best-effort and self-skipping: returns False (no-op) when no breakdown or
     no receipt exists yet, when live push was disabled, or on any error. Never
     raises -- it must not mask the session's stop_reason at shutdown.
+
+    Args:
+        session_dir: The hyperloom session directory holding the breakdown.
+
+    Returns:
+        ``True`` when the langfuse section was refreshed, ``False`` otherwise.
     """
     from ..orchestrator.trace.langfuse_emitter import read_receipt
 
@@ -443,6 +478,14 @@ def write_minimal_final_report(
 
     Stays minimal (one SharedState read) so it never raises or blocks
     shutdown. Idempotent: never overwrites an existing ``reports/final.md``.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        output_path: Destination file; defaults to
+            ``<session_dir>/reports/final.md``.
+
+    Returns:
+        The path of the (existing or newly written) ``final.md`` file.
     """
     from ..orchestrator.shared_state import SharedState
     from ..session_paths import reports_dir

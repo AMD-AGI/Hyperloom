@@ -107,7 +107,31 @@ def build_rayjob_workload_body(
     extra_env: dict[str, str] | None = None,
     extra_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Build a SaFE CreateWorkloadRequest body for a multi-node RayJob (resource quantities as K8s-notation strings; json.dumps-safe)."""
+    """Build a SaFE CreateWorkloadRequest body for a multi-node RayJob (resource quantities as K8s-notation strings; json.dumps-safe).
+
+    Args:
+        workspace: SaFE workspace id the workload belongs to.
+        display_name: Human-readable name for the workload.
+        image: Container image used for both head and worker roles.
+        nodes: Total node count; head is 1 and workers are ``nodes - 1``.
+        gpus_per_node: GPUs requested per node.
+        cpus_per_node: CPUs requested per node.
+        mem_gi_per_node: Memory in GiB requested per node.
+        ephemeral_gi_per_node: Ephemeral storage in GiB requested per node.
+        description: Optional workload description.
+        owner_id: Optional owner id to attach to the workload.
+        session_id: Optional session id injected as ``primus-claw/session-id``
+            for Brain correlation.
+        extra_env: Optional user environment variables (reserved keys stripped).
+        extra_labels: Optional user labels (Brain-managed prefixes stripped).
+
+    Returns:
+        dict[str, Any]: A json.dumps-safe CreateWorkloadRequest body.
+
+    Raises:
+        ValueError: If ``nodes`` or ``gpus_per_node`` is below 1, or if
+            ``workspace``, ``display_name``, or ``image`` is empty.
+    """
     if nodes < 1:
         raise ValueError(f"nodes must be >= 1, got {nodes}")
     if gpus_per_node < 1:

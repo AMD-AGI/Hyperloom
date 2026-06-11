@@ -191,6 +191,12 @@ def _json_list(value: Any) -> list[Any]:
     only renders scalar lists. Tolerates an already-decoded list (in case
     a future page stores them natively) and degrades to ``[]`` on absence
     or malformed content so a bad page never breaks warm-start.
+
+    Args:
+        value: A list, a JSON-encoded list string, or anything else.
+
+    Returns:
+        The decoded list, or ``[]`` when the value is absent or malformed.
     """
     if isinstance(value, list):
         return value
@@ -216,6 +222,13 @@ def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     be invisible to the consumer's nested ``best_config["extra_envs"]``
     read and the high-confidence warm recipe would be skipped as
     ``best_config_empty``.
+
+    Args:
+        attrs: The flat gbrain recipe page attrs mapping.
+
+    Returns:
+        The canonical ``best_config`` dict with launch args under the
+        canonical key and the env map nested under ``extra_envs``.
     """
     out: dict[str, Any] = {}
     args = str(attrs.get("best_config_args") or "").strip()
@@ -239,6 +252,13 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
 
     Returns ``None`` when the page lacks the minimum identity (model /
     hardware) needed to build a canonical id.
+
+    Args:
+        frontmatter: The gbrain recipe page frontmatter mapping.
+
+    Returns:
+        The nested KB-interface recipe envelope, or ``None`` when the page
+        lacks the model/hardware identity needed for a canonical id.
     """
     attrs = frontmatter.get("attrs") if isinstance(frontmatter.get("attrs"), Mapping) else {}
     model = str(attrs.get("model") or "").strip()
@@ -301,6 +321,15 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
     :func:`_page_to_recipe`); the caller's ``label_match`` may be a raw or
     slugged value, so we re-run it through ``canonical_labels`` to make
     the comparison slug-normalized (``Qwen/Qwen3`` vs ``qwen3`` converge).
+
+    Args:
+        recipe: The candidate recipe carrying slugged ``labels``.
+        label_match: The constraining labels (raw or slugged); empty matches
+            everything.
+
+    Returns:
+        ``True`` when every constrained label equals the recipe's slugged
+        value.
     """
     if not label_match:
         return True
@@ -415,7 +444,15 @@ class GbrainRemoteRecipeClient:
         return _SCAN_CACHE_TTL_SEC
 
     def _get_page_recipe(self, slug: str) -> dict[str, Any] | None:
-        """Fetch one gbrain recipe page by slug and project it."""
+        """Fetch one gbrain recipe page by slug and project it.
+
+        Args:
+            slug: The gbrain page slug to fetch.
+
+        Returns:
+            The projected recipe envelope, or ``None`` when disabled, missing,
+            or lacking frontmatter.
+        """
         if not self.enabled or self._mcp is None:
             return None
         page = self._mcp.call("get_page", {"slug": slug})
@@ -432,6 +469,13 @@ class GbrainRemoteRecipeClient:
         early when many pages share the same ``updated_at``, hiding older
         recipes from client-side search. Dedup by slug across page boundaries
         and return newest-first to preserve the previous caller contract.
+
+        Args:
+            limit: Maximum number of recipes to return (capped at the internal
+                scan cap).
+
+        Returns:
+            Newest-first projected recipe dicts, or ``[]`` when disabled.
         """
         if not self.enabled or self._mcp is None:
             return []
@@ -486,6 +530,17 @@ class GbrainRemoteRecipeClient:
 
         gbrain keeps no per-version archive, so ``version`` is accepted
         for interface parity but only ``version in (None, 1)`` can match.
+
+        Args:
+            canonical_id: The canonical recipe id to look up.
+            version: Optional version; only ``None`` or ``1`` can match.
+
+        Returns:
+            The matching recipe envelope, or ``None`` on miss / disabled /
+            non-matching version.
+
+        Raises:
+            ValueError: If ``canonical_id`` is empty.
         """
         if not self.enabled:
             return None
@@ -557,6 +612,19 @@ class GbrainRemoteRecipeClient:
         unified KB-interface signature; the dispatcher applies the
         client-side rerank over the normalized rows, so this adapter
         only honours the ``required`` (``label_match`` / metric) filter.
+
+        Args:
+            label_match: Identity labels to filter on (empty matches all).
+            metric_filters: ``{metric: {min, max}}`` bounds to apply.
+            updated_since: Keep only rows with ``updated_at`` at or after this.
+            order_by: Ordering key; ASC variants reverse the default newest-
+                first order.
+            limit: Maximum number of rows to return.
+            prefer: Accepted for signature parity; ignored here (rerank lives
+                in the dispatcher).
+
+        Returns:
+            The filtered, ordered recipe rows, or ``[]`` when disabled.
         """
         del prefer  # client-side rerank lives in RecipeKB
         if not self.enabled:
@@ -617,6 +685,13 @@ def _passes_metric_filters(recipe: Mapping[str, Any], metric_filters: Mapping[st
     The recipe is the nested KB-interface envelope, so throughput lives
     under ``metrics.throughput`` / ``body.best_throughput``. We accept
     both the ``throughput`` and the ``best_throughput`` filter aliases.
+
+    Args:
+        recipe: The nested KB-interface recipe envelope.
+        metric_filters: ``{metric: {min, max}}`` bounds to apply.
+
+    Returns:
+        ``True`` when the recipe satisfies every metric bound.
     """
     metrics = recipe.get("metrics") if isinstance(recipe.get("metrics"), Mapping) else {}
     body = recipe.get("body") if isinstance(recipe.get("body"), Mapping) else {}
@@ -642,6 +717,10 @@ def build_gbrain_remote_from_env() -> GbrainRemoteRecipeClient | None:
 
     Returns ``None`` when the env is not configured so the caller can
     fall back to local-only or the cortex remote.
+
+    Returns:
+        A configured :class:`GbrainRemoteRecipeClient`, or ``None`` when the
+        base URL / token env vars are not set.
     """
     base_url = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
     token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()

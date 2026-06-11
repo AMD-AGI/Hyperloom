@@ -43,7 +43,14 @@ except ImportError:  # pragma: no cover — exercised only in IO-only test envs
     }
 
     def repo_url_for_framework(framework: str) -> str:
-        """Return the canonical GitHub repo URL for ``framework`` ("" if unknown)."""
+        """Return the canonical GitHub repo URL for ``framework`` ("" if unknown).
+
+        Args:
+            framework: The framework name (case-insensitive).
+
+        Returns:
+            The repo URL, or ``""`` when the framework is unknown.
+        """
         return _FRAMEWORK_TO_REPO_URL.get(
             (framework or "").strip().lower(), "",
         )
@@ -54,6 +61,10 @@ def _resolve_fa_binary() -> str | None:
 
     Resolution order: ``$FA_BIN``; ``shutil.which('fa')``;
     ``$FRAMEWORK_AGENT_ROOT/scripts/fa``.
+
+    Returns:
+        The absolute path to the ``fa`` binary, or ``None`` when it cannot be
+        located.
     """
     explicit = (os.environ.get("FA_BIN") or "").strip()
     if explicit and Path(explicit).exists():
@@ -80,7 +91,18 @@ def _run_fa_subcommand_sync(
     request_path: Path,
     timeout_sec: float,
 ) -> "tuple[int, str, str]":
-    """Sync helper: run ``fa <subcommand> --request <path> --out -``. Never raises."""
+    """Sync helper: run ``fa <subcommand> --request <path> --out -``. Never raises.
+
+    Args:
+        fa_bin: Path to the ``fa`` binary.
+        subcommand: The ``fa`` subcommand to run.
+        request_path: Path to the request JSON file.
+        timeout_sec: Subprocess wall-clock timeout in seconds.
+
+    Returns:
+        A ``(returncode, stdout, stderr)`` tuple; failures map to ``127``
+        (missing binary) or ``124`` (timeout).
+    """
     cmd = [fa_bin, subcommand, "--request", str(request_path), "--out", "-"]
     try:
         cp = subprocess.run(
@@ -109,6 +131,19 @@ async def _invoke_fa_phase(
     Writes ``request`` as temp JSON, runs the subcommand, returns parsed
     JSON. Raises :class:`RuntimeError` on missing binary / non-zero exit /
     parse failure.
+
+    Args:
+        subcommand: The ``fa phase-*`` subcommand to run.
+        request: The request payload serialized to temp JSON.
+        session_dir: The session directory under which the temp request lives.
+        timeout_sec: Subprocess wall-clock timeout in seconds.
+
+    Returns:
+        The parsed JSON payload returned by the subcommand.
+
+    Raises:
+        RuntimeError: If the ``fa`` binary is missing, the subcommand exits
+            non-zero, or its output is not valid JSON.
     """
     fa_bin = _resolve_fa_binary()
     if not fa_bin:
@@ -163,6 +198,23 @@ async def phase_discover(
     (fa skips its own ``extract_keywords``); empty/``None`` keeps the legacy
     behaviour. Returns the ``fa phase-discover`` payload
     ``{batch_id, framework, repo_url, candidates: [...]}``.
+
+    Args:
+        model: The model identifier.
+        framework: The target framework (defaults to ``sglang`` when empty).
+        gpu_type: The target GPU type.
+        gaps: The performance gaps driving discovery.
+        session_dir: The session directory for temp request staging.
+        repo_url: Optional explicit repo URL; resolved from ``framework`` when
+            empty.
+        keywords: Optional verbatim AND-search keywords; ``None``/empty keeps
+            the legacy keyword extraction.
+        max_candidates: Maximum number of candidate PRs to request.
+        batch_id: Optional batch identifier.
+        timeout_sec: Subprocess wall-clock timeout in seconds.
+
+    Returns:
+        The ``fa phase-discover`` payload dict.
     """
     resolved_repo_url = (repo_url or repo_url_for_framework(framework)).strip()
     request = {
