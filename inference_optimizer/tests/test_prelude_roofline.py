@@ -91,6 +91,28 @@ def test_prelude_initial_roofline_task_contract(coord: Coordinator):
     assert task.params["benchmark_script"] == "magpie_serving_bench.sh"
 
 
+def test_prelude_initial_roofline_uses_baseline_server_args(
+    coord: Coordinator, monkeypatch,
+):
+    """PRELUDE roofline injects baseline's own server args, never current_best's."""
+    coord.shared_state.current_best = {
+        "extra_server_args": "--enable-torch-compile --quantization fp8",
+    }
+    import inference_optimizer.orchestrator.roofline_ceiling as rc
+    monkeypatch.setattr(
+        rc, "_read_baseline_yaml_server_args",
+        lambda _state: "--attention-backend AITER",
+    )
+
+    task = asyncio.run(
+        coord._enqueue_internal_analysis_task(reason="prelude_initial"),
+    )
+
+    assert task.params["base_extra_args"] == "--attention-backend AITER"
+    assert "--enable-torch-compile" not in task.params["base_extra_args"]
+    assert "fp8" not in task.params["base_extra_args"]
+
+
 @pytest.mark.asyncio
 async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
     """A second call with the same reason returns the same task (no double-enqueue on resume)."""
