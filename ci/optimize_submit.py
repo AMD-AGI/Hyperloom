@@ -2563,6 +2563,12 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
     match; only sessions modified in the last 24h. Updates ci_metrics.json,
     manifest.json, session_breakdown[_v2].json across subdirs via
     _backfill_ci_metrics_file. No-op when wekafs isn't mounted.
+
+    Args:
+        rec: The submission record supplying match keys and audit fields.
+
+    Returns:
+        The number of source files updated in place.
     """
     nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
     users_root = os.path.join(nfs_root, "users")
@@ -2709,9 +2715,19 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
 
 
 def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
-    """Conservative directory-name match for the /wekafs/users fallback. Prefer
-    the displayName slug; fall back to basename with strict-term guards to avoid
-    cross-wiring adjacent repos (Qwen2.5 vs -AWQ, Nano vs Super, bnb, etc.)."""
+    """Conservatively match a session directory name to a record.
+
+    Prefers the displayName slug; falls back to basename with strict-term
+    guards to avoid cross-wiring adjacent repos (Qwen2.5 vs -AWQ, Nano vs
+    Super, bnb, etc.).
+
+    Args:
+        rec: The submission record.
+        sess_name: The session directory basename.
+
+    Returns:
+        ``True`` when the directory name matches the record.
+    """
     sess_slug = _slug_token(sess_name)
     sess_norm = _norm_token(sess_name)
     display = rec.display_name or ""
@@ -2737,7 +2753,15 @@ def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
 
 
 def _record_model_field_matches(rec: SubmissionRecord, model_field: str) -> bool:
-    """Compare a JSON model field with a SubmissionRecord conservatively."""
+    """Conservatively compare a JSON ``model`` field with a record.
+
+    Args:
+        rec: The submission record.
+        model_field: The model identifier read from a JSON artifact.
+
+    Returns:
+        ``True`` when the field matches one of the record's model aliases.
+    """
     observed = _norm_token(str(model_field or ""))
     if not observed:
         return False
@@ -2879,8 +2903,17 @@ def _env_truthy(name: str) -> bool:
 
 
 def _copy_session_tree(src_dir: str, dst_dir: Path) -> int:
-    """Copy an entire persisted session directory into ``dst_dir`` (existing files
-    untouched). Returns the number of files copied."""
+    """Copy an entire persisted session directory into ``dst_dir``.
+
+    Existing files are left untouched; VCS / cache dirs are skipped.
+
+    Args:
+        src_dir: Source session directory to copy from.
+        dst_dir: Destination directory (created if needed).
+
+    Returns:
+        The number of files copied.
+    """
     copied = 0
     dst_dir.mkdir(parents=True, exist_ok=True)
     for root, dirnames, filenames in os.walk(src_dir):
@@ -2911,13 +2944,22 @@ def _nfs_fallback_collect(
     copy_full_session: bool = False,
     current_session_hints: set[str] | None = None,
 ) -> int:
-    """Scan NFS result directories for files matching this model, used when the
-    SaFE artifact API returns nothing (V2 writes under /wekafs/users/<uid>/...).
+    """Scan NFS result directories for files matching this model.
 
-    Two stages: A. legacy canonical CI dirs, matched by dir name; B. per-user
-    session dirs, matched by each ci_metrics.json's `model` field (more accurate
-    than dir-name fuzzy match). Mirrors ci/orchestrator.py's fallback.
-    Returns count of files copied.
+    Used when the SaFE artifact API returns nothing (V2 writes under
+    ``/wekafs/users/<uid>/...``). Two stages: A. legacy canonical CI dirs,
+    matched by dir name; B. per-user session dirs, matched by each
+    ci_metrics.json's ``model`` field (more accurate than dir-name fuzzy
+    match). Mirrors ci/orchestrator.py's fallback.
+
+    Args:
+        rec: The submission record.
+        artifacts_dir: Local root to copy collected artifacts into.
+        copy_full_session: When True, copy the entire session tree.
+        current_session_hints: Optional session-id hints to bias matching.
+
+    Returns:
+        The number of files copied.
     """
     current_session_hints = set(current_session_hints or set())
     nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
@@ -3219,9 +3261,25 @@ def wait_and_collect_one(
     collect: bool,
     all_artifacts: bool,
 ) -> SubmissionRecord:
-    """Wait for one task to finish, then optionally download its artifacts:
-    (1) SaFE artifacts API, then (2) NFS fallback when session_breakdown.json
-    (the CI delivery contract) is still missing."""
+    """Wait for one task to finish, then optionally download its artifacts.
+
+    Collection tries (1) the SaFE artifacts API, then (2) the NFS fallback
+    when ``session_breakdown.json`` (the CI delivery contract) is still
+    missing.
+
+    Args:
+        safe: The SaFE optimize client.
+        rec: The submission record to update in place.
+        artifacts_dir: Local root for downloaded artifacts.
+        task_timeout_min: Per-task wait deadline in minutes.
+        poll_s: Poll interval in seconds.
+        collect: When False, skip artifact collection.
+        all_artifacts: When True, download every artifact, not just the
+            delivery-contract files.
+
+    Returns:
+        The updated submission record.
+    """
     if not rec.task_id:
         return rec  # nothing to wait for (skipped/failed during submit)
 
