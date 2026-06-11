@@ -790,9 +790,26 @@ _UNSUPPORTED_CONFIG_KEYS = (
 )
 
 
-_TEXT_COMPAT_MULTIMODAL_EXCEPTIONS = frozenset({
-    ("kimi_k25", "KimiK25ForConditionalGeneration"),
-    ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+# Three-way model verdicts returned by ``_detect_unsupported_model``:
+#   text           — plain decoder-only causal LM; ``_detect`` returns None.
+#   text_coercible — config carries a multimodal signal (vision_config key or a
+#                    *ConditionalGeneration arch whose model_type is text-MoE)
+#                    but a usable text decoder exists. Not fail-fast: the run
+#                    proceeds on the text path with a loud degraded-mode warning
+#                    (gated by --allow-mm-text-fallback, default on).
+#   vision_only    — positively-identified VLM with no meaningful text-only path
+#                    (Llava / PaliGemma / Qwen-VL / Phi3V / …) or an
+#                    unclassifiable config. Always fail-fast.
+_VERDICT_TEXT_COERCIBLE = "text_coercible"
+_VERDICT_VISION_ONLY = "vision_only"
+
+# model_type values that ship a vision_config for the VLM checkpoint but whose
+# text MoE path is benchmark-compatible. Used to route a vision-config hit to
+# text_coercible instead of fail-fast. Matched on model_type so a whole family
+# is covered without re-listing every per-checkpoint arch name.
+_TEXT_COERCIBLE_MODEL_TYPES = frozenset({
+    "kimi_k25",
+    "qwen3_5_moe",
 })
 
 
@@ -805,29 +822,20 @@ def _arch_is_supported_text_generation(arch: str) -> bool:
     return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
 
 
-def _is_text_compatible_multimodal_exception(
-    model_type_l: str,
-    architectures: list[str],
-) -> bool:
-    """Allow known multimodal configs whose text path is benchmark-compatible.
-
-    Kimi-K2.6 and Qwen3.6 MoE ship with ``vision_config`` even when used as
-    text-only checkpoints. Their serving stacks can exercise the text-generation
-    path for our benchmark; the generic multimodal gate was too broad and
-    rejected them before baseline could start. Keep this list exact so ordinary
-    VLMs remain fail-fast.
-    """
-    return any(
-        (model_type_l, arch) in _TEXT_COMPAT_MULTIMODAL_EXCEPTIONS
-        for arch in architectures
-    )
-
-
 def _detect_unsupported_model(model_path: str) -> dict | None:
-    """Best-effort classify a model as unsupported (non-text-generation): multimodal/vision rejected, else whitelist.
+    """Best-effort classify a model's text-serving viability.
 
-    Returns ``{"architecture", "model_type", "signal"}`` when unsupported, else ``None`` (also for an
-    unreadable config.json — we don't hard-block on a config we cannot read).
+    Returns ``None`` for a plain text-generation model (and for an unreadable
+    config.json — we don't hard-block on a config we cannot read). Otherwise
+    returns ``{"architecture", "model_type", "signal", "verdict"}`` where
+    ``verdict`` is one of:
+
+    * ``"vision_only"`` — positively-identified VLM with no usable text path, or
+      an unclassifiable config. Caller fail-fasts.
+    * ``"text_coercible"`` — multimodal signal present but a text decoder exists
+      (e.g. Kimi-K2.6 / Qwen3.6 MoE, or a generic ``ForCausalLM`` arch that
+      merely carries a ``vision_config``). Caller proceeds on the text path with
+      a degraded-mode warning unless ``--allow-mm-text-fallback`` is off.
     """
     config = _load_model_config_dict(model_path)
     if config is None:
@@ -836,28 +844,43 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
 
-    if _is_text_compatible_multimodal_exception(model_type_l, architectures):
-        return None
-
+    # Hard denylist wins first: explicit VLM arch / model_type is vision_only
+    # even if it also carries a ForCausalLM marker (e.g. Phi3VForCausalLM).
     for arch in architectures:
         if arch in _UNSUPPORTED_ARCHITECTURES:
             return {
                 "architecture": arch,
                 "model_type": model_type,
                 "signal": f"unsupported architecture '{arch}'",
+                "verdict": _VERDICT_VISION_ONLY,
             }
     if model_type_l in _UNSUPPORTED_MODEL_TYPES:
         return {
             "architecture": architectures[0] if architectures else "",
             "model_type": model_type,
             "signal": f"unsupported model_type '{model_type}'",
+            "verdict": _VERDICT_VISION_ONLY,
         }
+
+    # A multimodal config key (vision_config, image_token_id, …) is only a
+    # degrade signal, not a hard block: if a text decoder exists we coerce to
+    # the text path with a warning instead of fail-fasting.
+    _has_text_decoder = (
+        model_type_l in _TEXT_COERCIBLE_MODEL_TYPES
+        or any(_arch_is_supported_text_generation(a) for a in architectures)
+        or model_type_l in _SUPPORTED_MODEL_TYPES
+    )
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:
+            verdict = (
+                _VERDICT_TEXT_COERCIBLE if _has_text_decoder
+                else _VERDICT_VISION_ONLY
+            )
             return {
                 "architecture": architectures[0] if architectures else "",
                 "model_type": model_type,
-                "signal": f"unsupported multimodal config key '{key}'",
+                "signal": f"multimodal config key '{key}'",
+                "verdict": verdict,
             }
 
     if any(_arch_is_supported_text_generation(a) for a in architectures):
@@ -875,6 +898,7 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
                 f"supported text-generation pattern "
                 f"({', '.join(_SUPPORTED_ARCH_MARKERS)})"
             ),
+            "verdict": _VERDICT_VISION_ONLY,
         }
 
     if model_type:
@@ -885,12 +909,14 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
                 f"model_type '{model_type}' is not in the supported "
                 f"text-generation allowlist"
             ),
+            "verdict": _VERDICT_VISION_ONLY,
         }
 
     return {
         "architecture": "",
         "model_type": "",
         "signal": "config.json has neither architectures nor model_type",
+        "verdict": _VERDICT_VISION_ONLY,
     }
 
 
@@ -1263,10 +1289,18 @@ def _preflight_model_config_compat(
 def _preflight_unsupported_model_arch(
     args: argparse.Namespace, session_dir: Path,
 ) -> bool:
-    """Fail fast on positively-identified unsupported multimodal/vision models before expensive bring-up.
+    """Gate multimodal/vision models before expensive bring-up.
 
-    Best-effort (an unreadable config.json is not a hard block). Persists a stop reason and returns True
-    (caller should exit) when unsupported; False when supported or unclassifiable.
+    Best-effort (an unreadable config.json is not a hard block). Three outcomes:
+
+    * plain text model → returns False (run proceeds normally).
+    * ``text_coercible`` (multimodal signal but a text decoder exists) →
+      when ``--allow-mm-text-fallback`` is on (default), records a degraded-mode
+      warning on SharedState, emits a loud stderr/log warning, and returns False
+      so the run proceeds on the text path. When the flag is off, falls through
+      to fail-fast.
+    * ``vision_only`` (true VLM / unclassifiable) → persists
+      ``stop_reason=unsupported_model_arch`` and returns True (caller exits).
     """
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)
@@ -1276,6 +1310,41 @@ def _preflight_unsupported_model_arch(
     name = Path(model).name or model
     arch = hit.get("architecture") or "<unknown>"
     mt = hit.get("model_type") or "<unknown>"
+    verdict = str(hit.get("verdict") or _VERDICT_VISION_ONLY)
+    allow_fallback = bool(getattr(args, "allow_mm_text_fallback", True))
+
+    if verdict == _VERDICT_TEXT_COERCIBLE and allow_fallback:
+        warning = (
+            f"DEGRADED MODE: model '{name}' carries a multimodal signal "
+            f"({hit.get('signal', 'multimodal config')}; architecture '{arch}', "
+            f"model_type '{mt}') but exposes a text-generation path. Hyperloom "
+            f"is running it on the TEXT path only — any image/audio inputs are "
+            f"ignored, so benchmark numbers reflect the text decoder alone. "
+            f"Pass --no-allow-mm-text-fallback to fail-fast instead."
+        )
+        print(f"WARNING: {warning}", file=sys.stderr)
+        log.warning(warning)
+        try:
+            from .orchestrator.shared_state import SharedState
+
+            state = SharedState.load_or_init(session_dir)
+            state.degraded_mode = True
+            state.model_warnings = list(state.model_warnings or []) + [{
+                "kind": "multimodal_text_fallback",
+                "model_name": name,
+                "architecture": arch,
+                "model_type": mt,
+                "signal": str(hit.get("signal") or ""),
+                "detail": warning,
+            }]
+            state.save(session_dir)
+        except Exception as exc:  # noqa: BLE001 — never block the run on advisory write
+            print(
+                f"WARNING: failed to persist degraded-mode marker: {exc!r}",
+                file=sys.stderr,
+            )
+        return False
+
     reason = (
         f"Unsupported model '{name}': architecture '{arch}' (model_type "
         f"'{mt}') is not a supported text-generation model. Hyperloom only "
@@ -4397,6 +4466,19 @@ def _build_parser() -> argparse.ArgumentParser:
                       default=os.environ.get("CLAUDE_MODEL", "claude-opus-4-7"))
     opt.add_argument("--codex-model", type=str,
                       default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
+    opt.add_argument(
+        "--allow-mm-text-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When a model carries a multimodal signal (e.g. vision_config) "
+             "but exposes a text-generation path, run it on the TEXT path with "
+             "a degraded-mode warning instead of fail-fasting. Image/audio "
+             "inputs are ignored, so numbers reflect the text decoder alone. "
+             "True VLMs with no text path (Llava / PaliGemma / Qwen-VL / "
+             "Phi3V) still fail-fast regardless of this flag. Pass "
+             "--no-allow-mm-text-fallback to fail-fast on text-coercible "
+             "models too. Default: enabled.",
+    )
     opt.add_argument("--no-kernel", action="store_true", default=False,
                       help="Disable the Kernel agent entirely. The run will "
                            "only do baseline + params + backends + sweep (pure "

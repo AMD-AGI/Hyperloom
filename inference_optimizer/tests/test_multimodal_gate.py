@@ -11,8 +11,6 @@ import argparse
 import json
 from pathlib import Path
 
-import pytest
-
 from inference_optimizer import cli
 
 
@@ -25,8 +23,10 @@ def _write_config(model_dir: Path, payload) -> None:
         cfg.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _args(model: str) -> argparse.Namespace:
-    return argparse.Namespace(model=model)
+def _args(model: str, *, allow_mm_text_fallback: bool = True) -> argparse.Namespace:
+    return argparse.Namespace(
+        model=model, allow_mm_text_fallback=allow_mm_text_fallback,
+    )
 
 
 def _seed_state(session_dir: Path, monkeypatch) -> None:
@@ -147,8 +147,9 @@ def test_detect_known_text_model_type_with_nonstandard_arch_allowed(tmp_path):
     assert cli._detect_unsupported_model(str(m)) is None
 
 
-def test_detect_causal_lm_with_vision_config_rejected(tmp_path):
-    """Explicit vision keys win over a generic ForCausalLM architecture."""
+def test_detect_causal_lm_with_vision_config_is_text_coercible(tmp_path):
+    """A generic ForCausalLM arch carrying vision_config is text-coercible:
+    a text decoder exists, so we degrade to the text path (not fail-fast)."""
     m = tmp_path / "visioncausal"
     _write_config(m, {
         "architectures": ["LlamaForCausalLM"],
@@ -157,29 +158,36 @@ def test_detect_causal_lm_with_vision_config_rejected(tmp_path):
     })
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
+    assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
     assert "vision_config" in hit["signal"]
 
 
-def test_detect_kimi_k25_text_compatible_exception_allowed(tmp_path):
-    """Kimi-K2.6 carries vision_config but its text path is benchmark-compatible."""
+def test_detect_kimi_k25_text_coercible(tmp_path):
+    """Kimi-K2.6 carries vision_config but its text MoE path benchmarks fine
+    -> text_coercible (degrade with warning), not fail-fast."""
     m = tmp_path / "kimi_k25"
     _write_config(m, {
         "architectures": ["KimiK25ForConditionalGeneration"],
         "model_type": "kimi_k25",
         "vision_config": {"hidden_size": 1024},
     })
-    assert cli._detect_unsupported_model(str(m)) is None
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
 
 
-def test_detect_qwen35_moe_text_compatible_exception_allowed(tmp_path):
-    """Qwen3.6 MoE carries vision_config but benchmarks as text-only."""
+def test_detect_qwen35_moe_text_coercible(tmp_path):
+    """Qwen3.6 MoE carries vision_config but benchmarks as text-only
+    -> text_coercible."""
     m = tmp_path / "qwen3_5_moe"
     _write_config(m, {
         "architectures": ["Qwen3_5MoeForConditionalGeneration"],
         "model_type": "qwen3_5_moe",
         "vision_config": {"hidden_size": 1024},
     })
-    assert cli._detect_unsupported_model(str(m)) is None
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
 
 
 def test_detect_missing_config_returns_none(tmp_path):
@@ -271,3 +279,109 @@ def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
     assert cli._preflight_unsupported_model_arch(_args(str(model)), sd) is True
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "unsupported_model_arch"
+
+
+# 4. text_coercible — multimodal signal but a text path exists
+def _coercible_model(tmp_path: Path) -> Path:
+    m = tmp_path / "kimi_k25"
+    _write_config(m, {
+        "architectures": ["KimiK25ForConditionalGeneration"],
+        "model_type": "kimi_k25",
+        "vision_config": {"hidden_size": 1024},
+    })
+    return m
+
+
+def test_preflight_text_coercible_fallback_on_proceeds(tmp_path, monkeypatch):
+    """Default --allow-mm-text-fallback: a text-coercible model proceeds (no
+    fail-fast), records degraded_mode + a model warning, writes no final.json."""
+    model = _coercible_model(tmp_path)
+    sd = tmp_path / "session_coerce_on"
+    _seed_state(sd, monkeypatch)
+
+    blocked = cli._preflight_unsupported_model_arch(
+        _args(str(model), allow_mm_text_fallback=True), sd,
+    )
+
+    assert blocked is False
+    # No fail-fast report written.
+    assert not (sd / "reports" / "final.json").exists()
+    # Degraded marker persisted to state.json.
+    state = json.loads((sd / "state.json").read_text())
+    assert state["degraded_mode"] is True
+    assert state.get("stop_reason", "") in ("", None)
+    warnings = state["model_warnings"]
+    assert len(warnings) == 1
+    assert warnings[0]["kind"] == "multimodal_text_fallback"
+    assert "kimi_k25" in warnings[0]["model_type"]
+
+
+def test_preflight_text_coercible_fallback_off_fails_fast(tmp_path, monkeypatch):
+    """--no-allow-mm-text-fallback turns a text-coercible model back into a
+    fail-fast (stop_reason=unsupported_model_arch)."""
+    model = _coercible_model(tmp_path)
+    sd = tmp_path / "session_coerce_off"
+    _seed_state(sd, monkeypatch)
+
+    blocked = cli._preflight_unsupported_model_arch(
+        _args(str(model), allow_mm_text_fallback=False), sd,
+    )
+
+    assert blocked is True
+    state = json.loads((sd / "state.json").read_text())
+    assert state["stop_reason"] == "unsupported_model_arch"
+
+
+def test_preflight_vision_only_ignores_fallback_flag(tmp_path, monkeypatch):
+    """A true VLM (vision_only) fail-fasts even with the fallback flag on."""
+    model = tmp_path / "llava"
+    _write_config(model, {
+        "architectures": ["LlavaForConditionalGeneration"],
+        "model_type": "llava",
+    })
+    sd = tmp_path / "session_vision_only"
+    _seed_state(sd, monkeypatch)
+
+    blocked = cli._preflight_unsupported_model_arch(
+        _args(str(model), allow_mm_text_fallback=True), sd,
+    )
+
+    assert blocked is True
+    state = json.loads((sd / "state.json").read_text())
+    assert state["stop_reason"] == "unsupported_model_arch"
+
+
+# 5. report rendering of the degraded-mode section
+def test_report_renders_degraded_mode_section():
+    from inference_optimizer.orchestrator.action_executors import report
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState(session_id="s", model_name="kimi", model_path="/m/kimi")
+    state.degraded_mode = True
+    state.model_warnings = [{
+        "kind": "multimodal_text_fallback",
+        "model_name": "kimi",
+        "architecture": "KimiK25ForConditionalGeneration",
+        "model_type": "kimi_k25",
+        "signal": "multimodal config key 'vision_config'",
+        "detail": "DEGRADED MODE: ...",
+    }]
+    summary = report._build_summary_dict(state, {}, [], external_baseline=None)
+    assert summary["degraded_mode"] is True
+    assert len(summary["model_warnings"]) == 1
+
+    md = report._format_md(summary)
+    assert "Degraded mode" in md
+    assert "text path only" in md
+    assert "KimiK25ForConditionalGeneration" in md
+
+
+def test_report_no_degraded_section_when_clean():
+    from inference_optimizer.orchestrator.action_executors import report
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState(session_id="s", model_name="llama", model_path="/m/llama")
+    summary = report._build_summary_dict(state, {}, [], external_baseline=None)
+    assert summary["degraded_mode"] is False
+    md = report._format_md(summary)
+    assert "## Degraded mode" not in md
