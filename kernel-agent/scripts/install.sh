@@ -122,15 +122,11 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
   fi
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Pin GEAK to the save-and-test-diff-fallthrough fix tip
-# (https://github.com/AMD-AGI/GEAK/pull/244, not yet released as a tag).
-# We pin to the *commit SHA* of the branch tip, NOT the branch name, so a
-# future force-push / rebase upstream cannot silently change what every
-# fresh install gets.
-# TODO(post-GEAK-PR-244): once PR #244 lands and ships in a new GEAK tag,
-# revert this pin to the tag (e.g. v3.2.1) for stronger discoverability.
-# Operators can override with GEAK_REF=<tag|branch|sha>.
-GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
+# Pin GEAK to the v3.2.0 release, which carries the GEMM tuning entrypoint
+# used by kernel-agent/tools/gemm_tuning.py
+# (minisweagent.run.gemm_tuning). Operators can override with
+# GEAK_REF=<tag|branch|sha>.
+GEAK_REF="${GEAK_REF:-v3.2.0}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
@@ -842,12 +838,20 @@ ensure_geak() {
       run git init -q "${HYPERLOOM_ROOT}/geak"
       run git -C "${HYPERLOOM_ROOT}/geak" remote add origin "$GEAK_REPO"
       run git -C "${HYPERLOOM_ROOT}/geak" fetch --depth 1 origin "$GEAK_REF"
-      run git -C "${HYPERLOOM_ROOT}/geak" checkout -q FETCH_HEAD
+      run git -C "${HYPERLOOM_ROOT}/geak" checkout -q --force FETCH_HEAD
     else
       run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
     fi
   else
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
+    if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+      # Keep existing runtime mirrors aligned with the requested GEAK_REF.
+      # Older pods may have a stale checkout (for example ec61bdbd/d1ccfb2c)
+      # that lacks minisweagent.run.gemm_tuning even after install.sh is
+      # updated. Fetch+checkout is idempotent for both branch refs and SHAs.
+      run git -C "${HYPERLOOM_ROOT}/geak" fetch --depth 1 origin "$GEAK_REF"
+      run git -C "${HYPERLOOM_ROOT}/geak" checkout -q --force FETCH_HEAD
+    fi
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     # Pin the pip flag set so we work in both venv installs (main upstream
@@ -1270,6 +1274,12 @@ write_env_file() {
     if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
       echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
       echo "export TL_EXTENSION='TraceLens_internal'"
+    fi
+    [ -n "${HYPERLOOM_ROOT:-}" ] && echo "export HYPERLOOM_ROOT='${HYPERLOOM_ROOT}'"
+    if [ -d "${HYPERLOOM_ROOT}/geak/src" ]; then
+      echo "export GEAK_ROOT='${HYPERLOOM_ROOT}/geak'"
+      echo "export HYPERLOOM_GEAK_ROOT='${HYPERLOOM_ROOT}/geak'"
+      echo "export PYTHONPATH='${HYPERLOOM_ROOT}/geak/src:${PYTHONPATH:-}'"
     fi
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
