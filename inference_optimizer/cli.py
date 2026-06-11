@@ -4231,6 +4231,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 "Session breakdown : (already written by CLOSE phase "
                 "sequencer; skipping cli.finally safety-net write)"
             )
+            # The sequencer already flushed Langfuse + packaged at step 2.5/2.6.
+            # Re-run flush idempotently as a safety net (only re-writes the
+            # receipt if it already ran), so a step-2.5 failure still gets a
+            # final receipt spliced in.
+            try:
+                from .orchestrator.trace.langfuse_emitter import flush_session
+                flush_session(session_dir)
+                from .breakdown import patch_breakdown_langfuse
+                patch_breakdown_langfuse(session_dir)
+            except Exception:  # noqa: BLE001
+                log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
         else:
             try:
                 from .breakdown import write_breakdown_json
@@ -4249,13 +4260,29 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 log.exception(
                     "emergency final report write failed (non-fatal)"
                 )
+            # Live Langfuse push (opt-in, default off): reconcile + flush,
+            # then splice the post-flush receipt (final counts) into the
+            # session_breakdown.json langfuse section (written above with only
+            # the pre-flush in-process counts). MUST run BEFORE the artifact
+            # package below, so the bundled SBD carries counts_final=true and
+            # the bundle includes the final langfuse_receipt.json. No-op unless
+            # HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* are set; idempotent if the
+            # CLOSE sequencer already flushed (re-writes the receipt only).
+            try:
+                from .orchestrator.trace.langfuse_emitter import flush_session
+                flush_session(session_dir)
+                from .breakdown import patch_breakdown_langfuse
+                patch_breakdown_langfuse(session_dir)
+            except Exception:  # noqa: BLE001
+                log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
+
             # Safety-net artifact package -> /workspace. The CLOSE phase
             # sequencer normally packages at step 2.6, but the wall-clock
             # deadline path (_enter_closing_phase) and crash paths leave
             # close_sequence_done False and never run the sequencer, so the
             # bundle would be missing without this. Best-effort: failures
-            # must not mask stop_reason. Runs after the SBD/final.md
-            # safety-net writes so the freshest products are bundled.
+            # must not mask stop_reason. Runs after the SBD/final.md +
+            # Langfuse flush above so the freshest products are bundled.
             try:
                 from .breakdown import package_session_artifacts
                 pkg_path = package_session_artifacts(
@@ -4271,20 +4298,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 log.exception(
                     "session artifact package failed (non-fatal)"
                 )
-
-        # Live Langfuse push (opt-in, default off): reconcile + flush after the
-        # breakdown wrote decision_trace.jsonl / ext shards. No-op unless
-        # HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* are configured. Best-effort.
-        # Then splice the post-flush receipt (final counts) back into the
-        # session_breakdown.json langfuse section, which was written above with
-        # only the pre-flush in-process counts.
-        try:
-            from .orchestrator.trace.langfuse_emitter import flush_session
-            flush_session(session_dir)
-            from .breakdown import patch_breakdown_langfuse
-            patch_breakdown_langfuse(session_dir)
-        except Exception:  # noqa: BLE001
-            log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.

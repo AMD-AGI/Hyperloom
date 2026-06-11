@@ -72,6 +72,11 @@ from pathlib import Path
 from typing import Any
 
 from inference_optimizer.orchestrator.trace import langfuse_mapping as lfmap
+from inference_optimizer.orchestrator.trace.langfuse_emitter import (
+    _end_obs,
+    _set_trace_attrs,
+    _start_obs,
+)
 
 log = logging.getLogger("backfill_langfuse")
 
@@ -252,21 +257,21 @@ def ingest(plan: dict[str, Any]) -> int:
     trace_id = lfmap.derive_trace_id(plan["trace_id_seed"])
     trace_start = lfmap.parse_ts(plan["created_at"])
 
-    root = client.start_observation(
+    root = _start_obs(
+        client,
         name=plan["name"],
         as_type="span",
         start_time=trace_start,
         trace_context={"trace_id": trace_id},
         metadata=plan["metadata"],
     )
-    try:
-        root.update_trace(
-            name=plan["name"],
-            session_id=plan["session_id"],
-            metadata=plan["metadata"],
-        )
-    except Exception:  # noqa: BLE001 — older SDKs may differ
-        log.warning("update_trace not available; trace attrs partially set")
+    # Version-tolerant (v2/v3 update_trace -> v4 OTEL attrs); never raises.
+    _set_trace_attrs(
+        root,
+        name=plan["name"],
+        session_id=plan["session_id"],
+        metadata=plan["metadata"],
+    )
 
     # trace -> phase span -> agent span -> generation. Keep the agent spans so
     # decision scores can attach to the agent that produced them.
@@ -274,13 +279,15 @@ def ingest(plan: dict[str, Any]) -> int:
     last_end = trace_start
     for phase, agents in plan["phases"].items():
         p_lo, p_hi = _phase_time_bounds(agents)
-        phase_span = root.start_observation(
+        phase_span = _start_obs(
+            root,
             name=f"phase:{phase}", as_type="span", start_time=p_lo or trace_start,
             metadata={"phase": phase, "agent_count": len(agents)},
         )
         for agent, gens in agents.items():
             a_lo, a_hi = _time_bounds(gens)
-            agent_span = phase_span.start_observation(
+            agent_span = _start_obs(
+                phase_span,
                 name=f"agent:{agent}", as_type="span", start_time=a_lo or p_lo or trace_start,
                 metadata={"phase": phase, "agent": agent, "generation_count": len(gens)},
             )
@@ -288,7 +295,8 @@ def ingest(plan: dict[str, Any]) -> int:
             for g in gens:
                 g_start = lfmap.parse_ts(g["ts"])
                 row = g["row"]
-                gen = agent_span.start_observation(
+                gen = _start_obs(
+                    agent_span,
                     name=lfmap.generation_name(row),
                     as_type="generation",
                     start_time=g_start,
@@ -300,9 +308,9 @@ def ingest(plan: dict[str, Any]) -> int:
                     ),
                     usage_details=lfmap.usage_details(row),
                 )
-                gen.end(end_time=g_start)
-            agent_span.end(end_time=a_hi or a_lo or p_lo or trace_start)
-        phase_span.end(end_time=p_hi or p_lo or trace_start)
+                _end_obs(gen, g_start)
+            _end_obs(agent_span, a_hi or a_lo or p_lo or trace_start)
+        _end_obs(phase_span, p_hi or p_lo or trace_start)
         if p_hi is not None:
             last_end = p_hi
 
@@ -330,7 +338,7 @@ def ingest(plan: dict[str, Any]) -> int:
             except Exception:  # noqa: BLE001
                 log.exception("create_score failed for decision %d", i)
 
-    root.end(end_time=last_end)
+    _end_obs(root, last_end)
     client.flush()
     print(f"Backfilled trace_id={trace_id} session_id={plan['session_id']}")
     return 0

@@ -290,7 +290,8 @@ class ProposalScorer:
             record = LLMCallRecord(
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
-                model=str(model),
+                role="proposal_scorer",  # must match the conversation row's
+                model=str(model),        # role for Langfuse token<->text pairing
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
             )

@@ -119,13 +119,15 @@ def pair_key(row: dict[str, Any]) -> tuple:
 
     Both streams (``llm_calls.jsonl`` / ``conversations.jsonl``) share the
     same closed schema, so we key on every per-call identity field they
-    carry -- (component, task_id, dyn_id, tick, turn, role) -- and fall back
-    to the UTC-second of ``ts`` only to disambiguate. ``turn`` / ``task_id``
-    / ``dyn_id`` are what keep a *burst* of calls in the same UTC second and
-    same (component, tick, role) -- e.g. multi-turn specialist/critic within
-    one tick -- from cross-pairing a token row with the wrong text row.
-    Older rows that predate these fields simply carry ``None`` for them, so
-    the key degrades gracefully to the previous coarser behaviour.
+    carry -- (component, task_id, dyn_id, tick, turn, role, model) -- and
+    fall back to the UTC-second of ``ts`` only to disambiguate. ``turn`` /
+    ``task_id`` / ``dyn_id`` keep a *burst* of calls in the same UTC second
+    and same (component, tick, role) -- e.g. multi-turn specialist/critic
+    within one tick -- from cross-pairing. ``model`` keeps concurrently
+    scored proposals apart: ``ProposalScorer.score`` fires several models via
+    ``asyncio.gather``, so multiple rows land in the same second with
+    otherwise identical keys. Older rows that predate any field carry
+    ``None``, so the key degrades gracefully to the previous behaviour.
     """
     return (
         str(row.get("component") or ""),
@@ -134,6 +136,7 @@ def pair_key(row: dict[str, Any]) -> tuple:
         row.get("tick"),
         row.get("turn"),
         str(row.get("role") or ""),
+        str(row.get("model") or ""),
         utc_second_key(row.get("ts")),
     )
 

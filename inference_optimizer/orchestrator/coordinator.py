@@ -3104,6 +3104,26 @@ class Coordinator:
                 detail=repr(exc)[:240],
             )
 
+        # ---------------- Step 2.5: Langfuse flush + receipt splice --------
+        # MUST run before the artifact package (step 2.6): flush_session
+        # reconciles out-of-process children + flips the receipt to final
+        # counts, and patch_breakdown_langfuse splices that post-flush
+        # receipt back into session_breakdown.json. If this ran AFTER
+        # packaging, the bundled SBD would carry counts_final=false and the
+        # final langfuse_receipt.json would be missing from the bundle.
+        # No-op unless live push is enabled; idempotent (a later cli.finally
+        # flush only re-writes the receipt). Best-effort.
+        try:
+            from .trace.langfuse_emitter import flush_session
+            flush_session(self.session_dir)
+            from ..breakdown import patch_breakdown_langfuse
+            patch_breakdown_langfuse(self.session_dir)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
+            await self._record_close_step(
+                "langfuse_flush", status="failed", detail=repr(exc)[:240],
+            )
+
         # ---------------- Step 2.6: artifact package -> /workspace -------
         # Bundle the curated result/report/analysis files (incl. the
         # session_breakdown just written in step 2) into a single zip

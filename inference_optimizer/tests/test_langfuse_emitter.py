@@ -572,6 +572,31 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
     assert lfmap.pair_key(token) == lfmap.pair_key(text)
 
 
+def test_pair_key_distinguishes_concurrent_models_same_second():
+    """ProposalScorer fires several models via asyncio.gather; their rows land
+    in the same UTC second with identical keys except model -> must not collide
+    (otherwise usage of model A pairs with the prompt/response of model B)."""
+    base = {
+        "component": "proposal_scorer", "tick": None, "role": "proposal_scorer",
+        "task_id": None, "dyn_id": None, "turn": None,
+        "ts": "2026-06-11T10:00:00.300Z",
+    }
+    a = {**base, "model": "qwen-32b"}
+    b = {**base, "model": "llama-70b", "ts": "2026-06-11T10:00:00.700Z"}
+    assert lfmap.pair_key(a) != lfmap.pair_key(b)
+
+
+def test_pair_key_scorer_token_and_text_pair_when_roles_match():
+    """The scorer's token row and conversation row must share role+model so
+    their pair_key matches (the bug: token row had role=None)."""
+    token = {
+        "component": "proposal_scorer", "role": "proposal_scorer",
+        "model": "qwen-32b", "ts": "2026-06-11T10:00:00.100Z",
+    }
+    text = {**token, "ts": "2026-06-11T10:00:00.900Z"}  # same second
+    assert lfmap.pair_key(token) == lfmap.pair_key(text)
+
+
 def test_pair_key_degrades_when_turn_absent():
     """Legacy rows without turn/task_id/dyn_id still produce a stable key
     (all the new slots are None) rather than raising."""
