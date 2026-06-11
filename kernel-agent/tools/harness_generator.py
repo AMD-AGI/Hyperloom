@@ -167,7 +167,15 @@ class BenchmarkAnalyzer:
     def classify_functions(
         self, decorated: dict[str, FuncInfo]
     ) -> tuple[FuncInfo | None, FuncInfo | None]:
-        """Classify decorated functions into (reference, kernel); either can be None."""
+        """Classify decorated functions into a reference/kernel pair.
+
+        Args:
+            decorated: Mapping of function name to its :class:`FuncInfo`.
+
+        Returns:
+            A ``(reference, kernel)`` tuple; either element may be ``None``
+            when no suitable candidate is found.
+        """
         ref_candidates: list[FuncInfo] = []
         kernel_candidates: list[FuncInfo] = []
 
@@ -218,7 +226,14 @@ class BenchmarkAnalyzer:
         return ref, kernel
 
     def get_test_function(self, decorated: dict[str, FuncInfo]) -> FuncInfo | None:
-        """Find the main test/benchmark orchestrator function."""
+        """Find the main test/benchmark orchestrator function.
+
+        Args:
+            decorated: Mapping of function name to its :class:`FuncInfo`.
+
+        Returns:
+            The orchestrator :class:`FuncInfo`, or ``None`` if none is found.
+        """
         # Prefer a @benchmark-decorated function; else a top-level test_*/bench_* caller.
         for fi in decorated.values():
             if fi.decorator == "benchmark":
@@ -373,7 +388,14 @@ class BenchmarkAnalyzer:
 # Config builder — from TraceLens input_shapes
 
 def _build_configs(candidate: dict) -> tuple[str, str, str]:
-    """Build (ALL_CONFIGS, cfg unpack, config_str) code from candidate shapes."""
+    """Build harness config code from a candidate's trace shapes.
+
+    Args:
+        candidate: Candidate dict carrying ``input_shapes`` from TraceLens.
+
+    Returns:
+        A tuple of ``(ALL_CONFIGS, cfg unpack, config_str)`` code fragments.
+    """
     input_shapes = candidate.get("input_shapes") or []
     if not input_shapes:
         return _default_configs()
@@ -507,7 +529,20 @@ def _generate_setup_inputs(
     ref_func: FuncInfo | None,
     kernel_func: FuncInfo | None,
 ) -> str:
-    """Generate the setup_inputs(cfg) body, creating inputs only for args the test actually passes."""
+    """Generate the ``setup_inputs(cfg)`` body for the harness.
+
+    Inputs are created only for args the test actually passes.
+
+    Args:
+        analyzer: The benchmark analyzer for the source module.
+        test_func: The orchestrator test function, if any.
+        cfg_unpack: The config-unpack code line (e.g. ``M, N = cfg``).
+        ref_func: The reference function, if any.
+        kernel_func: The kernel function, if any.
+
+    Returns:
+        The generated ``setup_inputs`` body as source text.
+    """
     dim_vars = cfg_unpack.replace(" = cfg", "").split(", ")
     dim_vars = [v.strip() for v in dim_vars if v.strip() != "dtype"]
 
@@ -567,7 +602,17 @@ def _generate_setup_inputs(
 def _match_call_args_to_params(
     call: CallInfo, params: list[str]
 ) -> list[tuple[str, str | None]]:
-    """Match call args to params, returning [(param, call_value_or_None), ...] (positional + tensor kwargs)."""
+    """Match a call's args to a function's parameters.
+
+    Handles positional args and tensor keyword args.
+
+    Args:
+        call: The call-site info to match.
+        params: The target function's parameter names.
+
+    Returns:
+        A list of ``(param, call_value_or_None)`` tuples.
+    """
     result: list[tuple[str, str | None]] = []
 
     # Positional args are always required.
@@ -675,7 +720,18 @@ def _generate_run_func_body(
     test_func: FuncInfo | None,
     target_func: FuncInfo,
 ) -> str:
-    """Generate a body that calls target_func with inputs dict values; missing params use defaults."""
+    """Generate a run-function body that calls the target function.
+
+    Arguments are pulled from the inputs dict; missing params use defaults.
+
+    Args:
+        analyzer: The benchmark analyzer for the source module.
+        test_func: The orchestrator test function, if any.
+        target_func: The function the generated body should call.
+
+    Returns:
+        The generated run-function body as source text.
+    """
     call = None
     if test_func:
         call = analyzer.extract_call_to(test_func, target_func.name)
