@@ -202,10 +202,16 @@ class HFClient:
         return r.json()
 
     def listing(self, limit: int) -> list[dict]:
-        """Top-N text-generation by downloads (raw HF API records).
+        """Return the top-N text-generation models by downloads.
 
-        HF caps one page at 1000 entries; follow the ``Link`` header cursor
-        until ``limit`` entries are fetched.
+        HF caps one page at 1000 entries; this follows the ``Link`` header
+        cursor until ``limit`` entries are fetched.
+
+        Args:
+            limit: Maximum number of model records to return.
+
+        Returns:
+            Raw HF API model records, up to ``limit``.
         """
         out: list[dict] = []
         page_limit = min(max(limit, 1), 1000)
