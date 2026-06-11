@@ -2311,6 +2311,7 @@ def deterministic_extract_hot_kernels(
     top_k: int = 10,
     *,
     log_path: Path | None = None,
+    fail_on_corrupt_priority: bool = False,
 ) -> list[dict[str, Any]]:
     """Extract hot kernels directly from TraceLens deterministic outputs.
 
@@ -2325,7 +2326,20 @@ def deterministic_extract_hot_kernels(
     if not priority_path.exists():
         return []
 
-    priority_data = json.loads(priority_path.read_text(encoding="utf-8"))
+    try:
+        priority_data = json.loads(priority_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        if log_path is not None:
+            append_log(
+                log_path,
+                f"deterministic: failed to parse {priority_path}: {exc}",
+            )
+        if fail_on_corrupt_priority:
+            raise RuntimeError(
+                f"Deterministic TraceLens pipeline failed to parse "
+                f"{priority_path}: {exc}"
+            ) from exc
+        return []
     findings = priority_data.get("findings", [])
 
     cat_data_dir = output_dir / "category_data"
@@ -3874,7 +3888,10 @@ def main() -> int:
                             "-- below gate, extracting candidates",
                         )
                     raw_det_candidates = deterministic_extract_hot_kernels(
-                        tracelens_dir, args.top_k, log_path=log_path,
+                        tracelens_dir,
+                        args.top_k,
+                        log_path=log_path,
+                        fail_on_corrupt_priority=True,
                     )
                     if raw_det_candidates:
                         total_dur = (

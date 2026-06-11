@@ -3155,6 +3155,31 @@ def test_deterministic_extract_hot_kernels_missing_priority(tmp_path):
     assert tla.deterministic_extract_hot_kernels(tmp_path, top_k=5) == []
 
 
+def test_deterministic_extract_hot_kernels_bad_priority_json(tmp_path):
+    priority_path = tmp_path / "priority_data.json"
+    priority_path.write_text("{not json", encoding="utf-8")
+    log_path = tmp_path / "deterministic.log"
+
+    result = tla.deterministic_extract_hot_kernels(
+        tmp_path, top_k=5, log_path=log_path,
+    )
+
+    assert result == []
+    assert "failed to parse" in log_path.read_text(encoding="utf-8")
+
+
+def test_deterministic_extract_hot_kernels_bad_priority_json_fail_loud(tmp_path):
+    priority_path = tmp_path / "priority_data.json"
+    priority_path.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="failed to parse"):
+        tla.deterministic_extract_hot_kernels(
+            tmp_path,
+            top_k=5,
+            fail_on_corrupt_priority=True,
+        )
+
+
 def test_deterministic_extract_hot_kernels_top_k_limit(tmp_path):
     ops = [
         {"name": f"op{i}", "time_ms": float(i), "count": 1, "args": ""}
