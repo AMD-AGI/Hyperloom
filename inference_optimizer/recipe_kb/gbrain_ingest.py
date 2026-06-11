@@ -147,18 +147,40 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     return args, envs
 
 
+def _has_shareable_signal(recipe: Mapping[str, Any]) -> bool:
+    """Return True when a seed-only recipe carries reusable prior signal."""
+    for s in (recipe.get("sessions") or []):
+        if not isinstance(s, Mapping):
+            continue
+        try:
+            tput = float(s.get("throughput_after") or 0.0)
+        except (TypeError, ValueError):
+            tput = 0.0
+        if tput > 0.0 or s.get("actions_taken"):
+            return True
+    for field in ("what_worked", "what_failed", "remaining_gaps", "pitfalls", "lessons"):
+        if recipe.get(field):
+            return True
+    if recipe.get("architectures") or recipe.get("model_class"):
+        return True
+    return False
+
+
 def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     """Map a v2 recipe dict to a (slug, content) gbrain better-landing page.
 
-    Returns ``None`` when the recipe carries no concrete ``best_config``
-    (a bare anchor is skipped — nothing useful to cache remotely).
+    Returns ``None`` only when the recipe has no ``canonical_id``. By default
+    even pure seed-only anchors are mirrored so future gbrain reads can hit the
+    5-tuple (tier=seed_only); set RECIPE_KB_MIRROR_REQUIRE_SIGNAL=1 to restore
+    the old stricter gate (best_config OR reusable prior).
     """
     best_config = recipe.get("best_config") if isinstance(recipe.get("best_config"), Mapping) else {}
-    if not best_config:
-        return None
     canonical = str(recipe.get("canonical_id") or "").strip()
     if not canonical:
         return None
+    if str(os.environ.get("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", "")).strip().lower() in ("1", "true", "yes"):
+        if not best_config and not _has_shareable_signal(recipe):
+            return None
     args, envs = _best_config_split(best_config)
     model = str(recipe.get("model") or "")
     hardware = str(recipe.get("hardware") or "")
@@ -231,10 +253,20 @@ def ingest_local_to_gbrain(
     dry_run: bool,
 ) -> dict[str, int]:
     """Ingest a list of v2 recipe dicts into gbrain. Returns counters."""
-    stats = {"total": len(recipes), "ingested": 0, "skipped_no_config": 0, "errors": 0}
+    stats = {
+        "total": len(recipes),
+        "ingested": 0,
+        # Accurate name for newly skipped rows (currently: missing canonical_id,
+        # or strict-gate seed-only skeletons). Keep the legacy key below as an
+        # alias for callers that still read it.
+        "skipped_unmirrorable": 0,
+        "skipped_no_config": 0,
+        "errors": 0,
+    }
     for recipe in recipes:
         page = recipe_to_page(recipe)
         if page is None:
+            stats["skipped_unmirrorable"] += 1
             stats["skipped_no_config"] += 1
             continue
         slug, content = page
