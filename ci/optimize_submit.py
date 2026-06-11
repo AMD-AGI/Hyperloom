@@ -2284,7 +2284,24 @@ def _wait_for_nfs_session_delivery(
     grace_min: float | None = None,
     idle_min: float | None = None,
 ) -> str | None:
-    """After SaFE early terminal, wait while the NFS session is still active."""
+    """Wait for NFS session delivery after a SaFE early-terminal status.
+
+    Polls the session directory while it still appears active, up to the
+    grace/idle deadlines, so delivery-contract files have time to land.
+
+    Args:
+        rec: The submission record.
+        current_session_hints: Optional session-id hints to bias matching.
+        poll_s: Poll interval in seconds.
+        grace_min: Overall grace window in minutes; resolved from env when
+            ``None``.
+        idle_min: Idle window in minutes before giving up; resolved from env
+            when ``None``.
+
+    Returns:
+        The session directory to collect from, or ``None`` when none found
+        or grace is disabled.
+    """
     grace_min = _env_float("SAFE_OPTIMIZE_NFS_LIVE_GRACE_MIN", 180.0) \
         if grace_min is None else grace_min
     idle_min = _env_float("SAFE_OPTIMIZE_NFS_IDLE_GRACE_MIN", 20.0) \
@@ -2349,16 +2366,30 @@ def _wait_for_nfs_session_delivery(
 
 
 def _category_from_arch(arch: str | None) -> str:
-    """Coarse model-shape classification: "moe" if arch contains "moe", else
-    "dense"; "" when unknown so downstream JSON stays "n/a"."""
+    """Classify a model's coarse shape from its architecture name.
+
+    Args:
+        arch: The HF architecture name, if known.
+
+    Returns:
+        ``"moe"`` when the arch contains "moe", ``"dense"`` otherwise, or
+        ``""`` when unknown (so downstream JSON stays ``"n/a"``).
+    """
     if not arch:
         return ""
     return "moe" if "moe" in arch.lower() else "dense"
 
 
 def _sandbox_duration_seconds(last_task: dict) -> float | None:
-    """SaFE-side sandbox wallclock = finishedAt - startedAt (from the task API).
-    None when either field is missing/unparseable so we don't fabricate a duration."""
+    """Compute SaFE-side sandbox wallclock (``finishedAt - startedAt``).
+
+    Args:
+        last_task: The SaFE task payload carrying timestamp fields.
+
+    Returns:
+        The duration in seconds (rounded), or ``None`` when either field is
+        missing/unparseable so a duration is never fabricated.
+    """
     from datetime import datetime
     start = (last_task or {}).get("startedAt") or ""
     end = (last_task or {}).get("finishedAt") or ""
@@ -2380,6 +2411,12 @@ def _find_hyperloom_commit_sha(start: Path) -> str:
     First hit wins: (1) hyperloom_source_commit.txt written by the agent (depth
     varies by which fallback collected it), then (2) the CI runner env
     (HYPERLOOM_SOURCE_REF, else GITHUB_SHA).
+
+    Args:
+        start: A path inside the collected session tree to search from.
+
+    Returns:
+        The resolved SHA string, or ``""`` when none is found.
     """
     candidates = [
         start.parent / "hyperloom_source_commit.txt",
@@ -2407,13 +2444,17 @@ def _find_hyperloom_commit_sha(start: Path) -> str:
 
 
 def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
-    """Backfill task metadata (model, image, hyperloom_commit, category,
-    sandbox_duration_seconds) into ci_metrics.json / session_breakdown.json /
-    manifest.json so each artifact is self-describing.
+    """Backfill task metadata into a CI artifact so it is self-describing.
 
-    Writes the right shape per filename: ci_metrics.json → flat top-level;
-    session_breakdown.json → under session_meta; manifest.json → flat top-level
-    (V2 cli schema; category/duration are extra keys V2 ignores on re-read).
+    Adds model, image, hyperloom_commit, category, and
+    sandbox_duration_seconds. Writes the right shape per filename:
+    ci_metrics.json → flat top-level; session_breakdown.json → under
+    session_meta; manifest.json → flat top-level (V2 cli schema;
+    category/duration are extra keys V2 ignores on re-read).
+
+    Args:
+        path: The artifact file to backfill (no-op for other filenames).
+        rec: The submission record supplying the metadata.
     """
     if path.name not in ("ci_metrics.json", "session_breakdown.json", "manifest.json"):
         return
