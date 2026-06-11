@@ -2709,12 +2709,175 @@ class Coordinator:
                     state.rejected_kernel_ids.append(kid)
                 state.save(self.session_dir)
             drained += 1
+        await self._maybe_validate_positive_needs_review_stack()
         if drained >= max_drain:
             log.warning(
                 "SWEEP entry: drain cap (%d) reached; remaining pending "
                 "KEEPs will be visible in summary.by_kernel as KEEP_PENDING",
                 max_drain,
             )
+
+    def _positive_needs_review_integrates(self) -> list[dict[str, Any]]:
+        """Return positive NEEDS_REVIEW integrate entries eligible for stack validation."""
+        out: list[dict[str, Any]] = []
+        for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("last_decision") or "").upper() != "NEEDS_REVIEW":
+                continue
+            try:
+                best_gain = float(entry.get("best_gain_pct") or 0.0)
+            except (TypeError, ValueError):
+                best_gain = 0.0
+            if best_gain <= 0:
+                continue
+            patch_path = str(entry.get("patch_path") or "").strip()
+            target_file = str(entry.get("target_file") or "").strip()
+            kernel_id = str(entry.get("kernel_id") or "").strip()
+            if patch_path and target_file and kernel_id:
+                out.append(entry)
+        out.sort(key=lambda e: float(e.get("best_gain_pct") or 0.0), reverse=True)
+        return out
+
+    async def _maybe_validate_positive_needs_review_stack(self) -> None:
+        """Run one E2E stack validation for multiple small positive kernel patches.
+
+        Single-patch ``NEEDS_REVIEW`` is not retried automatically. When two or
+        more pending kernel patches individually show positive but sub-threshold
+        E2E gain, validate their combined effect once before moving to SWEEP.
+        """
+        entries = self._positive_needs_review_integrates()
+        if len(entries) < 2:
+            return
+        # Avoid applying two whole-file patches to the same target file.
+        seen_targets: set[str] = set()
+        stack: list[dict[str, Any]] = []
+        for entry in entries:
+            target = str(entry.get("target_file") or "")
+            if target in seen_targets:
+                continue
+            seen_targets.add(target)
+            stack.append(entry)
+        if len(stack) < 2:
+            return
+        result = await self._run_kernel_stack_validation_e2e(stack)
+        if not isinstance(result, dict):
+            return
+        self.shared_state.record_kernel_integrate_result(result)
+        if str(result.get("decision") or "").upper() == "KEEP":
+            await self._record_integrate_keep(result)
+        self.shared_state.save(self.session_dir)
+
+    async def _run_kernel_stack_validation_e2e(
+        self, entries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack."""
+        from .action_executors.baseline import BaselineExecutor
+        from .action_executors.benchmark_result import is_valid_measurement
+        from .kernel_request_handlers import (
+            _maybe_apply_kernel_patch,
+            _maybe_revert_kernel_patch,
+        )
+        from .sub_agent_runner import RunnerContext
+        from .task_registry import Task
+        from ..session_paths import runs_dir
+
+        kernel_ids = [str(e.get("kernel_id") or "") for e in entries]
+        stack_id = "+".join(kernel_ids)
+        apply_results: list[dict[str, Any]] = []
+        try:
+            for entry in entries:
+                payload = {
+                    "kernel_id": entry.get("kernel_id"),
+                    "patch_path": entry.get("patch_path"),
+                    "target_file": entry.get("target_file"),
+                    "allow_unknown_target": True,
+                }
+                applied = _maybe_apply_kernel_patch(
+                    payload,
+                    session_dir=self.session_dir,
+                    kernel_id=str(entry.get("kernel_id") or ""),
+                )
+                apply_results.append(applied)
+                if applied.get("status") != "ok":
+                    raise RuntimeError(
+                        f"stack patch apply failed for {entry.get('kernel_id')}: {applied}"
+                    )
+
+            workspace = runs_dir(self.session_dir, "integrate", f"integrate-stack-{stack_id}")
+            workspace.mkdir(parents=True, exist_ok=True)
+            fake_task = Task(
+                task_id=f"integrate-stack-{stack_id}",
+                kind="baseline",
+                state="running",
+                params={
+                    "config_path": self.shared_state.baseline_config_path,
+                    "output_dir": str(workspace),
+                    "timeout_sec": 20 * 60,
+                    "extra_server_args": (
+                        (self.shared_state.current_best or {}).get("extra_server_args")
+                        or ""
+                    ),
+                },
+                idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
+            )
+            bench_result = await BaselineExecutor(session_dir=self.session_dir)(
+                RunnerContext(task=fake_task, lease=None)
+            )
+            if not is_valid_measurement(bench_result):
+                decision = "REVERT"
+                new_tput = 0.0
+                gain_pct = -100.0
+            else:
+                base_tput = float(self.shared_state.baseline_tput or 0.0)
+                new_tput = float(bench_result.get("output_throughput") or 0.0)
+                gain_pct = (
+                    (new_tput - base_tput) / base_tput * 100.0
+                    if base_tput > 0 else 0.0
+                )
+                decision = "KEEP" if gain_pct > 1.0 else "REVERT"
+
+            result = {
+                "status": "ok",
+                "decision": decision,
+                "kernel_id": stack_id,
+                "patch_path": "+".join(str(e.get("patch_path") or "") for e in entries),
+                "target_file": "+".join(str(e.get("target_file") or "") for e in entries),
+                "base_tput": float(self.shared_state.baseline_tput or 0.0),
+                "new_tput": new_tput,
+                "gain_pct": gain_pct,
+                "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
+                "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),
+                "apply_result": {"status": "ok", "stack_apply_results": apply_results},
+                "stack_kernel_ids": kernel_ids,
+                "stack_validation": True,
+            }
+            if decision != "KEEP":
+                result["revert_result"] = {
+                    "status": "ok",
+                    "stack_reverts": [
+                        _maybe_revert_kernel_patch(applied)
+                        for applied in reversed(apply_results)
+                    ],
+                }
+            else:
+                result["revert_result"] = {"status": "skipped", "reason": "KEEP decision"}
+            return result
+        except Exception as exc:  # noqa: BLE001
+            reverts = [
+                _maybe_revert_kernel_patch(applied)
+                for applied in reversed(apply_results)
+            ]
+            return {
+                "status": "failed",
+                "decision": "REVERT",
+                "kernel_id": stack_id,
+                "error": repr(exc),
+                "apply_result": {"status": "failed", "stack_apply_results": apply_results},
+                "revert_result": {"status": "ok", "stack_reverts": reverts},
+                "stack_kernel_ids": kernel_ids,
+                "stack_validation": True,
+            }
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue a ``sweep`` task on SWEEP entry (§3.2 §5.4). Idempotent via internal-sweep-phase_entry (Inv-2.1); PolicyGate's sweep_phase_singleton then denies LLM-emitted sweep (OOM race)."""

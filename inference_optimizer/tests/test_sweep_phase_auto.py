@@ -140,6 +140,112 @@ async def test_drain_pending_keep_integrates_records_result_once(
     assert c.shared_state.current_best["kernel_id"] == "k004"
 
 
+def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
+    """E2E integrate order should prefer trace impact over isolated micro speedup."""
+    state = SharedState()
+    state.last_trace_analyze = {
+        "hot_kernels_top15": [
+            {"kernel_id": "k001", "gpu_pct": 60.0},
+            {"kernel_id": "k004", "gpu_pct": 10.0},
+        ],
+    }
+    state.kernel_opt_attempts = {
+        "k004": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 4.21,
+            "last_source_file": "/tmp/rmsnorm.cu",
+        },
+        "k001": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 1.51,
+            "last_source_file": "/tmp/moe.cu",
+        },
+    }
+
+    assert state.pending_keep_kernel_ids() == ["k001", "k004"]
+    assert state.next_pending_keep_kernel_id() == "k001"
+
+
+def test_pending_keep_kernel_ids_do_not_retry_needs_review():
+    """A recorded NEEDS_REVIEW attempt should not auto-rerun the same patch."""
+    state = SharedState()
+    state.kernel_opt_attempts = {
+        "k004": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 4.21,
+            "last_source_file": "/tmp/rmsnorm.cu",
+        },
+        "k001": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 1.51,
+            "last_source_file": "/tmp/moe.cu",
+        },
+    }
+    state.record_kernel_integrate_result({
+        "status": "ok",
+        "decision": "NEEDS_REVIEW",
+        "kernel_id": "k004",
+        "patch_path": "/tmp/k004_opt.cu",
+        "target_file": "/tmp/rmsnorm.cu",
+        "new_tput": 100.8,
+        "gain_pct": 0.8,
+        "workspace": "/tmp/integrate-k004",
+    })
+
+    assert state.pending_keep_kernel_ids() == ["k001"]
+    assert state.next_pending_keep_kernel_id() == "k001"
+
+
+@pytest.mark.asyncio
+async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: Path):
+    """Two positive sub-threshold kernel patches should get one combined E2E validation."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        c.shared_state.record_kernel_integrate_result({
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": kid,
+            "patch_path": f"/tmp/{kid}_opt.cu",
+            "target_file": f"/tmp/{kid}.cu",
+            "new_tput": 100.0 + gain,
+            "gain_pct": gain,
+            "workspace": f"/tmp/integrate-{kid}",
+        })
+
+    async def _fake_stack_validation(entries):
+        assert {e["kernel_id"] for e in entries} == {"k001", "k004"}
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": "k001+k004",
+            "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
+            "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+            "base_tput": 100.0,
+            "new_tput": 102.0,
+            "gain_pct": 2.0,
+            "workspace": str(tmp_path / "integrate-stack"),
+            "apply_result": {"status": "ok"},
+            "stack_validation": True,
+        }
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    c._run_kernel_stack_validation_e2e = _fake_stack_validation
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._maybe_validate_positive_needs_review_stack()
+
+    assert c.shared_state.current_best["action"] == "integrate"
+    assert c.shared_state.current_best["kernel_id"] == "k001+k004"
+    assert c.shared_state.cumulative_gain_validated == pytest.approx(2.0)
+
+
 # 1. _build_sweep_params_from_recipe — pure static helper
 def test_build_sweep_params_defaults_when_no_recipe():
     """No warm_start_recipe → SKILL.md defaults + source='skill_md_default'."""
