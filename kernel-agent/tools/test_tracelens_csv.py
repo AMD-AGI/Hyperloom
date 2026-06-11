@@ -1665,6 +1665,26 @@ def test_duration_fallback_keeps_existing_order_when_any_impact_is_positive():
     assert warning is None
 
 
+def test_duration_fallback_ignores_other_bucket_sidecar_recoveries():
+    """#514 sidecar recoveries are not analysis.md rows. They must not by
+    themselves trigger the #434 "analysis.md zero impact" warning."""
+    candidates = [
+        {
+            "name": "sidecar_only_kernel",
+            "duration_us": 900.0,
+            "impact_score": 0.0,
+            "candidate_source": "other_bucket_fallback",
+        },
+    ]
+
+    ranked, warning = tla.rank_analysis_candidates_for_dispatch(
+        candidates, top_k=10, report_path=Path("/tmp/analysis.md"),
+    )
+
+    assert ranked == []
+    assert warning is None
+
+
 # normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
 @pytest.mark.parametrize("raw,expected", [
     ("gemm", "GEMM"),

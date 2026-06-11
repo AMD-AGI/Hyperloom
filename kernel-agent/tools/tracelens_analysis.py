@@ -141,7 +141,11 @@ def rank_analysis_candidates_for_dispatch(
     only candidate source but fall back to measured GPU time so Hyperloom does
     not return an empty or arbitrary candidate list.
     """
-    if not candidates:
+    analysis_candidates = [
+        c for c in candidates
+        if str(c.get("candidate_source") or "") != "other_bucket_fallback"
+    ]
+    if not analysis_candidates:
         return [], None
 
     def _num(value: Any) -> float:
@@ -150,18 +154,20 @@ def rank_analysis_candidates_for_dispatch(
         except (TypeError, ValueError):
             return 0.0
 
-    has_measured_gpu_time = any(_num(c.get("duration_us")) > 0.0 for c in candidates)
+    has_measured_gpu_time = any(
+        _num(c.get("duration_us")) > 0.0 for c in analysis_candidates
+    )
     all_impact_zero = all(
         _num(c.get("impact_score")) <= 0.0
         and _num(c.get("impact_score_low")) <= 0.0
         and _num(c.get("impact_score_high")) <= 0.0
-        for c in candidates
+        for c in analysis_candidates
     )
     if not has_measured_gpu_time or not all_impact_zero:
-        return candidates[:top_k], None
+        return analysis_candidates[:top_k], None
 
     ranked = sorted(
-        candidates,
+        analysis_candidates,
         key=lambda c: _num(c.get("duration_us")),
         reverse=True,
     )[:top_k]
@@ -169,7 +175,7 @@ def rank_analysis_candidates_for_dispatch(
         "code": "analysis_md_zero_impact_duration_fallback",
         "severity": "warning",
         "source": str(report_path),
-        "candidate_count": len(candidates),
+        "candidate_count": len(analysis_candidates),
         "selected_count": len(ranked),
         "message": (
             "TraceLens analysis.md contained measured GPU kernel time, but "
@@ -3834,22 +3840,21 @@ def main() -> int:
                                 skill_result.report_path,
                                 max(args.top_k, 1000),
                             )
-                            pool_fallback_cands = recover_other_bucket_candidates(
-                                skill_result.output_dir,
-                                fallback_pool,
-                                top_k=args.top_k,
-                                log=lambda msg: append_log(log_path, msg),
-                            )
-                            if pool_fallback_cands:
-                                fallback_pool = fallback_pool + pool_fallback_cands
-                            report_cands, fallback_warning = (
+                            ranked_pool, fallback_warning = (
                                 rank_analysis_candidates_for_dispatch(
                                     fallback_pool,
                                     top_k=args.top_k,
                                     report_path=skill_result.report_path,
                                 )
                             )
+                            pool_fallback_cands = recover_other_bucket_candidates(
+                                skill_result.output_dir,
+                                fallback_pool,
+                                top_k=args.top_k,
+                                log=lambda msg: append_log(log_path, msg),
+                            )
                             if fallback_warning is not None:
+                                report_cands = ranked_pool + pool_fallback_cands
                                 trace_health_warnings.append(fallback_warning)
                                 append_log(
                                     log_path,
