@@ -4028,6 +4028,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir=session_dir,
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
+        cortex_kb_url=(getattr(args, "cortex_kb_url", None) or "").strip() or None,
         robustness_choice=robustness_choice,
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,

@@ -288,6 +288,12 @@ class CriticAgentBackend:
         Extra env vars merged into the runtime.cli subprocess env when
         ``kb_mode == "live"``. Caller is responsible for filling
         ``KB_BASE_URL`` / ``KB_TIMEOUT_MS`` / ``KB_DEAD_LETTER_DIR`` etc.
+    cortex_kb_url:
+        Optional cortex kb-service base URL (the ``--cortex-kb-url`` flag).
+        When set, it is exported as ``CORTEX_KB_URL`` into the runtime.cli
+        subprocess env (unless already present) so the critic runtime's
+        optional ``/v2/reasoning/assess`` enrichment can reach the same KB
+        recipe-snapshot uses. ``None`` leaves env-based config untouched.
     runtime_caller_factory:
         Test seam returning a :data:`RuntimeCaller`. Tests override this
         to bypass the real Python subprocess.
@@ -305,6 +311,7 @@ class CriticAgentBackend:
     codex_client_factory: Callable[[], Any] | None = None
     kb_mode: Literal["inmemory", "live"] = "inmemory"
     kb_env: dict[str, str] | None = None
+    cortex_kb_url: str | None = None
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
     static_context: dict[str, Any] | None = None
     known_actions: tuple[str, ...] = ()
@@ -814,6 +821,13 @@ class CriticAgentBackend:
         dlq_dir = self.session_dir / "critic-kb-dead-letter"
         env.setdefault("KB_DEAD_LETTER_DIR", str(dlq_dir))
 
+        # Propagate the --cortex-kb-url flag into the subprocess so the critic
+        # runtime's optional /v2/reasoning/assess enrichment can reach the same
+        # cortex KB recipe-snapshot uses. An explicit env var still wins.
+        cortex_kb_url = (self.cortex_kb_url or "").strip()
+        if cortex_kb_url and not env.get("CORTEX_KB_URL"):
+            env["CORTEX_KB_URL"] = cortex_kb_url
+
         if self.kb_mode == "live":
             for k, v in (self.kb_env or {}).items():
                 env[k] = v
@@ -858,6 +872,7 @@ class CriticAgentBackend:
                 "proposals": judge_bundle.get("proposals"),
                 "kb_priors_by_proposal": judge_bundle.get("kb_priors_by_proposal"),
                 "kb_priors_for_decision": judge_bundle.get("kb_priors_for_decision"),
+                "kb_assess_by_proposal": judge_bundle.get("kb_assess_by_proposal"),
                 "kb_read_skipped_reason": judge_bundle.get("kb_read_skipped_reason"),
                 "review_constraints": judge_bundle.get("review_constraints"),
                 "notes": judge_bundle.get("notes"),

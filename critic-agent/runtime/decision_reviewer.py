@@ -37,6 +37,7 @@ from .intent_envelope import (
     build_heartbeat_intent,
     build_review_verdict_intent,
 )
+from .kb_assess_client import KBAssessClient
 from .kb_client import KBClient
 from .kb_writer import KBWriter, WriteContext
 from .metrics import CRITIC_REVIEW_VERDICT_TOTAL, get_registry
@@ -60,6 +61,63 @@ def _now_iso() -> str:
         str: The current UTC timestamp with microsecond precision.
     """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+# Proposal-payload keys that carry environment-variable / CLI-arg levers as
+# containers rather than direct param values; pulled out so the rest of
+# ``params`` resolves cleanly to substrate knobs.
+_LEVER_ENV_KEYS: tuple[str, ...] = ("extra_envs", "envs", "env")
+_LEVER_ARG_KEYS: tuple[str, ...] = ("extra_server_args", "server_args", "args")
+_LEVER_CONTAINER_KEYS: frozenset[str] = frozenset(
+    _LEVER_ENV_KEYS + _LEVER_ARG_KEYS + ("grid",)
+)
+
+
+def _proposal_levers(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Extract ``(params, envs, args)`` levers from a proposal payload.
+
+    Best-effort, schema-tolerant: pulls env-var and CLI-arg containers out of
+    ``payload['params']`` (or ``payload`` itself) and treats the remaining
+    scalar params as direct levers. CLI args given as a list are space-joined.
+
+    Args:
+        payload (dict[str, Any]): The raw proposal payload.
+
+    Returns:
+        tuple[dict, dict, str]: The resolved ``params``, ``envs`` and ``args``.
+    """
+    if not isinstance(payload, dict):
+        return {}, {}, ""
+    # Levers live under ``params``; the top-level payload is proposal metadata
+    # (action_name / predicted_gain_pct / reason) and must not be mistaken for
+    # tunable levers. No ``params`` dict → nothing to assess.
+    src = payload.get("params")
+    if not isinstance(src, dict):
+        return {}, {}, ""
+
+    envs: dict[str, Any] = {}
+    for key in _LEVER_ENV_KEYS:
+        val = src.get(key)
+        if isinstance(val, dict):
+            envs.update(val)
+
+    args_parts: list[str] = []
+    for key in _LEVER_ARG_KEYS:
+        val = src.get(key)
+        if isinstance(val, str) and val.strip():
+            args_parts.append(val.strip())
+        elif isinstance(val, (list, tuple)):
+            args_parts.extend(str(a) for a in val if a is not None)
+    args = " ".join(args_parts).strip()
+
+    params: dict[str, Any] = {
+        k: v
+        for k, v in src.items()
+        if k not in _LEVER_CONTAINER_KEYS and isinstance(v, (str, int, float, bool))
+    }
+    return params, envs, args
 
 
 # Review-constraints taxonomy: a single strict checklist would deadlock the
@@ -274,6 +332,9 @@ class JudgeBundle:
     decision: dict[str, Any] = field(default_factory=dict)
     kb_priors_by_proposal: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     kb_priors_for_decision: list[dict[str, Any]] = field(default_factory=list)
+    # Substrate KB per-proposal reasonableness verdicts (optional enrichment),
+    # keyed by proposal ``msg_id``; empty when assess is unconfigured/skipped.
+    kb_assess_by_proposal: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Recent Robustness findings so the SKILL can factor in what already broke;
     # empty when absent or disabled.
     robustness_priors: list[dict[str, Any]] = field(default_factory=list)
@@ -303,6 +364,9 @@ class JudgeBundle:
                 k: [dict(p) for p in v] for k, v in self.kb_priors_by_proposal.items()
             },
             "kb_priors_for_decision": [dict(p) for p in self.kb_priors_for_decision],
+            "kb_assess_by_proposal": {
+                k: dict(v) for k, v in self.kb_assess_by_proposal.items()
+            },
             "robustness_priors": [dict(p) for p in self.robustness_priors],
             "kb_read_skipped_reason": self.kb_read_skipped_reason,
             "review_constraints": dict(self.review_constraints),
@@ -368,6 +432,7 @@ class DecisionReviewer:
         session_memory: SessionMemory | None = None,
         kb_client: KBClient | None = None,
         kb_writer: KBWriter | None = None,
+        kb_assess_client: "KBAssessClient | None" = None,
     ):
         """Wire up the reviewer with its memory, KB client and writer.
 
@@ -379,6 +444,11 @@ class DecisionReviewer:
                 created if both ``kb_writer`` and ``kb_client`` are ``None``.
             kb_writer (KBWriter | None): KB write façade; built from
                 ``kb_client`` and ``session_memory`` when ``None``.
+            kb_assess_client (KBAssessClient | None): Optional substrate
+                ``/v2/reasoning/assess`` client. When ``None``, one is built
+                from the environment (``CORTEX_KB_URL`` — the same cortex KB
+                recipe-snapshot uses); if that is unset too, per-proposal
+                assessment is skipped entirely.
         """
         self.session_memory = session_memory or SessionMemory()
         if kb_writer is None:
@@ -388,6 +458,9 @@ class DecisionReviewer:
                 kb_client = InMemoryKBClient()
             kb_writer = KBWriter(kb_client, session_memory=self.session_memory)
         self.kb_writer = kb_writer
+        if kb_assess_client is None:
+            kb_assess_client = KBAssessClient.from_env()
+        self.kb_assess_client = kb_assess_client
 
     # ------------------------------------------------------------------
     # Phase 0: init / close session
@@ -610,10 +683,85 @@ class DecisionReviewer:
             bundle.notes.append("scope partially unknown — proceed with caution")
         bundle.notes.append(f"scope_cache_key={scope_cache_key(scope_filter)}")
 
+        # Best-effort substrate KB per-proposal reasonableness verdicts; only
+        # runs when ``CRITIC_KB_ASSESS_URL`` is configured, never blocks review.
+        self._inject_kb_assess(bundle, req)
+
         # Best-effort last-N high-severity Robustness findings; never blocks
         # the review. Disabled via ``CRITIC_ROBUSTNESS_PRIORS_DISABLED=1``.
         self._inject_robustness_priors(bundle)
         return bundle
+
+    # ------------------------------------------------------------------
+    # Optional: associate each proposal's raw levers to the substrate KB's
+    # calibrated mechanism evidence to judge reasonableness. Opt-in via
+    # ``CORTEX_KB_URL`` (same cortex KB recipe-snapshot uses); best-effort
+    # and never blocks the review.
+    # ------------------------------------------------------------------
+    def _inject_kb_assess(self, bundle: JudgeBundle, req: CriticRequest) -> None:
+        """Populate ``bundle.kb_assess_by_proposal`` from the substrate KB.
+
+        For each proposal that carries usable optimisation levers, POST its
+        ``focus`` + levers to ``/v2/reasoning/assess`` and store the verdict
+        keyed by proposal ``msg_id``. Silently skipped when the assess client
+        is unconfigured, ``focus.model`` is unknown, or a call fails.
+
+        Args:
+            bundle (JudgeBundle): The bundle to enrich in place.
+            req (CriticRequest): The parsed request (for proposals).
+        """
+        client = self.kb_assess_client
+        if client is None or not req.proposals:
+            return
+        focus = self._assess_focus(bundle.merged_context)
+        if not focus.get("model"):
+            return
+        results: dict[str, dict[str, Any]] = {}
+        for p in req.proposals:
+            params, envs, args = _proposal_levers(p.payload)
+            if not params and not envs and not args:
+                continue
+            verdict = client.assess(focus=focus, params=params, envs=envs, args=args)
+            if verdict is None:
+                continue
+            results[p.msg_id] = verdict
+            self.session_memory.append_event(req.session_id, {
+                "kind": "kb_assess_lookup",
+                "msg_id": p.msg_id,
+                "reasonable": verdict.get("reasonable"),
+            })
+        if results:
+            bundle.kb_assess_by_proposal = results
+            bundle.notes.append(
+                f"kb_assess_injected count={len(results)}"
+            )
+
+    @staticmethod
+    def _assess_focus(merged_context: dict[str, Any]) -> dict[str, Any]:
+        """Map merged review context to the assess endpoint's ``focus``.
+
+        Args:
+            merged_context (dict[str, Any]): Session-merged review context.
+
+        Returns:
+            dict[str, Any]: A ``focus`` dict with non-empty known dimensions.
+        """
+        hardware = (
+            merged_context.get("hardware")
+            or merged_context.get("gpu_type")
+            or merged_context.get("scale")
+        )
+        candidate = {
+            "model": merged_context.get("model"),
+            "hardware": hardware,
+            "framework": merged_context.get("framework"),
+            "framework_version": merged_context.get("framework_version"),
+            "precision": merged_context.get("precision"),
+        }
+        return {
+            k: v for k, v in candidate.items()
+            if v not in (None, "", "unknown")
+        }
 
     # ------------------------------------------------------------------
     # L4 helper: pull recent HIGH-severity Robustness findings into the

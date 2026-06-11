@@ -207,6 +207,50 @@ def _make_backend(
     return backend, fake_client
 
 
+def test_cortex_kb_url_propagated_to_runtime_env(
+    fake_critic_root, fake_session_dir, monkeypatch
+):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    backend = CriticAgentBackend(
+        critic_agent_root=fake_critic_root,
+        session_dir=fake_session_dir,
+        codex_client_factory=lambda: FakeOpenAIClient([]),
+        runtime_caller_factory=lambda: (lambda call: None),
+        cortex_kb_url="http://kb.local/",
+    )
+    env = backend._build_runtime_env()
+    assert env["CORTEX_KB_URL"] == "http://kb.local/"
+
+
+def test_explicit_cortex_kb_url_env_wins(
+    fake_critic_root, fake_session_dir, monkeypatch
+):
+    monkeypatch.setenv("CORTEX_KB_URL", "http://from-env.local")
+    backend = CriticAgentBackend(
+        critic_agent_root=fake_critic_root,
+        session_dir=fake_session_dir,
+        codex_client_factory=lambda: FakeOpenAIClient([]),
+        runtime_caller_factory=lambda: (lambda call: None),
+        cortex_kb_url="http://from-flag.local",
+    )
+    env = backend._build_runtime_env()
+    assert env["CORTEX_KB_URL"] == "http://from-env.local"
+
+
+def test_no_cortex_kb_url_leaves_env_unset(
+    fake_critic_root, fake_session_dir, monkeypatch
+):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    backend = CriticAgentBackend(
+        critic_agent_root=fake_critic_root,
+        session_dir=fake_session_dir,
+        codex_client_factory=lambda: FakeOpenAIClient([]),
+        runtime_caller_factory=lambda: (lambda call: None),
+    )
+    env = backend._build_runtime_env()
+    assert "CORTEX_KB_URL" not in env
+
+
 # _extract_review_json
 def test_extract_review_json_fenced():
     text = """Reasoning prose.
