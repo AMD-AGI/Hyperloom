@@ -1714,6 +1714,21 @@ def test_duration_fallback_ignores_other_bucket_sidecar_recoveries():
     assert warning is None
 
 
+def test_merge_candidates_preserves_first_occurrence_order_by_name():
+    merged = tla.merge_candidates_preserving_order(
+        [{"name": "ranked_a"}, {"name": "shared_kernel"}],
+        [{"name": "shared_kernel"}, {"name": "sidecar_b"}],
+        [{"name": "sidecar_c"}],
+    )
+
+    assert [c["name"] for c in merged] == [
+        "ranked_a",
+        "shared_kernel",
+        "sidecar_b",
+        "sidecar_c",
+    ]
+
+
 # normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
 @pytest.mark.parametrize("raw,expected", [
     ("gemm", "GEMM"),

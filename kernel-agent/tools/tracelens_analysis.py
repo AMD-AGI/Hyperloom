@@ -187,6 +187,23 @@ def rank_analysis_candidates_for_dispatch(
     return ranked, warning
 
 
+def merge_candidates_preserving_order(
+    *candidate_lists: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge candidate lists by kernel name, preserving first occurrence order."""
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidates in candidate_lists:
+        for cand in candidates:
+            name = str(cand.get("name") or "").strip().lower()
+            key = name or str(cand.get("kernel_id") or id(cand))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cand)
+    return merged
+
+
 def _build_trace_split_warning(
     *, trace_input: Path, split_dir: Path, split_rc: int,
     mixed_count: int, decode_count: int, prefilldecode_count: int,
@@ -3854,7 +3871,11 @@ def main() -> int:
                                 log=lambda msg: append_log(log_path, msg),
                             )
                             if fallback_warning is not None:
-                                report_cands = ranked_pool + pool_fallback_cands
+                                report_cands = merge_candidates_preserving_order(
+                                    ranked_pool,
+                                    fallback_cands,
+                                    pool_fallback_cands,
+                                )
                                 trace_health_warnings.append(fallback_warning)
                                 append_log(
                                     log_path,
