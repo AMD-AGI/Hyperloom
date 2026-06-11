@@ -1009,10 +1009,14 @@ class PolicyGate:
             return
         if is_action_llm_proposable_in_phase_with_interleave(
             action_name, phase,
+            explore_enabled=getattr(state, "explore_enabled", None),
         ):
             return
         allowed = tuple(sorted(
-            llm_proposable_actions_for_with_interleave(phase)
+            llm_proposable_actions_for_with_interleave(
+                phase,
+                explore_enabled=getattr(state, "explore_enabled", None),
+            )
         ))
         hint = (
             f"you are in phase={phase}; action {action_name!r} is not in "

@@ -6425,6 +6425,9 @@ class Coordinator:
                     ):
                         self.shared_state.record_kernel_opt(result)
                     self.shared_state.save(self.session_dir)
+                    # Auto-enqueue integrate for KEEP'd kernels that haven't
+                    # been integrated yet (IR-3: integration is mandatory).
+                    await self._auto_enqueue_pending_integrations()
                 if kind == "run_gemm_tuning":
                     self.shared_state.record_gemm_tuning(result)
                     self.shared_state.save(self.session_dir)
@@ -6737,6 +6740,64 @@ class Coordinator:
         if latest:
             top = latest[0]
             await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
+
+    async def _auto_enqueue_pending_integrations(self) -> None:
+        """Auto-dispatch integrate for KEEP'd kernels not yet integrated (IR-3).
+
+        After kernel_opt completes, any kernel with decision=KEEP that has no
+        entry in kernel_integrate_attempts is immediately queued as an integrate
+        REQUEST on the kernel agent's bus. This prevents the LLM from proposing
+        explore/specialist instead of integrate after a successful kernel_opt.
+        """
+        state = self.shared_state
+        opt_attempts = getattr(state, "kernel_opt_attempts", None) or {}
+        integ_attempts = getattr(state, "kernel_integrate_attempts", None) or {}
+        if not isinstance(opt_attempts, dict):
+            return
+
+        integrated_kids: set[str] = set()
+        if isinstance(integ_attempts, dict):
+            for entry in integ_attempts.values():
+                if isinstance(entry, dict):
+                    kid = str(entry.get("kernel_id") or "")
+                    if kid:
+                        integrated_kids.add(kid)
+
+        # Track dispatched auto-integrates across ticks via instance set.
+        if not hasattr(self, "_auto_integrate_dispatched"):
+            self._auto_integrate_dispatched: set[str] = set()
+
+        pending_kids: list[str] = []
+        for kid, data in opt_attempts.items():
+            if not isinstance(data, dict):
+                continue
+            decision = str(data.get("last_decision") or "").upper()
+            if (
+                decision == "KEEP"
+                and kid not in integrated_kids
+                and kid not in self._auto_integrate_dispatched
+            ):
+                pending_kids.append(kid)
+
+        if not pending_kids:
+            return
+
+        for kid in pending_kids:
+            log.info(
+                "auto-integrate: dispatching integrate for KEEP'd kernel %s "
+                "(IR-3 mandatory integration)",
+                kid,
+            )
+            await self.bus.append_and_seq(Message.new(
+                "orchestration", "kernel", "request",
+                {
+                    "kind": "integrate",
+                    "kernel_id": kid,
+                    "source": "auto_integrate_after_kernel_opt",
+                },
+                priority=2,
+            ))
+            self._auto_integrate_dispatched.add(kid)
 
     def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
         """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_attempts immediately so the next-tick prompt is accurate mid-batch."""

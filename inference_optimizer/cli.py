@@ -156,6 +156,7 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
 def _build_orchestration_prompt(
     *,
     no_kernel: bool,
+    no_explore: bool = False,
     framework: str,
     objective: Objective,
     max_minutes: int,
@@ -170,6 +171,7 @@ def _build_orchestration_prompt(
         enabled_actions=enabled,
         framework=framework,
         kernel_enabled=not no_kernel,
+        explore_enabled=not no_explore,
         objective_kind=kind,
         objective_value=value,
         max_minutes=int(max_minutes),
@@ -3945,6 +3947,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt or _build_orchestration_prompt(
             no_kernel=no_kernel,
+            no_explore=bool(getattr(args, "no_explore", False)),
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
