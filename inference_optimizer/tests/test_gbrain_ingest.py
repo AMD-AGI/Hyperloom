@@ -146,9 +146,16 @@ def test_negative_knowledge_absent_yields_empty() -> None:
     assert r["failures"] == [] and r["findings"] == []
 
 
-def test_recipe_to_page_skips_bare_anchor() -> None:
-    assert recipe_to_page(_recipe(best_config={})) is None
+def test_recipe_to_page_mirrors_bare_anchor_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
+    assert recipe_to_page(_recipe(best_config={})) is not None
     assert recipe_to_page(_recipe(best_config={}, canonical_id="")) is None
+
+
+def test_recipe_to_page_strict_flag_skips_bare_anchor(monkeypatch) -> None:
+    monkeypatch.setenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", "1")
+    assert recipe_to_page(_recipe(best_config={})) is None
+    assert recipe_to_page(_recipe(best_config={}, lessons=[{"statement": "x"}])) is not None
 
 
 class _FakeMcp:
@@ -161,20 +168,23 @@ class _FakeMcp:
         return {}
 
 
-def test_ingest_counts_and_gates() -> None:
+def test_ingest_counts_and_gates(monkeypatch) -> None:
+    monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
     recipes = [
         _recipe(),
-        _recipe(canonical_id="inference:a:b:c:d:e", best_config={}),  # anchor -> skip
+        _recipe(canonical_id="inference:a:b:c:d:e", best_config={}),  # anchor -> mirror
+        _recipe(canonical_id="", best_config={}),                     # no cid -> skip
         _recipe(canonical_id="inference:m2:mi355x:vllm:v1:fp16",
                 model="m2", hardware="mi355x", framework="vllm"),
     ]
     mcp = _FakeMcp()
     stats = ingest_local_to_gbrain(recipes=recipes, mcp=mcp, dry_run=False)
-    assert stats["total"] == 3
-    assert stats["ingested"] == 2
-    assert stats["skipped_no_config"] == 1
+    assert stats["total"] == 4
+    assert stats["ingested"] == 3
+    assert stats["skipped_unmirrorable"] == 1
+    assert stats["skipped_no_config"] == 1  # legacy alias
     assert stats["errors"] == 0
-    assert len(mcp.puts) == 2
+    assert len(mcp.puts) == 3
 
 
 def test_ingest_dry_run_writes_nothing() -> None:
@@ -183,13 +193,15 @@ def test_ingest_dry_run_writes_nothing() -> None:
     assert stats["ingested"] == 1 and mcp.puts == []
 
 
-def test_mirror_recipe_gates_and_writes() -> None:
+def test_mirror_recipe_gates_and_writes(monkeypatch) -> None:
     from inference_optimizer.recipe_kb.gbrain_ingest import mirror_recipe
+    monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
     mcp = _FakeMcp()
     assert mirror_recipe(_recipe(), mcp) is True and len(mcp.puts) == 1
-    assert mirror_recipe(_recipe(best_config={}), mcp) is False
+    assert mirror_recipe(_recipe(best_config={}), mcp) is True
+    assert len(mcp.puts) == 2
     assert mirror_recipe(_recipe(), None) is False
-    assert len(mcp.puts) == 1
+    assert len(mcp.puts) == 2
 
 
 class _RecordingInner:
