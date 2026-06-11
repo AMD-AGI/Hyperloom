@@ -21,7 +21,14 @@ _WARNED_NO_USER_DATA = False
 
 
 def workspace_root() -> str:
-    """Return ``$USER_DATA_PATH`` if set, else ``DEFAULT_WORKSPACE_ROOT`` (warns once)."""
+    """Resolve the workspace root for kernel-agent tool outputs.
+
+    Returns ``$USER_DATA_PATH`` when set; otherwise falls back to
+    ``DEFAULT_WORKSPACE_ROOT`` and logs a one-time misconfiguration warning.
+
+    Returns:
+        The resolved workspace root path.
+    """
     global _WARNED_NO_USER_DATA
     user_data = os.environ.get(ENV_USER_DATA_PATH)
     if user_data:

@@ -40,10 +40,17 @@ def _coerce_str(value: Any) -> str:
 
 
 def read_extra_server_args(payload: dict, *, default: str = "") -> str:
-    """Read ``extra_server_args`` with a read-only fallback to legacy ``extra_sglang_args``.
+    """Read ``extra_server_args`` with a fallback to legacy ``extra_sglang_args``.
 
-    Canonical wins silently; legacy-only emits one DeprecationWarning; neither
-    returns ``default``.
+    The canonical key wins silently; a legacy-only payload emits one
+    ``DeprecationWarning``; if neither key is present, ``default`` is returned.
+
+    Args:
+        payload: The payload dict to read from.
+        default: Value returned when neither key is present.
+
+    Returns:
+        The coerced string value for the server args.
     """
     if CANONICAL_KEY in payload:
         return _coerce_str(payload[CANONICAL_KEY])
