@@ -242,10 +242,24 @@ def list_perf_prs(
     label: str | None = None,
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """List PRs from primus-cortex; hard-fails on transport/parse errors.
+    """List PRs from primus-cortex.
 
     Returns :class:`GitHubPr` (same as the GitHub backend) so the dispatcher
     can union both sources without per-source branching.
+
+    Args:
+        repo_url: Repository URL to list PRs for.
+        base_url: Primus Cortex base URL.
+        limit: Maximum number of PRs to return.
+        state: PR state filter (e.g. ``"open"``).
+        label: Optional label filter.
+        timeout_sec: Per-request timeout.
+
+    Returns:
+        A list of :class:`GitHubPr` records.
+
+    Raises:
+        PrimusCortexError: On bad repo URL or transport/parse errors.
     """
     try:
         repo_slug = _repo_slug(repo_url)
@@ -353,6 +367,18 @@ def pr_patches(
     ``diff --git`` / ``--- a/`` / ``+++ b/`` headers per file so ``git apply``
     can consume it. Honours ``previous_path`` / ``status`` for renames+deletes;
     items missing ``patch`` (binary) emit only the file header.
+
+    Args:
+        repo_slug: ``owner/name`` repository slug.
+        number: PR number to fetch patches for.
+        base_url: Primus Cortex base URL.
+        timeout_sec: Per-request timeout.
+
+    Returns:
+        A unified-diff string suitable for ``git apply``.
+
+    Raises:
+        PrimusCortexError: On unexpected payload shapes or transport errors.
     """
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}/patches")
     payload = _http_get_json(url, timeout_sec=timeout_sec)
