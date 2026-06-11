@@ -74,8 +74,19 @@ def render_template(
     """Render known ``{var}`` placeholders, raise on unknown placeholders.
 
     Leaves JSON-style ``{...}`` braces that don't match the
-    ``[A-Za-z_][A-Za-z0-9_]*`` identifier pattern untouched. ``shell_quote=True``
-    wraps each value in :func:`shlex.quote` for shell-bound strings.
+    ``[A-Za-z_][A-Za-z0-9_]*`` identifier pattern untouched.
+
+    Args:
+        template: Template string with ``{var}`` placeholders.
+        variables: Mapping of placeholder names to replacement values.
+        shell_quote: When True, wrap each value in :func:`shlex.quote` for
+            shell-bound strings.
+
+    Returns:
+        The rendered string.
+
+    Raises:
+        ValueError: If any ``{identifier}`` placeholder is left unresolved.
     """
     rendered = template
     for key, value in variables.items():
