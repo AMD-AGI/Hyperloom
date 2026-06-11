@@ -495,6 +495,25 @@ def test_gate_update_state_model_arch_tags_rejected(gate):
         assert exc.value.rule == "state_field", field_name
 
 
+def test_core_state_fields_includes_degraded_markers():
+    """``degraded_mode`` / ``model_warnings`` are preflight-authored facts that
+    drive the final report's degraded warning; locking them stops an LLM from
+    forging or clearing a degraded-run verdict."""
+    assert "degraded_mode" in CORE_STATE_FIELDS
+    assert "model_warnings" in CORE_STATE_FIELDS
+
+
+def test_gate_update_state_degraded_markers_rejected(gate):
+    """A non-core-mutating role must not forge/clear the degraded-run markers."""
+    for field_name, value in (("degraded_mode", False), ("model_warnings", [])):
+        with pytest.raises(PolicyDenied) as exc:
+            gate.validate_intent("orchestration", Intent(
+                type=IntentType.UPDATE_STATE,
+                payload={"changes": {field_name: value}},
+            ))
+        assert exc.value.rule == "state_field", field_name
+
+
 # allowed_tools_for_agent
 def test_allowed_tools_claude_returns_emit_intent(gate):
     assert gate.allowed_tools_for_agent("kernel") == ["emit_intent"]

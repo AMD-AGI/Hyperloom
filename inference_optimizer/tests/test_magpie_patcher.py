@@ -14,11 +14,17 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
+    _ATOMIC_REASON_ALREADY_PATCHED,
+    _ATOMIC_REASON_APPLIED,
+    _ATOMIC_REASON_MISSING,
+    _ATOMIC_REASON_UNRECOGNIZED_SHAPE,
+    _ATOMIC_REASON_UPSTREAM_ATOMIC,
     _LEGACY_BLOCK,
     _PATCH_SENTINEL,
     _PATCHED_BLOCK,
     _REMOTE_TRUST_SENTINEL,
     _UPSTREAM_ATOMIC_HELPER,
+    _apply_patch_atomic_reason,
     _extract_prepare_region,
     _upstream_is_already_atomic,
     ensure_magpie_atomic_scripts_patch,
@@ -306,6 +312,60 @@ def test_fail_soft_when_legacy_block_missing(tmp_path: Path):
     (bench_dir / "benchmarker.py").write_text(drifted, encoding="utf-8")
     assert ensure_magpie_atomic_scripts_patch(tmp_path) is False
     assert (bench_dir / "benchmarker.py").read_text(encoding="utf-8") == drifted
+
+
+# Reason classification — distinguish a GENUINE failure (race unmitigated)
+# from a benign no-op, so install.sh can fail-loud only on the former.
+def test_reason_applied_on_legacy_block(fake_magpie: Path):
+    bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_APPLIED
+
+
+def test_reason_already_patched(fake_magpie: Path):
+    bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_APPLIED
+    # Second pass sees the sentinel.
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_ALREADY_PATCHED
+
+
+def test_reason_upstream_atomic_is_benign(tmp_path: Path):
+    bench_py = _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_UPSTREAM_ATOMIC
+
+
+def test_reason_unrecognized_shape_is_genuine_failure(tmp_path: Path):
+    """Neither legacy block nor atomic upstream → genuine failure: the status
+    must flag atomic_genuine_failure so a strict install fails loud."""
+    drifted = (
+        "class _FakeBenchmarker:\n"
+        "    def _prepare_benchmark_scripts(self):\n"
+        "        pass\n"
+    )
+    bench_py = _write_magpie_tree(tmp_path, drifted)
+    assert (
+        _apply_patch_atomic_reason(bench_py)
+        == _ATOMIC_REASON_UNRECOGNIZED_SHAPE
+    )
+    status = magpie_scripts_patch_status(tmp_path)
+    assert status.atomic_ok is False
+    assert status.atomic_reason == _ATOMIC_REASON_UNRECOGNIZED_SHAPE
+    assert status.atomic_genuine_failure is True
+
+
+def test_missing_tree_is_benign_not_genuine_failure(tmp_path: Path):
+    """No benchmarker.py → atomic_ok False but NOT a genuine failure (the race
+    just cannot be assessed), so a strict install must not abort on it."""
+    status = magpie_scripts_patch_status(tmp_path / "nope")
+    assert status.atomic_ok is False
+    assert status.atomic_reason == _ATOMIC_REASON_MISSING
+    assert status.atomic_genuine_failure is False
+
+
+def test_upstream_atomic_status_is_not_genuine_failure(tmp_path: Path):
+    _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    status = magpie_scripts_patch_status(tmp_path)
+    assert status.atomic_ok is True
+    assert status.atomic_genuine_failure is False
 
 
 def test_already_patched_returns_true_without_rewriting(fake_magpie: Path):

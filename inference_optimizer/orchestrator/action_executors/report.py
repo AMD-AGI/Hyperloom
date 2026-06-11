@@ -95,6 +95,10 @@ def _build_summary_dict(
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         "event_counts_by_topic": ev_counts,
         "highlights": highlights,
+        # Degraded-mode advisory: surfaces a multimodal-text-fallback run so the
+        # reader knows benchmark numbers reflect the text path only.
+        "degraded_mode": bool(getattr(state, "degraded_mode", False)),
+        "model_warnings": list(getattr(state, "model_warnings", None) or []),
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
@@ -130,6 +134,11 @@ def _format_md(summary: dict[str, Any]) -> str:
     stop_detail = str(summary.get("stop_detail") or "").strip()
     if stop_detail:
         lines.append(f"- **Stop detail**: {stop_detail}")
+    if summary.get("degraded_mode"):
+        lines.append(
+            "- **⚠ Degraded mode**: ran on the TEXT path only "
+            "(multimodal inputs ignored) — see 'Degraded mode' below"
+        )
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
@@ -193,6 +202,8 @@ def _format_md(summary: dict[str, Any]) -> str:
             )
     lines.append("")
 
+    lines.extend(_format_degraded_mode_section(summary))
+
     # steward verdict transcript.
     lines.extend(_format_steward_section(summary))
 
@@ -205,6 +216,33 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.extend(_format_external_baseline_section(ext))
 
     return "\n".join(lines)
+
+
+def _format_degraded_mode_section(summary: dict[str, Any]) -> list[str]:
+    """Render the degraded-mode section (multimodal models run on the text path).
+
+    Empty when the run was not degraded. Lists each recorded model warning so
+    the reader knows benchmark numbers reflect the text decoder alone.
+    """
+    warnings = summary.get("model_warnings") or []
+    if not summary.get("degraded_mode") and not warnings:
+        return []
+    lines = ["## Degraded mode", ""]
+    lines.append(
+        "This run executed on the **text path only**. Multimodal (image/audio) "
+        "inputs were ignored, so throughput/accuracy reflect the text decoder "
+        "alone. Pass `--no-allow-mm-text-fallback` to fail-fast instead."
+    )
+    lines.append("")
+    for w in warnings:
+        if not isinstance(w, dict):
+            continue
+        name = w.get("model_name") or "?"
+        arch = w.get("architecture") or "?"
+        signal = w.get("signal") or w.get("kind") or "multimodal signal"
+        lines.append(f"- `{name}` (arch `{arch}`): {signal}")
+    lines.append("")
+    return lines
 
 
 def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:

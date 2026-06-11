@@ -393,7 +393,8 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
 
 # pin-dependency-shas: install.sh must clone Magpie / InferenceX pinned to a
 # commit SHA via the SHA-aware fetch-checkout dance, and the Magpie in-place
-# patch must be fail-soft. Grep/static-level guards on the script text.
+# patch must fail-loud on a genuine failure (strict default) while staying
+# soft on a benign no-op. Grep/static-level guards on the script text.
 
 
 def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
@@ -432,10 +433,20 @@ def test_io_install_uses_sha_aware_fetch_checkout_for_both_deps() -> None:
     assert 'git clone --depth 1 "$INFERENCEX_REPO"' not in text
 
 
-def test_io_install_magpie_patch_is_fail_soft() -> None:
-    # A no-op Magpie patch must warn-and-continue, not die; PATCH_MAGPIE=0 override preserved.
+def test_io_install_magpie_patch_strict_default_with_benign_no_op_soft() -> None:
+    # A GENUINE atomic-patch failure (race unmitigated) must fail-loud by
+    # default; a benign no-op (missing benchmarker tree) must still
+    # warn-and-continue. Both PATCH_MAGPIE and MAGPIE_PATCH_STRICT overrides
+    # are honoured and parsed as boolean-ish strings.
     text = IO_INSTALL.read_text(encoding="utf-8")
-    assert "Magpie atomic-write patch did not apply" in text, "missing fail-soft warn"
     assert "Magpie #C1 patch OK" in text, "success log must be preserved"
     assert "PATCH_MAGPIE=0" in text, "PATCH_MAGPIE=0 override must be preserved"
-    assert 'die "Magpie atomic-write patch failed' not in text
+    # Genuine failure aborts (strict default).
+    assert 'die "Magpie atomic-write patch GENUINELY failed' in text
+    # Strict mode is downgradable to a warning via a falsy MAGPIE_PATCH_STRICT.
+    assert "MAGPIE_PATCH_STRICT" in text
+    assert 'is_falsy "${MAGPIE_PATCH_STRICT:-1}"' in text
+    # Benign no-op (missing tree) still warns and continues.
+    assert "Magpie atomic-write patch skipped" in text, "missing benign no-op warn"
+    # Boolean-ish parsing helper replaces the brittle numeric -eq test.
+    assert 'is_falsy "${PATCH_MAGPIE:-1}"' in text

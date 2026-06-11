@@ -177,6 +177,23 @@ class RooflineExecutor:
         # long the auto-roofline TraceLens run took.
         _lc_t0 = time.monotonic()
 
+        # #266: emit a paired START so the auto-roofline path (which bypasses
+        # Coordinator._handle_request) does not show a lone END. Without it the
+        # operator sees nothing for the whole profile-retry + TraceLens run —
+        # potentially minutes — then a sudden END. Best-effort, never blocks the
+        # run; the END below carries the produced artifact paths + duration.
+        try:
+            self.shared_state.record_lifecycle_event(
+                step="roofline",
+                status="START",
+                detail="auto-roofline: profile + TraceLens",
+            )
+            _sd0 = Path(session_dir)
+            if _sd0.name and _sd0.is_dir() and (_sd0 / "state.json").exists():
+                self.shared_state.save(_sd0)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("roofline: lifecycle START emit failed", exc_info=True)
+
         # ---- Step 1: profile (with retry) ------------------------------------
         # sglang's torch profiler on MI300X/ROCm is unstable: ~86% per-attempt
         # failure rate (SIGQUIT / "Profiling is not in progress" / engine init
