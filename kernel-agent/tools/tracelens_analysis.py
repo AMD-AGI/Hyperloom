@@ -2273,7 +2273,16 @@ _RANK_PCT_KEYS = (
 
 
 def _coerce_float(value: Any) -> float | None:
-    """Parse a CSV/JSON cell to float (strips ``%`` / commas); ``None`` if not numeric."""
+    """Parse a CSV/JSON cell into a float.
+
+    Strips a trailing ``%`` and comma thousands separators.
+
+    Args:
+        value: The raw cell value.
+
+    Returns:
+        The parsed float, or ``None`` when not numeric.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -2322,6 +2331,12 @@ def _clean_category_label(raw: str) -> str:
     The real ``ops_summary.csv`` stores the category as a Python list-repr
     string, e.g. ``['MoE_fused']`` or ``['GEMM', 'Reduce']`` — return the first
     element (``MoE_fused`` / ``GEMM``). Plain labels pass through unchanged.
+
+    Args:
+        raw: The raw category cell value.
+
+    Returns:
+        The bare category label.
     """
     s = str(raw or "").strip()
     if s.startswith("[") and s.endswith("]"):
@@ -2337,7 +2352,14 @@ def _clean_category_label(raw: str) -> str:
 
 
 def _record_gpu_us(low: dict[str, Any]) -> float | None:
-    """Best-effort GPU time in microseconds from a per-op ranking record."""
+    """Extract GPU time in microseconds from a per-op ranking record.
+
+    Args:
+        low: A per-op ranking record with lower-cased keys.
+
+    Returns:
+        The GPU time in microseconds, or ``None`` when no time field resolves.
+    """
     for k in _RANK_TIME_MS_KEYS:
         if k in low:
             val = _coerce_float(low[k])
@@ -2470,9 +2492,16 @@ def load_ops_ranking(
 
     Returns ``[{name, category, gpu_us, gpu_pct}]`` from the first sidecar that
     yields rows (ops_summary.csv / unified_perf_summary.csv /
-    priority_data.json, under the output dir or its ``perf_report_csvs/``);
-    ``[]`` when none is present/parseable. Used only by the ``other``-bucket
-    recovery fallback — the contracted candidate source remains analysis.md.
+    priority_data.json, under the output dir or its ``perf_report_csvs/``).
+    Used only by the ``other``-bucket recovery fallback — the contracted
+    candidate source remains analysis.md.
+
+    Args:
+        skill_output_dir: The TraceLens skill output directory to scan.
+
+    Returns:
+        A list of ``{name, category, gpu_us, gpu_pct}`` rows, or ``[]`` when no
+        sidecar is present or parseable.
     """
     if not skill_output_dir:
         return []
@@ -2545,10 +2574,19 @@ def recover_other_bucket_candidates(
     the recovery net does not route non-patchable kernels to GEAK.
 
     Fires for ops that are (a) absent from ``existing_candidates`` by name and
-    (b) at or above ``min_gpu_pct`` of total GPU time (env
-    ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT``, default 10%). Returns ``[]`` when no
-    sidecar is available or nothing qualifies, so analysis.md stays the primary
-    source.
+    (b) at or above ``min_gpu_pct`` of total GPU time.
+
+    Args:
+        skill_output_dir: The TraceLens skill output directory to scan.
+        existing_candidates: Candidates already extracted from analysis.md.
+        top_k: Maximum number of recovered candidates to return.
+        min_gpu_pct: Minimum GPU-time percentage to qualify; defaults to the
+            ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT`` env value (10%).
+        log: Optional logging callable for diagnostics.
+
+    Returns:
+        The recovered candidate dicts, or ``[]`` when no sidecar is available
+        or nothing qualifies (so analysis.md stays primary).
     """
     ranking = load_ops_ranking(skill_output_dir)
     if not ranking:
@@ -2628,9 +2666,21 @@ def _finalize_candidates(
     top: list[dict[str, Any]], *, total_dur: float | None = None,
     perf_report_csv_dir: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Shared post-processing for parsed candidate rows (source resolution / pybind upgrade / backend recommend / notes); mutates ``top`` in place.
+    """Apply shared post-processing to parsed candidate rows.
 
-    When ``perf_report_csv_dir`` is given, populates each item's ``tracelens_category`` from the CSV.
+    Resolves source files, promotes pybind/launcher shims, recommends
+    backends, classifies patchability, and attaches notes; mutates ``top`` in
+    place.
+
+    Args:
+        top: The parsed candidate rows to finalize (mutated in place).
+        total_dur: Total GPU duration for percentage computation; summed from
+            ``top`` when omitted.
+        perf_report_csv_dir: Optional CSV directory used to populate each
+            item's ``tracelens_category``.
+
+    Returns:
+        The finalized candidate list (the same ``top`` object).
     """
     op_cat_map = (
         load_op_category_map(perf_report_csv_dir)
@@ -2724,9 +2774,16 @@ def _finalize_candidates(
 
 
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
-    """Recommend a backend ladder (GEAK first, then claude/codex) for a reusable native kernel.
+    """Recommend a backend ladder for a reusable native kernel.
 
-    Returns ``[]`` for unresolved source, non-reusable, vendor-binary, or runtime-generated kernels.
+    Orders GEAK first, then claude/codex.
+
+    Args:
+        candidate: The hot-kernel candidate dict.
+
+    Returns:
+        The recommended backend names, or ``[]`` for unresolved source,
+        non-reusable, vendor-binary, or runtime-generated kernels.
     """
     source_type = candidate.get("source_type")
     if not candidate.get("source_file"):
@@ -2965,7 +3022,22 @@ def build_kernel_roofline_payload(
     roofline_json_path: str,
     candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Build the per-kernel roofline sidecar (a view over candidates + optional --roofline-json; missing counters stay null)."""
+    """Build the per-kernel roofline sidecar payload.
+
+    A view over the candidates plus an optional ``--roofline-json``; missing
+    counters stay null.
+
+    Args:
+        trace_input: The trace input path recorded in the payload.
+        trace_input_type: Whether ``trace_input`` is a file or capture dir.
+        analysis_md_path: Path to the source analysis report.
+        kernel_candidates_path: Path to the candidates JSON.
+        roofline_json_path: Optional path to an external roofline JSON.
+        candidates: The finalized hot-kernel candidate rows.
+
+    Returns:
+        The kernel-roofline sidecar payload dict.
+    """
     rows = [
         _kernel_roofline_row(candidate)
         for candidate in candidates
@@ -2988,6 +3060,12 @@ def kernel_roofline_path_for_run(run_dir: Path) -> Path:
 
     PR-C layout is ``.../runs/<session_id>/<ts>_<run_id>/``; the pre-PR-C
     ``.../runs/<session_id>/`` layout is still handled by the fallback branch.
+
+    Args:
+        run_dir: The ``runs/<session_id>/`` root for the session.
+
+    Returns:
+        The stable session-level kernel roofline report path.
     """
     try:
         # PR-C layout: .../runs/<session_id>/<ts>_<run_id>/
@@ -3108,7 +3186,15 @@ _FLYDSL_BUFFER_LOAD_MARKERS = (
 
 
 def _resolve_flydsl_source_fallback() -> str:
-    """Resolve the real FlyDSL MoE kernel source ($DSL2_ROOT/kernels/moe_gemm_2stage.py) for synthetic PR #668 pseudo-ops; first existing path or ""."""
+    """Resolve the real FlyDSL MoE kernel source for synthetic pseudo-ops.
+
+    Used for PR #668 pseudo-ops, looking for
+    ``$DSL2_ROOT/kernels/moe_gemm_2stage.py`` and known fallback roots.
+
+    Returns:
+        The first existing FlyDSL MoE kernel source path, or ``""`` when none
+        exists.
+    """
     roots = [
         os.environ.get("DSL2_ROOT", "").strip(),
         os.environ.get("FLYDSL_ROOT", "").strip(),
@@ -3127,7 +3213,18 @@ def _resolve_flydsl_source_fallback() -> str:
 def _flydsl_kernel_params(
     source_file: str, target_platform: str,
 ) -> dict[str, Any]:
-    """Return FlyDSL-specific kernel_params (target arch, JIT cache state, smem/buffer-load usage); best-effort, never raises."""
+    """Build FlyDSL-specific kernel params.
+
+    Captures target arch, JIT cache state, and smem/buffer-load usage;
+    best-effort and never raises.
+
+    Args:
+        source_file: The FlyDSL kernel source path.
+        target_platform: The target GPU platform name.
+
+    Returns:
+        The FlyDSL kernel-params dict (possibly partial).
+    """
     params: dict[str, Any] = {}
     arch = _FLYDSL_TARGET_ARCH_BY_PLATFORM.get(
         (target_platform or "").strip().lower(),
@@ -3227,10 +3324,18 @@ def build_task_groups(
     *,
     source_root: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Aggregate reusable candidates by AST-resolved source function (wrapper over aggregate_by_source_function).
+    """Aggregate reusable candidates by AST-resolved source function.
 
-    Only reusable_native_kernel candidates are grouped. Returns ``[]`` when none carries a
-    parseable launcher path, so callers fall through to per-kernel dispatch.
+    A wrapper over :func:`aggregate_by_source_function`; only
+    ``reusable_native_kernel`` candidates are grouped.
+
+    Args:
+        candidates: The hot-kernel candidate rows.
+        source_root: Optional root to resolve relative source paths against.
+
+    Returns:
+        The task-group dicts, or ``[]`` when none carries a parseable launcher
+        path (callers fall through to per-kernel dispatch).
     """
     reusable = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel")]
     if not reusable:
@@ -3247,7 +3352,22 @@ def build_audit_summary(
     task_groups: list[dict[str, Any]] | None = None,
     trace_health_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build the ``tracelens/summary.json`` payload, splitting candidates into routable ``tasks`` and ``skipped`` (each with ``skip_reason``), preserving priority order. Pure function."""
+    """Build the ``tracelens/summary.json`` payload.
+
+    Splits candidates into routable ``tasks`` and ``skipped`` (each with a
+    ``skip_reason``), preserving priority order. Pure function.
+
+    Args:
+        candidates: The hot-kernel candidate rows.
+        trace_input: The trace input path recorded in the summary.
+        framework: Optional framework name recorded in the summary.
+        target_platform: Optional target platform recorded in the summary.
+        task_groups: Optional task-group projections to include.
+        trace_health_warnings: Optional trace-health warnings to include.
+
+    Returns:
+        The ``summary.json`` payload dict.
+    """
     tasks: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for cand in candidates:
@@ -3321,8 +3441,24 @@ def write_reports(
 ) -> dict[str, str]:
     """Write Hyperloom-owned sidecar JSONs and surface the upstream ``analysis.md``.
 
-    ``analysis.md`` is owned by the TraceLens SDK orchestrator and not copied/aliased (#203).
-    Raises ``RuntimeError`` rather than fabricating a report when the orchestrator didn't produce it.
+    ``analysis.md`` is owned by the TraceLens SDK orchestrator and not
+    copied/aliased (#203).
+
+    Args:
+        run_dir: The per-run output directory to write sidecars into.
+        trace_input_type: Whether the trace input is a file or capture dir.
+        trace_files: The resolved trace files for the manifest.
+        candidates: The finalized hot-kernel candidate rows.
+        args: Parsed CLI args carrying model/framework/platform settings.
+        existing_report_path: Optional pre-existing report path to surface.
+        trace_health_warnings: Optional trace-health warnings to record.
+
+    Returns:
+        A mapping of report name to its written/surfaced path.
+
+    Raises:
+        RuntimeError: When the orchestrator did not produce ``analysis.md``
+            (rather than fabricating a report).
     """
     tracelens_dir = run_dir / "tracelens"
     (tracelens_dir / "system_findings").mkdir(parents=True, exist_ok=True)
@@ -3474,6 +3610,9 @@ def _default_workspace_path() -> str:
 
     Fallback order: ``$USER_DATA_PATH``, then legacy ``$WORKSPACE_PATH``, then
     ``_paths.workspace_root()`` (which warns once when ``$USER_DATA_PATH`` is unset).
+
+    Returns:
+        The resolved default workspace path.
     """
     user_data = os.environ.get("USER_DATA_PATH")
     if user_data:
