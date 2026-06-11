@@ -26,6 +26,8 @@ from ..session_paths import runs_dir
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
 from .specialist_bench import BENCH_TOOL_ENABLED, TOOL_RUN_BENCH
+from .trace.conversation_trace import ConversationRecord, append_conversation
+from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     FREEFORM_DOMAIN,
@@ -97,11 +99,27 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp formatted with microsecond precision.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _safe_redact(s: str) -> str:
-    """Redact obvious secrets from a transcript line before writing to disk."""
+    """Redact obvious secrets from a transcript line before writing to disk.
+
+    Scans for known environment-variable secret names and masks their values
+    in place using a conservative, regex-less substitution.
+
+    Args:
+        s (str): The raw transcript line that may contain secret material.
+
+    Returns:
+        str: The line with any recognised secret names suffixed by
+            ``[REDACTED]``.
+    """
     out = s
     for needle in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
         if needle in out:
@@ -361,6 +379,21 @@ class SpecialistRunner:
         *,
         prompt_inputs: SpecialistPromptInputs | None,
     ) -> "_PreparedRun":
+        """Run the shared setup phase before dispatch.
+
+        Resolves the domain, gap, turn budget and workspace, optionally
+        provisions a git worktree, assembles the system/user prompts and
+        writes the initial prompt + heartbeat artifacts.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task.
+            prompt_inputs (SpecialistPromptInputs | None): Pre-built prompt
+                inputs; assembled from task params when ``None``.
+
+        Returns:
+            _PreparedRun: The setup bundle; ``early_return`` is set when the
+                execute phase should be skipped (e.g. unknown domain).
+        """
         params = ctx.task.params or {}
         domain_key = str(params.get("domain") or "").strip()
         gap = str(
@@ -520,6 +553,84 @@ class SpecialistRunner:
             ),
         )
 
+    def _trace_specialist_llm_call(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """Append one ``llm_calls.jsonl`` row for an in-process specialist turn.
+
+        No-op when ``self.session_dir`` is unset (some test harnesses run
+        the runner without a session dir) or the backend reported no token
+        counters. Wrapped broadly so a trace failure never aborts the run.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            md = metadata or {}
+            has_tokens = any(
+                md.get(k) is not None
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                )
+            )
+            if not has_tokens:
+                return
+            record = LLMCallRecord.from_metadata(
+                session_id=self.session_dir.name,
+                component="specialist",
+                task_id=task_id,
+                turn=turn,
+                metadata=md,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the run
+            log.debug(
+                "full-trace: specialist llm_call append failed for "
+                "task_id=%s turn=%s", task_id, turn, exc_info=True,
+            )
+
+    def _record_specialist_conversation(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for an in-process specialist
+        turn. Persists the full (redacted) prompt + completion the backend put
+        on ``metadata``. No-op without a session dir; best-effort otherwise.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            md = metadata or {}
+            prompt = md.get("prompt")
+            response = md.get("response")
+            if not prompt and not response:
+                return
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component="specialist",
+                task_id=task_id,
+                turn=turn,
+                model=md.get("model"),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the run
+            log.debug(
+                "full-trace: specialist conversation append failed for "
+                "task_id=%s turn=%s", task_id, turn, exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
     # In-process Backend path (test path)
     async def _run_via_backend(
         self, ctx: RunnerContext, prep: "_PreparedRun",
@@ -600,6 +711,21 @@ class SpecialistRunner:
                 "raw_text_preview": _safe_redact(turn_result.raw_text[:1024]),
                 "metadata": dict(turn_result.metadata),
             })
+            # Full-trace A3: in-process specialist fallback. The token
+            # spend is already in the transcript's turn metadata; mirror it
+            # onto the unified ledger keyed by task_id + turn so the
+            # collector can join it to the EXPLORE decision. The production
+            # default (subprocess) path is covered separately by B1.
+            self._trace_specialist_llm_call(
+                task_id=ctx.task.task_id,
+                turn=turn_idx,
+                metadata=turn_result.metadata,
+            )
+            self._record_specialist_conversation(
+                task_id=ctx.task.task_id,
+                turn=turn_idx,
+                metadata=turn_result.metadata,
+            )
 
             # Tool-violation check (defense in depth).
             for intent in turn_result.intents:
@@ -639,7 +765,15 @@ class SpecialistRunner:
         self, ctx: RunnerContext, prep: "_PreparedRun",
     ) -> SpecialistRunResult:
         """Spawn a per-task ``claude`` subprocess inside the worktree
-        and reap its ``specialist_done.json`` / ``patches/`` output."""
+        and reap its ``specialist_done.json`` / ``patches/`` output.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task.
+            prep (_PreparedRun): Setup bundle from :meth:`_prepare`.
+
+        Returns:
+            SpecialistRunResult: The finalized run outcome.
+        """
         assert self.subprocess_dispatcher is not None  # narrowed by run()
         domain = prep.domain
         gap = prep.gap
@@ -688,8 +822,20 @@ class SpecialistRunner:
             "stale_heartbeat": sub_result.stale_heartbeat,
             "process_log_path": sub_result.process_log_path,
             "patch_count": len(sub_result.patches),
+            "usage": sub_result.usage,
             "error": sub_result.error,
         })
+        # Full-trace B1: fold the production specialist's token spend
+        # (recovered from the Claude CLI stream-json log by the dispatcher)
+        # into the unified ledger. The subprocess runs one logical agent
+        # session, so we record turn=1. ``usage`` already uses the four
+        # canonical counter names, so the metadata-shaped helper consumes
+        # it directly.
+        self._trace_specialist_llm_call(
+            task_id=ctx.task.task_id,
+            turn=1,
+            metadata=sub_result.usage,
+        )
         self._write_heartbeat(
             workspace, turn=1, max_turns=prep.max_turns, status="finished",
         )
@@ -730,6 +876,26 @@ class SpecialistRunner:
         extra_notes: list[str],
         patches_written: list[str],
     ) -> SpecialistRunResult:
+        """Persist the ``specialist_done`` artifact and build the result.
+
+        Synthesises an empty payload when none was produced, sanitises and
+        truncates the proposal set, merges discovered patches and writes the
+        on-disk ``specialist_done.json``.
+
+        Args:
+            ctx (RunnerContext): Dispatch context carrying the task.
+            prep (_PreparedRun): Setup bundle from :meth:`_prepare`.
+            specialist_done_payload (dict[str, Any] | None): Payload harvested
+                from the run, or ``None`` if the run produced none.
+            turns_used (int): Number of turns consumed.
+            tool_violations (list[str]): Non-specialist intent types seen.
+            backend_error (str): Backend/subprocess error string, if any.
+            extra_notes (list[str]): Notes to carry into the result.
+            patches_written (list[str]): Patch paths discovered by the run.
+
+        Returns:
+            SpecialistRunResult: The finalized run outcome record.
+        """
         domain = prep.domain
         gap = prep.gap
         workspace = prep.workspace
@@ -912,7 +1078,14 @@ class SpecialistRunner:
     # Coordinator-facing convenience: produce a SubAgentResult shape.
     @staticmethod
     def to_sub_agent_result(run_result: SpecialistRunResult) -> SubAgentResult:
-        """Translate the rich runner result into the dispatcher contract."""
+        """Translate the rich runner result into the dispatcher contract.
+
+        Args:
+            run_result (SpecialistRunResult): The runner-level outcome record.
+
+        Returns:
+            SubAgentResult: The TaskRegistry-facing result shape.
+        """
         state = "succeeded" if run_result.status in (
             "succeeded", "empty_synthesised", "tool_violation"
         ) else "failed"
@@ -948,20 +1121,61 @@ class SpecialistRunner:
         return p
 
     def _prompt_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``prompt.md`` path within the workspace.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The prompt path, or ``None`` when no workspace.
+        """
         return (workspace / "prompt.md") if workspace else None
 
     def _transcript_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``transcript.jsonl`` path within the workspace.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The transcript path, or ``None`` when no workspace.
+        """
         return (workspace / "transcript.jsonl") if workspace else None
 
     def _heartbeat_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``heartbeat.json`` path within the workspace.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The heartbeat path, or ``None`` when no workspace.
+        """
         return (workspace / "heartbeat.json") if workspace else None
 
     def _done_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``specialist_done.json`` path within the workspace.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The done-artifact path, or ``None`` when no workspace.
+        """
         return (workspace / "specialist_done.json") if workspace else None
 
     def _write_prompt(
         self, workspace: Path | None, system: str, user: str,
     ) -> None:
+        """Write the combined system/user prompt to ``prompt.md``.
+
+        No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            system (str): The system prompt text.
+            user (str): The user prompt text.
+        """
         path = self._prompt_path(workspace)
         if path is None:
             return
@@ -977,6 +1191,15 @@ class SpecialistRunner:
     def _append_transcript(
         self, workspace: Path | None, turn: int, entry: dict[str, Any],
     ) -> None:
+        """Append one JSON line to the workspace ``transcript.jsonl``.
+
+        No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            turn (int): The turn index the entry belongs to.
+            entry (dict[str, Any]): The transcript record to serialise.
+        """
         path = self._transcript_path(workspace)
         if path is None:
             return
@@ -992,6 +1215,17 @@ class SpecialistRunner:
         self, workspace: Path | None, *,
         turn: int, max_turns: int, status: str,
     ) -> None:
+        """Atomically write the workspace ``heartbeat.json``.
+
+        Writes to a temp file then ``os.replace``-s it into place so readers
+        never observe a partial write. No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            turn (int): The current turn index.
+            max_turns (int): The configured turn budget.
+            status (str): A short lifecycle status string.
+        """
         path = self._heartbeat_path(workspace)
         if path is None:
             return
@@ -1009,6 +1243,14 @@ class SpecialistRunner:
     def _write_specialist_done(
         self, workspace: Path | None, payload: dict[str, Any],
     ) -> None:
+        """Write the ``specialist_done.json`` artifact with a timestamp.
+
+        No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            payload (dict[str, Any]): The ``specialist_done`` payload to persist.
+        """
         path = self._done_path(workspace)
         if path is None:
             return

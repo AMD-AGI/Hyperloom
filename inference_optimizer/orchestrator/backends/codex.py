@@ -68,7 +68,19 @@ _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 
 
 def _extract_envelope(text: str) -> dict | None:
-    """Pull the first valid JSON envelope out of a model reply."""
+    """Pull the first valid JSON envelope out of a model reply.
+
+    Prefers a fenced ```json block (least ambiguous), then falls back to a bare
+    top-level object containing ``"intents"``, progressively trimming trailing
+    prose until ``json.loads`` accepts the candidate.
+
+    Args:
+        text (str): The raw model reply that may contain a JSON envelope.
+
+    Returns:
+        dict | None: The first dict envelope containing an ``"intents"`` key, or
+        ``None`` when no parseable envelope is found.
+    """
     if not text:
         return None
     for m in _FENCED_JSON_RE.finditer(text):
@@ -118,6 +130,17 @@ class CodexBackend:
     _client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Construct the OpenAI client (or use the test factory).
+
+        When ``client_factory`` is set it builds the client directly (test
+        seam). Otherwise it imports the OpenAI SDK, resolves the API key and
+        base URL from the configured env vars (with legacy fallbacks), and
+        creates an :class:`AsyncOpenAI` client.
+
+        Raises:
+            BackendError: If the ``openai`` SDK is not installed or no API key
+                is found in the environment.
+        """
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
@@ -155,6 +178,29 @@ class CodexBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,  # ignored — single API call per turn
     ) -> BackendTurnResult:
+        """Run one turn via a single chat-completion call and parse intents.
+
+        Appends the JSON-envelope output instructions to ``prompt``, issues one
+        bounded chat-completion request, extracts and validates the returned
+        envelope, and records call telemetry.
+
+        Args:
+            prompt (str): The composed turn prompt.
+            system_prompt (str | None): Optional system prompt sent as the
+                leading system message.
+            tools (list[str] | None): Unused; Codex roles are no-tools by
+                default.
+            max_turns (int): Ignored; one API call is made per turn.
+
+        Returns:
+            BackendTurnResult: The validated intents plus raw reply text and
+            model/finish metadata.
+
+        Raises:
+            BackendError: If the API call times out or otherwise fails.
+            NoIntentEmitted: If the reply has no parseable envelope or the
+                envelope fails intent validation.
+        """
         full_prompt = f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
         messages: list[dict[str, Any]] = []
         if system_prompt:
@@ -181,11 +227,23 @@ class CodexBackend:
         choice = resp.choices[0]
         text = (choice.message.content or "")
         finish = getattr(choice, "finish_reason", None)
+        # Token usage: the OpenAI chat-completions response carries a
+        # ``usage`` object (prompt_tokens / completion_tokens). Map it
+        # onto the SAME metadata keys ClaudeBackend uses so
+        # Coordinator's accumulator stays backend-agnostic. OpenAI has
+        # no prompt-cache split, so the two cache_* counters are 0.
+        usage = getattr(resp, "usage", None)
+        input_tokens = self._safe_int(getattr(usage, "prompt_tokens", None))
+        output_tokens = self._safe_int(getattr(usage, "completion_tokens", None))
         self.calls.append({
             "prompt_chars": len(full_prompt),
             "reply_chars": len(text),
             "finish_reason": finish,
             "model": self.model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
         })
 
         envelope = _extract_envelope(text)
@@ -203,8 +261,34 @@ class CodexBackend:
         return BackendTurnResult(
             intents=intents,
             raw_text=text,
-            metadata={"model": self.model, "finish_reason": finish},
+            metadata={
+                "model": self.model,
+                "finish_reason": finish,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                # Full conversation text for conversations.jsonl — the
+                # stateless backend hands it up so the caller (which has
+                # the session_dir / component / tick context) can persist
+                # it. ``full_prompt`` is the user turn; the system prompt
+                # is snapshotted once under agents/<role>/.
+                "prompt": full_prompt,
+                "response": text,
+            },
         )
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        """Coerce a usage value to int, defaulting to 0 on None / bad type.
+
+        Mirrors ``ClaudeBackend._safe_int`` so both backends report
+        identically-shaped token counts on metadata.
+        """
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
 
 
 __all__ = ["CodexBackend", "_extract_envelope"]

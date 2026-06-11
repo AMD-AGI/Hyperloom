@@ -288,7 +288,7 @@ class KernelAgentToolTests(unittest.TestCase):
             'TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"',
             install_text,
         )
-        self.assertIn('TRACELENS_REF="c35c787ef31f0425fa0028a605ffc8c60a737c2c"', install_text)
+        self.assertIn('TRACELENS_REF="0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors/TraceLens}"', install_text)
         self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"', install_text)
         self.assertIn('git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
@@ -695,7 +695,8 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
 
     def test_geak_config_for_run_falls_back_to_3600(self) -> None:
         ko = self._import_ko()
-        import tempfile, argparse
+        import tempfile
+        import argparse
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

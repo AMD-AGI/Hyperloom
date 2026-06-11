@@ -353,7 +353,7 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
-    """A KEEP appends an 'integrated' record to lessons.jsonl for dedup."""
+    """D2: a KEEP appends an 'integrated' record to lessons.jsonl for dedup."""
     import inference_optimizer.orchestrator.kb_writeback as kb_writeback
 
     kb_root = tmp_path / "kb" / "framework_optimization"
@@ -402,7 +402,7 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
-    """A REVERT appends a 'reverted_smoke_fail' record for dedup."""
+    """D2: a REVERT appends a 'reverted_smoke_fail' record for dedup."""
     import inference_optimizer.orchestrator.kb_writeback as kb_writeback
 
     kb_root = tmp_path / "kb" / "framework_optimization"

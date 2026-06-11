@@ -27,6 +27,11 @@ class MockKernelBackend:
     """Auto-respond Kernel adapter. Implements :class:`Backend`."""
 
     def __init__(self, name: str = "kernel-mock"):
+        """Initialise the mock Kernel backend.
+
+        Args:
+            name (str): Human-readable backend name used in logs and metadata.
+        """
         self.name = name
         self.calls: list[dict[str, Any]] = []
         # Track answered requests so reactor fan-out re-renders don't double-respond.
@@ -40,6 +45,23 @@ class MockKernelBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
+        """Auto-respond to every visible request, else emit a heartbeat.
+
+        Scans the rendered inbox in ``prompt`` for request rows and emits one
+        ``response`` with ``status="ok"`` per not-yet-answered request, echoing
+        the request ``kind`` as ``<kind>_done``. When no request is visible,
+        emits a single heartbeat message.
+
+        Args:
+            prompt (str): The composed turn prompt containing the rendered inbox.
+            system_prompt (str | None): Unused; accepted for protocol parity.
+            tools (list[str] | None): Unused; accepted for protocol parity.
+            max_turns (int): Unused; accepted for protocol parity.
+
+        Returns:
+            BackendTurnResult: The response and/or heartbeat intents for this
+            turn.
+        """
         self.calls.append({"prompt": prompt})
         intents: list[Intent] = []
         for match in _REQUEST_RE.finditer(prompt):

@@ -33,7 +33,16 @@ from ..sources.primus_cortex import (
 
 
 def _pr_to_candidate(pr: GitHubPr, repo_url: str, source: str) -> Candidate:
-    """Map a GitHubPr record into the shared Candidate shape."""
+    """Map a GitHubPr record into the shared Candidate shape.
+
+    Args:
+        pr (GitHubPr): Source PR record from a discovery backend.
+        repo_url (str): Repo URL to record on the candidate.
+        source (str): Origin tag (e.g. ``"primus_cortex"`` or ``"github"``).
+
+    Returns:
+        Candidate: A candidate carrying the PR ref, repo, title, and URL.
+    """
     return Candidate(
         ref=pr.ref,
         repo=repo_url,
@@ -146,7 +155,16 @@ def fetch_pr_audit_material(
 
 
 def _coerce_dict(value: dict | Path | str | None) -> dict:
-    """Accept a dict, a Path to a JSON file, or a str path; return dict."""
+    """Accept a dict, a Path to a JSON file, or a str path; return dict.
+
+    Args:
+        value (dict | Path | str | None): A dict (returned as-is), a path to a
+            JSON file, or ``None``.
+
+    Returns:
+        dict: The dict value, the parsed JSON object, or ``{}`` when the input
+            is missing, unreadable, or not a JSON object.
+    """
     if value is None:
         return {}
     if isinstance(value, dict):
@@ -162,7 +180,16 @@ def _coerce_dict(value: dict | Path | str | None) -> dict:
 
 
 def _metric_float(data: dict, keys: Iterable[str]) -> float | None:
-    """Return the first int/float among ``keys`` in ``data``."""
+    """Return the first int/float among ``keys`` in ``data``.
+
+    Args:
+        data (dict): Mapping to look up.
+        keys (Iterable[str]): Candidate keys checked in order.
+
+    Returns:
+        float | None: The first numeric value coerced to float, or ``None`` if
+            no key holds a numeric value.
+    """
     for k in keys:
         v = data.get(k)
         if isinstance(v, (int, float)):

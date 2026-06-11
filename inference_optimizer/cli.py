@@ -85,6 +85,17 @@ class _RetiredFlag(argparse.Action):
         hint: str,
         **kwargs: Any,
     ) -> None:
+        """Register the retired flag as a zero-argument, hidden action.
+
+        Args:
+            option_strings (list[str]): The flag spellings this action handles.
+            dest (str): The argparse destination name (unused; suppressed).
+            hint (str): One-line migration hint shown in the error message when
+                the retired flag is used.
+            **kwargs (Any): Passed through to :class:`argparse.Action`; ``nargs``,
+                ``default``, and ``help`` are defaulted so the flag takes no
+                value and stays out of ``--help``.
+        """
         kwargs.setdefault("nargs", 0)
         kwargs.setdefault("default", argparse.SUPPRESS)
         kwargs.setdefault("help", argparse.SUPPRESS)
@@ -98,6 +109,17 @@ class _RetiredFlag(argparse.Action):
         values: Any,
         option_string: str | None = None,
     ) -> None:
+        """Abort parsing with a migration hint when the retired flag is seen.
+
+        Args:
+            parser (argparse.ArgumentParser): The parser invoking this action.
+            namespace (argparse.Namespace): The in-progress parse namespace.
+            values (Any): Parsed values for the flag (always empty; ``nargs=0``).
+            option_string (str | None): The exact flag spelling that triggered this.
+
+        Raises:
+            SystemExit: Always — ``parser.error`` prints the message and exits 2.
+        """
         parser.error(f"{option_string} was removed. {self._hint}")
 
 
@@ -107,7 +129,19 @@ def _orchestration_rules_fragment_path() -> Path:
 
 
 def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
-    """Return ``(kind, value)`` strings consumed by the prompt builder."""
+    """Summarise an objective into the ``(kind, value)`` pair the prompt expects.
+
+    Inspects the objective for the first recognised target attribute
+    (``target_gain_pct`` → float, ``target_tput_per_gpu`` → float,
+    ``baseline_dir`` → str) and pairs it with the objective's ``kind()``.
+
+    Args:
+        objective (Objective): The run objective to summarise.
+
+    Returns:
+        tuple[str, float | str | None]: ``(kind, value)`` where ``value`` is the
+        objective's numeric / string target, or ``None`` when none is present.
+    """
     kind = objective.kind()
     value: float | str | None = None
     if hasattr(objective, "target_gain_pct"):
@@ -145,7 +179,11 @@ def _build_orchestration_prompt(
 
 
 def _load_critic_prompt() -> str:
-    """Return the Critic system prompt sourced from ``system_prompts/critic.md``."""
+    """Return the Critic system prompt sourced from ``system_prompts/critic.md``.
+
+    Returns:
+        str: The contents of ``critic.md``.
+    """
     return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
 
 
@@ -183,9 +221,13 @@ _GFX_TO_RUNNER: dict[str, str] = {
 
 
 def _gpu_runner_type(gpu_type: str) -> str:
-    """Return the Magpie runner label for a resolved real GPU type."""
+    """Return the Magpie runner label for a resolved real GPU type.
+
+    MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
+    the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
+    """
     normalized = str(gpu_type or "").strip().lower()
-    if normalized == "mi325x":
+    if normalized in ("mi325x", "mi308x"):
         return "mi300x"
     return normalized
 
@@ -269,7 +311,19 @@ def _resolve_robustness_agent_root() -> Path | None:
 
 
 def _validate_robustness_agent_runtime(root: Path) -> None:
-    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work."""
+    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work.
+
+    Runs the runtime's ``--help`` with ``cwd=root`` and ``PYTHONPATH`` extended
+    by ``<root>/src`` so the subprocess resolves the module the same way the
+    real backend will. Any launch failure or non-zero exit prints an
+    operator-facing message and aborts.
+
+    Args:
+        root (Path): The robustness-agent skill root to validate.
+
+    Raises:
+        SystemExit: With code 2 when the runtime cannot start or exits non-zero.
+    """
     src = str(root / "src")
     env = dict(os.environ)
     env["PYTHONPATH"] = src + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src
@@ -476,14 +530,14 @@ def _clean_stale_aiter_locks(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
+    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
     import subprocess
     try:
         out = subprocess.run(
             ["rocm-smi", "--showproductname"],
             capture_output=True, text=True, timeout=5,
         ).stdout.upper()
-        for tag in ("MI355X", "MI325X", "MI300X"):
+        for tag in ("MI355X", "MI325X", "MI308X", "MI300X"):
             if tag in out:
                 return tag.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
@@ -495,6 +549,29 @@ def _autodetect_gpu_type() -> str | None:
         return _GFX_TO_RUNNER.get(gfx)
     except Exception:  # noqa: BLE001
         return None
+
+
+# AMD/ROCm runner types (gfx9). dual_chunk_flash_attn (sm90+) is unsupported
+# here, and some upstream archs (DSA) are not adapted to AMD yet.
+_AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
+
+
+def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
+    """Resolve the current AMD GPU type, or None when not on AMD/unknown.
+
+    Resolution order (most authoritative first): an explicit ``gpu_type``
+    argument, the ``GPU_TYPE`` env, then a best-effort runtime autodetect.
+    Returning the resolved value only when it names a known AMD runner lets
+    callers gate AMD-specific behaviour on real hardware while still honouring
+    a launcher/CI-supplied ``gpu_type`` even if ``rocm-smi``/torch probing is
+    unavailable at the call site.
+    """
+    for cand in (explicit, os.environ.get("GPU_TYPE")):
+        norm = str(cand or "").strip().lower()
+        if norm in _AMD_GPU_TYPES:
+            return norm
+    detected = (_autodetect_gpu_type() or "").strip().lower()
+    return detected if detected in _AMD_GPU_TYPES else None
 
 
 def _resume_safe_flag(
@@ -713,6 +790,12 @@ _UNSUPPORTED_CONFIG_KEYS = (
 )
 
 
+_TEXT_COMPAT_MULTIMODAL_EXCEPTIONS = frozenset({
+    ("kimi_k25", "KimiK25ForConditionalGeneration"),
+    ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+})
+
+
 def _arch_is_supported_text_generation(arch: str) -> bool:
     """True when an architecture class name denotes a supported text-generation
     (decoder-only causal LM) model."""
@@ -720,6 +803,24 @@ def _arch_is_supported_text_generation(arch: str) -> bool:
     if not a:
         return False
     return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
+
+
+def _is_text_compatible_multimodal_exception(
+    model_type_l: str,
+    architectures: list[str],
+) -> bool:
+    """Allow known multimodal configs whose text path is benchmark-compatible.
+
+    Kimi-K2.6 and Qwen3.6 MoE ship with ``vision_config`` even when used as
+    text-only checkpoints. Their serving stacks can exercise the text-generation
+    path for our benchmark; the generic multimodal gate was too broad and
+    rejected them before baseline could start. Keep this list exact so ordinary
+    VLMs remain fail-fast.
+    """
+    return any(
+        (model_type_l, arch) in _TEXT_COMPAT_MULTIMODAL_EXCEPTIONS
+        for arch in architectures
+    )
 
 
 def _detect_unsupported_model(model_path: str) -> dict | None:
@@ -734,6 +835,9 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     architectures = _config_architectures(config)
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
+
+    if _is_text_compatible_multimodal_exception(model_type_l, architectures):
+        return None
 
     for arch in architectures:
         if arch in _UNSUPPORTED_ARCHITECTURES:
@@ -852,6 +956,43 @@ def _model_has_dual_chunk_attention(model_path: str) -> bool:
     )
 
 
+def _model_is_moe(model_path: str) -> bool:
+    """Best-effort detect a Mixture-of-Experts model from config.json.
+
+    MoE checkpoints declare an expert count (``num_experts`` /
+    ``num_local_experts`` / ``n_routed_experts``), a ``moe_intermediate_size``,
+    or carry a ``moe`` marker in ``architectures`` / ``model_type`` (e.g.
+    Qwen3MoeForCausalLM / qwen3_moe). On ROCm/aiter, sglang's default
+    ``--moe-runner-backend auto`` routes these through aiter's CK 2-stage
+    fused-MoE kernel, whose first-request JIT build is broken in some images;
+    callers use this to switch to a ROCm-capable MoE runner. Checks the top
+    level and a nested ``text_config``. Soft-degrades to False on any missing
+    / unreadable / invalid config.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    expert_keys = ("num_experts", "num_local_experts", "n_routed_experts")
+    for cfg in candidates:
+        for key in expert_keys:
+            val = cfg.get(key)
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, int) and val > 1:
+                return True
+        if cfg.get("moe_intermediate_size"):
+            return True
+        if "moe" in str(cfg.get("model_type") or "").lower():
+            return True
+        if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
+            return True
+    return False
+
+
 def _context_headroom_tokens() -> int:
     """Resolve the context headroom (tokens); env override, else default."""
     raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
@@ -935,6 +1076,183 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
         print(
             f"WARNING: failed to write session_breakdown.json on context "
+            f"fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
+
+
+# RoPE-config signals: their presence means the model uses extended/scaled
+# positions, so transformers/vLLM read a max-position field during rope init.
+# A config that ships these but no max-position key crashes with
+# "'PreTrainedConfig' object has no attribute 'max_position_embeddings'" deep
+# in engine init.
+_ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
+
+# Architectures whose runtime path is not adapted to AMD/ROCm yet.
+# Matched case-insensitively against model_type and architectures.
+_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32"})
+_AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
+
+# model_type values that ship a custom AutoConfig (auto_map) but aren't
+# registered in sglang/vLLM's config mapping. sglang falls back to
+# PreTrainedConfig (base class), which lacks max_position_embeddings etc.,
+# causing AttributeError deep in engine init.
+_UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
+
+
+def _detect_incompatible_model_config(
+    model_path: str, gpu_type: str | None = None,
+) -> str | None:
+    """Detect a statically-knowable model-config incompatibility.
+
+    Returns a human-readable reason string when the model's ``config.json``
+    will crash vLLM/transformers at load time, else ``None``. Two cases,
+    both conservative (no false positives on healthy configs):
+
+    * ``config.json`` is present but corrupt / not a JSON object — the loader
+      soft-degrades to ``None``, but a present-yet-unparseable file means the
+      framework will fail at config load, so block early.
+    * the config (top level or ``text_config``) declares a RoPE block but has
+      no max-position key at all — the rope init then dereferences a missing
+      ``max_position_embeddings``.
+
+    A fully absent ``config.json`` is NOT blocked (kept soft-degrade): the
+    upstream submission filter + downstream loader still apply.
+    """
+    if not model_path:
+        return None
+    cfg_path = Path(model_path) / "config.json"
+    if not cfg_path.is_file():
+        return None
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        # File exists but did not parse into a dict (corrupt / non-object).
+        return (
+            f"config.json at {cfg_path} is present but unparseable "
+            f"(corrupt JSON or not a JSON object); the framework would crash "
+            f"at config load."
+        )
+    # Reject DSA-like architectures only on AMD/ROCm.
+    # The same model can still run on vendor-supported NVIDIA engines.
+    if _resolve_amd_gpu_type(gpu_type):
+        model_type = str(data.get("model_type") or "").strip().lower()
+        arches = {a.lower() for a in _config_architectures(data)}
+        if (
+            model_type in _AMD_UNSUPPORTED_MODEL_TYPES
+            or arches & _AMD_UNSUPPORTED_ARCHITECTURES
+        ):
+            label = model_type or (next(iter(arches), "") if arches else "?")
+            return (
+                f"model architecture '{label}' has no AMD/ROCm runtime path "
+                f"(needs a vendor engine on NVIDIA Hopper/Blackwell, e.g. "
+                f"DeepSeek Sparse Attention); it crashes in engine init on "
+                f"this hardware."
+            )
+    scopes = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append(nested)
+    has_rope = any(
+        s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS
+    )
+    has_maxpos = any(
+        isinstance(s.get(k), int) and not isinstance(s.get(k), bool)
+        and s.get(k) > 0
+        for s in scopes for k in _MAXPOS_CONFIG_KEYS
+    )
+    if has_rope and not has_maxpos:
+        return (
+            "config.json declares a RoPE block "
+            f"({', '.join(_ROPE_CONFIG_KEYS)}) but no max-position field "
+            f"({', '.join(_MAXPOS_CONFIG_KEYS)}); transformers/vLLM rope "
+            "init dereferences a missing max_position_embeddings and crashes "
+            "in engine init (DeepSeek-V3.2-Exp class)."
+        )
+    # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
+    # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
+    auto_map = data.get("auto_map")
+    model_type = str(data.get("model_type") or "").strip().lower()
+    if (
+        isinstance(auto_map, dict)
+        and auto_map.get("AutoConfig")
+        and model_type in _UNREGISTERED_CUSTOM_CONFIG_TYPES
+    ):
+        return (
+            f"model_type '{model_type}' ships a custom AutoConfig "
+            f"({auto_map['AutoConfig']}) but is not registered in sglang/"
+            f"vLLM's config mapping; the engine falls back to "
+            f"PreTrainedConfig which lacks key attributes "
+            f"(max_position_embeddings) and crashes in init."
+        )
+    # Dual-chunk attention on AMD/ROCm: sglang hard-requires
+    # dual_chunk_flash_attn (sm90+ only) and rejects all other backends.
+    if _resolve_amd_gpu_type(gpu_type) and _model_has_dual_chunk_attention(
+        model_path
+    ):
+        return (
+            "model declares dual_chunk_attention_config but sglang requires "
+            "the dual_chunk_flash_attn backend which only builds on sm90+ "
+            "(NVIDIA Hopper); no compatible backend exists for AMD/ROCm."
+        )
+    return None
+
+
+def _preflight_model_config_compat(
+    args: argparse.Namespace, session_dir: Path,
+) -> bool:
+    """Fail fast when the model config is statically known to be incompatible.
+
+    Catches configs that crash vLLM/transformers at load (corrupt config.json,
+    or a RoPE block without any max-position field) so we persist a clear stop
+    reason instead of booting a server that dies cryptically in engine init.
+
+    Returns True when incompatible (caller should exit); False otherwise.
+    """
+    model = str(getattr(args, "model", "") or "")
+    detail = _detect_incompatible_model_config(
+        model, str(getattr(args, "gpu_type", "") or "") or None,
+    )
+    if detail is None:
+        return False
+    name = Path(model).name or model
+    reason = (
+        f"Model '{name}' has an incompatible config: {detail} Refusing to run "
+        f"before the heavy server bring-up. Upgrade the framework/transformers "
+        f"to a version that supports this model, or skip it on this hardware."
+    )
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        state.set_stop_reason("model_config_incompatible")
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist model-config stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on config "
             f"fail-fast: {exc!r}",
             file=sys.stderr,
         )
@@ -1060,6 +1378,15 @@ def _seed_shared_state(
         )
     # Resolve workload metadata from CLI flags then env; parse duplicated here to avoid re-reading manifest.json.
     def _int_env_or_arg(arg_name: str, env_name: str) -> int:
+        """Resolve an int workload knob from a CLI arg, falling back to env.
+
+        Args:
+            arg_name (str): Attribute name to read off ``args``.
+            env_name (str): Environment variable consulted when the arg is unset/0.
+
+        Returns:
+            int: The resolved value, or 0 when neither source yields a valid int.
+        """
         val = getattr(args, arg_name, None)
         if val is None or val == 0:
             raw = (os.environ.get(env_name, "") or "").strip()
@@ -1224,12 +1551,17 @@ def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
-    """Echo the freshly-created skeleton so launchers see the exact layout."""
+    """Echo the freshly-created skeleton so launchers see the exact layout.
+
+    Args:
+        session_dir (Path): The session root directory whose skeleton
+            subdirectories are listed.
+    """
     print(f"Session layout under {session_dir}:")
     for sub in _SESSION_SKELETON:
         marker = "ok" if (session_dir / sub).is_dir() else "MISSING"
         print(f"  [{marker}] {sub}/")
-    print(f"  [ok] manifest.json (written first)")
+    print("  [ok] manifest.json (written first)")
 
 
 def _snapshot_system_prompts(
@@ -1245,6 +1577,20 @@ def _snapshot_system_prompts(
 
 
 def _default_target_summary(args: argparse.Namespace) -> str:
+    """Compose a human-readable objective summary from the CLI target flags.
+
+    Used as the fallback ``target_summary`` when the operator did not pass an
+    explicit ``--target-summary``. The phrasing depends on which target flag is
+    set: ``--target-gain`` (percentage), ``--target-tput`` (tok/s/GPU), or
+    neither (open-ended optimization within the time budget).
+
+    Args:
+        args (argparse.Namespace): Parsed ``optimize`` arguments (reads ``model``,
+            ``target_gain``, ``target_tput``, ``max_hours``).
+
+    Returns:
+        str: A one-sentence description of the run's objective.
+    """
     if args.target_gain:
         return (
             f"Establish baseline on {Path(args.model).name} then drive "
@@ -1260,6 +1606,20 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
+    """Print the end-of-run summary block to stdout.
+
+    Reports the stop reason, session id, model, baseline throughput, the
+    per-round (informational) cumulative gain, the validated cumulative gain
+    (with a staleness warning when the optimization stack grew after the last
+    validation), the current best config, pruned families, and crash count.
+
+    Args:
+        state (SharedState): The final shared state after the run completes.
+        stop_reason (str): Why the run stopped (e.g. ``"target_reached"``).
+
+    Returns:
+        None
+    """
     print()
     print("================ Final summary ================")
     print(f"  stop_reason          : {stop_reason}")
@@ -1283,8 +1643,8 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
         )
     else:
         print(
-            f"  cumulative_gain_val  : 0.00% "
-            f"⚠ never validated — no `explore` stack-rebench has succeeded yet"
+            "  cumulative_gain_val  : 0.00% "
+            "⚠ never validated — no `explore` stack-rebench has succeeded yet"
         )
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
@@ -1827,6 +2187,15 @@ def _print_cortex_kb_queue_status() -> None:
     flushed = cortex_flushed_ndjson(sd)
 
     def _count(p: Path) -> int:
+        """Count non-blank lines (NDJSON rows) in a queue file.
+
+        Args:
+            p (Path): Path to the NDJSON file to count.
+
+        Returns:
+            int: The number of non-empty lines, or 0 when the file is missing
+            or unreadable.
+        """
         if not p.exists():
             return 0
         try:
@@ -2546,7 +2915,25 @@ def _gc_old_profile_traces(
 
 
 def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
-    """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS."""
+    """Create/reuse the SaFE RayJob stack for a multi-node run.
+
+    No-op when ``--nodes < 2``. Otherwise resolves the RayJob container image
+    (CLI flag → env → prior state file), creates or reuses the RayJob, runs the
+    one-time bootstrap if it hasn't run yet, exports ``RAY_ADDRESS`` for
+    kernel-agent Ray tasks, sets ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` to a
+    cluster-shared trace directory namespaced by ``rayjob_id`` (GC'ing older
+    sibling dirs), and replays previously-applied kernel patches onto the
+    (possibly fresh) pods.
+
+    Args:
+        args (argparse.Namespace): Parsed ``optimize`` arguments (reads
+            ``nodes``, ``rayjob_image``, ``rayjob_gpus_per_node``,
+            ``rayjob_extra_env``).
+
+    Raises:
+        SystemExit: With code 2 when ``--nodes >= 2`` but no RayJob image is
+            configured, or with the create/bootstrap return code on failure.
+    """
     nodes = max(1, int(args.nodes))
     if nodes < 2:
         return
@@ -2828,7 +3215,18 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
 
 
 def _argv_has_option(argv: list[str], option: str) -> bool:
-    """Return True when argv explicitly carries ``option``."""
+    """Report whether ``argv`` explicitly carries a given option.
+
+    Matches both the bare flag (``--tp``) and the ``=``-joined form
+    (``--tp=8``).
+
+    Args:
+        argv (list[str]): The argument vector to scan.
+        option (str): The long-option flag to look for (e.g. ``"--tp"``).
+
+    Returns:
+        bool: ``True`` when the option appears in ``argv``, else ``False``.
+    """
     prefix = f"{option}="
     return any(arg == option or arg.startswith(prefix) for arg in argv)
 
@@ -2990,7 +3388,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             picked = find_latest_per_session_dir()
             if picked is not None:
                 session_dir = picked
-                print(f"  --resume: auto-picked latest per-session subdir")
+                print("  --resume: auto-picked latest per-session subdir")
             else:
                 # Legacy flat layout — workspace_root itself is the session_dir.
                 session_dir = ws
@@ -3235,8 +3633,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         runner_gpu_type = _gpu_runner_type(gpu_type)
         if gpu_type and runner_gpu_type != gpu_type:
             print(
-                "WARN: mi325x uses mi300x as Magpie runner_type (same arch; "
-                "Magpie has no sglang_mi325x.sh / vllm_mi325x.sh yet)",
+                f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
+                f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
+                f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
                 file=sys.stderr,
             )
         args.gpu_type = gpu_type or None
@@ -3305,6 +3704,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         # Unsupported-model preflight: reject multimodal/vision configs (runs after seed, before heavy bring-up).
         if _preflight_unsupported_model_arch(args, session_dir):
+            sys.exit(2)
+        # Model-config compatibility preflight: reject statically-broken
+        # configs before the heavy server bring-up.
+        if _preflight_model_config_compat(args, session_dir):
             sys.exit(2)
         # Context-window preflight: reject when ISL+OSL+headroom exceeds max_position_embeddings (no stretch by policy).
         if _preflight_context_window(args, session_dir):
@@ -3510,9 +3913,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         phase_budget_pct=phase_budget_pct or None,
         # KnowledgePlane facade (None when --degraded-kb).
         knowledge_plane=knowledge_plane,
-        # Advisory multi-model proposal scorer (None when --no-proposal-scoring); never gates anything.
-        proposal_scorer=_build_proposal_scorer(args),
-        # Warm-recipe replay controls (default ON; manifest is resume-safe authority).
+        # Advisory multi-model specialist-proposal scorer. ``None`` when
+        # --no-proposal-scoring or an empty model list; otherwise scores
+        # each proposal_set and surfaces the results to Orchestration as
+        # one reference among many (never gates anything). ``session_dir``
+        # is forwarded so the scorer can append its per-model token usage
+        # to the full-trace ledger (component=proposal_scorer).
+        proposal_scorer=_build_proposal_scorer(args, session_dir),
+        # Warm-recipe replay controls. Default ON, fires when
+        # warm_start_recipe.confidence >= min_confidence and the
+        # measured gain reproduces at least min_reproduce_pct of the
+        # recipe's historical claim. Manifest is the persistent
+        # authority across restarts (resume-safe).
         warm_replay_enabled=_resume_safe_flag(
             args, "no_warm_replay", manifest, "warm_replay_enabled",
             default=True, invert=True,
@@ -3707,7 +4119,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "quantization. Ignored if --quantize (free text) is also given.",
     )
     opt.add_argument(
-        "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
+        "--gpu-type", choices=["mi300x", "mi308x", "mi325x", "mi355x"], default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
              "wins when both are present and disagree; a WARN is "
              "emitted to stderr so the operator sees the typo. Used "
@@ -4404,6 +4816,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # Integration toggles. Roofline refresh is unconditional now (fires at PRELUDE and every 10%
     # cumulative_gain_validated crossing); the legacy composite/deny profile toggles are gone.
     def _env_default_on(env_var: str) -> bool:
+        """Resolve a default-on boolean toggle from an environment variable.
+
+        Args:
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            bool: ``False`` only when the variable is explicitly set to ``"0"``;
+            ``True`` otherwise (including when unset).
+        """
         return os.environ.get(env_var, "1").strip() != "0"
 
     opt.add_argument(
@@ -4561,6 +4982,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # Default 1.10: kill a single-variant run once wall-clock exceeds baseline by +10% (outcome=KILLED_OVERTIME).
     # 0 disables (legacy variant_timeout_sec hard cap still applies); gate skips the inlined stack rebench (Q4).
     def _env_float_or(default: float, env_var: str) -> float:
+        """Resolve a float CLI default from an environment variable.
+
+        Args:
+            default (float): Value to use when the variable is unset or invalid.
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            float: The parsed env value, or ``default`` on absence / parse error.
+        """
         raw = os.environ.get(env_var, "").strip()
         if not raw:
             return float(default)
@@ -4570,6 +5000,15 @@ def _build_parser() -> argparse.ArgumentParser:
             return float(default)
 
     def _env_int_or(default: int, env_var: str) -> int:
+        """Resolve an int CLI default from an environment variable.
+
+        Args:
+            default (int): Value to use when the variable is unset or invalid.
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            int: The parsed env value, or ``default`` on absence / parse error.
+        """
         raw = os.environ.get(env_var, "").strip()
         if not raw:
             return int(default)
@@ -4816,6 +5255,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: parse arguments and dispatch the requested subcommand.
+
+    Configures logging from the ``-v`` count, resolves any ``--*-prompt`` flag
+    that points at a file (reading its contents in place), and runs the
+    ``optimize`` subcommand via :func:`asyncio.run`. Prints help and returns a
+    non-zero code for unknown commands.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv[1:]`` when ``None``.
+
+    Returns:
+        int: The process exit code (``optimize`` result, or ``2`` for no/unknown
+        command).
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)

@@ -26,6 +26,15 @@ DEFAULT_ALREADY = Path(__file__).parent / "candidates" / "already_done.json"
 
 
 def _load_json(path: Path) -> dict:
+    """Load a JSON object from disk, tolerating missing or invalid files.
+
+    Args:
+        path (Path): Path to the JSON file.
+
+    Returns:
+        dict: The parsed object, or an empty dict if the file is missing or
+        cannot be parsed (a warning is printed to stderr in the latter case).
+    """
     if not path.exists():
         return {}
     try:
@@ -63,6 +72,16 @@ def _classify_status(row: dict) -> tuple[str, str | None]:
 
 
 def _row_to_entry(row: dict) -> dict:
+    """Convert a summary row into an already_done.json entry.
+
+    Args:
+        row (dict): A summary row from a ci_summary.json file.
+
+    Returns:
+        dict: An entry with ``repo_id``, ``status``, framework/precision/tp
+        fields, and optional ``reason``, ``gain_pct``, ``vs_infx_pct``, and
+        ``task_id`` keys.
+    """
     status, reason = _classify_status(row)
     e = {
         "repo_id":   row.get("model"),
@@ -84,6 +103,19 @@ def _row_to_entry(row: dict) -> dict:
 
 
 def cmd_promote(args: argparse.Namespace) -> int:
+    """Promote batch summary rows into already_done.json.
+
+    Merges new entries and upgrades existing ones (never downgrading
+    completed > partial > failed). Without ``--write`` the planned changes are
+    printed as a dry-run.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``summary``,
+            ``already_done``, and ``write`` attributes.
+
+    Returns:
+        int: ``0`` on success or no-op, ``1`` if the summary contains no rows.
+    """
     summary = _summary_rows(Path(args.summary))
     if not summary:
         print(f"no rows in {args.summary}", file=sys.stderr)
@@ -151,6 +183,15 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
 
 def cmd_list_remaining(args: argparse.Namespace) -> int:
+    """Print candidate repo_ids that are not yet in already_done.json.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``candidates`` and
+            ``already_done`` attributes.
+
+    Returns:
+        int: ``0`` on success, ``1`` if the candidates file has no entries.
+    """
     cands = _load_json(Path(args.candidates))
     cand_repos = [c["repo_id"] for c in cands.get("candidates", [])]
     if not cand_repos:
@@ -168,6 +209,18 @@ def cmd_list_remaining(args: argparse.Namespace) -> int:
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
+    """Summarize already_done.json counts and gain statistics.
+
+    Prints totals by status, framework, and precision, plus gain stats, and
+    optionally compares against a candidates pool.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``already_done`` and
+            optional ``candidates`` attributes.
+
+    Returns:
+        int: Always ``0``.
+    """
     already = _load_json(Path(args.already_done))
     models = already.get("models", [])
     by_status: dict[str, int] = {}
@@ -209,6 +262,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """Parse CLI arguments and dispatch to the selected subcommand.
+
+    Supports the ``promote``, ``list-remaining``, and ``stats`` subcommands.
+
+    Returns:
+        int: The exit code returned by the dispatched subcommand.
+    """
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
 

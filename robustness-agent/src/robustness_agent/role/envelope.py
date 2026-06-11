@@ -165,6 +165,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
+    # operator-facing lifecycle event log (#266); Coordinator-only writer.
+    "lifecycle",
     # specialist sub-agent ledger.
     "specialist_rounds",
     "specialist_domain_empty_streak",
@@ -215,7 +217,12 @@ class Intent:
     payload: dict[str, Any] = field(default_factory=dict)
 
     def to_envelope_item(self) -> dict[str, Any]:
-        """Return the dict shape used inside an ``intents`` envelope."""
+        """Return the dict shape used inside an ``intents`` envelope.
+
+        Returns:
+            dict[str, Any]: A ``{"intent_type": ..., "payload": ...}`` dict
+            with a copy of the payload.
+        """
         return {"intent_type": self.type.value, "payload": dict(self.payload)}
 
 
@@ -237,7 +244,14 @@ class BackendTurnResult:
 # ---------------------------------------------------------------------------
 
 def build_heartbeat(body_md: str = "ok (robustness-agent)") -> Intent:
-    """Default tick-end fallback when no symptom warrants an emit."""
+    """Default tick-end fallback when no symptom warrants an emit.
+
+    Args:
+        body_md (str): Markdown body for the heartbeat message.
+
+    Returns:
+        Intent: A ``send_message`` intent on the ``heartbeat`` topic.
+    """
     return Intent(
         type=IntentType.SEND_MESSAGE,
         payload={"topic": "heartbeat", "body_md": body_md},
@@ -255,6 +269,16 @@ def build_send_message(
 
     The Coordinator soft-degrades unknown topics to ``observation`` per
     DESIGN v0.6 13.2; callers should still use a known topic.
+
+    Args:
+        topic (str): Message topic.
+        body_md (str | None): Optional markdown body.
+        to (str | None): Optional target agent name.
+        extras (Mapping[str, Any] | None): Optional extra payload fields;
+            any ``topic`` key is ignored to protect the canonical topic.
+
+    Returns:
+        Intent: A ``send_message`` intent with the assembled payload.
     """
     payload: dict[str, Any] = {"topic": topic}
     if body_md is not None:
@@ -280,6 +304,17 @@ def build_alert(
     severity must be one of :data:`ALERT_SEVERITIES`. ``summary`` is the
     one-line message PolicyGate sees; ``detail`` carries structured
     evidence the Coordinator persists verbatim.
+
+    Args:
+        severity (str): Alert severity; must be in :data:`ALERT_SEVERITIES`.
+        summary (str): One-line, non-empty alert summary.
+        detail (Mapping[str, Any] | None): Optional structured evidence.
+
+    Returns:
+        Intent: An ``alert`` intent with the assembled payload.
+
+    Raises:
+        ValueError: If ``severity`` is invalid or ``summary`` is empty.
     """
     if severity not in ALERT_SEVERITIES:
         raise ValueError(
@@ -303,6 +338,18 @@ def build_escalate(
 
     Robustness-only. Non-destructive priority-0 broadcast hint per
     DESIGN v0.6 19.3.4.
+
+    Args:
+        reason (str): Non-empty reason for the escalation.
+        next_action_hint (str): Non-empty hint for the next action.
+        severity (str): Severity; must be in :data:`ALERT_SEVERITIES`.
+
+    Returns:
+        Intent: An ``escalate_strategy_change`` intent.
+
+    Raises:
+        ValueError: If ``reason``/``next_action_hint`` is empty or
+            ``severity`` is invalid.
     """
     if not reason:
         raise ValueError("escalate reason must be non-empty")
@@ -328,6 +375,16 @@ def build_kill_task(task_id: str, reason: str) -> Intent:
     Robustness-only. ``scope`` is hardcoded to ``"task"`` because the
     upstream PolicyGate v0.6 rejects any other value (server / process
     kills go through delegate(server_lifecycle) under IR-5).
+
+    Args:
+        task_id (str): Non-empty id of the task to kill.
+        reason (str): Non-empty reason for the kill.
+
+    Returns:
+        Intent: A ``kill_task`` intent scoped to ``"task"``.
+
+    Raises:
+        ValueError: If ``task_id`` or ``reason`` is empty.
     """
     if not task_id:
         raise ValueError("kill_task task_id must be non-empty")
@@ -340,7 +397,18 @@ def build_kill_task(task_id: str, reason: str) -> Intent:
 
 
 def build_force_dispatch(task_id: str, reason: str) -> Intent:
-    """Construct a ``force_dispatch`` intent. Robustness-only."""
+    """Construct a ``force_dispatch`` intent. Robustness-only.
+
+    Args:
+        task_id (str): Non-empty id of the task to force-dispatch.
+        reason (str): Non-empty reason for the force-dispatch.
+
+    Returns:
+        Intent: A ``force_dispatch`` intent.
+
+    Raises:
+        ValueError: If ``task_id`` or ``reason`` is empty.
+    """
     if not task_id:
         raise ValueError("force_dispatch task_id must be non-empty")
     if not reason:
@@ -352,7 +420,18 @@ def build_force_dispatch(task_id: str, reason: str) -> Intent:
 
 
 def build_prune_branch(family: str, reason: str) -> Intent:
-    """Construct a ``prune_branch`` intent. Robustness-only."""
+    """Construct a ``prune_branch`` intent. Robustness-only.
+
+    Args:
+        family (str): Non-empty action family to prune.
+        reason (str): Non-empty reason for the prune.
+
+    Returns:
+        Intent: A ``prune_branch`` intent.
+
+    Raises:
+        ValueError: If ``family`` or ``reason`` is empty.
+    """
     if not family:
         raise ValueError("prune_branch family must be non-empty")
     if not reason:
@@ -375,6 +454,18 @@ def build_delegate(
     :data:`ROBUSTNESS_DELEGATE_ACTIONS`. Other action names will be
     rejected by PolicyGate's ``KERNEL_OWNED_ACTIONS`` / role check; we
     fail fast locally to keep error context.
+
+    Args:
+        action_name (str): Action to delegate; must be in
+            :data:`ROBUSTNESS_DELEGATE_ACTIONS`.
+        params (Mapping[str, Any] | None): Optional action parameters.
+        idempotency_key (str | None): Optional idempotency key.
+
+    Returns:
+        Intent: A ``delegate`` intent with the assembled payload.
+
+    Raises:
+        ValueError: If ``action_name`` is not in the robustness allowlist.
     """
     if action_name not in ROBUSTNESS_DELEGATE_ACTIONS:
         raise ValueError(
@@ -394,6 +485,17 @@ def build_update_state(changes: Mapping[str, Any]) -> Intent:
 
     Restricted to fields in :data:`ROBUSTNESS_STATE_FIELDS`;
     fields in :data:`CORE_STATE_FIELDS` are rejected upstream.
+
+    Args:
+        changes (Mapping[str, Any]): Non-empty mapping of state fields to
+            new values; keys must be in :data:`ROBUSTNESS_STATE_FIELDS`.
+
+    Returns:
+        Intent: An ``update_state`` intent carrying the changes.
+
+    Raises:
+        ValueError: If ``changes`` is empty or names a field outside the
+            robustness allowlist.
     """
     if not changes:
         raise ValueError("update_state changes must be a non-empty mapping")
@@ -417,5 +519,11 @@ def build_envelope_dict(intents: list[Intent]) -> dict[str, Any]:
     CLI's ``tick`` command to populate ``emit.json.intent_envelope`` —
     identical to ``critic-agent``'s ``commit-review`` output, so the
     same ``validate_envelope`` host-side check accepts both.
+
+    Args:
+        intents (list[Intent]): Intents to serialise into the envelope.
+
+    Returns:
+        dict[str, Any]: An ``{"intents": [...]}`` envelope dict.
     """
     return {"intents": [i.to_envelope_item() for i in intents]}

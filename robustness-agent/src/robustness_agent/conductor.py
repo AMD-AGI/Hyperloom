@@ -22,11 +22,23 @@ class ConductorReader:
     """Read events and task state from Conductor's SQLite DB."""
 
     def __init__(self, db_path: Path):
+        """Initialise the reader against a Conductor SQLite database.
+
+        Args:
+            db_path (Path): Path to the Conductor ``conductor.db`` file.
+                The connection is opened lazily by :meth:`connect`.
+        """
         self._db_path = db_path
         self._last_event_id: int = 0
         self._conn: Optional[sqlite3.Connection] = None
 
     def connect(self) -> bool:
+        """Open a read-only WAL connection to the Conductor DB.
+
+        Returns:
+            bool: True when connected; False when the file is missing or
+            the connection failed.
+        """
         if not self._db_path.exists():
             log.warning("Conductor DB not found at %s", self._db_path)
             return False
@@ -46,6 +58,18 @@ class ConductorReader:
             return False
 
     def poll_events(self, limit: int = 100) -> list[ConductorEvent]:
+        """Fetch new events since the last polled event id.
+
+        Advances the internal cursor so each call only returns rows not
+        seen before. JSON payload strings are decoded into dicts.
+
+        Args:
+            limit (int): Maximum number of events to return this call.
+
+        Returns:
+            list[ConductorEvent]: New events in ascending id order; empty
+            when disconnected or on query error.
+        """
         if not self._conn:
             return []
         try:
@@ -77,7 +101,12 @@ class ConductorReader:
             return []
 
     def get_agent_last_activity(self) -> dict[str, float]:
-        """Return {agent_name: last_event_timestamp} for stall detection."""
+        """Return {agent_name: last_event_timestamp} for stall detection.
+
+        Returns:
+            dict[str, float]: Mapping of agent name to its most recent
+            event timestamp; empty when disconnected or on query error.
+        """
         if not self._conn:
             return {}
         try:
@@ -90,6 +119,15 @@ class ConductorReader:
             return {}
 
     def get_task_state(self, task_id: str) -> Optional[dict[str, Any]]:
+        """Look up a single task row by id.
+
+        Args:
+            task_id (str): The task id to query.
+
+        Returns:
+            Optional[dict[str, Any]]: The task row as a dict, or ``None``
+            when not found, disconnected, or on query error.
+        """
         if not self._conn:
             return None
         try:
@@ -101,6 +139,12 @@ class ConductorReader:
             return None
 
     def get_active_leases(self) -> list[dict[str, Any]]:
+        """Return all leases that have not yet been released.
+
+        Returns:
+            list[dict[str, Any]]: One dict per active lease row; empty when
+            disconnected or on query error.
+        """
         if not self._conn:
             return []
         try:
@@ -112,6 +156,7 @@ class ConductorReader:
             return []
 
     def close(self) -> None:
+        """Close the underlying SQLite connection if one is open."""
         if self._conn:
             self._conn.close()
             self._conn = None

@@ -37,6 +37,10 @@ HW_SPECS: dict[str, dict[str, Any]] = {
         "hbm_gb": 192.0, "hbm_bw_gbps": 5300.0,
         "peak_tflops": _MI300X_PEAK_TFLOPS,
     },
+    "mi308x": {
+        "hbm_gb": 192.0, "hbm_bw_gbps": 5300.0,
+        "peak_tflops": _MI300X_PEAK_TFLOPS,
+    },
     "mi325x": {
         "hbm_gb": 256.0, "hbm_bw_gbps": 6000.0,
         "peak_tflops": _MI300X_PEAK_TFLOPS,
@@ -61,7 +65,14 @@ _DTYPE_BYTES: dict[str, float] = {
 
 
 def _resolve_dtype_bytes(tag: str | None) -> float:
-    """HF/precision tag → bytes per element; bf16 (2.0) on miss."""
+    """HF/precision tag → bytes per element; bf16 (2.0) on miss.
+
+    Args:
+        tag (str | None): HF ``torch_dtype`` / precision tag.
+
+    Returns:
+        float: Bytes per element, defaulting to ``2.0`` on an unknown tag.
+    """
     if not tag:
         return 2.0
     return _DTYPE_BYTES.get(str(tag).strip().lower(), 2.0)
@@ -485,6 +496,15 @@ def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
 
 
 def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
+    """Read and parse ``config.json`` from a local HF model directory.
+
+    Args:
+        model_path (Path): Local HF model directory.
+
+    Returns:
+        dict[str, Any] | None: The parsed config, or ``None`` when the file is
+            absent or unreadable.
+    """
     cfg = model_path / "config.json"
     if not cfg.is_file():
         return None

@@ -39,6 +39,17 @@ def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
 
 
 def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
+    """Read ``manifest.json`` as a plain dict.
+
+    Args:
+        session_dir (Path): The hyperloom session directory.
+        warnings (list[str]): Accumulator appended to when the file is missing
+            or unparseable.
+
+    Returns:
+        dict[str, Any]: The parsed ``manifest.json`` contents, or an empty
+            dict on any failure.
+    """
     manifest_path = session_dir / "manifest.json"
     if not manifest_path.exists():
         warnings.append(f"manifest.json missing at {manifest_path}")
@@ -194,6 +205,17 @@ def build(
                                         ),
                                         warnings,
                                         default={})
+    # Full-trace: unified token + decision timeline. Joins the per-call
+    # token ledger (reports/trace/llm_calls.jsonl + ext/*.jsonl) with the
+    # KEEP/REVERT journal + dynamic_action dispatch history. Empty (zeroed
+    # rollup) on sessions that predate the trace subsystem. Also writes
+    # reports/trace/decision_trace.jsonl as a side effect.
+    decision_trace     = _safe_collect("decision_trace",
+                                        lambda: collectors.collect_decision_trace(
+                                            sd, state, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
 
     source_files = collectors.collect_source_files(
         sd,
@@ -244,6 +266,12 @@ def build(
         # Optimization-progress curve (spec §2); ``ceiling_available`` False
         # when the watermark roofline pipeline never ran.
         "roofline_progress":   roofline_progress,
+        # Full-trace token + decision timeline (FULL_TRACE_DESIGN §6).
+        # ``decision_trace`` is the per-decision join (phase/tick/decision
+        # + token rollup); ``token_rollup`` is the by_phase / by_component
+        # / session_total summary. New optional section — v1 readers ignore
+        # it. Empty on pre-trace sessions.
+        "decision_trace":      decision_trace,
 
         "warnings":            warnings,
         "source_files":        source_files,
@@ -307,7 +335,18 @@ def write_breakdown_json(
 
 
 def _json_default(obj: Any) -> Any:
-    """Stringify objects json.dumps can't handle natively (Path, set, ...)."""
+    """Stringify objects json.dumps can't handle natively (Path, set, ...).
+
+    Args:
+        obj (Any): The object ``json.dumps`` could not serialize.
+
+    Returns:
+        Any: ``str(obj)`` for :class:`~pathlib.Path`, a sorted list for
+            ``set``.
+
+    Raises:
+        TypeError: If ``obj`` is of an unsupported type.
+    """
     if isinstance(obj, Path):
         return str(obj)
     if isinstance(obj, set):
@@ -342,6 +381,16 @@ def write_minimal_final_report(
     breakdown_link = sd / BREAKDOWN_FILENAME
 
     def _fmt_attempt(d: dict[str, Any] | None, label: str) -> str:
+        """Format one ``last_*`` attempt record as a markdown bullet.
+
+        Args:
+            d (dict[str, Any] | None): The attempt record (or ``None``).
+            label (str): The bullet label (e.g. ``"last_sweep"``).
+
+        Returns:
+            str: A markdown bullet line; ``"(none)"`` when the record is
+                empty.
+        """
         if not isinstance(d, dict) or not d:
             return f"- **{label}**: (none)"
         ts = d.get("ts") or "-"
@@ -372,7 +421,7 @@ def write_minimal_final_report(
         sw_line = "(none)"
 
     lines = [
-        f"# Inference Optimizer — emergency final report",
+        "# Inference Optimizer — emergency final report",
         "",
         "> **Auto-generated safety-net.** The CLOSE phase 5-step "
         + "sequencer did not run to completion (process exited before "
@@ -400,7 +449,7 @@ def write_minimal_final_report(
         _fmt_attempt(getattr(state, "last_explore", None), "last_explore"),
         _fmt_attempt(state.last_sweep, "last_sweep"),
         "",
-        f"## Structured detail",
+        "## Structured detail",
         "",
         f"See `{breakdown_link.name}` (sibling of session root) for the "
         f"complete `phase_history` / `critic_robustness` / "

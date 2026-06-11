@@ -147,6 +147,21 @@ class KnowledgePlane:
         pr_feed_per_repo_limit: int = DEFAULT_PR_FEED_PER_REPO_LIMIT,
         pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL,
     ) -> "KnowledgePlane":
+        """Construct a plane from injected clients and config.
+
+        Args:
+            cortex_kb (Any): Optional legacy Cortex KB client (``None`` under
+                v2).
+            pr_monitor (PRMonitorClient | None): Optional PR Monitor client.
+            domain_repos (dict[str, DomainRepos] | None): Domain→repos config;
+                loaded from disk when ``None``.
+            pr_feed_window_days (int): PR feed lookback window in days.
+            pr_feed_per_repo_limit (int): Max PRs fetched per repo.
+            pr_monitor_mcp_url (str): MCP URL advertised to specialists.
+
+        Returns:
+            KnowledgePlane: The constructed facade.
+        """
         return cls(
             pr_monitor=pr_monitor,
             domain_repos=domain_repos if domain_repos is not None else load_domain_repos(),
@@ -164,6 +179,11 @@ class KnowledgePlane:
     # Read surface
     @property
     def pr_monitor_enabled(self) -> bool:
+        """Whether the PR Monitor client is wired and enabled.
+
+        Returns:
+            bool: ``True`` when a PR Monitor client is present and enabled.
+        """
         return self.pr_monitor is not None and self.pr_monitor.enabled
 
     @property
@@ -172,7 +192,14 @@ class KnowledgePlane:
         return False
 
     def resolve_domain_repos(self, domain: str) -> DomainRepos | None:
-        """Look up domain config; returns None for unknown domains."""
+        """Look up domain config; returns None for unknown domains.
+
+        Args:
+            domain (str): The specialist domain key.
+
+        Returns:
+            DomainRepos | None: The resolved config, or ``None`` when unknown.
+        """
         return self.domain_repos.get(domain)
 
     def specialist_mcp_url(self) -> str:

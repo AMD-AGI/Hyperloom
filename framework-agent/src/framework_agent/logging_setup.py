@@ -42,7 +42,17 @@ _FILE_ENV = "FRAMEWORK_AGENT_LOG_FILE"
 
 
 def _resolve_level(explicit: str | int | None) -> int:
-    """Pick the effective log level (explicit > env > INFO)."""
+    """Pick the effective log level (explicit > env > INFO).
+
+    Args:
+        explicit (str | int | None): An explicit level as an int, a numeric
+            string, or a level name (e.g. ``"DEBUG"``). ``None`` defers to the
+            environment variables in :data:`_LEVEL_ENVS`.
+
+    Returns:
+        int: The resolved :mod:`logging` level constant, defaulting to
+            ``logging.INFO``.
+    """
     if explicit is not None:
         if isinstance(explicit, int):
             return explicit
@@ -71,6 +81,18 @@ class _JsonLineFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401
+        """Serialise a log record to a single JSON line.
+
+        Promotes any ``extra_*`` record attribute to a top-level field (with
+        the ``extra_`` prefix stripped) and includes a formatted traceback when
+        exception info is present.
+
+        Args:
+            record (logging.LogRecord): The record to format.
+
+        Returns:
+            str: A JSON object encoded as a single line.
+        """
         payload: dict[str, Any] = {
             "ts":     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
             "level":  record.levelname,
@@ -151,6 +173,14 @@ def get_logger(name: str | None = None) -> logging.Logger:
 
     When ``name`` is a fully-qualified module name (``framework_agent.xxx``),
     it is returned as-is; otherwise it is treated as a leaf under the root.
+
+    Args:
+        name (str | None): Logger name. ``None`` or empty returns the root
+            logger; a name already under the root is used verbatim; any other
+            name becomes a leaf under ``framework_agent``.
+
+    Returns:
+        logging.Logger: The resolved child (or root) logger.
     """
     if not name:
         return logging.getLogger(_ROOT_NAME)

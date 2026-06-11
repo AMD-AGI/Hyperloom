@@ -19,6 +19,13 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class HealthConfig:
+    """Tunables for :func:`evaluate_health_signals`.
+
+    Attributes:
+        no_metrics_warn_s (float): Minimum pod age in seconds before an empty
+            ``available_metrics`` list triggers a ``pod_no_metrics`` symptom.
+    """
+
     no_metrics_warn_s: float = 600.0
 
 
@@ -36,6 +43,22 @@ def evaluate_health_signals(
     *,
     config: HealthConfig | None = None,
 ) -> list[Symptom]:
+    """Emit pod-health symptoms from the server session snapshot.
+
+    Flags pods in a non-running phase (``pod_not_running``) and hands pods that
+    have produced no metric series for longer than the configured age
+    (``pod_no_metrics``).
+
+    Args:
+        ctx (ReactorContext): Reactor context (provides the current unix time).
+        data (SourceData): Collected source data including ``session_pods`` and
+            ``session_summary``.
+        config (HealthConfig | None): Tunables; defaults to :class:`HealthConfig`
+            when ``None``.
+
+    Returns:
+        list[Symptom]: All pod-health symptoms found this tick, possibly empty.
+    """
     cfg = config or HealthConfig()
     out: list[Symptom] = []
 
@@ -115,6 +138,14 @@ def evaluate_health_signals(
 
 
 def _pod_dict(entry: dict[str, Any]) -> dict[str, Any]:
+    """Extract the nested ``pod`` dict from an assignment/summary entry.
+
+    Args:
+        entry (dict[str, Any]): A session-pod assignment or summary row.
+
+    Returns:
+        dict[str, Any]: The nested ``pod`` dict, or an empty dict when absent.
+    """
     pod = entry.get("pod")
     if isinstance(pod, dict):
         return pod
@@ -122,6 +153,15 @@ def _pod_dict(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _phase(entry: dict[str, Any], pod: dict[str, Any]) -> str:
+    """Resolve a pod's phase from the entry or its nested pod dict.
+
+    Args:
+        entry (dict[str, Any]): The assignment/summary row.
+        pod (dict[str, Any]): The nested pod dict (see :func:`_pod_dict`).
+
+    Returns:
+        str: The trimmed phase string, or an empty string when unset.
+    """
     phase = entry.get("phase") or pod.get("phase")
     return str(phase or "").strip()
 

@@ -79,6 +79,22 @@ _PATCHED_BLOCK = (
 
 # "Already patched?" sentinel.
 _PATCH_SENTINEL = "Hyperloom #C1 patch"
+_REMOTE_TRUST_SENTINEL = "MAGPIE_TRUST_REMOTE_CODE"
+
+# Magpie's remote-server SGLang client path bypasses the local run_benchmark
+# helper, so it used to miss --trust-remote-code for custom tokenizer models.
+_REMOTE_DIRECT_LEGACY_BLOCK = (
+    "    SERVER_MONITOR_ARGS=()\n"
+    "    magpie_run_benchmark_serving_remote_direct || exit $?\n"
+)
+_REMOTE_DIRECT_PATCHED_BLOCK = (
+    "    SERVER_MONITOR_ARGS=()\n"
+    "    if [[ \"${MAGPIE_TRUST_REMOTE_CODE:-0}\" == \"1\" ]]; then\n"
+    "      magpie_run_benchmark_serving_remote_direct trust || exit $?\n"
+    "    else\n"
+    "      magpie_run_benchmark_serving_remote_direct || exit $?\n"
+    "    fi\n"
+)
 
 # Helper upstream Magpie introduced when it made the copy loop race-safe; its
 # presence means the legacy block is gone because upstream already fixed it.
@@ -116,6 +132,23 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _resolve_sglang_mi300x_script_path(
+    magpie_dir: Path | str | None,
+) -> Path | None:
+    """Resolve Magpie's generic SGLang MI300X benchmark script when present."""
+    root: Path | None = None
+    if magpie_dir:
+        root = Path(magpie_dir)
+    else:
+        env = os.environ.get("MAGPIE_DIR", "").strip()
+        if env:
+            root = Path(env)
+    if root is None:
+        return None
+    candidate = root / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh"
+    return candidate if candidate.is_file() else None
+
+
 @contextmanager
 def _file_lock(lock_path: str) -> Iterator[None]:
     """Best-effort cross-process mutex via ``fcntl.flock``.
@@ -144,6 +177,15 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 
 
 def _is_patched(src: Path) -> bool:
+    """Return whether ``src`` already contains the patch sentinel.
+
+    Args:
+        src (Path): The ``benchmarker.py`` file to inspect.
+
+    Returns:
+        bool: True iff the Hyperloom patch sentinel is present (and False on
+            any read error).
+    """
     try:
         return _PATCH_SENTINEL in src.read_text(encoding="utf-8")
     except OSError as e:
@@ -192,6 +234,13 @@ def _upstream_is_already_atomic(text: str) -> bool:
 def _apply_patch_atomic(src: Path) -> bool:
     """Rewrite ``src`` via temp-file + atomic rename so a crash
     mid-write cannot leave a corrupt ``benchmarker.py``.
+
+    Args:
+        src (Path): The ``benchmarker.py`` file to patch in place.
+
+    Returns:
+        bool: True when the patch was written; False when the legacy block was
+            missing or any read/write step failed.
     """
     try:
         original = src.read_text(encoding="utf-8")
@@ -260,6 +309,74 @@ def _apply_patch_atomic(src: Path) -> bool:
     return True
 
 
+def _is_remote_trust_patched(src: Path) -> bool:
+    """Return whether the SGLang remote-client trust gate is already present."""
+    try:
+        return _REMOTE_TRUST_SENTINEL in src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
+        return False
+
+
+def _apply_remote_trust_patch_atomic(src: Path) -> bool:
+    """Patch ``sglang_mi300x.sh`` so remote clients can pass trust mode."""
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
+        return False
+
+    if _REMOTE_TRUST_SENTINEL in original:
+        return True
+    if _REMOTE_DIRECT_LEGACY_BLOCK not in original:
+        log.warning(
+            "_magpie_patcher: remote benchmark direct-call block not found in "
+            "%s; Magpie custom-tokenizer trust patch could not be applied",
+            src,
+        )
+        return False
+
+    patched = original.replace(
+        _REMOTE_DIRECT_LEGACY_BLOCK,
+        _REMOTE_DIRECT_PATCHED_BLOCK,
+        1,
+    )
+    tmp_dir = src.parent
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".sglang_mi300x.sh.hyperloom_",
+            dir=str(tmp_dir),
+        )
+    except OSError as e:
+        log.warning(
+            "_magpie_patcher: cannot create temp file in %s: %s",
+            tmp_dir, e,
+        )
+        return False
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(patched)
+        os.chmod(tmp_name, src.stat().st_mode)
+        os.replace(tmp_name, src)
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot write %s: %s", src, e)
+        try:
+            os.unlink(tmp_name)
+        except OSError as cleanup_err:
+            log.debug(
+                "_magpie_patcher: best-effort cleanup failed for temp "
+                "file %s: %s", tmp_name, cleanup_err,
+            )
+        return False
+
+    log.info(
+        "_magpie_patcher: applied SGLang remote trust patch to %s",
+        src,
+    )
+    return True
+
+
 def ensure_magpie_atomic_scripts_patch(
     magpie_dir: Path | str | None = None,
 ) -> bool:
@@ -280,13 +397,22 @@ def ensure_magpie_atomic_scripts_patch(
         )
         return False
 
-    if _is_patched(src):
-        return True
-
     with _file_lock(_LOCK_PATH):
-        if _is_patched(src):
-            return True
-        return _apply_patch_atomic(src)
+        atomic_ok = _is_patched(src) or _apply_patch_atomic(src)
+        sglang_script = _resolve_sglang_mi300x_script_path(magpie_dir)
+        if sglang_script is None:
+            log.info(
+                "_magpie_patcher: sglang_mi300x.sh missing — skipping "
+                "remote trust patch (fine for reduced tests / non-SGLang "
+                "Magpie layouts)",
+            )
+            remote_trust_ok = True
+        else:
+            remote_trust_ok = (
+                _is_remote_trust_patched(sglang_script)
+                or _apply_remote_trust_patch_atomic(sglang_script)
+            )
+        return atomic_ok and remote_trust_ok
 
 
 __all__ = [
