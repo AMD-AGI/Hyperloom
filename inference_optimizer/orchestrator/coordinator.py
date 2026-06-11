@@ -2689,10 +2689,14 @@ class Coordinator:
                 "kernel_id=%s (drained %d so far)", kid, drained,
             )
             try:
-                await integrate_handler(
+                result = await integrate_handler(
                     {"kernel_id": kid, "base_tput": float(state.baseline_tput or 0.0)},
                     session_dir=self.session_dir,
                 )
+                if isinstance(result, dict) and result.get("status") != "skipped":
+                    state.record_kernel_integrate_result(result)
+                    if str(result.get("decision") or "").upper() == "KEEP":
+                        await self._record_integrate_keep(result)
                 state.save(self.session_dir)
             except Exception as exc:  # noqa: BLE001 — never block SWEEP entry
                 log.exception(

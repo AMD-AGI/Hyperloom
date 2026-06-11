@@ -21,6 +21,7 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
     MockBackend, MockTurn, ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
+from inference_optimizer.orchestrator.shared_state import SharedState
 
 
 # Fixtures
@@ -85,6 +86,58 @@ def coord(tmp_path: Path):
     c.knowledge_plane = None
     c.role_registry = {"kernel": object()}
     return c
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_keep_integrates_records_result_once(
+    tmp_path: Path, monkeypatch,
+):
+    """SWEEP entry drain must record integrate results so the same KEEP is not retried until cap."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    c.shared_state.kernel_opt_attempts = {
+        "k004": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 4.21,
+            "last_source_file": "/tmp/kernel.cu",
+        },
+    }
+    calls: list[str] = []
+
+    async def _fake_integrate_handler(payload, *, session_dir):
+        calls.append(payload["kernel_id"])
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": payload["kernel_id"],
+            "patch_path": "/tmp/optimized.cu",
+            "target_file": "/tmp/kernel.cu",
+            "base_tput": 100.0,
+            "new_tput": 102.0,
+            "gain_pct": 2.0,
+            "workspace": str(tmp_path / "integrate-k004"),
+        }
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.kernel_request_handlers.integrate_handler",
+        _fake_integrate_handler,
+    )
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._drain_pending_keep_integrates()
+
+    assert calls == ["k004"]
+    assert c.shared_state.kernel_integrate_attempts
+    assert c.shared_state.next_pending_keep_kernel_id() == ""
+    assert c.shared_state.current_best["action"] == "integrate"
+    assert c.shared_state.current_best["kernel_id"] == "k004"
 
 
 # 1. _build_sweep_params_from_recipe — pure static helper
