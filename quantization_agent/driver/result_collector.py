@@ -107,6 +107,15 @@ _STEP_LINE_RE = re.compile(
 
 
 def _parse_validation_report(text: str) -> ValidationSteps:
+    """Parse the validator's Markdown report into per-step statuses.
+
+    Args:
+        text: Contents of ``validation_report.md``.
+
+    Returns:
+        A :class:`ValidationSteps` with the auxiliary, MD5, config, and fuzzy
+        step statuses (``ok`` / ``FAIL`` / ``skipped`` / ``None`` if absent).
+    """
     by_num: dict[str, str] = {}
     for m in _STEP_LINE_RE.finditer(text):
         # Normalize to lower-case "ok"/"fail"/"skipped" for downstream compares.
@@ -123,6 +132,14 @@ def _parse_validation_report(text: str) -> ValidationSteps:
 
 
 def _read_text(path: Path) -> str | None:
+    """Read a UTF-8 text file, returning ``None`` if it cannot be read.
+
+    Args:
+        path: File to read.
+
+    Returns:
+        The file contents, or ``None`` when the file is missing or unreadable.
+    """
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -132,6 +149,17 @@ def _read_text(path: Path) -> str | None:
 
 
 def _read_json(path: Path) -> tuple[dict | None, str | None]:
+    """Read and parse a JSON file.
+
+    Args:
+        path: File to read.
+
+    Returns:
+        A ``(data, error)`` tuple. On success ``data`` is the parsed object and
+        ``error`` is ``None``; on a decode failure ``data`` is ``None`` and
+        ``error`` is a human-readable message. A missing file yields
+        ``(None, None)``.
+    """
     raw = _read_text(path)
     if raw is None:
         return None, None
@@ -179,6 +207,15 @@ def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | No
 
 
 def _has_any(directory: Path, names: Iterable[str]) -> bool:
+    """Return whether any of the named files exists in ``directory``.
+
+    Args:
+        directory: Directory to check.
+        names: Candidate file names.
+
+    Returns:
+        ``True`` if at least one named file exists, otherwise ``False``.
+    """
     for name in names:
         if (directory / name).is_file():
             return True
@@ -186,6 +223,15 @@ def _has_any(directory: Path, names: Iterable[str]) -> bool:
 
 
 def _has_glob(directory: Path, patterns: Iterable[str]) -> bool:
+    """Return whether any glob pattern matches a file in ``directory``.
+
+    Args:
+        directory: Directory to search.
+        patterns: Glob patterns to test.
+
+    Returns:
+        ``True`` if at least one pattern matches an entry, otherwise ``False``.
+    """
     for pat in patterns:
         for _ in directory.glob(pat):
             return True
@@ -213,6 +259,15 @@ def _scan_hypothesis_attempts(workspace: Path) -> tuple[int, ...]:
 
 
 def _strict_validation_enabled(env: dict[str, str] | None = None) -> bool:
+    """Return whether strict validation mode is enabled.
+
+    Args:
+        env: Environment mapping to read from; defaults to ``os.environ``.
+
+    Returns:
+        ``True`` unless ``STRICT_VALIDATION_ENV`` is explicitly set to a
+        falsy value (``0``, ``false``, ``no``, or empty).
+    """
     raw = (env if env is not None else os.environ).get(STRICT_VALIDATION_ENV, "1")
     return raw.strip().lower() not in ("0", "false", "no", "")
 
@@ -226,6 +281,21 @@ def collect_artifacts(
     *,
     env: dict[str, str] | None = None,
 ) -> CollectedArtifacts:
+    """Scan a run workspace and summarize the on-disk artifacts.
+
+    Inspects the run manifest, quantized model directory, validation report,
+    eval report, and retry/hypothesis markers to build the evidence record the
+    outcome classifier consumes.
+
+    Args:
+        workspace: Per-run workspace directory to inspect.
+        env: Environment mapping used for feature flags; defaults to
+            ``os.environ``.
+
+    Returns:
+        A :class:`CollectedArtifacts` describing which expected outputs are
+        present and any parse errors encountered.
+    """
     workspace = Path(workspace)
 
     qdir, manifest_present, manifest_err = _resolve_quantized_dir(workspace)
