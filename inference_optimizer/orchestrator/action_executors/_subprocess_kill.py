@@ -201,6 +201,12 @@ class _StreamCapture:
     """Capture child output while mirroring each line to the parent stream."""
 
     def __init__(self, proc: subprocess.Popen, *, text: bool) -> None:
+        """Set up capture/mirror threads for a child's stdout and stderr.
+
+        Args:
+            proc: The child process whose pipes should be captured.
+            text: Whether the pipes are in text (``str``) or bytes mode.
+        """
         self._text = text
         self._stdout_chunks: list[str | bytes] = []
         self._stderr_chunks: list[str | bytes] = []
@@ -219,10 +225,20 @@ class _StreamCapture:
             ))
 
     def start(self) -> None:
+        """Start the capture threads."""
         for thread in self._threads:
             thread.start()
 
     def finish(self, timeout: float = 2.0) -> tuple[str | bytes, str | bytes]:
+        """Join the capture threads and return the captured output.
+
+        Args:
+            timeout: Per-thread join timeout in seconds.
+
+        Returns:
+            A ``(stdout, stderr)`` tuple of the captured streams (``str`` or
+            ``bytes`` depending on the capture mode).
+        """
         for thread in self._threads:
             thread.join(timeout=timeout)
         empty: str | bytes = "" if self._text else b""
@@ -232,9 +248,24 @@ class _StreamCapture:
         )
 
     def _join(self, chunks: list[str | bytes]) -> str | bytes:
+        """Concatenate captured chunks using the appropriate empty separator.
+
+        Args:
+            chunks: Captured stdout or stderr chunks.
+
+        Returns:
+            The joined ``str`` or ``bytes`` output.
+        """
         return "".join(chunks) if self._text else b"".join(chunks)  # type: ignore[arg-type,return-value]
 
     def _pump(self, pipe, chunks: list[str | bytes], mirror) -> None:
+        """Read a pipe line-by-line, capturing and mirroring each line.
+
+        Args:
+            pipe: The child pipe to read from.
+            chunks: List that read chunks are appended to.
+            mirror: Parent stream the chunks are echoed to.
+        """
         try:
             while True:
                 chunk = pipe.readline()
@@ -249,6 +280,12 @@ class _StreamCapture:
                 pass
 
     def _mirror(self, chunk: str | bytes, mirror) -> None:
+        """Echo a captured chunk to the parent stream, ignoring errors.
+
+        Args:
+            chunk: The captured ``str``/``bytes`` chunk.
+            mirror: Parent stream to write to.
+        """
         try:
             if isinstance(chunk, bytes):
                 stream = getattr(mirror, "buffer", mirror)
@@ -466,6 +503,13 @@ class _ServerDeadDetected(Exception):
     def __init__(
         self, *, marker: str, grace_sec: float, elapsed_sec: float,
     ) -> None:
+        """Build the error message describing the hung-after-death condition.
+
+        Args:
+            marker: Log marker that indicated the server init died.
+            grace_sec: Grace period the parent was allowed after the marker.
+            elapsed_sec: Actual wall-clock elapsed at trip time.
+        """
         super().__init__(
             f"server init died (marker={marker!r}) and parent hung past "
             f"grace {grace_sec:.1f}s (elapsed={elapsed_sec:.1f}s)"
