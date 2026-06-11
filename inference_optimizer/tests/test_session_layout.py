@@ -214,6 +214,7 @@ def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypa
     # NOT under $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "shared"))
     monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
+    monkeypatch.delenv("MAGPIE_DIR", raising=False)
     monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
     expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos"
     assert paths.open_source_root() == expected
