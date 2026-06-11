@@ -17,8 +17,8 @@ name: SaFE Optimize Submit
 #                                    register, so download is overlapped
 #                                    with the rest of the batch (no serial
 #                                    prewarm stage that blocks optimize).
-#                                    schedule forces max_parallel=100 so the
-#                                    whole 100-model batch dispatches at once
+#                                    schedule forces max_parallel=200 so the
+#                                    whole 200-model batch dispatches at once
 #                                    (dispatch default stays 60).
 #   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
@@ -76,7 +76,7 @@ on:
         required: false
         default: '7'
       max_parallel:
-        description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 100 to match the 100-model batch).'
+        description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 200 to match the 200-model batch).'
         required: false
         default: '60'
       submit_jitter_sec:
@@ -204,24 +204,26 @@ jobs:
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      # Rolling cron prioritizes the current not-on-leaderboard pool generated
-      # by ci/build_rolling_pool.py. The full merged corpus lives in
-      # ci/candidates/production_1000_from_hf_2026-05-25.json; the top-100 are
-      # reserved in manual_100.json for operator-triggered dispatch.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/unrun_excluding_manual_100.json' || github.event.inputs.candidates_file }}
-      # Schedule pins batch_index=0: every cron pulls the FIRST 100 of the
-      # (dynamically shrinking) un-run + not-active list, so rotation is driven
-      # by the leaderboard/active exclusions instead of a clock slot.
+      # Rolling cron cycles the downloads>100 pool (every size), ordered with
+      # not-yet-run models first so the front-anchored window picks them up
+      # before the already-run tail. With exclude_leaderboard=false (see below)
+      # the pool never drains — once the front models finish and are no longer
+      # active, the window wraps and the whole 2426-model pool keeps repeating.
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json' || github.event.inputs.candidates_file }}
+      # Schedule pins batch_index=0: every cron walks from the FRONT of the
+      # pool, skipping models currently active in another run (active-refill),
+      # so the window advances as tasks occupy/free up runners rather than by a
+      # clock slot. Not-run models sit at the front and are picked up first.
       INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '0' || github.event.inputs.batch_index }}
-      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '100' || github.event.inputs.batch_size }}
+      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '200' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
-      # Schedule EXCLUDES leaderboard-known models: the rolling cron only
-      # submits models with no leaderboard data yet, so each run makes forward
-      # progress and the pool drains to empty. We also exclude active workflows
-      # so cron never double-submits a model already running — the two
-      # exclusions together advance the "first 100" window every run.
-      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_leaderboard }}
+      # Schedule does NOT exclude leaderboard-known models: we want the whole
+      # downloads>100 pool to keep cycling (re-running finished models too), so
+      # the pool never drains. We still exclude active workflows so cron never
+      # double-submits a model already running — that exclusion alone advances
+      # the front-anchored window each run.
+      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
       INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
@@ -247,7 +249,7 @@ jobs:
     timeout-minutes: 780
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '100' || github.event.inputs.max_parallel || '60') }}
+      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '200' || github.event.inputs.max_parallel || '60') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
