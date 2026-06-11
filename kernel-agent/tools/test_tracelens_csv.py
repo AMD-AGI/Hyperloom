@@ -89,15 +89,11 @@ def test_deterministic_category_analysis_command_skips_non_compute(tmp_path):
     assert tla._category_analysis_command("unknown_new_category", "compute_kernel", tmp_path) is None
 
 
-def test_deterministic_pipeline_failure_cannot_return_empty_hot_kernels():
-    with pytest.raises(RuntimeError, match="refusing to return empty hot_kernels"):
-        tla._raise_on_empty_failed_deterministic_pipeline(2, [])
+def test_deterministic_pipeline_failure_cannot_return_partial_hot_kernels():
+    with pytest.raises(RuntimeError, match="refusing to return partial hot_kernels"):
+        tla._raise_on_failed_deterministic_pipeline(2)
 
-    tla._raise_on_empty_failed_deterministic_pipeline(0, [])
-    tla._raise_on_empty_failed_deterministic_pipeline(
-        2,
-        [{"name": "already_extracted"}],
-    )
+    tla._raise_on_failed_deterministic_pipeline(0)
 
 
 def test_deterministic_steps_return_category_script_failure(monkeypatch, tmp_path):
@@ -144,6 +140,96 @@ def test_deterministic_steps_return_category_script_failure(monkeypatch, tmp_pat
         for cmd in calls
     )
     assert any("generate_priority_data" in " ".join(cmd) for cmd in calls)
+
+
+def test_deterministic_steps_quote_priority_output_dir(monkeypatch, tmp_path):
+    output_dir = tmp_path / "out'quoted"
+    category_dir = output_dir / "category_data"
+    category_dir.mkdir(parents=True)
+    (category_dir / "category_manifest.json").write_text(
+        '{"categories": []}',
+        encoding="utf-8",
+    )
+    (tmp_path / "trace.json").write_text("{}", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd, *, cwd, log_path, timeout_s, env=None):
+        calls.append(cmd)
+        return 0
+
+    monkeypatch.setattr(tla, "run_command", fake_run_command)
+
+    rc = tla._run_deterministic_tracelens_steps(
+        trace_path=tmp_path / "trace.json",
+        output_dir=output_dir,
+        tl_root=tmp_path,
+        platform="MI300X",
+        analysis_mode="standalone",
+        framework="sglang",
+        capture_folder=None,
+        log_path=tmp_path / "tl.log",
+        budget_minutes=1,
+    )
+
+    assert rc == 0
+    priority_cmd = next(cmd for cmd in calls if "generate_priority_data" in " ".join(cmd))
+    assert str(output_dir) in priority_cmd[2]
+    assert f"generate_priority_data({str(output_dir)!r})" in priority_cmd[2]
+
+
+def test_deterministic_main_fails_before_high_idle_gate(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import json as _json
+
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"traceEvents": []}', encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    tl_root = tmp_path / "TraceLens"
+    skill = (
+        tl_root
+        / "TraceLens"
+        / "Agent"
+        / "Analysis"
+        / ".cursor"
+        / "skills"
+        / "analysis-orchestrator.md"
+    )
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# skill\n", encoding="utf-8")
+
+    monkeypatch.setattr(tla, "count_gpu_kernel_events", lambda _path: 1)
+    monkeypatch.setattr(tla, "populate_gpu_arch_json", lambda **_kwargs: None)
+    monkeypatch.setattr(tla, "run_command", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        tla,
+        "_run_deterministic_tracelens_steps",
+        lambda **_kwargs: 9,
+    )
+
+    def _unexpected_idle_read(_output_dir):
+        raise AssertionError("idle gate must not run after deterministic failure")
+
+    monkeypatch.setattr(tla, "_extract_idle_pct_from_gpu_timeline", _unexpected_idle_read)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tracelens_analysis.py",
+            "--trace-input", str(trace),
+            "--workspace-path", str(workspace),
+            "--tracelens-root", str(tl_root),
+            "--analysis-route", "deterministic",
+            "--skip-split",
+        ],
+    )
+
+    assert tla.main() == 1
+    result = _json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert "Deterministic TraceLens pipeline failed" in result["error"]
 
 
 # A path — is_kernel_event strict cat == 'kernel'
