@@ -151,7 +151,16 @@ def evaluate_repeated_payload_signals(
 def _walk_streaks(
     events: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group consecutive same-hash failures per family; a ``succeeded`` entry resets the streak."""
+    """Group consecutive same-hash failures per family.
+
+    A ``succeeded`` entry resets the streak for its family.
+
+    Args:
+        events: Time-ordered ``delegated_result`` rows.
+
+    Returns:
+        Mapping of family to its current run of same-hash failure events.
+    """
     by_family: dict[str, list[dict[str, Any]]] = {}
     current_hash: dict[str, str | None] = {}
     for ev in events:
@@ -183,7 +192,19 @@ def _gather_events(
     coord_events: list[dict[str, Any]],
     cfg: RepeatedPayloadConfig,
 ) -> list[dict[str, Any]]:
-    """Build a single time-ordered list of ``delegated_result`` rows, trimmed to ``lookback_events``."""
+    """Build a time-ordered list of ``delegated_result`` rows.
+
+    Unions inbox items and coordinator events, trimmed to
+    ``lookback_events``.
+
+    Args:
+        inbox: Reactor inbox items.
+        coord_events: Coordinator event dicts.
+        cfg: Repeated-payload configuration (lookback window).
+
+    Returns:
+        The merged, trimmed list of ``delegated_result`` rows.
+    """
     inbox_rows = [
         {
             "topic": item.topic,
@@ -277,9 +298,17 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
 
 
 def _normalise_extra_server_args_key(payload: dict[str, Any]) -> dict[str, Any]:
-    """Shallow copy with ``params.extra_server_args`` set from the compat
-    helper (originals not mutated). No-op when no extra-args key or canonical
-    already present; the shim's DeprecationWarning stays as the legacy audit channel.
+    """Normalise the legacy ``extra_sglang_args`` key to the canonical one.
+
+    Returns a shallow copy with ``params.extra_server_args`` populated from
+    the compat helper (originals not mutated). No-op when no extra-args key
+    exists or the canonical key is already present.
+
+    Args:
+        payload: The event payload to normalise.
+
+    Returns:
+        The (possibly copied) payload with a canonical extra-args key.
     """
     params = payload.get("params")
     if not isinstance(params, dict):
@@ -296,7 +325,16 @@ def _normalise_extra_server_args_key(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _walk_path(payload: dict[str, Any], path: str) -> Any:
-    """Walk dotted ``a.b.c`` paths against nested dicts (non-dicts short-circuit to ``None``)."""
+    """Walk a dotted ``a.b.c`` path against nested dicts.
+
+    Args:
+        payload: The mapping to traverse.
+        path: Dot-separated key path.
+
+    Returns:
+        The value at the path, or ``None`` if any segment is missing or a
+        non-dict is encountered.
+    """
     cur: Any = payload
     for token in path.split("."):
         if not isinstance(cur, dict):
