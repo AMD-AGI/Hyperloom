@@ -34,12 +34,15 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Rolling un-run pool: 100 models three times a day, firing at UTC
-  # 04:00 / 12:00 / 20:00 (Beijing 12:00 / 20:00 / 04:00). Each run submits the
-  # next 100 models from ci/candidates/unrun_excluding_manual_100.json that are
-  # NOT yet on the leaderboard AND not already running (exclude_leaderboard +
-  # exclude_active below), so the priority pool drains toward empty. Manual
-  # workflow_dispatch is unaffected.
+  # Rolling downloads>100 pool: 200 models three times a day, firing at UTC
+  # 04:00 / 12:00 / 20:00 (Beijing 12:00 / 20:00 / 04:00). Each fire submits the
+  # NEXT sequential 200-model slice of
+  # ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json (ordered not-run
+  # first), stepping batch 0,1,2,... and wrapping at the pool end. Both
+  # exclude_leaderboard and exclude_active are OFF on schedule: slices are
+  # disjoint, so the whole pool keeps cycling (re-running finished models too).
+  # The tail batch is short (not head-wrapped) so consecutive fires never
+  # double-submit the head models. Manual workflow_dispatch is unaffected.
   schedule:
     - cron: '0 4,12,20 * * *'
   workflow_dispatch:

@@ -456,7 +456,8 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
     """Determine which batch slice to dispatch for this run.
 
     Honors an explicit ``INPUT_BATCH_INDEX``; otherwise derives the index from
-    the cron half-day slot (schedule events) or the GitHub run number.
+    the sequential scheduled-fire counter (schedule events, see
+    ``_cron_batch_index``) or the GitHub run number (manual dispatch).
 
     Args:
         pool_size (int): Total number of candidate entries.
@@ -521,6 +522,11 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
     repeats — independent of ad-hoc manual dispatches (which would otherwise
     perturb a ``GITHUB_RUN_NUMBER``-based scheme). The index is anchored to
     ``_CRON_ANCHOR_UTC`` so the first fire at/after the anchor is batch 0.
+
+    Fires strictly before the anchor are clamped to batch 0 (the not-run head)
+    instead of wrapping to the pool tail: a negative ``steps % batches`` would
+    otherwise land on the last batch, silently skipping the not-run backlog the
+    anchor is meant to drain first.
     """
     batches = max((pool_size + batch_size - 1) // batch_size, 1)
     now_raw = (os.environ.get("INPUT_CRON_NOW") or "").strip()
@@ -532,7 +538,7 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
     else:
         now_utc = datetime.now(timezone.utc)
     now_utc = now_utc.astimezone(timezone.utc)
-    steps = _cron_fire_counter(now_utc) - _cron_fire_counter(_CRON_ANCHOR_UTC)
+    steps = max(_cron_fire_counter(now_utc) - _cron_fire_counter(_CRON_ANCHOR_UTC), 0)
     batch_index = steps % batches
     print(
         "cron rotation (sequential): "
@@ -546,9 +552,14 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
 def _slice_entries(entries: list[dict | str]) -> list[dict | str]:
     """Select this run's batch slice from the candidate entries.
 
-    Reads ``INPUT_BATCH_SIZE`` (0/unset returns all). When a partial tail slice
-    results, it wraps to the front of the pool to keep the batch full, and
-    annotates dict entries with the selected batch index/size.
+    Reads ``INPUT_BATCH_SIZE`` (0/unset returns all). For a manual dispatch a
+    partial tail slice wraps to the front of the pool to keep the batch full.
+    For the ``schedule`` rotation the tail is NOT wrapped: the sequential cron
+    index advances to batch 0 on the very next fire, so a head-refill here would
+    re-submit those head models in the same cycle (the wrap slice and the next
+    fire's batch 0 overlap), double-dispatching them while the slow tasks from
+    this fire are still in flight. Letting the tail batch be short keeps every
+    batch a disjoint slice.
 
     Args:
         entries (list[dict | str]): All candidate entries in pool order.
@@ -573,7 +584,8 @@ def _slice_entries(entries: list[dict | str]) -> list[dict | str]:
     start = batch_index * batch_size
     end = start + batch_size
     sliced = entries[start:end]
-    if len(sliced) < batch_size and start and entries:
+    is_schedule = os.environ.get("GITHUB_EVENT_NAME") == "schedule"
+    if len(sliced) < batch_size and start and entries and not is_schedule:
         sliced = sliced + entries[:batch_size - len(sliced)]
     for item in sliced:
         if isinstance(item, dict):
