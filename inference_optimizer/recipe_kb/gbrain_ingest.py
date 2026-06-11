@@ -6,8 +6,8 @@ main's ``recipe_kb`` writes recipes LOCAL-only; the gbrain read remote
 (:class:`recipe_kb.gbrain_remote_client.GbrainRemoteRecipeClient`) serves
 them back to a future session's warm-start. This module is the
 "separately-scheduled bulk ingest" that lifts the authoritative local
-store into gbrain so a remote read actually returns the champion config
-instead of a bare anchor.
+store into gbrain so remote reads can hit champion configs and
+seed-only identity anchors alike.
 
 Mirror gate (default: permissive so seed-only anchors participate in
 warm-start reads):
