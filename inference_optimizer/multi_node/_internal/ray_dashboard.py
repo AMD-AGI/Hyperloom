@@ -28,7 +28,14 @@ _HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
 
 
 def _wrap_for_dash(body: str) -> str:
-    """Base64-wrap a bash body so it survives /bin/sh (dash), which Ray Dashboard uses to run entrypoints."""
+    """Base64-wrap a bash body so it survives /bin/sh (dash), which Ray Dashboard uses to run entrypoints.
+
+    Args:
+        body: The bash script body to wrap.
+
+    Returns:
+        str: A shell command that decodes and runs ``body`` under bash.
+    """
     import base64 as _b64
     encoded = _b64.b64encode(body.encode()).decode()
     return f'echo {encoded} | base64 -d | bash'
@@ -131,7 +138,19 @@ class RayDashboardClient:
             raise RayDashboardError(resp.status_code, resp.text, endpoint=endpoint) from e
 
     def submit_job(self, entrypoint: str, *, runtime_env: dict | None = None) -> str:
-        """POST /api/jobs/; returns the ``submission_id`` immediately (entrypoint runs async, poll :meth:`get_job`)."""
+        """POST /api/jobs/; returns the ``submission_id`` immediately (entrypoint runs async, poll :meth:`get_job`).
+
+        Args:
+            entrypoint: The shell entrypoint to run on the cluster.
+            runtime_env: Optional Ray runtime environment payload.
+
+        Returns:
+            str: The dashboard ``submission_id`` (or ``job_id``) for polling.
+
+        Raises:
+            ValueError: If ``entrypoint`` is empty.
+            RayDashboardError: On a non-200 status or a response missing an id.
+        """
         if not entrypoint:
             raise ValueError("entrypoint is empty")
         # Wrap for dash compatibility (Ray Dashboard uses /bin/sh).
@@ -150,7 +169,18 @@ class RayDashboardClient:
         return sub
 
     def get_job(self, submission_id: str) -> dict:
-        """GET /api/jobs/{submission_id}; response carries ``status`` (PENDING/RUNNING/SUCCEEDED/FAILED/STOPPED) + ``message``."""
+        """GET /api/jobs/{submission_id}; response carries ``status`` (PENDING/RUNNING/SUCCEEDED/FAILED/STOPPED) + ``message``.
+
+        Args:
+            submission_id: The dashboard submission id to query.
+
+        Returns:
+            dict: The decoded job status payload.
+
+        Raises:
+            ValueError: If ``submission_id`` is empty.
+            RayDashboardError: On any non-200 status.
+        """
         if not submission_id:
             raise ValueError("submission_id is empty")
         endpoint = f"GET /api/jobs/{submission_id}"

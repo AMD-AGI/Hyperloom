@@ -50,6 +50,12 @@ def _merge_sglang_defaults(extra_args: str) -> str:
 
     Mirrors ``sglang_mi300x.sh:74-79``; a caller's explicit value for a flag
     wins and that default is dropped.
+
+    Args:
+        extra_args: The caller's existing server-arg string.
+
+    Returns:
+        The merged server-arg string with missing defaults appended.
     """
     user = (extra_args or "").strip()
     parts = [user] if user else []
@@ -94,6 +100,24 @@ def _resolve_pd_args(
     Resolution per field: explicit kwarg > ``state["last_restart_pd_*"]`` >
     ``$PD_*`` env > defaults (mode=colocated, prefill/decode TP=tp). Validates
     ``pd_mode`` and disaggregated prefill/decode TP.
+
+    Args:
+        pd_mode: Prefill/decode mode (``colocated`` or ``disaggregated``).
+        pd_prefill_nodes: Node count for the prefill group.
+        pd_decode_nodes: Node count for the decode group.
+        pd_prefill_tp: Tensor-parallel size for the prefill group.
+        pd_decode_tp: Tensor-parallel size for the decode group.
+        pd_transfer_backend: KV transfer backend name.
+        pd_ib_device: InfiniBand device name.
+        tp_int: Resolved overall tensor-parallel size used as a TP default.
+
+    Returns:
+        A flat dict of resolved PD values for the multi_node CLI Namespace.
+
+    Raises:
+        ServerRestartFailed: If ``pd_mode`` is unsupported, the cluster has
+            fewer than 2 nodes for disaggregated mode, the prefill/decode node
+            split is invalid, or the prefill/decode TP values are non-positive.
     """
     state = _read_state()
     mode = (
@@ -202,8 +226,19 @@ def _resolve_round_args(
 
     Resolution per field: explicit kwarg > ``state["last_restart_*"]`` >
     ``$FRAMEWORK`` / ``$MODEL_PATH`` / ``$TP`` / ``$EP`` env > defaults (ep=1).
-    Raises :class:`ServerRestartFailed` if model/tp are empty, framework is
-    unsupported, or ``ep > tp``.
+
+    Args:
+        framework: Inference framework override (``sglang`` or ``vllm``).
+        model_path: Model path/id override.
+        tp: Tensor-parallel size override.
+        ep: Expert-parallel size override (defaults to 1).
+
+    Returns:
+        A ``(framework, model, tp, ep)`` tuple of resolved restart args.
+
+    Raises:
+        ServerRestartFailed: If model/tp are empty, the framework is
+            unsupported, or ``ep > tp``.
     """
     state = _read_state()
     fw = (framework or state.get("last_restart_framework")
@@ -274,7 +309,29 @@ async def restart_server_for_round(
     this invocation so a fresh kill+launch runs — required after kernel-agent
     fans patched source so sglang re-imports the new modules.
 
-    Raises :class:`ServerRestartFailed` on any failure (callers let it bubble).
+    Args:
+        extra_server_args: Extra framework server args for this round.
+        torch_profiler_dir: Per-round profiler trace dir; exported via
+            ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` and restored afterward.
+        framework: Inference framework override.
+        model_path: Model path/id override.
+        tp: Tensor-parallel size override.
+        ep: Expert-parallel size override.
+        pd_mode: Prefill/decode mode override.
+        pd_prefill_nodes: Node count for the prefill group.
+        pd_decode_nodes: Node count for the decode group.
+        pd_prefill_tp: Tensor-parallel size for the prefill group.
+        pd_decode_tp: Tensor-parallel size for the decode group.
+        pd_transfer_backend: KV transfer backend name.
+        pd_ib_device: InfiniBand device name.
+        health_timeout_s: Timeout for the post-launch /health poll.
+        poll_interval_s: Poll interval passed to the restart driver.
+        force_full_restart: When True, force a fresh kill+launch instead of
+            resuming a running server.
+
+    Raises:
+        ServerRestartFailed: On any restart or post-launch /health failure
+            (callers let it bubble).
     """
     global _LAST_ROUND_TRACE_DIR
 
@@ -488,6 +545,14 @@ async def _wait_for_server_health_async(
 
     Reads ``service_url`` from ``state.json``; rewrites a ClusterIP DNS URL to
     ``head_pod_ip`` when available so the sandbox can reach it directly.
+
+    Args:
+        timeout_s: Maximum seconds to wait for a 200 from /health.
+        poll_every_s: Seconds between successive /health polls.
+
+    Raises:
+        ServerRestartFailed: If /health does not return 200 within
+            ``timeout_s``.
     """
     import time as _time
     import re as _re

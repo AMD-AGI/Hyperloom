@@ -38,6 +38,13 @@ def correlation_seed(manifest: dict[str, Any], fallback: str) -> str:
     and any future claw-side upload -- collapses onto the same Langfuse trace
     / session view. Falls back to the internal session id (e.g. the session
     dir name) for standalone/local runs where no claw id exists.
+
+    Args:
+        manifest: Session manifest dict carrying id fields.
+        fallback: Seed used when no id is present in the manifest.
+
+    Returns:
+        The chosen correlation seed string.
     """
     claw = str(manifest.get("claw_session_id") or "").strip()
     if claw:
@@ -52,6 +59,13 @@ def langfuse_session_id(manifest: dict[str, Any], fallback: str) -> str:
     Same precedence as :func:`correlation_seed` (claw id wins) -- this is the
     human-facing session grouping in the Langfuse UI, whereas the trace_id is
     its hashed form.
+
+    Args:
+        manifest: Session manifest dict carrying id fields.
+        fallback: Seed used when no id is present in the manifest.
+
+    Returns:
+        The Langfuse session grouping id.
     """
     return correlation_seed(manifest, fallback)
 
@@ -63,17 +77,37 @@ def agent_of(row: dict[str, Any]) -> str:
     specialist / critic / geak / oob / robustness / proposal_scorer /
     tracelens / breakdown); it is the "which agent did this" axis used for the
     per-agent span layer.
+
+    Args:
+        row: A trace row dict.
+
+    Returns:
+        The producing agent name, or ``UNKNOWN_AGENT`` when absent.
     """
     return str(row.get("component") or row.get("role") or UNKNOWN_AGENT)
 
 
 def phase_of(row: dict[str, Any]) -> str:
-    """The phase a row belongs to (``(unphased)`` when absent)."""
+    """The phase a row belongs to (``(unphased)`` when absent).
+
+    Args:
+        row: A trace row dict.
+
+    Returns:
+        The phase name, or ``UNPHASED`` when absent.
+    """
     return str(row.get("phase") or UNPHASED)
 
 
 def span_key(row: dict[str, Any]) -> tuple[str, str]:
-    """(phase, agent) key identifying which agent-span a Generation nests in."""
+    """(phase, agent) key identifying which agent-span a Generation nests in.
+
+    Args:
+        row: A trace row dict.
+
+    Returns:
+        A ``(phase, agent)`` tuple.
+    """
     return (phase_of(row), agent_of(row))
 
 
@@ -83,6 +117,12 @@ def derive_trace_id(seed: str) -> str:
     Langfuse trace ids must be 32-char lowercase hex; deriving from the
     session id keeps re-runs / live+backfill of the same session writing to
     one trace instead of duplicating it.
+
+    Args:
+        seed: Session id or any seed string to hash.
+
+    Returns:
+        A 32-char lowercase hex trace id.
     """
     return hashlib.sha256(str(seed).encode("utf-8")).hexdigest()[:32]
 
@@ -92,6 +132,12 @@ def parse_ts(ts: str | None) -> datetime | None:
 
     Returns ``None`` for missing / unparseable input so callers can fall
     back to a span/trace-level time without crashing.
+
+    Args:
+        ts: Timestamp string in ISO+offset or ``...Z`` form, or ``None``.
+
+    Returns:
+        The parsed ``datetime``, or ``None`` when missing/unparseable.
     """
     if not ts:
         return None
@@ -107,6 +153,12 @@ def utc_second_key(ts: str | None) -> str:
     ``llm_calls.jsonl`` and ``conversations.jsonl`` stamp their own ``ts`` a
     few milliseconds apart for the same logical call, so pairing is done at
     whole-second resolution.
+
+    Args:
+        ts: Timestamp string, or ``None``.
+
+    Returns:
+        The UTC second key string, or ``""`` when unparseable.
     """
     dt = parse_ts(ts)
     if dt is None:
@@ -128,6 +180,12 @@ def pair_key(row: dict[str, Any]) -> tuple:
     ``asyncio.gather``, so multiple rows land in the same second with
     otherwise identical keys. Older rows that predate any field carry
     ``None``, so the key degrades gracefully to the previous behaviour.
+
+    Args:
+        row: A token or conversation trace row dict.
+
+    Returns:
+        A tuple join key pairing the row across streams.
     """
     return (
         str(row.get("component") or ""),
@@ -147,6 +205,12 @@ def usage_details(row: dict[str, Any]) -> dict[str, int]:
     Drops ``None`` counters (so an unreported counter is absent rather than
     a misleading zero) and maps our canonical names onto the short Langfuse
     keys.
+
+    Args:
+        row: A token trace row dict.
+
+    Returns:
+        Mapping of Langfuse usage key to integer count (``None`` dropped).
     """
     raw = {
         "input": row.get("input_tokens"),
@@ -158,14 +222,30 @@ def usage_details(row: dict[str, Any]) -> dict[str, int]:
 
 
 def generation_name(row: dict[str, Any]) -> str:
-    """Human-friendly Generation name: component, falling back to role."""
+    """Human-friendly Generation name: component, falling back to role.
+
+    Args:
+        row: A token trace row dict.
+
+    Returns:
+        The Generation display name.
+    """
     return str(row.get("component") or row.get("role") or "llm_call")
 
 
 def generation_metadata(
     row: dict[str, Any], *, phase: str, has_text: bool,
 ) -> dict[str, Any]:
-    """Assemble the per-Generation metadata block (join keys + flags)."""
+    """Assemble the per-Generation metadata block (join keys + flags).
+
+    Args:
+        row: A token trace row dict.
+        phase: Phase name to stamp onto the metadata.
+        has_text: Whether a paired conversation text was found.
+
+    Returns:
+        The per-Generation metadata dict.
+    """
     return {
         "phase": phase,
         "tick": row.get("tick"),
@@ -179,7 +259,14 @@ def generation_metadata(
 
 
 def trace_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Assemble the trace-level metadata block from ``manifest.json``."""
+    """Assemble the trace-level metadata block from ``manifest.json``.
+
+    Args:
+        manifest: Parsed ``manifest.json`` dict.
+
+    Returns:
+        The trace-level metadata dict.
+    """
     workload = manifest.get("workload") or {}
     return {
         "model_name": manifest.get("model_name"),
@@ -204,6 +291,12 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
     carries a measured gain. Each returned dict is transport-agnostic
     (``name`` / ``value`` / ``data_type`` / ``comment`` / ``metadata``) so the
     caller can hand it to the SDK or a REST body unchanged.
+
+    Args:
+        decision_row: One ``decision_trace.jsonl`` row dict.
+
+    Returns:
+        A list of transport-agnostic Score dicts (one or two entries).
     """
     dec = decision_row.get("decision") or {}
     meta = {

@@ -81,6 +81,10 @@ def _detect_stack_fingerprint() -> dict[str, str]:
     """Best-effort ``stack_fingerprint`` (KB_design §3.6.5.1). Per component,
     first non-empty wins: env var -> /opt/rocm marker (rocm only) -> package
     __version__/__commit__. Missing components map to ``"unknown"``.
+
+    Returns:
+        Mapping of component name to detected version/commit (``"unknown"``
+        when not found).
     """
     out: dict[str, str] = {}
     for component, env_vars in _STACK_FINGERPRINT_ENVS.items():
@@ -172,7 +176,15 @@ def _git_remote_at(path: Path) -> str:
 
 
 def _path_is_relative_to(path: Path, root: Path) -> bool:
-    """Return True when ``path`` is inside ``root`` after best-effort resolution."""
+    """Return True when ``path`` is inside ``root`` after best-effort resolution.
+
+    Args:
+        path: The path to test.
+        root: The root directory ``path`` may be nested under.
+
+    Returns:
+        True when ``path`` is provably inside ``root``.
+    """
     try:
         path.resolve(strict=False).relative_to(root.resolve(strict=False))
         return True
@@ -192,6 +204,10 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
     """Warn when a dependency checkout points at a pod-local, non-persistent
     path (erased on pod recycle); a shared checkout outside USER_DATA_PATH is
     legitimate and does not warn.
+
+    Args:
+        env_var: Name of the env var holding the dependency checkout path.
+        raw: The raw checkout path value.
     """
     user_data = (os.environ.get(_paths.ENV_USER_DATA_PATH) or "").strip()
     if not user_data:
@@ -251,6 +267,9 @@ def _describe_dep(env_var: str) -> dict[str, str]:
 def _build_dependencies() -> dict[str, dict[str, str]]:
     """Provenance (path/commit/remote) for the Magpie / InferenceX trees this
     session executes against, so debuggers can answer "which upstream?" later.
+
+    Returns:
+        Mapping of dependency name to its ``{path, commit, remote}`` block.
     """
     return {
         "magpie":     _describe_dep("MAGPIE_DIR"),
@@ -261,6 +280,9 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
 def _detect_image() -> str | None:
     """Best-effort container image detection: env vars -> known mount points
     -> cgroup probe. Returns None when nothing matches (never raises).
+
+    Returns:
+        The detected container image string, or ``None`` when none matches.
     """
     for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         val = (os.environ.get(var) or "").strip()
@@ -315,7 +337,14 @@ def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_session_id(model_name: str = "") -> str:
     """Derive an internal session_id label for manifest / SharedState / report
-    metadata (not used for path computation)."""
+    metadata (not used for path computation).
+
+    Args:
+        model_name: Model name used as the id stem; defaults to ``session``.
+
+    Returns:
+        The derived internal session-id label.
+    """
     stem = (model_name or "session").strip().replace("/", "_") or "session"
     return f"{stem}_{_utc_now_compact()}_{uuid.uuid4().hex[:8]}"
 
@@ -433,7 +462,16 @@ def write_manifest(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """Atomically write ``manifest.json`` under session_dir; returns the
-    manifest dict."""
+    manifest dict.
+
+    Args:
+        session_dir: Session directory to write the manifest into.
+        args: Parsed CLI args overriding env-based defaults, or ``None``.
+        session_id: Explicit session-id label, or ``None`` to derive one.
+
+    Returns:
+        The manifest dict that was written.
+    """
     sd = Path(session_dir)
     manifest = build_manifest(sd, args=args, session_id=session_id)
     target = manifest_path(sd)
@@ -452,7 +490,17 @@ def write_manifest(
 def load_manifest(session_dir: Path) -> dict[str, Any]:
     """Read ``manifest.json`` for an existing session. Raises
     ``FileNotFoundError`` if missing (the signal ``--resume`` uses to refuse a
-    fresh sandbox)."""
+    fresh sandbox).
+
+    Args:
+        session_dir: Session directory to read the manifest from.
+
+    Returns:
+        The parsed manifest dict.
+
+    Raises:
+        FileNotFoundError: If ``manifest.json`` does not exist.
+    """
     p = manifest_path(Path(session_dir))
     if not p.exists():
         raise FileNotFoundError(

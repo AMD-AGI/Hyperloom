@@ -104,7 +104,15 @@ _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 
 def _extract_review_json(text: str) -> dict[str, Any] | None:
-    """Pull the first valid review JSON out of a model reply, or ``None``."""
+    """Pull the first valid review JSON out of a model reply, or ``None``.
+
+    Args:
+        text: The raw model reply that may contain a review JSON object.
+
+    Returns:
+        The first dict containing a ``"review_verdicts"`` key, or ``None`` when
+        no parseable review object is found.
+    """
     if not text:
         return None
     for m in _FENCED_JSON_RE.finditer(text):
@@ -150,7 +158,16 @@ fake that writes the desired ``judge_bundle.json`` / ``emit.json`` to
 
 def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
     """Re-serialize an OpenAI assistant message that issued tool_calls
-    (minimal dict shape, pydantic v1/v2 compatible)."""
+    (minimal dict shape, pydantic v1/v2 compatible).
+
+    Args:
+        msg: The OpenAI assistant message object carrying ``content`` and
+            ``tool_calls``.
+
+    Returns:
+        A minimal assistant-message dict with role, content, and a normalized
+        ``tool_calls`` list suitable for re-sending to the API.
+    """
     return {
         "role": "assistant",
         "content": getattr(msg, "content", None),
@@ -222,7 +239,16 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
 
 # Cross-domain enrichment helper for cross-domain (scope=domains) proposals.
 def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
-    """Read the ``scope`` dial off a proposal (top-level or nested ``params``)."""
+    """Read the ``scope`` dial off a proposal (top-level or nested ``params``).
+
+    Args:
+        proposal: A proposal dict that may carry ``scope`` at the top level or
+            under ``params``.
+
+    Returns:
+        The stripped scope string, or an empty string when absent or the
+        proposal is not a dict.
+    """
     if not isinstance(proposal, dict):
         return ""
     top = proposal.get("scope")
@@ -238,7 +264,13 @@ def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
 
 def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
     """Set ``review_constraints.cross_domain`` + rule descriptors when any
-    proposal is cross-domain (unified ``scope == 'domains'`` dial). Idempotent."""
+    proposal is cross-domain (unified ``scope == 'domains'`` dial). Idempotent.
+
+    Args:
+        judge_bundle: The judge bundle to enrich in place; its
+            ``review_constraints`` are updated when a cross-domain proposal is
+            present.
+    """
     proposals = judge_bundle.get("proposals") or []
     if not isinstance(proposals, list):
         return
@@ -740,6 +772,10 @@ class CriticAgentBackend:
         manifest.json (model / framework / gpu_type / model_path / tp /
         workload / precision); empty values dropped. Any read error logs a
         WARNING and returns ``{}``.
+
+        Returns:
+            A context dict built from the manifest's non-empty fields, or an
+            empty dict when the manifest is missing or unreadable.
         """
         path = manifest_path(self.session_dir)
         try:
@@ -908,6 +944,16 @@ class CriticAgentBackend:
         web_search / web_fetch up to ``self._web_tool_max_turns`` before a
         final text-only reply. Returns ``(text, finish_reason)``; tool-exec
         failures are reported back to the model, never raised.
+
+        Args:
+            messages: The running chat-completions message list; tool-use turns
+                are appended in place.
+
+        Returns:
+            A tuple of the final reply text and the final finish reason.
+
+        Raises:
+            BackendError: If any Codex chat-completions API call fails.
         """
         tools = self._web_tool_schemas
         max_turns = self._web_tool_max_turns if tools else 0
@@ -982,6 +1028,11 @@ class CriticAgentBackend:
         OpenAI reports ``prompt_tokens`` / ``completion_tokens``; map them
         onto the canonical in/out counters. Missing / bad values contribute
         0 so a single malformed response never corrupts the running sum.
+
+        Args:
+            acc: The running accumulator with ``input_tokens`` /
+                ``output_tokens`` keys, updated in place.
+            usage: An OpenAI usage object (or ``None``) to fold into ``acc``.
         """
         if usage is None:
             return
@@ -1003,6 +1054,10 @@ class CriticAgentBackend:
         ``component=critic``. tick/phase are unknown to the critic backend
         (it runs as its own reactor) — the collector backfills from the ts
         window. Best-effort: never raises into the review path.
+
+        Args:
+            usage_acc: Accumulated token counts with ``input_tokens`` /
+                ``output_tokens`` keys for this reasoning loop.
         """
         try:
             record = LLMCallRecord(
@@ -1035,6 +1090,12 @@ class CriticAgentBackend:
         (it runs as its own reactor); the collector backfills from the ts
         window. Best-effort: never raises into the review path. No-op when
         both prompt and reply are empty.
+
+        Args:
+            system_prompt: Optional system prompt prepended to the recorded
+                prompt.
+            user_prompt: The judge-bundle user prompt the critic reasoned over.
+            response: The model's externally-visible reply text.
         """
         try:
             prompt = (

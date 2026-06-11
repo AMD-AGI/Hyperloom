@@ -139,6 +139,12 @@ def _pick_worktree_base(roots: tuple[str, ...]) -> Path | None:
 
     Falls back to None when none exist — the runner then runs the
     specialist without an isolated worktree.
+
+    Args:
+        roots: Candidate root paths to probe for a ``.git`` marker.
+
+    Returns:
+        The first git-checkout root, or ``None`` when none qualify.
     """
     for r in roots:
         p = Path(r)
@@ -159,6 +165,15 @@ def _setup_worktree(
 
     Best-effort: on git error returns ``(None, err)`` so the caller can
     proceed without isolation (PR-A2 default) or hard-fail.
+
+    Args:
+        base: Git checkout the worktree is branched off of.
+        worktree_path: Destination path for the new worktree.
+        branch: Branch name to create for the worktree.
+
+    Returns:
+        A ``(worktree_path, "")`` tuple on success, or ``(None, error)`` on
+        git failure.
     """
     if worktree_path.exists():
         # Resume / retry: reuse an existing worktree (stale ones are rare).
@@ -191,6 +206,10 @@ def _teardown_worktree(base: Path | None, worktree_path: Path) -> None:
 
     Called only on the REVERT / synth-empty path; the KEEP path leaves the
     worktree in place so ``integrate_patch`` can pull patches out of it.
+
+    Args:
+        base: Git checkout the worktree was created from, or ``None``.
+        worktree_path: Path of the worktree to remove.
     """
     if not worktree_path.exists():
         return

@@ -139,6 +139,12 @@ def _path_fstype(path: str) -> str:
     Picks the longest mountpoint that is a prefix of the resolved path.
     Returns ``""`` when it cannot be determined (non-Linux, unreadable
     ``/proc/mounts``, ...), which callers treat as "assume local".
+
+    Args:
+        path: The filesystem path to classify.
+
+    Returns:
+        The filesystem type string, or ``""`` when it cannot be determined.
     """
     try:
         rp = os.path.realpath(path)
@@ -172,7 +178,14 @@ def _path_fstype(path: str) -> str:
 
 
 def _is_network_fs(path: str) -> bool:
-    """True when ``path`` is backed by a revocable network filesystem."""
+    """True when ``path`` is backed by a revocable network filesystem.
+
+    Args:
+        path: The filesystem path to classify.
+
+    Returns:
+        True when ``path`` is backed by a known network filesystem type.
+    """
     return _path_fstype(path).lower() in _NETWORK_FS_TYPES
 
 
@@ -188,6 +201,12 @@ def _mirror_lock(lock_path: str) -> Iterator[None]:
     wait for the winner and then overwrite a consistent tree. Degrades to no
     exclusion when ``fcntl`` is unavailable (non-Linux) or the lock file
     cannot be opened — the unique staging dir still prevents torn copies.
+
+    Args:
+        lock_path: Filesystem path of the lock file to acquire exclusively.
+
+    Yields:
+        Control while the exclusive lock is held; the lock is released on exit.
     """
     try:
         import fcntl
@@ -238,6 +257,15 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     materialized YAML first) patches the LOCAL mirror in place — the mirror
     therefore ends up carrying the NUM_PROMPTS / PROFILE_EXTRA_BODY patches,
     and Magpie ``cd``-s into the patched local copy.
+
+    Args:
+        src: The InferenceX checkout path to mirror.
+        mirror_key: Optional caller-supplied key (e.g. task output dir) that
+            isolates concurrent tasks sharing the same source checkout.
+
+    Returns:
+        A local-disk mirror path, or ``src`` unchanged when relocation is
+        disabled, unnecessary, or fails.
     """
     src = str(src)
     if os.environ.get(
@@ -325,6 +353,10 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     pre-built ``.so``); the legacy fixed ``jit/build`` list mis-reports
     every wheel install as COLD. Returns an ordered candidate list
     (``jit`` preferred over ``jit/build``); empty if aiter not found.
+
+    Returns:
+        An ordered list of candidate ``jit`` directory paths, or ``[]`` when
+        aiter is not importable.
     """
     try:
         spec = importlib.util.find_spec("aiter")
@@ -458,6 +490,13 @@ class BaselineExecutor:
 
         Order: ``task.params['output_dir']`` → ``ctx.extra['workspace']``
         → ``runs_dir(...)`` (direct-instantiation fallback for tests).
+
+        Args:
+            ctx: The runner context carrying task params and ``extra``.
+            action: The action name used to build the fallback runs dir.
+
+        Returns:
+            The resolved per-task workspace directory.
         """
         params = ctx.task.params or {}
         if params.get("output_dir"):
@@ -474,6 +513,12 @@ class BaselineExecutor:
         when the aiter jit probe reports COLD (env-overridable via
         ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``) → warm default.
         Every path emits one log line for greppability.
+
+        Args:
+            params: The task params, optionally carrying ``timeout_sec``.
+
+        Returns:
+            The resolved subprocess timeout in seconds.
         """
         explicit = params.get("timeout_sec")
         if explicit:
@@ -524,6 +569,14 @@ class BaselineExecutor:
 
         ProfileExecutor uses this to patch/validate the InferenceX checkout
         named by the rendered YAML. No-op default keeps baseline unchanged.
+
+        Args:
+            config_path: The materialized Magpie YAML config path.
+            output_dir: The per-task output directory.
+
+        Returns:
+            ``None`` to proceed with the launch, or a failure result dict to
+            short-circuit (subclasses only).
         """
         return None
 
@@ -777,6 +830,12 @@ class BaselineExecutor:
 
         Returns a dict with ``eligible`` (bool), ``framework`` (str),
         ``port`` (int) and ``reason`` (str, populated when ineligible).
+
+        Args:
+            materialized_config_path: The materialized YAML config to inspect.
+
+        Returns:
+            A dict with ``eligible``, ``framework``, ``port`` and ``reason``.
         """
         info: dict[str, Any] = {
             "eligible": False,
@@ -836,6 +895,16 @@ class BaselineExecutor:
 
         Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches;
         only ``cleanup`` differs (round 1 persists, round 2 tears down).
+
+        Args:
+            base_config_path: The base materialized YAML to extend.
+            dest_dir: Directory the per-round YAML is written into.
+            cleanup: Whether this round tears down the persistent server.
+            pid_dir: Shared directory keying the persistent server pid/meta.
+            port: HTTP port pinned for the persistent server.
+
+        Returns:
+            The path to the rendered per-round lifecycle YAML.
         """
         with Path(base_config_path).open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
@@ -866,6 +935,11 @@ class BaselineExecutor:
         """Best-effort teardown of a persistent server left by the
         double-run rounds. Idempotent and never raises (safe in finally);
         a no-op on the happy path, real work only on abnormal paths.
+
+        Args:
+            pid_dir: Directory holding the persistent server pid/meta files.
+            framework: Framework name used to key the pid/meta filenames.
+            port: HTTP port used to key the pid/meta filenames.
         """
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
@@ -923,6 +997,22 @@ class BaselineExecutor:
 
         Single-round core extracted from ``__call__`` so the cold-start
         guard can invoke it twice. ``output_dir`` is the per-round slot.
+
+        Args:
+            config_path: The materialized Magpie YAML config to run.
+            output_dir: The per-round output directory.
+            timeout_sec: Hard subprocess timeout in seconds.
+            override_result_dir: Optional ``$RESULT_DIR`` override, or ``None``.
+            resolved_model: The resolved model path (may be empty).
+            materialized_config_path: The canonical materialized config path
+                surfaced in the result for downstream reuse.
+            inferencex_path: The InferenceX checkout path Magpie should use.
+            params: The task params forwarded to server restart logic.
+            ctx: The runner context (carries ``extra`` flags).
+
+        Returns:
+            A result dict (``status="succeeded"`` with measurements, or
+            ``status="failed"`` with an ``error_class``).
         """
         cmd = [
             self.magpie_python, "-m", "Magpie", "-v", "benchmark",

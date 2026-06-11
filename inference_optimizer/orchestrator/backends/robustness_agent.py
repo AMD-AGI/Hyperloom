@@ -43,6 +43,14 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
 
     Sets ``PYTHONPATH=<root>/src`` + ``cwd=<root>`` so the package resolves
     without a pip-install (matching the critic-agent convention).
+
+    Args:
+        call: The invocation descriptor with phase, request / output paths,
+            working directory, and subprocess env.
+
+    Raises:
+        BackendError: If the phase is not ``tick``, the subprocess times out,
+            cannot start, or exits non-zero.
     """
     if call.phase != "tick":
         raise BackendError(
@@ -324,7 +332,12 @@ class RobustnessAgentBackend:
 
     def _build_runtime_env(self) -> dict[str, str]:
         """Build subprocess env with ``<root>/src`` prepended to PYTHONPATH
-        (preserving any existing value) so the CLI module resolves."""
+        (preserving any existing value) so the CLI module resolves.
+
+        Returns:
+            A copy of the current environment with ``PYTHONPATH`` and the
+            robustness session-dir hint applied.
+        """
         env = dict(os.environ)
         src = str(self.robustness_agent_root / "src")
         existing = env.get("PYTHONPATH", "").strip()
