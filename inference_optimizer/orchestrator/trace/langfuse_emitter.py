@@ -200,6 +200,59 @@ class LangfuseEmitter:
     def enabled(self) -> bool:
         return self._enabled
 
+    # -- debug probe (fast "is the pipe open?" marker) ------------------
+    def emit_probe(self, note: str | None = None) -> bool:
+        """Push a tiny marker Generation and flush immediately (debug aid).
+
+        Lets you confirm the live pipe works within seconds of session start,
+        without waiting for the first real LLM call to pair up or for the
+        session-end flush. Opens the root trace span (so the trace appears in
+        the UI), emits a ``probe:session-start`` Generation under an
+        ``agent:probe`` span, then forces ``client.flush()`` so it is not held
+        in the SDK's batch buffer.
+
+        Returns True if a probe was sent. When the push is disabled it does
+        NOT stay silent: it logs a warning naming the gate that tripped
+        (``disabled`` / ``no_credentials`` / ``sdk_missing`` / ``init_failed``)
+        so you immediately know *why* nothing shows up in Langfuse. Never
+        raises -- a probe failure must not break the run.
+        """
+        if not self._enabled:
+            log.warning(
+                "langfuse: probe skipped — live push is disabled (reason=%s). "
+                "trace_id=%s would have been used. Check HYPERLOOM_LANGFUSE_ENABLE "
+                "+ LANGFUSE_* creds + the langfuse SDK.",
+                self._disabled_reason, self._trace_id,
+            )
+            return False
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        try:
+            parent = self._ensure_agent_span(lfmap.UNPHASED, "probe", now)
+            meta = {"probe": True, "note": note or "session-start"}
+            gen = parent.start_observation(
+                name="probe:session-start",
+                as_type="generation",
+                start_time=now,
+                metadata=meta,
+            )
+            gen.end(end_time=now)
+            self._counts["generations_sent"] += 1
+            self._counts["generations_token_only"] += 1
+            self._client.flush()
+            log.info(
+                "langfuse: probe sent + flushed (trace_id=%s session=%s host=%s). "
+                "Look for trace '%s' -> agent:probe -> probe:session-start.",
+                self._trace_id, self._session_label,
+                langfuse_credentials().get(ENV_LANGFUSE_HOST), self._trace_name(),
+            )
+            return True
+        except Exception:  # noqa: BLE001 — a probe must never break the run
+            self._counts["errors"] += 1
+            log.warning("langfuse: probe send failed", exc_info=True)
+            return False
+
     # -- span hierarchy (trace -> phase -> agent -> generation) ---------
     def _trace_name(self) -> str:
         return str(self._manifest.get("model_name") or self._session_label or "hyperloom")
@@ -518,6 +571,21 @@ def flush_session(session_dir: Path) -> None:
     get_emitter(session_dir).flush_session()
 
 
+def emit_probe(session_dir: Path, note: str | None = None) -> bool:
+    """Module-level convenience: push + flush a debug probe for ``session_dir``.
+
+    Confirms the live Langfuse pipe within seconds without waiting for real
+    traffic. Returns True if a probe was sent (False when push is disabled —
+    a warning is logged with the reason). See
+    :meth:`LangfuseEmitter.emit_probe`.
+
+    Quick manual check from a shell::
+
+        python -m inference_optimizer.orchestrator.trace.langfuse_probe <session_dir>
+    """
+    return get_emitter(session_dir).emit_probe(note=note)
+
+
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     """Read the persisted ``langfuse_receipt.json`` for ``session_dir``.
 
@@ -540,6 +608,7 @@ def read_receipt(session_dir: Path) -> dict[str, Any] | None:
 
 __all__ = [
     "LangfuseEmitter",
+    "emit_probe",
     "flush_session",
     "get_emitter",
     "read_receipt",
