@@ -39,6 +39,14 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
 
     One sweep covers both colocated and PD-disaggregated modes (unused
     patterns are no-ops).
+
+    Args:
+        pid_dir: Directory containing the PID files to sweep.
+        grace_sec: Seconds to wait between SIGTERM and SIGKILL.
+
+    Returns:
+        dict: Summary with ``killed``, ``stale``, and ``missing`` lists keyed
+        by PID-file name.
     """
     summary: dict[str, list] = {"killed": [], "stale": [], "missing": []}
     p = Path(pid_dir)

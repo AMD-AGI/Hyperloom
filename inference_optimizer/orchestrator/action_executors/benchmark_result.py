@@ -173,6 +173,14 @@ def _rescue_candidate_paths(
     When ``subprocess_started_unix`` is given, candidates older than it
     (minus :data:`_MTIME_GATE_SLACK_SEC`) are dropped as stale prior-run
     leaks. Never raises: per-candidate I/O errors are swallowed.
+
+    Args:
+        workspace: The per-task workspace; in-workspace files are skipped.
+        subprocess_started_unix: Optional launch time used to drop stale
+            prior-run leaks.
+
+    Returns:
+        Absolute paths to fresh, out-of-workspace Magpie leak destinations.
     """
     candidates: list[Path] = []
     seen: set[Path] = set()
@@ -247,6 +255,14 @@ def _materialize_rescue_into_workspace(
     self-contained. Returns the destination on success, or ``None`` on I/O
     error (caller falls back to the leak path) or when the source already
     lives inside the workspace.
+
+    Args:
+        rescue_path: The leaked InferenceX result file to copy in.
+        workspace: The per-task workspace to copy the result into.
+
+    Returns:
+        The in-workspace destination path on success, or ``None`` on I/O error
+        or when the source already lives inside the workspace.
     """
     try:
         rescue_resolved = rescue_path.resolve()
@@ -277,6 +293,13 @@ def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
     Order: explicit ``leak_root`` kwarg (tests) →
     ``$INFERENCE_OPTIMIZER_LEAK_ROOTS`` (colon-separated) →
     :data:`_DEFAULT_LEAK_ARTIFACT_ROOT` (``/workspace``).
+
+    Args:
+        leak_root: Optional explicit root override (used by tests); when
+            ``None`` the env var or default is used.
+
+    Returns:
+        A tuple of directory roots to scan for wrapper-side leak files.
     """
     if leak_root is not None:
         return (leak_root,)
@@ -303,6 +326,17 @@ def harvest_leaked_artifacts(
     ``shutil.copy2``-s each match (source never moved). Returns
     ``(leak_path, copy_path)`` tuples for audit; never raises (per-artifact
     errors are isolated).
+
+    Args:
+        destination: Directory the harvested artifacts are copied into.
+        subprocess_started_unix: Optional launch time used to skip stale
+            prior-run leaks.
+        leak_root: Optional explicit root override forwarded to
+            :func:`_resolve_leak_roots`.
+        extra_globs: Additional filename globs to harvest beyond the defaults.
+
+    Returns:
+        A list of ``(leak_path, copy_path)`` tuples for the artifacts copied.
     """
     harvested: list[tuple[Path, Path]] = []
     leak_roots = _resolve_leak_roots(leak_root)
@@ -440,6 +474,17 @@ def extract_benchmark_measurement(
     ``subprocess_started_unix`` enables an opt-in salvage pass over the
     Magpie leak destinations (see :func:`_rescue_candidate_paths`) when the
     in-workspace search fails; only leaks written after this run are adopted.
+
+    Args:
+        report: The Magpie ``benchmark_report.json`` mapping, or ``None``.
+        workspace: Optional task workspace scanned for raw InferenceX results
+            and (as a fallback) salvageable leaks.
+        subprocess_started_unix: Optional launch time enabling the mtime-gated
+            leak salvage pass.
+
+    Returns:
+        A normalized measurement dict (including ``valid_measurement`` and any
+        ``nonfatal_warnings``).
     """
     report = report or {}
     throughput = report.get("throughput") or {}
@@ -533,6 +578,11 @@ def _derive_tpot_if_missing(
     Best-effort: only derives when end-to-end and TTFT latencies are
     available and an output sequence length greater than 1 can be
     resolved from the report. Leaves the field untouched otherwise.
+
+    Args:
+        measurement: The measurement dict to fill in place.
+        report: The Magpie report mapping used to resolve the output sequence
+            length, or ``None``.
     """
     if measurement.get("tpot_mean_ms") is not None:
         return
@@ -547,7 +597,14 @@ def _derive_tpot_if_missing(
 
 
 def _resolve_osl(report: dict[str, Any] | None) -> int | None:
-    """Pull the output sequence length from common report locations."""
+    """Pull the output sequence length from common report locations.
+
+    Args:
+        report: The Magpie report mapping to search, or ``None``.
+
+    Returns:
+        The first positive output sequence length found, or ``None``.
+    """
     if not isinstance(report, dict):
         return None
     candidates: list[Any] = [report.get("osl"), report.get("output_len")]

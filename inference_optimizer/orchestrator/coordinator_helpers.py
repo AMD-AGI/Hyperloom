@@ -18,7 +18,16 @@ log = logging.getLogger(__name__)
 
 
 def _infer_model_class_from_config(model_path: str) -> str:
-    """Infer a deterministic model_class from local model metadata."""
+    """Infer a deterministic model_class from local model metadata.
+
+    Args:
+        model_path: Local filesystem path to the model directory containing
+            ``config.json``.
+
+    Returns:
+        One of ``moe_mla_nsa`` / ``moe_mla`` / ``moe_swa`` / ``dense`` derived
+        from the model's architecture and config.
+    """
     import json
     raw_path = (model_path or "").strip()
     payload: dict[str, Any] = {}
@@ -124,6 +133,15 @@ def effective_closing_grace_sec(
 
     Explicit ``closing_grace_sec`` (including ``0`` to disable) wins;
     otherwise default to ``min(120, max_minutes * 60 * 0.02)``.
+
+    Args:
+        max_minutes: Total session budget in minutes, used to derive the
+            default grace window.
+        closing_grace_sec: Explicit grace window in seconds, or ``None`` to use
+            the derived default.
+
+    Returns:
+        The closing-phase grace window in seconds.
     """
     if closing_grace_sec is not None:
         return float(closing_grace_sec)
@@ -134,6 +152,13 @@ def _parse_iso_unix(ts: str) -> float:
     """Parse an ISO 8601 UTC timestamp into unix seconds; ``0.0`` on failure.
 
     Naive timestamps are treated as UTC. Never raises.
+
+    Args:
+        ts: An ISO 8601 timestamp string (``Z`` suffix accepted).
+
+    Returns:
+        The timestamp as unix epoch seconds, or ``0.0`` when empty or
+        unparseable.
     """
     s = (ts or "").strip()
     if not s:
@@ -154,6 +179,14 @@ def _summarize_failed_variants(
 
     Returns ``[{name, error_class, error_excerpt, extra_server_args}, ...]``
     (excerpt capped at 400 chars, at most ``max_entries`` rows).
+
+    Args:
+        all_results: The grid_runner result rows to scan (non-list inputs
+            yield an empty list).
+        max_entries: Maximum number of failed rows to include.
+
+    Returns:
+        A compact list of failed-variant dicts.
     """
     if not isinstance(all_results, list):
         return []
@@ -181,6 +214,13 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     Reads workload-shape fields outside ``_collect_workload_tags`` from
     ``benchmark.envs`` extra-args blobs and top-level ``benchmark`` fields.
     Defensive — parse errors return ``{}``.
+
+    Args:
+        yaml_path: Path to the baseline-materialized Magpie YAML file.
+
+    Returns:
+        A dict of extracted workload-tag fields, or ``{}`` on any read/parse
+        error.
     """
     import yaml as _yaml
     try:
@@ -240,6 +280,12 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
     Missing keys recorded as ``None``; ``extra_envs`` normalized to a sorted
     list of stringified ``[key, value]`` pairs so ordering doesn't affect
     equality.
+
+    Args:
+        params: The baseline action params to fingerprint, or ``None``.
+
+    Returns:
+        A fingerprint dict keyed by the baseline-determining params.
     """
     params = params or {}
     out: dict[str, Any] = {}
@@ -259,7 +305,12 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
 
 
 def _resolve_roofline_watermark_ratio() -> float:
-    """Resolve the roofline watermark ratio from ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` (fallback 1.10)."""
+    """Resolve the roofline watermark ratio from ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` (fallback 1.10).
+
+    Returns:
+        The configured ratio when it parses to a float greater than 1.0,
+        otherwise the default ``1.10``.
+    """
     raw = (os.environ.get(_ROOFLINE_WATERMARK_RATIO_ENV) or "").strip()
     if not raw:
         return _DEFAULT_ROOFLINE_WATERMARK_RATIO
@@ -281,6 +332,15 @@ def _merge_cumulative_extra_sglang_args(
 
     Prefer the full stack and dedupe, since joining ``base + candidate``
     when both are full stacks duplicates flags.
+
+    Args:
+        base_args: The baseline launch args string.
+        candidate_args: The candidate's launch args string.
+        full_args: The full cumulative stack args string, preferred when
+            present and distinct from the candidate.
+
+    Returns:
+        The merged, deduplicated launch args string.
     """
     base = str(base_args or "").strip()
     candidate = str(candidate_args or "").strip()
@@ -303,6 +363,12 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     Keep each flag once with its last value (first-seen order preserved),
     since argparse ``action="store"`` only honors the last value. Flags in
     ``_MULTI_VALUE_SGLANG_FLAGS`` keep their multi-value runs.
+
+    Args:
+        args_str: The space-separated launch args string to deduplicate.
+
+    Returns:
+        The deduplicated launch args string, or ``""`` when input is empty.
     """
     if not args_str:
         return ""

@@ -33,6 +33,13 @@ def env_flag(name: str, default: bool = False) -> bool:
 
     Accepts ``1/true/yes/on`` (True) and ``0/false/no/off`` (False),
     case-insensitive. An unset or unrecognized value returns ``default``.
+
+    Args:
+        name: Environment variable name to read.
+        default: Value returned when the var is unset or unrecognized.
+
+    Returns:
+        The parsed boolean, or ``default`` when not recognized.
     """
     raw = os.environ.get(name)
     if raw is None:
@@ -46,7 +53,11 @@ def env_flag(name: str, default: bool = False) -> bool:
 
 
 def langfuse_live_enabled() -> bool:
-    """Report whether the live-Langfuse master switch is on (default off)."""
+    """Report whether the live-Langfuse master switch is on (default off).
+
+    Returns:
+        True when the master switch env var is enabled.
+    """
     return env_flag(ENV_LANGFUSE_ENABLE, default=False)
 
 
@@ -55,6 +66,9 @@ def langfuse_credentials() -> dict[str, str]:
 
     Missing / blank vars are omitted; callers treat an incomplete set as
     "not configured" and degrade to a no-op.
+
+    Returns:
+        Mapping of env var name to stripped value for each set variable.
     """
     out: dict[str, str] = {}
     for key in (ENV_LANGFUSE_HOST, ENV_LANGFUSE_PUBLIC_KEY, ENV_LANGFUSE_SECRET_KEY):
@@ -65,7 +79,11 @@ def langfuse_credentials() -> dict[str, str]:
 
 
 def langfuse_credentials_complete() -> bool:
-    """True iff all three Langfuse connection vars are present and non-empty."""
+    """True iff all three Langfuse connection vars are present and non-empty.
+
+    Returns:
+        True when all three connection vars are set and non-empty.
+    """
     return len(langfuse_credentials()) == 3
 
 

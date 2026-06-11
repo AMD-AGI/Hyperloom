@@ -438,6 +438,10 @@ class LocalRecipeStore:
           rather than indexing it);
         * the ``history`` subdir (six levels deep, the recipe.json
           presence check naturally rules it out).
+
+        Yields:
+            Each recipe directory at the documented 5-level depth that holds a
+            live ``recipe.json``.
         """
         if not self.root.is_dir():
             return
@@ -466,6 +470,10 @@ class LocalRecipeStore:
         against a cid that doesn't (yet) have a parent recipe row
         are still discoverable. Mirrors the central server contract
         that attempts have no FK to the parent recipe.
+
+        Yields:
+            Each canonical-id directory at the 5-level depth holding either a
+            ``recipe.json`` or an ``attempts.ndjson`` (deduplicated).
         """
         if not self.root.is_dir():
             return

@@ -207,7 +207,15 @@ _ANCHOR_TO_DOMAIN: dict[str, "SpecialistDomain"] = _anchor_to_domain_map()
 
 def domain_for_tag(tag: str) -> "SpecialistDomain | None":
     """Return a representative catalogue entry for a knowledge-domain
-    tag (matched first by ``kb_anchor``, then by ``key``)."""
+    tag (matched first by ``kb_anchor``, then by ``key``).
+
+    Args:
+        tag: The knowledge-domain tag to look up.
+
+    Returns:
+        The matching catalogue entry, or ``None`` when the tag is empty or
+        unknown.
+    """
     t = (tag or "").strip()
     if not t:
         return None
@@ -223,6 +231,12 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
     Reads ``params.tags``; falls back to the ``params.domain`` alias (mapped
     to its ``kb_anchor`` when it names a catalogue entry, else verbatim) when
     absent. Order-preserving dedup; empty entries dropped.
+
+    Args:
+        params: The dispatch payload (reads ``tags`` then ``domain``).
+
+    Returns:
+        The resolved, order-preserving deduped tag list.
     """
     raw = params.get("tags")
     tags: list[str] = []

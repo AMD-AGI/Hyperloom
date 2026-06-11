@@ -56,7 +56,14 @@ DEFAULT_NUM_PROMPTS_FACTOR = 5
 
 def _coerce_int(value: Any) -> int:
     """Best-effort int coercion that never raises; non-numeric / None
-    collapse to 0 so an unset ``max_model_len`` disables filtering."""
+    collapse to 0 so an unset ``max_model_len`` disables filtering.
+
+    Args:
+        value: The value to coerce to an int.
+
+    Returns:
+        The parsed integer, or 0 when ``value`` is empty/non-numeric.
+    """
     if value is None or value == "":
         return 0
     try:
@@ -78,8 +85,19 @@ def _build_grid(
 
     Combos with ``ISL + OSL`` over a positive ``max_model_len`` are dropped
     up front (the server would reject every request), avoiding a wasted
-    launch. Returns ``(runnable_variants, skipped_records)`` so dropped
-    combos stay visible in the result.
+    launch.
+
+    Args:
+        conc_values: Concurrency values to fan out.
+        isl_osl_configs: ``"ISL:OSL"`` strings to fan out.
+        num_prompts_factor: Multiplier deriving ``NUM_PROMPTS`` from concurrency.
+        base_extra_args: Server args applied to every variant.
+        max_model_len: When positive, drops combos whose ``ISL + OSL`` exceeds
+            it.
+
+    Returns:
+        A ``(runnable_variants, skipped_records)`` tuple so dropped combos
+        stay visible in the result.
     """
     out: list[GridVariant] = []
     skipped: list[dict[str, Any]] = []
