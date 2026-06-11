@@ -38,6 +38,7 @@ from ._subprocess_kill import (
     run_with_session_kill,
 )
 from ._workload_envs import (
+    FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -376,15 +377,25 @@ class BaselineExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        config_path = materialize_config_with_envs(
-            config_path,
-            output_dir,
-            extra_server_args=read_extra_server_args(params),
-            extra_envs=dict(params.get("extra_envs") or {}),
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            benchmark_script=override_script,
-        )
+        try:
+            config_path = materialize_config_with_envs(
+                config_path,
+                output_dir,
+                extra_server_args=read_extra_server_args(params),
+                extra_envs=dict(params.get("extra_envs") or {}),
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                benchmark_script=override_script,
+            )
+        except FrameworkScriptMismatchError as exc:
+            # Cross-framework script override (e.g. sglang_*.sh on a vllm run):
+            # return a structured failure instead of bubbling to coordinator.
+            return {
+                "status": "failed",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
         # Stash for the result so Coordinator can reuse it downstream
         # (workload-contract reuse).
         materialized_config_path = config_path
