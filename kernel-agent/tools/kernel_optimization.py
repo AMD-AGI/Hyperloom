@@ -3385,8 +3385,8 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    # 1.10x KEEP threshold; below is treated as noise and routed to NEEDS_REVIEW.
-    KEEP_THRESHOLD = 1.10
+    # 1.05x KEEP threshold (issue #442); below is routed to NEEDS_REVIEW.
+    KEEP_THRESHOLD = 1.05
     if verification["micro_speedup"] < KEEP_THRESHOLD:
         reasons.append(
             f"speedup {verification['micro_speedup']:.3f}x below KEEP "

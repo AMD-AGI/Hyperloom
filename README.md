@@ -67,7 +67,14 @@ Local Mode runs Hyperloom in a remote AMD GPU environment, then uses Cursor to c
 
 #### 1. Prepare the GPU Environment
 
-You need an AMD GPU machine that supports MI300X or MI355X, using an SGLang or vLLM ROCm inference image. Example images:
+You need an AMD GPU machine that supports MI300X or MI355X, using an SGLang or vLLM ROCm inference image.
+
+The SGLang images are available from two sources — pick the one that matches your environment:
+
+- **Public Docker Hub** (`primussafe/sglang:<tag>`) — pull directly from anywhere with `docker pull`. Use these refs when running `docker run` on your own GPU machine. Browse all available tags at **[hub.docker.com/r/primussafe/sglang/tags](https://hub.docker.com/r/primussafe/sglang/tags)**.
+- **Self-hosted Harbor registry** (`harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:<tag>`) — AMD's internal mirror hosted in the Core42 data center, reachable from our Primus-SaFE platform running there. Use this prefix when selecting an image for a SaFE Authoring Pod.
+
+Example images (Harbor refs for the SaFE Authoring Pod path; drop the `harbor.core42.primus-safe.amd.com/proxy/` prefix to get the public Docker Hub ref):
 
 - SGLang MI300X: `harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix`
 - SGLang MI355X: `harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:v0.5.11-rocm720-mi35x-profilerfix`
@@ -92,9 +99,11 @@ docker run -d \
   --group-add video \
   -v /path/to/workspace:/workspace \
   -v /path/to/models:/models \
-  harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix \
+  primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix \
   tail -f /dev/null
 ```
+
+> This example uses the public Docker Hub ref (`primussafe/sglang:...`) since it runs on your own GPU machine. Inside Primus-SaFE, use the `harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:...` mirror instead.
 
 If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
 

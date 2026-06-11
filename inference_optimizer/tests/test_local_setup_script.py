@@ -231,25 +231,52 @@ def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> No
     assert "Optimize inference for this workload" in result.stdout
 
 
-def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> None:
+def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path) -> None:
+    # Deps root must NOT follow --session-dir: it stays on a pod-local base
+    # (TMPDIR) so a shared session tree never collocates concurrent checkouts.
     session_dir = tmp_path / "custom-session"
+    tmpdir = tmp_path / "podlocal"
+    tmpdir.mkdir()
+    env = _clean_base_env()
+    env["TMPDIR"] = str(tmpdir)
     result = subprocess.run(
         ["bash", str(SCRIPT), "--dry-run", "--session-dir", str(session_dir)],
         cwd=REPO_ROOT,
-        env=_clean_base_env(),
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
 
-    expected_deps = session_dir / "runtime" / "source-mirrors"
+    expected_deps = tmpdir / "hyperloom" / "open-source-repos"
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"HYPERLOOM_DEPS_ROOT={expected_deps}" in result.stdout
+    assert str(session_dir / "runtime" / "open-source-repos") not in result.stdout
     assert str(expected_deps / "Primus-Claw") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
     assert "0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9" in result.stdout
+
+
+def test_local_setup_explicit_deps_root_overrides_pod_local(tmp_path: Path) -> None:
+    # An explicit HYPERLOOM_DEPS_ROOT still wins over the pod-local default.
+    deps = tmp_path / "explicit-deps"
+    env = _clean_base_env()
+    env["HYPERLOOM_DEPS_ROOT"] = str(deps)
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--session-dir", str(tmp_path / "sess")],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"HYPERLOOM_DEPS_ROOT={deps}" in result.stdout
+    assert str(deps / "Primus-Claw") in result.stdout
 
 
 # install-harden: loud USER_DATA_PATH fallback notice + flock around the
@@ -332,6 +359,10 @@ def test_install_scripts_guard_mirror_writes_with_flock(script: Path) -> None:
     assert "exec 9>" in text, script
     assert "flock 9" in text, script
     assert "HYPERLOOM_INSTALL_LOCK_HELD" in text, script
+    # The lock must live in the pod-local open-source root it guards, not on the
+    # shared $HYPERLOOM_RUNTIME_DIR — otherwise separate pod roots block each other.
+    assert 'exec 9>"${_open_source_root}/.install.lock"' in text, script
+    assert '${HYPERLOOM_RUNTIME_DIR}/.install.lock' not in text, script
 
 
 def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
@@ -369,6 +400,13 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
 def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
     # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift (bugs.md §C #1).
     text = IO_INSTALL.read_text(encoding="utf-8")
+    assert (
+        '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"'
+        in text
+    )
+    assert 'MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"' in text
+    assert 'INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"' in text
+    assert "export HYPERLOOM_OPEN_SOURCE_ROOT" not in text
     assert re.search(
         r'^MAGPIE_REF="\$\{MAGPIE_REF:-[0-9a-fA-F]{40}\}"', text, re.M
     ), "MAGPIE_REF must default to a full 40-char commit SHA and be overridable"
