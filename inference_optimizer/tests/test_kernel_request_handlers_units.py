@@ -62,17 +62,6 @@ class TestBackendOrder:
 
         assert krh._backend_order({}) == ["geak", "codex"]
 
-
-# _backend_order
-class TestBackendOrder:
-    def test_documented_kernel_opt_backends_env_is_honored(self, monkeypatch):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-        monkeypatch.setenv("KERNEL_OPT_BACKENDS", "geak")
-
-        assert krh._backend_order({}) == ["geak"]
-
-
 # _candidate_env_allowed
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])

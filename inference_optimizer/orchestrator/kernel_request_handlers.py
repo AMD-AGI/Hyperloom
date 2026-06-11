@@ -1546,7 +1546,11 @@ def _backend_order(payload: dict) -> list[str]:
         list[str]: The filtered, ordered backend names (subset of
             ``{"claude", "codex", "cursor", "geak"}``).
     """
-    raw = payload.get("backend_order") or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+    raw = (
+        payload.get("backend_order")
+        or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+        or os.environ.get("KERNEL_OPT_BACKENDS")
+    )
     if raw:
         order = [item.strip().lower() for item in str(raw).split(",") if item.strip()]
         explicit = True
