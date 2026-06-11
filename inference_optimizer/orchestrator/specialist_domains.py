@@ -160,6 +160,14 @@ EXTRA_KNOWLEDGE_DOMAIN_TAGS: tuple[str, ...] = ()
 
 
 def _derive_knowledge_domain_tags() -> tuple[str, ...]:
+    """Collect the distinct knowledge-domain tags from the catalogue.
+
+    Combines the ``kb_anchor`` of each specialist domain with any extra
+    standalone tags, preserving first-seen order and dropping blanks.
+
+    Returns:
+        Ordered tuple of unique knowledge-domain tags.
+    """
     seen: dict[str, None] = {}
     for d in SPECIALIST_DOMAINS:
         anchor = (d.kb_anchor or "").strip()
@@ -179,6 +187,13 @@ KNOWLEDGE_DOMAIN_TAG_SET: frozenset[str] = frozenset(KNOWLEDGE_DOMAIN_TAGS)
 # Map each knowledge-domain tag back to a representative catalogue entry.
 # The first catalogue entry that owns the anchor wins.
 def _anchor_to_domain_map() -> dict[str, "SpecialistDomain"]:
+    """Build a map from KB anchor to its representative domain entry.
+
+    The first catalogue entry that owns a given anchor wins.
+
+    Returns:
+        Mapping of ``kb_anchor`` to the owning :class:`SpecialistDomain`.
+    """
     out: dict[str, SpecialistDomain] = {}
     for d in SPECIALIST_DOMAINS:
         anchor = (d.kb_anchor or "").strip()

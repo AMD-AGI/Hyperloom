@@ -427,6 +427,12 @@ class MagpiePatchStatus:
 
     @property
     def ok(self) -> bool:
+        """Whether the patch result is fully successful.
+
+        Returns:
+            ``True`` only when both the atomic write and remote-trust
+            checks succeeded.
+        """
         return self.atomic_ok and self.remote_trust_ok
 
     @property
