@@ -1101,6 +1101,61 @@ _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 # causing AttributeError deep in engine init.
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
+# Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
+# use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
+# CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
+# compressed-tensors), gptq, awq are NOT listed so they keep running.
+_AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
+_AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
+
+
+def _detect_amd_unsupported_quant(model_path: str) -> str | None:
+    """Return a reason when the model ships a quant format unsupported on ROCm.
+
+    Reads both ``config.json:quantization_config`` (standard HF) and the
+    separate ``hf_quant_config.json`` (NVIDIA ModelOpt). Returns None when the
+    format is ROCm-runnable or absent.
+    """
+    if not model_path:
+        return None
+    cfg = _load_model_config_dict(model_path) or {}
+    qc = cfg.get("quantization_config")
+    if isinstance(qc, dict):
+        method = str(qc.get("quant_method") or "").strip().lower()
+        if method in _AMD_UNSUPPORTED_QUANT_METHODS:
+            return (
+                f"quantization_config.quant_method '{method}' ships CUDA-only "
+                f"kernels with no ROCm equivalent; it crashes in engine init "
+                f"on AMD."
+            )
+    # NVIDIA ModelOpt writes a separate hf_quant_config.json, not config.json.
+    hq_path = Path(model_path) / "hf_quant_config.json"
+    if hq_path.is_file():
+        try:
+            hq = json.loads(hq_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            hq = None
+        if isinstance(hq, dict):
+            producer = str(
+                (hq.get("producer") or {}).get("name") or "",
+            ).strip().lower()
+            algo = str(
+                (hq.get("quantization") or {}).get("quant_algo") or "",
+            ).strip().lower()
+            if producer == "modelopt" and algo:
+                return (
+                    f"NVIDIA ModelOpt '{algo.upper()}' quantization "
+                    f"(hf_quant_config.json) uses vendor-specific scale packing "
+                    f"with no sglang ROCm loader (e.g. 'modelopt_fp8 ... not "
+                    f"supported in ROCm'); use an AMD-native (Quark) checkpoint."
+                )
+            if algo in _AMD_UNSUPPORTED_QUANT_ALGOS:
+                return (
+                    f"'{algo.upper()}' quantization needs NVIDIA Blackwell "
+                    f"hardware; no AMD/ROCm runtime path exists."
+                )
+    return None
+
 
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
@@ -1137,6 +1192,9 @@ def _detect_incompatible_model_config(
     # Reject DSA-like architectures only on AMD/ROCm.
     # The same model can still run on vendor-supported NVIDIA engines.
     if _resolve_amd_gpu_type(gpu_type):
+        quant_reason = _detect_amd_unsupported_quant(model_path)
+        if quant_reason is not None:
+            return quant_reason
         model_type = str(data.get("model_type") or "").strip().lower()
         arches = {a.lower() for a in _config_architectures(data)}
         if (
