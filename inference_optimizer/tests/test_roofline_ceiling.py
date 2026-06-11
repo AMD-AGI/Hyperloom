@@ -1930,3 +1930,64 @@ class TestRuntimeDtypeResolution:
         meta = load_model_meta(state.model_path)
         rt = resolve_runtime_dtype(state, meta)
         assert rt.quantization == "none"
+
+
+class TestArmPinnedPrecision:
+    """``arm`` pins ceiling precision: baseline keeps baseline dtype even after a fp8 current_best is promoted."""
+
+    def _bf16_baseline_with_fp8_best(self, tmp_path):
+        _write_synthetic_model(
+            tmp_path / "m",
+            total_size=140_000_000_000,
+            num_layers=80, num_kv_heads=8,
+            hidden_size=8192, num_attention_heads=64,
+            torch_dtype="bfloat16",
+        )
+        # Baseline yaml carries NO quantization (bf16 weights).
+        yaml_path = tmp_path / "bl.yaml"
+        yaml_path.write_text(
+            "benchmark:\n  envs:\n    CONC: 32\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(
+            model_path=str(tmp_path / "m"),
+            gpu_type="mi300x",
+            tp=1,
+            precision="bf16",
+            conc=32,
+            isl=2048,
+            osl=512,
+            last_baseline={"extras": {"materialized_config": str(yaml_path)}},
+            # Promoted optimized arm quantizes weights to fp8.
+            current_best={
+                "tput": 2000.0,
+                "extra_server_args": "--quantization fp8",
+            },
+        )
+
+    def test_baseline_arm_ignores_current_best_fp8(self, tmp_path):
+        state = self._bf16_baseline_with_fp8_best(tmp_path)
+        meta = load_model_meta(state.model_path)
+        rt = resolve_runtime_dtype(state, meta, arm="baseline")
+        # Baseline yaml had no --quantization -> weights stay bf16 (2 bytes).
+        assert rt.weight_dtype_bytes == 2.0
+        assert rt.quantization == "none"
+
+    def test_current_best_arm_picks_up_fp8(self, tmp_path):
+        state = self._bf16_baseline_with_fp8_best(tmp_path)
+        meta = load_model_meta(state.model_path)
+        rt = resolve_runtime_dtype(state, meta, arm="current_best")
+        assert rt.weight_dtype_bytes == 1.0
+        assert rt.quantization == "fp8"
+
+    def test_baseline_arm_ceiling_below_fp8_arm(self, tmp_path):
+        state = self._bf16_baseline_with_fp8_best(tmp_path)
+        baseline_peak = compute_roofline_breakdown_from_state(
+            state, arm="baseline",
+        ).peak_tok_per_sec
+        best_peak = compute_roofline_breakdown_from_state(
+            state, arm="current_best",
+        ).peak_tok_per_sec
+        # fp8 halves weight IO, so the best-arm ceiling must be higher.
+        assert baseline_peak > 0
+        assert best_peak > baseline_peak

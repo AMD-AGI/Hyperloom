@@ -2685,6 +2685,18 @@ class Coordinator:
                 cb_args = str(cb.get("extra_server_args") or "")
                 if cb_args:
                     params["base_extra_args"] = cb_args
+        else:
+            # PRELUDE roofline profiles the baseline arm: inject baseline's own
+            # server args (from its materialized yaml), never current_best's,
+            # so a later warm-replay can't swap in compile/fp8 flags that
+            # destabilize profiling and skew the baseline ceiling.
+            try:
+                from .roofline_ceiling import _read_baseline_yaml_server_args
+                bl_args = _read_baseline_yaml_server_args(state).strip()
+            except Exception:  # noqa: BLE001 — best-effort; empty falls through
+                bl_args = ""
+            if bl_args:
+                params["base_extra_args"] = bl_args
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
             bs = str(last_bl.get("benchmark_script") or "").strip()

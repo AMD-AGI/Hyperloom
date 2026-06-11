@@ -2021,20 +2021,28 @@ class SharedState:
                 compute_roofline_from_perfmodel,
                 load_model_meta,
             )
-            # Primary decode ceiling plus memory/compute sides; PerfModel bottom-up formula, legacy is fallback only.
-            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            try:
-                breakdown = compute_roofline_breakdown_from_state(self)
-            except Exception:  # noqa: BLE001 — ceiling is best-effort
-                pass
-            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            # Resolve which arm this snapshot measures FIRST so the ceiling's
+            # precision is anchored to the SAME arm as achieved: a baseline
+            # snapshot keeps its dtype on baseline even after current_best is
+            # promoted (else a later fp8 best would retro-inflate the ceiling).
             achieved_tput = 0.0
+            snapshot_arm = "baseline"
             cb = self.current_best if isinstance(self.current_best, dict) else {}
             cb_tput = cb.get("tput")
             if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                 achieved_tput = float(cb_tput)
+                snapshot_arm = "current_best"
             elif isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
                 achieved_tput = float(self.baseline_tput)
+            # Primary decode ceiling plus memory/compute sides; PerfModel bottom-up formula, legacy is fallback only.
+            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+            try:
+                breakdown = compute_roofline_breakdown_from_state(
+                    self, arm=snapshot_arm,
+                )
+            except Exception:  # noqa: BLE001 — ceiling is best-effort
+                pass
+            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             history_entry = build_roofline_snapshot(
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
@@ -2048,7 +2056,7 @@ class SharedState:
             # Per-op PerfModel breakdown for dashboard visualization.
             try:
                 from .roofline_ceiling import resolve_runtime_workload
-                runtime = resolve_runtime_workload(self)
+                runtime = resolve_runtime_workload(self, arm=snapshot_arm)
                 meta = load_model_meta(
                     runtime.model_path,
                     precision_hint=runtime.precision,
@@ -2060,8 +2068,9 @@ class SharedState:
                     )
                     eff_conc = runtime.concurrency
                     # Use the dtype the run actually read (e.g. fp8 over a
-                    # float32 checkpoint), not the on-disk torch_dtype.
-                    rt = resolve_runtime_dtype(self, meta)
+                    # float32 checkpoint), not the on-disk torch_dtype; pinned
+                    # to this snapshot's arm so baseline keeps baseline dtype.
+                    rt = resolve_runtime_dtype(self, meta, arm=snapshot_arm)
                     meta = apply_runtime_dtype(meta, rt)
                     pm_bd = compute_roofline_from_perfmodel(
                         meta=meta,

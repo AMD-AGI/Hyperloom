@@ -236,19 +236,22 @@ def _achieved_arm_source(state: Any) -> str:
     return "baseline"
 
 
-def _collect_runtime_server_args(state: Any) -> str:
+def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
     """Server args for the arm the ceiling is actually compared against.
 
     Selects a SINGLE source aligned with ``achieved`` (see
     ``_achieved_arm_source``). Baseline materialized yaml is the base
     config; current_best contributes only overlay server args when the
-    measured throughput comes from the optimized arm.
+    measured throughput comes from the optimized arm. ``arm`` pins the
+    source explicitly ("baseline" never overlays current_best), so a
+    baseline snapshot's ceiling precision stays anchored to baseline.
     """
     base_args = (
         _read_baseline_yaml_server_args(state)
         or _server_args_from(getattr(state, "last_baseline", None))
     )
-    if _achieved_arm_source(state) == "current_best":
+    resolved_arm = arm or _achieved_arm_source(state)
+    if resolved_arm == "current_best":
         current_best = getattr(state, "current_best", None)
         override = _server_args_env_override(current_best)
         if override:
@@ -268,8 +271,16 @@ def _runtime_gpu_type(state: Any, benchmark: dict[str, Any]) -> str:
     )
 
 
-def resolve_runtime_workload(state: Any) -> RuntimeWorkload:
-    """Resolve runtime workload fields from baseline yaml plus overlay args."""
+def resolve_runtime_workload(
+    state: Any, *, arm: str | None = None,
+) -> RuntimeWorkload:
+    """Resolve runtime workload fields from baseline yaml plus overlay args.
+
+    Geometry (model/gpu/tp/conc/isl/osl) always comes from the baseline
+    yaml. ``arm`` only pins which arm's server args feed precision
+    resolution; ``"baseline"`` keeps the ceiling's dtype anchored to
+    baseline even after current_best is promoted.
+    """
     benchmark = _read_baseline_yaml_benchmark(state)
     envs = _benchmark_envs(benchmark)
 
@@ -289,7 +300,7 @@ def resolve_runtime_workload(state: Any) -> RuntimeWorkload:
         concurrency=_env_int(envs, "CONC") or _state_int("conc") or 1,
         isl=_env_int(envs, "ISL") or _state_int("isl"),
         osl=_env_int(envs, "OSL") or _state_int("osl"),
-        server_args=_collect_runtime_server_args(state),
+        server_args=_collect_runtime_server_args(state, arm=arm),
     )
 
 
@@ -316,7 +327,9 @@ class RuntimeDtype:
     compute_precision_tag: str = ""
 
 
-def resolve_runtime_dtype(state: Any, meta: "ModelMeta") -> RuntimeDtype:
+def resolve_runtime_dtype(
+    state: Any, meta: "ModelMeta", *, arm: str | None = None,
+) -> RuntimeDtype:
     """Resolve the runtime weight/activation dtype from the actual run.
 
     Priority (first decisive signal wins):
@@ -338,7 +351,7 @@ def resolve_runtime_dtype(state: Any, meta: "ModelMeta") -> RuntimeDtype:
     sub-bf16 without an explicit quantization signal. Activation dtype
     follows ``--dtype`` when present, else bf16, also floored at 2B.
     """
-    runtime = resolve_runtime_workload(state)
+    runtime = resolve_runtime_workload(state, arm=arm)
     args = runtime.server_args
     quant = _parse_server_arg(args, "--quantization").lower()
     dtype_arg = _parse_server_arg(args, "--dtype").lower()
@@ -782,9 +795,11 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
     return max(float(meta.weight_dtype_bytes or 2.0), 2.0)
 
 
-def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
-    """Primary decode ceiling + T_mem/T_cmp side projections. Prefers the bottom-up PerfModel (``compute_roofline_from_perfmodel``) when model config is complete, else the legacy top-down aggregate. Never raises; returns ``_EMPTY_BREAKDOWN`` on missing fields."""
-    runtime = resolve_runtime_workload(state)
+def compute_roofline_breakdown_from_state(
+    state: Any, *, arm: str | None = None,
+) -> RooflineBreakdown:
+    """Primary decode ceiling + T_mem/T_cmp side projections. Prefers the bottom-up PerfModel (``compute_roofline_from_perfmodel``) when model config is complete, else the legacy top-down aggregate. Never raises; returns ``_EMPTY_BREAKDOWN`` on missing fields. ``arm`` pins precision to a specific arm ("baseline" anchors the ceiling dtype to baseline)."""
+    runtime = resolve_runtime_workload(state, arm=arm)
     meta = load_model_meta(
         runtime.model_path,
         precision_hint=runtime.precision,
@@ -796,7 +811,7 @@ def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
     concurrency = runtime.concurrency
     # Rescale weights to the dtype the run actually read (e.g. fp8 over a
     # float32 checkpoint) so the ceiling reflects runtime, not on-disk size.
-    rt = resolve_runtime_dtype(state, meta)
+    rt = resolve_runtime_dtype(state, meta, arm=arm)
     meta = apply_runtime_dtype(meta, rt)
     precision_tag = (
         rt.compute_precision_tag

@@ -569,7 +569,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         monkeypatch.setattr(
             roofline_ceiling,
             "compute_roofline_breakdown_from_state",
-            lambda _state: br,
+            lambda _state, **_kw: br,
         )
 
     def test_stamps_ceiling_and_achieved_into_history(
@@ -715,7 +715,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         monkeypatch.setattr(
             roofline_ceiling,
             "compute_roofline_breakdown_from_state",
-            lambda _state: br,
+            lambda _state, **_kw: br,
         )
 
     def _record(self, tmp_path, state):
