@@ -705,6 +705,16 @@ class ReportExecutor:
         self.max_highlights = int(max_highlights)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the report-generation action for the given context.
+
+        Args:
+            ctx: Action context; used to resolve the session directory
+                and report parameters.
+
+        Returns:
+            A result dict with a ``status`` field, failing when the
+            session directory cannot be resolved.
+        """
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             return {"status": "failed",
