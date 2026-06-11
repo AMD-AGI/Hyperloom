@@ -102,7 +102,18 @@ def _first_of(d: dict, *keys: str) -> Any | None:
 
 
 def _parse_metrics_from_report(content: str) -> dict:
-    """Fallback: extract baseline/optimized throughput from the optimization_report.md Executive Summary table (prefers total over per-GPU)."""
+    """Extract throughput metrics from an optimization report (fallback path).
+
+    Parses the ``optimization_report.md`` Executive Summary table, preferring
+    total over per-GPU figures.
+
+    Args:
+        content: The Markdown report contents.
+
+    Returns:
+        A dict with any of ``gain_pct``, ``baseline_throughput``, and
+        ``optimized_throughput`` that could be parsed.
+    """
     import re
 
     result: dict[str, Any] = {}
