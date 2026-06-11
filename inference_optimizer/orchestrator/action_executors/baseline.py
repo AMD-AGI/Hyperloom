@@ -188,8 +188,13 @@ def _ensure_local_inferencex(src: str) -> str:
 
     Best-effort — never raises; on failure it falls back to ``src`` so the
     run proceeds (degraded to the pre-fix behaviour) rather than aborting.
-    The copy is taken AFTER ProfileExecutor's InferenceX patch step, so the
-    local mirror carries the NUM_PROMPTS / PROFILE_EXTRA_BODY patches.
+
+    Ordering: the caller relocates BEFORE config materialization and points
+    ``$INFERENCEX_PATH`` at the returned mirror, so the subsequent
+    ProfileExecutor patch step (``_after_materialize_config``) patches the
+    LOCAL mirror in place — the mirror therefore ends up carrying the
+    NUM_PROMPTS / PROFILE_EXTRA_BODY patches, and Magpie ``cd``-s into the
+    patched local copy.
     """
     src = str(src)
     if os.environ.get(
@@ -502,6 +507,17 @@ class BaselineExecutor:
         if ix_env:
             local_ix = _ensure_local_inferencex(ix_env)
             if local_ix != ix_env:
+                # Set process-wide on purpose: materialize_config_with_envs and
+                # ProfileExecutor._after_materialize_config both read
+                # ``$INFERENCEX_PATH`` from the environment (not a passed arg),
+                # and so does _run_single_benchmark when it exports
+                # MAGPIE_INFERENCEX_PATH — all three must see the local mirror.
+                # Not restored afterwards by design: the mirror dir is keyed by
+                # a hash of the source path, so a later task whose env already
+                # points at the mirror short-circuits (_is_network_fs → local →
+                # no-op) and reuses the same patched copy instead of re-pointing
+                # back to wekafs. Opt out entirely with
+                # INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX=1.
                 os.environ["INFERENCEX_PATH"] = local_ix
 
         timeout_sec = self._resolve_timeout(params)

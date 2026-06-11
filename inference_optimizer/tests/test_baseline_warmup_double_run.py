@@ -417,9 +417,17 @@ def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
 
 
 def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
-    """#523 end-to-end (unit): when INFERENCEX_PATH is on a network mount,
-    the Magpie subprocess env's MAGPIE_INFERENCEX_PATH is rewritten to the
-    local mirror so Magpie's ``cd <inferencex>`` lands on stable local disk."""
+    """#523 end-to-end (unit): when INFERENCEX_PATH is on a network mount, the
+    local mirror is what Magpie actually ``cd``-s into. Asserts BOTH channels:
+
+    * the materialized YAML's ``benchmark.inferencex_path`` (the field Magpie's
+      ``_build_local_command`` honours — the real ``cd`` target), and
+    * the ``MAGPIE_INFERENCEX_PATH`` env fallback.
+
+    The YAML assertion is the load-bearing one: an earlier iteration only
+    rewrote the env fallback and the pickle still dumped onto wekafs because
+    Magpie reads the YAML field, not the env, when it is populated.
+    """
     from inference_optimizer.orchestrator.action_executors import baseline as bl
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
@@ -441,6 +449,10 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
 
     def fake_run(cmd, *args, **kwargs):
         seen["env"] = kwargs.get("env")
+        cfg_idx = cmd.index("--benchmark-config")
+        seen["materialized_cfg"] = yaml.safe_load(
+            Path(cmd[cfg_idx + 1]).read_text()
+        )
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=_HOT_TPUT)
@@ -461,6 +473,11 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
+    # Load-bearing: the YAML field Magpie's `cd <inferencex>` reads.
+    yaml_ix = seen["materialized_cfg"]["benchmark"]["inferencex_path"]
+    assert yaml_ix != str(ix_src), seen["materialized_cfg"]
+    assert str(local_root) in yaml_ix
+    # Env fallback also points at the mirror.
     magpie_ix = seen["env"]["MAGPIE_INFERENCEX_PATH"]
     assert magpie_ix != str(ix_src), seen["env"]
     assert str(local_root) in magpie_ix
