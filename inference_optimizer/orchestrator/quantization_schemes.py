@@ -116,6 +116,15 @@ def _join_clauses(items: Sequence[str]) -> str:
 
 
 def _strategy_paragraph(cfg: QuantizationConfig) -> str:
+    """Render the quantization-strategy paragraph for a prompt.
+
+    Args:
+        cfg: Quantization configuration to describe.
+
+    Returns:
+        A prose paragraph covering the global scheme, layer overrides,
+        kv-cache handling, exclusions, and output directory.
+    """
     sentences = [f"Apply {cfg.global_scheme} as the global quantization scheme."]
     if cfg.layer_overrides:
         clauses = [
@@ -136,6 +145,15 @@ def _strategy_paragraph(cfg: QuantizationConfig) -> str:
 
 
 def _calibration_paragraph(cfg: QuantizationConfig) -> str | None:
+    """Render the calibration paragraph, composing only set fields.
+
+    Args:
+        cfg: Quantization configuration to describe.
+
+    Returns:
+        A calibration paragraph, or ``None`` when no calibration fields
+        are configured.
+    """
     if cfg.calib_dataset is None and cfg.num_calib_data is None and cfg.seq_len is None:
         return None
     # Compose only the parts that were set, e.g. "Calibrate with the pileval
@@ -151,6 +169,15 @@ def _calibration_paragraph(cfg: QuantizationConfig) -> str | None:
 
 
 def _evaluation_paragraph(cfg: QuantizationConfig) -> str | None:
+    """Render the evaluation paragraph describing the accuracy budget.
+
+    Args:
+        cfg: Quantization configuration to describe.
+
+    Returns:
+        An evaluation paragraph, or ``None`` when no acceptable eval gap
+        is configured.
+    """
     if cfg.acceptable_eval_gap is None:
         return None
     pct = f"{cfg.acceptable_eval_gap * 100:g}"
