@@ -29,7 +29,7 @@ name: SaFE Optimize Submit
 #
 # How to dispatch:
 #   • Single/few models      : `-f models='Qwen/Qwen2.5-7B-Instruct ...'`
-#   • Reproducible batch run : `-f candidates_file=ci/candidates/production_1000_from_hf_2026-05-25.json
+#   • Reproducible batch run : `-f candidates_file=ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json
 #                              -f batch_index=0 -f batch_size=130`
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
@@ -50,7 +50,7 @@ on:
         required: false
         default: ''
       candidates_file:
-        description: 'Path to a candidates JSON built by ci/build_production_hf_pool.py (e.g. ci/candidates/production_1000_from_hf_2026-05-25.json). Used when models is empty.'
+        description: 'Path to a candidates JSON built by ci/build_production_hf_pool.py (e.g. ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json). Used when models is empty.'
         required: false
         default: ''
       batch_index:
