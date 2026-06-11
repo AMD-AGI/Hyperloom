@@ -2941,7 +2941,7 @@ def wait_and_collect_one(
         log.info("[task %s] current session timestamp hints from artifacts: %s",
                  rec.task_id, ", ".join(sorted(current_session_hints)))
 
-    if final_status not in ("Succeeded", "Success") and not has_safe_breakdown:
+    if not has_safe_breakdown:
         waited_session = _wait_for_nfs_session_delivery(
             rec,
             current_session_hints=current_session_hints,
