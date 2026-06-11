@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Any
 
@@ -43,8 +43,13 @@ _GPU_SPECS: dict[str, GpuSpec] = {
     "MI300X": GpuSpec("MI300X", "gfx942", 304, 192, "amd"),
     "MI308X": GpuSpec("MI308X", "gfx942", 80, 128, "amd"),
     "MI325X": GpuSpec("MI325X", "gfx942", 304, 256, "amd"),
-    "MI350X": GpuSpec("MI350X", "gfx950", 320, 288, "amd"),
-    "MI355X": GpuSpec("MI355X", "gfx950", 320, 288, "amd"),
+    # gfx950 (CDNA4): rocminfo reports 256 *enabled* CUs on these parts (the
+    # 320 figure is the physical/spec die count, not what aiter sees). CU_NUM
+    # MUST match rocminfo, so the enabled count is authoritative here. See
+    # _detect_amd(), which additionally overrides this with the live rocminfo
+    # value when present.
+    "MI350X": GpuSpec("MI350X", "gfx950", 256, 288, "amd"),
+    "MI355X": GpuSpec("MI355X", "gfx950", 256, 288, "amd"),
     "H100": GpuSpec("H100", "sm_90a", 132, 80, "nvidia"),
     "H200": GpuSpec("H200", "sm_90a", 132, 141, "nvidia"),
     "B200": GpuSpec("B200", "sm_100a", 192, 192, "nvidia"),
@@ -126,11 +131,23 @@ def _detect_amd() -> GpuSpec | None:
             if not arch:
                 continue
 
+            spec: GpuSpec | None = None
             for s in _GPU_SPECS.values():
                 if s.arch == arch and s.compute_units == cu_count:
-                    return s
+                    spec = s
+                    break
+            if spec is None:
+                spec = get_spec_by_arch(arch)
 
-            return get_spec_by_arch(arch)
+            # Trust the CU count actually reported by rocminfo over the
+            # hardcoded spec. Several gfx950 parts (MI350X/MI355X) share an
+            # arch but differ in (and may be CU-masked below) the spec CU
+            # count. The injected CU_NUM MUST match what aiter detects from
+            # rocminfo, otherwise aiter's tuned MoE kernel lookup falls back
+            # to an unsupported config and CUDA graph capture crashes.
+            if spec is not None and cu_count and spec.compute_units != cu_count:
+                spec = replace(spec, compute_units=cu_count)
+            return spec
 
         return None
 
