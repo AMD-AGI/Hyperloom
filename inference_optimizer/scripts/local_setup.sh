@@ -340,7 +340,6 @@ Optimize inference for this workload:
 - CONC: 64
 - ISL: 1024
 - OSL: 1024
-- Precision: bf16
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
 

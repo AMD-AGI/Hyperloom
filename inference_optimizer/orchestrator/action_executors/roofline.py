@@ -278,7 +278,22 @@ class RooflineExecutor:
         )
 
         # ---- Step 2: trace_analyze ----------------------------------------
+        # Pin the snapshot's arm so the ceiling's precision is anchored to the
+        # arm this roofline actually profiled. A PRELUDE roofline measures the
+        # baseline arm; without this the recorder would infer "current_best"
+        # from a warm-replay-promoted state and retro-inflate the ceiling.
+        _task_params = ctx.task.params or {}
+        # Pin every roofline's arm explicitly so the ceiling precision never
+        # relies on a transient current_best inference: PRELUDE measures the
+        # baseline arm; all other reasons (watermark etc.) measure current_best.
+        roofline_arm = (
+            "baseline"
+            if str(_task_params.get("reason") or "") == "prelude_initial"
+            else "current_best"
+        )
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
+        if roofline_arm:
+            ta_payload["roofline_arm"] = roofline_arm
         try:
             ta_result = await trace_analyze_handler(
                 ta_payload,
@@ -316,6 +331,8 @@ class RooflineExecutor:
                     source_warning.get("requested_mode") or ""
                 ),
             }
+            if roofline_arm:
+                ta_payload_retry["roofline_arm"] = roofline_arm
             try:
                 ta_result = await trace_analyze_handler(
                     ta_payload_retry,
