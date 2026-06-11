@@ -172,9 +172,17 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
 def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | None]:
     """Read ``run_manifest.yaml`` and pull ``outputs.quantized_model_dir``.
 
-    Returns ``(path, manifest_present, parse_error)``. PyYAML is imported
-    lazily so the agent stays installable without it — falling back to the
-    ``nice_to_have_skipped`` (#20) outcome in that case.
+    PyYAML is imported lazily so the agent stays installable without it —
+    falling back to the ``nice_to_have_skipped`` (#20) outcome in that case.
+
+    Args:
+        workspace: Workspace directory containing ``run_manifest.yaml``.
+
+    Returns:
+        A ``(path, manifest_present, parse_error)`` tuple. ``path`` is the
+        resolved quantized-model directory (or ``None``), ``manifest_present``
+        indicates the manifest file existed, and ``parse_error`` carries a
+        reason string when parsing failed.
     """
 
     manifest = workspace / "run_manifest.yaml"
@@ -244,6 +252,12 @@ def _scan_hypothesis_attempts(workspace: Path) -> tuple[int, ...]:
     The classifier uses these to decide if SKILL.md actually diagnosed a fix
     before the retry was attempted (precondition for incrementing the
     retry counter — see §A.10).
+
+    Args:
+        workspace: Workspace directory to scan.
+
+    Returns:
+        The sorted attempt numbers ``N`` found on disk (empty if none).
     """
 
     pattern = re.compile(r"^fix_hypothesis_attempt_(\d+)\.md$")
