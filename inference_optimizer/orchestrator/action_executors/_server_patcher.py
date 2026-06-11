@@ -65,6 +65,13 @@ def _load_sglang_supported_versions_from_manifest(
 
     Returns ``None`` when no manifest exists (the common case today; a
     forward-compatible hook), or a frozenset of versions (empty = reject all).
+
+    Args:
+        patches_dir: SGLang patches directory that may ship the manifest.
+
+    Returns:
+        A frozenset of supported version strings, or ``None`` when no manifest
+        exists or it could not be read.
     """
     for name in _SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES:
         manifest = patches_dir / name
@@ -101,6 +108,14 @@ def _sglang_version_accepted(
     ``$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS`` (minor prefixes, ``0.5`` matches
     ``0.5.9`` not ``0.50.0``) > TraceLens ``SUPPORTED_VERSIONS`` manifest in
     ``patches_dir`` > :data:`_SGLANG_DEFAULT_ALLOWED_MINORS`.
+
+    Args:
+        version: The SGLang version string to test.
+        patches_dir: Optional patches directory consulted for the TraceLens
+            ``SUPPORTED_VERSIONS`` manifest.
+
+    Returns:
+        True iff ``version`` is accepted by the resolved allowlist.
     """
     text = (version or "").strip()
     if not text:
@@ -138,7 +153,15 @@ _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
 def _versioned_patches_subdir_name(version: str) -> str | None:
     """Map ``sglang.__version__`` to the per-version patch subdir name (e.g.
     ``0.5.11`` -> ``sglang_0_5_11``). Returns ``None`` when ``version`` has no
-    dotted numeric head."""
+    dotted numeric head.
+
+    Args:
+        version: The ``sglang.__version__`` string to map.
+
+    Returns:
+        The per-version patch subdir name, or ``None`` when ``version`` has no
+        dotted numeric head.
+    """
     text = (version or "").strip()
     if not text:
         return None
@@ -165,6 +188,13 @@ def _resolve_sglang_patches_dir(
     Requires the per-version subdir layout (``sglang_0_5_11/``, ...); the flat
     v0.3 layout is unsupported. Returns the subdir when it exists and has at
     least one ``*.patch``, else ``None`` (caller fail-softs).
+
+    Args:
+        patches_root: Root directory holding the per-version patch subdirs.
+        version: The running ``sglang`` version string.
+
+    Returns:
+        The resolved patches subdir, or ``None`` when it is missing or empty.
     """
     subdir_name = _versioned_patches_subdir_name(version)
     if subdir_name is None:
@@ -186,6 +216,14 @@ def ensure_vllm_patched_for_tracelens(
 
     Returns ``True`` when patched at exit, ``False`` on any fail-soft outcome
     (callers MUST then skip the TraceLens-only profiler flags).
+
+    Args:
+        tracelens_root: TraceLens checkout root; falls back to
+            ``$TRACELENS_ROOT`` when ``None``.
+
+    Returns:
+        True if the vLLM install is in patched state at exit, False on any
+        fail-soft outcome.
     """
     plan = _discover_vllm_plan(tracelens_root)
     if plan is None:
@@ -240,7 +278,16 @@ class _PatchPlan:
 
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
     """Resolve TRACELENS_ROOT from arg → env → None; fail-soft when unset or
-    missing on disk."""
+    missing on disk.
+
+    Args:
+        arg: Explicit TraceLens root override, or ``None`` to read
+            ``$TRACELENS_ROOT``.
+
+    Returns:
+        The resolved TraceLens root directory, or ``None`` when unset or
+        missing on disk.
+    """
     if arg:
         root = Path(arg)
     else:
@@ -462,6 +509,13 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     Editable (``<repo>/python/sglang/``): ``(repo_root, 1)``. Wheel
     (``site-packages/sglang/`` with no ``python/`` parent):
     ``(<site-packages>/sglang, 3)``. Anything else: ``None`` (fail-soft).
+
+    Args:
+        sglang_module: Resolved path to the imported ``sglang`` package file.
+
+    Returns:
+        An ``(apply_root, strip_count)`` tuple, or ``None`` when the install
+        layout is unrecognized.
     """
     if sglang_module.parent.parent.name == "python":
         return sglang_module.parent.parent.parent, 1
@@ -500,7 +554,15 @@ def _ensure_patched(plan: _PatchPlan) -> bool:
 
 def _is_patched(plan: _PatchPlan) -> bool:
     """True iff the sentinel file (and every extra_sentinel) exists with all of
-    its marker substrings present. The all-of-N rule lowers false positives."""
+    its marker substrings present. The all-of-N rule lowers false positives.
+
+    Args:
+        plan: The resolved patch plan whose sentinels are inspected.
+
+    Returns:
+        True when every sentinel file exists with all required markers, False
+        otherwise (including on read error).
+    """
     try:
         if not plan.sentinel_file.exists():
             return False
@@ -523,7 +585,14 @@ def _is_patched(plan: _PatchPlan) -> bool:
 @contextmanager
 def _file_lock(path: str) -> Iterator[None]:
     """Best-effort cross-process exclusion; proceeds unsynchronized if ``/tmp``
-    is read-only (the second patcher re-checks the sentinel and short-circuits)."""
+    is read-only (the second patcher re-checks the sentinel and short-circuits).
+
+    Args:
+        path: Filesystem path of the lock file to acquire exclusively.
+
+    Yields:
+        Control while the exclusive lock is held; the lock is released on exit.
+    """
     try:
         fp = open(path, "w")
     except OSError as e:
@@ -549,6 +618,13 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     ``git apply --check`` every patch first (any failure → apply none); then
     apply one at a time, reverse-applying the already-applied ones if a later
     patch fails.
+
+    Args:
+        plan: The resolved patch plan to apply as a transaction.
+
+    Returns:
+        True when every patch is applied (or already applied), False on any
+        precheck/apply failure (with already-applied patches rolled back).
     """
     git = shutil.which("git")
     if git is None:
@@ -678,6 +754,15 @@ def _patch_dry_run(
     Fuzzy fallback (zero side effects) when ``git apply --check`` rejects a
     patch for minor context drift. ``strip`` matches git apply's ``-p<N>``.
     See :data:`_FUZZ`.
+
+    Args:
+        patch_bin: Path to the ``patch`` executable.
+        patch_file: The patch file to dry-run.
+        cwd: Working directory the patch is tested relative to.
+        strip: The ``-p<N>`` strip count.
+
+    Returns:
+        True iff the dry-run exits with return code 0.
     """
     try:
         with patch_file.open("rb") as fh:

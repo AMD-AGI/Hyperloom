@@ -103,7 +103,15 @@ DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
 # resets HEAD to the pre-apply sha so a failed REJECT can't clobber prior KEEPs.
 def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
     """``git rev-parse HEAD`` in ``framework_root``; ``(sha, stderr)``,
-    sha None on failure."""
+    sha None on failure.
+
+    Args:
+        framework_root: The git checkout to read HEAD from.
+
+    Returns:
+        A ``(sha, stderr)`` tuple; ``sha`` is ``None`` on failure with the
+        error text in ``stderr``.
+    """
     cmd = ["git", "-C", str(framework_root), "rev-parse", "HEAD"]
     try:
         cp = subprocess.run(
@@ -119,7 +127,16 @@ def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
 def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
     """Revert ``framework_root`` to ``sha``: ``git reset --hard`` +
     ``git clean -fd`` (discards untracked files the candidate added) so a
-    failed candidate can't leak state into the next candidate's baseline."""
+    failed candidate can't leak state into the next candidate's baseline.
+
+    Args:
+        framework_root: The git checkout to reset.
+        sha: The commit sha to reset ``--hard`` to.
+
+    Returns:
+        A ``(ok, stderr)`` tuple; ``ok`` is False on failure with the error
+        text in ``stderr``.
+    """
     cmd = ["git", "-C", str(framework_root), "reset", "--hard", sha]
     try:
         cp = subprocess.run(
@@ -147,7 +164,16 @@ def _git_commit_keep(
     """``git add -A && git commit`` with a forced hyperloom identity (``-c``,
     Magpie clones may lack user.email), returning the new HEAD sha. ``add -A``
     (not ``commit -am``) so add-only PRs' new files land in the KEEP commit
-    instead of polluting the next candidate's baseline."""
+    instead of polluting the next candidate's baseline.
+
+    Args:
+        framework_root: The git checkout to commit into.
+        message: The commit message for the KEEP commit.
+
+    Returns:
+        A ``(new_sha, stderr)`` tuple; ``new_sha`` is ``None`` on failure with
+        the error text in ``stderr``.
+    """
     add = ["git", "-C", str(framework_root), "add", "-A"]
     try:
         cp_add = subprocess.run(
@@ -180,7 +206,15 @@ def _git_commit_keep(
 
 def _candidate_slug(candidate: dict[str, Any]) -> str:
     """Filesystem-safe candidate id (variant names + paths). Prefer
-    ``repo/pr_number``."""
+    ``repo/pr_number``.
+
+    Args:
+        candidate: The PR metadata row.
+
+    Returns:
+        A filesystem-safe slug derived from the candidate's repo / pr_number
+        / ref.
+    """
     repo = str(candidate.get("repo") or "").replace("/", "-")
     pr = candidate.get("pr_number")
     if repo and pr not in (None, "", 0):
@@ -196,7 +230,17 @@ def _fetch_diff_to_path(
 ) -> tuple[bool, str]:
     """Curl ``diff_url`` into ``dest`` (.patch path); returns ``(ok, stderr)``.
     Uses curl (not aiohttp) for consistent HTTPS_PROXY behaviour in
-    restricted-network sessions."""
+    restricted-network sessions.
+
+    Args:
+        diff_url: The unified-diff URL to download.
+        dest: Destination ``.patch`` path to write.
+        timeout_sec: Per-request curl timeout in seconds.
+
+    Returns:
+        A ``(ok, stderr)`` tuple; ``ok`` is False on failure with the error
+        text in ``stderr``.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "curl", "-fsSL", "--retry", "2", "--max-time",
@@ -244,7 +288,14 @@ def _run_git(
 
 def _normalize_repo_id(url_or_slug: str) -> str:
     """Reduce a repo URL / slug to a canonical lowercase ``owner/name`` token.
-    Tolerates https, ssh, and bare ``Owner/Name`` forms."""
+    Tolerates https, ssh, and bare ``Owner/Name`` forms.
+
+    Args:
+        url_or_slug: A repo URL or slug in any supported form.
+
+    Returns:
+        The canonical lowercase ``owner/name`` token, or ``""`` when empty.
+    """
     s = (url_or_slug or "").strip().lower()
     if not s:
         return ""
@@ -270,7 +321,16 @@ def _candidate_is_same_repo(
     resolve the wrong ref).
 
     Fails OPEN when inconclusive (no candidate repo, unreadable / non-GitHub
-    origin); only fires when both sides yield differing ``owner/name`` tokens."""
+    origin); only fires when both sides yield differing ``owner/name`` tokens.
+
+    Args:
+        candidate: The PR metadata row (carries the candidate repo).
+        framework_root: The live framework checkout whose origin is compared.
+
+    Returns:
+        True unless the candidate is positively proven to live in a different
+        repo than ``framework_root``'s origin.
+    """
     cand_repo = _normalize_repo_id(
         str(candidate.get("repo") or candidate.get("discovered_repo_url") or "")
     )
@@ -307,6 +367,16 @@ def _materialize_pr_diff_via_worktree(
 
     Head ref order: ``candidate.head_sha`` → ``candidate.ref`` →
     ``refs/pull/<pr_number>/head``.
+
+    Args:
+        framework_root: The live framework checkout to fetch the PR head into.
+        candidate: The PR metadata row (head_sha / ref / pr_number).
+        dest: Destination ``.patch`` path the net diff is written to.
+        timeout_sec: Per-git-operation timeout in seconds.
+
+    Returns:
+        A ``(ok, err)`` tuple; ``ok`` is False on failure with the error text
+        in ``err``.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     root = str(framework_root)
@@ -858,6 +928,14 @@ class FrameworkPrExecutor:
 
         Best-effort: candidates lacking both ``pr_url`` and ``head_sha``
         (no dedup key) are skipped; write errors are logged + swallowed.
+
+        Args:
+            candidate: The PR metadata row (provides the dedup key).
+            outcome: The outcome label to record (e.g. integrated / reverted).
+            tps_delta_pct: The measured throughput delta percentage.
+            patch_path: Path to the applied patch (for provenance).
+            extra: The runner ``extra`` mapping (provides the shared state /
+                session id).
         """
         pr_url = str(candidate.get("pr_url") or "").strip()
         pr_sha = str(candidate.get("head_sha") or "").strip()
@@ -900,6 +978,15 @@ class FrameworkPrExecutor:
         <pre_apply_sha>`` (prior KEEPs are committed past that sha, so they
         survive). Returns the patches reverted (full ``applied`` on success,
         empty on failure) for telemetry / schema compat.
+
+        Args:
+            framework_root: The git checkout to reset, or ``None`` (no-op).
+            applied: The patches applied this candidate.
+            pre_apply_sha: The HEAD sha captured before this candidate applied.
+
+        Returns:
+            The reverted patches (full ``applied`` on success, ``[]`` on
+            failure or no-op).
         """
         if framework_root is None or not applied:
             return []
@@ -919,7 +1006,17 @@ class FrameworkPrExecutor:
         slug: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy
-        gate. Mirrors :meth:`IntegratePatchExecutor._bench_patch`."""
+        gate. Mirrors :meth:`IntegratePatchExecutor._bench_patch`.
+
+        Args:
+            params: The task params (config / model / bench knobs).
+            output_root: The per-task workspace root for the bench.
+            slug: The candidate slug used to name the variant.
+
+        Returns:
+            A ``(bench, gate_evidence)`` tuple: the bench result dict and a
+            dict carrying the ``accuracy_pass`` verdict.
+        """
         config_path = Path(
             params.get("config_path")
             or self.default_config_path

@@ -29,7 +29,12 @@ _MEMORY_KEYS: tuple[str, ...] = (
 
 
 def _now_iso() -> str:
-    """Return the current UTC time as a second-resolution ISO-8601 string."""
+    """Return the current UTC time as a second-resolution ISO-8601 string.
+
+    Returns:
+        The current UTC time formatted as an ISO-8601 string with second
+        precision.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -106,6 +111,14 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
     Tolerant: accepts a fenced ```json block or bare object; missing keys
     default to empty. Never raises — malformed replies yield a best-effort
     dict (with a ``parse_error`` marker).
+
+    Args:
+        raw_text: The agent's raw checkpoint reply text.
+
+    Returns:
+        A memory-schema dict with ``current_plan`` plus the ``hypotheses``,
+        ``tried_and_why``, ``pending``, and ``learnings`` lists; includes a
+        ``parse_error`` marker when no JSON object could be extracted.
     """
     obj = _extract_json_object(raw_text)
     if obj is None:
@@ -172,6 +185,17 @@ def build_memory_record(
 
     ``learnings`` accumulate across checkpoints (deduped, capped) so durable
     lessons survive a later checkpoint that forgets to repeat them.
+
+    Args:
+        parsed: Parsed checkpoint reply (see ``parse_checkpoint_reply``).
+        seq: Conversation sequence number recorded with the checkpoint.
+        tick: Coordinator tick recorded with the checkpoint.
+        previous: Prior memory record, used to accumulate learnings and the
+            checkpoint count.
+
+    Returns:
+        The new ``orchestration_memory`` record with accumulated learnings and
+        updated checkpoint bookkeeping.
     """
     prev = previous or {}
     learnings = list(prev.get("learnings") or [])
@@ -198,6 +222,13 @@ def render_memory_for_seed(memory: dict[str, Any]) -> str:
 
     Used for compaction re-seed and resume rebuild. Returns "" when memory
     is empty (fresh session).
+
+    Args:
+        memory: An ``orchestration_memory`` record to render.
+
+    Returns:
+        A prompt-ready text block summarizing the recovered working memory, or
+        an empty string when ``memory`` is empty.
     """
     if not memory:
         return ""

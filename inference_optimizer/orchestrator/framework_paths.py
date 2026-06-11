@@ -325,6 +325,10 @@ def resolve_atom_arg_utils_path() -> tuple[Path, str]:
 
     Returns ``(Path, str)`` where the str is the file path on success or a
     diagnostic message on failure.
+
+    Returns:
+        A ``(Path, str)`` tuple of the resolved path and either the file path
+        (on success) or a diagnostic message (on failure).
     """
     override = os.environ.get("INFERENCE_OPTIMIZER_ATOM_ARG_UTILS", "").strip()
     if override:
@@ -377,6 +381,12 @@ def summarise_framework_root_discovery(roots: str) -> str:
     Input is the colon-separated string from
     ``probe_framework_source_roots_for_env``; emitted in ``_FRAMEWORK_BUCKETS``
     order for stable output.
+
+    Args:
+        roots: Colon-separated source roots to summarise.
+
+    Returns:
+        A one-line ``fw=ok``/``fw=missing`` summary in bucket order.
     """
     parts: list[str] = []
     items = [p.strip().lower() for p in (roots or "").split(":") if p.strip()]

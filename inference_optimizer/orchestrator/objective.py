@@ -70,7 +70,14 @@ class Objective(ABC):
 
     @abstractmethod
     def pressure_input(self, state: "SharedState") -> float:
-        """Feed to scheduler.pressure() (§12): 0.0 = relaxed, 1.0 = max urgency."""
+        """Feed to scheduler.pressure() (§12): 0.0 = relaxed, 1.0 = max urgency.
+
+        Args:
+            state: Current shared optimization state to evaluate.
+
+        Returns:
+            Urgency in the range 0.0 (relaxed) → 1.0 (maximum urgency).
+        """
 
     @abstractmethod
     def describe(self) -> str:
@@ -455,7 +462,21 @@ class TimeOnlyObjective(Objective):
 
 # ---------------------------------------------------------------------------
 def build_objective(env: dict[str, Any]) -> Objective:
-    """Factory (DESIGN §11.3): requires MAX_HOURS; at most one of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU / TARGET_DIR (none → TimeOnly)."""
+    """Factory (DESIGN §11.3): requires MAX_HOURS; at most one of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU / TARGET_DIR (none → TimeOnly).
+
+    Args:
+        env: Environment mapping; must contain ``MAX_HOURS`` and may contain at
+            most one of ``TARGET_GAIN_PCT``, ``TARGET_TPUT_PER_GPU``, or
+            ``TARGET_DIR``.
+
+    Returns:
+        The objective matching the supplied target, or a ``TimeOnlyObjective``
+        when no target is given.
+
+    Raises:
+        ObjectiveError: If ``MAX_HOURS`` is missing, non-numeric, or
+            non-positive, or if more than one ``TARGET_*`` key is supplied.
+    """
     if "MAX_HOURS" not in env:
         raise ObjectiveError("build_objective: MAX_HOURS is required")
     try:

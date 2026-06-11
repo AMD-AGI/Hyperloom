@@ -135,7 +135,14 @@ def _section_session_context(
 
 def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
     """Render the per-phase allowed-action contract (current phase injected
-    dynamically by the Coordinator)."""
+    dynamically by the Coordinator).
+
+    Args:
+        kernel_enabled: Whether kernel-owned actions are enabled.
+
+    Returns:
+        The rendered phase-contract lines.
+    """
     from ..phase_state import (
         PHASE_NAMES,
         is_phase_interleave_enabled,
@@ -227,7 +234,15 @@ def _filter_actions(
 
 
 def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, list[str]]]:
-    """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names)."""
+    """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names).
+
+    Args:
+        actions: The action metadata to group.
+
+    Returns:
+        Per-phase ``(phase, eta_min_sum, action_names)`` tuples ordered by
+        ``_PHASE_ORDER`` with any unranked phases appended.
+    """
     bucket: dict[str, list[ActionMetadata]] = {}
     for a in actions:
         bucket.setdefault(a.pipeline_phase, []).append(a)
@@ -366,7 +381,14 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
 
 
 def _format_grid_injection_hint(name: str) -> str | None:
-    """Return a per-action one-liner showing how to override grid, or None."""
+    """Return a per-action one-liner showing how to override grid, or None.
+
+    Args:
+        name: The action name to render a grid-injection hint for.
+
+    Returns:
+        The grid-injection hint line, or ``None`` when the action has none.
+    """
     if name == "explore":
         return (
             "GRID INPUT (v0.8 M3, REQUIRED): emit "
@@ -770,15 +792,23 @@ def build_orchestration_prompt(
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
-    Parameters
-    ----------
-    action_registry: pre-loaded ``ActionRegistry`` (caller calls ``.load()``).
-    enabled_actions: enabled action names; final ordering is by pipeline_phase.
-    framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
-    kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED actions.
-    objective_kind / objective_value: :mod:`objective` strings, printed verbatim.
-    max_minutes: wall-clock budget for the run.
-    rules_fragment_path: path to ``orchestration.md``; placeholder if unreadable.
+    Args:
+        action_registry: Pre-loaded ``ActionRegistry`` (caller calls ``.load()``).
+        enabled_actions: Enabled action names; final ordering is by
+            pipeline_phase.
+        framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
+        kernel_enabled: Explicit override; ``None`` derives from KERNEL_OWNED
+            actions.
+        objective_kind: :mod:`objective` kind string, printed verbatim.
+        objective_value: :mod:`objective` value, printed verbatim.
+        max_minutes: Wall-clock budget for the run.
+        rules_fragment_path: Path to ``orchestration.md``; placeholder if
+            unreadable.
+        framework_source_roots: Framework source roots printed in SESSION
+            CONTEXT.
+
+    Returns:
+        The composed Orchestration system prompt string.
     """
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:

@@ -71,6 +71,12 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     recognized counters (so a stray ``{}`` or an unrelated dict doesn't
     masquerade as a real measurement). Unknown keys are dropped; absent
     counters become ``None``.
+
+    Args:
+        usage: Arbitrary usage dict, or ``None``.
+
+    Returns:
+        The canonical four-key token dict, or ``None`` when nothing usable.
     """
     if not isinstance(usage, dict) or not usage:
         return None
@@ -100,6 +106,12 @@ def parse_claude_stream_json_usage(
     onto a different terminal message still works). Malformed lines are
     skipped. Returns ``None`` if the file is missing or no ``usage`` is
     found.
+
+    Args:
+        log_path: Path to the Claude CLI ``stream-json`` log.
+
+    Returns:
+        The canonical token dict, or ``None`` when no usage was found.
     """
     path = Path(log_path)
     last_usage: dict[str, Any] | None = None
@@ -161,6 +173,12 @@ def parse_claude_stream_json_response(
     Tolerant by contract: a missing file, malformed lines, or a stream with
     no recoverable text returns ``None`` so the best-effort trace path
     degrades to "no response captured" instead of raising.
+
+    Args:
+        log_path: Path to the Claude CLI ``stream-json`` log.
+
+    Returns:
+        The recovered response text, or ``None`` when none could be read.
     """
     path = Path(log_path)
     result_text: str | None = None
@@ -222,6 +240,12 @@ def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
 
     OpenAI-style OOB has no prompt-cache split, so ``cache_*`` stay
     ``None``. Returns ``None`` when nothing parseable is found.
+
+    Args:
+        stdout: Captured ``oob run --json`` stdout text.
+
+    Returns:
+        The canonical token dict, or ``None`` when nothing parseable.
     """
     if not stdout or not stdout.strip():
         return None
@@ -264,6 +288,12 @@ def parse_geak_usage(
 
     No prompt-cache split, so ``cache_*`` stay ``None``. Returns ``None``
     when nothing parseable is found.
+
+    Args:
+        payload: A parsed litellm response dict, a JSON string, or ``None``.
+
+    Returns:
+        The canonical token dict, or ``None`` when nothing parseable.
     """
     obj: Any = payload
     if isinstance(payload, str):
@@ -292,6 +322,13 @@ def _find_usage_in_obj(obj: Any, _depth: int = 0) -> dict[str, Any] | None:
     keys, then recurses one extra level into nested dicts. Bounded depth
     keeps this cheap and avoids pathological deep structures; out-of-process
     envelopes nest ``usage`` at most a couple of levels down in practice.
+
+    Args:
+        obj: Arbitrary parsed JSON value to search.
+        _depth: Internal recursion depth guard.
+
+    Returns:
+        The first ``usage``/``token_usage`` dict found, or ``None``.
     """
     if _depth > 4 or not isinstance(obj, dict):
         return None

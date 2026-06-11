@@ -92,6 +92,15 @@ def _build_specialist_executor(
     SpecialistRunner). Production uses the subprocess dispatcher (claude in a
     per-task worktree); --specialist-dispatch-mode / missing claude falls back
     to the in-process ClaudeBackend.
+
+    Args:
+        args: Parsed CLI arguments (specialist model, turns, dispatch mode).
+        session_dir: The current session directory.
+        knowledge_plane: The live KnowledgePlane used to wire MCP config.
+
+    Returns:
+        Callable[[Any], Awaitable[dict]]: An async executor that runs a
+        specialist and returns a result envelope dict.
     """
     import shutil
 
@@ -186,7 +195,15 @@ def _build_specialist_executor(
     async def _executor(ctx: Any) -> dict:
         """Adapter SubAgentRunner.run_task -> SpecialistRunner.run. Always
         returns a dict (even on failure); runner_status preserves the
-        SpecialistRunResult distinctions for breakdown analytics."""
+        SpecialistRunResult distinctions for breakdown analytics.
+
+        Args:
+            ctx: The action context passed by ``SubAgentRunner.run_task``.
+
+        Returns:
+            dict: A result envelope with runner status, task/domain ids,
+            transcript paths, and any allocated GPU ids.
+        """
         run_result = await runner.run(ctx)
         return {
             "runner_status": run_result.status,
@@ -220,6 +237,13 @@ def _register_executors(
     _REAL_EXECUTORS_FULL set, kernel-owned no-ops (skipped when no_kernel),
     the always-wired Coordinator-internal executors, and the optional
     specialist executor.
+
+    Args:
+        coordinator: The live Coordinator to register executors on.
+        no_kernel: When True, skip wiring the kernel-owned no-op executors.
+        compare_against_gpu: Optional GPU type for the target-analysis executor.
+        session_dir: Optional session directory passed to executors.
+        specialist_executor: Optional specialist executor to register.
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)

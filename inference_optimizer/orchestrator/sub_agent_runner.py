@@ -116,6 +116,13 @@ class SubAgentRunner:
 
         Returns the path (stashed on ``RunnerContext.extra``) or None when
         the task kind is not a known runs/ action.
+
+        Args:
+            task: The task whose workspace directory should be pre-created.
+
+        Returns:
+            The created workspace path, or ``None`` when there is no session
+            dir or the task kind is not a known runs/ action.
         """
         if self.session_dir is None:
             return None
@@ -139,6 +146,16 @@ class SubAgentRunner:
         Bug-fix N34: a long-running task's row can vanish before its terminal
         transition; swallowing TaskNotFound keeps the pipeline running.
         Returns True on success, False on the swallowed-TaskNotFound branch.
+
+        Args:
+            task_id: The task to transition.
+            new_state: The target state.
+            evidence: Optional evidence dict recorded with the transition.
+            context: Short label describing the transition call site.
+
+        Returns:
+            ``True`` on success, ``False`` on the swallowed-``TaskNotFound``
+            branch.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
@@ -165,6 +182,16 @@ class SubAgentRunner:
         Always transitions to ``running`` first (state machine constraint).
         With ``prebound_lease`` the runner skips its own acquire but still
         owns the release in its finally block.
+
+        Args:
+            task: The task to execute.
+            prebound_lease: Optional already-acquired lease; when given, the
+                runner skips its own acquire but still releases it.
+            extra_context: Optional extra values merged into the
+                :class:`RunnerContext`.
+
+        Returns:
+            The :class:`SubAgentResult` capturing terminal state and payload.
         """
         # queued → running first (state machine constraint).
         await self._transition_resilient(

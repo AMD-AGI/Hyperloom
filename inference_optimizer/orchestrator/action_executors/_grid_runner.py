@@ -53,6 +53,13 @@ def variant_fingerprint(
 
     Name and note are NOT inputs — variants with identical content but
     different names collapse to the same fingerprint.
+
+    Args:
+        extra_server_args: The variant's server-args string, or ``None``.
+        extra_envs: The variant's env overrides, or ``None``.
+
+    Returns:
+        A 16-char SHA-1 prefix fingerprint of the normalized content.
     """
     args_text = str(extra_server_args or "")
     try:
@@ -79,6 +86,10 @@ def _resolve_magpie_python() -> str:
     Magpie venv) as unconditional last resort. A stale ``$MAGPIE_PYTHON``
     resolved before Magpie was pip-installed (e.g. ``/usr/bin/python3``) is
     validated and skipped to avoid ``ModuleNotFoundError`` at benchmark time.
+
+    Returns:
+        Path to a Python interpreter that can import Magpie, falling back to
+        the canonical ``/opt/venv/bin/python``.
     """
     def _can_import_magpie(py: str) -> bool:
         """Whether an interpreter can import Magpie and its ``yaml`` dep.
@@ -136,6 +147,9 @@ def _resolve_session_dir() -> Path:
     Reads :func:`inference_optimizer.paths.session_dir` (honors
     ``$USER_DATA_PATH``, else ``/workspace/hyperloom``). Used by fallback
     paths when ``ctx.extra["workspace"]`` was not pre-mkdir'd.
+
+    Returns:
+        The resolved active session directory.
     """
     from ...paths import session_dir as _sd
     return _sd()
@@ -219,6 +233,13 @@ def annotate_multi_node_cuda_graph_max_bs(
     cross-node decode tick), but the variant is kept in the grid and surfaced
     as an advisory rather than auto-dropped. Returns ``[]`` outside multi-node
     mode, when ``$CONC`` is unset/non-positive, or when no variant matches.
+
+    Args:
+        grid: The variants to inspect for a low ``--cuda-graph-max-bs``.
+
+    Returns:
+        A list of advisory note dicts (``name``/``source``/``reason``), or
+        ``[]`` when nothing applies.
     """
     from ._multi_node_env import is_multi_node
     if not is_multi_node():
@@ -291,6 +312,12 @@ def _probe_server_help_text(framework: str) -> str:
     fall through to NOT filtering. Empty results are NOT cached. The broad
     ``except`` is deliberate: this probe is a perf optimisation only and must
     never crash the optimizer.
+
+    Args:
+        framework: The framework name (``sglang`` / ``vllm`` / ``atom``).
+
+    Returns:
+        The ``--help`` text, or ``""`` on any failure or unknown framework.
     """
     fw = (framework or "").strip().lower()
     if fw in _HELP_TEXT_CACHE:
@@ -316,6 +343,9 @@ def _probe_sglang_help_text() -> str:
 
     Kept so tests that monkey-patch this exact name still work; new call
     sites should use ``_probe_server_help_text("sglang")``.
+
+    Returns:
+        The SGLang ``--help`` text, or ``""`` on failure.
     """
     return _probe_server_help_text("sglang")
 
@@ -327,6 +357,12 @@ def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     variant before a 10-min doomed sglang restart. Misclassifications cost at
     most one restart. MLA: DeepSeek (V2/V3/R1), GLM-5, Kimi-K2; MoE: MLA set +
     Qwen3-MoE.
+
+    Args:
+        model_path: The model path/name to classify.
+
+    Returns:
+        A ``(is_mla_model, is_moe_model)`` tuple of detection flags.
     """
     p = model_path.lower()
     mla_keys = ("glm-5", "glm5", "deepseek", "kimi-k2", "kimi_k2", "kimi")
@@ -348,6 +384,13 @@ def apply_compatibility_filter(
     model class (MLA / MoE flags dropped when ``$MODEL_PATH`` lacks the family
     keyword), and sglang version (flags absent from ``launch_server --help``
     dropped). Returns the ``(kept, dropped)`` shape of ``apply_user_skip_list``.
+
+    Args:
+        grid: The candidate variants to filter.
+
+    Returns:
+        A ``(kept, dropped)`` tuple where ``dropped`` entries are
+        ``{"name", "source", "reason"}`` dicts (source=``"compatibility_filter"``).
     """
     model_path = os.environ.get("MODEL_PATH", "")
     if model_path:
@@ -409,6 +452,13 @@ def apply_user_skip_list(
 
     Returns ``(kept, dropped)`` where each dropped entry is
     ``{"name", "reason", "source"}`` with source=``"user_skip"``.
+
+    Args:
+        grid: The candidate variants to filter.
+        skip_spec: Comma/space-separated name or glob patterns to drop.
+
+    Returns:
+        A ``(kept, dropped)`` tuple of variants and drop-reason dicts.
     """
     patterns = _parse_skip_spec(skip_spec)
     if not patterns:
@@ -511,6 +561,12 @@ def coerce_extra_envs(value: Any) -> dict[str, str]:
     ``"FOO=1 BAR=2"`` string, and ``["FOO=1", "BAR=2"]`` token list — so
     downstream ``.items()`` callers never crash on a non-dict. Unknown shapes
     coerce to an empty dict.
+
+    Args:
+        value: The raw ``extra_envs`` value (dict, string, or list/tuple).
+
+    Returns:
+        A normalized ``dict[str, str]`` of environment overrides.
     """
     if isinstance(value, dict):
         return {str(k): str(v) for k, v in value.items() if k is not None}
@@ -675,6 +731,15 @@ def sanitize_script_name(value: Any) -> str | None:
 
     Must be a bare ``*.sh`` name (no slashes / ``..``). Empty/``None`` →
     ``None``; anything resembling shell injection raises ``ValueError``.
+
+    Args:
+        value: The Orchestration-supplied benchmark script name.
+
+    Returns:
+        The validated script name, or ``None`` when empty/``None``.
+
+    Raises:
+        ValueError: If ``value`` is not a bare ``*.sh`` file name.
     """
     if value is None:
         return None
@@ -695,6 +760,15 @@ def sanitize_result_dir(value: Any) -> str | None:
     Lands in a shell ``cd`` / ``mkdir`` via ``$RESULT_DIR``, so reject any
     character that could escape into a different shell word. Empty/``None`` →
     ``None``.
+
+    Args:
+        value: The Orchestration-supplied result directory path.
+
+    Returns:
+        The validated directory string, or ``None`` when empty/``None``.
+
+    Raises:
+        ValueError: If ``value`` contains whitespace or shell metacharacters.
     """
     if value is None:
         return None
@@ -735,6 +809,12 @@ def merge_server_args(*parts: str | None) -> str:
     Only removes empty chunks; does NOT de-duplicate option names, because
     repeated flags are how later args override base args (e.g. ``--block-size
     1`` then ``--block-size 256``).
+
+    Args:
+        *parts: Server-arg strings (or ``None``) in override order.
+
+    Returns:
+        The non-empty parts joined by single spaces.
     """
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
@@ -758,6 +838,9 @@ def resolve_sglang_watchdog_timeout() -> int:
     :data:`DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC` when the env var is unset,
     empty, non-integer, or non-positive. A malformed value logs a warning
     and uses the default rather than crashing the YAML materialization.
+
+    Returns:
+        The resolved watchdog timeout in seconds.
     """
     raw = os.environ.get(SGLANG_WATCHDOG_TIMEOUT_ENV, "").strip()
     if not raw:
@@ -790,6 +873,13 @@ def inject_sglang_watchdog_timeout(
     (empty/unknown is treated as sglang) or the flag is already present.
     Otherwise appends the value from :func:`resolve_sglang_watchdog_timeout`;
     no other flag is touched.
+
+    Args:
+        server_args: The existing server-args string, or ``None``.
+        framework: The backend framework name.
+
+    Returns:
+        The server-args string, with the watchdog flag appended when applicable.
     """
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
@@ -824,6 +914,13 @@ def _resolve_nonneg_int_env(name: str, default: int) -> int:
 
     A blank/non-integer/negative value logs a warning and falls back to the
     default rather than crashing the YAML materialization.
+
+    Args:
+        name: The environment variable name to read.
+        default: The fallback value when unset/invalid.
+
+    Returns:
+        The parsed non-negative integer, or ``default``.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -850,6 +947,13 @@ def resolve_sglang_context_cap(isl: int, osl: int) -> int:
     operator-tunable via ``$SGLANG_CONTEXT_HEADROOM_TOKENS`` /
     ``$SGLANG_CONTEXT_FLOOR_TOKENS``). Caller clamps to the model's native
     window before injecting.
+
+    Args:
+        isl: Input sequence length in tokens.
+        osl: Output sequence length in tokens.
+
+    Returns:
+        The resolved context-length cap in tokens.
     """
     headroom = _resolve_nonneg_int_env(
         SGLANG_CONTEXT_HEADROOM_ENV, DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
@@ -874,6 +978,16 @@ def inject_sglang_context_length(
     model's ``max_position_embeddings`` cannot be read. Otherwise appends
     ``min(max_pos, cap)`` from :func:`resolve_sglang_context_cap`; only this
     flag is added.
+
+    Args:
+        server_args: The existing server-args string, or ``None``.
+        framework: The backend framework name.
+        model_path: The model path used to read ``max_position_embeddings``.
+        isl: Input sequence length in tokens.
+        osl: Output sequence length in tokens.
+
+    Returns:
+        The server-args string, with ``--context-length`` appended when applicable.
     """
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
@@ -903,6 +1017,12 @@ def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
     (e.g. operator override), return the canonical backend and let sglang
     raise the clear error rather than silently injecting triton which
     sglang also rejects.  Override via ``$HYPERLOOM_DUAL_CHUNK_BACKEND``.
+
+    Args:
+        gpu_type: Optional caller-known GPU type (currently advisory).
+
+    Returns:
+        The dual-chunk attention backend name to inject.
     """
     override = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip()
     if override:
@@ -929,6 +1049,15 @@ def inject_sglang_attention_backend(
     Returns ``server_args`` unchanged when: framework is not sglang, an
     ``--attention-backend`` is already pinned (operator wins), or the model
     config has no dual-chunk block (fail-safe: inject nothing).
+
+    Args:
+        server_args: The existing server-args string, or ``None``.
+        framework: The backend framework name.
+        model_path: The model path used to detect dual-chunk attention.
+        gpu_type: Optional caller-known GPU type, preferred over autodetect.
+
+    Returns:
+        The server-args string, with ``--attention-backend`` appended when applicable.
     """
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
@@ -984,6 +1113,15 @@ def inject_sglang_moe_runner_backend(
     inject nothing). Otherwise appends the backend from
     ``$HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND`` (default ``triton``); only this
     flag is added.
+
+    Args:
+        server_args: The existing server-args string, or ``None``.
+        framework: The backend framework name.
+        model_path: The model path used to detect a MoE model.
+        gpu_type: Optional caller-known GPU type, preferred over autodetect.
+
+    Returns:
+        The server-args string, with ``--moe-runner-backend`` appended when applicable.
     """
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
@@ -1022,6 +1160,15 @@ def apply_runtime_benchmark_overrides(
     ``benchmark_script`` (must be pre-sanitized via :func:`sanitize_script_name`)
     force-selects a specific Magpie script, applied AFTER the
     ``gpu_type``-derived generic script so the operator pick wins.
+
+    Args:
+        bench: The benchmark YAML dict to mutate in place.
+        model_path: Optional model path override.
+        gpu_type: Optional GPU/runner type override.
+        benchmark_script: Optional pre-sanitized Magpie script name to force.
+
+    Returns:
+        The mutated ``envs`` sub-dict of ``bench``.
     """
     if model_path:
         bench["model"] = str(model_path)
@@ -1090,6 +1237,18 @@ def _build_variant_yaml(
     overrides the legacy hardcoded ``benchmark.model``; ``gpu_type`` pins the
     generic ``{framework}_{gpu_type}.sh``; ``benchmark_script`` (pre-sanitized)
     force-pins a script, applied last so the operator pick wins.
+
+    Args:
+        base_yaml_path: Path to the base Magpie YAML to clone.
+        base_extra_args: Server args common to every variant.
+        variant: The variant whose flags/envs are layered on top.
+        output_subdir: Directory the per-variant ``config.yaml`` is written to.
+        model_path: Optional model path override.
+        gpu_type: Optional GPU/runner type override.
+        benchmark_script: Optional pre-sanitized Magpie script name to force.
+
+    Returns:
+        Path to the materialized per-variant ``config.yaml``.
     """
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -1147,6 +1306,11 @@ def _kill_stale_servers() -> None:
     hangs ~5 min on zmq / shared-mem conflicts. Called before every Magpie
     invocation. Uses /proc scan (not pgrep) to avoid clashing with test
     subprocess mocks. No-op in multi-node mode (servers live in RayJob pods).
+
+    Note:
+        Side-effecting and best-effort: it sends signals to matching processes
+        and unlinks stale shared-memory segments, swallowing errors. Returns
+        nothing.
     """
     from ._multi_node_env import is_multi_node
     if is_multi_node():
@@ -1268,6 +1432,18 @@ def _run_magpie(
     land in the per-task workspace, not ``/workspace/``. ``soft_deadline_sec``
     is the Fix-E overtime cap: the tree is reaped and a sentinel
     ``OVERTIME_KILL_RETURNCODE`` returned instead of raising ``TimeoutExpired``.
+
+    Args:
+        magpie_python: Path to the Python interpreter that runs Magpie.
+        config_path: Path to the materialized benchmark YAML.
+        output_dir: Directory for the run's outputs (default ``$RESULT_DIR``).
+        timeout_sec: Hard subprocess timeout in seconds.
+        cwd: Working directory for the Magpie subprocess.
+        result_dir: Optional pre-sanitized override for ``$RESULT_DIR``.
+        soft_deadline_sec: Optional overtime soft cap in seconds.
+
+    Returns:
+        A ``(returncode, stdout, stderr)`` tuple from the Magpie subprocess.
     """
     # Pre-clean lingering servers + shared memory (skip under pytest).
     if not os.environ.get("PYTEST_CURRENT_TEST"):
@@ -1344,6 +1520,24 @@ async def run_grid(
     that hardcode ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path
     salvage"). ``soft_deadline_sec`` (Fix E): reap a variant once wall-clock
     exceeds it, marking it ``killed_overtime=True``; None/0 disables (legacy).
+
+    Args:
+        base_yaml_path: Path to the base Magpie YAML cloned per variant.
+        base_extra_args: Server args common to every variant.
+        grid: The variants to execute, in order.
+        output_root: Root directory under which each variant's outputs land.
+        magpie_python: Optional interpreter override; resolved when unset.
+        cwd: Working directory for each Magpie subprocess.
+        variant_timeout_sec: Hard per-variant subprocess timeout in seconds.
+        keep_going_on_failure: Whether to continue after a variant fails.
+        model_path: Optional model path forwarded to each YAML render.
+        gpu_type: Optional GPU/runner type forwarded to each YAML render.
+        benchmark_script: Optional pre-sanitized Magpie script name to force.
+        result_dir: Optional pre-sanitized override for ``$RESULT_DIR``.
+        soft_deadline_sec: Optional per-variant overtime soft cap in seconds.
+
+    Returns:
+        The per-variant :class:`VariantResult` list for every attempt.
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
@@ -1748,6 +1942,15 @@ def pick_winners(
     falls back to ``MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (2.0%, the empirical
     cross-node noise floor) in multi-node mode, else
     ``SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (1.0%).
+
+    Args:
+        results: The per-variant results to filter.
+        baseline_tput: The baseline output throughput to beat.
+        keep_threshold_pct: Explicit win margin percent; resolved by mode
+            when ``None``.
+
+    Returns:
+        The succeeded variants whose throughput clears the cutoff.
     """
     if keep_threshold_pct is None:
         from ._multi_node_env import is_multi_node
@@ -1793,6 +1996,13 @@ def _write_variant_abort_marker(
     "untested". This marker lets final-report / post-mortem tools count failed
     variants and find an explicit reason even after the log rotated. Failure
     to write it is non-fatal (log and continue).
+
+    Args:
+        slot: The variant slot directory to write the marker into.
+        variant_name: The aborted variant's name.
+        error_class: Short failure-classification tag.
+        error_summary: Human-readable error summary (truncated to 2000 chars).
+        extra_args: The variant's server args, recorded for post-mortem.
     """
     try:
         slot.mkdir(parents=True, exist_ok=True)
