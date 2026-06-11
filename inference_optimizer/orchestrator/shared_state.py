@@ -233,6 +233,13 @@ class SharedState:
     model_class: str = ""
     # Advisory architecture profile; prompt-context only, no deterministic gating (those stay on ``model_class``).
     model_arch: dict = field(default_factory=dict)
+    # Degraded-mode advisory: True when the run is knowingly running a
+    # multimodal checkpoint on the text-only path (--allow-mm-text-fallback).
+    # Advisory only — never a stop_reason, never gates Objective/scoring.
+    degraded_mode: bool = False
+    # Structured degraded-mode / model-compat warnings (e.g. multimodal text
+    # fallback). Surfaced verbatim in reports/final.{json,md}.
+    model_warnings: list[dict[str, Any]] = field(default_factory=list)
     # KB tags from config.json (``architectures`` + ``model_type``); stamped into recipe-snapshot ``extras`` so fine-tuned models carry base arch identity.
     model_architectures: list[str] = field(default_factory=list)
     model_type: str = ""
