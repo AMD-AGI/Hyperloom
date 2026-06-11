@@ -95,6 +95,15 @@ def _extract_scores_json(text: str) -> dict[str, Any] | None:
 
 
 def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
+    """Stringify a value and truncate it to a maximum length.
+
+    Args:
+        value: Value to stringify (``None`` becomes an empty string).
+        limit: Maximum number of characters to keep.
+
+    Returns:
+        The string, suffixed with an ellipsis if it was truncated.
+    """
     s = "" if value is None else str(value)
     return s if len(s) <= limit else (s[:limit] + "…")
 
@@ -161,6 +170,13 @@ class ProposalScorer:
     _client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Normalize the model list and optionally eager-build the client.
+
+        Strips and de-blanks the configured model names. If a
+        ``client_factory`` is provided the client is built immediately;
+        otherwise it is constructed lazily on first use so an
+        unconfigured environment degrades per-call rather than at boot.
+        """
         self.models = tuple(
             m for m in (str(x).strip() for x in (self.models or ())) if m
         )
@@ -171,6 +187,15 @@ class ProposalScorer:
         self._client = None
 
     def _ensure_client(self) -> Any:
+        """Return the cached client, constructing one on first use.
+
+        Returns:
+            The OpenAI-compatible async client.
+
+        Raises:
+            RuntimeError: If the ``openai`` SDK is missing or no API key
+                is configured in the environment.
+        """
         if self._client is not None:
             return self._client
         try:
