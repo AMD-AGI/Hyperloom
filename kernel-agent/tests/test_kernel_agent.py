@@ -225,6 +225,7 @@ class KernelAgentToolTests(unittest.TestCase):
             '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"',
             install_text,
         )
+        self.assertIn('MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
         # Internal extension is opt-in: no default path.
         self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)

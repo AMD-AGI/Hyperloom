@@ -54,7 +54,7 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
 _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
-MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
+MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"
 # Resolve MAGPIE_PYTHON dynamically. The previous default
 # ${MAGPIE_DIR}/venv/bin/python assumed a Magpie-private venv, but
 # inference_optimizer/scripts/install.sh's ensure_magpie() does
