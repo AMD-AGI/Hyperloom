@@ -276,6 +276,10 @@ def test_remote_trust_drift_is_reported_separately(
         for r in caplog.records
     )
 
+    # The bool compat wrapper reflects the atomic-copy race only (its name /
+    # docstring), so an optional remote-trust drift must NOT flip it to False.
+    assert ensure_magpie_atomic_scripts_patch(tmp_path) is True
+
 
 def test_patch_preserves_file_mode(fake_magpie: Path):
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"

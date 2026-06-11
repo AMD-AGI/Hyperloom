@@ -152,6 +152,10 @@ def test_succeeded_task_waits_for_nfs_when_safe_breakdown_lags(
         return "/nfs/session"
 
     monkeypatch.setattr(opt, "_wait_for_nfs_session_delivery", fake_wait_for_nfs)
+    # The artifact-retry loop in wait_and_collect_one sleeps 15s between the
+    # first 3 listings (session_breakdown.json lags); stub it so the test does
+    # not spend ~30-45s of real wall-clock in CI.
+    monkeypatch.setattr(opt.time, "sleep", lambda *_a, **_k: None)
 
     out = opt.wait_and_collect_one(
         _Safe(),

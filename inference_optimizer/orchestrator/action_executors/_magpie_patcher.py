@@ -443,8 +443,14 @@ def ensure_magpie_atomic_scripts_patch(
     or neither the legacy block nor an atomic impl is found — the install script
     should fail-loud on ``False`` (this is a known root-cause fix).
     Concurrency-safe (flock + atomic rename; patched fast-path skips the lock).
+
+    Reflects the atomic-copy patch only (matching this function's name). The
+    optional SGLang remote-client trust patch is independent and can drift
+    without the atomic race being open, so it is intentionally NOT folded in
+    here; callers that need both must use :func:`magpie_scripts_patch_status`
+    and check ``remote_trust_ok`` / ``ok`` (install.sh does this).
     """
-    return magpie_scripts_patch_status(magpie_dir).ok
+    return magpie_scripts_patch_status(magpie_dir).atomic_ok
 
 
 __all__ = [
