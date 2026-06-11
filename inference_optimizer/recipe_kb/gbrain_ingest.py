@@ -57,6 +57,17 @@ _TAG_CLEAN = str.maketrans({" ": "-", "\t": "-", "/": "-"})
 
 
 def _tag_value(value: Any) -> str:
+    """Normalize a value into a slug-style tag token.
+
+    Lowercases the value and replaces whitespace and slashes with
+    hyphens, trimming leading/trailing hyphens.
+
+    Args:
+        value: Arbitrary value to slugify.
+
+    Returns:
+        The tag slug, or ``"unknown"`` when the value is empty.
+    """
     return str(value or "").strip().lower().translate(_TAG_CLEAN).strip("-") or "unknown"
 
 
@@ -330,10 +341,27 @@ class GbrainMirroringRecipeKB:
     """
 
     def __init__(self, inner: Any, mcp: _GbrainMcp | None) -> None:
+        """Wrap an inner dispatcher with a gbrain mirroring side-effect.
+
+        Args:
+            inner: The wrapped recipe dispatcher to delegate to.
+            mcp: Optional gbrain MCP client used for mirroring writes.
+        """
         self._inner = inner
         self._mcp = mcp
 
     def put_recipe(self, **kwargs: Any) -> Any:
+        """Write a recipe locally, then best-effort mirror it to gbrain.
+
+        The local write is authoritative; mirroring failures are logged
+        and swallowed so they never block the local result.
+
+        Args:
+            **kwargs: Recipe fields forwarded to the inner dispatcher.
+
+        Returns:
+            The result of the wrapped ``put_recipe`` call.
+        """
         result = self._inner.put_recipe(**kwargs)
         try:
             mirror_recipe(kwargs, self._mcp)
@@ -342,12 +370,29 @@ class GbrainMirroringRecipeKB:
         return result
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate all other attribute access to the wrapped dispatcher.
+
+        Args:
+            name: Attribute name to resolve on the inner dispatcher.
+
+        Returns:
+            The corresponding attribute from the wrapped dispatcher.
+        """
         # Delegate everything else (get_recipe / search / append_attempt /
         # local / remote / ...) to the wrapped dispatcher.
         return getattr(self._inner, name)
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point to bulk-ingest local recipes into gbrain.
+
+    Args:
+        argv: Optional argument vector; defaults to ``sys.argv`` when
+            ``None``.
+
+    Returns:
+        Process exit code (``0`` on success, non-zero on usage errors).
+    """
     ap = argparse.ArgumentParser(description="Bulk-ingest local recipe snapshots into gbrain.")
     ap.add_argument("--local-kb-root", default=os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", ""),
                     help="LocalRecipeStore root (default: $HYPERLOOM_LOCAL_KB_ROOT)")
