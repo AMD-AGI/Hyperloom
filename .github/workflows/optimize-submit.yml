@@ -210,21 +210,22 @@ jobs:
       # the pool never drains — once the front models finish and are no longer
       # active, the window wraps and the whole 2426-model pool keeps repeating.
       INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json' || github.event.inputs.candidates_file }}
-      # Schedule pins batch_index=0: every cron walks from the FRONT of the
-      # pool, skipping models currently active in another run (active-refill),
-      # so the window advances as tasks occupy/free up runners rather than by a
-      # clock slot. Not-run models sit at the front and are picked up first.
-      INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '0' || github.event.inputs.batch_index }}
+      # Schedule leaves batch_index empty so generate_hf_matrix derives a
+      # SEQUENTIAL index from the scheduled-fire counter: each cron (UTC
+      # 4/12/20) steps batch 0,1,2,... and wraps, marching the whole pool in
+      # order then repeating. Anchored so the first fire at/after the anchor is
+      # batch 0 (= not-run head, since the pool is ordered not-run-first).
+      INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '' || github.event.inputs.batch_index }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '200' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
-      # Schedule does NOT exclude leaderboard-known models: we want the whole
-      # downloads>100 pool to keep cycling (re-running finished models too), so
-      # the pool never drains. We still exclude active workflows so cron never
-      # double-submits a model already running — that exclusion alone advances
-      # the front-anchored window each run.
+      # Schedule does NOT exclude leaderboard-known models, and does NOT exclude
+      # active workflows: the sequential batches are disjoint slices, so each
+      # cron submits its own slice. Keeping both exclusions off means the whole
+      # downloads>100 pool keeps cycling (re-running finished models too) and the
+      # clean batch boundaries are preserved.
       INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
-      INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
+      INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
