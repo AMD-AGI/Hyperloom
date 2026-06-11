@@ -124,7 +124,17 @@ def disk_preflight(
 
     Required = ``max(min_free_gb, n_candidates * per_candidate_gb)``. The
     work_dir is created when missing so :func:`shutil.disk_usage` doesn't
-    fail. Raises :class:`DiskPreflightError` on failure.
+    fail.
+
+    Args:
+        work_dir: Working directory whose mount is checked.
+        n_candidates: Number of candidates used to size the requirement.
+        min_free_gb: Floor on required free space; resolved from env when
+            ``None``.
+        per_candidate_gb: Estimated disk per candidate in GB.
+
+    Raises:
+        DiskPreflightError: If free space is below the computed requirement.
     """
     floor_gb = _resolve_min_free_gb(min_free_gb)
     required_gb = max(floor_gb, float(n_candidates) * per_candidate_gb)
@@ -247,9 +257,17 @@ def prepare_candidate_workspace(
 ) -> WorkspacePaths:
     """Materialise ``candidate_dir`` + (when execute) worktree + venv.
 
-    Returns :class:`WorkspacePaths`. ``execute=False`` /
-    ``prepare_candidate_env=False`` short-circuits before the git worktree
-    and venv steps so plan mode stays cheap.
+    ``execute=False`` / ``prepare_candidate_env=False`` short-circuits
+    before the git worktree and venv steps so plan mode stays cheap.
+
+    Args:
+        req: The explore request (work dir + env policy).
+        candidate: The candidate to prepare a workspace for.
+        index: Candidate index used in the directory name.
+        execute: Whether to materialize the worktree and venv.
+
+    Returns:
+        The :class:`WorkspacePaths` for the candidate.
     """
     candidate_dir = req.work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
     worktree_dir = candidate_dir / "worktree"
@@ -310,6 +328,12 @@ def cleanup_workspace(
     but ``candidate_dir`` (and its ``pr.patches`` / ``pr_files.json`` audit
     artefacts) is kept so reviewers can still diff. Best-effort: cleanup
     errors are logged, never re-raised.
+
+    Args:
+        workspace: Paths for the candidate workspace to clean up.
+        is_winner: Whether this candidate is a winner (winners are kept).
+        keep_winner_only: When False, nothing is removed.
+        repo_dir: Mirror repo dir used to detach the worktree cleanly.
     """
     if not keep_winner_only or is_winner:
         return
