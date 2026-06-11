@@ -16,7 +16,7 @@ Two failure modes are in scope:
    server start.
 2. The process is gone but ROCm KFD driver tables still attribute
    allocations to a dead PID, so every visible GPU reports near-zero
-   free MiB. `validate_stack` / `backends` / `params` then loops on
+   free MiB. `explore` then loops on
    `RuntimeError: Engine core initialization failed ... Free memory on
    device cuda:N (0.0/...)`.
 

@@ -10,12 +10,10 @@ returns the winners.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import time
@@ -25,6 +23,7 @@ from typing import Any
 
 import yaml
 
+from ._canonical_fingerprint import canonical_fingerprint
 from ._robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
     OVERTIME_KILL_RETURNCODE,
@@ -40,11 +39,9 @@ from .benchmark_result import (
 log = logging.getLogger(__name__)
 
 
-# Content-based variant fingerprint (cross-action dedup ledger key). Hashes the
-# content that changes Magpie behavior (server args + env overrides) so a rename
-# maps to the same key in ``SharedState.explore_search.tested``. Normalization:
-# args ``shlex.split`` → sorted tokens (order-insensitive); envs ``(str(k),
-# str(v))`` sorted by key (so ``"1"`` and ``1`` collide); 16-char SHA-1 prefix.
+# Content-based variant fingerprint (cross-action dedup ledger key). Thin alias
+# of :func:`canonical_fingerprint` (the single source of truth) kept for the
+# legacy import path; both produce the identical 16-char content hash.
 def variant_fingerprint(
     extra_server_args: str | None,
     extra_envs: dict[str, Any] | None,
@@ -52,23 +49,10 @@ def variant_fingerprint(
     """Stable content fingerprint for a (extra_server_args, extra_envs) pair.
 
     Name and note are NOT inputs — variants with identical content but
-    different names collapse to the same fingerprint.
+    different names collapse to the same fingerprint. Delegates to
+    :func:`canonical_fingerprint` so the two never drift.
     """
-    args_text = str(extra_server_args or "")
-    try:
-        args_tokens = sorted(shlex.split(args_text))
-    except ValueError:
-        # Shell-parse failure: whitespace split so we still produce a
-        # fingerprint (identical bad strings still collide).
-        args_tokens = sorted(args_text.split())
-    env_pairs = sorted(
-        (str(k), str(v)) for k, v in (extra_envs or {}).items()
-    )
-    payload = json.dumps(
-        [args_tokens, [list(p) for p in env_pairs]],
-        sort_keys=True, ensure_ascii=False, separators=(",", ":"),
-    )
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+    return canonical_fingerprint(extra_server_args, extra_envs)
 
 
 def _resolve_magpie_python() -> str:

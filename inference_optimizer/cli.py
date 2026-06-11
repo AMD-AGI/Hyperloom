@@ -4399,7 +4399,7 @@ def _build_parser() -> argparse.ArgumentParser:
                       default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
     opt.add_argument("--no-kernel", action="store_true", default=False,
                       help="Disable the Kernel agent entirely. The run will "
-                           "only do baseline + params + backends + sweep (pure "
+                           "only do baseline + explore + sweep (pure "
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
