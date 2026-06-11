@@ -782,7 +782,7 @@ class FrameworkPrExecutor:
             "workspace": str(output_root),
         }
 
-    # KB writeback (D2, Arbor-into-Hyperloom)
+    # KB writeback (Arbor-into-Hyperloom)
     async def _write_kb_record(
         self, *,
         candidate: dict[str, Any],
