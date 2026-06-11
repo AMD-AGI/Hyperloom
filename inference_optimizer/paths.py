@@ -316,6 +316,9 @@ def magpie_dir(session_dir: Path | None = None) -> Path:
     overrides). Aligned with install.sh so script and runtime resolve the same
     checkout. ``session_dir`` param ignored (back-compat).
     """
+    override = os.environ.get("MAGPIE_DIR")
+    if override:
+        return Path(override)
     return open_source_root() / "Magpie"
 
 

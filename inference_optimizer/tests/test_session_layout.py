@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -223,8 +224,15 @@ def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypa
 def test_open_source_root_honours_explicit_override(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "custom"))
     monkeypatch.setenv("TMPDIR", str(tmp_path / "ignored"))
+    monkeypatch.delenv("MAGPIE_DIR", raising=False)
     assert paths.open_source_root() == tmp_path / "custom"
     assert paths.magpie_dir() == tmp_path / "custom" / "Magpie"
+
+
+def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "operator-magpie"))
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "ignored"))
+    assert paths.magpie_dir() == tmp_path / "operator-magpie"
 
 
 # manifest
@@ -313,6 +321,23 @@ def test_manifest_dependencies_block_is_fail_soft_on_non_repo_paths(
     assert m["dependencies"]["inferencex"] == {
         "path": "", "commit": "", "remote": "",
     }
+
+
+def test_manifest_pod_local_dependency_warning_matches_default_policy(
+    tmp_path, monkeypatch, caplog,
+):
+    from inference_optimizer import manifest
+
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
+    monkeypatch.setenv("MAGPIE_DIR", "/workspace/hyperloom_runtime_smoke/Magpie")
+
+    with caplog.at_level(logging.WARNING, logger="inference_optimizer.manifest"):
+        manifest._describe_dep("MAGPIE_DIR")
+
+    messages = [r.message for r in caplog.records if "MAGPIE_DIR" in r.message]
+    assert messages
+    assert "defaults open-source dependencies to pod-local storage" in messages[0]
+    assert "point MAGPIE_DIR back" not in messages[0]
 
 
 def test_build_session_id_includes_uuid_and_model(monkeypatch):
