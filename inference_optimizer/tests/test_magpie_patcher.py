@@ -22,6 +22,7 @@ from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
     _extract_prepare_region,
     _upstream_is_already_atomic,
     ensure_magpie_atomic_scripts_patch,
+    magpie_scripts_patch_status,
 )
 
 
@@ -243,6 +244,41 @@ def test_sglang_remote_client_trust_patch_is_env_gated(fake_magpie: Path):
 
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
     assert script.read_text(encoding="utf-8") == text
+
+
+def test_remote_trust_drift_is_reported_separately(
+    tmp_path: Path,
+    caplog,
+):
+    """Atomic copy can be fixed while the SGLang trust patch drifts.
+
+    The status API must expose those as separate bits so install.sh can warn
+    about remote trust specifically instead of blaming the atomic-copy patch.
+    """
+    _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    script = _write_sglang_script(
+        tmp_path,
+        _UPSTREAM_SGLANG_MI300X_SH.replace(
+            "magpie_run_benchmark_serving_remote_direct || exit $?",
+            "magpie_run_benchmark_serving_remote_direct \"$@\" || exit $?",
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        status = magpie_scripts_patch_status(tmp_path)
+
+    assert status.atomic_ok is True
+    assert status.remote_trust_ok is False
+    assert status.ok is False
+    assert _REMOTE_TRUST_SENTINEL not in script.read_text(encoding="utf-8")
+    assert any(
+        "remote trust patch did not apply" in r.getMessage()
+        for r in caplog.records
+    )
+
+    # The bool compat wrapper reflects the atomic-copy race only (its name /
+    # docstring), so an optional remote-trust drift must NOT flip it to False.
+    assert ensure_magpie_atomic_scripts_patch(tmp_path) is True
 
 
 def test_patch_preserves_file_mode(fake_magpie: Path):
