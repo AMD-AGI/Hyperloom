@@ -57,11 +57,18 @@ def load_results(path: Path) -> list[dict[str, Any]]:
 
 
 def _normalize_submitted_at(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Move ``run.submitted_at`` ISO strings to ``run.submitted_at_iso`` (set original to None).
+    """Move ``run.submitted_at`` ISO strings to ``run.submitted_at_iso``.
 
-    Required because the ingest path binds ``submitted_at`` (timestamptz) as a str and asyncpg
-    rejects it with HTTP 500. The sibling key preserves the value in the raw_result JSONB blob.
-    Drop once the ingest path accepts ISO strings directly.
+    Required because the ingest path binds ``submitted_at`` (timestamptz) as a
+    str and asyncpg rejects it with HTTP 500. The sibling key preserves the
+    value in the raw_result JSONB blob. Drop once the ingest path accepts ISO
+    strings directly.
+
+    Args:
+        results: Normalized result dicts to clean.
+
+    Returns:
+        New result dicts with ``submitted_at`` moved to ``submitted_at_iso``.
     """
     cleaned: list[dict[str, Any]] = []
     for r in results:
@@ -87,10 +94,22 @@ def publish(
     max_retries: int = 5,
     initial_backoff_s: float = 5.0,
 ) -> dict:
-    """POST results to /api/import with exponential-backoff retry.
+    """POST results to ``/api/import`` with exponential-backoff retry.
 
-    Retries cover intermittent service-side failures: PG pool drops after a pod crashloop
-    (HTTP 500, succeeds on retry once asyncpg reconnects) and liveness-probe restarts (5xx / refused).
+    Retries cover intermittent service-side failures: PG pool drops after a pod
+    crashloop (HTTP 500, succeeds on retry once asyncpg reconnects) and
+    liveness-probe restarts (5xx / refused).
+
+    Args:
+        results: Normalized result dicts to publish.
+        url: Base service URL (``/api/import`` is appended).
+        token: Optional bearer token.
+        timeout: Per-request timeout in seconds.
+        max_retries: Maximum retry attempts.
+        initial_backoff_s: Initial backoff delay in seconds.
+
+    Returns:
+        The decoded JSON response from the import endpoint.
     """
     import time
     import requests
