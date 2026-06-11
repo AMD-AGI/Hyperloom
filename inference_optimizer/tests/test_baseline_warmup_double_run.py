@@ -361,11 +361,117 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
     assert result["error_class"] == "server_init_dead", result
 
 
+def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
+    """#523: a checkout already on a local filesystem is returned unchanged
+    (no needless copy)."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: False)
+
+    assert bl._ensure_local_inferencex(str(src)) == str(src)
+
+
+def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
+    """#523: a checkout on a (simulated) network mount is mirrored to local
+    disk and the returned path points at the local copy, not the original."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
+    (src / "utils").mkdir()
+    (src / "utils" / "marker.txt").write_text("payload")
+
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
+
+    dest = bl._ensure_local_inferencex(str(src))
+
+    assert dest != str(src)
+    assert str(local_root) in dest
+    # Mirror is complete (benchmark_lib.sh + the rest of the patched tree).
+    assert (Path(dest) / "benchmarks" / "benchmark_lib.sh").read_text() == (
+        "# patched lib"
+    )
+    assert (Path(dest) / "utils" / "marker.txt").read_text() == "payload"
+
+
+def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
+    """#523: the relocation can be opted out of via env even on a network
+    mount (escape hatch for multi-node / shared-mount setups)."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
+
+    assert bl._ensure_local_inferencex(str(src)) == str(src)
+
+
+def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
+    """#523 end-to-end (unit): when INFERENCEX_PATH is on a network mount,
+    the Magpie subprocess env's MAGPIE_INFERENCEX_PATH is rewritten to the
+    local mirror so Magpie's ``cd <inferencex>`` lands on stable local disk."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="sglang")
+    output_dir = tmp_path / "ws"
+
+    ix_src = tmp_path / "wekafs_InferenceX"
+    (ix_src / "benchmarks").mkdir(parents=True)
+    (ix_src / "benchmarks" / "benchmark_lib.sh").write_text("# patched")
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv("INFERENCEX_PATH", str(ix_src))
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
+
+    seen: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["env"] = kwargs.get("env")
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=_HOT_TPUT)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    magpie_ix = seen["env"]["MAGPIE_INFERENCEX_PATH"]
+    assert magpie_ix != str(ix_src), seen["env"]
+    assert str(local_root) in magpie_ix
+
+
 def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
-    """#523: the Magpie/server subprocess cwd is anchored to the stable task
-    output_dir (never the default ``/tmp``), so SGLang's cuda-graph
-    relative-path memory-snapshot dump lands in a directory that still exists
-    instead of a transient one torn down mid-run."""
+    """The Magpie *parent* subprocess cwd is anchored to the stable task
+    output_dir (never the default ``/tmp``) as defence-in-depth. (The actual
+    #523 cuda-graph fix is the local-InferenceX mirror — see
+    ``test_baseline_points_magpie_at_local_inferencex`` — because Magpie
+    re-roots the server via ``cd <inferencex>``.)"""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")

@@ -15,12 +15,15 @@ Robustness RCA later (P1-7).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -107,6 +110,138 @@ AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
 # names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
+
+
+# #523: filesystem types that can be revoked / unmounted mid-run (e.g. a
+# wekafs/NFS mount flap). A process whose cwd lives on such a mount sees its
+# working directory "vanish underneath it" and any RELATIVE-path write hits
+# ``FileNotFoundError``. SGLang's cuda-graph profiling
+# (``--enable-profile-cuda-graph``, injected by profile_sglang.yaml) dumps
+# ``cuda_graph_runner_memory_usage.pickle`` to a bare relative path, and
+# Magpie launches the server via ``cd <inferencex> && bash <script>`` — so
+# the server's cwd IS the InferenceX checkout. When that checkout is on
+# wekafs and the mount flaps, the dump ENOENTs and the scheduler sigquits
+# before any ``.trace.json.gz`` is produced (issue #523).
+_NETWORK_FS_TYPES = frozenset(
+    {
+        "nfs", "nfs4", "cifs", "smb3", "lustre", "glusterfs", "ceph",
+        "fuse.weka", "wekafs", "wekafsgw", "fuse.juicefs", "fuse.s3fs",
+        "fuse.sshfs", "9p",
+    }
+)
+
+
+def _path_fstype(path: str) -> str:
+    """Return the filesystem type backing ``path`` per ``/proc/mounts``.
+
+    Picks the longest mountpoint that is a prefix of the resolved path.
+    Returns ``""`` when it cannot be determined (non-Linux, unreadable
+    ``/proc/mounts``, ...), which callers treat as "assume local".
+    """
+    try:
+        rp = os.path.realpath(path)
+    except OSError:
+        return ""
+    best_mp = ""
+    best_type = ""
+    try:
+        with open("/proc/mounts", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                # /proc/mounts octal-escapes spaces etc. in the mountpoint.
+                try:
+                    mp = parts[1].encode("latin-1").decode("unicode_escape")
+                except (UnicodeDecodeError, UnicodeEncodeError):
+                    mp = parts[1]
+                fstype = parts[2]
+                norm = mp.rstrip("/") or "/"
+                if norm == "/":
+                    is_under = True  # root matches everything (lowest priority)
+                else:
+                    is_under = rp == norm or rp.startswith(norm + "/")
+                if is_under and len(norm) >= len(best_mp):
+                    best_mp = norm
+                    best_type = fstype
+    except OSError:
+        return ""
+    return best_type
+
+
+def _is_network_fs(path: str) -> bool:
+    """True when ``path`` is backed by a revocable network filesystem."""
+    return _path_fstype(path).lower() in _NETWORK_FS_TYPES
+
+
+def _ensure_local_inferencex(src: str) -> str:
+    """Mirror an already-patched InferenceX checkout onto stable local disk.
+
+    #523: returns a local-disk path Magpie can ``cd`` into so the sglang
+    server's relative-path cuda-graph snapshot dump survives a network-mount
+    (wekafs/NFS) flap. No-op (returns ``src`` unchanged) when:
+
+    * relocation is disabled via
+      ``INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX=1``,
+    * ``src`` already lives on a local filesystem, or
+    * the copy fails for any reason.
+
+    Best-effort — never raises; on failure it falls back to ``src`` so the
+    run proceeds (degraded to the pre-fix behaviour) rather than aborting.
+    The copy is taken AFTER ProfileExecutor's InferenceX patch step, so the
+    local mirror carries the NUM_PROMPTS / PROFILE_EXTRA_BODY patches.
+    """
+    src = str(src)
+    if os.environ.get(
+        "INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "",
+    ).strip() == "1":
+        return src
+    try:
+        if not _is_network_fs(src):
+            return src
+    except Exception:  # noqa: BLE001 — detection is best-effort
+        return src
+
+    real_src = os.path.realpath(src)
+    local_root = Path(
+        os.environ.get("INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", "")
+        or os.path.join(
+            os.path.expanduser("~"), ".cache", "hyperloom", "inferencex_local",
+        )
+    )
+    dest = local_root / hashlib.sha1(real_src.encode("utf-8")).hexdigest()[:16]
+    try:
+        local_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(dir=str(local_root)))
+        staged_ix = staging / "InferenceX"
+        # Copy the patched tree; re-copy every run because the patch state
+        # changes per task. 8-9 MB onto local disk is sub-second.
+        shutil.copytree(real_src, staged_ix, symlinks=True)
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        os.replace(staged_ix, dest)
+        shutil.rmtree(staging, ignore_errors=True)
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: could not mirror InferenceX %s to local disk "
+            "(%s); using the network-mount checkout. The #523 cuda-graph "
+            "pickle dump may ENOENT if the mount flaps mid-run.",
+            real_src, exc,
+        )
+        return src
+
+    if not (dest / "benchmarks" / "benchmark_lib.sh").is_file():
+        log.warning(
+            "baseline_executor: local InferenceX mirror at %s is incomplete; "
+            "using original %s", dest, real_src,
+        )
+        return src
+    log.info(
+        "baseline_executor: #523 — mirrored InferenceX from network mount %s "
+        "to local disk %s so the server cwd (cuda-graph pickle dump target) "
+        "survives a wekafs/NFS flap.", real_src, dest,
+    )
+    return str(dest)
 
 
 def _resolve_aiter_jit_dir_dynamic() -> list[str]:
@@ -352,6 +487,22 @@ class BaselineExecutor:
 
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # #523: keep the InferenceX checkout Magpie will ``cd`` into on stable
+        # local disk. Magpie launches the server via ``cd <inferencex> && bash
+        # <script>`` (see Magpie ``_build_local_command``), so that checkout is
+        # the server's cwd — and SGLang's cuda-graph profiling dumps
+        # ``cuda_graph_runner_memory_usage.pickle`` there via a RELATIVE path.
+        # On wekafs/NFS a mid-run mount flap makes the cwd vanish and the dump
+        # ENOENTs (scheduler sigquit, no trace). Relocate BEFORE materialize so
+        # the rendered ``benchmark.inferencex_path`` (which Magpie actually
+        # honours — the MAGPIE_INFERENCEX_PATH env is only a fallback), the
+        # ProfileExecutor patch step, and Magpie all use the local mirror.
+        ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
+        if ix_env:
+            local_ix = _ensure_local_inferencex(ix_env)
+            if local_ix != ix_env:
+                os.environ["INFERENCEX_PATH"] = local_ix
 
         timeout_sec = self._resolve_timeout(params)
         # Model path: task.params['model_path'] > $MODEL_PATH; if neither,
@@ -747,15 +898,15 @@ class BaselineExecutor:
         # root cause of the bash-source race in §C #1). See
         # ``_subprocess_kill.py``.
         subprocess_started_unix = time.time()
-        # #523: anchor the Magpie/server subprocess cwd to the stable per-task
-        # output_dir instead of the default ``/tmp``. SGLang's cuda-graph
-        # profiling dumps ``cuda_graph_runner_memory_usage.pickle`` to a
-        # RELATIVE path under the running process's cwd; when the server is
-        # launched from a transient working dir that the benchmark wrapper
-        # tears down mid-run, that dump hits ``FileNotFoundError`` and the
-        # scheduler dies (sigquit) before any ``.trace.json.gz`` is produced.
-        # output_dir lives for the whole task and Hyperloom never rmtrees it,
-        # so the relative dump lands in a directory that still exists.
+        # Anchor the Magpie *parent* process cwd to the stable per-task
+        # output_dir instead of the default ``/tmp`` (defence-in-depth for any
+        # relative-path writes Magpie itself makes). NOTE: this does NOT fix
+        # #523 on its own — Magpie re-roots the actual server via
+        # ``cd <inferencex>`` (see ``_build_local_command`` in Magpie), so the
+        # server's cwd (where SGLang dumps the cuda-graph pickle) is the
+        # InferenceX checkout, not this output_dir. The #523 fix is
+        # ``_ensure_local_inferencex`` above, which keeps that checkout on
+        # stable local disk.
         output_dir.mkdir(parents=True, exist_ok=True)
         try:
             proc = await asyncio.to_thread(
