@@ -68,10 +68,19 @@ def fetch_inferenceX_ref(
     isl: int,
     osl: int,
 ) -> float | None:
-    """Look up InferenceX output_tput_per_gpu for repo_id on target_gpu.
+    """Look up the InferenceX reference throughput for a model.
 
-    Returns None when no comparison is available (unmapped repo, no benchmarks,
-    or no (hardware, ISL, OSL) match) — the column stays blank.
+    Args:
+        repo_id: HF repo id to look up.
+        hf_to_ifx: Mapping of HF repo ids to InferenceX api names.
+        target_gpu: GPU type to match.
+        isl: Input sequence length to match.
+        osl: Output sequence length to match.
+
+    Returns:
+        The ``output_tput_per_gpu`` reference value, or ``None`` when no
+        comparison is available (unmapped repo, no benchmarks, or no
+        (hardware, ISL, OSL) match).
     """
     api_name = hf_to_ifx.get(repo_id)
     if not api_name:
