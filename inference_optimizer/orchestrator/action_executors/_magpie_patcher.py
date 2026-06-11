@@ -28,6 +28,7 @@ import logging
 import os
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -377,17 +378,24 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
     return True
 
 
-def ensure_magpie_atomic_scripts_patch(
-    magpie_dir: Path | str | None = None,
-) -> bool:
-    """Ensure cloned Magpie's ``_prepare_benchmark_scripts`` copies each
-    script atomically (via ``os.replace``).
+@dataclass(frozen=True)
+class MagpiePatchStatus:
+    atomic_ok: bool
+    remote_trust_ok: bool
 
-    Returns ``True`` when the race is closed (freshly-patched, already-patched,
-    or upstream already atomic). Returns ``False`` only when the file is missing
-    or neither the legacy block nor an atomic impl is found — the install script
-    should fail-loud on ``False`` (this is a known root-cause fix).
-    Concurrency-safe (flock + atomic rename; patched fast-path skips the lock).
+    @property
+    def ok(self) -> bool:
+        return self.atomic_ok and self.remote_trust_ok
+
+
+def magpie_scripts_patch_status(
+    magpie_dir: Path | str | None = None,
+) -> MagpiePatchStatus:
+    """Return independent status for atomic-copy and remote-trust patches.
+
+    This keeps a drift in the optional SGLang remote-client trust patch from
+    being reported as a generic atomic-copy failure. The bool-valued
+    ``ensure_magpie_atomic_scripts_patch`` wrapper remains for compatibility.
     """
     src = _resolve_benchmarker_path(magpie_dir)
     if src is None:
@@ -395,7 +403,7 @@ def ensure_magpie_atomic_scripts_patch(
             "_magpie_patcher: MAGPIE_DIR unset or benchmarker.py missing — "
             "skipping patch (fine for tests / dry-runs)",
         )
-        return False
+        return MagpiePatchStatus(atomic_ok=False, remote_trust_ok=True)
 
     with _file_lock(_LOCK_PATH):
         atomic_ok = _is_patched(src) or _apply_patch_atomic(src)
@@ -412,9 +420,35 @@ def ensure_magpie_atomic_scripts_patch(
                 _is_remote_trust_patched(sglang_script)
                 or _apply_remote_trust_patch_atomic(sglang_script)
             )
-        return atomic_ok and remote_trust_ok
+        if not remote_trust_ok:
+            log.warning(
+                "_magpie_patcher: SGLang remote trust patch did not apply; "
+                "MAGPIE_TRUST_REMOTE_CODE=1 will not reach remote "
+                "benchmark_serving.py for custom-code models",
+            )
+        return MagpiePatchStatus(
+            atomic_ok=atomic_ok,
+            remote_trust_ok=remote_trust_ok,
+        )
+
+
+def ensure_magpie_atomic_scripts_patch(
+    magpie_dir: Path | str | None = None,
+) -> bool:
+    """Ensure cloned Magpie's ``_prepare_benchmark_scripts`` copies each
+    script atomically (via ``os.replace``).
+
+    Returns ``True`` when the race is closed (freshly-patched, already-patched,
+    or upstream already atomic). Returns ``False`` only when the file is missing
+    or neither the legacy block nor an atomic impl is found — the install script
+    should fail-loud on ``False`` (this is a known root-cause fix).
+    Concurrency-safe (flock + atomic rename; patched fast-path skips the lock).
+    """
+    return magpie_scripts_patch_status(magpie_dir).ok
 
 
 __all__ = [
+    "MagpiePatchStatus",
     "ensure_magpie_atomic_scripts_patch",
+    "magpie_scripts_patch_status",
 ]

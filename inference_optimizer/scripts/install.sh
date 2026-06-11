@@ -585,25 +585,36 @@ ensure_magpie_atomic_scripts_patch() {
   if MAGPIE_DIR="$MAGPIE_DIR" "$PYTHON" - <<'PY'
 import os, sys
 from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
-    ensure_magpie_atomic_scripts_patch,
+    magpie_scripts_patch_status,
 )
-ok = ensure_magpie_atomic_scripts_patch(os.environ["MAGPIE_DIR"])
-sys.exit(0 if ok else 1)
+status = magpie_scripts_patch_status(os.environ["MAGPIE_DIR"])
+if status.ok:
+    sys.exit(0)
+if not status.atomic_ok:
+    sys.exit(1)
+if not status.remote_trust_ok:
+    sys.exit(2)
+sys.exit(3)
 PY
   then
     log "Magpie #C1 patch OK"
   else
-    # Fail-soft (was fail-loud): with MAGPIE_REF now pinned to an upstream
-    # commit that already copies benchmark scripts atomically
-    # (_copy_benchmark_script_atomic), the in-place patcher finds no legacy
-    # `shutil.copy2` block and returns False — which is the EXPECTED no-op
-    # state, not a regression. bugs.md §C #1 is already mitigated upstream in
-    # that case. A sibling branch makes the patcher upstream-aware; this warn
-    # is defense in depth so a pinned/atomic Magpie does not abort install.
-    # If you are NOT on a pinned/atomic Magpie, the script-tearing race is
-    # genuinely unpatched — review _magpie_patcher.py. PATCH_MAGPIE=0 skips
-    # this step entirely.
-    warn "Magpie atomic-write patch did not apply (legacy block not found). Expected when MAGPIE_REF is pinned to an upstream-atomic commit (patch is a no-op); otherwise bugs.md §C #1 may be unpatched — review _magpie_patcher.py or set PATCH_MAGPIE=0."
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
+    else
+      # Fail-soft (was fail-loud): with MAGPIE_REF now pinned to an upstream
+      # commit that already copies benchmark scripts atomically
+      # (_copy_benchmark_script_atomic), the in-place patcher finds no legacy
+      # `shutil.copy2` block and returns False — which is the EXPECTED no-op
+      # state, not a regression. bugs.md §C #1 is already mitigated upstream in
+      # that case. A sibling branch makes the patcher upstream-aware; this warn
+      # is defense in depth so a pinned/atomic Magpie does not abort install.
+      # If you are NOT on a pinned/atomic Magpie, the script-tearing race is
+      # genuinely unpatched — review _magpie_patcher.py. PATCH_MAGPIE=0 skips
+      # this step entirely.
+      warn "Magpie atomic-write patch did not apply (legacy block not found). Expected when MAGPIE_REF is pinned to an upstream-atomic commit (patch is a no-op); otherwise bugs.md §C #1 may be unpatched — review _magpie_patcher.py or set PATCH_MAGPIE=0."
+    fi
   fi
 }
 

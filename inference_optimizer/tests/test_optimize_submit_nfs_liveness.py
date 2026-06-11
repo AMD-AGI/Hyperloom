@@ -113,3 +113,58 @@ def test_wait_for_nfs_session_delivery_waits_until_terminal_marker(
         idle_min=1,
     ) == str(session)
     assert (session / "complete").is_file()
+
+
+def test_succeeded_task_waits_for_nfs_when_safe_breakdown_lags(
+    tmp_path,
+    monkeypatch,
+):
+    rec = _record()
+    rec.final_status = None
+    artifacts_dir = tmp_path / "artifacts"
+    calls = {"waited": 0, "listed": 0}
+
+    class _Safe:
+        def wait_task_done(self, task_id, *, timeout_min, poll_s):
+            return "Succeeded", {
+                "currentPhase": 99,
+                "message": "done",
+                "clawSessionId": "claw-1",
+                "modelPath": rec.model_path,
+                "userId": rec.safe_user_id,
+                "startedAt": rec.safe_started_at,
+                "finishedAt": rec.safe_finished_at,
+            }
+
+        def list_artifacts(self, task_id):
+            calls["listed"] += 1
+            if calls["listed"] <= 3:
+                return [{"path": "reports/final.md"}]
+            return [{"path": "session_breakdown.json"}]
+
+        def download_artifact_to(self, task_id, item, local_path):
+            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(local_path).write_text("{}", encoding="utf-8")
+            return 2
+
+    def fake_wait_for_nfs(*args, **kwargs):
+        calls["waited"] += 1
+        return "/nfs/session"
+
+    monkeypatch.setattr(opt, "_wait_for_nfs_session_delivery", fake_wait_for_nfs)
+
+    out = opt.wait_and_collect_one(
+        _Safe(),
+        rec,
+        artifacts_dir,
+        task_timeout_min=1,
+        poll_s=1,
+        collect=True,
+        all_artifacts=False,
+    )
+
+    assert out.final_status == "Succeeded"
+    assert calls["waited"] == 1
+    assert calls["listed"] == 4
+    assert out.ci_success is True
+    assert any(p.endswith("session_breakdown.json") for p in out.artifact_files)
