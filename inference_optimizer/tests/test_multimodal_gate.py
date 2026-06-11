@@ -39,6 +39,32 @@ def _seed_state(session_dir: Path, monkeypatch) -> None:
     SharedState(session_id="t", model_name="m", model_path="m").save(session_dir)
 
 
+def test_detect_rwkv6qwen2_hybrid_rejected(tmp_path):
+    """RWKV6Qwen2ForCausalLM (RWKV/Qwen2 hybrid) is not in sglang's supported
+    arch list and fails ModelConfig validation; reject before boot."""
+    m = tmp_path / "rwkv6qwen2"
+    _write_config(m, {
+        "architectures": ["RWKV6Qwen2ForCausalLM"],
+        "model_type": "rwkv6qwen2",
+        "max_position_embeddings": 8192,
+    })
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert hit["architecture"] == "RWKV6Qwen2ForCausalLM"
+    assert "unsupported architecture" in hit["signal"]
+
+
+def test_detect_plain_rwkv_not_rejected(tmp_path):
+    """Plain RwkvForCausalLM IS supported by sglang; must NOT be blocked."""
+    m = tmp_path / "rwkv"
+    _write_config(m, {
+        "architectures": ["RwkvForCausalLM"],
+        "model_type": "rwkv",
+        "max_position_embeddings": 4096,
+    })
+    assert cli._detect_unsupported_model(str(m)) is None
+
+
 # 1. classifier — whitelist-based detection
 def test_detect_gemma3_conditional_generation_rejected(tmp_path):
     """Gemma3ForConditionalGeneration is not a causal LM arch -> rejected."""

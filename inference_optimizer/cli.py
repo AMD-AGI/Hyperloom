@@ -762,6 +762,9 @@ _UNSUPPORTED_MODEL_TYPES = frozenset({
 })
 
 _UNSUPPORTED_ARCHITECTURES = frozenset({
+    # RWKV6/Qwen2 hybrid linear-attention arch: not in sglang's supported list
+    # (only plain RwkvForCausalLM is), fails ModelConfig validation at boot.
+    "RWKV6Qwen2ForCausalLM",
     "Gemma3ForConditionalGeneration",
     "InternVLChatModel",
     "Phi3VForCausalLM",
