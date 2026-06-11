@@ -50,6 +50,12 @@ def extract_keywords(description: str) -> list[str]:
 
     Whitelist hits first, then CamelCase identifiers; if nothing matched,
     fall back to the first five 3+ letter words so callers get some signal.
+
+    Args:
+        description: The gap description text to mine.
+
+    Returns:
+        A sorted, deduplicated list of keywords.
     """
     tokens = set(re.findall(r"[a-z][a-z0-9_]+", description.lower()))
     keywords = tokens & _TECHNICAL_TERMS
@@ -66,7 +72,13 @@ def score_title_against_keywords(title: str, keywords: Sequence[str]) -> int:
     """Count keywords overlapping the title's tokens, to rerank candidate PRs.
 
     Lowercase, snake_case-aware token split mirrors :func:`extract_keywords`.
-    Returns 0 for an empty title or empty keywords list.
+
+    Args:
+        title: The PR title to score.
+        keywords: Keywords to match against the title.
+
+    Returns:
+        The overlap count; ``0`` for an empty title or keyword list.
     """
     if not keywords or not title:
         return 0
@@ -130,10 +142,16 @@ def score_title_with_anti_signal(
 
     ``positive`` = keyword tokens in the title; ``anti`` = title tokens in the
     anti-set of any active gap keyword (only :data:`_ANTI_KEYWORDS` entries
-    activate). Default ``anti_penalty`` of 2.0 means one anti hit erases two
+    activate). A default ``anti_penalty`` of 2.0 means one anti hit erases two
     positive hits, so a wrong-axis PR ranks below any single correct-axis hit.
-    Clamped to 0.0 so callers can post-filter ``score == 0`` to drop
-    anti-heavy PRs.
+
+    Args:
+        title: The PR title to score.
+        keywords: Active gap keywords driving positive and anti matches.
+        anti_penalty: Weight applied per anti-signal hit.
+
+    Returns:
+        The clamped score (>= 0.0); callers can drop ``score == 0`` PRs.
     """
     if not keywords or not title:
         return 0.0
