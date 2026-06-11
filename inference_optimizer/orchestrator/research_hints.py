@@ -74,6 +74,14 @@ def load_hints(session_dir: Path) -> list[dict[str, Any]]:
 
 
 def _render_md(hints: list[dict[str, Any]]) -> str:
+    """Render research hints as a Markdown document.
+
+    Args:
+        hints: Normalized hint records.
+
+    Returns:
+        Markdown text, with a placeholder note when there are no hints.
+    """
     lines = ["# Research Hints", ""]
     if not hints:
         lines += [
@@ -97,6 +105,12 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    """Write text to a file atomically via a temp file and rename.
+
+    Args:
+        path: Destination file path.
+        text: Text content to write.
+    """
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
@@ -112,6 +126,12 @@ def write_hints_skeleton(session_dir: Path) -> None:
 
 
 def _persist(session_dir: Path, hints: list[dict[str, Any]]) -> None:
+    """Persist hints to the session's JSON and Markdown artifacts.
+
+    Args:
+        session_dir: Session directory to write into.
+        hints: Hint records to serialize.
+    """
     sd = Path(session_dir)
     sd.mkdir(parents=True, exist_ok=True)
     try:
@@ -317,6 +337,14 @@ def full_gap_summary(
 
 
 def _to_num(value: Any) -> float | None:
+    """Coerce a value to ``float``, returning ``None`` on failure.
+
+    Args:
+        value: Arbitrary value to convert.
+
+    Returns:
+        The float value, or ``None`` if it cannot be parsed.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -338,6 +366,17 @@ _STOPWORDS: frozenset[str] = frozenset({
 
 
 def _tokens(text: str) -> set[str]:
+    """Tokenize text into a set of lowercase content words.
+
+    Splits on non-alphanumeric characters and drops short tokens and
+    stopwords so the remaining set is useful for overlap matching.
+
+    Args:
+        text: Free-form text to tokenize.
+
+    Returns:
+        Set of distinct content tokens (length >= 3, non-stopword).
+    """
     out: set[str] = set()
     for raw in re.split(r"[^a-z0-9]+", str(text).lower()):
         tok = raw.strip()

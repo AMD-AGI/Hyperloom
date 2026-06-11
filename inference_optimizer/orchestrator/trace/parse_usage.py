@@ -48,6 +48,14 @@ _TOKEN_KEYS: tuple[str, ...] = (
 
 
 def _coerce_optional_int(value: Any) -> int | None:
+    """Coerce a value to ``int`` or ``None`` if it cannot be parsed.
+
+    Args:
+        value: Arbitrary value to convert.
+
+    Returns:
+        The integer value, or ``None`` on failure.
+    """
     if value is None:
         return None
     try:
