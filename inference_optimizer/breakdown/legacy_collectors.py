@@ -55,12 +55,30 @@ def is_legacy_session(state: dict[str, Any]) -> bool:
 
 
 def _phase_for_event(action: str, prev_phase: str) -> str:
+    """Determine the phase associated with an action event.
+
+    Args:
+        action: The action name from the event.
+        prev_phase: The phase carried over from the previous event.
+
+    Returns:
+        The mapped phase, the previous phase for phase-neutral actions,
+        or the default phase as a fallback.
+    """
     if action in _PHASE_NEUTRAL:
         return prev_phase or _DEFAULT_PHASE
     return _ACTION_PHASE.get(action, _DEFAULT_PHASE)
 
 
 def _stack_adoptions(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract timestamped optimization-stack adoption entries.
+
+    Args:
+        state: Session state mapping holding ``optimization_stack``.
+
+    Returns:
+        The stack entries that are dicts carrying a ``ts`` timestamp.
+    """
     stack = state.get("optimization_stack") or []
     out: list[dict[str, Any]] = []
     if isinstance(stack, list):
