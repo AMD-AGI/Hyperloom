@@ -789,6 +789,12 @@ _UNSUPPORTED_CONFIG_KEYS = (
     "mm_projector_type",
 )
 
+_TEXT_DECODER_CONFIG_KEYS = (
+    "text_config",
+    "language_config",
+    "llm_config",
+)
+
 
 # Three-way model verdicts returned by ``_detect_unsupported_model``:
 #   text           — plain decoder-only causal LM; ``_detect`` returns None.
@@ -820,6 +826,51 @@ def _arch_is_supported_text_generation(arch: str) -> bool:
     if not a:
         return False
     return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
+
+
+def _config_declares_text_decoder(config: dict, architectures: list[str], model_type_l: str) -> bool:
+    """True when config positively identifies a usable text decoder.
+
+    For multimodal wrapper configs the top-level architecture often names the
+    wrapper (``*ForConditionalGeneration``), while the benchmarkable decoder is
+    described under ``text_config`` / ``language_config``. Treat those nested
+    text blocks as capability evidence instead of requiring a per-family
+    allowlist entry.
+    """
+    if model_type_l in _TEXT_COERCIBLE_MODEL_TYPES:
+        return True
+    if any(_arch_is_supported_text_generation(a) for a in architectures):
+        return True
+
+    for key in _TEXT_DECODER_CONFIG_KEYS:
+        nested = config.get(key)
+        if not isinstance(nested, dict):
+            continue
+        nested_architectures = _config_architectures(nested)
+        if any(_arch_is_supported_text_generation(a) for a in nested_architectures):
+            return True
+
+        nested_model_type = str(nested.get("model_type") or "").strip().lower()
+        if (
+            nested_model_type in _SUPPORTED_MODEL_TYPES
+            or nested_model_type in _TEXT_COERCIBLE_MODEL_TYPES
+        ):
+            return True
+
+        # Some multimodal configs (including newer family wrappers) expose a
+        # text_config with decoder dimensions but do not use a model_type that
+        # this package has seen yet. Because the evidence is scoped to an
+        # explicitly named text block, this does not widen fallback for a
+        # top-level mislabeled VLM.
+        has_vocab = isinstance(nested.get("vocab_size"), int) and nested["vocab_size"] > 0
+        has_decoder_shape = any(
+            isinstance(nested.get(field), int) and nested[field] > 0
+            for field in ("hidden_size", "num_hidden_layers", "intermediate_size")
+        )
+        if has_vocab and has_decoder_shape:
+            return True
+
+    return False
 
 
 def _detect_unsupported_model(model_path: str) -> dict | None:
@@ -866,16 +917,14 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     # degrade signal, not a hard block: if a text decoder exists we coerce to
     # the text path with a warning instead of fail-fasting. Routing to
     # text_coercible requires a *positive* text-decoder signal — either an
-    # explicitly coercible model_type family or a confirmed text-generation
-    # architecture class. We deliberately do NOT fall back to
-    # ``_SUPPORTED_MODEL_TYPES`` here: that allowlist is a last-resort match
-    # for a bare model_type with no architectures, and a mislabeled VLM config
-    # (e.g. a real vision model carrying model_type="llama" but no ForCausalLM
-    # arch) must fail-fast rather than silently degrade to a text run.
-    _has_text_decoder = (
-        model_type_l in _TEXT_COERCIBLE_MODEL_TYPES
-        or any(_arch_is_supported_text_generation(a) for a in architectures)
-    )
+    # explicitly coercible model_type family, a confirmed text-generation
+    # architecture class, or a nested text decoder config. We deliberately do
+    # NOT fall back to top-level ``_SUPPORTED_MODEL_TYPES`` here: that allowlist
+    # is a last-resort match for a bare model_type with no architectures, and a
+    # mislabeled VLM config (e.g. a real vision model carrying model_type="llama"
+    # but no decoder evidence) must fail-fast rather than silently degrade to a
+    # text run.
+    _has_text_decoder = _config_declares_text_decoder(config, architectures, model_type_l)
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:
             verdict = (

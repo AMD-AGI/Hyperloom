@@ -190,6 +190,47 @@ def test_detect_qwen35_moe_text_coercible(tmp_path):
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
 
 
+def test_detect_gemma4_wrapper_with_text_config_is_text_coercible(tmp_path):
+    """A multimodal wrapper with an explicit nested text decoder should fall
+    back to text-only without requiring a per-family top-level allowlist entry."""
+    m = tmp_path / "gemma4"
+    _write_config(m, {
+        "architectures": ["Gemma4ForConditionalGeneration"],
+        "model_type": "gemma4",
+        "vision_config": {"hidden_size": 1024},
+        "text_config": {
+            "model_type": "gemma4_text",
+            "vocab_size": 262144,
+            "hidden_size": 4096,
+            "num_hidden_layers": 48,
+        },
+    })
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
+    assert hit["architecture"] == "Gemma4ForConditionalGeneration"
+
+
+def test_detect_known_vlm_with_text_config_still_vision_only(tmp_path):
+    """The hard denylist wins before text_config capability detection."""
+    m = tmp_path / "qwen_vl"
+    _write_config(m, {
+        "architectures": ["Qwen2VLForConditionalGeneration"],
+        "model_type": "qwen2_vl",
+        "vision_config": {"hidden_size": 1024},
+        "text_config": {
+            "model_type": "qwen2",
+            "architectures": ["Qwen2ForCausalLM"],
+            "vocab_size": 151936,
+            "hidden_size": 4096,
+        },
+    })
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert hit["verdict"] == cli._VERDICT_VISION_ONLY
+    assert "unsupported architecture" in hit["signal"]
+
+
 def test_detect_mislabeled_vlm_with_vision_config_is_vision_only(tmp_path):
     """A multimodal config whose model_type is merely in the text allowlist
     (e.g. a real VLM mislabeled model_type='qwen2') but with NO confirmed
