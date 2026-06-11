@@ -193,7 +193,17 @@ def derive_image(framework_name: str, session_image: Optional[str]) -> str:
 
 
 def derive_image_short(image: str) -> str:
-    """Strip version tag/digest, return the last 2 path components (or 1 if only one)."""
+    """Shorten a container image reference for display.
+
+    Strips the version tag/digest and keeps the last two path components
+    (or one when only one is present).
+
+    Args:
+        image: The full container image reference.
+
+    Returns:
+        The shortened image string, or ``"unknown"`` when empty.
+    """
     img = image.split("@")[0]            # strip digest
     img = img.split(":")[0]              # strip tag
     parts = [p for p in img.split("/") if p]
@@ -203,8 +213,18 @@ def derive_image_short(image: str) -> str:
 
 
 def derive_unique_key(model_name: str, image: str) -> str:
-    """BASE64("<model_name>+<image_short>"); matches the perf-runs API unique_key
-    contract so dev rows promote to prod without rekeying."""
+    """Build the perf-runs ``unique_key`` for a (model, image) pair.
+
+    Returns ``BASE64("<model_name>+<image_short>")``, matching the perf-runs
+    API contract so dev rows promote to prod without rekeying.
+
+    Args:
+        model_name: The model name.
+        image: The container image reference.
+
+    Returns:
+        The base64-encoded unique key.
+    """
     raw = f"{model_name}+{derive_image_short(image)}"
     return base64.b64encode(raw.encode("utf-8")).decode("ascii")
 
@@ -213,8 +233,15 @@ _STOP_REASON_FAILED_TOKENS = ("timeout", "killed", "error", "failed", "abort", "
 
 
 def derive_status(session: Dict) -> str:
-    """Map session.stop_reason to {success, running, failed}: empty=>running,
-    failure token=>failed, else success (report emitted = clean termination)."""
+    """Map ``session.stop_reason`` to a coarse status.
+
+    Args:
+        session: The session dict carrying ``stop_reason``.
+
+    Returns:
+        ``"running"`` (empty stop reason), ``"failed"`` (a failure token),
+        or ``"success"`` otherwise.
+    """
     stop = (session.get("stop_reason") or "").strip().lower()
     if not stop:
         return "running"
@@ -224,8 +251,17 @@ def derive_status(session: Dict) -> str:
 
 
 def detect_category(data: Dict) -> str:
-    """MoE if a kernel category/name or model name has MoE markers; VLM for
-    vision markers; else Dense."""
+    """Classify a session as MoE, VLM, or Dense.
+
+    MoE wins when a kernel category/name or the model name has MoE markers;
+    VLM for vision markers; otherwise Dense.
+
+    Args:
+        data: The session breakdown data dict.
+
+    Returns:
+        One of ``"MoE"``, ``"VLM"``, or ``"Dense"``.
+    """
     kernels = safe_get(data, "kernel_lifecycle", "detected", default=[]) or []
     if isinstance(kernels, list):
         for k in kernels:
@@ -271,9 +307,17 @@ def reshape_snapshot(snap: Optional[Dict]) -> Optional[Dict]:
 
 
 def extract_roofline(data: Dict) -> Optional[Dict]:
-    """Pass through the first roofline entry verbatim for full fidelity (every
-    nested field). Previously reshaped fields remain under entry.baseline.* /
-    entry.latest.* — nothing removed."""
+    """Return the first roofline entry verbatim for full fidelity.
+
+    Every nested field is preserved; previously reshaped fields remain under
+    ``entry.baseline.*`` / ``entry.latest.*``.
+
+    Args:
+        data: The session breakdown data dict.
+
+    Returns:
+        A deep copy of the first roofline entry, or ``None`` when absent.
+    """
     rl_list = safe_get(data, "roofline", default=[]) or []
     if isinstance(rl_list, list) and rl_list and isinstance(rl_list[0], dict):
         return copy.deepcopy(rl_list[0])
@@ -321,8 +365,18 @@ def compute_kernel_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_param_gain(attribution_src: Dict) -> Optional[float]:
-    """Param-attribution gain = params choice + sweep variant search (sweep is a
-    parameter-space search, so it belongs in the 'param' category)."""
+    """Compute the param-attribution gain.
+
+    Sums the params choice and sweep variant search (a sweep is a
+    parameter-space search, so it belongs in the 'param' category).
+
+    Args:
+        attribution_src: The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        The combined gain rounded to two decimals, or ``None`` when both
+        values are absent.
+    """
     params = attribution_src.get("params_pct_of_total")
     sweep = attribution_src.get("sweep_pct_of_total")
     if params is None and sweep is None:
@@ -380,8 +434,18 @@ def compute_oob_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_framework_gain(attribution: Dict) -> Optional[float]:
-    """Framework-source gain = SUM(delta_pct) over gain_per_stack_entry[] where
-    action='framework_pr'. None when absent so normalisation collapses it to 0.00."""
+    """Compute the framework-source gain.
+
+    Sums ``delta_pct`` over ``gain_per_stack_entry[]`` where
+    ``action == "framework_pr"``.
+
+    Args:
+        attribution: The ``attribution`` sub-dict.
+
+    Returns:
+        The summed gain rounded to two decimals, or ``None`` when absent so
+        normalisation collapses it to ``0.00``.
+    """
     entries = attribution.get("gain_per_stack_entry")
     if not isinstance(entries, list):
         return None
@@ -744,9 +808,20 @@ def format_duration_pretty(seconds: Optional[int]) -> str:
 
 
 def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = None) -> Dict:
-    """Build the JSON persisted into perf_runs.raw_data: deep-copy the original,
-    backfill session.image when missing, and add a top-level `_enrichment` block
-    of inferred/computed values (`meta` carries derivation provenance)."""
+    """Build the JSON persisted into ``perf_runs.raw_data``.
+
+    Deep-copies the original, backfills ``session.image`` /
+    ``session.session_duration_seconds`` / workload dims when missing, and
+    adds a top-level ``_enrichment`` block of inferred/computed values.
+
+    Args:
+        original: The original session breakdown JSON.
+        row: The derived perf-runs row supplying fallbacks.
+        meta: Optional derivation provenance recorded under ``_enrichment``.
+
+    Returns:
+        The enriched, deep-copied data dict.
+    """
     enriched = copy.deepcopy(original)
 
     session = enriched.get("session")
@@ -1080,7 +1155,18 @@ def _sql_jsonb_literal(obj: Any) -> str:
 
 
 def build_upsert_statement_inline(row: Dict[str, Any], table: str) -> str:
-    """Build one SQL statement with all values inlined (dollar-quoted)."""
+    """Build one upsert SQL statement with all values inlined.
+
+    String values are dollar-quoted so the statement can be piped over SSH
+    without a parameter protocol.
+
+    Args:
+        row: The perf-runs row to upsert.
+        table: Target table name (sanitized internally).
+
+    Returns:
+        The complete SQL upsert statement.
+    """
     table = safe_table(table)
     parts = (
         f"INSERT INTO {table} (\n"
@@ -1148,7 +1234,19 @@ def build_upsert_statement_inline(row: Dict[str, Any], table: str) -> str:
 
 
 def build_ssh_kubectl_psql(hop1: str, namespace: str, user: str, dbname: str) -> List[str]:
-    """Return argv to invoke psql on the master postgres pod via SSH+kubectl (stdin piped)."""
+    """Build the argv to run ``psql`` on the master Postgres pod over SSH.
+
+    The SQL is expected to be piped via stdin to the returned command.
+
+    Args:
+        hop1: SSH jump host (``user@host``) to reach the cluster.
+        namespace: Kubernetes namespace of the Postgres cluster.
+        user: Postgres user to connect as.
+        dbname: Target database name.
+
+    Returns:
+        The ``ssh`` argv list invoking ``kubectl exec ... psql``.
+    """
     remote_cmd = (
         f"kubectl exec -i -n {namespace} "
         f"$(kubectl get pod -n {namespace} "
@@ -1249,8 +1347,18 @@ def looks_like_session_breakdown(data: Any) -> bool:
 
 
 def looks_like_v1_flat_schema(data: Any) -> bool:
-    """Recognise the legacy 'V1 flat' layout: top-level dict with model,
-    framework, baseline_tput and best_tput (not nested under workload/baseline)."""
+    """Recognise the legacy "V1 flat" schema layout.
+
+    A V1 flat doc is a top-level dict with ``model``, ``framework``,
+    ``baseline_tput`` and ``best_tput`` (not nested under
+    ``workload`` / ``baseline``).
+
+    Args:
+        data: The parsed JSON value to inspect.
+
+    Returns:
+        ``True`` when the value matches the V1 flat schema.
+    """
     if not isinstance(data, dict):
         return False
     return (
