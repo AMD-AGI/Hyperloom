@@ -33,6 +33,15 @@ class ConcSweepExecutor:
     """ActionRunner for ``conc_sweep``. See module docstring."""
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the concurrency sweep action for the given context.
+
+        Args:
+            ctx: Action context; ``ctx.extra['session_dir']`` is required.
+
+        Returns:
+            A result dict with a ``status`` field (and error metadata on
+            failure, such as a missing ``session_dir``).
+        """
         extra = getattr(ctx, "extra", None) or {}
         session_dir_str = str(extra.get("session_dir") or "").strip()
         if not session_dir_str:

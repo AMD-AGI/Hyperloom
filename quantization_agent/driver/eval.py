@@ -88,6 +88,18 @@ def decide(
     workspace: Path,
     acceptable_eval_gap: float | None,
 ) -> EvalDecision:
+    """Decide whether an evaluation report passes the quality gap threshold.
+
+    Args:
+        eval_report: Parsed evaluation report, or ``None`` when absent.
+        workspace: Run workspace, used to resolve a per-run gap threshold file.
+        acceptable_eval_gap: Explicit maximum relative gap; falls back to the
+            workspace threshold or the default when ``None``.
+
+    Returns:
+        An :class:`EvalDecision` describing the status (``missing``,
+        ``within``, or ``exceeded``), the relative gap, and the threshold used.
+    """
     threshold, source = resolve_threshold(
         workspace, acceptable_eval_gap=acceptable_eval_gap
     )
