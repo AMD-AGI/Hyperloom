@@ -3618,21 +3618,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
         _print_session_skeleton(session_dir)
 
-        # DEBUG (temporary): fire a Langfuse probe as early as possible — right
-        # after the manifest exists (so the trace correlates) — so you can
-        # confirm the live pipe within seconds of launch instead of waiting for
-        # real traffic. No-op unless live push is enabled; disable with
-        # HYPERLOOM_LANGFUSE_PROBE=0. Remove this block when the link check is
-        # done (see langfuse_probe.py / emit_probe).
-        if os.environ.get("HYPERLOOM_LANGFUSE_PROBE", "1").strip().lower() not in (
-            "0", "false", "no", "off",
-        ):
-            try:
-                from .orchestrator.trace.langfuse_emitter import emit_probe
-                emit_probe(session_dir, note="cli-session-start")
-            except Exception:  # noqa: BLE001 — a probe must never break launch
-                log.debug("langfuse probe failed (non-fatal)", exc_info=True)
-
         # Machine-readable launch info: stable point for launcher scripts to harvest pid/session_dir/run_log.
         _emit_launch_info(
             pid=os.getpid(),
